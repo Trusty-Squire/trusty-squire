@@ -1,0 +1,36 @@
+{
+  "name": "@trusty-squire/inbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Inbound email service: alias allocation, MIME parsing, OTP/link extraction, polling API.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:cov": "vitest run --coverage",
+    "prisma:validate": "prisma validate --schema=prisma/schema.prisma",
+    "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
+    "prisma:migrate:dev": "prisma migrate dev --schema=prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "mailparser": "^3.7.1",
+    "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.5",
+    "@vitest/coverage-v8": "^1.6.1",
+    "prisma": "^5.22.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

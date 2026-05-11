@@ -1,0 +1,36 @@
+{
+  "name": "@trusty-squire/registry-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Adapter manifest registry. Serves signed manifests over HTTP; CLI for publishing.",
+  "main": "./src/server.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:cov": "vitest run --coverage",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "publish:adapter": "tsx src/publish.ts",
+    "prisma:validate": "prisma validate --schema=prisma/schema.prisma",
+    "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
+    "prisma:migrate:dev": "prisma migrate dev --schema=prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@trusty-squire/adapter-sdk": "workspace:*",
+    "@prisma/client": "^5.22.0",
+    "canonicalize": "^2.0.0",
+    "fastify": "^4.28.0",
+    "semver": "^7.6.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/semver": "^7.5.8",
+    "@vitest/coverage-v8": "^1.6.1",
+    "prisma": "^5.22.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

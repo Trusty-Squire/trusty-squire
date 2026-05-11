@@ -1,0 +1,30 @@
+{
+  "name": "@trusty-squire/mandate-validator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mandate signature verification + policy evaluation for Trusty Squire.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:cov": "vitest run --coverage"
+  },
+  "dependencies": {
+    "canonicalize": "^2.0.0",
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^1.6.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

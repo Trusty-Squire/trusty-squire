@@ -1,0 +1,58 @@
+// Inbox persistence schema. Lives in its own database
+// (trusty_squire_inbox); inbound mail is high-volume and has its own
+// retention policy (body 7d, metadata 90d) that wants its own
+// migration cadence.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("INBOX_DATABASE_URL")
+}
+
+model ReceivedEmail {
+  id                 String    @id @db.VarChar(26)
+  alias              String
+  associated_run_id  String?   @db.VarChar(26)
+
+  // RFC 822 Message-ID. Globally unique per email; SES retries that
+  // re-deliver the same message hit the unique constraint and the
+  // handler treats the dup as a no-op.
+  message_id         String    @unique
+  from_address       String
+  from_domain        String
+  subject            String
+
+  // Pointer to the raw RFC 822 in S3 (or any object store). The body
+  // columns hold the parsed text/html for the 7-day retrieval window;
+  // a background job nulls them at body_purged_at.
+  s3_raw_uri         String
+  body_text          String?
+  body_html          String?
+
+  parsed_links       String[]
+  parsed_codes       String[]
+
+  received_at        DateTime  @default(now())
+  consumed_at        DateTime?
+  body_purged_at     DateTime?
+
+  @@index([alias, received_at])
+  @@index([associated_run_id])
+}
+
+model EmailAlias {
+  alias          String    @id
+  account_id     String    @db.VarChar(26)
+  run_id         String    @db.VarChar(26)
+  service        String
+  active         Boolean   @default(true)
+  inbound_count  Int       @default(0)
+  created_at     DateTime  @default(now())
+  expires_at     DateTime
+
+  @@index([account_id])
+  @@index([run_id])
+}

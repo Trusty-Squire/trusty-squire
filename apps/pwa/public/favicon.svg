@@ -1,0 +1,6 @@
+<svg width="32" height="32" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 14 10 L 86 10 L 86 46 Q 86 72 50 92 Q 14 72 14 46 Z"
+        fill="#d4a82c" stroke="#8a1a30" stroke-width="6" stroke-linejoin="round"/>
+  <text x="50" y="62" font-family="ui-monospace, monospace" font-size="42"
+        fill="#8a1a30" font-weight="700" text-anchor="middle">{ }</text>
+</svg>

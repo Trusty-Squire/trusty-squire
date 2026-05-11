@@ -1,0 +1,50 @@
+# Local development services. Persisted volumes so data survives `down`.
+# Run via `docker compose -f docker-compose.dev.yml up -d`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trusty-squire-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: trusty_squire
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # On first start, create the vault's separate database. Ignored on
+      # subsequent restarts (the volume already has data).
+      - ./scripts/postgres-init.sh:/docker-entrypoint-initdb.d/01-create-vault-db.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d trusty_squire"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: trusty-squire-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: trusty-squire-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  postgres_data:
+  redis_data:

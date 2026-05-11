@@ -1,0 +1,8 @@
+<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 18 14 L 82 14 L 82 46 Q 82 70 50 88 Q 18 70 18 46 Z"
+        fill="#d4a82c" stroke="#8a1a30" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M 22 18 L 78 18 L 78 46 Q 78 67 50 83 Q 22 67 22 46 Z"
+        fill="none" stroke="#8a1a30" stroke-width="1" opacity="0.25"/>
+  <text x="50" y="56" font-family="ui-monospace, monospace" font-size="32"
+        fill="#8a1a30" font-weight="700" text-anchor="middle">{ }</text>
+</svg>

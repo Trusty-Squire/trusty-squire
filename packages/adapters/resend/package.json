@@ -1,0 +1,27 @@
+{
+  "name": "@trusty-squire/adapter-resend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference adapter manifest for Resend (illustrative; real signup uses Stack Auth, see chunk 8).",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@trusty-squire/adapter-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

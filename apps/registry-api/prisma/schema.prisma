@@ -1,0 +1,37 @@
+// Registry persistence schema. Lives in trusty_squire_registry —
+// adapter manifests are public read-only data with their own
+// retention story (we keep all versions forever; disabled flips
+// flip the kill-switch but don't delete).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("REGISTRY_DATABASE_URL")
+}
+
+model AdapterManifestRecord {
+  service          String
+  version          String
+  // Full manifest JSON exactly as published — this is the bytes
+  // the runtime reads to drive a flow. Any change here would
+  // change the canonical-bytes-derived signature.
+  manifest_json    Json
+  signature        String
+  signed_at        DateTime
+  signed_by        String
+
+  // Kill-switch + reason. Disabled versions return 410 Gone;
+  // older non-disabled versions of the same service still serve
+  // (operators can pin to a known-good prior).
+  disabled_at      DateTime?
+  disabled_reason  String?
+
+  created_at       DateTime  @default(now())
+
+  @@id([service, version])
+  @@index([service])
+  @@index([disabled_at])
+}
