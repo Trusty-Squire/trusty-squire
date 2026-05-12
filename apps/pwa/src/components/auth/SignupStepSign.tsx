@@ -51,11 +51,20 @@ export function SignupStepSign() {
       router.push("/signup/connect");
     } catch (err) {
       console.error("[signup] sign+register failed", err);
-      const msg = isVouchflowError(err)
-        ? `Signature failed: ${err.code}${err.message !== undefined && err.message.length > 0 ? ` — ${err.message}` : ""}`
-        : err instanceof ApiClientError
-          ? `Server rejected: ${err.status}`
-          : "Something went wrong.";
+      let msg: string;
+      if (isVouchflowError(err)) {
+        msg = `Signature failed: ${err.code}${err.message !== undefined && err.message.length > 0 ? ` — ${err.message}` : ""}`;
+      } else if (err instanceof ApiClientError) {
+        const bodyText =
+          err.body !== null && typeof err.body === "object"
+            ? JSON.stringify(err.body)
+            : typeof err.body === "string"
+              ? err.body
+              : "";
+        msg = `Server rejected (${err.status})${bodyText.length > 0 ? `: ${bodyText}` : ""}`;
+      } else {
+        msg = `Something went wrong: ${err instanceof Error ? err.message : String(err)}`;
+      }
       setError(msg);
       setErrorObj(err);
     } finally {
