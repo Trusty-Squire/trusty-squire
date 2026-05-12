@@ -73,13 +73,26 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
       await api.claimPair(token, bundle, status.agent ?? "unknown", null);
       setStatus({ kind: "done" });
     } catch (err) {
-      setError(
-        isVouchflowError(err)
-          ? `Pairing failed: ${err.code}`
-          : err instanceof ApiClientError
-            ? `Server rejected: ${err.status}`
-            : "Pairing failed.",
-      );
+      // Log the full error so DevTools shows the underlying cause —
+      // the SDK's `code` is often unhelpfully generic (e.g.
+      // unknown_error). The `cause` chain usually has the real story.
+      console.error("[pair] signPayload/claim failed", err);
+      let display: string;
+      if (isVouchflowError(err)) {
+        const parts = [err.code];
+        if (err.sessionId !== undefined) parts.push(`session=${err.sessionId.slice(0, 12)}…`);
+        if (err.cause !== undefined) {
+          const c = err.cause instanceof Error ? err.cause.message : String(err.cause);
+          parts.push(`cause=${c}`);
+        }
+        display = `Pairing failed: ${parts.join(" ")}`;
+      } else if (err instanceof ApiClientError) {
+        const body = err.body !== null && typeof err.body === "object" ? JSON.stringify(err.body) : "";
+        display = `Server rejected (${err.status}): ${body}`;
+      } else {
+        display = `Pairing failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      setError(display);
     } finally {
       setPending(false);
     }
