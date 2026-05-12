@@ -31,27 +31,24 @@ export function SignupStepSign() {
     setPending(true);
     setError(null);
     try {
-      const registerBundle = await signPayload({
-        context: "account_register",
-        payload: { email: state.email, display_name: state.display_name },
-        userHandle: state.email,
-        minConfidence: "medium",
-      });
-      await api.registerAccount(registerBundle);
-
-      const mandateBundle = await signPayload({
-        context: "mandate_signing",
+      // Single ceremony — registers the account AND signs the initial
+      // mandate atomically. Server constructs the canonical Mandate
+      // from the signed policy intent (see policy-to-mandate.ts).
+      const bundle = await signPayload({
+        context: "account_register_with_mandate",
         payload: {
           email: state.email,
+          display_name: state.display_name,
           policy: state.policy,
           expires_at: expiresAt.toISOString(),
         },
         userHandle: state.email,
         minConfidence: "high",
       });
-      await api.createMandate(mandateBundle);
+      await api.registerAccountWithMandate(bundle);
       router.push("/signup/connect");
     } catch (err) {
+      console.error("[signup] sign+register failed", err);
       const msg = isVouchflowError(err)
         ? `Signature failed: ${err.code}`
         : err instanceof ApiClientError

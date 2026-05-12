@@ -186,6 +186,91 @@ describe("/v1/accounts", () => {
       url: "/v1/accounts",
       payload: { bundle },
     });
+    // 'login' is not 'account_register' nor 'account_register_with_mandate' →
+    // rejected at the context-routing layer.
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("creates account + mandate atomically on account_register_with_mandate", async () => {
+    const expiresAt = new Date(Date.now() + 365 * 86_400_000).toISOString();
+    const bundle = await h.signer.signBundle({
+      context: "account_register_with_mandate",
+      payload: {
+        email: "combined@example.test",
+        display_name: "Combined User",
+        policy: {
+          spend_limit_cents_per_month: 50_000,
+          allowed_categories: ["email-api"],
+          silent_signup: { max_monthly_cost_cents: 1000, allow_free: true },
+          approval_required_categories: [],
+          confidence_requirements: {
+            login: "low",
+            mandate_signing: "high",
+            delta_mandate_signing: "high",
+            provision_silent: "low",
+            provision_approved: "medium",
+            amend_mandate: "high",
+            cancel: "low",
+            rotate: "medium",
+            release_identity: "high",
+          },
+        },
+        expires_at: expiresAt,
+      },
+      confidence: "high",
+    });
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/accounts",
+      payload: { bundle },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as {
+      account: { id: string; email: string };
+      mandate: { id: string; not_before: string; not_after: string };
+    };
+    expect(body.account.email).toBe("combined@example.test");
+    expect(body.mandate.id).toMatch(/^[0-9A-Z]{26}$/);
+    expect(body.mandate.not_after).toBe(expiresAt);
+
+    // Server actually stored an active mandate against the new account.
+    const active = await h.deps.accountStore.getActiveMandate(body.account.id);
+    expect(active).not.toBeNull();
+    expect(active?.mandate.monthly_budget_cents).toBe(50_000);
+  });
+
+  it("rejects account_register_with_mandate at medium confidence", async () => {
+    const bundle = await h.signer.signBundle({
+      context: "account_register_with_mandate",
+      payload: {
+        email: "low@example.test",
+        display_name: "Low",
+        policy: {
+          spend_limit_cents_per_month: 50_000,
+          allowed_categories: [],
+          silent_signup: { max_monthly_cost_cents: 0, allow_free: false },
+          approval_required_categories: [],
+          confidence_requirements: {
+            login: "low",
+            mandate_signing: "high",
+            delta_mandate_signing: "high",
+            provision_silent: "low",
+            provision_approved: "medium",
+            amend_mandate: "high",
+            cancel: "low",
+            rotate: "medium",
+            release_identity: "high",
+          },
+        },
+        expires_at: new Date(Date.now() + 365 * 86_400_000).toISOString(),
+      },
+      confidence: "medium",
+    });
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/accounts",
+      payload: { bundle },
+    });
     expect(res.statusCode).toBe(401);
   });
 });

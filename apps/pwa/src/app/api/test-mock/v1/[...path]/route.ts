@@ -21,13 +21,33 @@ async function handle(req: Request, ctx: Ctx): Promise<NextResponse> {
   const route = path.join("/");
 
   if (route === "accounts" && req.method === "POST") {
-    return ok(
-      {
-        account: { id: "acc_test", email: "test@example.com", display_name: "Test" },
-        session: { id: "ses_test", absolute_expires_at: new Date(Date.now() + 86_400_000).toISOString() },
-      },
-      201,
-    );
+    // Sniff the bundle's context — the combined ceremony returns a
+    // mandate stanza alongside the account.
+    let context = "account_register";
+    try {
+      const body = (await req.clone().json()) as { bundle?: { context?: string } };
+      context = body.bundle?.context ?? context;
+    } catch {
+      // fall through
+    }
+    const base = {
+      account: { id: "acc_test", email: "test@example.com", display_name: "Test" },
+      session: { id: "ses_test", absolute_expires_at: new Date(Date.now() + 86_400_000).toISOString() },
+    };
+    if (context === "account_register_with_mandate") {
+      return ok(
+        {
+          ...base,
+          mandate: {
+            id: "mnd_test",
+            not_before: new Date().toISOString(),
+            not_after: new Date(Date.now() + 365 * 86_400_000).toISOString(),
+          },
+        },
+        201,
+      );
+    }
+    return ok(base, 201);
   }
   if (route === "auth/login" && req.method === "POST") {
     return ok({

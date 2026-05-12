@@ -54,6 +54,10 @@ export interface AccountResponse {
   session: { id: string; absolute_expires_at: string };
 }
 
+export interface AccountWithMandateResponse extends AccountResponse {
+  mandate: { id: string; not_before: string; not_after: string };
+}
+
 export interface MandateResponse {
   mandate: { id: string; version: number; expires_at: string };
 }
@@ -93,6 +97,12 @@ export interface RunRow {
 export const api = {
   registerAccount: (bundle: Bundle): Promise<AccountResponse> =>
     request<AccountResponse>("POST", "/v1/accounts", { bundle }),
+
+  // Single-ceremony onboarding: creates the account AND installs the
+  // first mandate from one signed bundle (context:
+  // account_register_with_mandate).
+  registerAccountWithMandate: (bundle: Bundle): Promise<AccountWithMandateResponse> =>
+    request<AccountWithMandateResponse>("POST", "/v1/accounts", { bundle }),
 
   login: (bundle: Bundle): Promise<AccountResponse> =>
     request<AccountResponse>("POST", "/v1/auth/login", { bundle }),
