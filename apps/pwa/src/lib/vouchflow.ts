@@ -234,6 +234,29 @@ export async function enroll(userHandle: string): Promise<void> {
   await Vouchflow.shared.enroll({ userHandle });
 }
 
+// Clears the SDK's local device record. Use when the platform
+// authenticator and the SDK have desynced (e.g. user deleted their
+// passkey from chrome://settings/passkeys, or a previous enrollment
+// failed mid-flight leaving a half-finished record). After forget,
+// the next signPayload performs a fresh enrollment.
+export async function forgetDevice(): Promise<void> {
+  if (MODE === "stub") return;
+  configure();
+  await Vouchflow.shared.forgetAll();
+}
+
+// Best-guess for "this looks like a state desync the user can clear
+// by forgetting the local device record". biometric_cancelled +
+// device_not_found are the canonical signals.
+export function isLikelyDeviceDesync(err: unknown): boolean {
+  if (!isVouchflowError(err)) return false;
+  return (
+    err.code === "biometric_cancelled" ||
+    err.code === "biometric_failed" ||
+    err.code === "device_not_found"
+  );
+}
+
 export function isVouchflowError(err: unknown): err is VouchflowError {
   return err instanceof VouchflowError;
 }
