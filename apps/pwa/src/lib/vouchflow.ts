@@ -58,6 +58,14 @@ function bundleFromSignResult(result: SignResult, context: string): Bundle {
   };
 }
 
+// Empty-string userHandle is a real "we don't know" signal from pages
+// like /pair that aren't sure of the logged-in email yet. Treat it the
+// same as not provided — Vouchflow will pick the only credential on the
+// device, which is the right thing in v0's single-user-per-device world.
+function cleanHandle(h: string | undefined): string | undefined {
+  return h !== undefined && h.length > 0 ? h : undefined;
+}
+
 export async function signPayload(opts: {
   context: string;
   payload: unknown;
@@ -66,10 +74,11 @@ export async function signPayload(opts: {
 }): Promise<Bundle> {
   configure();
   if (MODE === "stub") return stubBundle(opts.context, opts.payload);
+  const handle = cleanHandle(opts.userHandle);
   const result = await Vouchflow.shared.signPayload({
     context: opts.context,
     payload: opts.payload,
-    ...(opts.userHandle !== undefined ? { userHandle: opts.userHandle } : {}),
+    ...(handle !== undefined ? { userHandle: handle } : {}),
     ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
   });
   return bundleFromSignResult(result, opts.context);
@@ -97,9 +106,10 @@ export async function verify(opts: {
       },
     };
   }
+  const handle = cleanHandle(opts.userHandle);
   return Vouchflow.shared.verify({
     context: opts.context,
-    ...(opts.userHandle !== undefined ? { userHandle: opts.userHandle } : {}),
+    ...(handle !== undefined ? { userHandle: handle } : {}),
     ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
   });
 }
