@@ -1,6 +1,10 @@
 // Multi-step signup state. Lives in sessionStorage so each step page
 // can be a server component that bootstraps a small client island for
 // the WebAuthn ceremony at the end.
+//
+// Passkey enrollment happens automatically on first signPayload — the
+// Vouchflow SDK auto-enrolls when no credential exists for the given
+// userHandle. No explicit enroll() step in the flow.
 
 "use client";
 
@@ -13,7 +17,6 @@ export interface SignupState {
   email: string;
   display_name: string;
   policy: MandatePolicy;
-  enrolled: boolean;
 }
 
 export function loadSignup(): SignupState | null {
@@ -38,5 +41,5 @@ export function clearSignup(): void {
 }
 
 export function initialSignup(): SignupState {
-  return { email: "", display_name: "", policy: defaultPolicy(), enrolled: false };
+  return { email: "", display_name: "", policy: defaultPolicy() };
 }

@@ -23,7 +23,7 @@ export function SignupStepIntro() {
       return;
     }
     saveSignup({ ...initial, email: email.trim(), display_name: displayName.trim() });
-    router.push("/signup/passkey");
+    router.push("/signup/policy");
   }
 
   return (

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-test("signup flow: intro → passkey → policy → sign → connect", async ({ page }) => {
+test("signup flow: intro → policy → sign → connect", async ({ page }) => {
   await page.goto("/signup");
 
   await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
@@ -8,9 +8,9 @@ test("signup flow: intro → passkey → policy → sign → connect", async ({ 
   await page.getByLabel("Display name").fill("Test");
   await page.getByRole("button", { name: "Continue" }).click();
 
-  await expect(page).toHaveURL(/\/signup\/passkey$/);
-  await page.getByRole("button", { name: "Set up passkey" }).click();
-
+  // Passkey enrollment happens automatically inside the combined
+  // signPayload ceremony on /signup/sign — no separate /signup/passkey
+  // step exists.
   await expect(page).toHaveURL(/\/signup\/policy$/);
   await expect(page.getByText(/Monthly spend limit/i)).toBeVisible();
   await page.getByRole("button", { name: "Review mandate" }).click();

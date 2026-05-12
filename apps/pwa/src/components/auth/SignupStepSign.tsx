@@ -17,7 +17,7 @@ export function SignupStepSign() {
   const [error, setError] = useState<string | null>(null);
   const expiresAt = new Date(Date.now() + ONE_YEAR_MS);
 
-  if (state === null || !state.enrolled) {
+  if (state === null) {
     return (
       <p className="text-[color:var(--color-ink-soft)]">
         Your signup session has expired.{" "}
@@ -63,6 +63,10 @@ export function SignupStepSign() {
   return (
     <div className="space-y-6">
       <MandateReview policy={state.policy} expiresAt={expiresAt} />
+      <p className="text-sm text-[color:var(--color-ink-soft)]">
+        Your device will create a passkey for Trusty Squire on the first sign — no separate setup
+        step.
+      </p>
       {error !== null ? (
         <p role="alert" className="text-[color:var(--color-wine)] text-sm">
           {error}

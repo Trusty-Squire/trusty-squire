@@ -3,7 +3,7 @@ import { SignupStepSign } from "@/components/auth/SignupStepSign";
 
 export default function SignupSignPage() {
   return (
-    <AuthLayout title="Review and sign" step={4} totalSteps={5}>
+    <AuthLayout title="Review and sign" step={3} totalSteps={4}>
       <SignupStepSign />
     </AuthLayout>
   );
