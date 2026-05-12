@@ -7,6 +7,7 @@ import { type FastifyPluginAsync, type FastifyReply, type FastifyRequest } from 
 import { ulid } from "ulid";
 import {
   executeOneStep,
+  isTerminal,
   transition,
   type ExecutorConfig,
   type RunContext,
@@ -120,9 +121,34 @@ export const registerRunsRoute: FastifyPluginAsync<{
       });
     }
 
-    // Silent path — enqueue immediate execution (in v0 we execute
-    // synchronously for testability; the BullMQ worker takes over in
-    // production via the run-execution queue).
+    // Silent path. In production a BullMQ worker drains the run queue.
+    // For demo mode (DEMO_MODE=true) we drive the run to completion
+    // synchronously in this request so the caller sees the final state
+    // immediately — adequate because the demo adapter (mock-resend) is
+    // pure HTTP with no inbox waits. Hard cap on iterations is a safety
+    // net against infinite-loop bugs in the state machine.
+    if (process.env.DEMO_MODE === "true") {
+      const config = executorConfigFrom(opts.deps);
+      let current = run;
+      let i = 0;
+      const MAX_STEPS = 20;
+      while (!isTerminal(current.state) && current.state !== "PENDING_APPROVAL" && i < MAX_STEPS) {
+        current = await executeOneStep(config, current.id);
+        i += 1;
+      }
+      return reply.code(201).send({
+        run: {
+          id: current.id,
+          state: current.state,
+          steps_count: current.steps.length,
+          side_effects_count: current.side_effects.length,
+          subscription_id: current.subscription_id,
+          failure_reason: current.failure_reason,
+        },
+        decision: "silent",
+      });
+    }
+
     return reply.code(201).send({
       run: { id: run.id, state: run.state },
       decision: "silent",

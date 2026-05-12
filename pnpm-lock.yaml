@@ -44,6 +44,9 @@ importers:
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
+      '@trusty-squire/adapter-resend':
+        specifier: workspace:*
+        version: link:../../packages/adapters/resend
       '@trusty-squire/adapter-sdk':
         specifier: workspace:*
         version: link:../../packages/adapter-sdk

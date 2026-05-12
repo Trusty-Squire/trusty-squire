@@ -12,6 +12,7 @@ import {
   type RunStore,
   type VaultClient,
 } from "@trusty-squire/runtime";
+import { resendDemoManifest } from "@trusty-squire/adapter-resend";
 import { InboxService, InMemoryAliasStore, InMemoryEmailStore } from "@trusty-squire/inbox";
 import {
   CredentialVault,
@@ -89,6 +90,14 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
 
   const runStore = new InMemoryRunStore();
   const adapterRegistry = new InMemoryAdapterRegistry();
+
+  // Demo mode preloads the mock-target Resend manifest so `pnpm demo`
+  // can run the full provisioning loop end-to-end without a separate
+  // registry-api process. Production wires a RegistryClient against
+  // the live registry-api in its own composition root.
+  if (process.env.DEMO_MODE === "true") {
+    adapterRegistry.register(resendDemoManifest);
+  }
 
   const credentialStore = new InMemoryCredentialStore();
   const vaultAuditStore = new InMemoryVaultAuditStore();

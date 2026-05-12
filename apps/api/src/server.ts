@@ -27,6 +27,16 @@ export interface BuildServerOpts {
   deps?: ApiDeps;
   buildDeps?: BuildInMemoryDepsOpts;
   approvalBaseUrl?: string;
+  pairBaseUrl?: string;
+}
+
+// Pick the PWA base URL that pair/approval emails point at. In dev the
+// PWA runs on :3002; in prod it's the canonical app.trustysquire.ai.
+// PWA_BASE_URL overrides for self-hosters or staging deployments.
+function defaultPwaBaseUrl(): string {
+  if (process.env.PWA_BASE_URL !== undefined) return process.env.PWA_BASE_URL;
+  if (process.env.NODE_ENV === "production") return "https://app.trustysquire.ai";
+  return "http://localhost:3002";
 }
 
 export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyInstance> {
@@ -70,7 +80,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerApprovalsRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerCredentialsRoute, { deps, requireAgent: auth.requireAgent });
-  await fastify.register(registerMcpPairRoute, { deps, requireWeb: auth.requireWeb });
+  const pairBaseUrl = opts.pairBaseUrl ?? `${defaultPwaBaseUrl()}/pair`;
+  await fastify.register(registerMcpPairRoute, {
+    deps,
+    requireWeb: auth.requireWeb,
+    pairBaseUrl,
+  });
   await fastify.register(registerReadViewsRoute, {
     deps,
     requireAny: auth.requireAny,

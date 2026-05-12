@@ -2,12 +2,18 @@
 //
 // Session is carried by the squire_session cookie (HttpOnly, set by
 // /v1/auth/login and /v1/accounts). We send `credentials: 'include'`
-// on every request so the browser ships the cookie. The API enforces
-// CORS + cookie attributes; we just need to set the base URL.
+// on every request so the browser ships the cookie.
+//
+// Default base is the empty string → relative URLs that hit the PWA's
+// own origin. Next.js rewrites in next.config.mjs proxy /v1/* to the
+// API. This means same-origin requests from the browser's perspective,
+// so no CORS preflights and no cross-domain cookie attributes needed.
+// Override with NEXT_PUBLIC_API_BASE only if you're hitting the API
+// from a different origin (e.g. Playwright's stub-API mount).
 
 import type { Bundle } from "./vouchflow.js";
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:3000";
+const BASE_URL = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
 export class ApiClientError extends Error {
   constructor(

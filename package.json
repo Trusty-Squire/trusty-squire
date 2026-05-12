@@ -10,7 +10,9 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\" --no-error-on-unmatched-pattern",
     "format": "prettier --write \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\"",
-    "registry:publish": "pnpm --filter @trusty-squire/registry-api publish:adapter"
+    "registry:publish": "pnpm --filter @trusty-squire/registry-api publish:adapter",
+    "demo": "bash scripts/demo.sh",
+    "demo:stop": "bash scripts/demo-stop.sh"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
