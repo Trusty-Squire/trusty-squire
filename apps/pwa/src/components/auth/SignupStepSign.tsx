@@ -7,6 +7,7 @@ import { MandateReview } from "./MandateReview";
 import { loadSignup } from "./signup-state";
 import { signPayload, isVouchflowError } from "@/lib/vouchflow";
 import { api, ApiClientError } from "@/lib/api-client";
+import { VouchflowDiagnostics } from "./VouchflowDiagnostics";
 
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -15,6 +16,7 @@ export function SignupStepSign() {
   const state = loadSignup();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorObj, setErrorObj] = useState<unknown>(null);
   const expiresAt = new Date(Date.now() + ONE_YEAR_MS);
 
   if (state === null) {
@@ -50,11 +52,12 @@ export function SignupStepSign() {
     } catch (err) {
       console.error("[signup] sign+register failed", err);
       const msg = isVouchflowError(err)
-        ? `Signature failed: ${err.code}`
+        ? `Signature failed: ${err.code}${err.message !== undefined && err.message.length > 0 ? ` — ${err.message}` : ""}`
         : err instanceof ApiClientError
           ? `Server rejected: ${err.status}`
           : "Something went wrong.";
       setError(msg);
+      setErrorObj(err);
     } finally {
       setPending(false);
     }
@@ -68,9 +71,12 @@ export function SignupStepSign() {
         step.
       </p>
       {error !== null ? (
-        <p role="alert" className="text-[color:var(--color-wine)] text-sm">
-          {error}
-        </p>
+        <div className="space-y-2">
+          <p role="alert" className="text-[color:var(--color-wine)] text-sm">
+            {error}
+          </p>
+          <VouchflowDiagnostics err={errorObj} />
+        </div>
       ) : null}
       <Button onClick={onSign} disabled={pending} className="w-full">
         {pending ? "Signing…" : "Sign with passkey"}

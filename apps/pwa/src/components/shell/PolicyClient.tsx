@@ -6,6 +6,7 @@ import { PolicyEditor } from "@/components/policy/PolicyEditor";
 import { api, ApiClientError } from "@/lib/api-client";
 import { defaultPolicy, type MandatePolicy } from "@/lib/mandate";
 import { signPayload, isVouchflowError } from "@/lib/vouchflow";
+import { VouchflowDiagnostics } from "@/components/auth/VouchflowDiagnostics";
 
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
@@ -14,6 +15,7 @@ export function PolicyClient() {
   const [email, setEmail] = useState<string>("");
   const [pending, setPending] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [errorObj, setErrorObj] = useState<unknown>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +48,7 @@ export function PolicyClient() {
     }
     setPending(true);
     setMsg(null);
+    setErrorObj(null);
     try {
       const bundle = await signPayload({
         context: "mandate_signing",
@@ -56,11 +59,13 @@ export function PolicyClient() {
       await api.createMandate(bundle);
       setMsg("Policy updated.");
     } catch (err) {
+      console.error("[policy] save failed", err);
       setMsg(
         isVouchflowError(err)
-          ? `Signature failed: ${err.code}`
+          ? `Signature failed: ${err.code}${err.message !== undefined && err.message.length > 0 ? ` — ${err.message}` : ""}`
           : "Could not save policy.",
       );
+      setErrorObj(err);
     } finally {
       setPending(false);
     }
@@ -85,6 +90,7 @@ export function PolicyClient() {
         {msg !== null ? (
           <p role="status" className="text-sm text-[color:var(--color-ink-soft)]">{msg}</p>
         ) : null}
+        <VouchflowDiagnostics err={errorObj} />
         <Button onClick={onSave} disabled={pending}>
           {pending ? "Signing…" : "Save policy"}
         </Button>

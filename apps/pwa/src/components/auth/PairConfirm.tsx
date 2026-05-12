@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { signPayload, isVouchflowError } from "@/lib/vouchflow";
 import { api, ApiClientError, apiBaseUrl } from "@/lib/api-client";
+import { VouchflowDiagnostics } from "./VouchflowDiagnostics";
 
 const AGENT_DISPLAY: Record<string, string> = {
   "claude-code": "Claude Code",
@@ -29,6 +30,7 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
   const [status, setStatus] = useState<PairStatus>({ kind: "loading" });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorObj, setErrorObj] = useState<unknown>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +95,7 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
         display = `Pairing failed: ${err instanceof Error ? err.message : String(err)}`;
       }
       setError(display);
+      setErrorObj(err);
     } finally {
       setPending(false);
     }
@@ -133,9 +136,12 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
         time from Settings.
       </p>
       {error !== null ? (
-        <p role="alert" className="text-[color:var(--color-wine)] text-sm">
-          {error}
-        </p>
+        <div className="space-y-2">
+          <p role="alert" className="text-[color:var(--color-wine)] text-sm">
+            {error}
+          </p>
+          <VouchflowDiagnostics err={errorObj} />
+        </div>
       ) : null}
       <Button onClick={onConfirm} disabled={pending} className="w-full">
         {pending ? "Pairing…" : "Approve pairing"}

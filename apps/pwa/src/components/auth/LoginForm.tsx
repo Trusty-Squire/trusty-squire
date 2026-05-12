@@ -6,21 +6,25 @@ import { Button } from "@/components/ui/Button";
 import { Field } from "@/components/ui/Field";
 import { signPayload, isVouchflowError } from "@/lib/vouchflow";
 import { api, ApiClientError } from "@/lib/api-client";
+import { VouchflowDiagnostics } from "./VouchflowDiagnostics";
 
 export function LoginForm() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorObj, setErrorObj] = useState<unknown>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       setError("Enter a valid email address.");
+      setErrorObj(null);
       return;
     }
     setPending(true);
     setError(null);
+    setErrorObj(null);
     try {
       const bundle = await signPayload({
         context: "login",
@@ -31,13 +35,15 @@ export function LoginForm() {
       await api.login(bundle);
       router.push("/dashboard");
     } catch (err) {
+      console.error("[login] failed", err);
       setError(
         isVouchflowError(err)
-          ? `Sign-in failed: ${err.code}`
+          ? `Sign-in failed: ${err.code}${err.message !== undefined && err.message.length > 0 ? ` — ${err.message}` : ""}`
           : err instanceof ApiClientError
             ? `Server rejected: ${err.status}`
             : "Sign-in failed.",
       );
+      setErrorObj(err);
     } finally {
       setPending(false);
     }
@@ -58,6 +64,7 @@ export function LoginForm() {
       <Button type="submit" disabled={pending} className="w-full">
         {pending ? "Signing in…" : "Sign in with passkey"}
       </Button>
+      <VouchflowDiagnostics err={errorObj} />
     </form>
   );
 }
