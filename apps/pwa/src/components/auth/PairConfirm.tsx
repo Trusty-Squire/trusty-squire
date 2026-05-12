@@ -79,7 +79,7 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
       console.error("[pair] signPayload/claim failed", err);
       let display: string;
       if (isVouchflowError(err)) {
-        const parts = [err.code];
+        const parts: string[] = [err.code];
         if (err.sessionId !== undefined) parts.push(`session=${err.sessionId.slice(0, 12)}…`);
         if (err.cause !== undefined) {
           const c = err.cause instanceof Error ? err.cause.message : String(err.cause);
