@@ -169,6 +169,47 @@ flyctl deploy
 Dockerfile generates both Prisma clients before `tsc`. The
 `@prisma/client` package is bundled into the runner image.
 
+### npm distribution (the install path)
+
+Two packages ship to the public npm registry:
+
+- `@trusty-squire/mcp` — the MCP server + install CLI users run.
+- `@trusty-squire/universal-bot` — the bot engine (a dependency of
+  `@trusty-squire/mcp`).
+
+Current published versions: `@trusty-squire/mcp@0.1.3`,
+`@trusty-squire/universal-bot@0.1.0`.
+
+**Pack with `pnpm`, publish the tarball with `npm`.** The mcp package
+depends on `@trusty-squire/universal-bot": "workspace:*"`; `pnpm pack`
+(like `pnpm publish`) rewrites that to the resolved version, while a
+bare `npm publish` would ship the literal `workspace:*` and break
+installs. The npm account has passkey-based 2FA, so plain
+`npm publish` / `pnpm publish` fail with `EOTP` from a non-interactive
+shell. Use an **npm Automation token** (skips the 2FA challenge):
+
+```bash
+# only if universal-bot's version changed:
+cd packages/universal-bot && pnpm pack
+# mcp (publish universal-bot first if it was bumped):
+cd apps/mcp && pnpm pack
+printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_AUTOMATION_TOKEN" > /tmp/np
+npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /tmp/np
+rm -f /tmp/np
+```
+
+**The `mcp` bin + entrypoint guard are load-bearing.**
+`apps/mcp/package.json` declares three bins (`mcp`, `squire-mcp`,
+`squire-mcp-server`). The `mcp` bin exists *only* so
+`npx @trusty-squire/mcp install` resolves — npx needs a bin matching
+the package's unscoped name (`mcp`) when a package has multiple bins.
+Separately, `cli.ts`'s "am I the entrypoint?" check must `realpathSync`
+`process.argv[1]` before comparing to `import.meta.url`: launched via
+a bin shim, `argv[1]` is the symlink path, not the real `cli.js`, so a
+naive `file://${argv[1]}` compare silently skips `main()`. Don't
+regress either — the documented install command and `scripts/install.sh`
+both break.
+
 ### Ports / local dev
 - API: `API_PORT=3000` (default), `node apps/api/dist/server.js`
 - PWA: `pnpm -F @trusty-squire/pwa dev` (Next.js default 3000 — run

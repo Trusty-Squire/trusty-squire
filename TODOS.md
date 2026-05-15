@@ -21,9 +21,26 @@ These must be done on/before the next deploy of `trusty-squire-api`.
   any code path yet, so it can wait until the revocation/introspection
   features land — but set it with the rotated key when those arrive.
 
-> Larger queued engineering work (T1 distribution/npm publish, T2 Tier-1
-> Prisma persistence, T3 spend tracking, T4–T10) lives in the design doc and
+> Larger queued engineering work (T2 Tier-1 Prisma persistence, T3 spend
+> tracking, T4–T10) lives in the design doc and
 > `~/.gstack/projects/Trusty-Squire-trusty-squire/tasks-eng-review-*.jsonl`.
+
+## npm distribution
+
+- [x] **Publish `@trusty-squire/mcp` + `@trusty-squire/universal-bot` to npm.**
+  Both live on the public registry. `universal-bot` at `0.1.0`, `mcp` at
+  `0.1.3`.
+- [x] **Fix the broken `npx @trusty-squire/mcp install` entry point.**
+  Two compounding bugs, both fixed and verified end-to-end against the live
+  registry:
+  - `0.1.0`/`0.1.1` shipped two bins, neither matching the unscoped package
+    name, so npx couldn't resolve an executable. `0.1.2` adds an `mcp` bin.
+  - `cli.ts`'s entrypoint guard compared `import.meta.url` to a raw
+    `file://${process.argv[1]}`; launched via a bin shim, `argv[1]` is the
+    symlink path, so `main()` silently never ran. `0.1.3` resolves the
+    symlink with `realpathSync` before comparing.
+  Both the documented `npx @trusty-squire/mcp install` and
+  `scripts/install.sh` now work. See the npm distribution notes in `CLAUDE.md`.
 
 ## S1 — Residential proxy support for the universal-bot
 

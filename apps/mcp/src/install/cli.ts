@@ -18,6 +18,8 @@
 //   --pair               run pairing as part of install (Tier 1 from minute 1)
 
 import process from "node:process";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
@@ -314,7 +316,21 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run main() when this file is the process entrypoint. process.argv[1] is
+// often a bin symlink (e.g. node_modules/.bin/mcp under npx); realpathSync
+// resolves it to the real cli.js path so the comparison holds for every
+// launch style — `node dist/install/cli.js`, the bin shim, and npx.
+function isEntrypoint(): boolean {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  try {
+    return realpathSync(invoked) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
   main().catch((err: unknown) => {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
