@@ -8,10 +8,11 @@ These must be done on/before the next deploy of `trusty-squire-api`.
   postfix, and fly-email inbound webhook routes were removed; SES is the
   sole inbound-mail path and verifies the SNS cert (no secret needed).
 
-- [ ] **Run the inbox migration.**
-  `pnpm -F @trusty-squire/inbox prisma migrate deploy` against the inbox
-  database. Adds the `issued_to` column on `EmailAlias` that backs the new
-  per-token alias ownership check; the API expects the column to exist.
+- [x] **Run the inbox migration. — done.** Both inbox migrations
+  (`inbox_init`, `alias_issued_to`) applied to the `trustysquire_inbox`
+  database. The API schema was pushed to `trustysquire`. Both DBs live on
+  the `trusty-squire-db` cluster; `INBOX_DATABASE_URL` + `AUTH_DATABASE_URL`
+  are set on `trusty-squire-api`.
 
 - [ ] **Set `VOUCHFLOW_READ_KEY` on `trusty-squire-api`** (lower urgency).
   `config/vouchflow.ts` no longer hardcodes the server-side read key; it

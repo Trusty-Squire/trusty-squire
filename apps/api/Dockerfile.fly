@@ -1,7 +1,9 @@
 # Clean Fly.io deployment - build everything in one stage
 FROM node:22-alpine
 
-# Install pnpm
+# Install pnpm. openssl provides libssl.so.3, which the Prisma
+# linux-musl-openssl-3.0.x query engine links against at runtime.
+RUN apk add --no-cache openssl
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
@@ -9,12 +11,24 @@ WORKDIR /app
 # Copy everything
 COPY . .
 
-# Install dependencies and build
+# Install dependencies
 RUN pnpm install --frozen-lockfile
+
+# Generate the Prisma clients before tsc. There are two schemas —
+# packages/inbox (default @prisma/client output) and apps/api/prisma
+# (custom .prisma/api-client output). deps.ts imports both generated
+# clients at runtime; without generate the server crashes on boot with
+# "@prisma/client did not initialize yet". Both run via the inbox
+# package's prisma CLI (apps/api has no prisma CLI of its own).
+RUN pnpm -F @trusty-squire/inbox exec prisma generate --schema=/app/packages/inbox/prisma/schema.prisma
+RUN pnpm -F @trusty-squire/inbox exec prisma generate --schema=/app/apps/api/prisma/schema.prisma
+
+# Build
 RUN pnpm --filter @trusty-squire/api... build
 
-# Clean up dev dependencies
-RUN pnpm install --prod --filter @trusty-squire/api...
+# NOTE: no `pnpm install --prod` prune — pruning after `prisma generate`
+# can strip the generated clients out of node_modules. The image keeps
+# devDependencies; that is an acceptable size tradeoff for a correct boot.
 
 ENV NODE_ENV=production
 EXPOSE 8080

@@ -34,11 +34,14 @@ OpenRouter for LLM, AWS SES for inbound mail.
   `vouchflow.dev`, `speakeasyapp.xyz`). Catch-all + Gmail forwarding
   for personal aliases (`dani@`, `hello@`, `info@`,
   `partnerships@`); the rest land in the inbox store.
-- **Postgres persistence (Fly Postgres, `trustysquire-db-1`).** Two
-  schemas:
-  - `packages/inbox/prisma` → `EmailAlias`, `ReceivedEmail`
-  - `apps/api/prisma` → `MachineToken`, `LLMUsageEvent`,
-    `PairingToken`
+- **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
+  Prisma schemas live in **two separate databases** on one cluster —
+  they cannot share a database (`prisma db push` drops any table
+  outside its own schema):
+  - `trustysquire_inbox` ← `packages/inbox/prisma` (`INBOX_DATABASE_URL`)
+    → `EmailAlias`, `ReceivedEmail`
+  - `trustysquire` ← `apps/api/prisma` (`AUTH_DATABASE_URL`)
+    → `MachineToken`, `PairingToken`, `LLMUsageEvent`, `CaptchaEvent`
 - **Retention cron** (hourly, in-process). Bodies → null at 7d,
   metadata → delete at 90d, pairing tokens → delete at 1h, LLM events
   → delete at 30d. Structured JSON log per run.
@@ -162,12 +165,17 @@ pnpm -F @trusty-squire/api prisma:generate
 
 ### Deploy (API only)
 ```bash
-cd apps/api
-flyctl deploy
+# from the repo root — the build context must be the monorepo root
+flyctl deploy --config apps/api/fly.toml --dockerfile apps/api/Dockerfile.fly
 ```
 
-Dockerfile generates both Prisma clients before `tsc`. The
-`@prisma/client` package is bundled into the runner image.
+`fly.toml` builds with `apps/api/Dockerfile.fly`. That Dockerfile runs
+`prisma generate` for **both** schemas before `tsc` and deliberately
+keeps devDependencies — pruning with `pnpm install --prod` strips the
+generated Prisma clients out of `node_modules` and the server then
+crashes on boot. The root `Dockerfile` and `apps/api/Dockerfile` are
+stale (they reference a `prisma:generate` script that no longer exists)
+— don't use them.
 
 ### npm distribution (the install path)
 
@@ -220,14 +228,15 @@ both break.
 - `trusty-squire-api`        — main API
 - `trusty-squire-pwa`        — web UI
 - `trusty-squire-registry`   — adapter registry
-- `trustysquire-db-1`        — Postgres (shared by inbox + api schemas)
+- `trusty-squire-db`         — Postgres-flex cluster. Two databases:
+  `trustysquire` (api schema) + `trustysquire_inbox` (inbox schema).
 - (`trusty-squire-mail`)     — DESTROYED. Old postfix server, not in use.
 
 ### Fly secrets (set on `trusty-squire-api`)
 | Secret | Purpose |
 |---|---|
-| `INBOX_DATABASE_URL` | Postgres URL for inbox schema |
-| `AUTH_DATABASE_URL`  | Postgres URL for api schema (same DB as inbox) |
+| `INBOX_DATABASE_URL` | Postgres URL — `trustysquire_inbox` db (inbox schema) |
+| `AUTH_DATABASE_URL`  | Postgres URL — `trustysquire` db (api schema) |
 | `OPENROUTER_API_KEY` | Operator's OpenRouter key for `/v1/llm/chat` proxy |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | SES + S3 for inbound mail |
 | `AWS_REGION` | `us-east-1` |

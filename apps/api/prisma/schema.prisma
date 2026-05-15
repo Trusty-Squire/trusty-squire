@@ -4,13 +4,17 @@
 // its own retention policy (body 7d, metadata 90d). Auth data stays
 // indefinitely until explicitly revoked.
 //
-// All three tables can live in the same physical Postgres as inbox —
-// they just use a different DATABASE_URL alias for clarity. In prod
-// today both point at trustysquire-db-1.
+// This schema gets its own database — `trustysquire` on the
+// trusty-squire-db cluster (AUTH_DATABASE_URL). It cannot share a
+// database with the inbox schema: `prisma db push` reconciles a
+// database to exactly one schema and drops everything else.
 
 generator client {
   provider = "prisma-client-js"
   output   = "../node_modules/.prisma/api-client"
+  // `native` for local dev; the openssl-3.0.x musl target for the
+  // node:alpine deploy image (Alpine ships OpenSSL 3, not 1.1).
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

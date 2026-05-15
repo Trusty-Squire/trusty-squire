@@ -1,10 +1,13 @@
 // Inbox persistence schema. Lives in its own database
-// (trusty_squire_inbox); inbound mail is high-volume and has its own
-// retention policy (body 7d, metadata 90d) that wants its own
-// migration cadence.
+// (`trustysquire_inbox` on the trusty-squire-db cluster); inbound mail
+// is high-volume and has its own retention policy (body 7d, metadata
+// 90d) that wants its own migration cadence.
 
 generator client {
   provider = "prisma-client-js"
+  // `native` for local dev; the openssl-3.0.x musl target for the
+  // node:alpine deploy image (Alpine ships OpenSSL 3, not 1.1).
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
