@@ -7,9 +7,19 @@
 
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
-import { loadVouchflowConfig } from "./config/vouchflow.js";
+import { loadVouchflowConfig, isStubMode } from "./config/vouchflow.js";
+import { makeStubVouchflowVerifier } from "./config/stub-verifier.js";
 import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerAccountsRoute } from "./routes/accounts.js";
+import { registerInstallRoute } from "./routes/install.js";
+import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
+import { registerInboxRoute } from "./routes/inbox.js";
+import { registerLLMRoute } from "./routes/llm.js";
+import { registerSesWebhookRoute } from "./routes/ses-webhook.js";
+import { registerMailgunWebhookRoute } from "./routes/mailgun-webhook.js";
+import { registerFlyEmailWebhookRoute } from "./routes/fly-email-webhook.js";
+import { registerPostfixWebhookRoute } from "./routes/postfix-webhook.js";
+import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerApprovalsRoute } from "./routes/approvals.js";
 import { registerCredentialsRoute } from "./routes/credentials.js";
@@ -40,12 +50,18 @@ function defaultPwaBaseUrl(): string {
 }
 
 export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyInstance> {
+  // If stub mode is enabled, create a test verifier that accepts any bundle
+  const stubVerifier = isStubMode()
+    ? makeStubVouchflowVerifier(loadVouchflowConfig().customerId)
+    : undefined;
+
   const deps =
     opts.deps ??
     buildInMemoryDeps(
       opts.buildDeps ?? {
         sessionSecret: process.env.SESSION_JWT_SECRET ?? "dev-secret-do-not-use",
         customerId: loadVouchflowConfig().customerId,
+        ...(stubVerifier ? { vouchflowVerifier: stubVerifier as any } : {}),
       },
     );
 
@@ -56,6 +72,21 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   const fastify = Fastify({ logger });
 
   await fastify.register(fastifyCookie);
+
+  // Add raw body parser for email webhooks
+  fastify.addContentTypeParser('message/rfc822', { parseAs: 'buffer' }, (req, body, done) => {
+    done(null, body);
+  });
+  
+  // Add text/plain parser for SNS notifications
+  fastify.addContentTypeParser('text/plain', { parseAs: 'string' }, (req, body: string | Buffer, done) => {
+    try {
+      const text = typeof body === 'string' ? body : body.toString();
+      done(null, JSON.parse(text));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
 
   const auth = makeAuthMiddleware({
     sessionStore: deps.sessionStore,
@@ -73,6 +104,38 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerAccountsRoute, { deps });
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerMandatesRoute, { deps, requireWeb: auth.requireWeb });
+  await fastify.register(registerSesWebhookRoute, { deps });
+  await fastify.register(registerMailgunWebhookRoute, { deps });
+  await fastify.register(registerFlyEmailWebhookRoute, { deps });
+  await fastify.register(registerPostfixWebhookRoute, { deps });
+  await fastify.register(registerResendWebhookRoute, { deps });
+  await fastify.register(registerInstallRoute, {
+    deps: {
+      machineTokenStore: deps.machineTokenStore,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
+  });
+  await fastify.register(registerCaptchaEventsRoute, {
+    deps: {
+      captchaEventStore: deps.captchaEventStore,
+      machineTokenStore: deps.machineTokenStore,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
+  });
+  await fastify.register(registerInboxRoute, {
+    deps: {
+      inbox: deps.inbox,
+      machineTokenStore: deps.machineTokenStore,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
+  });
+  await fastify.register(registerLLMRoute, {
+    deps: {
+      machineTokenStore: deps.machineTokenStore,
+      llmUsageTracker: deps.llmUsageTracker,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
+  });
   await fastify.register(registerRunsRoute, {
     deps,
     requireAny: auth.requireAny,
@@ -99,7 +162,20 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.API_PORT ?? 3000);
-  const server = await buildServer();
+  // Build deps explicitly so we can grab a handle to the retention
+  // cron alongside the server. Matches the default buildServer() path
+  // when opts.deps isn't passed.
+  const deps = buildInMemoryDeps({
+    sessionSecret: process.env.SESSION_JWT_SECRET ?? "dev-secret-do-not-use",
+    customerId: loadVouchflowConfig().customerId,
+  });
+  const server = await buildServer({ deps });
+
+  // Retention cron only fires when a DB is wired (it's null otherwise).
+  // .start() is idempotent and uses unref'd timers so it doesn't block
+  // process exit.
+  deps.retentionCron?.start();
+
   await server.listen({ port, host: "0.0.0.0" });
 }
 

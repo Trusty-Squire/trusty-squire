@@ -1,0 +1,115 @@
+// Auth & operational persistence for Trusty Squire API.
+//
+// Separate from packages/inbox/prisma/schema.prisma because inbox has
+// its own retention policy (body 7d, metadata 90d). Auth data stays
+// indefinitely until explicitly revoked.
+//
+// All three tables can live in the same physical Postgres as inbox —
+// they just use a different DATABASE_URL alias for clarity. In prod
+// today both point at trustysquire-db-1.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/api-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("AUTH_DATABASE_URL")
+}
+
+// Tier 0 machine tokens for anonymous MCP installs.
+// One row per `npx @trusty-squire/mcp install`.
+//
+// The asn_* columns capture the network class of the install machine
+// (ipinfo lookup at /v1/install time) so we can correlate captcha
+// failure rates with egress reputation. They're nullable because
+// the lookup is best-effort — older tokens issued before the column
+// existed, and tokens issued during an ipinfo outage, both stay null.
+model MachineToken {
+  token              String    @id
+  created_at         DateTime  @default(now())
+  signup_count       Int       @default(0)
+  last_used_at       DateTime?
+  // Once paired (Tier 1 upgrade), quota stops applying. The PWA's
+  // /v1/mcp/pair/:token/claim sets this.
+  paired_account_id  String?   @db.VarChar(26)
+
+  // Install-time network classification. We don't refresh this over
+  // time — if a user moves networks, future captcha events will tell
+  // a different story than the install-time class, which is itself
+  // useful signal.
+  asn_class          String?   // "residential" | "datacenter" | "unknown"
+  asn_number         String?   // e.g. "AS24940"
+  asn_org            String?   // e.g. "Hetzner Online GmbH"
+  asn_country        String?   // ISO 2-letter
+
+  @@index([paired_account_id])
+  @@index([asn_class])
+}
+
+// Captcha-failure ledger. One row per detected captcha block during a
+// signup attempt. Lets us answer "what % of failures come from
+// datacenter networks?" with data — the leading indicator for whether
+// residential-proxy work (Tier S1) is actually worth doing.
+//
+// Retention: short. These are operational telemetry, not user data.
+// 30-day sweep handled by the existing retention cron alongside
+// LLMUsageEvent.
+model CaptchaEvent {
+  id              String   @id @default(cuid())
+  occurred_at     DateTime @default(now())
+  machine_token   String?
+  service         String
+  // "turnstile" | "recaptcha" | "unknown"
+  captcha_kind    String
+  // Same shape as MachineToken.asn_class. Captured at event time, not
+  // looked up retroactively — the machine might have moved networks
+  // since install.
+  asn_class       String?
+  asn_org         String?
+  // Did the bot escape the captcha or was the run abandoned?
+  blocked         Boolean
+
+  @@index([occurred_at])
+  @@index([asn_class, blocked])
+  @@index([service, blocked])
+}
+
+// Rolling per-machine-token LLM-call ledger. The proxy at /v1/llm/chat
+// inserts one row per call; the rate limiter counts rows in the last
+// hour. We don't bother purging old rows here — the count is cheap
+// and a daily cron could trim entries older than 24h if it becomes an
+// issue. (At 150 calls/hour × 1000 machines × 24h = 3.6M rows/day,
+// which is fine to retain for ~30 days before pruning.)
+model LLMUsageEvent {
+  id              String   @id @default(cuid())
+  machine_token   String
+  occurred_at     DateTime @default(now())
+  // Optional cost-tracking fields surfaced by OpenRouter. Helpful for
+  // "which user is burning the most spend" reports.
+  input_tokens    Int?
+  output_tokens   Int?
+  tier            String?
+
+  @@index([machine_token, occurred_at])
+}
+
+// MCP pair-flow tokens. 10-minute TTL; single-use claim. Expiry is
+// enforced in code, not DB — a background cron can sweep expired rows.
+model PairingToken {
+  token                     String    @id
+  created_at                DateTime  @default(now())
+  expires_at                DateTime
+  status                    String    // "pending" | "claimed" | "expired" | "delivered"
+  agent_identity            String?
+  agent_session_raw_token   String?
+  account_id                String?   @db.VarChar(26)
+  // Tier 0 → Tier 1 upgrade hook. When the CLI declared its machine
+  // token at /initiate, the eventual /claim marks the machine token
+  // paired so the quota counter stops.
+  machine_token             String?
+
+  @@index([machine_token])
+  @@index([status, expires_at])
+}

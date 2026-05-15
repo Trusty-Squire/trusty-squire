@@ -24,6 +24,10 @@ const initiateBody = z
   .object({
     target: z.string().min(1).max(60).optional(),
     agent_identity: z.string().min(1).max(60).optional(),
+    // Optional Tier-0 machine token. When present, the eventual claim
+    // links the machine token to the new account so the quota counter
+    // stops applying.
+    machine_token: z.string().min(8).max(128).optional(),
   })
   .optional();
 
@@ -53,7 +57,8 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
     // `agent_identity` is the canonical field; `target` is a legacy alias
     // the early CLI sent. Either works.
     const agentIdentity = parsed.data?.agent_identity ?? parsed.data?.target ?? null;
-    const record = issuePairingToken(now, agentIdentity);
+    const machineToken = parsed.data?.machine_token ?? null;
+    const record = issuePairingToken(now, agentIdentity, machineToken);
     await opts.deps.pairingTokenStore.insert(record);
     return reply.code(201).send({
       pair_token: record.token,
@@ -142,6 +147,21 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
       if (!claimed) {
         reply.code(409).send({ error: "claim_failed" });
         return;
+      }
+
+      // Tier 0 → Tier 1 upgrade: if a machine token was declared at
+      // /initiate, link it to the account so subsequent quota checks
+      // skip this token.
+      if (record.machine_token !== null) {
+        try {
+          await opts.deps.machineTokenStore.markPaired(
+            record.machine_token,
+            auth.account_id,
+          );
+        } catch (err) {
+          // Non-fatal: pairing already succeeded. Log and continue.
+          fastify.log.warn({ err, machine_token_prefix: record.machine_token.slice(0, 8) }, "markPaired failed");
+        }
       }
 
       return reply.code(200).send({

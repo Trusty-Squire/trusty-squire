@@ -31,6 +31,12 @@ export {
 } from "./ses-handler.js";
 
 export {
+  MailgunHandler,
+  type MailgunHandlerDeps,
+  type MailgunInboundPayload,
+} from "./mailgun-handler.js";
+
+export {
   extractLinks,
   extractOtp,
   matchString,
@@ -46,3 +52,4 @@ export {
 } from "./alias-generator.js";
 
 export { InMemoryAliasStore, InMemoryEmailStore } from "./in-memory-stores.js";
+export { PrismaAliasStore, PrismaEmailStore } from "./prisma-stores.js";

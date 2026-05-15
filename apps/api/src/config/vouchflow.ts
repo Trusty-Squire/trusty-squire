@@ -32,3 +32,7 @@ export function loadVouchflowConfig(): VouchflowApiConfig {
     environment,
   };
 }
+
+export function isStubMode(): boolean {
+  return process.env.VOUCHFLOW_STUB_MODE === "true";
+}

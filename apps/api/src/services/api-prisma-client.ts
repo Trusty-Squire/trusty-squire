@@ -1,0 +1,95 @@
+// Lazy loader for the API's Prisma client.
+//
+// The schema lives at apps/api/prisma/schema.prisma and generates to
+// apps/api/node_modules/.prisma/api-client (custom output so it
+// doesn't clash with @prisma/client used by the inbox package).
+//
+// We createRequire so test runs without an applied migration don't
+// fail at import; the in-memory fallback handles them.
+
+import { createRequire } from "node:module";
+
+// Minimal structural type — just what our stores call. Keeps the type
+// surface narrow even though the real generated client has hundreds of
+// methods.
+// Shape returned by machineToken read/write ops. The asn_* fields are
+// nullable optionals — the underlying schema makes them nullable
+// columns, and older rows (issued before the migration) come back as
+// nulls. Callers that don't care about asn ignore them.
+interface MachineTokenRow {
+  token: string;
+  created_at: Date;
+  signup_count: number;
+  last_used_at: Date | null;
+  paired_account_id: string | null;
+  asn_class?: string | null;
+  asn_number?: string | null;
+  asn_org?: string | null;
+  asn_country?: string | null;
+}
+
+export interface ApiPrismaClient {
+  machineToken: {
+    create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
+    findUnique(args: { where: { token: string } }): Promise<MachineTokenRow | null>;
+    update(args: { where: { token: string }; data: Record<string, unknown> }): Promise<MachineTokenRow>;
+    updateMany(args: { where: { token: string }; data: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  lLMUsageEvent: {
+    create(args: { data: Record<string, unknown> }): Promise<unknown>;
+    count(args: { where: { machine_token: string; occurred_at: { gte: Date } } }): Promise<number>;
+  };
+  // Captcha encounter ledger. Tightly typed for create() because that's
+  // all PrismaCaptchaEventStore uses; readers (analytics queries) will
+  // either come through raw SQL or use prisma directly via the full
+  // generated client. Keeping the structural surface narrow protects
+  // us from accidentally depending on Prisma internals here.
+  captchaEvent: {
+    create(args: { data: Record<string, unknown> }): Promise<unknown>;
+  };
+  pairingToken: {
+    create(args: { data: Record<string, unknown> }): Promise<unknown>;
+    findUnique(args: { where: { token: string } }): Promise<{
+      token: string;
+      created_at: Date;
+      expires_at: Date;
+      status: string;
+      agent_identity: string | null;
+      agent_session_raw_token: string | null;
+      account_id: string | null;
+      machine_token: string | null;
+    } | null>;
+    update(args: { where: { token: string }; data: Record<string, unknown> }): Promise<{
+      token: string;
+      created_at: Date;
+      expires_at: Date;
+      status: string;
+      agent_identity: string | null;
+      agent_session_raw_token: string | null;
+      account_id: string | null;
+      machine_token: string | null;
+    }>;
+    // updateMany powers race-safe single-use claim: update only if
+    // (status, expires_at) match. Returns { count: 0 } when guards
+    // fire — surfaced to the caller as "claim failed", no throw.
+    updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  receivedEmail?: {
+    updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+}
+
+// Cached singleton so multiple stores share one connection pool.
+let cached: ApiPrismaClient | null = null;
+
+export function getApiPrismaClient(databaseUrl: string): ApiPrismaClient {
+  if (cached !== null) return cached;
+  const req = createRequire(import.meta.url);
+  // Custom output path from the schema. Falls back to the generated
+  // location under node_modules.
+  type Ctor = new (opts: { datasourceUrl: string }) => ApiPrismaClient;
+  const mod = req("../../node_modules/.prisma/api-client/index.js") as { PrismaClient: Ctor };
+  cached = new mod.PrismaClient({ datasourceUrl: databaseUrl });
+  return cached;
+}

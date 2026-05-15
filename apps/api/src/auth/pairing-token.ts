@@ -34,6 +34,10 @@ export interface PairingTokenRecord {
   // it ONCE (status flips to `delivered` after the first delivery).
   agent_session_raw_token: string | null;
   account_id: string | null;
+  // Tier 0 → Tier 1 upgrade hook. When the CLI declared a machine token
+  // at /initiate, we associate it on /claim so the server can flip the
+  // machine token's paired_account_id and stop counting its quota.
+  machine_token: string | null;
 }
 
 export interface PairingTokenStore {
@@ -49,6 +53,7 @@ export interface PairingTokenStore {
 export function issuePairingToken(
   now: Date,
   agentIdentity: string | null = null,
+  machineToken: string | null = null,
 ): PairingTokenRecord {
   return {
     token: Buffer.from(randomBytes(TOKEN_BYTES)).toString("base64url"),
@@ -58,6 +63,7 @@ export function issuePairingToken(
     agent_identity: agentIdentity,
     agent_session_raw_token: null,
     account_id: null,
+    machine_token: machineToken,
   };
 }
 

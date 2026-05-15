@@ -1,0 +1,34 @@
+# Simple API Dockerfile - assumes dist is already built locally
+FROM node:22-alpine
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/*/package.json ./packages/
+COPY apps/api/package.json ./apps/api/
+
+# Install production dependencies only
+RUN pnpm install --frozen-lockfile --prod --filter @trusty-squire/api...
+
+# Copy built dist folders AND package.json files (needed for module resolution)
+COPY packages/mandate-validator/dist ./packages/mandate-validator/dist
+COPY packages/mandate-validator/package.json ./packages/mandate-validator/
+COPY packages/inbox/dist ./packages/inbox/dist
+COPY packages/inbox/package.json ./packages/inbox/
+COPY packages/adapters ./packages/adapters
+COPY packages/adapter-sdk/dist ./packages/adapter-sdk/dist
+COPY packages/adapter-sdk/package.json ./packages/adapter-sdk/
+COPY packages/runtime/dist ./packages/runtime/dist
+COPY packages/runtime/package.json ./packages/runtime/
+COPY packages/vault/dist ./packages/vault/dist
+COPY packages/vault/package.json ./packages/vault/
+COPY packages/universal-bot/dist ./packages/universal-bot/dist
+COPY packages/universal-bot/package.json ./packages/universal-bot/
+COPY apps/api/dist ./apps/api/dist
+
+ENV NODE_ENV=production
+EXPOSE 8080
+
+CMD ["node", "apps/api/dist/server.js"]

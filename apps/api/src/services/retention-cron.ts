@@ -1,0 +1,187 @@
+// Retention cron — runs every hour inside the API process.
+//
+// Schedule:
+//   Hourly:
+//     - Null body_text/body_html for ReceivedEmail older than 7d
+//     - Delete ReceivedEmail older than 90d (metadata + S3 pointer)
+//     - Delete PairingToken older than 1h
+//     - Delete LLMUsageEvent older than 30d
+//
+// Running this in-process is fine for v1: one machine, one schedule.
+// When we shard the API, move this to a separate worker or use
+// pg_cron.
+
+import type { ApiPrismaClient } from "./api-prisma-client.js";
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+export interface InboxPrismaClientLike {
+  receivedEmail: {
+    updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+}
+
+export interface RetentionCronDeps {
+  // Inbox client (from packages/inbox via @prisma/client). Separate
+  // from the auth client because they target different generated
+  // outputs. We accept whichever is present — if a deployment lacks
+  // either DB, that section is skipped silently.
+  inboxPrisma?: InboxPrismaClientLike | undefined;
+  authPrisma?: ApiPrismaClient | undefined;
+  // Test seam.
+  now?: () => Date;
+  // Tunables (env-overridable in production).
+  bodyRetentionDays?: number;
+  metadataRetentionDays?: number;
+  pairingTokenRetentionHours?: number;
+  llmEventRetentionDays?: number;
+}
+
+export interface RetentionCronStats {
+  bodies_purged: number;
+  emails_deleted: number;
+  pairing_tokens_deleted: number;
+  llm_events_deleted: number;
+  duration_ms: number;
+  errors: string[];
+}
+
+export class RetentionCron {
+  private readonly now: () => Date;
+  private readonly bodyRetentionDays: number;
+  private readonly metadataRetentionDays: number;
+  private readonly pairingTokenRetentionHours: number;
+  private readonly llmEventRetentionDays: number;
+  private timer: NodeJS.Timeout | null = null;
+  private lastRunAt: Date | null = null;
+  private lastStats: RetentionCronStats | null = null;
+
+  constructor(private readonly deps: RetentionCronDeps) {
+    this.now = deps.now ?? (() => new Date());
+    this.bodyRetentionDays = deps.bodyRetentionDays
+      ?? Number.parseInt(process.env.INBOX_BODY_RETENTION_DAYS ?? "7", 10);
+    this.metadataRetentionDays = deps.metadataRetentionDays
+      ?? Number.parseInt(process.env.INBOX_METADATA_RETENTION_DAYS ?? "90", 10);
+    this.pairingTokenRetentionHours = deps.pairingTokenRetentionHours
+      ?? Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
+    this.llmEventRetentionDays = deps.llmEventRetentionDays
+      ?? Number.parseInt(process.env.LLM_EVENT_RETENTION_DAYS ?? "30", 10);
+  }
+
+  // Starts the hourly schedule. Idempotent; calling start() while
+  // already running is a no-op.
+  start(): void {
+    if (this.timer !== null) return;
+    // Fire once at startup so a freshly-deployed instance catches up.
+    // Don't await — we don't want to block server startup on the cron.
+    void this.runOnceWithLog();
+    this.timer = setInterval(() => {
+      void this.runOnceWithLog();
+    }, HOUR_MS);
+    // Don't keep the event loop alive solely for the cron — when the
+    // server shuts down, this timer doesn't prevent exit.
+    this.timer.unref?.();
+  }
+
+  private async runOnceWithLog(): Promise<void> {
+    const stats = await this.runOnce();
+    // Log a single structured line per run so it shows up in fly logs.
+    // We avoid pulling in a logger dependency here — plain console.log
+    // gets routed correctly by Fastify's stdout pipeline.
+    // eslint-disable-next-line no-console
+    console.log(
+      JSON.stringify({
+        component: "retention-cron",
+        ...stats,
+      }),
+    );
+  }
+
+  stop(): void {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  status(): { last_run_at: Date | null; last_stats: RetentionCronStats | null } {
+    return { last_run_at: this.lastRunAt, last_stats: this.lastStats };
+  }
+
+  // Single run. Public so ops can trigger it via an admin endpoint if
+  // needed, and so tests can drive it deterministically.
+  async runOnce(): Promise<RetentionCronStats> {
+    const startedAt = this.now();
+    const stats: RetentionCronStats = {
+      bodies_purged: 0,
+      emails_deleted: 0,
+      pairing_tokens_deleted: 0,
+      llm_events_deleted: 0,
+      duration_ms: 0,
+      errors: [],
+    };
+
+    const bodyCutoff = new Date(startedAt.getTime() - this.bodyRetentionDays * DAY_MS);
+    const metaCutoff = new Date(startedAt.getTime() - this.metadataRetentionDays * DAY_MS);
+    const pairingCutoff = new Date(startedAt.getTime() - this.pairingTokenRetentionHours * HOUR_MS);
+    const llmCutoff = new Date(startedAt.getTime() - this.llmEventRetentionDays * DAY_MS);
+
+    if (this.deps.inboxPrisma !== undefined) {
+      // Body purge: null out body_text/body_html, set body_purged_at.
+      // We only update rows that aren't already purged to keep the
+      // count meaningful.
+      try {
+        const r = await this.deps.inboxPrisma.receivedEmail.updateMany({
+          where: { received_at: { lt: bodyCutoff }, body_purged_at: null },
+          data: { body_text: null, body_html: null, body_purged_at: startedAt },
+        });
+        stats.bodies_purged = r.count;
+      } catch (err) {
+        stats.errors.push(`body purge: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // Hard-delete old metadata.
+      try {
+        const r = await this.deps.inboxPrisma.receivedEmail.deleteMany({
+          where: { received_at: { lt: metaCutoff } },
+        });
+        stats.emails_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(`email delete: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (this.deps.authPrisma !== undefined) {
+      try {
+        const r = await this.deps.authPrisma.pairingToken.deleteMany({
+          where: { created_at: { lt: pairingCutoff } } as Record<string, unknown>,
+        });
+        stats.pairing_tokens_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(`pairing sweep: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // LLM events are append-only. The rate limiter only looks at the
+      // last hour, so anything older than 30 days is purely audit and
+      // can be trimmed.
+      try {
+        // deleteMany on LLMUsageEvent uses an unindexed column in the
+        // where clause; cap with a `take`-style hard limit via
+        // raw delete... actually deleteMany is fine for our row counts.
+        const r = await (this.deps.authPrisma.lLMUsageEvent as unknown as {
+          deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+        }).deleteMany({ where: { occurred_at: { lt: llmCutoff } } });
+        stats.llm_events_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(`llm event delete: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    stats.duration_ms = this.now().getTime() - startedAt.getTime();
+    this.lastRunAt = startedAt;
+    this.lastStats = stats;
+    return stats;
+  }
+}

@@ -5,6 +5,7 @@
 // Prisma-backed equivalents in a separate module (out-of-package).
 
 import { Buffer } from "node:buffer";
+import { createRequire } from "node:module";
 import {
   InMemoryAdapterRegistry,
   InMemoryRunStore,
@@ -13,7 +14,18 @@ import {
   type VaultClient,
 } from "@trusty-squire/runtime";
 import { resendDemoManifest } from "@trusty-squire/adapter-resend";
-import { InboxService, InMemoryAliasStore, InMemoryEmailStore } from "@trusty-squire/inbox";
+import {
+  InboxService,
+  InMemoryAliasStore,
+  InMemoryEmailStore,
+  PrismaAliasStore,
+  PrismaEmailStore,
+  SesHandler,
+  MailgunHandler,
+  type AliasStore,
+  type EmailStore,
+  type RawEmailFetcher,
+} from "@trusty-squire/inbox";
 import {
   CredentialVault,
   InMemoryCredentialStore,
@@ -37,6 +49,16 @@ import {
   InMemoryPairingTokenStore,
   type PairingTokenStore,
 } from "../auth/pairing-token.js";
+import { PrismaPairingTokenStore } from "../auth/prisma-pairing-token.js";
+import { getApiPrismaClient, type ApiPrismaClient } from "./api-prisma-client.js";
+import { PrismaMachineTokenStore } from "./prisma-machine-tokens.js";
+import { PrismaLLMUsageTracker } from "./prisma-llm-usage-tracker.js";
+import {
+  InMemoryCaptchaEventStore,
+  PrismaCaptchaEventStore,
+  type CaptchaEventStore,
+} from "./captcha-events.js";
+import { RetentionCron, type InboxPrismaClientLike } from "./retention-cron.js";
 import {
   InMemorySessionStore,
   type SessionStore,
@@ -45,6 +67,14 @@ import {
   InMemoryAccountStore,
   type AccountStore,
 } from "./in-memory-account-store.js";
+import {
+  InMemoryMachineTokenStore,
+  type MachineTokenStore,
+} from "./machine-tokens.js";
+import {
+  InMemoryLLMUsageTracker,
+  type LLMUsageTracker,
+} from "./llm-usage-tracker.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -59,6 +89,16 @@ export interface ApiDeps {
   adapterRegistry: AdapterRegistry;
   vault: VaultClient;
   inbox: InboxService;
+  sesHandler: SesHandler;
+  mailgunHandler: MailgunHandler;
+  machineTokenStore: MachineTokenStore;
+  llmUsageTracker: LLMUsageTracker;
+  captchaEventStore: CaptchaEventStore;
+  // Hourly retention cron — purges inbox bodies after 7d, deletes
+  // metadata after 90d, sweeps stale pairing tokens, trims old LLM
+  // events. Null when no DB is wired (in-memory mode); otherwise
+  // started by the server boot path.
+  retentionCron: RetentionCron | null;
 
   // Mandate validation
   mandateValidator: MandateValidator;
@@ -79,6 +119,9 @@ export interface BuildInMemoryDepsOpts {
   // Override the Vouchflow JWKS for tests (so we can sign locally).
   vouchflowVerifier?: VouchflowVerifier;
   now?: () => Date;
+  // Inbox poll cadence in ms. Tests run with 1ms to keep wait loops fast;
+  // omit in prod to use the default 2000ms.
+  pollIntervalMs?: number;
 }
 
 export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
@@ -86,7 +129,20 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   const sessionStore = new InMemorySessionStore();
   const agentSessionStore = new InMemoryAgentSessionStore();
   const approvalTokenStore = new InMemoryApprovalTokenStore();
-  const pairingTokenStore = new InMemoryPairingTokenStore();
+
+  // Auth Prisma client — loaded once and shared across pairing tokens,
+  // machine tokens, and LLM usage. Conditional on AUTH_DATABASE_URL so
+  // tests/local use in-memory stores.
+  const authDatabaseUrl = process.env.AUTH_DATABASE_URL;
+  const authPrisma =
+    authDatabaseUrl !== undefined && authDatabaseUrl.length > 0
+      ? getApiPrismaClient(authDatabaseUrl)
+      : null;
+
+  const pairingTokenStore: PairingTokenStore =
+    authPrisma !== null
+      ? new PrismaPairingTokenStore(authPrisma)
+      : new InMemoryPairingTokenStore();
 
   const runStore = new InMemoryRunStore();
   const adapterRegistry = new InMemoryAdapterRegistry();
@@ -104,11 +160,93 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
   const vault = new CredentialVault({ store: credentialStore, audit: vaultAuditStore, kms });
 
+  // Inbox stores: Postgres-backed when INBOX_DATABASE_URL is set,
+  // in-memory otherwise. Tests + the demo use in-memory; prod wires
+  // Postgres via the Fly secret. The PrismaClient is loaded lazily via
+  // createRequire so test runs without @prisma/client installed don't
+  // fail at import.
+  let aliasStore: AliasStore;
+  let emailStore: EmailStore;
+  // Captured for the retention cron — null in in-memory mode.
+  let inboxPrismaForCron: InboxPrismaClientLike | null = null;
+  if (process.env.INBOX_DATABASE_URL !== undefined && process.env.INBOX_DATABASE_URL.length > 0) {
+    const req = createRequire(import.meta.url);
+    const { PrismaClient } = req("@prisma/client") as typeof import("@prisma/client");
+    const prisma = new PrismaClient({ datasourceUrl: process.env.INBOX_DATABASE_URL });
+    aliasStore = new PrismaAliasStore(prisma);
+    emailStore = new PrismaEmailStore(prisma);
+    inboxPrismaForCron = prisma as unknown as InboxPrismaClientLike;
+  } else {
+    aliasStore = new InMemoryAliasStore();
+    emailStore = new InMemoryEmailStore();
+  }
+
+  // Alias domain. In prod we issue aliases under trustysquire.ai so SES
+  // inbound (which has a catch-all rule for all 4 of our domains) routes
+  // them in. Local/test mode falls back to test.local so unit tests don't
+  // accidentally hit real DNS resolution.
+  const aliasDomain =
+    process.env.INBOX_ALIAS_DOMAIN ??
+    (process.env.NODE_ENV === "production" ? "trustysquire.ai" : "test.local");
   const inbox = new InboxService({
-    aliasStore: new InMemoryAliasStore(),
-    emailStore: new InMemoryEmailStore(),
-    domain: "test.local",
-    pollIntervalMs: 1,
+    aliasStore,
+    emailStore,
+    domain: aliasDomain,
+    // pollIntervalMs intentionally omitted in prod — default is 2s which
+    // is the right cadence for long-poll endpoints serving the universal
+    // signup bot. Tests can wire this down through buildInMemoryDeps opts.
+    ...(opts.pollIntervalMs !== undefined ? { pollIntervalMs: opts.pollIntervalMs } : {}),
+  });
+
+  // S3 fetcher for inbound SES emails. In production we use a real S3 client;
+  // tests/dev get a mock that returns empty buffers. This is the same fetch
+  // path the ses-webhook route uses for personal-Gmail forwarding, just
+  // exposed through the SesHandler abstraction so the inbox-store fallback
+  // works too. Lazy-init keeps buildInMemoryDeps sync and avoids loading the
+  // AWS SDK in test runs.
+  let fetcher: RawEmailFetcher;
+  if (process.env.NODE_ENV === "production") {
+    type S3ClientCtor = typeof import("@aws-sdk/client-s3").S3Client;
+    type GetObjectCmdCtor = typeof import("@aws-sdk/client-s3").GetObjectCommand;
+    let s3Bits: Promise<{ s3: InstanceType<S3ClientCtor>; GetObjectCommand: GetObjectCmdCtor }> | null = null;
+    const getS3 = (): Promise<{ s3: InstanceType<S3ClientCtor>; GetObjectCommand: GetObjectCmdCtor }> => {
+      if (s3Bits === null) {
+        s3Bits = (async () => {
+          const mod = await import("@aws-sdk/client-s3");
+          return {
+            s3: new mod.S3Client({ region: process.env.AWS_REGION ?? "us-east-1" }),
+            GetObjectCommand: mod.GetObjectCommand,
+          };
+        })();
+      }
+      return s3Bits;
+    };
+    fetcher = {
+      async fetch(bucket: string, key: string): Promise<Buffer> {
+        const { s3, GetObjectCommand } = await getS3();
+        const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+        if (res.Body === undefined) throw new Error("s3_empty_body");
+        const chunks: Buffer[] = [];
+        // @ts-expect-error — AWS SDK v3 stream typing
+        for await (const chunk of res.Body) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        return Buffer.concat(chunks);
+      },
+    };
+  } else {
+    fetcher = { fetch: async () => Buffer.from("") };
+  }
+
+  const sesHandler = new SesHandler({
+    aliasStore,
+    emailStore,
+    fetcher,
+  });
+
+  const mailgunHandler = new MailgunHandler({
+    aliasStore,
+    emailStore,
   });
 
   const usedNonces = new Set<string>();
@@ -129,6 +267,41 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     opts.vouchflowVerifier ?? new VouchflowVerifier({ customerId: opts.customerId });
   const mandateValidator = new MandateValidator(validatorDeps, vouchflowVerifier);
 
+  // Tier 0 machine tokens for anonymous MCP installs. Quota-limited; no
+  // account required. See machine-tokens.ts for the model.
+  const machineTokenStore: MachineTokenStore =
+    authPrisma !== null
+      ? new PrismaMachineTokenStore(authPrisma)
+      : new InMemoryMachineTokenStore();
+
+  // Rolling per-machine-token LLM-call counter. Server-side ceiling so a
+  // runaway client can't drill our wallet past the per-signup cap the
+  // bot enforces on itself.
+  const llmUsageTracker: LLMUsageTracker =
+    authPrisma !== null
+      ? new PrismaLLMUsageTracker(authPrisma)
+      : new InMemoryLLMUsageTracker();
+
+  // Captcha-encounter ledger. Same Prisma-or-in-memory split — tests
+  // and DB-less local dev get the in-memory store; prod writes to the
+  // CaptchaEvent table. See captcha-events.ts for the analytics
+  // motivation.
+  const captchaEventStore: CaptchaEventStore =
+    authPrisma !== null
+      ? new PrismaCaptchaEventStore(authPrisma)
+      : new InMemoryCaptchaEventStore();
+
+  // Retention cron only runs when at least one DB is wired — there's
+  // nothing to purge from in-memory stores.
+  const retentionCron: RetentionCron | null =
+    inboxPrismaForCron !== null || authPrisma !== null
+      ? new RetentionCron({
+          inboxPrisma: inboxPrismaForCron ?? undefined,
+          authPrisma: authPrisma ?? undefined,
+          ...(opts.now !== undefined ? { now: opts.now } : {}),
+        })
+      : null;
+
   return {
     accountStore,
     sessionStore,
@@ -139,6 +312,12 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     adapterRegistry,
     vault,
     inbox,
+    sesHandler,
+    mailgunHandler,
+    machineTokenStore,
+    llmUsageTracker,
+    captchaEventStore,
+    retentionCron,
     mandateValidator,
     validatorDeps,
     vouchflowVerifier,

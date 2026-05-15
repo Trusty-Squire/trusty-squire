@@ -14,6 +14,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1045.0",
     "@fastify/cookie": "^9.4.0",
     "@fastify/rate-limit": "^9.1.0",
     "@prisma/client": "^5.22.0",
@@ -26,11 +27,13 @@
     "bullmq": "^5.21.1",
     "fastify": "^4.28.0",
     "jose": "^5.9.6",
+    "nodemailer": "^8.0.7",
     "pino": "^9.5.0",
     "ulid": "^2.3.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/nodemailer": "^8.0.0",
     "@vitest/coverage-v8": "^1.6.1",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
