@@ -1,24 +1,32 @@
 {
   "name": "@trusty-squire/mcp",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API.",
-  "main": "./src/server.ts",
+  "main": "./dist/server.js",
   "bin": {
-    "squire-mcp": "./src/install/cli.ts"
+    "squire-mcp": "./dist/install/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
     "dev:server": "tsx src/server.ts",
-    "install:dev": "tsx src/install/cli.ts"
+    "install:dev": "tsx src/install/cli.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "@trusty-squire/inbox": "workspace:*",
     "@trusty-squire/universal-bot": "workspace:*",
     "open": "^10.1.0",
     "yaml": "^2.6.1",

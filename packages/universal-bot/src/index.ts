@@ -5,7 +5,7 @@ import { randomBytes } from "crypto";
 import { BrowserController } from "./browser.js";
 import { SignupAgent, type SignupResult, LLMCallBudgetExceeded } from "./agent.js";
 import type { AgentInbox } from "./agent.js";
-import type { LLMClient } from "./llm-client.js";
+import type { LLMClient, LLMPair } from "./llm-client.js";
 
 export { type SignupResult, LLMCallBudgetExceeded };
 export { InboxClient } from "./inbox-client.js";

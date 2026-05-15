@@ -421,10 +421,7 @@ export function pickVerificationLink(links: readonly string[]): string | null {
 // LLMClient); LLMClient has `createMessage`. They're mutually exclusive
 // shapes so a structural check is reliable.
 function isLLMPair(x: LLMClient | LLMPair): x is LLMPair {
-  return (
-    typeof (x as Record<string, unknown>)["primary"] === "object" &&
-    (x as Record<string, unknown>)["primary"] !== null
-  );
+  return "primary" in x && typeof x.primary === "object" && x.primary !== null;
 }
 
 export class SignupAgent {

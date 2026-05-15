@@ -1,21 +1,35 @@
 {
   "name": "@trusty-squire/universal-bot",
   "version": "0.1.0",
+  "description": "Playwright + Claude-vision bot that signs up for SaaS services. The engine behind Trusty Squire's provision_any_service.",
   "type": "module",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "NODE_OPTIONS='--experimental-vm-modules' vitest run"
+    "test": "NODE_OPTIONS='--experimental-vm-modules' vitest run",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
-    "@trusty-squire/inbox": "workspace:*",
     "playwright": "^1.49.0"
   },
   "devDependencies": {
+    "@trusty-squire/inbox": "workspace:*",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

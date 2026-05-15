@@ -127,9 +127,6 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
-      '@trusty-squire/inbox':
-        specifier: workspace:*
-        version: link:../../packages/inbox
       '@trusty-squire/universal-bot':
         specifier: workspace:*
         version: link:../../packages/universal-bot
@@ -369,13 +366,13 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.32.1
         version: 0.32.1
-      '@trusty-squire/inbox':
-        specifier: workspace:*
-        version: link:../inbox
       playwright:
         specifier: ^1.49.0
         version: 1.59.1
     devDependencies:
+      '@trusty-squire/inbox':
+        specifier: workspace:*
+        version: link:../inbox
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.19
