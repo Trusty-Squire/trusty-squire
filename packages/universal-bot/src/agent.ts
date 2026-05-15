@@ -8,7 +8,7 @@
 // executor; the prompt is the contract. If a service breaks we tweak the
 // prompt rather than threading service-specific logic through the agent.
 
-import type { BrowserController } from "./browser.js";
+import type { BrowserController, CaptchaKind } from "./browser.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -110,12 +110,12 @@ export interface SignupResult {
 }
 
 // Plan emitted by Claude when looking at a signup form. One action per field.
-type FillAction =
-  | { kind: "fill"; selector: string; value_kind: "email" | "password" | "name" | "username" | "company" | "literal"; literal?: string; reason: string }
+export type FillAction =
+  | { kind: "fill"; selector: string; value_kind: FillValueKind; literal?: string; reason: string }
   | { kind: "check"; selector: string; reason: string }
   | { kind: "click"; selector: string; reason: string };
 
-interface SignupPlan {
+export interface SignupPlan {
   actions: FillAction[];
   submit_selector: string;
   confidence: "high" | "medium" | "low";
@@ -127,7 +127,7 @@ interface SignupPlan {
 // two clicks ("create your first project", "skip tour", etc.) before the
 // key appears. The post-verification loop asks Claude one of these on
 // every round until it sees `done` or runs out of rounds.
-type PostVerifyStep =
+export type PostVerifyStep =
   | { kind: "done"; reason: string }
   | { kind: "extract"; reason: string }
   | { kind: "click"; selector: string; reason: string }
@@ -135,56 +135,286 @@ type PostVerifyStep =
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
-// Parsers live at module scope so callLLM() can pass them as plain
-// functions. Each parser MUST throw on any malformed reply — the throw
-// is the signal callLLM uses to trigger the premium-fallback retry.
+// The set of value_kinds the planner is allowed to emit. Kept as a
+// runtime array so validation and the exhaustive `valueFor` switch
+// share one source of truth.
+const FILL_VALUE_KINDS = [
+  "email",
+  "password",
+  "name",
+  "username",
+  "company",
+  "literal",
+] as const;
+type FillValueKind = (typeof FILL_VALUE_KINDS)[number];
 
-function parseSignupPlan(raw: string): SignupPlan {
+// Parsers/validators live at module scope so callLLM() can pass them
+// as plain functions. Each parser MUST throw on any malformed reply —
+// the throw is the signal callLLM uses to trigger the premium-fallback
+// retry. The model output is untrusted: every field an executor later
+// reads (selector, value_kind, url, ...) is validated here so a
+// `{kind:"fill"}` with no selector can never reach browser.type().
+
+// Shared fence-strip + `{...}` extraction + JSON.parse. Both planners
+// take the same raw LLM reply shape, so the boilerplate lives once.
+function extractJsonObject(raw: string): Record<string, unknown> {
   const trimmed = raw.trim();
   // Tolerate models that wrap their reply in markdown fences.
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
   const candidate = fenced !== null && fenced[1] !== undefined ? fenced[1] : trimmed;
-  const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-  if (jsonMatch === null) {
-    throw new Error(`signup plan not parseable as JSON: ${raw.slice(0, 200)}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonMatch[0]);
-  } catch (err) {
-    throw new Error(`signup plan JSON.parse failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("signup plan: top-level not an object");
-  }
-  const obj = parsed as Record<string, unknown>;
-  if (!Array.isArray(obj["actions"])) {
-    throw new Error("signup plan missing actions[]");
-  }
-  if (typeof obj["submit_selector"] !== "string" || obj["submit_selector"].length === 0) {
-    throw new Error("signup plan missing submit_selector");
-  }
-  return obj as unknown as SignupPlan;
-}
-
-function parsePostVerifyStep(raw: string): PostVerifyStep {
-  const trimmed = raw.trim();
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
-  const candidate = fenced !== null && fenced[1] !== undefined ? fenced[1] : trimmed;
   const match = candidate.match(/\{[\s\S]*\}/);
-  if (match === null) throw new Error(`post-verify step: no JSON in reply: ${raw.slice(0, 200)}`);
+  if (match === null) {
+    throw new Error(`no JSON object in reply: ${raw.slice(0, 200)}`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(match[0]);
   } catch (err) {
-    throw new Error(`post-verify step JSON.parse failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(
+      `JSON.parse failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("post-verify step: top-level not an object");
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("top-level JSON is not an object");
   }
-  const obj = parsed as Record<string, unknown>;
-  if (typeof obj["kind"] !== "string") throw new Error("post-verify step: missing kind");
-  return obj as unknown as PostVerifyStep;
+  // A plain object's own enumerable string keys are exactly
+  // Record<string, unknown> — no cast needed once we've ruled out
+  // null/array above.
+  const obj: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(parsed)) obj[k] = v;
+  return obj;
+}
+
+// Narrow `unknown` to a non-null object map.
+function asObject(value: unknown, context: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${context}: expected an object`);
+  }
+  const obj: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) obj[k] = v;
+  return obj;
+}
+
+// Narrow `unknown` to a non-empty string.
+function requireString(
+  obj: Record<string, unknown>,
+  key: string,
+  context: string,
+): string {
+  const v = obj[key];
+  if (typeof v !== "string" || v.length === 0) {
+    throw new Error(`${context}: missing or empty string field "${key}"`);
+  }
+  return v;
+}
+
+function isFillValueKind(value: unknown): value is FillValueKind {
+  // .some() over the readonly tuple avoids a widening cast: each
+  // element compares as the literal-union type against `value`.
+  return (
+    typeof value === "string" &&
+    FILL_VALUE_KINDS.some((kind) => kind === value)
+  );
+}
+
+function validateFillAction(obj: Record<string, unknown>): FillAction {
+  const selector = requireString(obj, "selector", "fill action");
+  const valueKind = obj["value_kind"];
+  if (!isFillValueKind(valueKind)) {
+    throw new Error(
+      `fill action: invalid value_kind ${JSON.stringify(valueKind)}`,
+    );
+  }
+  // `reason` is advisory only — tolerate it missing so a model that
+  // skips the field doesn't trigger an otherwise-pointless retry.
+  const reason = typeof obj["reason"] === "string" ? obj["reason"] : "";
+  const literal = typeof obj["literal"] === "string" ? obj["literal"] : undefined;
+  if (valueKind === "literal" && literal === undefined) {
+    throw new Error('fill action: value_kind "literal" requires a "literal" string');
+  }
+  return literal !== undefined
+    ? { kind: "fill", selector, value_kind: valueKind, literal, reason }
+    : { kind: "fill", selector, value_kind: valueKind, reason };
+}
+
+function validateAction(value: unknown, index: number): FillAction {
+  const obj = asObject(value, `action[${index}]`);
+  const kind = obj["kind"];
+  switch (kind) {
+    case "fill":
+      return validateFillAction(obj);
+    case "check":
+      return {
+        kind: "check",
+        selector: requireString(obj, "selector", `action[${index}] (check)`),
+        reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
+      };
+    case "click":
+      return {
+        kind: "click",
+        selector: requireString(obj, "selector", `action[${index}] (click)`),
+        reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
+      };
+    default:
+      throw new Error(`action[${index}]: unknown kind ${JSON.stringify(kind)}`);
+  }
+}
+
+export function parseSignupPlan(raw: string): SignupPlan {
+  const obj = extractJsonObject(raw);
+  const rawActions = obj["actions"];
+  if (!Array.isArray(rawActions)) {
+    throw new Error("signup plan missing actions[]");
+  }
+  const actions = rawActions.map((a, i) => validateAction(a, i));
+  const submitSelector = requireString(obj, "submit_selector", "signup plan");
+  const confidence = obj["confidence"];
+  if (confidence !== "high" && confidence !== "medium" && confidence !== "low") {
+    throw new Error(`signup plan: invalid confidence ${JSON.stringify(confidence)}`);
+  }
+  const notes = typeof obj["notes"] === "string" ? obj["notes"] : undefined;
+  return notes !== undefined
+    ? { actions, submit_selector: submitSelector, confidence, notes }
+    : { actions, submit_selector: submitSelector, confidence };
+}
+
+export function parsePostVerifyStep(raw: string): PostVerifyStep {
+  const obj = extractJsonObject(raw);
+  const kind = obj["kind"];
+  // `reason` is required by the schema but advisory; default it so a
+  // model omitting it doesn't trip a retry on an otherwise-valid step.
+  const reason = typeof obj["reason"] === "string" ? obj["reason"] : "";
+  switch (kind) {
+    case "done":
+      return { kind: "done", reason };
+    case "extract":
+      return { kind: "extract", reason };
+    case "click":
+      return {
+        kind: "click",
+        selector: requireString(obj, "selector", "post-verify click step"),
+        reason,
+      };
+    case "fill":
+      return {
+        kind: "fill",
+        selector: requireString(obj, "selector", "post-verify fill step"),
+        value: requireString(obj, "value", "post-verify fill step"),
+        reason,
+      };
+    case "navigate":
+      return {
+        kind: "navigate",
+        url: requireString(obj, "url", "post-verify navigate step"),
+        reason,
+      };
+    case "wait": {
+      const seconds = obj["seconds"];
+      if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+        throw new Error("post-verify wait step: invalid seconds");
+      }
+      return { kind: "wait", seconds, reason };
+    }
+    default:
+      throw new Error(`post-verify step: unknown kind ${JSON.stringify(kind)}`);
+  }
+}
+
+// Upper bound on a credential we'll accept from a labeled match.
+// Real API keys / bearer tokens are short (Stripe ~32, JWT ~hundreds
+// but our labeled patterns don't target JWTs). Captcha challenge
+// tokens are very long: g-recaptcha-response runs ~500-2000 chars and
+// cf-turnstile-response is similar. A 100-char ceiling cleanly admits
+// real keys and rejects every captcha token shape we've seen.
+const MAX_CREDENTIAL_LENGTH = 100;
+
+// Substrings that, if present in a candidate, mark it as a
+// challenge/cookie token rather than a credential. Cloudflare clearance
+// cookies (`__cf`, `cf_clearance`), CDN challenge paths (`cdn-cgi`),
+// and the visible field/param names of the two captcha widgets.
+const CAPTCHA_TOKEN_MARKERS: readonly string[] = [
+  "__cf",
+  "cf_clearance",
+  "cdn-cgi",
+  "cf-turnstile-response",
+  "g-recaptcha-response",
+  "h-captcha-response",
+];
+
+// Pull an API key out of the *visible* page text.
+//
+// Two strategies, in priority order:
+//   1. Known service-specific prefixes (re_, sk_live_, …) — high
+//      confidence, the prefix itself is the proof.
+//   2. Labeled patterns ("api key: <value>") — lower confidence, so
+//      they carry guard rails: the value must sit IMMEDIATELY after
+//      the label (a small bounded gap of spaces/colon/equals, NOT
+//      arbitrary whitespace that could span unrelated page sections),
+//      must be under MAX_CREDENTIAL_LENGTH, and must not look like a
+//      captcha/cookie token. Without these, a `g-recaptcha-response`
+//      value or a session token elsewhere in the body could be
+//      mistaken for `credentials.api_key`.
+//
+// Exported for unit testing — the regex tuning here is the load-
+// bearing logic and deserves direct coverage.
+export function extractApiKeyFromText(text: string): string | null {
+  const prefixed: readonly RegExp[] = [
+    /\bre_[a-zA-Z0-9]{20,}\b/, // Resend
+    /\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe secret
+    /\bpk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe public
+    /\bkey-[a-f0-9]{32}\b/, // Mailgun
+    /\bphc_[a-zA-Z0-9]{32,}\b/, // PostHog
+    /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
+  ];
+  for (const pattern of prefixed) {
+    const match = text.match(pattern);
+    if (match !== null) return match[0];
+  }
+
+  // Labeled patterns. The gap between label and value is
+  // `[ \t]*[:=]?[ \t]*` — only spaces/tabs, never a newline — so the
+  // value must be adjacent to its label. The value charset excludes
+  // the captcha-token shape implicitly via the length ceiling, and we
+  // re-check markers explicitly below for the dot-bearing bearer case.
+  const labeled: readonly RegExp[] = [
+    /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)[ \t]*[:=]?[ \t]*([a-zA-Z0-9_\-]{20,})/i,
+    /\b[Bb]earer[ \t]+([a-zA-Z0-9_\-.]{30,})/,
+  ];
+  for (const pattern of labeled) {
+    const match = text.match(pattern);
+    const candidate = match?.[1];
+    if (candidate === undefined) continue;
+    // A captcha challenge token: too long for a real key, and/or
+    // carries a known cookie/widget marker.
+    if (candidate.length > MAX_CREDENTIAL_LENGTH) continue;
+    const lower = candidate.toLowerCase();
+    if (CAPTCHA_TOKEN_MARKERS.some((marker) => lower.includes(marker))) continue;
+    return candidate;
+  }
+
+  return null;
+}
+
+// Choose which link in a verification email to click. Scores each URL
+// by keyword and picks the best — but only if it scored positive.
+//
+// Exported for unit testing. The all-negative case is the bug this
+// guards: an email whose only links are unsubscribe/preferences scores
+// <= 0 everywhere, and an earlier version returned links[0] anyway,
+// navigating the bot straight to an unsubscribe URL.
+export function pickVerificationLink(links: readonly string[]): string | null {
+  const scored = links.map((url) => {
+    const lower = url.toLowerCase();
+    let score = 0;
+    if (lower.includes("verify") || lower.includes("confirm")) score += 10;
+    if (lower.includes("activate")) score += 8;
+    if (lower.includes("welcome")) score += 3;
+    if (lower.includes("unsubscribe") || lower.includes("preferences")) score -= 10;
+    return { url, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored[0];
+  return top !== undefined && top.score > 0 ? top.url : null;
 }
 
 // Discriminates LLMPair from LLMClient. LLMPair has `primary` (an
@@ -229,6 +459,71 @@ export class SignupAgent {
       browser_channel: this.browser.channel,
       ...(this.captchaEncounter !== undefined ? { captcha: this.captchaEncounter } : {}),
     };
+  }
+
+  // Run one Tier-2 visible-captcha gate. There are three gates in a
+  // run (pre-submit, post-submit, re-plan). Each solveVisibleCaptcha()
+  // call burns up to its 30s timeout.
+  //
+  // Short-circuit: Cloudflare/reCAPTCHA scoring is sticky per session
+  // — once one gate reports `blocked`, every later gate is doomed to
+  // the same outcome, so probing them just burns another 30s each (up
+  // to 90s wasted on a run that's already lost). Once captchaEncounter
+  // records a block, subsequent gates skip the browser call entirely
+  // and report blocked immediately with the original kind.
+  private async runCaptchaGate(
+    label: string,
+    steps: string[],
+  ): Promise<{ found: boolean; solved: boolean; blocked: boolean; kind: CaptchaKind }> {
+    if (this.captchaEncounter !== undefined && this.captchaEncounter.blocked) {
+      const kind = this.captchaEncounter.kind;
+      steps.push(`${label} captcha gate skipped — session already captcha-blocked (${kind}).`);
+      return { found: true, solved: false, blocked: true, kind };
+    }
+    const result = await this.browser.solveVisibleCaptcha();
+    if (!result.found) {
+      return { found: false, solved: false, blocked: false, kind: "turnstile" };
+    }
+    steps.push(
+      `${label} captcha (${result.kind}): ${result.solved ? "solved" : "NOT solved (timeout)"}`,
+    );
+    this.captchaEncounter = { kind: result.kind, blocked: !result.solved };
+    return { found: true, solved: result.solved, blocked: !result.solved, kind: result.kind };
+  }
+
+  // Execute a planned set of fill/check/click actions. Used by both
+  // the initial-plan and the validation re-plan paths so the step
+  // logging stays consistent (the re-plan copy historically dropped
+  // the per-action steps.push entries the initial path had).
+  private async executePlan(
+    plan: SignupPlan,
+    fillValues: Record<FillValueKind, string>,
+    steps: string[],
+  ): Promise<void> {
+    for (const action of plan.actions) {
+      try {
+        if (action.kind === "fill") {
+          // `literal` is per-action; everything else is a fixed value.
+          const value =
+            action.value_kind === "literal"
+              ? action.literal ?? ""
+              : fillValues[action.value_kind];
+          steps.push(`Fill ${action.value_kind} → ${action.selector}`);
+          await this.browser.type(action.selector, value);
+        } else if (action.kind === "check") {
+          steps.push(`Check ${action.selector} (${action.reason})`);
+          await this.browser.check(action.selector);
+        } else {
+          steps.push(`Click ${action.selector} (${action.reason})`);
+          await this.browser.click(action.selector);
+        }
+      } catch (err) {
+        steps.push(
+          `⚠ action failed (${action.kind} ${action.selector}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        // continue — a missing optional field shouldn't abort the whole signup
+      }
+    }
   }
 
   constructor(
@@ -427,35 +722,16 @@ export class SignupAgent {
       steps.push(`Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}${plan.notes !== undefined ? ` — ${plan.notes}` : ""}`);
 
       // Step 3: Execute the plan.
-      const valueFor = (a: Extract<FillAction, { kind: "fill" }>): string => {
-        switch (a.value_kind) {
-          case "email": return task.email;
-          case "password": return password;
-          case "name": return displayName;
-          case "username": return username;
-          case "company": return "Trusty Squire";
-          case "literal": return a.literal ?? "";
-        }
+      const fillValues: Record<FillValueKind, string> = {
+        email: task.email,
+        password,
+        name: displayName,
+        username,
+        company: "Trusty Squire",
+        // `literal` has no fixed value — resolved per-action below.
+        literal: "",
       };
-
-      for (const action of plan.actions) {
-        try {
-          if (action.kind === "fill") {
-            const value = valueFor(action);
-            steps.push(`Fill ${action.value_kind} → ${action.selector}`);
-            await this.browser.type(action.selector, value);
-          } else if (action.kind === "check") {
-            steps.push(`Check ${action.selector} (${action.reason})`);
-            await this.browser.check(action.selector);
-          } else if (action.kind === "click") {
-            steps.push(`Click ${action.selector} (${action.reason})`);
-            await this.browser.click(action.selector);
-          }
-        } catch (err) {
-          steps.push(`⚠ action failed (${action.kind} ${action.selector}): ${err instanceof Error ? err.message : String(err)}`);
-          // continue — a missing optional field shouldn't abort the whole signup
-        }
-      }
+      await this.executePlan(plan, fillValues, steps);
 
       // Tier 2 captcha (pre-submit): check for a visible
       // Turnstile/reCAPTCHA widget rendered inline with the form.
@@ -463,23 +739,14 @@ export class SignupAgent {
       // load; failing to interact with it leaves cf-turnstile-response
       // empty and the submit gets server-side-rejected with a generic
       // validation error we'd waste a re-plan trying to debug.
-      const preSubmitCaptcha = await this.browser.solveVisibleCaptcha();
-      if (preSubmitCaptcha.found) {
-        steps.push(
-          `Pre-submit captcha (${preSubmitCaptcha.kind}): ${preSubmitCaptcha.solved ? "solved" : "NOT solved (timeout)"}`,
-        );
-        this.captchaEncounter = { kind: preSubmitCaptcha.kind, blocked: !preSubmitCaptcha.solved };
-        if (!preSubmitCaptcha.solved) {
-          // Cloudflare scoring is sticky per session — a failed solve
-          // usually means the entire session is flagged. Bail with a
-          // clear signal so the MCP tool can surface captcha_blocked.
-          return {
-            success: false,
-            error: `captcha_blocked: visible ${preSubmitCaptcha.kind} challenge did not resolve. The site flagged this session.`,
-            steps,
-            ...this.resultTail(),
-          };
-        }
+      const preSubmitGate = await this.runCaptchaGate("Pre-submit", steps);
+      if (preSubmitGate.blocked) {
+        return {
+          success: false,
+          error: `captcha_blocked: visible ${preSubmitGate.kind} challenge did not resolve. The site flagged this session.`,
+          steps,
+          ...this.resultTail(),
+        };
       }
 
       // Step 4: Submit.
@@ -494,29 +761,24 @@ export class SignupAgent {
       // Tier 2 captcha (post-submit): some services only render the
       // challenge after form submission (deferred rendering). Same
       // shape as the pre-submit check.
-      const postSubmitCaptcha = await this.browser.solveVisibleCaptcha();
-      if (postSubmitCaptcha.found) {
-        steps.push(
-          `Post-submit captcha (${postSubmitCaptcha.kind}): ${postSubmitCaptcha.solved ? "solved" : "NOT solved (timeout)"}`,
-        );
-        this.captchaEncounter = { kind: postSubmitCaptcha.kind, blocked: !postSubmitCaptcha.solved };
-        if (postSubmitCaptcha.solved) {
-          // Re-click submit so the populated token ships with the form.
-          try {
-            await this.browser.click(plan.submit_selector);
-            await this.browser.wait(3);
-          } catch (err) {
-            steps.push(
-              `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        } else {
-          return {
-            success: false,
-            error: `captcha_blocked: post-submit ${postSubmitCaptcha.kind} challenge did not resolve.`,
-            steps,
-            ...this.resultTail(),
-          };
+      const postSubmitGate = await this.runCaptchaGate("Post-submit", steps);
+      if (postSubmitGate.blocked) {
+        return {
+          success: false,
+          error: `captcha_blocked: post-submit ${postSubmitGate.kind} challenge did not resolve.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+      if (postSubmitGate.found && postSubmitGate.solved) {
+        // Re-click submit so the populated token ships with the form.
+        try {
+          await this.browser.click(plan.submit_selector);
+          await this.browser.wait(3);
+        } catch (err) {
+          steps.push(
+            `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
 
@@ -537,36 +799,18 @@ export class SignupAgent {
           screenshot: state2.screenshot,
           hint: `Previous submit produced validation errors. Visible page text snippet: ${afterSubmitText.slice(0, 800)}`,
         });
-        for (const action of plan2.actions) {
-          try {
-            if (action.kind === "fill") {
-              await this.browser.type(action.selector, valueFor(action));
-            } else if (action.kind === "check") {
-              await this.browser.check(action.selector);
-            } else if (action.kind === "click") {
-              await this.browser.click(action.selector);
-            }
-          } catch (err) {
-            steps.push(`⚠ retry action failed: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
+        await this.executePlan(plan2, fillValues, steps);
         // Re-plan path: same captcha guard as initial submit. If the
         // first submit triggered captcha rendering, the second pass
         // sees it inline.
-        const replanCaptcha = await this.browser.solveVisibleCaptcha();
-        if (replanCaptcha.found) {
-          steps.push(
-            `Re-plan captcha (${replanCaptcha.kind}): ${replanCaptcha.solved ? "solved" : "NOT solved (timeout)"}`,
-          );
-          this.captchaEncounter = { kind: replanCaptcha.kind, blocked: !replanCaptcha.solved };
-          if (!replanCaptcha.solved) {
-            return {
-              success: false,
-              error: `captcha_blocked: re-plan ${replanCaptcha.kind} challenge did not resolve.`,
-              steps,
-              ...this.resultTail(),
-            };
-          }
+        const replanGate = await this.runCaptchaGate("Re-plan", steps);
+        if (replanGate.blocked) {
+          return {
+            success: false,
+            error: `captcha_blocked: re-plan ${replanGate.kind} challenge did not resolve.`,
+            steps,
+            ...this.resultTail(),
+          };
         }
         try {
           await this.browser.click(plan2.submit_selector);
@@ -742,18 +986,7 @@ ${trimmedHtml}`,
   }
 
   private pickVerificationLink(links: string[]): string | null {
-    const scored = links.map((url) => {
-      const lower = url.toLowerCase();
-      let score = 0;
-      if (lower.includes("verify") || lower.includes("confirm")) score += 10;
-      if (lower.includes("activate")) score += 8;
-      if (lower.includes("welcome")) score += 3;
-      if (lower.includes("unsubscribe") || lower.includes("preferences")) score -= 10;
-      return { url, score };
-    });
-    scored.sort((a, b) => b.score - a.score);
-    const top = scored[0];
-    return top !== undefined && top.score > 0 ? top.url : (links[0] ?? null);
+    return pickVerificationLink(links);
   }
 
   // The InboxClient long-poll caps at 120s server-side (matches the API
@@ -929,44 +1162,8 @@ ${visibleText}`,
     // naive regex.
     const text = await this.browser.extractText();
     const credentials: Record<string, string> = {};
-
-    // Patterns with a known service-specific prefix are reliable.
-    // Generic "api_key: …" patterns require the literal label to appear
-    // adjacent to the value (case-insensitive, allowing whitespace/colon/=).
-    const prefixed: RegExp[] = [
-      /\bre_[a-zA-Z0-9]{20,}\b/,                     // Resend
-      /\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/,       // Stripe secret
-      /\bpk_(?:live|test)_[a-zA-Z0-9]{20,}\b/,       // Stripe public
-      /\bkey-[a-f0-9]{32}\b/,                         // Mailgun
-      /\bphc_[a-zA-Z0-9]{32,}\b/,                     // PostHog
-      /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
-    ];
-    for (const pattern of prefixed) {
-      const match = text.match(pattern);
-      if (match !== null) {
-        credentials.api_key = match[0];
-        return credentials;
-      }
-    }
-
-    // Labeled patterns: require the label to be near the value, on the
-    // *visible* text. We bound the gap to avoid matching across unrelated
-    // sections of the page.
-    const labeled: RegExp[] = [
-      /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)\s*[:=]?\s*([a-zA-Z0-9_\-]{20,})/i,
-      /[Bb]earer\s+([a-zA-Z0-9_\-\.]{30,})/,
-    ];
-    for (const pattern of labeled) {
-      const match = text.match(pattern);
-      if (match !== null && match[1] !== undefined) {
-        const candidate = match[1];
-        // Filter out obvious challenge/cookie strings.
-        if (candidate.includes("__cf") || candidate.includes("cdn-cgi")) continue;
-        credentials.api_key = candidate;
-        return credentials;
-      }
-    }
-
+    const apiKey = extractApiKeyFromText(text);
+    if (apiKey !== null) credentials.api_key = apiKey;
     return credentials;
   }
 }

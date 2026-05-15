@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "NODE_OPTIONS='--experimental-vm-modules' vitest"
+    "test": "NODE_OPTIONS='--experimental-vm-modules' vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
