@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Tool } from "./index.js";
+import { assertPaired, type Tool } from "./index.js";
 
 const inputSchema = z.object({
   category: z.string().min(1).max(60).optional(),
@@ -34,6 +34,7 @@ export const listServicesTool: Tool<z.infer<typeof inputSchema>> = {
     },
   },
   async handler(args, api) {
+    assertPaired(api);
     const directory = await api.listServices(args.category);
     let entries = directory.adapters;
     if (args.query !== undefined) {

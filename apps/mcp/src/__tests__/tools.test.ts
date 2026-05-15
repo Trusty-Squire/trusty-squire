@@ -298,8 +298,8 @@ describe("wait_for_approval", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes 8 tools", () => {
-    expect(TOOLS).toHaveLength(8);
+  it("exposes 9 tools", () => {
+    expect(TOOLS).toHaveLength(9);
   });
 
   it("every tool has a non-trivial description (helps the coding agent decide when to call)", () => {

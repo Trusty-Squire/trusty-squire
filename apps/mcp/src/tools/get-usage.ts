@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Tool } from "./index.js";
+import { assertPaired, type Tool } from "./index.js";
 
 const inputSchema = z.object({});
 
@@ -20,6 +20,7 @@ export const getUsageTool: Tool<z.infer<typeof inputSchema>> = {
   inputSchema,
   jsonInputSchema: { type: "object", properties: {} },
   async handler(_args, api) {
+    assertPaired(api);
     return api.getUsage();
   },
 };

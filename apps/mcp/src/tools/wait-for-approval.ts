@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
-import type { Tool } from "./index.js";
+import { assertPaired, type Tool } from "./index.js";
 
 const inputSchema = z.object({
   run_id: z.string().min(1),
@@ -34,6 +34,7 @@ export const waitForApprovalTool: Tool<z.infer<typeof inputSchema>> = {
     },
   },
   async handler(args, api) {
+    assertPaired(api);
     return waitForApprovalImpl(args, api);
   },
 };

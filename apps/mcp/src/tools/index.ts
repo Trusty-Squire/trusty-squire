@@ -25,7 +25,17 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   description: string;
   inputSchema: ZodTypeAny;
   jsonInputSchema: Record<string, unknown>;
-  handler: (args: TArgs, api: ApiClient) => Promise<unknown>;
+  handler: (args: TArgs, api: ApiClient | null) => Promise<unknown>;
+}
+
+// Auth-requiring tools receive `api: ApiClient | null` per the registry
+// contract; server.ts only invokes them after confirming a paired session.
+// This assertion makes that invariant explicit so each handler narrows to a
+// non-null ApiClient without repeating the guard.
+export function assertPaired(api: ApiClient | null): asserts api is ApiClient {
+  if (api === null) {
+    throw new Error("This tool requires a paired (Tier 1+) session.");
+  }
 }
 
 export const TOOLS: Tool[] = [

@@ -1,6 +1,6 @@
 // MCP server entry point. Reads the session from keytar/file, sets up
 // an ApiClient against the configured API base URL, and exposes the
-// eight tools over stdio.
+// registered tools over stdio.
 //
 // The server is what a coding agent (Claude Code, Cursor, etc.)
 // launches as a child process via the MCP config it found in
@@ -47,7 +47,7 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     try {
       // provision_any_service doesn't need API client (anonymous mode)
       if (tool.name === "provision_any_service") {
-        const result = await tool.handler(parsed.data, null as any);
+        const result = await tool.handler(parsed.data, null);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };

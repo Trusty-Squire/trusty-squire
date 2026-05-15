@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Tool } from "./index.js";
+import { assertPaired, type Tool } from "./index.js";
 
 const inputSchema = z.object({
   subscription_id: z.string().min(1),
@@ -30,6 +30,7 @@ export const cancelTool: Tool<z.infer<typeof inputSchema>> = {
     properties: { subscription_id: { type: "string" } },
   },
   async handler(args, api) {
+    assertPaired(api);
     return api.cancelSubscription(args.subscription_id);
   },
 };
