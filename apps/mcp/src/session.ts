@@ -18,11 +18,18 @@ const FALLBACK_DIR = path.join(
 );
 const FALLBACK_FILE = path.join(FALLBACK_DIR, "session.json");
 
+// Session storage holds whatever auth the machine has earned.
+// Tier 0 machines have just a machine_token; Tier 1+ also have a paired
+// agent_session_token + account_id. Both fields are optional so the install
+// flow can save a Tier 0 session today and upgrade later without rewriting.
 export interface SessionData {
-  agent_session_token: string;
-  account_id: string;
   api_base_url: string;
   saved_at: string;
+  // Tier 0 — issued at install, no account needed.
+  machine_token?: string;
+  // Tier 1+ — written when the user pairs.
+  agent_session_token?: string;
+  account_id?: string;
 }
 
 export interface SessionStorage {
@@ -46,8 +53,22 @@ export async function openSessionStorage(
 }
 
 async function tryLoadKeytar(): Promise<KeytarShape | null> {
+  // Two things can fail here:
+  //   1. The module itself can't load (no native binding for this Node
+  //      version, or the package isn't installed).
+  //   2. The module loads but the OS keychain isn't available (no
+  //      D-Bus secrets daemon on a headless Linux box, locked Keychain
+  //      on macOS, etc.) — load succeeds, the first call throws.
+  // Probe with a write to a throwaway entry: getPassword() can succeed
+  // (returning null) on a half-broken D-Bus where the secrets service
+  // is present but no collection is unlocked — only setPassword
+  // surfaces that. We delete the probe right after so we don't pollute
+  // the keychain.
   try {
     const mod: KeytarModule = await import("keytar");
+    const probeAccount = `${KEYTAR_ACCOUNT}__probe`;
+    await mod.default.setPassword(KEYTAR_SERVICE, probeAccount, "1");
+    await mod.default.deletePassword(KEYTAR_SERVICE, probeAccount);
     return {
       getPassword: mod.default.getPassword,
       setPassword: mod.default.setPassword,

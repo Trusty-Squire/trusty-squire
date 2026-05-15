@@ -1,40 +1,56 @@
 #!/usr/bin/env node
-// Install / uninstall CLI.
+// Install / pair / logout CLI.
 //
-// Flows:
-//   install              → detect agents, pair, write config
-//   install --target=X   → skip detection, pair, write config for X
-//   logout               → clear keychain/file session
-//
-// Usage:
-//   npx @trusty-squire/mcp install
+// Tier 0 install (default) — friction-free:
 //   npx @trusty-squire/mcp install --target=claude-code
+//   → issues an anonymous machine token, writes MCP config, done.
+//
+// Tier 1+ pair (opt-in, on quota hit or user request):
+//   npx @trusty-squire/mcp pair
+//   → opens browser, pairs machine, upgrades session to a real account.
+//
+// Logout:
 //   npx @trusty-squire/mcp logout
+//
+// Flags:
+//   --target=<agent>     skip auto-detection
+//   --api-base=<url>     override the API base URL
+//   --pair               run pairing as part of install (Tier 1 from minute 1)
 
 import process from "node:process";
-import { pairInitiate, pairPoll } from "../api-client.js";
-import { openSessionStorage } from "../session.js";
+import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
+import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
+import { detectAsn, type AsnInfo } from "@trusty-squire/universal-bot";
 
-const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://api.trustysquire.ai";
+const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 
-type Argv = { command: string; target?: AgentTarget; apiBase: string };
+type Argv = {
+  command: string;
+  target?: AgentTarget;
+  apiBase: string;
+  withPair: boolean;
+};
 
 function parseArgs(argv: string[]): Argv {
   const positional = argv.filter((a) => !a.startsWith("--"));
   const command = positional[0] ?? "install";
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
+  let withPair = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
       if (isAgentTarget(t)) target = t;
-    }
-    if (arg.startsWith("--api-base=")) {
+    } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
+    } else if (arg === "--pair") {
+      withPair = true;
     }
   }
-  return target !== undefined ? { command, target, apiBase } : { command, apiBase };
+  return target !== undefined
+    ? { command, target, apiBase, withPair }
+    : { command, apiBase, withPair };
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
@@ -43,81 +59,176 @@ function isAgentTarget(s: string): s is AgentTarget {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  if (args.command === "logout") return logout();
-  if (args.command !== "install" && args.command !== "help") {
-    console.error(`unknown command: ${args.command}`);
-    console.error("usage: squire-mcp install [--target=<agent>] [--api-base=<url>]");
-    process.exit(64);
+  switch (args.command) {
+    case "install":
+      await install(args);
+      return;
+    case "pair":
+      await pair(args);
+      return;
+    case "logout":
+      await logout();
+      return;
+    case "help":
+      printHelp();
+      return;
+    default:
+      console.error(`unknown command: ${args.command}`);
+      printHelp();
+      process.exit(64);
   }
-  if (args.command === "help") {
-    printHelp();
-    return;
-  }
-  await install(args);
 }
 
 async function install(args: Argv): Promise<void> {
-  // ── Resolve target ──────────────────────────────────────────
-  let target = args.target;
-  if (target === undefined) {
-    const detected = await detectInstalledAgents();
-    if (detected.length === 1) {
-      target = detected[0]!.target;
-      console.warn(`Detected ${detected[0]!.display_name}. Configuring squire for it.`);
-    } else if (detected.length > 1) {
-      console.error("Multiple agents detected. Please pass --target=<agent>:");
-      for (const a of detected) console.error(`  --target=${a.target}  (${a.display_name})`);
-      process.exit(2);
-    } else {
-      console.error("No coding agents auto-detected. Pass --target= explicitly:");
-      for (const a of Object.values(AGENTS)) {
-        console.error(`  --target=${a.target}  (${a.display_name})`);
-      }
-      process.exit(2);
-    }
-  }
+  const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
 
-  // ── Pair ──────────────────────────────────────────────────
+  // ── Detect egress class ───────────────────────────────────
+  // We do this before issuing the machine token so the asn class can
+  // be sent in the install payload (lets the API pre-correlate captcha
+  // failures with network class for analytics). Best-effort — a network
+  // failure here just means "unknown" gets sent.
+  const asn = await detectAsn();
+
+  // ── Tier 0: get a machine token (zero clicks) ─────────────
+  console.warn(`Setting up Trusty Squire on this machine…`);
+  const machine = await issueMachineToken(args.apiBase, fetch, asn ?? undefined);
+  console.warn(
+    `✓ Got ${machine.quota_limit} free signups. No account needed yet.`,
+  );
+
+  // ── Warn datacenter users explicitly ──────────────────────
+  // The whole captcha-bypass story depends on a residential egress IP.
+  // Datacenter ASNs (Hetzner, AWS, Codespaces) get auto-rejected by
+  // reCAPTCHA v2 regardless of fingerprint quality. We don't try to
+  // hide this — better to set expectations now than have the user
+  // file a "Postmark signup doesn't work" bug later.
+  if (asn !== null) {
+    printAsnWarning(asn);
+  }
+
+  const storage = await openSessionStorage();
+  const baseSession: SessionData = {
+    api_base_url: args.apiBase,
+    saved_at: new Date().toISOString(),
+    machine_token: machine.machine_token,
+  };
+
+  // ── Optional Tier 1: pair if --pair was passed ────────────
+  let finalSession = baseSession;
+  if (args.withPair) {
+    const upgraded = await runPair(args.apiBase, target, baseSession);
+    if (upgraded === null) {
+      console.warn(
+        "Pairing didn't complete — keeping Tier 0 session. Run `squire-mcp pair` later to upgrade.",
+      );
+    } else {
+      finalSession = upgraded;
+    }
+  }
+
+  await storage.write(finalSession);
+  console.warn(`✓ Session saved (${storage.backendName()}).`);
+
+  // ── Write the MCP config into the host agent ──────────────
+  //
+  // Env vars passed to the MCP child:
+  //   - TRUSTY_SQUIRE_AGENT_IDENTITY: which host agent we're running under
+  //   - UNIVERSAL_BOT_PREFER_CHEAP=true: cheap-mode is the right default
+  //     for free Tier-0 signups; the proxy enforces this server-side
+  //     anyway, but setting it here means users who run the bot CLI
+  //     directly (outside MCP) also get the cheap path by default.
+  //
+  // The machine token itself is NOT in the env — the MCP server reads it
+  // from session storage (keychain / file), which keeps it out of any
+  // child-process listing or shell history.
+  await agent.writeConfig({
+    command: "npx",
+    args: ["-y", "@trusty-squire/mcp"],
+    env: {
+      TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+      UNIVERSAL_BOT_PREFER_CHEAP: "true",
+    },
+  });
+  console.warn(`✓ Wrote ${agent.display_name} MCP config at ${agent.config_path()}.`);
+  console.warn(``);
+  console.warn(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
+  console.warn(``);
+  console.warn(
+    `Free signups available: ${machine.quota_limit - machine.quota_used}. ` +
+      `When you hit the limit, run \`npx @trusty-squire/mcp pair\` to upgrade.`,
+  );
+}
+
+async function pair(args: Argv): Promise<void> {
+  const storage = await openSessionStorage();
+  const existing = (await storage.read()) ?? {
+    api_base_url: args.apiBase,
+    saved_at: new Date().toISOString(),
+  };
+  const target = await resolveTarget(args.target);
+  const upgraded = await runPair(args.apiBase, target, existing);
+  if (upgraded === null) {
+    console.error("Pairing failed or expired. Try again with `npx @trusty-squire/mcp pair`.");
+    process.exit(1);
+  }
+  await storage.write(upgraded);
+  console.warn(`✓ Paired. You can now use vault + paid-service provisioning.`);
+}
+
+// Runs the browser-based pair flow. Returns an upgraded SessionData on
+// success, null on timeout/expiry. Preserves any existing machine_token
+// so quota tracking continues to work post-pair.
+async function runPair(
+  apiBase: string,
+  target: AgentTarget,
+  existing: SessionData,
+): Promise<SessionData | null> {
   console.warn(`Pairing this machine with Trusty Squire…`);
-  const initiate = await pairInitiate(args.apiBase, target);
+  const initiate = await pairInitiate(
+    apiBase,
+    target,
+    existing.machine_token ?? null,
+  );
   console.warn(`Open this URL in your browser to confirm:`);
   console.warn(`  ${initiate.pair_url}`);
 
-  // Best-effort browser open; failure is non-fatal (the user can
-  // copy/paste the URL).
   try {
     const openMod = await import("open");
     await openMod.default(initiate.pair_url);
   } catch {
-    // ignore
+    // ignore — user copies the URL
   }
 
-  // ── Poll ──────────────────────────────────────────────────
-  const sessionToken = await pollForClaim(args.apiBase, initiate.pair_token);
-  if (sessionToken === null) {
-    console.error("Pairing timed out or expired. Re-run `squire-mcp install` to try again.");
-    process.exit(1);
-  }
+  const claim = await pollForClaim(apiBase, initiate.pair_token);
+  if (claim === null) return null;
 
-  // ── Save session ──────────────────────────────────────────
-  const storage = await openSessionStorage();
-  await storage.write({
-    agent_session_token: sessionToken.token,
-    account_id: sessionToken.account_id,
-    api_base_url: args.apiBase,
+  return {
+    ...existing,
+    api_base_url: apiBase,
     saved_at: new Date().toISOString(),
-  });
-  console.warn(`✓ Session saved (${storage.backendName()}).`);
+    agent_session_token: claim.token,
+    account_id: claim.account_id,
+  };
+}
 
-  // ── Write agent config ────────────────────────────────────
-  await agent.writeConfig({
-    command: "npx",
-    args: ["-y", "@trusty-squire/mcp"],
-    env: { TRUSTY_SQUIRE_AGENT_IDENTITY: target },
-  });
-  console.warn(`✓ Wrote ${agent.display_name} MCP config at ${agent.config_path()}.`);
-  console.warn(`Restart ${agent.display_name} to pick up the new tools.`);
+async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {
+  if (explicit !== undefined) return explicit;
+  const detected = await detectInstalledAgents();
+  if (detected.length === 1) {
+    console.warn(`Detected ${detected[0]!.display_name}. Configuring squire for it.`);
+    return detected[0]!.target;
+  }
+  if (detected.length > 1) {
+    console.error("Multiple agents detected. Please pass --target=<agent>:");
+    for (const a of detected) console.error(`  --target=${a.target}  (${a.display_name})`);
+    process.exit(2);
+  }
+  console.error("No coding agents auto-detected. Pass --target= explicitly:");
+  for (const a of Object.values(AGENTS)) {
+    console.error(`  --target=${a.target}  (${a.display_name})`);
+  }
+  process.exit(2);
 }
 
 async function logout(): Promise<void> {
@@ -130,10 +241,15 @@ function printHelp(): void {
   console.warn(`squire-mcp — install Trusty Squire MCP into a coding agent`);
   console.warn(``);
   console.warn(`Commands:`);
-  console.warn(`  install [--target=<agent>] [--api-base=<url>]`);
+  console.warn(`  install [--target=<agent>] [--api-base=<url>] [--pair]`);
+  console.warn(`  pair [--target=<agent>] [--api-base=<url>]`);
   console.warn(`  logout`);
   console.warn(``);
   console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);
+  console.warn(``);
+  console.warn(`The default \`install\` runs Tier 0: zero clicks, issues a machine token`);
+  console.warn(`good for a handful of free signups. Run \`pair\` later to upgrade.`);
+  console.warn(`Use \`install --pair\` to do both at once.`);
 }
 
 interface ClaimResult {
@@ -144,8 +260,13 @@ interface ClaimResult {
 async function pollForClaim(
   apiBase: string,
   pairToken: string,
-  opts: { intervalMs?: number; timeoutMs?: number } = {},
+  intervalMsOrOpts: number | { intervalMs?: number; timeoutMs?: number } = {},
+  timeoutMsArg?: number,
 ): Promise<ClaimResult | null> {
+  const opts =
+    typeof intervalMsOrOpts === "number"
+      ? { intervalMs: intervalMsOrOpts, timeoutMs: timeoutMsArg }
+      : intervalMsOrOpts;
   const intervalMs = opts.intervalMs ?? 1500;
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
   const deadline = Date.now() + timeoutMs;
@@ -163,6 +284,36 @@ async function pollForClaim(
   return null;
 }
 
+// Print a class-appropriate message about the network we detected.
+// Datacenter gets a clear warning + link; residential gets a brief
+// confirmation; unknown gets a heads-up. All to stderr.
+function printAsnWarning(asn: AsnInfo): void {
+  const orgDisplay = asn.org ?? "(unknown ASN)";
+  switch (asn.class) {
+    case "datacenter":
+      console.warn(``);
+      console.warn(`⚠  Detected network: ${orgDisplay}`);
+      console.warn(`   This looks like a datacenter / cloud network (Codespaces, AWS,`);
+      console.warn(`   Hetzner, etc.). Some signups — especially those gated by`);
+      console.warn(`   reCAPTCHA v2 — are likely to be blocked because anti-bot`);
+      console.warn(`   scoring weighs network reputation heavily.`);
+      console.warn(``);
+      console.warn(`   For best results: run Trusty Squire from a laptop/desktop`);
+      console.warn(`   on a home or office network. Cloud dev environments can`);
+      console.warn(`   still provision services that don't gate signup with`);
+      console.warn(`   reCAPTCHA (Resend, IPInfo, etc.), but Postmark/MailerSend`);
+      console.warn(`   and similar will likely fail.`);
+      console.warn(``);
+      return;
+    case "residential":
+      console.warn(`✓ Detected network: ${orgDisplay} (residential — captchas should pass cleanly).`);
+      return;
+    case "unknown":
+      console.warn(`ℹ Detected network: ${orgDisplay} (couldn't classify — proceed and we'll see).`);
+      return;
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err: unknown) => {
     console.error(err instanceof Error ? err.message : String(err));
@@ -170,4 +321,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
 }
 
-export { install, logout, parseArgs, pollForClaim };
+export { install, pair, logout, parseArgs, pollForClaim, printAsnWarning };

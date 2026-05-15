@@ -220,12 +220,18 @@ export interface PairInitiateResponse {
 export async function pairInitiate(
   apiBaseUrl: string,
   agentIdentity: string,
+  // Optional Tier-0 machine token. When supplied the eventual claim
+  // links it to the new account so quota stops applying.
+  machineToken: string | null = null,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PairInitiateResponse> {
   const res = await fetchImpl(`${apiBaseUrl}/v1/mcp/pair/initiate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agent_identity: agentIdentity }),
+    body: JSON.stringify({
+      agent_identity: agentIdentity,
+      ...(machineToken !== null ? { machine_token: machineToken } : {}),
+    }),
   });
   if (!res.ok) throw new ApiCallError(res.status, "pair_initiate_failed", "pairing failed");
   return (await res.json()) as PairInitiateResponse;
@@ -249,4 +255,63 @@ export async function pairPoll(
   if (res.status === 410) return { status: "expired" };
   if (!res.ok) throw new ApiCallError(res.status, "pair_poll_failed", "pairing poll failed");
   return (await res.json()) as PairStatusResponse;
+}
+
+// ── Tier 0 machine-token install ───────────────────────────
+
+export interface MachineInstallResponse {
+  machine_token: string;
+  quota_limit: number;
+  quota_used: number;
+  tier: "anonymous" | "paired";
+  message?: string;
+}
+
+// Shape of the optional asn block we send on install. Matches the
+// `AsnInfo` returned by `@trusty-squire/universal-bot` but flattened
+// to the wire fields the API actually persists.
+export interface InstallAsnPayload {
+  ip: string;
+  asn: string | null;
+  org: string | null;
+  country: string | null;
+  class: "residential" | "datacenter" | "unknown";
+}
+
+export async function issueMachineToken(
+  apiBaseUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  asn?: InstallAsnPayload,
+): Promise<MachineInstallResponse> {
+  const init: RequestInit = { method: "POST" };
+  if (asn !== undefined) {
+    init.headers = { "content-type": "application/json" };
+    init.body = JSON.stringify({ asn });
+  }
+  const res = await fetchImpl(`${apiBaseUrl}/v1/install`, init);
+  if (!res.ok) throw new ApiCallError(res.status, "install_failed", "machine install failed");
+  return (await res.json()) as MachineInstallResponse;
+}
+
+export interface MachineStatusResponse {
+  tier: "anonymous" | "paired";
+  quota_limit: number;
+  quota_used: number;
+  quota_remaining: number;
+  over_quota: boolean;
+  paired_account_id: string | null;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export async function getMachineStatus(
+  apiBaseUrl: string,
+  machineToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<MachineStatusResponse> {
+  const res = await fetchImpl(`${apiBaseUrl}/v1/install/status`, {
+    headers: { "x-machine-token": machineToken },
+  });
+  if (!res.ok) throw new ApiCallError(res.status, "status_failed", "machine status failed");
+  return (await res.json()) as MachineStatusResponse;
 }

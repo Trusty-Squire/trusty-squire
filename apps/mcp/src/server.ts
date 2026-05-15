@@ -21,7 +21,7 @@ const SERVER_VERSION = "0.1.0";
 
 const DEFAULT_REGISTRY_BASE = process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
 
-export async function buildServer(api: ApiClient): Promise<Server> {
+export async function buildServer(api: ApiClient | null): Promise<Server> {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {} } },
@@ -45,6 +45,28 @@ export async function buildServer(api: ApiClient): Promise<Server> {
       return errorContent(`invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
     }
     try {
+      // provision_any_service doesn't need API client (anonymous mode)
+      if (tool.name === "provision_any_service") {
+        const result = await tool.handler(parsed.data, null as any);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+      
+      // Other tools require an authenticated (Tier 1+) agent_session_token.
+      // provision_any_service is the Tier 0 escape hatch and handles its own
+      // session check above, so users who only need universal signup don't
+      // need to pair at all.
+      if (api === null) {
+        return errorContent(
+          `This tool requires pairing (Tier 1+). For local dev: ` +
+          `\`node /home/chode/trusty-squire/apps/mcp/dist/install/cli.js install --target=goose --pair\`. ` +
+          `In production: \`npx @trusty-squire/mcp install --target=<agent> --pair\`. ` +
+          `If you just want to sign up for a free service, call \`provision_any_service\` instead — ` +
+          `it works with a Tier 0 machine_token and doesn't need pairing.`
+        );
+      }
+      
       const result = await tool.handler(parsed.data, api);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -67,16 +89,20 @@ function errorContent(message: string) {
 async function main(): Promise<void> {
   const storage = await openSessionStorage();
   const session = await storage.read();
-  if (session === null) {
-    throw new MissingSessionError();
-  }
-
-  const api = new ApiClient({
-    apiBaseUrl: session.api_base_url,
-    registryBaseUrl: DEFAULT_REGISTRY_BASE,
-    agentSessionToken: session.agent_session_token,
-    agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
-  });
+  
+  // Tier-aware ApiClient: only paired (Tier 1+) sessions can call the
+  // authenticated API. Tier 0 machine-token-only sessions get a null
+  // ApiClient — provision_any_service uses session.machine_token via the
+  // InboxClient directly, no agent session required.
+  const api =
+    session !== null && session.agent_session_token !== undefined
+      ? new ApiClient({
+          apiBaseUrl: session.api_base_url,
+          registryBaseUrl: DEFAULT_REGISTRY_BASE,
+          agentSessionToken: session.agent_session_token,
+          agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
+        })
+      : null;
 
   const server = await buildServer(api);
   const transport = new StdioServerTransport();

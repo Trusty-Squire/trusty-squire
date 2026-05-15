@@ -18,6 +18,7 @@ import { listSubscriptionsTool } from "./list-subscriptions.js";
 import { cancelTool } from "./cancel.js";
 import { getUsageTool } from "./get-usage.js";
 import { rotateCredentialTool } from "./rotate-credential.js";
+import { provisionAnyTool } from "./provision-any.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -28,6 +29,7 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
 }
 
 export const TOOLS: Tool[] = [
+  provisionAnyTool,
   provisionTool,
   waitForApprovalTool,
   getCredentialTool,
