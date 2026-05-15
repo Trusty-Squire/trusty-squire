@@ -1,0 +1,16 @@
+node_modules
+.next
+dist
+*.log
+.env
+.env.local
+.demo-logs
+.demo-pids
+.demo-urls
+coverage
+.git
+.github
+*.md
+!README.md
+debug-*.png
+debug-*.html

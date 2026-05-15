@@ -1,0 +1,52 @@
+# Fly.io configuration for Trusty Squire API
+
+app = "trusty-squire-api"
+primary_region = "iad" # US East, change if needed
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+
+# Secrets (set via `fly secrets set`)
+# DATABASE_URL - Postgres connection string
+# REDIS_URL - Redis connection string  
+# SESSION_JWT_SECRET - Session signing key
+# VOUCHFLOW_CUSTOMER_ID - Your Vouchflow customer ID
+# S3_BUCKET - For email storage
+# AWS_ACCESS_KEY_ID - For S3 access
+# AWS_SECRET_ACCESS_KEY - For S3 access
+# AWS_REGION - us-east-1 or your region

@@ -18,21 +18,36 @@ if [ -d "$PID_DIR" ]; then
     pid=$(cat "$f")
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
+      sleep 0.5
+      kill -9 "$pid" 2>/dev/null || true
       echo "  killed $(basename "$f" .pid) (pid=$pid)"
     fi
     rm -f "$f"
   done
 fi
 
-# Reap anything we might have missed (mock-resend / next / tsx tied
-# to our ports).
+# Kill process trees by pattern (more aggressive)
+echo "  killing cloudflared processes..."
+pkill -9 -f "cloudflared tunnel" 2>/dev/null || true
+pkill -9 -f "cloudflared-wrapper" 2>/dev/null || true
+
+echo "  killing API/PWA/mock-resend processes..."
+pkill -9 -f "tsx watch src/server.ts" 2>/dev/null || true
+pkill -9 -f "mock-resend.mjs" 2>/dev/null || true
+pkill -9 -f "next-server" 2>/dev/null || true
+
+# Reap anything on our ports (last resort)
 for port in 3000 3002 4001; do
   pids=$(lsof -ti tcp:$port 2>/dev/null || true)
   if [ -n "$pids" ]; then
     echo "  killing leftover processes on :$port (pids=$pids)"
-    echo "$pids" | xargs -r kill 2>/dev/null || true
+    echo "$pids" | xargs -r kill -9 2>/dev/null || true
   fi
 done
+
+# Clean up temp files
+rm -f "$REPO_ROOT/apps/pwa/.env.local"
+rm -rf "$REPO_ROOT/.demo-urls"
 
 green "✓ Demo stopped."
 echo

@@ -12,6 +12,7 @@
     "format": "prettier --write \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\"",
     "registry:publish": "pnpm --filter @trusty-squire/registry-api publish:adapter",
     "demo": "bash scripts/demo.sh",
+    "demo:mobile": "bash scripts/demo.sh mobile",
     "demo:stop": "bash scripts/demo-stop.sh"
   },
   "devDependencies": {

@@ -1,0 +1,46 @@
+# Email aliases - forward all business emails to personal Gmail
+# Format: business_email    personal_email
+
+# trustysquire.ai
+dani@trustysquire.ai          lunchboxfortwo@gmail.com
+hello@trustysquire.ai         lunchboxfortwo@gmail.com
+info@trustysquire.ai          lunchboxfortwo@gmail.com
+press@trustysquire.ai         lunchboxfortwo@gmail.com
+legal@trustysquire.ai         lunchboxfortwo@gmail.com
+partnerships@trustysquire.ai  lunchboxfortwo@gmail.com
+career@trustysquire.ai        lunchboxfortwo@gmail.com
+dev@trustysquire.ai           lunchboxfortwo@gmail.com
+no-reply@trustysquire.ai      lunchboxfortwo@gmail.com
+
+# speakeasyapp.xyz
+dani@speakeasyapp.xyz         lunchboxfortwo@gmail.com
+hello@speakeasyapp.xyz        lunchboxfortwo@gmail.com
+info@speakeasyapp.xyz         lunchboxfortwo@gmail.com
+press@speakeasyapp.xyz        lunchboxfortwo@gmail.com
+legal@speakeasyapp.xyz        lunchboxfortwo@gmail.com
+partnerships@speakeasyapp.xyz lunchboxfortwo@gmail.com
+career@speakeasyapp.xyz       lunchboxfortwo@gmail.com
+dev@speakeasyapp.xyz          lunchboxfortwo@gmail.com
+no-reply@speakeasyapp.xyz     lunchboxfortwo@gmail.com
+
+# vouchflow.dev
+dani@vouchflow.dev            lunchboxfortwo@gmail.com
+hello@vouchflow.dev           lunchboxfortwo@gmail.com
+info@vouchflow.dev            lunchboxfortwo@gmail.com
+press@vouchflow.dev           lunchboxfortwo@gmail.com
+legal@vouchflow.dev           lunchboxfortwo@gmail.com
+partnerships@vouchflow.dev    lunchboxfortwo@gmail.com
+career@vouchflow.dev          lunchboxfortwo@gmail.com
+dev@vouchflow.dev             lunchboxfortwo@gmail.com
+no-reply@vouchflow.dev        lunchboxfortwo@gmail.com
+
+# helmpoint.ai
+dani@helmpoint.ai             lunchboxfortwo@gmail.com
+hello@helmpoint.ai            lunchboxfortwo@gmail.com
+info@helmpoint.ai             lunchboxfortwo@gmail.com
+press@helmpoint.ai            lunchboxfortwo@gmail.com
+legal@helmpoint.ai            lunchboxfortwo@gmail.com
+partnerships@helmpoint.ai     lunchboxfortwo@gmail.com
+career@helmpoint.ai           lunchboxfortwo@gmail.com
+dev@helmpoint.ai              lunchboxfortwo@gmail.com
+no-reply@helmpoint.ai         lunchboxfortwo@gmail.com
