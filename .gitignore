@@ -25,3 +25,12 @@ Thumbs.db
 # Demo orchestrator runtime
 .demo-logs/
 .demo-pids/
+.demo-urls/
+
+# Local binaries / installers
+cloudflared.deb
+
+# Universal signup bot debug artifacts
+.debug/
+debug-*.html
+debug-*.png
