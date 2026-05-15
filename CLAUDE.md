@@ -232,20 +232,17 @@ both break.
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | SES + S3 for inbound mail |
 | `AWS_REGION` | `us-east-1` |
 | `SES_INBOUND_BUCKET` / `SES_INBOUND_PREFIX` | Raw email storage |
-| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` + `/v1/webhooks/postfix` |
-| `MAILGUN_WEBHOOK_SIGNING_KEY` | HMAC-verifies inbound `/v1/webhooks/mailgun`. Missing → route 503s. |
-| `RESEND_WEBHOOK_SECRET` | Resend/Svix secret (`whsec_…`); verifies `/v1/webhooks/resend`. Missing → route 503s. |
+| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Outbound Gmail forwarding |
 | `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
 | `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
 
-**Webhook auth:** all four inbound-mail webhooks verify the sender. SES
-verifies the SNS signing certificate (no secret needed). Mailgun and Resend
-require the signing secrets above and **fail closed (503) when unset** — set
-them on `trusty-squire-api` before relying on those routes. The inbox schema
-gained an `issued_to` column for alias ownership; run
-`pnpm -F @trusty-squire/inbox prisma migrate deploy` against the inbox
-database on the next deploy.
+**Webhook auth:** inbound mail arrives only via SES (`/v1/webhooks/ses`),
+which verifies the SNS signing certificate — no pre-shared secret needed.
+The Mailgun, Resend, postfix, and fly-email webhook routes were removed;
+SES is the sole inbound path. The inbox schema gained an `issued_to`
+column for alias ownership; run `pnpm -F @trusty-squire/inbox prisma
+migrate deploy` against the inbox database on the next deploy.
 
 ### Goose / local-dev MCP install
 

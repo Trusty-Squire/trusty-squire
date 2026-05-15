@@ -4,11 +4,9 @@
 
 These must be done on/before the next deploy of `trusty-squire-api`.
 
-- [ ] **Set webhook signing secrets on `trusty-squire-api`.**
-  `MAILGUN_WEBHOOK_SIGNING_KEY` and `RESEND_WEBHOOK_SECRET`. The
-  `/v1/webhooks/mailgun` and `/v1/webhooks/resend` routes now verify sender
-  signatures and **fail closed (503) when these are unset** — inbound mail
-  from Mailgun/Resend will break until they are set.
+- [x] **~~Set webhook signing secrets~~ — moot.** The Mailgun, Resend,
+  postfix, and fly-email inbound webhook routes were removed; SES is the
+  sole inbound-mail path and verifies the SNS cert (no secret needed).
 
 - [ ] **Run the inbox migration.**
   `pnpm -F @trusty-squire/inbox prisma migrate deploy` against the inbox

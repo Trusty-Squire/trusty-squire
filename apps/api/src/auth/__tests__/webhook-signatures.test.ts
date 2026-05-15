@@ -1,18 +1,13 @@
-// Unit tests for the per-provider webhook signature verifiers.
-//   - SNS (SES): RSA signature over the canonical string-to-sign
-//   - Mailgun: HMAC-SHA256 of (timestamp + token)
-//   - Svix (Resend): HMAC-SHA256 over `${id}.${timestamp}.${body}`
-//
-// Each verifier is checked with a genuine signature and a forged one.
+// Unit tests for the SES inbound-mail webhook signature verifier:
+// the SNS RSA signature over the canonical string-to-sign, checked
+// with a genuine signature and a forged one.
 
 import { describe, expect, it } from "vitest";
-import { createHmac, createSign, generateKeyPairSync } from "node:crypto";
+import { createSign, generateKeyPairSync } from "node:crypto";
 import {
   buildSnsStringToSign,
   isAwsSnsHost,
-  verifyMailgunSignature,
   verifySnsSignature,
-  verifySvixSignature,
 } from "../webhook-signatures.js";
 
 describe("isAwsSnsHost", () => {
@@ -107,107 +102,5 @@ describe("verifySnsSignature", () => {
     sns["Signature"] = signSns(sns);
     const res = await verifySnsSignature(sns, { certFetcher: async () => publicPem });
     expect(res.ok).toBe(true);
-  });
-});
-
-describe("verifyMailgunSignature", () => {
-  const signingKey = "key-test-mailgun";
-
-  function sign(timestamp: string, token: string): string {
-    return createHmac("sha256", signingKey).update(timestamp + token).digest("hex");
-  }
-
-  it("accepts a genuine signature", () => {
-    const res = verifyMailgunSignature({
-      timestamp: "1700000000",
-      token: "tok-abc",
-      signature: sign("1700000000", "tok-abc"),
-      signingKey,
-    });
-    expect(res.ok).toBe(true);
-  });
-
-  it("rejects a forged signature", () => {
-    const res = verifyMailgunSignature({
-      timestamp: "1700000000",
-      token: "tok-abc",
-      signature: "deadbeef",
-      signingKey,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.reason).toBe("invalid");
-  });
-
-  it("fails closed when the signing key is missing", () => {
-    const res = verifyMailgunSignature({
-      timestamp: "1700000000",
-      token: "tok-abc",
-      signature: sign("1700000000", "tok-abc"),
-      signingKey: undefined,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.reason).toBe("not_configured");
-  });
-});
-
-describe("verifySvixSignature", () => {
-  // Svix secrets are `whsec_<base64>`.
-  const secret = `whsec_${Buffer.from("svix-test-secret").toString("base64")}`;
-  const svixId = "msg_abc";
-  const svixTimestamp = "1700000000";
-
-  function sign(id: string, ts: string, body: string): string {
-    const key = Buffer.from(secret.slice("whsec_".length), "base64");
-    const sig = createHmac("sha256", key).update(`${id}.${ts}.${body}`).digest("base64");
-    return `v1,${sig}`;
-  }
-
-  it("accepts a genuine signature over the raw body", () => {
-    const body = JSON.stringify({ type: "email.received" });
-    const res = verifySvixSignature({
-      svixId,
-      svixTimestamp,
-      svixSignature: sign(svixId, svixTimestamp, body),
-      rawBody: body,
-      secret,
-    });
-    expect(res.ok).toBe(true);
-  });
-
-  it("rejects when the body is tampered after signing", () => {
-    const body = JSON.stringify({ type: "email.received" });
-    const res = verifySvixSignature({
-      svixId,
-      svixTimestamp,
-      svixSignature: sign(svixId, svixTimestamp, body),
-      rawBody: JSON.stringify({ type: "email.received", injected: true }),
-      secret,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.reason).toBe("invalid");
-  });
-
-  it("rejects when svix headers are missing", () => {
-    const res = verifySvixSignature({
-      svixId: undefined,
-      svixTimestamp,
-      svixSignature: "v1,whatever",
-      rawBody: "{}",
-      secret,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.detail).toBe("missing_svix_headers");
-  });
-
-  it("fails closed when the secret is missing", () => {
-    const res = verifySvixSignature({
-      svixId,
-      svixTimestamp,
-      svixSignature: "v1,whatever",
-      rawBody: "{}",
-      secret: undefined,
-    });
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.reason).toBe("not_configured");
   });
 });

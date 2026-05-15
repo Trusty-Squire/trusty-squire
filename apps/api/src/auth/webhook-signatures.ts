@@ -1,20 +1,12 @@
 // Inbound-mail webhook signature verification.
 //
-// None of the inbound-mail webhooks used to verify the sender. An
-// attacker who can POST to /v1/webhooks/* can forge an email; the bot
-// then reads parsed_codes/parsed_links off the stored row to complete a
-// signup, so a forged email can inject a verification code or link.
-//
-// Each provider signs differently:
-//   - SES   — SNS message signature against the AWS SNS signing cert
-//   - Mailgun — HMAC-SHA256 of (timestamp + token)
-//   - Resend  — Svix HMAC-SHA256 over `${id}.${timestamp}.${body}`
-//
-// Fail-closed: when a required secret is missing the caller rejects the
-// request (503/500) and logs loudly — never silently accept.
+// An attacker who can POST to /v1/webhooks/ses can forge an email; the
+// bot then reads parsed_codes/parsed_links off the stored row to
+// complete a signup, so a forged email can inject a verification code
+// or link. SES is verified by its SNS message signature against the AWS
+// SNS signing cert — no pre-shared secret, the cert is the trust anchor.
 
-import { Buffer } from "node:buffer";
-import { createHmac, createVerify, timingSafeEqual } from "node:crypto";
+import { createVerify } from "node:crypto";
 
 // ── Result type ──────────────────────────────────────────────
 
@@ -24,14 +16,6 @@ export type VerifyResult =
   // caller must fail-closed (503) and log. `invalid` → a real forgery
   // or replay; caller returns 401.
   | { ok: false; reason: "not_configured" | "invalid"; detail: string };
-
-// Constant-time compare for two equal-length byte strings.
-function timingSafeStrEquals(a: string, b: string): boolean {
-  const aBuf = Buffer.from(a, "utf8");
-  const bBuf = Buffer.from(b, "utf8");
-  if (aBuf.length !== bBuf.length) return false;
-  return timingSafeEqual(aBuf, bBuf);
-}
 
 // ── SES / SNS ────────────────────────────────────────────────
 
@@ -159,85 +143,4 @@ export async function verifySnsSignature(
       detail: `verify_error:${err instanceof Error ? err.message : String(err)}`,
     };
   }
-}
-
-// ── Mailgun ──────────────────────────────────────────────────
-
-// Mailgun signs inbound webhooks: HMAC-SHA256 of `timestamp + token`
-// with the webhook signing key, hex-encoded.
-export function verifyMailgunSignature(input: {
-  timestamp: string;
-  token: string;
-  signature: string;
-  signingKey: string | undefined;
-}): VerifyResult {
-  if (input.signingKey === undefined || input.signingKey.length === 0) {
-    return {
-      ok: false,
-      reason: "not_configured",
-      detail: "MAILGUN_WEBHOOK_SIGNING_KEY not set",
-    };
-  }
-  if (
-    input.timestamp.length === 0 ||
-    input.token.length === 0 ||
-    input.signature.length === 0
-  ) {
-    return { ok: false, reason: "invalid", detail: "missing_signature_fields" };
-  }
-  const expected = createHmac("sha256", input.signingKey)
-    .update(input.timestamp + input.token)
-    .digest("hex");
-  return timingSafeStrEquals(expected, input.signature.toLowerCase())
-    ? { ok: true }
-    : { ok: false, reason: "invalid", detail: "signature_mismatch" };
-}
-
-// ── Resend (Svix) ────────────────────────────────────────────
-
-// Resend delivers webhooks via Svix. Svix signs `${id}.${timestamp}.${body}`
-// with HMAC-SHA256; the secret is base64 after the `whsec_` prefix. The
-// `svix-signature` header may carry multiple space-separated `v1,<sig>`
-// entries — any match is accepted.
-export function verifySvixSignature(input: {
-  svixId: string | undefined;
-  svixTimestamp: string | undefined;
-  svixSignature: string | undefined;
-  rawBody: string;
-  secret: string | undefined;
-}): VerifyResult {
-  if (input.secret === undefined || input.secret.length === 0) {
-    return {
-      ok: false,
-      reason: "not_configured",
-      detail: "RESEND_WEBHOOK_SECRET not set",
-    };
-  }
-  if (
-    input.svixId === undefined ||
-    input.svixTimestamp === undefined ||
-    input.svixSignature === undefined
-  ) {
-    return { ok: false, reason: "invalid", detail: "missing_svix_headers" };
-  }
-
-  // The secret is `whsec_<base64>`; the HMAC key is the decoded base64.
-  const secretBody = input.secret.startsWith("whsec_")
-    ? input.secret.slice("whsec_".length)
-    : input.secret;
-  const key = Buffer.from(secretBody, "base64");
-
-  const signedContent = `${input.svixId}.${input.svixTimestamp}.${input.rawBody}`;
-  const expected = createHmac("sha256", key).update(signedContent).digest("base64");
-
-  // `svix-signature` is space-separated `v1,<base64sig>` entries.
-  for (const entry of input.svixSignature.split(" ")) {
-    const comma = entry.indexOf(",");
-    if (comma === -1) continue;
-    const presented = entry.slice(comma + 1);
-    if (timingSafeStrEquals(expected, presented)) {
-      return { ok: true };
-    }
-  }
-  return { ok: false, reason: "invalid", detail: "signature_mismatch" };
 }

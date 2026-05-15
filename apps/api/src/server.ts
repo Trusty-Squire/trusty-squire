@@ -16,10 +16,6 @@ import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
 import { registerInboxRoute } from "./routes/inbox.js";
 import { registerLLMRoute } from "./routes/llm.js";
 import { registerSesWebhookRoute } from "./routes/ses-webhook.js";
-import { registerMailgunWebhookRoute } from "./routes/mailgun-webhook.js";
-import { registerFlyEmailWebhookRoute } from "./routes/fly-email-webhook.js";
-import { registerPostfixWebhookRoute } from "./routes/postfix-webhook.js";
-import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerApprovalsRoute } from "./routes/approvals.js";
 import { registerCredentialsRoute } from "./routes/credentials.js";
@@ -128,10 +124,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerMandatesRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerSesWebhookRoute, { deps });
-  await fastify.register(registerMailgunWebhookRoute, { deps });
-  await fastify.register(registerFlyEmailWebhookRoute, { deps });
-  await fastify.register(registerPostfixWebhookRoute, { deps });
-  await fastify.register(registerResendWebhookRoute, { deps });
   await fastify.register(registerInstallRoute, {
     deps: {
       machineTokenStore: deps.machineTokenStore,
