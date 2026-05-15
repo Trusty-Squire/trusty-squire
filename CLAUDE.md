@@ -121,16 +121,12 @@ instance API scaling.
 2. **Surface retention-cron + LLM-usage stats on
    `/v1/install/status`.** The cron logs per run but there's no API
    to inspect current state.
-3. **Fix 3 pre-existing test failures** in `routes.test.ts` and
-   `mandate.test.ts`. Drift between `auth.account_id` and
-   `auth.actor_id` after an earlier refactor. Unrelated to recent
-   work but blocks a green CI badge.
-4. **Domain prewarm for strict sites.** `BrowserController.prewarm()`
+3. **Domain prewarm for strict sites.** `BrowserController.prewarm()`
    exists; agent doesn't yet call it. Probably 30 mins of plumbing
    plus a per-service config.
-5. **PostHog SPA wait.** Add `waitForSelector` on a known form field
+4. **PostHog SPA wait.** Add `waitForSelector` on a known form field
    before invoking the Claude planner.
-6. **Tier 1+ work (PWA mark-paired UI, vault delivery, mandate
+5. **Tier 1+ work (PWA mark-paired UI, vault delivery, mandate
    signing).** Bigger product surface; pick up when Tier 0 → Tier 1
    conversion becomes a real user funnel.
 
@@ -195,9 +191,20 @@ Dockerfile generates both Prisma clients before `tsc`. The
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | SES + S3 for inbound mail |
 | `AWS_REGION` | `us-east-1` |
 | `SES_INBOUND_BUCKET` / `SES_INBOUND_PREFIX` | Raw email storage |
-| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
+| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` + `/v1/webhooks/postfix` |
+| `MAILGUN_WEBHOOK_SIGNING_KEY` | HMAC-verifies inbound `/v1/webhooks/mailgun`. Missing → route 503s. |
+| `RESEND_WEBHOOK_SECRET` | Resend/Svix secret (`whsec_…`); verifies `/v1/webhooks/resend`. Missing → route 503s. |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Outbound Gmail forwarding |
 | `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
+| `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
+
+**Webhook auth:** all four inbound-mail webhooks verify the sender. SES
+verifies the SNS signing certificate (no secret needed). Mailgun and Resend
+require the signing secrets above and **fail closed (503) when unset** — set
+them on `trusty-squire-api` before relying on those routes. The inbox schema
+gained an `issued_to` column for alias ownership; run
+`pnpm -F @trusty-squire/inbox prisma migrate deploy` against the inbox
+database on the next deploy.
 
 ### Goose / local-dev MCP install
 
