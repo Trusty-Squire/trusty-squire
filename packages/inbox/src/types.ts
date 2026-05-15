@@ -27,6 +27,12 @@ export interface EmailAliasRecord {
   account_id: string;
   run_id: string;
   service: string;
+  // The principal that created this alias — a machine token string, or
+  // a sentinel for admin-issued aliases. Long-poll / delete routes
+  // assert the caller matches this so one machine token can't read or
+  // revoke another's alias. Null on aliases created before this column
+  // existed (those predate the ownership check).
+  issued_to: string | null;
   active: boolean;
   inbound_count: number;
   created_at: Date;
@@ -43,6 +49,11 @@ export interface CreateAliasInput {
   account_id: string;
   run_id: string;
   service: string;
+  // The principal creating the alias (machine token, or an admin
+  // sentinel). Stamped onto the alias for ownership enforcement.
+  // Optional so non-API callers (tests, future internal flows) can
+  // omit it; omitted → null → ownership check is permissive.
+  issued_to?: string;
   // Optional override of the default expiry (default 24h).
   ttl_seconds?: number;
 }

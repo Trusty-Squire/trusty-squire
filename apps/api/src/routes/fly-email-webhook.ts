@@ -3,7 +3,7 @@
 // https://fly.io/docs/networking/email-handlers/
 
 import type { FastifyInstance } from "fastify";
-import type { MailgunHandler } from "@trusty-squire/inbox";
+import type { MailgunHandler, MailgunInboundPayload } from "@trusty-squire/inbox";
 import { z } from "zod";
 
 // Fly.io sends emails in Mailgun-compatible format
@@ -35,8 +35,23 @@ export async function registerFlyEmailWebhookRoute(
     }
 
     // Reuse Mailgun handler (same format)
+    const payload = {
+      sender: parsed.data.sender,
+      recipient: parsed.data.recipient,
+      subject: parsed.data.subject,
+      "message-id": parsed.data["message-id"],
+      ...(parsed.data["body-mime"] !== undefined
+        ? { "body-mime": parsed.data["body-mime"] }
+        : {}),
+      ...(parsed.data["stripped-text"] !== undefined
+        ? { "stripped-text": parsed.data["stripped-text"] }
+        : {}),
+      ...(parsed.data["stripped-html"] !== undefined
+        ? { "stripped-html": parsed.data["stripped-html"] }
+        : {}),
+    } satisfies MailgunInboundPayload;
     try {
-      const result = await opts.deps.mailgunHandler.ingest(parsed.data as any);
+      const result = await opts.deps.mailgunHandler.ingest(payload);
 
       fastify.log.info(
         {

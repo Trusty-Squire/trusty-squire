@@ -8,10 +8,20 @@
 // deliberately thin (no joins, no pagination state in headers).
 
 import { type FastifyPluginAsync, type FastifyReply, type FastifyRequest } from "fastify";
+import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 
 const ROLLING_WINDOW_DAYS = 30;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+// Page size cap for the account-scoped ledger / subscriptions queries.
+// Bounded so a caller can't ask the store for an unbounded slice.
+const MAX_PAGE_LIMIT = 100;
+
+const paginationQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_LIMIT).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 export const registerReadViewsRoute: FastifyPluginAsync<{
   deps: ApiDeps;
@@ -23,13 +33,21 @@ export const registerReadViewsRoute: FastifyPluginAsync<{
   fastify.get("/v1/subscriptions", { preHandler: opts.requireWeb }, async (req, reply) => {
     const auth = req.auth!;
     if (auth.kind !== "web") return;
+    const page = paginationQuerySchema.safeParse(req.query);
+    if (!page.success) {
+      return reply.code(400).send({ error: "invalid_query", issues: page.error.issues });
+    }
     // v0: derive subscriptions from completed runs. A future chunk
     // will land a dedicated Subscription store fed by vault-write
-    // completion events.
-    const completed = await opts.deps.runStore.findRunsInState("COMPLETE", 100);
-    const filtered = completed.filter(
-      (r) => r.account_id === auth.account_id && r.subscription_id !== null,
+    // completion events. Account-scoped at the store layer so the
+    // result isn't a truncated slice across all accounts.
+    const completed = await opts.deps.runStore.findRunsByAccount(
+      auth.account_id,
+      "COMPLETE",
+      page.data.limit,
+      page.data.offset,
     );
+    const filtered = completed.filter((r) => r.subscription_id !== null);
     return reply.code(200).send({
       subscriptions: filtered.map((r) => ({
         id: r.subscription_id,
@@ -66,15 +84,23 @@ export const registerReadViewsRoute: FastifyPluginAsync<{
   fastify.get("/v1/ledger", { preHandler: opts.requireWeb }, async (req, reply) => {
     const auth = req.auth!;
     if (auth.kind !== "web") return;
-    // List recent runs for the account and surface their event count.
-    // The full audit log lives behind `runStore.loadEvents(runId)`;
-    // the PWA fetches per-run details on click.
-    const runs = await opts.deps.runStore.findRunsInState("COMPLETE", 100);
-    const failed = await opts.deps.runStore.findRunsInState("FAILED", 100);
-    const all = [...runs, ...failed]
-      .filter((r) => r.account_id === auth.account_id)
-      .sort((a, b) => (b.created_at > a.created_at ? 1 : -1))
-      .slice(0, 50);
+    const page = paginationQuerySchema.safeParse(req.query);
+    if (!page.success) {
+      return reply.code(400).send({ error: "invalid_query", issues: page.error.issues });
+    }
+    // List recent runs for the account. The ledger spans two terminal
+    // states (COMPLETE + FAILED); the store query is account-scoped so
+    // the result is the account's runs, not a truncated slice across
+    // every account. We over-fetch each state by (limit + offset) so the
+    // merged-and-sorted page is correct, then apply the window once.
+    const span = page.data.limit + page.data.offset;
+    const [completed, failed] = await Promise.all([
+      opts.deps.runStore.findRunsByAccount(auth.account_id, "COMPLETE", span, 0),
+      opts.deps.runStore.findRunsByAccount(auth.account_id, "FAILED", span, 0),
+    ]);
+    const all = [...completed, ...failed]
+      .sort((a, b) => (b.created_at > a.created_at ? 1 : b.created_at < a.created_at ? -1 : 0))
+      .slice(page.data.offset, page.data.offset + page.data.limit);
 
     return reply.code(200).send({
       entries: all.map((r) => ({

@@ -40,6 +40,17 @@ export interface RunStore {
   applyTransition(runId: string, result: TransitionResult): Promise<Run>;
   loadEvents(runId: string): Promise<RunEvent[]>;
   findRunsInState(state: RunState, limit: number): Promise<Run[]>;
+  // Account-scoped, paginated lookup. findRunsInState returns the first
+  // N runs across ALL accounts, so the read-views (ledger /
+  // subscriptions) that filtered its output in JS would silently
+  // truncate an account's view once total runs exceeded the limit.
+  // This query filters by account at the store layer instead.
+  findRunsByAccount(
+    accountId: string,
+    state: RunState,
+    limit: number,
+    offset: number,
+  ): Promise<Run[]>;
 }
 
 export class RunNotFoundError extends Error {
@@ -170,6 +181,20 @@ export class InMemoryRunStore implements RunStore {
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  async findRunsByAccount(
+    accountId: string,
+    state: RunState,
+    limit: number,
+    offset: number,
+  ): Promise<Run[]> {
+    // Sort newest-first so pagination is stable as new runs land — the
+    // ledger view consumes pages in created_at-descending order.
+    const matched = [...this.runs.values()]
+      .filter((r) => r.account_id === accountId && r.state === state)
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+    return matched.slice(offset, offset + limit).map(clone);
   }
 }
 

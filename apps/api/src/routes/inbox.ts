@@ -7,20 +7,20 @@
 // Tier 0 callers are checked against their quota on alias creation. Once
 // quota is hit, the response carries an explicit cta_pair_url so the MCP
 // tool can tell Claude to surface the pairing flow to the user.
+//
+// Alias ownership: an alias is stamped with the principal that created
+// it. The /wait and DELETE routes assert the caller owns the alias, so
+// one machine token cannot long-poll or revoke another machine's alias
+// (an admin bearer bypasses the check).
 
-import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import type { InboxService } from "@trusty-squire/inbox";
+import type { FastifyInstance } from "fastify";
+import { AliasInactiveError, EmailTimeoutError, type InboxService } from "@trusty-squire/inbox";
 import { z } from "zod";
 import {
-  authorizeMachineToken,
-  extractMachineToken,
-} from "./install.js";
-import {
-  defaultQuota,
-  isMachineToken,
-  isOverQuota,
-  type MachineTokenStore,
-} from "../services/machine-tokens.js";
+  authorizeMachineOrAdmin,
+  type AuthPrincipal,
+} from "../auth/authorize-machine-or-admin.js";
+import { defaultQuota, type MachineTokenStore } from "../services/machine-tokens.js";
 
 export interface InboxRouteDeps {
   inbox: InboxService;
@@ -43,48 +43,25 @@ const waitQuerySchema = z.object({
   body_contains: z.string().optional(),
 });
 
-// Returns the auth principal as either an admin bearer (legacy) or a
-// machine token record. Writes the failure response and returns null on
-// auth failure.
-async function authorize(
-  req: FastifyRequest,
-  reply: FastifyReply,
-  store: MachineTokenStore,
-): Promise<{ kind: "admin" } | { kind: "machine"; token: string; signup_count: number; paired_account_id: string | null } | null> {
-  // Try machine token first (the common Tier 0 case).
-  const machineToken = extractMachineToken(req);
-  if (machineToken !== null) {
-    const record = await authorizeMachineToken(req, reply, store);
-    if (record === null) return null;
-    return {
-      kind: "machine",
-      token: record.token,
-      signup_count: record.signup_count,
-      paired_account_id: record.paired_account_id,
-    };
-  }
+// Sentinel owner stamped on aliases created via an admin bearer. Admin
+// callers also bypass the ownership check on read/delete, so this value
+// is only ever compared when a machine token tries to touch an
+// admin-created alias.
+const ADMIN_OWNER = "admin";
 
-  // Fall back to the admin bearer token. Constant-time compare.
-  const expected = process.env.UNIVERSAL_BOT_API_KEY;
-  const auth = req.headers["authorization"];
-  if (typeof auth === "string" && auth.startsWith("Bearer ") && expected !== undefined && expected.length > 0) {
-    const presented = auth.slice("Bearer ".length).trim();
-    // Skip machine-prefix tokens here — they're handled above.
-    if (!isMachineToken(presented)) {
-      if (presented.length === expected.length) {
-        let diff = 0;
-        for (let i = 0; i < presented.length; i++) {
-          diff |= presented.charCodeAt(i) ^ expected.charCodeAt(i);
-        }
-        if (diff === 0) return { kind: "admin" };
-      }
-      reply.code(401).send({ error: "invalid_token" });
-      return null;
-    }
-  }
+// The owner key stored on an alias for a given principal.
+function ownerKey(principal: AuthPrincipal): string {
+  return principal.kind === "machine" ? principal.token : ADMIN_OWNER;
+}
 
-  reply.code(401).send({ error: "missing_auth" });
-  return null;
+// True when `principal` is allowed to read/delete an alias whose
+// recorded owner is `issuedTo`. Admin bypasses. A null owner means the
+// alias predates ownership tracking — treated as permissive so legacy
+// aliases keep working.
+function ownsAlias(principal: AuthPrincipal, issuedTo: string | null): boolean {
+  if (principal.kind === "admin") return true;
+  if (issuedTo === null) return true;
+  return issuedTo === principal.token;
 }
 
 export async function registerInboxRoute(
@@ -94,9 +71,9 @@ export async function registerInboxRoute(
   const now = (): Date => opts.deps.now?.() ?? new Date();
 
   // Create an alias. For machine-token callers, this consumes one quota
-  // slot.
+  // slot. The creating principal is stamped onto the alias.
   fastify.post("/v1/inbox/aliases", async (req, reply) => {
-    const principal = await authorize(req, reply, opts.deps.machineTokenStore);
+    const principal = await authorizeMachineOrAdmin(req, reply, opts.deps.machineTokenStore);
     if (principal === null) return;
 
     const parsed = createAliasSchema.safeParse(req.body);
@@ -108,10 +85,7 @@ export async function registerInboxRoute(
     // Quota check for Tier 0 callers.
     if (principal.kind === "machine") {
       const quota = defaultQuota();
-      if (
-        principal.paired_account_id === null &&
-        principal.signup_count >= quota
-      ) {
+      if (principal.paired_account_id === null && principal.signup_count >= quota) {
         reply.code(429).send({
           error: "quota_exceeded",
           quota_limit: quota,
@@ -130,9 +104,11 @@ export async function registerInboxRoute(
     // `ttl_seconds?: number` rejects an explicit undefined. Build the
     // call input by spreading ttl_seconds only when present.
     const { ttl_seconds, ...rest } = parsed.data;
-    const alias = await opts.deps.inbox.createAlias(
-      ttl_seconds === undefined ? rest : { ...rest, ttl_seconds },
-    );
+    const alias = await opts.deps.inbox.createAlias({
+      ...rest,
+      issued_to: ownerKey(principal),
+      ...(ttl_seconds === undefined ? {} : { ttl_seconds }),
+    });
 
     if (principal.kind === "machine") {
       await opts.deps.machineTokenStore.incrementUsage(principal.token, now());
@@ -144,8 +120,21 @@ export async function registerInboxRoute(
   fastify.get<{
     Params: { alias: string };
   }>("/v1/inbox/aliases/:alias/wait", async (req, reply) => {
-    const principal = await authorize(req, reply, opts.deps.machineTokenStore);
+    const principal = await authorizeMachineOrAdmin(req, reply, opts.deps.machineTokenStore);
     if (principal === null) return;
+
+    // Ownership check: only the issuing principal (or an admin) may
+    // long-poll this alias. Without it, any valid machine token could
+    // read another machine's verification codes/links.
+    const aliasRecord = await opts.deps.inbox.getAlias(req.params.alias);
+    if (aliasRecord === null) {
+      reply.code(404).send({ error: "unknown_alias", alias: req.params.alias });
+      return;
+    }
+    if (!ownsAlias(principal, aliasRecord.issued_to)) {
+      reply.code(403).send({ error: "alias_not_owned", alias: req.params.alias });
+      return;
+    }
 
     const query = waitQuerySchema.safeParse(req.query);
     if (!query.success) {
@@ -192,12 +181,14 @@ export async function registerInboxRoute(
         received_at: email.received_at.toISOString(),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("timeout")) {
+      // Match on the typed error classes the inbox package exports —
+      // the previous string-matching on err.message was brittle (the
+      // timeout error message says "within Ns", not "timeout").
+      if (err instanceof EmailTimeoutError) {
         reply.code(408).send({ error: "timeout", alias: req.params.alias });
         return;
       }
-      if (message.includes("inactive") || message.includes("revoked") || message.includes("expired")) {
+      if (err instanceof AliasInactiveError) {
         reply.code(410).send({ error: "alias_inactive", alias: req.params.alias });
         return;
       }
@@ -209,8 +200,22 @@ export async function registerInboxRoute(
   fastify.delete<{
     Params: { alias: string };
   }>("/v1/inbox/aliases/:alias", async (req, reply) => {
-    const principal = await authorize(req, reply, opts.deps.machineTokenStore);
+    const principal = await authorizeMachineOrAdmin(req, reply, opts.deps.machineTokenStore);
     if (principal === null) return;
+
+    // Ownership check: only the issuing principal (or admin) may revoke.
+    const aliasRecord = await opts.deps.inbox.getAlias(req.params.alias);
+    if (aliasRecord === null) {
+      // Idempotent delete: a never-created (or already TTL-swept) alias
+      // is a no-op success, matching the store's revoke() semantics.
+      reply.code(204).send();
+      return;
+    }
+    if (!ownsAlias(principal, aliasRecord.issued_to)) {
+      reply.code(403).send({ error: "alias_not_owned", alias: req.params.alias });
+      return;
+    }
+
     await opts.deps.inbox.revokeAlias(req.params.alias);
     reply.code(204).send();
   });

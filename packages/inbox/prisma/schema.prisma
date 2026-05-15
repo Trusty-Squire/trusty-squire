@@ -48,6 +48,14 @@ model EmailAlias {
   account_id     String    @db.VarChar(26)
   run_id         String    @db.VarChar(26)
   service        String
+
+  // The principal that created this alias (a machine token, or an
+  // admin sentinel). The inbox API asserts the long-poll / delete
+  // caller matches this so one machine token can't read or revoke
+  // another machine's alias. Nullable: aliases created before this
+  // column existed have no owner recorded.
+  issued_to      String?
+
   active         Boolean   @default(true)
   inbound_count  Int       @default(0)
   created_at     DateTime  @default(now())

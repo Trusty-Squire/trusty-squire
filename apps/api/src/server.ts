@@ -77,7 +77,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   fastify.addContentTypeParser('message/rfc822', { parseAs: 'buffer' }, (req, body, done) => {
     done(null, body);
   });
-  
+
   // Add text/plain parser for SNS notifications
   fastify.addContentTypeParser('text/plain', { parseAs: 'string' }, (req, body: string | Buffer, done) => {
     try {
@@ -87,6 +87,29 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       done(err as Error, undefined);
     }
   });
+
+  // Replace the default JSON parser with one that also stashes the raw
+  // body string on req.rawBody. Webhook signature verification (Svix /
+  // Resend) must HMAC the exact bytes received — a re-serialised object
+  // would not byte-match the sender's signed payload.
+  fastify.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (req, body: string | Buffer, done) => {
+      const text = typeof body === 'string' ? body : body.toString('utf8');
+      req.rawBody = text;
+      if (text.trim().length === 0) {
+        // Mirror Fastify's default: empty JSON body parses to undefined.
+        done(null, undefined);
+        return;
+      }
+      try {
+        done(null, JSON.parse(text));
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+    },
+  );
 
   const auth = makeAuthMiddleware({
     sessionStore: deps.sessionStore,

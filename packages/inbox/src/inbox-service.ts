@@ -11,6 +11,7 @@ import {
   EmailTimeoutError,
   type AliasStore,
   type CreateAliasInput,
+  type EmailAliasRecord,
   type EmailMatcher,
   type EmailStore,
   type ReceivedEmail,
@@ -55,6 +56,7 @@ export class InboxService {
       account_id: input.account_id,
       run_id: input.run_id,
       service: input.service,
+      issued_to: input.issued_to ?? null,
       active: true,
       inbound_count: 0,
       created_at: createdAt,
@@ -121,6 +123,13 @@ export class InboxService {
 
   async revokeAlias(alias: string): Promise<void> {
     await this.deps.aliasStore.revoke(alias);
+  }
+
+  // Fetch the alias record (regardless of active/expired state) so
+  // callers can enforce ownership before long-polling or revoking it.
+  // Returns null when the alias was never created.
+  async getAlias(alias: string): Promise<EmailAliasRecord | null> {
+    return this.deps.aliasStore.find(alias);
   }
 
   // ── Internals ────────────────────────────────────────────────

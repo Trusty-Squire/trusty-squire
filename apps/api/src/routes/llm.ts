@@ -17,13 +17,10 @@
 // intentionally — we keep the proxy boring so it can't accidentally
 // become a general-purpose Anthropic-compatible endpoint.
 
-import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import {
-  authorizeMachineToken,
-  extractMachineToken,
-} from "./install.js";
-import { isMachineToken, type MachineTokenStore } from "../services/machine-tokens.js";
+import { authorizeMachineOrAdmin } from "../auth/authorize-machine-or-admin.js";
+import type { MachineTokenStore } from "../services/machine-tokens.js";
 import type { LLMUsageTracker } from "../services/llm-usage-tracker.js";
 
 const blockSchema = z.union([
@@ -89,9 +86,8 @@ export async function registerLLMRoute(
       return;
     }
 
-    // Auth: machine token OR admin bearer. Reuse the same shape as the
-    // inbox routes for consistency.
-    const principal = await authorize(req, reply, opts.deps.machineTokenStore);
+    // Auth: machine token OR admin bearer. Shared with /v1/inbox/*.
+    const principal = await authorizeMachineOrAdmin(req, reply, opts.deps.machineTokenStore);
     if (principal === null) return;
 
     const parsed = chatBodySchema.safeParse(req.body);
@@ -180,38 +176,4 @@ export async function registerLLMRoute(
       reply.code(502).send({ error: "upstream_unreachable" });
     }
   });
-}
-
-// Same auth shape as /v1/inbox/* — machine token preferred, admin bearer
-// (UNIVERSAL_BOT_API_KEY) as a fallback for ops/tests.
-async function authorize(
-  req: FastifyRequest,
-  reply: FastifyReply,
-  store: MachineTokenStore,
-): Promise<{ kind: "admin" } | { kind: "machine"; token: string } | null> {
-  const machineToken = extractMachineToken(req);
-  if (machineToken !== null) {
-    const record = await authorizeMachineToken(req, reply, store);
-    if (record === null) return null;
-    return { kind: "machine", token: record.token };
-  }
-
-  const expected = process.env.UNIVERSAL_BOT_API_KEY;
-  const auth = req.headers["authorization"];
-  if (typeof auth === "string" && auth.startsWith("Bearer ") && expected !== undefined && expected.length > 0) {
-    const presented = auth.slice("Bearer ".length).trim();
-    if (!isMachineToken(presented)) {
-      if (presented.length === expected.length) {
-        let diff = 0;
-        for (let i = 0; i < presented.length; i++) {
-          diff |= presented.charCodeAt(i) ^ expected.charCodeAt(i);
-        }
-        if (diff === 0) return { kind: "admin" };
-      }
-      reply.code(401).send({ error: "invalid_token" });
-      return null;
-    }
-  }
-  reply.code(401).send({ error: "missing_auth" });
-  return null;
 }

@@ -62,6 +62,7 @@ async function setup(opts: { registerAlias?: boolean } = {}): Promise<Setup> {
       account_id: "01HACCOUNTAAAAAAAAAAAAAAAA",
       run_id: "01HRUNAAAAAAAAAAAAAAAAAAAA",
       service: "resend",
+      issued_to: null,
       active: true,
       inbound_count: 0,
       created_at: NOW,

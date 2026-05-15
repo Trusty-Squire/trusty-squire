@@ -32,6 +32,7 @@ export class PrismaAliasStore implements AliasStore {
         account_id: record.account_id,
         run_id: record.run_id,
         service: record.service,
+        issued_to: record.issued_to,
         active: record.active,
         inbound_count: record.inbound_count,
         created_at: record.created_at,
@@ -72,6 +73,7 @@ export class PrismaAliasStore implements AliasStore {
     account_id: string;
     run_id: string;
     service: string;
+    issued_to: string | null;
     active: boolean;
     inbound_count: number;
     created_at: Date;
@@ -82,6 +84,7 @@ export class PrismaAliasStore implements AliasStore {
       account_id: row.account_id,
       run_id: row.run_id,
       service: row.service,
+      issued_to: row.issued_to,
       active: row.active,
       inbound_count: row.inbound_count,
       created_at: row.created_at,

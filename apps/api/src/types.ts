@@ -25,6 +25,10 @@ declare module "fastify" {
   // handlers can read it without re-parsing the cookie/header.
   interface FastifyRequest {
     auth?: AuthIdentity;
+    // Raw request body string, captured by the JSON content-type
+    // parser. Webhook signature verification (Svix/Resend) must HMAC
+    // the exact bytes sent, not a re-serialised object.
+    rawBody?: string;
   }
 }
 
