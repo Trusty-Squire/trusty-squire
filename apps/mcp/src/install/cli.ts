@@ -144,7 +144,7 @@ async function install(args: Argv): Promise<void> {
   // child-process listing or shell history.
   await agent.writeConfig({
     command: "npx",
-    args: ["-y", "@trusty-squire/mcp"],
+    args: ["-y", "-p", "@trusty-squire/mcp", "squire-mcp-server"],
     env: {
       TRUSTY_SQUIRE_AGENT_IDENTITY: target,
       UNIVERSAL_BOT_PREFER_CHEAP: "true",

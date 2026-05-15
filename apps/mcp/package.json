@@ -1,11 +1,12 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API.",
   "main": "./dist/server.js",
   "bin": {
-    "squire-mcp": "./dist/install/cli.js"
+    "squire-mcp": "./dist/install/cli.js",
+    "squire-mcp-server": "./dist/server.js"
   },
   "files": [
     "dist"

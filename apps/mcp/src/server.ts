@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // MCP server entry point. Reads the session from keytar/file, sets up
 // an ApiClient against the configured API base URL, and exposes the
 // registered tools over stdio.

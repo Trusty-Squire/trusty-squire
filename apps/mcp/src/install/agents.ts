@@ -59,7 +59,12 @@ async function readJsonIfExists(filePath: string): Promise<Record<string, unknow
 
 async function writeJson(filePath: string, data: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  // Atomic write: ~/.claude.json holds the user's entire Claude Code
+  // state, so a torn write would be catastrophic. Write a temp file on
+  // the same filesystem, then rename (atomic) over the target.
+  const tmp = `${filePath}.tmp-${Date.now()}`;
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  await fs.rename(tmp, filePath);
 }
 
 // Merge a `squire` entry into the standard mcpServers map without
@@ -84,7 +89,7 @@ async function mergeMcpServersJson(filePath: string, input: WriteConfigInput): P
 const claudeCode: AgentDefinition = {
   target: "claude-code",
   display_name: "Claude Code",
-  config_path: () => path.join(home(), ".claude", "mcp.json"),
+  config_path: () => path.join(home(), ".claude.json"),
   detect: async () => exists(path.join(home(), ".claude")),
   writeConfig: async (input) => mergeMcpServersJson(claudeCode.config_path(), input),
 };
