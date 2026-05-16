@@ -25,6 +25,7 @@
 import { chromium as baseChromium } from "playwright";
 import type { Browser, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
+import { detectAsn, type AsnClass } from "./asn.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -189,6 +190,11 @@ export class BrowserController {
   // separating fingerprint regressions from network regressions when
   // a service starts failing.
   private launchedChannel: string | null = null;
+  // The proxy server this run egressed through, or null for a direct
+  // connection. Set by .start(); surfaced via the `proxied` getter —
+  // a captcha failure behind a residential proxy is materially
+  // different signal from the same failure on a raw datacenter IP.
+  private proxyServer: string | null = null;
 
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
@@ -205,13 +211,26 @@ export class BrowserController {
     return this.launchedChannel;
   }
 
+  // The proxy server the most recent .start() routed egress through,
+  // or null for a direct connection. Useful telemetry alongside
+  // `channel`. Throws if .start() hasn't run — same reason as channel.
+  get proxied(): string | null {
+    if (this.browser === null) {
+      throw new Error("BrowserController.proxied read before .start()");
+    }
+    return this.proxyServer;
+  }
+
   async start(): Promise<void> {
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
+    const proxy = await this.resolveProxy();
+    this.proxyServer = proxy?.server ?? null;
     // Stderr so the MCP stdio transport's framing stays clean (the
     // module's existing logging convention).
     console.error(
-      `[universal-bot] launching browser channel=${channel ?? "bundled-chromium"}`,
+      `[universal-bot] launching browser channel=${channel ?? "bundled-chromium"} ` +
+        `proxy=${proxy?.server ?? "direct"}`,
     );
     this.browser = await getChromium().launch({
       headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
@@ -219,6 +238,10 @@ export class BrowserController {
       // real installed browser instead of the bundled binary. When null
       // we omit the key entirely so Playwright falls back to default.
       ...(channel !== null ? { channel } : {}),
+      // `proxy:` routes all egress through a residential proxy. Omitted
+      // (direct connection) for the ~80% of users on residential
+      // networks — see resolveProxy().
+      ...(proxy !== null ? { proxy } : {}),
       args: [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
@@ -237,6 +260,53 @@ export class BrowserController {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
     this.page = await context.newPage();
+  }
+
+  // Decide whether this run egresses through a residential proxy, and
+  // return Playwright's proxy settings or null for a direct connection.
+  //
+  // The fast path: when UNIVERSAL_BOT_PROXY_URL is unset (the default),
+  // this returns null before doing anything — no ASN lookup, no added
+  // latency for the ~80% of users who never configure a proxy.
+  //
+  // When a proxy IS configured, it's used only for datacenter-class
+  // egress: reCAPTCHA/Cloudflare score datacenter IPs as bot-likely no
+  // matter how clean the fingerprint is, while residential users
+  // already pass — so routing them through the proxy would just burn
+  // money. UNIVERSAL_BOT_PROXY_ALWAYS=true forces it on for networks
+  // that misclassify as "unknown". A malformed URL never aborts the
+  // run — we log and fall back to a direct connection.
+  private async resolveProxy(): Promise<ProxySettings | null> {
+    const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
+    if (raw === undefined || raw.trim().length === 0) return null;
+
+    let proxy: ProxySettings;
+    try {
+      proxy = parseProxyUrl(raw);
+    } catch (err) {
+      console.error(
+        `[universal-bot] UNIVERSAL_BOT_PROXY_URL is malformed — running ` +
+          `direct: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+
+    const forceAlways = process.env.UNIVERSAL_BOT_PROXY_ALWAYS === "true";
+    // detectAsn is best-effort (5s timeout, null on failure) → "unknown".
+    const asn = await detectAsn();
+    const asnClass: AsnClass = asn?.class ?? "unknown";
+    if (shouldRouteThroughProxy(asnClass, forceAlways)) {
+      console.error(
+        `[universal-bot] routing through residential proxy ` +
+          `(asn=${asnClass}${forceAlways ? ", forced" : ""})`,
+      );
+      return proxy;
+    }
+    console.error(
+      `[universal-bot] direct connection (asn=${asnClass}) — proxy ` +
+        `configured but not needed for this network`,
+    );
+    return null;
   }
 
   async goto(url: string): Promise<void> {
@@ -774,4 +844,53 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
     }
   });
   return bestIndex;
+}
+
+// ───────────── residential proxy (S1) ─────────────
+
+// Playwright proxy settings, narrowed to the fields we set. Structurally
+// assignable to Playwright's launch `proxy` option (which also has an
+// optional `bypass`).
+export interface ProxySettings {
+  server: string;
+  username?: string;
+  password?: string;
+}
+
+// Parse a UNIVERSAL_BOT_PROXY_URL — e.g. "http://user:pass@host:8080" or
+// "socks5://host:1080" — into Playwright's proxy option shape. Playwright
+// wants credentials separate from `server`, so we split them out and
+// percent-decode them (residential providers embed session IDs with
+// reserved characters in the username, which arrive %-encoded).
+//
+// Throws on a URL the WHATWG parser rejects, or one with no host (a bare
+// "host:port" parses as a scheme with an empty host) — the caller logs
+// and falls back to a direct connection.
+//
+// Exported for unit testing — URL parsing is the error-prone bit.
+export function parseProxyUrl(raw: string): ProxySettings {
+  const u = new URL(raw.trim());
+  if (u.hostname.length === 0) {
+    throw new Error(
+      `proxy URL has no host: "${raw}" (expected e.g. http://host:port)`,
+    );
+  }
+  // `host` includes the port; `protocol` keeps its trailing ":".
+  const settings: ProxySettings = { server: `${u.protocol}//${u.host}` };
+  if (u.username.length > 0) settings.username = decodeURIComponent(u.username);
+  if (u.password.length > 0) settings.password = decodeURIComponent(u.password);
+  return settings;
+}
+
+// Should this run route through the configured proxy? True when the
+// egress network is datacenter-class (the case the proxy exists for) or
+// when the operator forced it on. Residential/unknown without the
+// override stay direct — the ~80% who don't need it pay nothing.
+//
+// Exported for unit testing.
+export function shouldRouteThroughProxy(
+  asnClass: AsnClass,
+  forceAlways: boolean,
+): boolean {
+  return forceAlways || asnClass === "datacenter";
 }

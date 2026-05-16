@@ -43,10 +43,10 @@ These must be done on/before the next deploy of `trusty-squire-api`.
 
 ## S1 — Residential proxy support for the universal-bot
 
-- [ ] **S1 = Residential proxy support for the universal-bot.** Originally
-  framed as the single biggest lever against the captcha problem when the bot
-  can't run on a residential network (Codespaces, Replit, Hetzner CI/test
-  boxes, corporate networks).
+- [x] **S1 = Residential proxy support for the universal-bot. — shipped.**
+  The single biggest lever against the captcha problem when the bot can't run
+  on a residential network (Codespaces, Replit, Hetzner CI/test boxes,
+  corporate networks).
 
 The shape converged on across two conversations:
 
@@ -58,9 +58,30 @@ The shape converged on across two conversations:
 | **Implementation effort** | ~half a day. Single change to `BrowserController.start()` to accept `proxy: { server, username, password }` via env vars. Gated so the ~80% of residential users pay zero proxy cost; only datacenter-detected sessions route through the proxy. |
 | **Cost** | $0.05–$0.10 per signup via PacketStream or IPRoyal pay-as-you-go. Bright Data has a $5 one-time signup credit (~100–600 signups) for free initial validation. |
 
+**Shipped.** `BrowserController.start()` reads `UNIVERSAL_BOT_PROXY_URL`
+(`http://user:pass@host:port` or `socks5://host:port`) and routes egress
+through it — gated by `shouldRouteThroughProxy()` so only datacenter-class
+sessions use the proxy; residential/unknown stay direct at zero cost.
+`UNIVERSAL_BOT_PROXY_ALWAYS=true` overrides the gate. Vendor-agnostic: any
+proxy works, switching is one env var. Tests in `proxy.test.ts`.
+
+**Vendor strategy (operational — not in code):**
+1. **Validate** with Bright Data's $5 free credit — set `UNIVERSAL_BOT_PROXY_URL`
+   to the Bright Data endpoint, run a Resend signup from the Hetzner box, confirm
+   captcha blocked → passes. Zero cost.
+2. **Production** on IPRoyal Royal Residential (pay-as-you-go, non-expiring
+   balance) — cleaner pool than PacketStream's P2P network for a few cents more
+   per signup, and the non-expiring balance fits sporadic low-volume use. Swap
+   the env var; no code change.
+
+**Not yet done:** threading a `proxied` flag from the `BrowserController.proxied`
+getter through `SignupResult` → `CaptchaEvent` telemetry, so "did the proxy
+help?" is answerable from data. Small follow-up.
+
 ## S2 — Universal-bot: ambiguous submit selector + 5-minute false hang
 
-Diagnosed 2026-05-16 from a real Resend signup run. **Not yet fixed.**
+Diagnosed 2026-05-16 from a real Resend signup run. **Fixed** — see the
+S2.1/S2.2/S2.3 checklist below.
 
 **Symptom.** A `provision_any_service` Resend signup appeared to hang for
 ~5 minutes, then failed with the generic `Could not find credentials on
