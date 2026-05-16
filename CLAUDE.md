@@ -185,8 +185,15 @@ Two packages ship to the public npm registry:
 - `@trusty-squire/universal-bot` — the bot engine (a dependency of
   `@trusty-squire/mcp`).
 
-Current published versions: `@trusty-squire/mcp@0.1.4`,
-`@trusty-squire/universal-bot@0.1.0`.
+Current published versions: `@trusty-squire/mcp@0.1.5`,
+`@trusty-squire/universal-bot@0.1.1`.
+
+**Republish `universal-bot` whenever the bot changes.** `@trusty-squire/mcp`
+bundles `@trusty-squire/universal-bot` as a pinned dependency — a fix to
+the bot (agent.ts, browser.ts) does **nothing** for `npx`-installed users
+until `universal-bot` is republished *and* `mcp` is republished against
+the new version. S1/S2 shipped to git but sat unpublished for several
+commits; every `npx @trusty-squire/mcp` user kept getting the old bot.
 
 **Pack with `pnpm`, publish the tarball with `npm`.** The mcp package
 depends on `@trusty-squire/universal-bot": "workspace:*"`; `pnpm pack`

@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/universal-bot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Playwright + Claude-vision bot that signs up for SaaS services. The engine behind Trusty Squire's provision_any_service.",
   "type": "module",
   "exports": {
