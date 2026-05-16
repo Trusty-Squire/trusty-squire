@@ -167,22 +167,20 @@ call (or a keyword scan of the visible text) covers it. Lives in
 
 ## A1 — Consolidate the provision / provision_any_service packages
 
-Raised by the user 2026-05-16. **Design note — needs an eng review.**
+Raised by the user 2026-05-16. **Part 1 (the package merge) shipped in
+`@trusty-squire/mcp@0.1.7`. Part 2 (the feedback loop) still open.**
 
-Today: `apps/mcp` (MCP relay) and `packages/universal-bot` (browser bot)
-are separate, separately-*published* npm packages; native adapters live
-in `packages/adapters/*` + `apps/registry-api`. Two reasons to consolidate:
+Native adapters live in `packages/adapters/*` + `apps/registry-api`.
+Two reasons drove the consolidation:
 
-1. **Two published npm packages = dependency skew.** Lived this all of
-   2026-05-16: `@trusty-squire/mcp` pins `@trusty-squire/universal-bot`;
-   S1/S2 shipped to git but `universal-bot` wasn't republished, so every
-   `npx` user ran the stale bot through five "fixed but still broken"
-   cycles. **Immediate cheap win, independent of the bigger merge:** stop
-   publishing `universal-bot` as its own npm package — bundle it into
-   `@trusty-squire/mcp` (keep it a workspace package for code layout,
-   just not a separate *published* artifact). That alone kills the
-   version-skew bug class.
-2. **Closed feedback loop.** `provision_any_service` should be the
+1. **[x] DONE — two published npm packages caused dependency skew.**
+   `@trusty-squire/mcp` pinned `@trusty-squire/universal-bot`; S1/S2
+   shipped to git but `universal-bot` wasn't republished, so every `npx`
+   user ran the stale bot through five "fixed but still broken" cycles.
+   Fixed in `0.1.7`: the bot's source moved into `apps/mcp/src/bot/`,
+   `universal-bot` is no longer a package or published. One package, one
+   version — the version-skew bug class is gone.
+2. **[ ] Closed feedback loop.** `provision_any_service` should be the
    *fallback* when no native adapter exists — and a successful universal
    signup should **codify a native adapter and register it** (same idea
    as the /skillify pattern: a proven flow becomes a permanent fast
@@ -203,7 +201,7 @@ not the code organization — consolidate the published surface.
 consolidation must keep: `install` issues an anonymous machine token
 with no account/pairing; `provision_any_service` runs on a
 machine-token-only session; 10 free signups (`MACHINE_TOKEN_QUOTA`)
-before any pairing CTA. Lock it with an explicit test — `install`
-produces an anonymous session, and `provision_any_service` is callable
-with no `agent_session_token` — so a future refactor cannot silently
-reintroduce signup/pairing gating.
+before any pairing CTA. **[x] Locked** by
+`apps/mcp/src/__tests__/tier0.test.ts` — verified through the 0.1.7
+merge: `install` does not pair by default, and the Tier-0 server
+exposes `provision_any_service` while gating account-scoped tools.

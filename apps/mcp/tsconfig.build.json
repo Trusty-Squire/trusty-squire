@@ -1,4 +1,11 @@
 {
   "extends": "./tsconfig.json",
-  "exclude": ["dist", "node_modules", "src/**/__tests__/**"]
+  "comment": "cli.ts and test-with-inbox.ts are manual dev harnesses — they import the @trusty-squire/inbox devDependency, so they must not be compiled into the published dist.",
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/**/__tests__/**",
+    "src/bot/cli.ts",
+    "src/bot/test-with-inbox.ts"
+  ]
 }

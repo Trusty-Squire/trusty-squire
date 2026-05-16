@@ -13,9 +13,9 @@
 //   UNIVERSAL_BOT_HEADLESS=false — show the browser window
 
 import { randomBytes } from "crypto";
-import { UniversalSignupBot, InboxClient } from "./src/index.js";
+import { UniversalSignupBot, InboxClient } from "./index.js";
 import { InboxService, InMemoryAliasStore, InMemoryEmailStore } from "@trusty-squire/inbox";
-import type { AgentInbox } from "./src/index.js";
+import type { AgentInbox } from "./index.js";
 
 async function main(): Promise<void> {
   const service = process.argv[2];

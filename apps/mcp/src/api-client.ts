@@ -268,7 +268,7 @@ export interface MachineInstallResponse {
 }
 
 // Shape of the optional asn block we send on install. Matches the
-// `AsnInfo` returned by `@trusty-squire/universal-bot` but flattened
+// `AsnInfo` returned by the bundled bot (`src/bot/asn.ts`) but flattened
 // to the wire fields the API actually persists.
 export interface InstallAsnPayload {
   ip: string;

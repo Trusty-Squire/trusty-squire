@@ -45,7 +45,8 @@ OpenRouter for LLM, AWS SES for inbound mail.
 - **Retention cron** (hourly, in-process). Bodies → null at 7d,
   metadata → delete at 90d, pairing tokens → delete at 1h, LLM events
   → delete at 30d. Structured JSON log per run.
-- **Universal signup bot** (`packages/universal-bot`):
+- **Universal signup bot** (`apps/mcp/src/bot/` — bundled into the mcp
+  package, no longer a separate npm package):
   - Stealth (`playwright-extra` + stealth plugin)
   - **Tier 1 captcha bypass: behavior simulation** (bezier mouse,
     variable typing with thinking pauses, post-load dwell, hover
@@ -140,14 +141,15 @@ instance API scaling.
 trusty-squire/
 ├── apps/
 │   ├── api/         Fastify API. Prisma schema in prisma/.
-│   ├── mcp/         The MCP server users install on their machines.
+│   ├── mcp/         The MCP server users install. Bundles the universal
+│   │                signup bot at src/bot/ (Playwright + Claude vision,
+│   │                tiered captcha). The bot is NOT a separate package.
 │   ├── pwa/         Web UI for approvals + pairing.
 │   ├── registry-api/Adapter registry (used by native provision path).
 │   └── tooling/     Internal scripts (Vouchflow stub, etc.)
 ├── packages/
 │   ├── inbox/       Email alias + inbound parsing. Owns inbox Prisma schema.
 │   ├── runtime/     Run state machine; mandate-validator + run-context.
-│   ├── universal-bot/  Playwright + Claude bot. Tier 1 captcha bypass here.
 │   ├── vault/       Encrypted credential store.
 │   └── ...          Other shared libs (auth, http-clients, etc.)
 └── CLAUDE.md        This file.
@@ -158,7 +160,8 @@ trusty-squire/
 pnpm -F @trusty-squire/api build
 pnpm -F @trusty-squire/api typecheck
 pnpm -F @trusty-squire/api test
-pnpm -F @trusty-squire/universal-bot build
+pnpm -F @trusty-squire/mcp build       # builds the bundled bot too
+pnpm -F @trusty-squire/mcp test        # mcp + bot tests, one suite
 pnpm -F @trusty-squire/inbox prisma:generate
 pnpm -F @trusty-squire/api prisma:generate
 ```
@@ -179,34 +182,23 @@ stale (they reference a `prisma:generate` script that no longer exists)
 
 ### npm distribution (the install path)
 
-Two packages ship to the public npm registry:
+**One package** ships to the public npm registry: `@trusty-squire/mcp`
+— the MCP server, install CLI, and the bundled universal signup bot
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.1.7`.
 
-- `@trusty-squire/mcp` — the MCP server + install CLI users run.
-- `@trusty-squire/universal-bot` — the bot engine (a dependency of
-  `@trusty-squire/mcp`).
+The bot used to be a separate `@trusty-squire/universal-bot` package.
+That split caused a recurring bug: a bot fix shipped to git, `mcp` was
+republished, but `universal-bot` was not — so `npx` users kept the
+stale bot. As of `0.1.7` the bot is folded into `apps/mcp/src/bot/`;
+one package, one version, no skew. `@trusty-squire/universal-bot` is no
+longer published — do not recreate it.
 
-Current published versions: `@trusty-squire/mcp@0.1.6`,
-`@trusty-squire/universal-bot@0.1.1`.
-
-**Republish `universal-bot` whenever the bot changes.** `@trusty-squire/mcp`
-bundles `@trusty-squire/universal-bot` as a pinned dependency — a fix to
-the bot (agent.ts, browser.ts) does **nothing** for `npx`-installed users
-until `universal-bot` is republished *and* `mcp` is republished against
-the new version. S1/S2 shipped to git but sat unpublished for several
-commits; every `npx @trusty-squire/mcp` user kept getting the old bot.
-
-**Pack with `pnpm`, publish the tarball with `npm`.** The mcp package
-depends on `@trusty-squire/universal-bot": "workspace:*"`; `pnpm pack`
-(like `pnpm publish`) rewrites that to the resolved version, while a
-bare `npm publish` would ship the literal `workspace:*` and break
-installs. The npm account has passkey-based 2FA, so plain
-`npm publish` / `pnpm publish` fail with `EOTP` from a non-interactive
-shell. Use an **npm Automation token** (skips the 2FA challenge):
+**Pack with `pnpm`, publish the tarball with `npm`.** `pnpm pack`
+resolves any `workspace:*` devDeps; the npm account has passkey-based
+2FA so plain `npm publish` / `pnpm publish` fail with `EOTP` from a
+non-interactive shell. Use an **npm Automation token**:
 
 ```bash
-# only if universal-bot's version changed:
-cd packages/universal-bot && pnpm pack
-# mcp (publish universal-bot first if it was bumped):
 cd apps/mcp && pnpm pack
 printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_AUTOMATION_TOKEN" > /tmp/np
 npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /tmp/np

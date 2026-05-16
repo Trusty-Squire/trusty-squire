@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
-import { detectAsn, type AsnInfo } from "@trusty-squire/universal-bot";
+import { detectAsn, type AsnInfo } from "../bot/index.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";

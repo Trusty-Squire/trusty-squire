@@ -17,7 +17,7 @@ import {
   ProxyLLMClient,
   detectAsn,
   type LLMPair,
-} from "@trusty-squire/universal-bot";
+} from "../bot/index.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
 
