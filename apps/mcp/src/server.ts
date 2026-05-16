@@ -13,6 +13,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ApiClient, MissingSessionError } from "./api-client.js";
 import { TOOLS, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
@@ -110,7 +112,22 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run main() when this file is the process entrypoint. process.argv[1]
+// is often a bin symlink (node_modules/.bin/squire-mcp-server under
+// npx); realpathSync resolves it to the real server.js path so the
+// comparison holds for every launch style — `node dist/server.js`, the
+// bin shim, and npx.
+function isEntrypoint(): boolean {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  try {
+    return realpathSync(invoked) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
   main().catch((err: unknown) => {
     // stderr goes to the coding agent's MCP log — keep the message
     // useful for debugging without leaking secrets.
