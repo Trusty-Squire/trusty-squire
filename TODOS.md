@@ -53,7 +53,7 @@ The shape converged on across two conversations:
 | Aspect | Decision |
 |--------|----------|
 | **What it is** | Route Playwright egress through a residential proxy (Bright Data / IPRoyal / PacketStream) when the user's egress network is datacenter-class. |
-| **Why it matters** | reCAPTCHA v2/v3 score datacenter IPs as bot-likely regardless of fingerprint quality. A residential proxy bypasses this entirely. Validated empirically: the same code passed on a residential Mac (Comcast AS7922) and was blocked on datacenter Hetzner (AS24940). |
+| **Why it matters** | reCAPTCHA v2/v3 score datacenter IPs as bot-likely. A residential proxy removes the *IP* signal — but **not** the whole challenge: v3 also scores fingerprint + behavior. Early signal looked promising (same code passed on a residential Mac, blocked on datacenter Hetzner) — but see the 2026-05-16 empirical result below: a confirmed residential-proxied run was still blocked. |
 | **Why deferred** | Pre-PMF, ~20% of users hit the problem, and there was no telemetry yet to justify ongoing proxy cost. Build the leading indicator first (bot-run telemetry — shipped ✅), then decide. |
 | **Implementation effort** | ~half a day. Single change to `BrowserController.start()` to accept `proxy: { server, username, password }` via env vars. Gated so the ~80% of residential users pay zero proxy cost; only datacenter-detected sessions route through the proxy. |
 | **Cost** | $0.05–$0.10 per signup via PacketStream or IPRoyal pay-as-you-go. Bright Data has a $5 one-time signup credit (~100–600 signups) for free initial validation. |
@@ -82,6 +82,21 @@ now threads from `BrowserController.proxied` → `SignupResult.proxied`
 fired?" is answerable from a single SQL query. Schema pushed to
 `trustysquire`, API deployed, route smoke-tested end-to-end. Tests in
 `apps/api/src/__tests__/captcha-events.test.ts`.
+
+**Empirical result — 2026-05-16: a residential IP alone does NOT
+defeat reCAPTCHA.** With `@trusty-squire/mcp@0.1.8` (proxied
+telemetry) and `UNIVERSAL_BOT_PROXY_ALWAYS=true`, a Postmark signup
+ran with browser egress confirmed through a residential proxy
+(SK Broadband AS9318, Seoul). The `CaptchaEvent` row:
+`proxied=true, blocked=true` — Postmark's reCAPTCHA flagged the
+session anyway. The proxy removes the IP signal; the automation
+fingerprint + behavior signals remain enough to score the session
+as a bot. (Contrast: Mailgun *passed* reCAPTCHA from the same
+machine — it was never purely about the IP.) **Conclusion:** the
+residential proxy is a marginal-case lever, not a captcha-defeat
+mechanism. Postmark-class signups are a hard block on the Tier 0
+browser path — the honest outcome is `captcha_blocked` + a
+manual-signup CTA, which `provision_any_service` already returns.
 
 ## S2 — Universal-bot: ambiguous submit selector + 5-minute false hang
 
