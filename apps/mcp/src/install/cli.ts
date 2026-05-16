@@ -15,6 +15,8 @@
 //   --target=<agent>     skip auto-detection
 //   --api-base=<url>     override the API base URL
 //   --pair               run pairing as part of install (Tier 1 from minute 1)
+//   --proxy-url=<url>    bake a residential proxy into the MCP config's env
+//                        (UNIVERSAL_BOT_PROXY_URL) — set once, never hand-edit
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -34,6 +36,10 @@ type Argv = {
   target?: AgentTarget;
   apiBase: string;
   withPair: boolean;
+  // Residential proxy URL to bake into the written MCP config's env as
+  // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
+  // and the user never hand-edits the config env.
+  proxyUrl?: string;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -42,19 +48,23 @@ function parseArgs(argv: string[]): Argv {
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let withPair = false;
+  let proxyUrl: string | undefined;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
       if (isAgentTarget(t)) target = t;
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
+    } else if (arg.startsWith("--proxy-url=")) {
+      proxyUrl = arg.slice("--proxy-url=".length);
     } else if (arg === "--pair") {
       withPair = true;
     }
   }
-  return target !== undefined
-    ? { command, target, apiBase, withPair }
-    : { command, apiBase, withPair };
+  const args: Argv = { command, apiBase, withPair };
+  if (target !== undefined) args.target = target;
+  if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
+  return args;
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
@@ -160,15 +170,25 @@ async function install(args: Argv): Promise<void> {
   // from session storage (keychain / file), which keeps it out of any
   // child-process listing or shell history.
   const launch = resolveServerLaunch();
+  const env: Record<string, string> = {
+    TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+    UNIVERSAL_BOT_PREFER_CHEAP: "true",
+  };
+  // --proxy-url bakes the residential proxy into the config so the user
+  // never hand-edits env. The bot still gates it at runtime — only
+  // datacenter-class egress actually routes through it.
+  if (args.proxyUrl !== undefined) {
+    env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
+  }
   await agent.writeConfig({
     command: launch.command,
     args: launch.args,
-    env: {
-      TRUSTY_SQUIRE_AGENT_IDENTITY: target,
-      UNIVERSAL_BOT_PREFER_CHEAP: "true",
-    },
+    env,
   });
   console.warn(`✓ Wrote ${agent.display_name} MCP config at ${agent.config_path()}.`);
+  if (args.proxyUrl !== undefined) {
+    console.warn(`  Residential proxy baked in: ${args.proxyUrl}`);
+  }
   console.warn(``);
   console.warn(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
   console.warn(``);
@@ -259,7 +279,7 @@ function printHelp(): void {
   console.warn(`mcp — install Trusty Squire MCP into a coding agent`);
   console.warn(``);
   console.warn(`Commands:`);
-  console.warn(`  install [--target=<agent>] [--api-base=<url>] [--pair]`);
+  console.warn(`  install [--target=<agent>] [--api-base=<url>] [--pair] [--proxy-url=<url>]`);
   console.warn(`  pair [--target=<agent>] [--api-base=<url>]`);
   console.warn(`  logout`);
   console.warn(``);

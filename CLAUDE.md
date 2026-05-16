@@ -185,7 +185,7 @@ Two packages ship to the public npm registry:
 - `@trusty-squire/universal-bot` — the bot engine (a dependency of
   `@trusty-squire/mcp`).
 
-Current published versions: `@trusty-squire/mcp@0.1.5`,
+Current published versions: `@trusty-squire/mcp@0.1.6`,
 `@trusty-squire/universal-bot@0.1.1`.
 
 **Republish `universal-bot` whenever the bot changes.** `@trusty-squire/mcp`
