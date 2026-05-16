@@ -198,3 +198,12 @@ every install pays the Playwright cost. Options: keep one package with
 Playwright as an `optionalDependency` / lazy-installed; or one repo,
 two thin published entrypoints. The pain is the *npm package boundary*,
 not the code organization — consolidate the published surface.
+
+**A1 hard constraint — Tier 0 zero-friction must survive.** Any
+consolidation must keep: `install` issues an anonymous machine token
+with no account/pairing; `provision_any_service` runs on a
+machine-token-only session; 10 free signups (`MACHINE_TOKEN_QUOTA`)
+before any pairing CTA. Lock it with an explicit test — `install`
+produces an anonymous session, and `provision_any_service` is callable
+with no `agent_session_token` — so a future refactor cannot silently
+reintroduce signup/pairing gating.
