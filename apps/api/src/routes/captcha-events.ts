@@ -71,6 +71,28 @@ export async function registerCaptchaEventsRoute(
     // "proxy ran and the captcha still fired" from "proxy never ran".
     const proxied = typeof b.proxied === "boolean" ? b.proxied : null;
 
+    // Spike telemetry (T3.2). All optional — a pre-0.1.9 client omits
+    // them and they record as null. captcha_variant is allowlisted
+    // (same posture as captcha_kind); an unrecognized string is
+    // normalized to "unknown" so a label mismatch never loses the row.
+    const captchaVariants = [
+      "recaptcha_v2",
+      "recaptcha_v3",
+      "turnstile",
+      "hcaptcha",
+      "unknown",
+    ];
+    const captchaVariant =
+      typeof b.captcha_variant === "string"
+        ? captchaVariants.includes(b.captcha_variant)
+          ? b.captcha_variant
+          : "unknown"
+        : null;
+    const challengeRendered =
+      typeof b.challenge_rendered === "boolean" ? b.challenge_rendered : null;
+    const signupSucceeded =
+      typeof b.signup_succeeded === "boolean" ? b.signup_succeeded : null;
+
     // Prefer the asn captured at event time (richer signal — the user
     // may have moved networks since install) but fall back to the
     // install-time asn from the MachineToken row so we always have
@@ -99,6 +121,9 @@ export async function registerCaptchaEventsRoute(
       captcha_kind: captchaKind,
       blocked,
       proxied,
+      captcha_variant: captchaVariant,
+      challenge_rendered: challengeRendered,
+      signup_succeeded: signupSucceeded,
       asn_class: asnClass,
       asn_org: asnOrg,
       machine_token: tokenRow.token,

@@ -80,6 +80,30 @@ export interface BrowserControllerOptions {
 
 export type CaptchaKind = "turnstile" | "recaptcha";
 
+// Finer-grained captcha classification for spike telemetry (T3.2).
+// `recaptcha_v3` covers any score-mode reCAPTCHA with no clickable
+// checkbox (true v3 and v2-invisible behave the same to the bot:
+// nothing to solve). Static-vs-dynamic of a v2 grid is intentionally
+// not split here — reliable pre-solve classification needs the grid
+// inspection that T3.4 (Module A) builds; the spike's question is
+// answered by family + challenge_rendered.
+export type CaptchaVariant =
+  | "turnstile"
+  | "recaptcha_v2"
+  | "recaptcha_v3"
+  | "hcaptcha"
+  | "unknown";
+
+function isCaptchaVariant(v: string): v is CaptchaVariant {
+  return (
+    v === "turnstile" ||
+    v === "recaptcha_v2" ||
+    v === "recaptcha_v3" ||
+    v === "hcaptcha" ||
+    v === "unknown"
+  );
+}
+
 // Result of solveVisibleCaptcha(). `found: false` is the happy path
 // for most pages — no widget, nothing to do, agent proceeds. `solved`
 // is only meaningful when `found: true`.
@@ -749,6 +773,55 @@ export class BrowserController {
     }
 
     return null;
+  }
+
+  // Pure-read captcha classification for spike telemetry (T3.2).
+  // Reports which captcha family is on the page and whether a solvable
+  // image-grid challenge has actually rendered. Clicks nothing and
+  // solves nothing — it cannot regress the Tier 2 solve path.
+  // Best-effort: a page-eval failure (e.g. mid-navigation) reports
+  // unknown / not-rendered rather than throwing.
+  async detectCaptchaVariant(): Promise<{
+    variant: CaptchaVariant;
+    challengeRendered: boolean;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      const raw = await this.page.evaluate(() => {
+        const present = (sel: string): boolean =>
+          document.querySelector(sel) !== null;
+        const visible = (sel: string): boolean => {
+          const el = document.querySelector(sel);
+          if (el === null) return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 30 && r.height > 30;
+        };
+        // The image-grid challenge frame: reCAPTCHA's `bframe`, or
+        // hCaptcha's challenge frame. Turnstile and score-mode
+        // reCAPTCHA never render a grid.
+        const challengeRendered =
+          visible('iframe[src*="recaptcha/api2/bframe"]') ||
+          visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
+        let variant = "unknown";
+        if (present('iframe[src*="challenges.cloudflare.com"]')) {
+          variant = "turnstile";
+        } else if (present('iframe[src*="hcaptcha.com"]')) {
+          variant = "hcaptcha";
+        } else if (present('iframe[src*="recaptcha/api2/anchor"]')) {
+          variant = "recaptcha_v2";
+        } else if (present(".grecaptcha-badge")) {
+          // Badge but no clickable anchor → score-mode reCAPTCHA.
+          variant = "recaptcha_v3";
+        }
+        return { variant, challengeRendered };
+      });
+      return {
+        variant: isCaptchaVariant(raw.variant) ? raw.variant : "unknown",
+        challengeRendered: raw.challengeRendered,
+      };
+    } catch {
+      return { variant: "unknown", challengeRendered: false };
+    }
   }
 
   // Small mouse wiggle near the current position. Used during prewarm

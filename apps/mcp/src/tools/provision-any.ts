@@ -17,6 +17,7 @@ import {
   ProxyLLMClient,
   detectAsn,
   type LLMPair,
+  type CaptchaVariant,
 } from "../bot/index.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
@@ -192,6 +193,9 @@ export const provisionAnyTool = {
         captcha_kind: result.captcha.kind,
         blocked: result.captcha.blocked,
         proxied: result.proxied ?? false,
+        captcha_variant: result.captcha.variant,
+        challenge_rendered: result.captcha.challenge_rendered,
+        signup_succeeded: result.success,
       });
     }
 
@@ -246,6 +250,9 @@ async function postCaptchaEvent(
     captcha_kind: "turnstile" | "recaptcha";
     blocked: boolean;
     proxied: boolean;
+    captcha_variant: CaptchaVariant;
+    challenge_rendered: boolean;
+    signup_succeeded: boolean;
   },
 ): Promise<void> {
   try {
@@ -255,6 +262,9 @@ async function postCaptchaEvent(
       captcha_kind: event.captcha_kind,
       blocked: event.blocked,
       proxied: event.proxied,
+      captcha_variant: event.captcha_variant,
+      challenge_rendered: event.challenge_rendered,
+      signup_succeeded: event.signup_succeeded,
       ...(asn !== null
         ? {
             asn: { class: asn.class, org: asn.org, country: asn.country, number: asn.asn },

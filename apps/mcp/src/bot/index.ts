@@ -8,6 +8,7 @@ import type { AgentInbox } from "./agent.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 
 export { type SignupResult, LLMCallBudgetExceeded };
+export type { CaptchaVariant } from "./browser.js";
 export { InboxClient } from "./inbox-client.js";
 export type { AgentInbox };
 export { detectAsn, type AsnInfo, type AsnClass } from "./asn.js";

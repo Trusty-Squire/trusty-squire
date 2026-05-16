@@ -8,7 +8,7 @@
 // executor; the prompt is the contract. If a service breaks we tweak the
 // prompt rather than threading service-specific logic through the agent.
 
-import type { BrowserController, CaptchaKind } from "./browser.js";
+import type { BrowserController, CaptchaKind, CaptchaVariant } from "./browser.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -109,6 +109,11 @@ export interface SignupResult {
   // MCP tool layer reads this to emit a CaptchaEvent.
   captcha?: {
     kind: "turnstile" | "recaptcha";
+    // Finer family classification + whether an image-grid challenge
+    // actually rendered (vs a checkbox that passed, or score-only
+    // reCAPTCHA). Spike telemetry — feeds CaptchaEvent (T3.2).
+    variant: CaptchaVariant;
+    challenge_rendered: boolean;
     // The bot's view of what happened. `blocked: true` means the run
     // bailed because the captcha didn't resolve; `blocked: false`
     // means the bot got past it (token populated client-side).
@@ -492,7 +497,15 @@ export class SignupAgent {
     steps.push(
       `${label} captcha (${result.kind}): ${result.solved ? "solved" : "NOT solved (timeout)"}`,
     );
-    this.captchaEncounter = { kind: result.kind, blocked: !result.solved };
+    // Classify the widget for spike telemetry — a pure read, after the
+    // solve attempt so the challenge grid (if any) has had time to render.
+    const detected = await this.browser.detectCaptchaVariant();
+    this.captchaEncounter = {
+      kind: result.kind,
+      variant: detected.variant,
+      challenge_rendered: detected.challengeRendered,
+      blocked: !result.solved,
+    };
     return { found: true, solved: result.solved, blocked: !result.solved, kind: result.kind };
   }
 

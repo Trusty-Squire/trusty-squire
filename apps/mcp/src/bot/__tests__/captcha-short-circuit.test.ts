@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import { SignupAgent } from "../agent.js";
-import type { CaptchaSolveResult } from "../browser.js";
+import type { CaptchaSolveResult, CaptchaVariant } from "../browser.js";
 import type { BrowserController } from "../browser.js";
 import type { LLMClient, LLMRequest, LLMResponse } from "../llm-client.js";
 
@@ -19,9 +19,10 @@ class FakeLLM implements LLMClient {
   }
 }
 
-// A browser stub exposing only solveVisibleCaptcha (the single method
-// runCaptchaGate touches) plus a call counter. Injected via the
-// unknown-narrowing path the existing dual-mode test established —
+// A browser stub exposing the two methods runCaptchaGate touches —
+// solveVisibleCaptcha and detectCaptchaVariant (a pure-read telemetry
+// classifier) — plus a call counter. Injected via the unknown-
+// narrowing path the existing dual-mode test established —
 // BrowserController is a class with private fields, so a structural
 // fake can't satisfy the nominal type without this narrowing.
 class FakeCaptchaBrowser {
@@ -30,6 +31,12 @@ class FakeCaptchaBrowser {
   async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
     this.solveCalls += 1;
     return this.result;
+  }
+  async detectCaptchaVariant(): Promise<{
+    variant: CaptchaVariant;
+    challengeRendered: boolean;
+  }> {
+    return { variant: "unknown", challengeRendered: false };
   }
 }
 

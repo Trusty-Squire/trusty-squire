@@ -79,11 +79,23 @@ model CaptchaEvent {
   // didn't report it (distinct from false = ran direct). This is the
   // field that makes "did the proxy help?" answerable from data.
   proxied         Boolean?
+  // Spike telemetry (T3.2) — null on all three = pre-0.1.9 client.
+  // captcha_variant: which captcha family the bot faced
+  // ("recaptcha_v2" | "recaptcha_v3" | "turnstile" | "hcaptcha" |
+  // "unknown"). challenge_rendered: did a solvable image-grid
+  // challenge actually render (vs a checkbox that passed, or
+  // score-only reCAPTCHA). signup_succeeded: the run's ultimate
+  // outcome — the number that says whether clearing a captcha
+  // actually leads to a completed signup.
+  captcha_variant    String?
+  challenge_rendered Boolean?
+  signup_succeeded   Boolean?
 
   @@index([occurred_at])
   @@index([asn_class, blocked])
   @@index([service, blocked])
   @@index([proxied, blocked])
+  @@index([captcha_variant, signup_succeeded])
 }
 
 // Rolling per-machine-token LLM-call ledger. The proxy at /v1/llm/chat

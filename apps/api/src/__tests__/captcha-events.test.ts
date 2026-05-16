@@ -105,4 +105,47 @@ describe("POST /v1/captcha-events", () => {
     });
     expect(res.statusCode).toBe(401);
   });
+
+  // T3.2 spike telemetry — captcha_variant / challenge_rendered /
+  // signup_succeeded.
+  it("records the spike fields when the bot reports them", async () => {
+    const token = await issueMachineToken();
+    const res = await post(token, {
+      service: "Postmark",
+      captcha_kind: "recaptcha",
+      blocked: true,
+      captcha_variant: "recaptcha_v3",
+      challenge_rendered: false,
+      signup_succeeded: false,
+    });
+    expect(res.statusCode).toBe(202);
+    const ev = captchaStore.events[0];
+    expect(ev?.captcha_variant).toBe("recaptcha_v3");
+    expect(ev?.challenge_rendered).toBe(false);
+    expect(ev?.signup_succeeded).toBe(false);
+  });
+
+  it("records spike fields as null for a pre-0.1.9 client that omits them", async () => {
+    const token = await issueMachineToken();
+    await post(token, {
+      service: "Resend",
+      captcha_kind: "turnstile",
+      blocked: false,
+    });
+    const ev = captchaStore.events[0];
+    expect(ev?.captcha_variant).toBeNull();
+    expect(ev?.challenge_rendered).toBeNull();
+    expect(ev?.signup_succeeded).toBeNull();
+  });
+
+  it("normalizes an unrecognized captcha_variant to 'unknown'", async () => {
+    const token = await issueMachineToken();
+    await post(token, {
+      service: "Mailgun",
+      captcha_kind: "recaptcha",
+      blocked: true,
+      captcha_variant: "recaptcha_v9_quantum",
+    });
+    expect(captchaStore.events[0]?.captcha_variant).toBe("unknown");
+  });
 });

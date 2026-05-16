@@ -28,6 +28,14 @@ export interface CaptchaEventRecord {
   // (distinct from false = ran direct). Lets a query separate "proxy
   // didn't help" from "proxy never ran".
   proxied: boolean | null;
+  // Spike telemetry (T3.2). null = pre-0.1.9 client. captcha_variant:
+  // the captcha family; challenge_rendered: did an image-grid
+  // challenge actually render; signup_succeeded: the run's ultimate
+  // outcome — the number that says whether clearing a captcha leads
+  // to a completed signup.
+  captcha_variant: string | null;
+  challenge_rendered: boolean | null;
+  signup_succeeded: boolean | null;
   // The asn class of the machine when this event happened. Captured
   // at event time rather than read from MachineToken row at query
   // time because the machine might have moved networks since install
@@ -62,6 +70,9 @@ export class PrismaCaptchaEventStore implements CaptchaEventStore {
         captcha_kind: event.captcha_kind,
         blocked: event.blocked,
         proxied: event.proxied,
+        captcha_variant: event.captcha_variant,
+        challenge_rendered: event.challenge_rendered,
+        signup_succeeded: event.signup_succeeded,
         asn_class: event.asn_class,
         asn_org: event.asn_org,
         machine_token: event.machine_token,
