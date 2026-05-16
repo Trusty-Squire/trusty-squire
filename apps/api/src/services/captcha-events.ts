@@ -23,6 +23,11 @@ export interface CaptchaEventRecord {
   service: string;
   captcha_kind: CaptchaKindLabel;
   blocked: boolean;
+  // Whether the bot's browser egress went through the residential
+  // proxy on this run. null = pre-0.1.8 client that didn't report it
+  // (distinct from false = ran direct). Lets a query separate "proxy
+  // didn't help" from "proxy never ran".
+  proxied: boolean | null;
   // The asn class of the machine when this event happened. Captured
   // at event time rather than read from MachineToken row at query
   // time because the machine might have moved networks since install
@@ -56,6 +61,7 @@ export class PrismaCaptchaEventStore implements CaptchaEventStore {
         service: event.service,
         captcha_kind: event.captcha_kind,
         blocked: event.blocked,
+        proxied: event.proxied,
         asn_class: event.asn_class,
         asn_org: event.asn_org,
         machine_token: event.machine_token,

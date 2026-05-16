@@ -97,6 +97,13 @@ export interface SignupResult {
   // failure on real Chrome.
   browser_channel?: string | null;
 
+  // Whether this run's browser egress was routed through the
+  // residential proxy (true) or went out direct (false). Lets the
+  // CaptchaEvent ledger answer "did the proxy actually run?" — a
+  // captcha block behind a residential proxy is a materially
+  // different signal from one on a bare datacenter IP.
+  proxied?: boolean;
+
   // Captcha encountered during the run. Populated only when the agent
   // hit at least one captcha widget — null/undefined otherwise. The
   // MCP tool layer reads this to emit a CaptchaEvent.
@@ -448,12 +455,13 @@ export class SignupAgent {
   // refactor that adds a 7th return path.
   private resultTail(): Pick<
     SignupResult,
-    "llm_calls" | "llm_backends" | "browser_channel" | "captcha"
+    "llm_calls" | "llm_backends" | "browser_channel" | "proxied" | "captcha"
   > {
     return {
       llm_calls: this.llmCallCount,
       llm_backends: [...this.backendsUsed],
       browser_channel: this.browser.channel,
+      proxied: this.browser.proxied !== null,
       ...(this.captchaEncounter !== undefined ? { captcha: this.captchaEncounter } : {}),
     };
   }

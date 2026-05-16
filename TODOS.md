@@ -74,9 +74,14 @@ proxy works, switching is one env var. Tests in `proxy.test.ts`.
    per signup, and the non-expiring balance fits sporadic low-volume use. Swap
    the env var; no code change.
 
-**Not yet done:** threading a `proxied` flag from the `BrowserController.proxied`
-getter through `SignupResult` → `CaptchaEvent` telemetry, so "did the proxy
-help?" is answerable from data. Small follow-up.
+**Proxy-usage telemetry — shipped 2026-05-16.** A `proxied` boolean
+now threads from `BrowserController.proxied` → `SignupResult.proxied`
+→ the `/v1/captcha-events` POST → `CaptchaEvent.proxied` (nullable;
+`null` = pre-0.1.8 client that didn't report it, distinct from
+`false` = ran direct). "Did the proxy actually run when this captcha
+fired?" is answerable from a single SQL query. Schema pushed to
+`trustysquire`, API deployed, route smoke-tested end-to-end. Tests in
+`apps/api/src/__tests__/captcha-events.test.ts`.
 
 ## S2 — Universal-bot: ambiguous submit selector + 5-minute false hang
 

@@ -64,6 +64,13 @@ export async function registerCaptchaEventsRoute(
 
     const blocked = b.blocked === true;
 
+    // Whether the bot's browser egress went through the residential
+    // proxy on this run. Optional — pre-0.1.8 clients don't send it,
+    // so absence is stored as null ("unknown"), distinct from false
+    // ("ran direct"). This is the field that tells a query apart
+    // "proxy ran and the captcha still fired" from "proxy never ran".
+    const proxied = typeof b.proxied === "boolean" ? b.proxied : null;
+
     // Prefer the asn captured at event time (richer signal — the user
     // may have moved networks since install) but fall back to the
     // install-time asn from the MachineToken row so we always have
@@ -91,6 +98,7 @@ export async function registerCaptchaEventsRoute(
       service,
       captcha_kind: captchaKind,
       blocked,
+      proxied,
       asn_class: asnClass,
       asn_org: asnOrg,
       machine_token: tokenRow.token,

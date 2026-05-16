@@ -191,6 +191,7 @@ export const provisionAnyTool = {
         service: input.service,
         captcha_kind: result.captcha.kind,
         blocked: result.captcha.blocked,
+        proxied: result.proxied ?? false,
       });
     }
 
@@ -240,7 +241,12 @@ export const provisionAnyTool = {
 async function postCaptchaEvent(
   apiBase: string,
   machineToken: string,
-  event: { service: string; captcha_kind: "turnstile" | "recaptcha"; blocked: boolean },
+  event: {
+    service: string;
+    captcha_kind: "turnstile" | "recaptcha";
+    blocked: boolean;
+    proxied: boolean;
+  },
 ): Promise<void> {
   try {
     const asn = await detectAsn();
@@ -248,6 +254,7 @@ async function postCaptchaEvent(
       service: event.service,
       captcha_kind: event.captcha_kind,
       blocked: event.blocked,
+      proxied: event.proxied,
       ...(asn !== null
         ? {
             asn: { class: asn.class, org: asn.org, country: asn.country, number: asn.asn },

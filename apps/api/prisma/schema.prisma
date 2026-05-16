@@ -74,10 +74,16 @@ model CaptchaEvent {
   asn_org         String?
   // Did the bot escape the captcha or was the run abandoned?
   blocked         Boolean
+  // Whether the bot's browser egress was routed through the
+  // residential proxy on this run. null = pre-0.1.8 client that
+  // didn't report it (distinct from false = ran direct). This is the
+  // field that makes "did the proxy help?" answerable from data.
+  proxied         Boolean?
 
   @@index([occurred_at])
   @@index([asn_class, blocked])
   @@index([service, blocked])
+  @@index([proxied, blocked])
 }
 
 // Rolling per-machine-token LLM-call ledger. The proxy at /v1/llm/chat
