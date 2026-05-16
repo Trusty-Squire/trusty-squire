@@ -746,12 +746,24 @@ export class SignupAgent {
         };
       }
 
-      // Step 4: Submit.
+      // Step 4: Submit. clickSubmit() disambiguates when the planned
+      // selector matches several button[type=submit] (OAuth buttons are
+      // submit-typed too). A submit click that fails means the form was
+      // never submitted — fail fast here rather than fall through into
+      // the multi-minute verification-email poll for an email that can
+      // never arrive.
       steps.push(`Submit → ${plan.submit_selector}`);
       try {
-        await this.browser.click(plan.submit_selector);
+        await this.browser.clickSubmit(plan.submit_selector);
       } catch (err) {
-        steps.push(`⚠ submit click failed: ${err instanceof Error ? err.message : String(err)}`);
+        const reason = err instanceof Error ? err.message : String(err);
+        steps.push(`⚠ submit click failed: ${reason}`);
+        return {
+          success: false,
+          error: `submit_failed: could not click the signup button — ${reason}`,
+          steps,
+          ...this.resultTail(),
+        };
       }
       await this.browser.wait(5);
 
@@ -810,8 +822,17 @@ export class SignupAgent {
           };
         }
         try {
-          await this.browser.click(plan2.submit_selector);
-        } catch { /* noop */ }
+          await this.browser.clickSubmit(plan2.submit_selector);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          steps.push(`⚠ re-plan submit click failed: ${reason}`);
+          return {
+            success: false,
+            error: `submit_failed: re-plan submit could not click the signup button — ${reason}`,
+            steps,
+            ...this.resultTail(),
+          };
+        }
         await this.browser.wait(5);
         await saveDebugSnapshot(this.browser, "after-resubmit");
       }

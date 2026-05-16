@@ -23,7 +23,7 @@
 // agent.ts.
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, Page } from "playwright";
+import type { Browser, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
@@ -415,6 +415,43 @@ export class BrowserController {
     await this.humanClick(selector);
   }
 
+  // Click the form's submit button, disambiguating when the planned
+  // selector matches several elements. Signup pages routinely render
+  // OAuth buttons ("Continue with Google" / "GitHub") as
+  // button[type=submit] alongside the real submit — and a Playwright
+  // locator is strict-mode, so a plain click on a multi-match selector
+  // throws "strict mode violation". We score the candidates by visible
+  // text and click the best, or throw a clear error when none reads as
+  // a signup button (e.g. an OAuth-only page).
+  async clickSubmit(selector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const locator = this.page.locator(selector);
+    const count = await locator.count();
+    // 0 or 1 match: the normal click path handles it (and surfaces a
+    // clean "waiting for selector" timeout when the count is 0).
+    if (count <= 1) {
+      await this.click(selector);
+      return;
+    }
+    const texts: string[] = [];
+    for (let i = 0; i < count; i++) {
+      texts.push(((await locator.nth(i).textContent()) ?? "").trim());
+    }
+    const best = pickSubmitButtonIndex(texts);
+    if (best === null) {
+      throw new Error(
+        `submit selector "${selector}" matched ${count} buttons, none scoring ` +
+          `as a signup button (texts: ${texts.map((t) => JSON.stringify(t)).join(", ")})`,
+      );
+    }
+    const chosen = locator.nth(best);
+    if (this.humanize) {
+      await this.humanClickLocator(chosen);
+    } else {
+      await chosen.click();
+    }
+  }
+
   async check(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Use force:true because TOS checkboxes are sometimes visually covered by
@@ -448,13 +485,22 @@ export class BrowserController {
   // remembered so successive clicks form a continuous path.
   private async humanClick(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
-    const box = await this.page.locator(selector).boundingBox();
+    await this.humanClickLocator(this.page.locator(selector));
+  }
+
+  // Locator-based core of humanClick. Taking a Locator (not a selector
+  // string) lets clickSubmit() hand us a `.nth(i)`-narrowed locator
+  // when a selector matched several elements — a bare selector through
+  // a strict-mode locator would throw before we could disambiguate.
+  private async humanClickLocator(locator: Locator): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await locator.waitFor({ state: "visible", timeout: 10000 });
+    const box = await locator.boundingBox();
     if (box === null) {
       // Element exists but isn't in the layout (e.g., display:none).
       // Fall back to the regular click which will fail loudly with a
       // useful error.
-      await this.page.click(selector);
+      await locator.click();
       return;
     }
     // Aim for a random point inside the bounding box (not always the
@@ -692,4 +738,40 @@ export class BrowserController {
 // human distribution that scorers can't reliably distinguish.
 function rand(min: number, max: number): number {
   return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+// Score signup-form submit candidates by visible text; return the index
+// of the best, or null when none scores positive. Signup pages commonly
+// render OAuth buttons ("Continue with Google" / "GitHub") as
+// button[type=submit] next to the real account-creation button, so a
+// generic selector resolves to several — this picks the right one.
+//
+// Same shape and rationale as agent.ts's pickVerificationLink: a positive
+// score gate so an OAuth-only page (every candidate negative) returns
+// null rather than mis-clicking "Continue with Google".
+//
+// Exported for unit testing — the scoring is the load-bearing logic.
+export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
+  let bestIndex: number | null = null;
+  let bestScore = 0;
+  texts.forEach((raw, i) => {
+    const t = raw.toLowerCase();
+    let score = 0;
+    if (t.includes("create account") || t.includes("create your account")) score += 12;
+    if (t.includes("sign up") || t.includes("signup")) score += 10;
+    if (t.includes("register")) score += 8;
+    if (t.includes("get started")) score += 6;
+    // "Continue" is often the real submit on single-field signup forms;
+    // weak positive so it wins over nothing but loses to OAuth markers.
+    if (t.includes("continue")) score += 2;
+    // OAuth / SSO buttons are submit-typed too — the provider name is
+    // the reliable discriminator, so drive those firmly negative.
+    if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso)\b/.test(t)) score -= 20;
+    if (t.includes("sign in") || t.includes("log in") || t.includes("login")) score -= 12;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  });
+  return bestIndex;
 }
