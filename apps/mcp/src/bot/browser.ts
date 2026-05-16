@@ -272,18 +272,73 @@ export class BrowserController {
         "--disable-dev-shm-usage",
       ],
     });
+    // T3.1: learn where this run's traffic actually exits (the proxy
+    // exit when proxied, the machine otherwise) so the browser's
+    // declared timezone matches its egress IP. A US-timezone browser
+    // on a foreign proxy IP is itself an anti-bot signal.
+    const geo = await this.probeEgressGeo();
+    if (geo !== null) {
+      console.error(
+        `[universal-bot] egress geo: timezone=${geo.timezoneId}` +
+          (geo.geolocation !== undefined
+            ? ` loc=${geo.geolocation.latitude},${geo.geolocation.longitude}`
+            : ""),
+      );
+    }
     const context = await this.browser.newContext({
       viewport: { width: 1280, height: 720 },
       userAgent:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      // locale stays en-US deliberately: matching it to the proxy
+      // country would render signup pages in that language, and the
+      // Claude vision form-planner expects English. timezone is the
+      // dominant IP-geo-mismatch signal; an English browser abroad is
+      // unremarkable, so locale is left as the weak, safe choice.
       locale: "en-US",
-      timezoneId: "America/New_York",
+      // timezone + geolocation track the real egress (T3.1). Falls
+      // back to a fixed default when the probe fails — no worse than
+      // the pre-T3.1 hardcoded value.
+      timezoneId: geo?.timezoneId ?? "America/New_York",
+      ...(geo?.geolocation !== undefined
+        ? { geolocation: geo.geolocation, permissions: ["geolocation"] }
+        : {}),
     });
     // Patch the navigator.webdriver flag — most anti-bot heuristics look here.
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
     this.page = await context.newPage();
+  }
+
+  // Probe the run's actual egress geo by loading ipinfo.io through a
+  // throwaway context. The proxy (when active) is set at launch level,
+  // so every context inherits it — this reports the *proxy exit* geo,
+  // not the machine's. Best-effort: any failure returns null and
+  // start() keeps a default timezone. Adds one short navigation to
+  // run start-up.
+  private async probeEgressGeo(): Promise<EgressGeo | null> {
+    if (!this.browser) return null;
+    const browser = this.browser;
+    let ctx: Awaited<ReturnType<typeof browser.newContext>> | undefined;
+    let geo: EgressGeo | null = null;
+    try {
+      ctx = await browser.newContext();
+      const page = await ctx.newPage();
+      await page.goto("https://ipinfo.io/json", {
+        timeout: 10000,
+        waitUntil: "domcontentloaded",
+      });
+      const body = await page.evaluate(() => document.body.innerText);
+      geo = parseEgressGeo(body);
+    } catch (err) {
+      console.error(
+        `[universal-bot] egress geo probe failed — using default ` +
+          `timezone: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      if (ctx !== undefined) await ctx.close();
+    }
+    return geo;
   }
 
   // Decide whether this run egresses through a residential proxy, and
@@ -966,4 +1021,57 @@ export function shouldRouteThroughProxy(
   forceAlways: boolean,
 ): boolean {
   return forceAlways || asnClass === "datacenter";
+}
+
+// ───────────── egress geo match (T3.1) ─────────────
+
+// Browser-context geo derived from the run's actual egress IP. Set on
+// newContext() so the browser's declared timezone matches where its
+// traffic exits — a US-timezone browser on a foreign proxy IP is
+// itself a signal anti-bot scorers check for.
+export interface EgressGeo {
+  timezoneId: string;
+  geolocation?: { latitude: number; longitude: number };
+}
+
+// Parse an ipinfo.io/json response body into EgressGeo. Returns null
+// when the timezone is absent or not a plausible IANA zone — the
+// caller then keeps a default rather than handing Playwright a bad
+// timezoneId (which would throw inside newContext()).
+//
+// geolocation is optional: a valid `loc` ("lat,long") sets it; a
+// missing or malformed one leaves a timezone-only result. Exported
+// for unit testing — JSON-shape handling is the error-prone bit.
+export function parseEgressGeo(text: string): EgressGeo | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (data === null || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+
+  const tz = typeof d.timezone === "string" ? d.timezone : null;
+  // IANA zones look like "Asia/Seoul" or "America/Argentina/Buenos_Aires".
+  // Reject anything else so a garbage value never reaches newContext().
+  if (tz === null || !/^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$/.test(tz)) return null;
+
+  const geo: EgressGeo = { timezoneId: tz };
+  if (typeof d.loc === "string") {
+    const parts = d.loc.split(",");
+    if (parts.length === 2) {
+      const latitude = Number(parts[0]);
+      const longitude = Number(parts[1]);
+      if (
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180
+      ) {
+        geo.geolocation = { latitude, longitude };
+      }
+    }
+  }
+  return geo;
 }

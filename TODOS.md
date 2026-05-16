@@ -235,11 +235,16 @@ Planned + reviewed 2026-05-16 (`/plan-eng-review`). Full plan:
 reCAPTCHA v3/Turnstile produce only a *score* — nothing to solve.
 Postmark is v3.
 
-- [ ] **T3.1 — Geo/fingerprint fix.** Probe proxied egress geo at run
-  start, set browser `timezoneId`/`locale`/`geolocation` to match; direct
-  runs match the machine. `apps/mcp/src/bot/browser.ts`. A quick
-  experiment — the proxied run already failed with default geo, so this
-  likely re-measures a near-certain negative. Re-measure Postmark after.
+- [x] **T3.1 — Geo/fingerprint fix. — shipped in `@trusty-squire/mcp@0.1.10`.**
+  `BrowserController.probeEgressGeo()` loads ipinfo.io through a
+  throwaway context (inherits the launch-level proxy, so it reports the
+  *proxy exit* geo), and `start()` sets the context `timezoneId` +
+  `geolocation` to match. `locale` stays `en-US` deliberately (matching
+  it would render signup pages in the proxy country's language and
+  break the form planner). Best-effort: a probe failure falls back to
+  the prior hardcoded default. `parseEgressGeo()` unit-tested
+  (`geo.test.ts`, 9 cases). Re-measure Postmark on 0.1.10 — though the
+  v3 reframe says this likely re-measures a near-certain negative.
 - [ ] **T3.2 — Spike telemetry.** Extend `CaptchaEvent` with
   `captcha_variant`, `challenge_rendered`, `signup_succeeded`. Same
   pattern as the `proxied` column. This is the instrumentation for T3.3.
