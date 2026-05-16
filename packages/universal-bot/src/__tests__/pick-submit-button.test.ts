@@ -21,6 +21,19 @@ describe("pickSubmitButtonIndex", () => {
     ).toBe(2);
   });
 
+  it("picks 'Create account' when OAuth buttons read 'Log in with …' (Resend's live layout)", () => {
+    // Exact labels observed on resend.com/signup — "Log in with X" is an
+    // OAuth button, not the email submit. `log in` + the provider name
+    // must both stay negative so "Create account" still wins.
+    expect(
+      pickSubmitButtonIndex([
+        "Log in with Google",
+        "Log in with GitHub",
+        "Create account",
+      ]),
+    ).toBe(2);
+  });
+
   it("picks the real submit regardless of position", () => {
     expect(pickSubmitButtonIndex(["Sign up", "Continue with Google"])).toBe(0);
   });
