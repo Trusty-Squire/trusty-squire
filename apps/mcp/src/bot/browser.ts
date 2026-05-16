@@ -923,6 +923,31 @@ export class BrowserController {
     return await this.page.textContent("body") || "";
   }
 
+  // Wait for the signup form to actually render before the planner
+  // screenshots the page (F1). SPA and two-stage signup pages render
+  // the form after JS executes; planning against a pre-render
+  // skeleton makes the planner emit plausible-but-wrong selectors and
+  // every executed action then times out. Best-effort — both waits
+  // swallow their own timeout so the planner always still runs.
+  async waitForFormReady(timeoutMs = 15000): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      await this.page.waitForLoadState("networkidle", { timeout: timeoutMs });
+    } catch {
+      // networkidle never settles on pages with analytics sockets or
+      // long-poll — not fatal, fall through to the element wait.
+    }
+    try {
+      await this.page.waitForSelector("input, button", {
+        state: "visible",
+        timeout: timeoutMs,
+      });
+    } catch {
+      // No interactive element appeared in time — let the planner run
+      // anyway; it fails cleanly rather than hanging.
+    }
+  }
+
   async close(): Promise<void> {
     if (this.page) await this.page.close();
     if (this.browser) await this.browser.close();

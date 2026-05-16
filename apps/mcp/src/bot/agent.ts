@@ -672,8 +672,44 @@ export class SignupAgent {
     }
   }
 
+  // Hard top-level deadline (F2). Every sub-step is individually
+  // bounded, but the 2026-05-16 sweep still produced 50-minute hangs —
+  // a stall outside the timed paths (a wedged navigation or LLM call).
+  // This race guarantees signup() always returns; the caller's
+  // finally{} closes the browser, which aborts whatever Playwright
+  // call hung. Override the 10-minute default with
+  // UNIVERSAL_BOT_RUN_TIMEOUT_MS.
   async signup(task: SignupTask): Promise<SignupResult> {
     const steps: string[] = [];
+    const rawTimeout = Number(process.env.UNIVERSAL_BOT_RUN_TIMEOUT_MS);
+    const timeoutMs =
+      Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 600_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<SignupResult>((resolve) => {
+      timer = setTimeout(() => {
+        const secs = Math.round(timeoutMs / 1000);
+        steps.push(`⚠ run exceeded ${secs}s — aborting`);
+        resolve({
+          success: false,
+          error: `run_timeout: exceeded ${secs}s`,
+          steps,
+          ...this.resultTail(),
+        });
+      }, timeoutMs);
+    });
+    const work = this.runSignup(task, steps);
+    // If the deadline wins, runSignup keeps going until the browser is
+    // closed under it — swallow that late rejection so it is not an
+    // unhandled rejection.
+    work.catch(() => {});
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async runSignup(task: SignupTask, steps: string[]): Promise<SignupResult> {
     const password = task.generatePassword();
     const displayName = "Trusty Squire Bot";
     const username = `tsbot${Date.now().toString().slice(-7)}`;
@@ -726,6 +762,12 @@ export class SignupAgent {
           await this.browser.wait(2);
         }
       }
+
+      // Wait for the form to actually render before planning (F1) —
+      // SPA and two-stage signup pages render late, and screenshotting
+      // a skeleton makes the planner emit selectors that don't exist.
+      steps.push("Waiting for the signup form to render...");
+      await this.browser.waitForFormReady();
 
       // Step 2: Plan the form fill with Claude.
       steps.push("Asking Claude to plan the signup form fill...");

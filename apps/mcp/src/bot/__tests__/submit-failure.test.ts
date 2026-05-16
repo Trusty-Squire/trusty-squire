@@ -38,6 +38,7 @@ class SubmitFailsBrowser {
   async prewarm(): Promise<void> {}
   async goto(): Promise<void> {}
   async wait(): Promise<void> {}
+  async waitForFormReady(): Promise<void> {}
   async type(): Promise<void> {}
   async check(): Promise<void> {}
   async click(): Promise<void> {}

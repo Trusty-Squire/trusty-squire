@@ -245,25 +245,83 @@ Postmark is v3.
   the prior hardcoded default. `parseEgressGeo()` unit-tested
   (`geo.test.ts`, 9 cases). Re-measure Postmark on 0.1.10 — though the
   v3 reframe says this likely re-measures a near-certain negative.
-- [ ] **T3.2 — Spike telemetry.** Extend `CaptchaEvent` with
-  `captcha_variant`, `challenge_rendered`, `signup_succeeded`. Same
-  pattern as the `proxied` column. This is the instrumentation for T3.3.
-- [ ] **T3.3 — The spike.** Collect ~2 weeks of real bot runs; answer
-  with data: which captcha variant does the bot actually face, and do
-  cleared captchas lead to a *completed* signup or a re-scored reject?
-  Define a minimum sample size before deciding. **Gates T3.4.**
-- [ ] **T3.4 — Module A v1: reCAPTCHA v2 static-grid solver.** GATED on
-  T3.3. Build only if the data shows the bot meaningfully faces static
-  grids AND v2 solves get accepted. Extends `solveVisibleCaptcha()`;
-  dedicated ~6-call LLM sub-budget; `solveGrid()` on `llm-client.ts`;
-  explicit fail-fast ladder; fast-model default; gated by a ~20-30 grid
-  eval; regression test for the checkbox-only path.
+- [x] **T3.2 — Spike telemetry. — shipped `@trusty-squire/mcp@0.1.9`.**
+  `CaptchaEvent` gained `captcha_variant`, `challenge_rendered`,
+  `signup_succeeded`; `BrowserController.detectCaptchaVariant()` does
+  the classification. Same nullable pattern as `proxied`.
+- [x] **T3.3 — The spike. — done 2026-05-16 (designed sweep, not the
+  2-week passive wait).** 16 fresh dev-SaaS signups via
+  `provision_any_service`. Result: **0/16 succeeded.** Captcha was a
+  *minority* blocker — 3 encounters, 2 blocked. The bot fails *upstream
+  of captcha* on form mechanics. Inbox pipeline exonerated (Neon's
+  verification email round-tripped fine end to end). Full diagnosis +
+  per-service failure map → the F-workstream below. Sweep file:
+  `~/.gstack/projects/Trusty-Squire-trusty-squire/chode-main-t33-spike-sweep-20260516.md`.
+- [ ] **T3.4 — Module A v1: reCAPTCHA v2 static-grid solver. —
+  DEFERRED.** The T3.3 spike says captcha is not the bottleneck:
+  captcha blocked 2/16, form-interaction bugs blocked 13/16. A solver
+  now fixes 2 runs while 13 stay broken. Mildly *for* it: Mailtrap +
+  Mailjet both rendered real reCAPTCHA image grids
+  (`challenge_rendered=true`) — so it would have targets. But it is
+  gated behind a working form layer (the F-workstream). Design when
+  resumed: extends `solveVisibleCaptcha()`; dedicated ~6-call LLM
+  sub-budget; `solveGrid()` on `llm-client.ts`; fail-fast ladder;
+  fast-model default; ~20-30 grid eval; checkbox-path regression test.
 
 **Deferred (data-gated, do not start):** Module A dynamic-refill grids,
-hCaptcha, audio/Whisper fallback. Validate need from T3.3 data first.
+hCaptcha, audio/Whisper fallback. Validate need from spike data first.
 
 **Cut:** Module B — reCAPTCHA v3 anti-detection (patched Chromium,
 fingerprint hardening). An open-ended anti-detection treadmill with no
 completion state. Postmark and other v3 services stay `captcha_blocked`
 + manual-signup CTA. Reopen only if v3-service coverage becomes a
 funded, ongoing commitment.
+
+## F — Form-interaction reliability
+
+The T3.3 spike (16 fresh services, 2026-05-16) signed up **0/16**.
+Step-trail diagnosis: the bot fails upstream of captcha on basic form
+mechanics. Ranked by leverage.
+
+- [x] **F1 — Planner render-wait. — shipped `0.1.11`.** The planner
+  screenshotted before SPA / two-stage pages rendered, then emitted
+  plausible-but-fake selectors (every action timed out — Axiom,
+  Back4app, Netlify, Together). `BrowserController.waitForFormReady()`
+  now gates the planner on networkidle + a visible form control.
+- [x] **F2 — Top-level `signup()` timeout. — shipped `0.1.11`.** 5 runs
+  hung >50min; sub-steps are bounded but a stall outside them wedges
+  the run. `signup()` now races a hard deadline
+  (`UNIVERSAL_BOT_RUN_TIMEOUT_MS`, default 600s) and returns
+  `run_timeout` instead of hanging. Test: `run-timeout.test.ts`.
+- [ ] **F3 — Two-stage signup forms. [P1]** Back4app / Netlify /
+  Together hide the form behind a "Sign up with email" button; one
+  wrong reveal selector cascades to total failure. Detect the chooser,
+  click email, re-plan against the revealed form.
+- [ ] **F4 — Checkbox robustness. [P1]** Generic `input[type=checkbox]`
+  hits cookie-consent decoys (Render → Osano marketing toggle),
+  off-viewport elements (Sentry), custom widgets. TOS-checkbox failures
+  in 7/16 runs.
+- [ ] **F5 — `<select>` support. [P1]** Sentry: the bot tried `.fill()`
+  on a `<select>`. The executor must detect `<select>` and use
+  `selectOption`.
+- [ ] **F6 — Cookie-consent dismissal. [P1]** Osano / OneTrust banners
+  block forms and confuse the planner (Mailjet's whole plan was "accept
+  cookies"; Render's checkbox hit Osano). Dismiss before planning.
+- [ ] **F7 — Multi-step / inline-code flows. [P2]** Mistral (email-first
+  multi-step), DeepSeek (inline verification code typed into the page).
+  The bot assumes single-page → submit → email-link.
+- [ ] **F8 — Verification-link extraction. [P2]** Neon: the email
+  arrived but "had no usable verification link." HTML-email /
+  button-link parsing.
+- [ ] **F9 — Search fallback. [P2]** Validic: no URL given → the bot
+  landed on Google's results page and tried to solve Google's captcha.
+  Fix or remove the search-for-signup-URL path.
+
+Also observed: 3/16 (Appwrite, MongoDB Atlas, Koyeb) submitted cleanly
+and got no verification email — genuine S3 anti-abuse withholding,
+confirming S3 is real and common.
+
+**Process:** F1 + F2 shipped (P0, certain). Next: re-run the 16-service
+sweep as empirical validation, then `/plan-eng-review` scoped to
+whatever is still red (likely F3 + F7 — the genuine flow-shape
+architecture questions).
