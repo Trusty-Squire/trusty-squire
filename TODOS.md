@@ -225,3 +225,40 @@ before any pairing CTA. **[x] Locked** by
 `apps/mcp/src/__tests__/tier0.test.ts` — verified through the 0.1.7
 merge: `install` does not pair by default, and the Tier-0 server
 exposes `provision_any_service` while gating account-scoped tools.
+
+## T3 — Tier 3 captcha handling
+
+Planned + reviewed 2026-05-16 (`/plan-eng-review`). Full plan:
+`~/.gstack/projects/Trusty-Squire-trusty-squire/chode-main-tier3-captcha-plan-20260516.md`.
+
+**Reframe:** reCAPTCHA v2/hCaptcha present a solvable *challenge*;
+reCAPTCHA v3/Turnstile produce only a *score* — nothing to solve.
+Postmark is v3.
+
+- [ ] **T3.1 — Geo/fingerprint fix.** Probe proxied egress geo at run
+  start, set browser `timezoneId`/`locale`/`geolocation` to match; direct
+  runs match the machine. `apps/mcp/src/bot/browser.ts`. A quick
+  experiment — the proxied run already failed with default geo, so this
+  likely re-measures a near-certain negative. Re-measure Postmark after.
+- [ ] **T3.2 — Spike telemetry.** Extend `CaptchaEvent` with
+  `captcha_variant`, `challenge_rendered`, `signup_succeeded`. Same
+  pattern as the `proxied` column. This is the instrumentation for T3.3.
+- [ ] **T3.3 — The spike.** Collect ~2 weeks of real bot runs; answer
+  with data: which captcha variant does the bot actually face, and do
+  cleared captchas lead to a *completed* signup or a re-scored reject?
+  Define a minimum sample size before deciding. **Gates T3.4.**
+- [ ] **T3.4 — Module A v1: reCAPTCHA v2 static-grid solver.** GATED on
+  T3.3. Build only if the data shows the bot meaningfully faces static
+  grids AND v2 solves get accepted. Extends `solveVisibleCaptcha()`;
+  dedicated ~6-call LLM sub-budget; `solveGrid()` on `llm-client.ts`;
+  explicit fail-fast ladder; fast-model default; gated by a ~20-30 grid
+  eval; regression test for the checkbox-only path.
+
+**Deferred (data-gated, do not start):** Module A dynamic-refill grids,
+hCaptcha, audio/Whisper fallback. Validate need from T3.3 data first.
+
+**Cut:** Module B — reCAPTCHA v3 anti-detection (patched Chromium,
+fingerprint hardening). An open-ended anti-detection treadmill with no
+completion state. Postmark and other v3 services stay `captcha_blocked`
++ manual-signup CTA. Reopen only if v3-service coverage becomes a
+funded, ongoing commitment.
