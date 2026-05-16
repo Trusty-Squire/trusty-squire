@@ -140,3 +140,61 @@ poll is never entered). universal-bot 65 tests + mcp 36 tests pass.
 > emits a precise selector up front. The executor-side `clickSubmit()`
 > disambiguation makes this a marginal optimization, not a fix — left
 > for later if planner-emitted selectors prove noisy in telemetry.
+
+## S3 — provision_any_service: detect withheld verification, don't blind-wait
+
+Diagnosed 2026-05-16. **Not yet implemented.**
+
+When a signup submits successfully but the service withholds the
+verification email (anti-abuse — observed with Resend: form submitted,
+account scored as automated, no verification mail ever dispatched), the
+bot enters the 300s verification-email poll and reports a generic
+timeout. Indistinguishable from a real "email is just slow" case.
+
+Root cause is not Squire's: the SES inbound pipeline is verified working
+(send → S3 → SNS → /v1/webhooks/ses → ReceivedEmail confirmed
+end-to-end 2026-05-16). The service simply never sends the mail.
+
+**Fix:** after submit, read the post-submit page state before entering
+the email poll. Distinguish:
+- "check your email" / "verify your inbox" copy visible → poll as today.
+- an error, a captcha re-challenge, or the signup form still present →
+  return `verification_not_sent` (or `signup_rejected`) immediately with
+  the page text, instead of a blind 5-minute wait.
+The Claude planner already screenshots the page; one classification
+call (or a keyword scan of the visible text) covers it. Lives in
+`agent.ts` between the submit and the `waitForVerificationEmail` call.
+
+## A1 — Consolidate the provision / provision_any_service packages
+
+Raised by the user 2026-05-16. **Design note — needs an eng review.**
+
+Today: `apps/mcp` (MCP relay) and `packages/universal-bot` (browser bot)
+are separate, separately-*published* npm packages; native adapters live
+in `packages/adapters/*` + `apps/registry-api`. Two reasons to consolidate:
+
+1. **Two published npm packages = dependency skew.** Lived this all of
+   2026-05-16: `@trusty-squire/mcp` pins `@trusty-squire/universal-bot`;
+   S1/S2 shipped to git but `universal-bot` wasn't republished, so every
+   `npx` user ran the stale bot through five "fixed but still broken"
+   cycles. **Immediate cheap win, independent of the bigger merge:** stop
+   publishing `universal-bot` as its own npm package — bundle it into
+   `@trusty-squire/mcp` (keep it a workspace package for code layout,
+   just not a separate *published* artifact). That alone kills the
+   version-skew bug class.
+2. **Closed feedback loop.** `provision_any_service` should be the
+   *fallback* when no native adapter exists — and a successful universal
+   signup should **codify a native adapter and register it** (same idea
+   as the /skillify pattern: a proven flow becomes a permanent fast
+   path). Bot, adapter format (`defineAdapter`), and registry
+   (`registry-api`) under one roof closes that loop. The codebase
+   already anticipates this — `adapters/resend/manifest.ts` says it's a
+   placeholder "until the browser tier ... rewritten against the real
+   flow."
+
+**Tradeoff to resolve in the review:** `universal-bot` pulls Playwright
+(browser binaries, heavy); native adapters are light. One package means
+every install pays the Playwright cost. Options: keep one package with
+Playwright as an `optionalDependency` / lazy-installed; or one repo,
+two thin published entrypoints. The pain is the *npm package boundary*,
+not the code organization — consolidate the published surface.
