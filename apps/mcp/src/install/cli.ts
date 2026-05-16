@@ -1,5 +1,4 @@
-#!/usr/bin/env node
-// Install / pair / logout CLI.
+// Setup CLI — the install / pair / logout subcommands.
 //
 // Tier 0 install (default) — friction-free:
 //   npx @trusty-squire/mcp install --target=claude-code
@@ -16,14 +15,17 @@
 //   --target=<agent>     skip auto-detection
 //   --api-base=<url>     override the API base URL
 //   --pair               run pairing as part of install (Tier 1 from minute 1)
+//
+// Pure module — `runCli()` is invoked by bin.ts. No shebang, no
+// entrypoint guard, no top-level execution.
 
 import process from "node:process";
-import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "@trusty-squire/universal-bot";
+import { VERSION } from "../version.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 
@@ -59,8 +61,21 @@ function isAgentTarget(s: string): s is AgentTarget {
   return s === "claude-code" || s === "cursor" || s === "goose" || s === "cline" || s === "continue";
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+// The MCP-config command that launches the server. An absolute
+// `node <bin.js> server` is deterministic and offline — no npx package
+// resolution every time the host agent spawns the server. But when this
+// CLI is itself running from npx's throwaway cache, that path won't
+// survive a cache sweep, so fall back to a version-pinned npx call.
+function resolveServerLaunch(): { command: string; args: string[] } {
+  const binPath = fileURLToPath(new URL("../bin.js", import.meta.url));
+  const ephemeral = /[/\\]_npx[/\\]/.test(binPath);
+  return ephemeral
+    ? { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] }
+    : { command: process.execPath, args: [binPath, "server"] };
+}
+
+export async function runCli(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
   switch (args.command) {
     case "install":
       await install(args);
@@ -122,7 +137,7 @@ async function install(args: Argv): Promise<void> {
     const upgraded = await runPair(args.apiBase, target, baseSession);
     if (upgraded === null) {
       console.warn(
-        "Pairing didn't complete — keeping Tier 0 session. Run `squire-mcp pair` later to upgrade.",
+        "Pairing didn't complete — keeping Tier 0 session. Run `npx @trusty-squire/mcp pair` later to upgrade.",
       );
     } else {
       finalSession = upgraded;
@@ -144,9 +159,10 @@ async function install(args: Argv): Promise<void> {
   // The machine token itself is NOT in the env — the MCP server reads it
   // from session storage (keychain / file), which keeps it out of any
   // child-process listing or shell history.
+  const launch = resolveServerLaunch();
   await agent.writeConfig({
-    command: "npx",
-    args: ["-y", "-p", "@trusty-squire/mcp", "squire-mcp-server"],
+    command: launch.command,
+    args: launch.args,
     env: {
       TRUSTY_SQUIRE_AGENT_IDENTITY: target,
       UNIVERSAL_BOT_PREFER_CHEAP: "true",
@@ -240,7 +256,7 @@ async function logout(): Promise<void> {
 }
 
 function printHelp(): void {
-  console.warn(`squire-mcp — install Trusty Squire MCP into a coding agent`);
+  console.warn(`mcp — install Trusty Squire MCP into a coding agent`);
   console.warn(``);
   console.warn(`Commands:`);
   console.warn(`  install [--target=<agent>] [--api-base=<url>] [--pair]`);
@@ -316,25 +332,4 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-// Run main() when this file is the process entrypoint. process.argv[1] is
-// often a bin symlink (e.g. node_modules/.bin/mcp under npx); realpathSync
-// resolves it to the real cli.js path so the comparison holds for every
-// launch style — `node dist/install/cli.js`, the bin shim, and npx.
-function isEntrypoint(): boolean {
-  const invoked = process.argv[1];
-  if (!invoked) return false;
-  try {
-    return realpathSync(invoked) === fileURLToPath(import.meta.url);
-  } catch {
-    return false;
-  }
-}
-
-if (isEntrypoint()) {
-  main().catch((err: unknown) => {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  });
-}
-
-export { install, pair, logout, parseArgs, pollForClaim, printAsnWarning };
+export { install, pair, logout, parseArgs, pollForClaim, printAsnWarning, resolveServerLaunch };

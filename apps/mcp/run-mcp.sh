@@ -11,4 +11,4 @@
 # (SIGTERM on shutdown) reach Node directly.
 
 cd /home/chode/trusty-squire/apps/mcp
-exec node dist/server.js "$@"
+exec node dist/bin.js server "$@"

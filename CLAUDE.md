@@ -185,7 +185,7 @@ Two packages ship to the public npm registry:
 - `@trusty-squire/universal-bot` — the bot engine (a dependency of
   `@trusty-squire/mcp`).
 
-Current published versions: `@trusty-squire/mcp@0.1.3`,
+Current published versions: `@trusty-squire/mcp@0.1.4`,
 `@trusty-squire/universal-bot@0.1.0`.
 
 **Pack with `pnpm`, publish the tarball with `npm`.** The mcp package
@@ -206,17 +206,21 @@ npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /t
 rm -f /tmp/np
 ```
 
-**The `mcp` bin + entrypoint guard are load-bearing.**
-`apps/mcp/package.json` declares three bins (`mcp`, `squire-mcp`,
-`squire-mcp-server`). The `mcp` bin exists *only* so
-`npx @trusty-squire/mcp install` resolves — npx needs a bin matching
-the package's unscoped name (`mcp`) when a package has multiple bins.
-Separately, `cli.ts`'s "am I the entrypoint?" check must `realpathSync`
-`process.argv[1]` before comparing to `import.meta.url`: launched via
-a bin shim, `argv[1]` is the symlink path, not the real `cli.js`, so a
-naive `file://${argv[1]}` compare silently skips `main()`. Don't
-regress either — the documented install command and `scripts/install.sh`
-both break.
+**MCP package launch model (hardened in 0.1.4 — don't regress it).**
+The package has exactly **one bin**, `mcp` → `dist/bin.js`, matching
+the unscoped package name so `npx @trusty-squire/mcp <subcommand>`
+always resolves. `bin.ts` is the *only* file with a shebang and
+top-level execution; it dispatches `server` → `runServer()` and
+everything else → `runCli()`. `server.ts` and `install/cli.ts` are
+pure modules — no shebang, no `import.meta.url === argv[1]` "am I
+main?" guard. That guard was wrong in both files (it fails under a bin
+symlink) and caused three shipped bugs; the structural fix is that
+there is nothing to guard. The installer writes an absolute
+`node <dist/bin.js> server` config (deterministic, no per-launch npx
+resolution), falling back to pinned `npx @trusty-squire/mcp@<ver>
+server` only when it is itself running from npx's cache.
+`src/__tests__/bin-smoke.test.ts` spawns the built artifact through a
+bin symlink and would catch any regression of the above.
 
 ### Ports / local dev
 - API: `API_PORT=3000` (default), `node apps/api/dist/server.js`
@@ -266,7 +270,7 @@ extensions:
     cmd: bash
     args:
     - -c
-    - cd /home/<you>/trusty-squire/apps/mcp && exec node dist/server.js
+    - cd /home/<you>/trusty-squire/apps/mcp && exec node dist/bin.js server
     enabled: true
     bundled: false
     name: trusty-squire

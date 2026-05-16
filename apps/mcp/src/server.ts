@@ -1,11 +1,10 @@
-#!/usr/bin/env node
-// MCP server entry point. Reads the session from keytar/file, sets up
-// an ApiClient against the configured API base URL, and exposes the
-// registered tools over stdio.
+// MCP server: reads the session from keytar/file, sets up an ApiClient
+// against the configured API base URL, and exposes the registered tools
+// over stdio.
 //
-// The server is what a coding agent (Claude Code, Cursor, etc.)
-// launches as a child process via the MCP config it found in
-// `~/.claude/mcp.json` or equivalent.
+// `runServer()` is invoked by bin.ts for the `server` subcommand. This
+// file is a pure module — no shebang, no entrypoint guard, no top-level
+// execution. The host agent launches `mcp server`; bin.ts dispatches.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -13,20 +12,18 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { ApiClient, MissingSessionError } from "./api-client.js";
+import { ApiClient } from "./api-client.js";
 import { TOOLS, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
+import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
-const SERVER_VERSION = "0.1.0";
 
 const DEFAULT_REGISTRY_BASE = process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
 
 export async function buildServer(api: ApiClient | null): Promise<Server> {
   const server = new Server(
-    { name: SERVER_NAME, version: SERVER_VERSION },
+    { name: SERVER_NAME, version: VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -55,21 +52,20 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
       }
-      
+
       // Other tools require an authenticated (Tier 1+) agent_session_token.
       // provision_any_service is the Tier 0 escape hatch and handles its own
       // session check above, so users who only need universal signup don't
       // need to pair at all.
       if (api === null) {
         return errorContent(
-          `This tool requires pairing (Tier 1+). For local dev: ` +
-          `\`node /home/chode/trusty-squire/apps/mcp/dist/install/cli.js install --target=goose --pair\`. ` +
-          `In production: \`npx @trusty-squire/mcp install --target=<agent> --pair\`. ` +
+          `This tool requires pairing (Tier 1+). Run ` +
+          `\`npx @trusty-squire/mcp install --target=<agent> --pair\` to enable it. ` +
           `If you just want to sign up for a free service, call \`provision_any_service\` instead — ` +
           `it works with a Tier 0 machine_token and doesn't need pairing.`
         );
       }
-      
+
       const result = await tool.handler(parsed.data, api);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -89,10 +85,18 @@ function errorContent(message: string) {
   };
 }
 
-async function main(): Promise<void> {
+// Start the MCP stdio server. Throws on a fatal startup failure; bin.ts
+// owns the process-level error handling.
+export async function runServer(): Promise<void> {
+  // Startup breadcrumb on stderr (which lands in the host agent's MCP
+  // log). A silent no-op was the worst part of the entrypoint-guard
+  // bug — this line makes "did the server actually start?" answerable
+  // at a glance.
+  process.stderr.write(`[trusty-squire] server v${VERSION} starting\n`);
+
   const storage = await openSessionStorage();
   const session = await storage.read();
-  
+
   // Tier-aware ApiClient: only paired (Tier 1+) sessions can call the
   // authenticated API. Tier 0 machine-token-only sessions get a null
   // ApiClient — provision_any_service uses session.machine_token via the
@@ -110,32 +114,4 @@ async function main(): Promise<void> {
   const server = await buildServer(api);
   const transport = new StdioServerTransport();
   await server.connect(transport);
-}
-
-// Run main() when this file is the process entrypoint. process.argv[1]
-// is often a bin symlink (node_modules/.bin/squire-mcp-server under
-// npx); realpathSync resolves it to the real server.js path so the
-// comparison holds for every launch style — `node dist/server.js`, the
-// bin shim, and npx.
-function isEntrypoint(): boolean {
-  const invoked = process.argv[1];
-  if (!invoked) return false;
-  try {
-    return realpathSync(invoked) === fileURLToPath(import.meta.url);
-  } catch {
-    return false;
-  }
-}
-
-if (isEntrypoint()) {
-  main().catch((err: unknown) => {
-    // stderr goes to the coding agent's MCP log — keep the message
-    // useful for debugging without leaking secrets.
-    console.error(
-      err instanceof MissingSessionError
-        ? err.message
-        : `[trusty-squire] startup failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    process.exit(1);
-  });
 }
