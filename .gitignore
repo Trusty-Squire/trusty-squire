@@ -34,3 +34,6 @@ cloudflared.deb
 .debug/
 debug-*.html
 debug-*.png
+
+# Personal Claude Code settings (per-developer, not shared)
+.claude/settings.local.json
