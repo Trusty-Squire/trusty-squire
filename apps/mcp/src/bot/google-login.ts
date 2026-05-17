@@ -85,6 +85,62 @@ async function pollForSession(
   return false;
 }
 
+// --- T5: Google auth-page state detection ------------------------------
+// After the bot clicks "Sign in with Google" on a service the browser
+// lands on a Google page. This classifies which one — so the OAuth
+// signup flow (T6) proceeds ONLY on a consent screen and otherwise
+// stops. CRITICAL: a `needs_login` or `challenge` result means the bot
+// must hand back to the human and NEVER type into Google's form — there
+// is no password to give, and driving Google's login is exactly what
+// trips its automation detection.
+export type GoogleAuthState =
+  | "consent" // valid session — Google is asking to share account info
+  | "needs_login" // session absent/expired — Google wants credentials
+  | "challenge" // Google interrupted with a verify-it's-you / 2FA step
+  | "not_google"; // not on a Google auth page (flow moved on, or completed)
+
+export function classifyGoogleAuthState(url: string, bodyText: string): GoogleAuthState {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "not_google";
+  }
+  if (!/(^|\.)accounts\.google\.com$/i.test(parsed.hostname)) {
+    return "not_google";
+  }
+  const path = parsed.pathname.toLowerCase();
+  const text = bodyText.toLowerCase();
+
+  // Consent — a valid session; Google is asking to share account data.
+  if (
+    path.includes("/oauth/consent") ||
+    path.includes("/signin/oauth") ||
+    text.includes("wants access to your google account") ||
+    text.includes("wants to access your google account") ||
+    (text.includes("to continue to") &&
+      (text.includes("allow") || text.includes("continue")))
+  ) {
+    return "consent";
+  }
+
+  // Challenge — a verify-it's-you / 2FA step. Not /challenge/pwd, which
+  // is the password step of an ordinary login (→ needs_login).
+  if (
+    (path.includes("/challenge/") && !path.includes("/challenge/pwd")) ||
+    text.includes("verify it's you") ||
+    text.includes("verify it’s you") ||
+    text.includes("2-step verification")
+  ) {
+    return "challenge";
+  }
+
+  // Everything else on accounts.google.com → Google wants credentials.
+  // Erring toward needs_login is the safe default: it stops the bot
+  // rather than risk it proceeding into a page it must not automate.
+  return "needs_login";
+}
+
 // --- environment helpers ----------------------------------------------
 export function hasDisplay(): boolean {
   if (process.env.TRUSTY_SQUIRE_FORCE_HEADLESS === "true") return false;
