@@ -5,8 +5,8 @@
 // `npx @trusty-squire/mcp <subcommand>` is never ambiguous about which
 // executable to run — npx can only auto-pick a bin when there is one,
 // or one named for the package. Subcommands:
-//   server                   — start the MCP stdio server (host agents)
-//   install | pair | logout   — the setup CLI (humans)
+//   server                          — start the MCP stdio server (host agents)
+//   install | pair | login | logout — the setup CLI (humans)
 //
 // This file is *only* ever a process entrypoint: it has no exports and
 // runs unconditionally. The old `import.meta.url === file://argv[1]`

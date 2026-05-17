@@ -27,6 +27,7 @@ import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
+import { ensureGoogleSession } from "../bot/google-login.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -95,6 +96,9 @@ export async function runCli(argv: string[]): Promise<void> {
       return;
     case "logout":
       await logout();
+      return;
+    case "login":
+      await login();
       return;
     case "help":
       printHelp();
@@ -275,12 +279,36 @@ async function logout(): Promise<void> {
   console.warn(`✓ Cleared local session (${storage.backendName()}).`);
 }
 
+// Establish (or confirm) a Google session in the bot's persistent Chrome
+// profile — the one-time interactive login the OAuth-first signup path
+// needs. With a display this opens a Chrome window; headless, it prints
+// a URL to log in from any browser. See bot/google-login.ts.
+async function login(): Promise<void> {
+  console.warn(`Establishing a Google session for the bot…`);
+  const result = await ensureGoogleSession();
+  switch (result.status) {
+    case "already_valid":
+      console.warn(`✓ Already logged in — the bot's Chrome profile has a valid Google session.`);
+      return;
+    case "logged_in":
+      console.warn(`✓ Logged in. The bot can now do OAuth signups with your Google identity.`);
+      return;
+    case "timeout":
+      console.error(`Login timed out — no login completed. Re-run \`npx @trusty-squire/mcp login\`.`);
+      process.exit(1);
+    case "error":
+      console.error(`Login failed: ${result.detail ?? "unknown error"}`);
+      process.exit(1);
+  }
+}
+
 function printHelp(): void {
   console.warn(`mcp — install Trusty Squire MCP into a coding agent`);
   console.warn(``);
   console.warn(`Commands:`);
   console.warn(`  install [--target=<agent>] [--api-base=<url>] [--pair] [--proxy-url=<url>]`);
   console.warn(`  pair [--target=<agent>] [--api-base=<url>]`);
+  console.warn(`  login    one-time Google sign-in for OAuth-based signups`);
   console.warn(`  logout`);
   console.warn(``);
   console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);
@@ -352,4 +380,4 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-export { install, pair, logout, parseArgs, pollForClaim, printAsnWarning, resolveServerLaunch };
+export { install, pair, logout, login, parseArgs, pollForClaim, printAsnWarning, resolveServerLaunch };
