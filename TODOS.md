@@ -350,3 +350,31 @@ drive Google's login (harder than the captcha problem).
   converted into motivation — the design doc's Bot-as-Wedge logic.
   Gated on spike/sweep data showing OAuth-only services are a
   meaningful slice.
+
+## H — Concurrency: the bot is single-flight
+
+Raised 2026-05-16. `provision_any_service` has no concurrency story —
+it is safe only run serially (the sweeps were). One concrete race was
+fixed; the rest is deferred.
+
+- [x] **H0 — `run_id` collision. — fixed in `0.1.13`.** `runId` was
+  `mcp-${Date.now().toString(36)}` — a bare millisecond timestamp.
+  Two concurrent signups for the same service in the same ms got the
+  same `run_id` → the same inbox alias → cross-read each other's
+  verification email. `provision-any.ts` now appends a `randomBytes`
+  suffix.
+- [ ] **H1 — Concurrent signups correlate on one exit IP.** Every
+  concurrent run egresses the *same* residential proxy IP at the same
+  instant; two account creations from one IP in one second is a far
+  stronger anti-bot signal than serial runs. Concurrency through a
+  single proxy silently lowers per-signup success. Real concurrency
+  needs per-run distinct exits — a residential proxy pool (the S1
+  vendor path), not one Tailscale Mac.
+- [ ] **H2 — Single proxy = SPOF + capacity.** One `ssh -D` tunnel,
+  one Mac: it saturates or the Mac sleeps → all in-flight runs fail
+  together. `ssh -D` has connection limits.
+- [ ] **H3 — Latent check-then-act races concurrency would expose.**
+  `recordPrewarmSuccess` writes a shared prewarm-cache file
+  (concurrent writes corrupt it); `MACHINE_TOKEN_QUOTA` and the LLM
+  rate-limit counter are both check-then-act (concurrent runs can slip
+  past the cap). Fix when concurrency becomes real.

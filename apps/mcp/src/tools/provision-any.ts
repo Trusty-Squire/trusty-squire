@@ -10,6 +10,7 @@
 // the API returns a structured quota_exceeded response and we tell Claude
 // to surface a pairing CTA.
 
+import { randomBytes } from "crypto";
 import { z } from "zod";
 import {
   UniversalSignupBot,
@@ -100,7 +101,11 @@ export const provisionAnyTool = {
       apiKey: session.machine_token,
     });
 
-    const runId = `mcp-${Date.now().toString(36)}`;
+    // Random suffix, not just a ms timestamp: two concurrent signups
+    // in the same millisecond would otherwise share a run_id — and,
+    // for the same service, the same inbox alias — and cross-read
+    // each other's verification email.
+    const runId = `mcp-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
     let alias: string;
     try {
       alias = await inboxClient.createAlias({
