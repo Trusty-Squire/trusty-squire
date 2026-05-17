@@ -728,6 +728,15 @@ export class SignupAgent {
         }
         steps.push(`⚠ planned selectors did not verify (${miss}) — re-planning`);
         hint = `These selectors did not resolve correctly: ${miss}. Pick different inventory entries.`;
+        if (miss.includes("not a checkbox")) {
+          // SendPulse: no real TOS checkbox exists, so the planner
+          // kept picking the link, then the submit button. Tell it to
+          // DROP the check rather than substitute another wrong pick.
+          hint +=
+            " If the inventory has NO input of type=checkbox, OMIT the check" +
+            " action entirely — do not substitute a link or a button. The" +
+            " agreement may be implicit or pre-accepted.";
+        }
         continue;
       }
 
@@ -1265,7 +1274,7 @@ Output rules:
   \`selector=\` field in the inventory below. Never invent, guess, or
   modify a selector. A selector not in the inventory is rejected and
   you will be asked to re-plan.
-- Include the TOS/agree checkbox if the form has one.
+- Include the TOS/agree checkbox ONLY if the inventory has a real input of type=checkbox for it. If there is no such checkbox, OMIT the check action entirely — never substitute a link or a button.
 - Skip elements marked [cookie-consent — avoid], and skip optional
   marketing-opt-in checkboxes.
 - Do NOT add a separate password-confirmation fill unless the
