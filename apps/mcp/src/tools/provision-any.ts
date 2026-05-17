@@ -33,6 +33,12 @@ type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
 export const provisionAnyInputSchema = z.object({
   service: z.string().describe("Name of the service to sign up for (e.g., 'Postmark', 'Mailgun')"),
   signup_url: z.string().optional().describe("Direct URL to signup page (optional, will search if not provided)"),
+  oauth_first: z
+    .boolean()
+    .optional()
+    .describe(
+      "Prefer Google OAuth signup: if the page has a 'Sign in with Google' button, sign up through it using the bot's Google session instead of filling a form. Requires a one-time `npx @trusty-squire/mcp login` first.",
+    ),
 });
 
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
@@ -57,6 +63,11 @@ const PROVISION_ANY_JSON_SCHEMA = {
     signup_url: {
       type: "string",
       description: "Direct URL to the service's signup page. Optional — the bot will navigate from the service name if omitted.",
+    },
+    oauth_first: {
+      type: "boolean",
+      description:
+        "Prefer Google OAuth signup. When true and the page has a 'Sign in with Google' affordance, the bot signs up through Google (using the session established by `npx @trusty-squire/mcp login`) instead of filling a form.",
     },
   },
 } as const;
@@ -117,6 +128,12 @@ RESPONSES:
   email (anti-abuse withholding, or it needs manual signup).
 - status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
+- status="needs_login" → an OAuth signup needs the bot's one-time Google login;
+  tell the user to run \`npx @trusty-squire/mcp login\`, then retry.
+- status="oauth_consent_needs_review" → the Google consent screen asked for more than
+  basic profile access; the user must complete the OAuth signup manually.
+- status="onboarding_blocked" → signed in via Google, but the API key is behind a
+  billing/payment wall; the user must add a payment method.
 - status="failed" → the form filled but yielded no credentials; show steps[].
 - status="error" → the run crashed; show error.
 - status="unknown_run" → no such run (it expired, or the MCP server restarted).`;
@@ -283,6 +300,9 @@ async function runSignupTask(
       email: ctx.alias,
       inbox: ctx.inboxClient,
       llm: llmPair,
+      // T6: route through the Google OAuth path when the caller asked
+      // for it. Phase 1 is Google-only (D7).
+      ...(input.oauth_first === true ? { oauthProvider: "google" as const } : {}),
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -321,8 +341,10 @@ async function runSignupTask(
 }
 
 // Maps a finished SignupResult to the response the caller sees via
-// check_provision_status. Mirrors the status set documented on the tools.
-function buildSignupResponse(
+// check_provision_status. Mirrors the status set documented on the
+// tools. Exported for unit testing — the error-prefix → status
+// mapping is the load-bearing logic.
+export function buildSignupResponse(
   input: ProvisionAnyInput,
   result: SignupResult,
 ): Record<string, unknown> {
@@ -363,6 +385,56 @@ function buildSignupResponse(
       message:
         `${input.service} only offers Google/GitHub (OAuth) signup — there is no email form the bot can fill. ` +
         `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  // T7/T10 — OAuth: the bot's Google session is missing/expired, or
+  // Google interrupted with a security challenge. The remedy for both
+  // is the one-time interactive login.
+  if (result.error !== undefined && result.error.startsWith("needs_login")) {
+    return {
+      status: "needs_login",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `The bot has no usable Google session for an OAuth signup. Tell the user to run ` +
+        `\`npx @trusty-squire/mcp login\` once (it opens a browser to sign into Google), ` +
+        `then retry provision_any_service with oauth_first.`,
+    };
+  }
+
+  // T7/T10 — OAuth: the consent screen requested broader-than-basic
+  // scopes (or its scopes could not be read). The bot deliberately
+  // does not auto-approve — a human must review it.
+  if (result.error !== undefined && result.error.startsWith("oauth_consent_needs_review")) {
+    return {
+      status: "oauth_consent_needs_review",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service}'s Google consent screen needs human review (it asked for more than ` +
+        `basic profile access). Tell the user to complete the OAuth signup manually at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  // T7/T10 — OAuth: signed in fine, but the API key sits behind a
+  // billing / payment-method wall the bot will not cross.
+  if (result.error !== undefined && result.error.startsWith("onboarding_blocked")) {
+    return {
+      status: "onboarding_blocked",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service} signed up via Google, but its API key is behind a billing/payment wall. ` +
+        `Tell the user to add a payment method at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`} to finish.`,
     };
   }
 

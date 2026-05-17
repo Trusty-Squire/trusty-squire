@@ -15,6 +15,11 @@ import type {
   InteractiveElement,
 } from "./browser.js";
 import { rankAndCapInventory, scoreSignupButton } from "./browser.js";
+import {
+  classifyGoogleAuthState,
+  extractOAuthScopes,
+  scopesAreBasic,
+} from "./google-login.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -82,6 +87,25 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
 // minute; this catches the fast case without 300s of dead air.
 const VERIFICATION_PROBE_SECONDS = 45;
 
+// T7: page text that means the post-OAuth API key sits behind a
+// billing / payment-method wall. When the OAuth onboarding loop ends
+// without a key and the page reads like this, the run ends
+// `onboarding_blocked` rather than grep-looping a wall it cannot
+// satisfy (the S3-class trap named in the plan's failure modes).
+const ONBOARDING_PAYWALL_PATTERNS: readonly string[] = [
+  "add a payment method",
+  "add a credit card",
+  "add credit card",
+  "payment method required",
+  "a payment method is required",
+  "credit card required",
+  "enter your card",
+  "enter your payment",
+  "enter payment details",
+  "upgrade your plan to",
+  "start your paid plan",
+];
+
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
 // full verification timeout or runs only a short probe. Exported so the
@@ -112,6 +136,13 @@ export interface SignupTask {
   // Each round = one Claude vision call + a browser action. Set to 0
   // to disable the post-verification navigation loop entirely.
   postVerifyMaxRounds?: number | undefined;
+  // OAuth-first signup (T6). When set, and the signup page carries a
+  // matching "Sign in with <provider>" affordance, the bot takes the
+  // OAuth path — clicking through the provider's consent screen using
+  // the session in the persistent profile — instead of form-filling.
+  // Absent (or no affordance found) → the form-fill path. Phase 1 is
+  // Google-only (D7).
+  oauthProvider?: "google" | undefined;
 }
 
 export interface SignupResult {
@@ -186,7 +217,11 @@ type PlanExecOutcome =
   | { kind: "captcha_blocked"; captchaKind: string }
   | { kind: "submit_failed"; reason: string }
   | { kind: "planning_failed"; reason: string }
-  | { kind: "oauth_required" };
+  | { kind: "oauth_required" }
+  // T6: an OAuth-first signup found its provider affordance — the
+  // selector of the "Sign in with Google" button to click. signup()
+  // hands off to the OAuth consent flow instead of credential extraction.
+  | { kind: "oauth"; selector: string };
 
 // What to do next after the verification link is clicked. Most services
 // land you on a dashboard with the API key visible; some require one or
@@ -424,6 +459,40 @@ export function isOauthOnlyChooser(
       ) > 0,
   );
   return !hasEmailOption;
+}
+
+// Find a "Sign in with Google" affordance in the page inventory — the
+// entry point for the OAuth-first path (T6). Matches a button/link
+// whose visible text or accessible label names Google AND reads as an
+// auth action ("sign in/up with Google", "Continue with Google"), so a
+// stray "Google Cloud" marketing link is not mistaken for the OAuth
+// button. Returns null when the page has no Google OAuth affordance —
+// the planner then falls back to the form-fill path. Exported for
+// unit testing — the match heuristic is the load-bearing logic.
+export function findGoogleOAuthButton(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  for (const e of inventory) {
+    const isButtonish =
+      e.tag === "button" ||
+      e.tag === "a" ||
+      e.role === "button" ||
+      e.type === "submit" ||
+      e.type === "button";
+    if (!isButtonish) continue;
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!/\bgoogle\b/.test(text)) continue;
+    // Require an auth verb so a non-auth link mentioning Google is not
+    // picked. An icon-only button whose entire accessible name is just
+    // "Google" also qualifies.
+    if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text) || text === "google") {
+      return e;
+    }
+  }
+  return null;
 }
 
 export function parsePostVerifyStep(raw: string): PostVerifyStep {
@@ -717,11 +786,33 @@ export class SignupAgent {
     let emptyPlans = 0;
     let hint: string | undefined;
 
+    const oauthFirst = task.oauthProvider === "google";
     for (;;) {
       await this.browser.waitForFormReady();
       await saveDebugSnapshot(this.browser, "before-fill");
       const state = await this.browser.getState();
-      const inventory = await this.buildInventory(steps);
+      const inventory = await this.buildInventory(steps, oauthFirst);
+
+      // T6 — OAuth-first: when an OAuth signup is requested and the
+      // page carries a "Sign in with Google" affordance, the OAuth
+      // button unconditionally outranks any form field (a rule, not
+      // score arithmetic — spec refinement). Hand off to the OAuth
+      // consent flow. Absent the affordance, fall through to form-fill.
+      if (oauthFirst) {
+        const googleButton = findGoogleOAuthButton(inventory);
+        if (googleButton !== null) {
+          steps.push(
+            `OAuth-first: found a Google sign-in affordance ` +
+              `(${JSON.stringify(googleButton.visibleText ?? googleButton.ariaLabel ?? "Google")}) ` +
+              `— taking the OAuth path`,
+          );
+          return { kind: "oauth", selector: googleButton.selector };
+        }
+        steps.push(
+          "OAuth-first requested but no Google affordance on the page — " +
+            "falling back to form-fill",
+        );
+      }
 
       // OAuth-only: no fillable input AND no button that reads as an
       // email-signup option — nothing to automate (Issue 4).
@@ -873,9 +964,14 @@ export class SignupAgent {
   }
 
   // Extract + rank the page's interactive elements (F3 T1/T2).
-  private async buildInventory(steps: string[]): Promise<InteractiveElement[]> {
+  // `oauthFirst` keeps a Google OAuth affordance from being ranked out
+  // of the capped inventory when an OAuth-first signup is requested (T6).
+  private async buildInventory(
+    steps: string[],
+    oauthFirst = false,
+  ): Promise<InteractiveElement[]> {
     const raw = await this.browser.extractInteractiveElements();
-    const { inventory, buttonsDropped } = rankAndCapInventory(raw);
+    const { inventory, buttonsDropped } = rankAndCapInventory(raw, 25, oauthFirst);
     steps.push(
       `Inventory: ${inventory.length} element(s)` +
         (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
@@ -1189,6 +1285,11 @@ export class SignupAgent {
             steps,
             ...this.resultTail(),
           };
+        case "oauth":
+          // T6/T7 — OAuth-first path. runOAuthFlow drives the consent
+          // handshake and post-OAuth onboarding to its own terminal
+          // SignupResult; there is no form submit / email verification.
+          return await this.runOAuthFlow(task, outcome.selector, steps);
         case "submitted":
           break;
       }
@@ -1239,8 +1340,7 @@ export class SignupAgent {
                 const maxRounds = task.postVerifyMaxRounds ?? 6;
                 credentials = await this.postVerifyLoop({
                   service: task.service,
-                  email: task.email,
-                  password,
+                  credentials: { email: task.email, password },
                   maxRounds,
                   steps,
                 });
@@ -1291,6 +1391,189 @@ export class SignupAgent {
         ...this.resultTail(),
       };
     }
+  }
+
+  // ------------ OAuth-first signup (T6/T7) ------------
+
+  // Drive a Google OAuth signup to a terminal SignupResult. Entered
+  // from runSignup when planExecuteWithRetry found a Google affordance
+  // (T6). Steps: click the button → walk the consent screens →
+  // scope-gate them → drive post-OAuth onboarding to the API key.
+  //
+  // THE CRITICAL GUARANTEE (D4 / eng-review critical gap): if the flow
+  // lands on a Google credential form (expired/missing session) or a
+  // security challenge, it hands back `needs_login` and NEVER types
+  // into Google's form. Driving Google's login is exactly what trips
+  // its automation detection — and there is no password to give.
+  private async runOAuthFlow(
+    task: SignupTask,
+    googleSelector: string,
+    steps: string[],
+  ): Promise<SignupResult> {
+    steps.push("OAuth: clicking the Google sign-in affordance");
+    await this.browser.startOAuth(googleSelector);
+    await this.browser.wait(3);
+    await saveDebugSnapshot(this.browser, "oauth-after-click");
+
+    // Bounded consent walk — handles account-chooser → consent as two
+    // steps without ever spinning. Each iteration re-reads the page.
+    const MAX_OAUTH_NAV = 6;
+    for (let i = 0; i < MAX_OAUTH_NAV; i++) {
+      if (this.browser.oauthPageClosed()) {
+        steps.push("OAuth: the Google window closed — handshake returned to the service");
+        break;
+      }
+      const url = this.browser.currentUrl();
+      let body: string;
+      try {
+        body = (await this.browser.extractText()).slice(0, 4000);
+      } catch {
+        // The page is navigating between Google screens — re-read.
+        await this.browser.wait(1);
+        continue;
+      }
+      const authState = classifyGoogleAuthState(url, body);
+      steps.push(`OAuth: Google auth state = ${authState}`);
+
+      if (authState === "not_google") break; // flow left Google — back on the service
+
+      if (authState === "challenge") {
+        return this.oauthAbort(
+          "needs_login",
+          `Google interrupted the sign-in with a security challenge ("verify it's you"). ` +
+            `Re-run \`npx @trusty-squire/mcp login\`, clear the challenge in the window, then retry.`,
+          steps,
+        );
+      }
+      if (authState === "needs_login") {
+        return this.oauthAbort(
+          "needs_login",
+          `the bot's Google session is missing or expired — no consent screen was reached. ` +
+            `Re-run \`npx @trusty-squire/mcp login\` to re-establish it, then retry.`,
+          steps,
+        );
+      }
+
+      // authState === "consent". Backstop the page classifier with a
+      // live-DOM check: if the page actually carries a credential
+      // field it is a login form (the text classifier can catch a
+      // login page that says "to continue to <app>"). Hand back —
+      // never type into it.
+      if (await this.googleLoginFormPresent()) {
+        return this.oauthAbort(
+          "needs_login",
+          `landed on a Google sign-in form — the session is missing or expired. ` +
+            `Re-run \`npx @trusty-squire/mcp login\`, then retry. The bot will not type into Google's login form.`,
+          steps,
+        );
+      }
+
+      // Genuine consent screen / account chooser — scope-gate it (T7).
+      const scopes = extractOAuthScopes(url);
+      if (scopes === null) {
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `reached a Google consent screen but could not read its requested scopes from the URL — ` +
+            `pausing for manual review rather than approving blind.`,
+          steps,
+        );
+      }
+      if (!scopesAreBasic(scopes)) {
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `the consent screen requests scopes beyond basic identity (${scopes.join(", ")}). ` +
+            `Approve it manually — the bot only auto-approves openid/email/profile.`,
+          steps,
+        );
+      }
+      steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
+      const advanced = await this.browser.advanceGoogleConsent();
+      if (!advanced) {
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `reached a Google consent screen but found no Continue/Allow control to click — ` +
+            `approve it manually.`,
+          steps,
+        );
+      }
+      await this.browser.wait(3);
+    }
+
+    // Handshake done — restore the product page (popup flow is a no-op
+    // for same-tab redirects) and drive post-OAuth onboarding.
+    await this.browser.settleAfterOAuth();
+    await this.browser.wait(2);
+    await saveDebugSnapshot(this.browser, "oauth-post-consent");
+    steps.push("OAuth: signed in via Google — driving post-OAuth onboarding to the API key");
+
+    let credentials = await this.extractCredentials();
+    if (credentials.api_key === undefined) {
+      credentials = await this.postVerifyLoop({
+        service: task.service,
+        maxRounds: task.postVerifyMaxRounds ?? 8,
+        steps,
+      });
+    }
+    if (credentials.api_key !== undefined) {
+      return {
+        success: true,
+        credentials: { ...credentials },
+        steps,
+        ...this.resultTail(),
+      };
+    }
+
+    // No API key. Distinguish a billing/card wall (onboarding_blocked)
+    // from a generic navigation miss — never grep-loop a paid wall.
+    const finalText = (await this.browser.extractText().catch(() => "")).toLowerCase();
+    if (ONBOARDING_PAYWALL_PATTERNS.some((p) => finalText.includes(p))) {
+      return {
+        success: false,
+        error:
+          `onboarding_blocked: ${task.service}'s API key sits behind a billing or ` +
+          `payment-method wall the bot will not cross — finish the signup manually.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
+    return {
+      success: false,
+      error:
+        `oauth_onboarding_failed: signed in to ${task.service} via Google but could not ` +
+        `reach an API key through post-OAuth onboarding.`,
+      steps,
+      ...this.resultTail(),
+    };
+  }
+
+  // Build a terminal SignupResult for an aborted OAuth run. `prefix`
+  // is the error tag provision-any.ts maps to a tool status
+  // (needs_login, oauth_consent_needs_review).
+  private oauthAbort(prefix: string, detail: string, steps: string[]): SignupResult {
+    steps.push(`OAuth aborted (${prefix}): ${detail}`);
+    return {
+      success: false,
+      error: `${prefix}: ${detail}`,
+      steps,
+      ...this.resultTail(),
+    };
+  }
+
+  // Backstop for the critical guarantee (D4): true when the active
+  // Google page carries a credential-entry field — an expired/missing
+  // session dropped the bot on a login form. A genuine consent screen
+  // or account chooser has buttons/tiles only, no text inputs.
+  private async googleLoginFormPresent(): Promise<boolean> {
+    const inv = await this.browser.extractInteractiveElements();
+    return inv.some(
+      (e) =>
+        e.tag === "input" &&
+        (e.type === "email" ||
+          e.type === "password" ||
+          e.type === "text" ||
+          e.type === "tel" ||
+          e.type === null),
+    );
   }
 
   // ------------ Claude planner ------------
@@ -1414,19 +1697,26 @@ ${formatInventory(input.inventory)}`,
     throw lastErr ?? new Error("verification email did not arrive in time");
   }
 
-  // After verification, drive the browser toward the API key. Each round
-  // asks Claude what to do next given the current page; we stop when
-  // Claude says "done" or when we extract a credential. Bounded by
-  // maxRounds so a confused agent can't burn the whole context window.
+  // Drive the browser toward the API key after the account exists —
+  // used by BOTH the email-verification path and the OAuth path (T9).
+  // Each round asks Claude what to do next given the current page; we
+  // stop when Claude says "done" or when we extract a credential.
+  // Bounded by maxRounds so a confused agent can't burn the context.
+  //
+  // T9 — decoupled from email+password. `credentials` is present only
+  // on the email-verification path, where the loop may need to sign in
+  // with the just-created account (SendPulse). On the OAuth path it is
+  // absent: there is no password, and the Google session already
+  // authenticated the user — a `login` step is then a no-op.
   private async postVerifyLoop(args: {
     service: string;
-    email: string;
-    password: string;
+    credentials?: { email: string; password: string } | undefined;
     maxRounds: number;
     steps: string[];
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     let loginAttempts = 0;
+    const oauth = args.credentials === undefined;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
@@ -1437,11 +1727,10 @@ ${formatInventory(input.inventory)}`,
       try {
         nextStep = await this.planPostVerifyStep({
           service: args.service,
-          email: args.email,
-          password: args.password,
           round,
           maxRounds: args.maxRounds,
           state,
+          oauth,
         });
       } catch (err) {
         args.steps.push(
@@ -1466,12 +1755,24 @@ ${formatInventory(input.inventory)}`,
         } else if (nextStep.kind === "wait") {
           await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {
-          if (loginAttempts >= 2) {
+          if (args.credentials === undefined) {
+            // OAuth run — no password to give, and the Google session
+            // already authenticated us. Treat `login` as a no-op note.
+            args.steps.push(
+              "Post-verify: planner asked to log in, but this is an OAuth run — " +
+                "already authenticated via Google; skipping.",
+            );
+          } else if (loginAttempts >= 2) {
             args.steps.push("Post-verify: already attempted login twice — stopping.");
             break;
+          } else {
+            loginAttempts += 1;
+            await this.loginWithCredentials(
+              args.credentials.email,
+              args.credentials.password,
+              args.steps,
+            );
           }
-          loginAttempts += 1;
-          await this.loginWithCredentials(args.email, args.password, args.steps);
         }
       } catch (err) {
         args.steps.push(
@@ -1538,15 +1839,23 @@ ${formatInventory(input.inventory)}`,
 
   private async planPostVerifyStep(input: {
     service: string;
-    email: string;
-    password: string;
     round: number;
     maxRounds: number;
     state: { url: string; title: string; html: string; screenshot: string };
+    // T9: an OAuth run is already authenticated via Google — the
+    // planner must never ask to log in. The email-verification path
+    // (oauth=false) keeps the login-wall recovery guidance.
+    oauth: boolean;
   }): Promise<PostVerifyStep> {
     const visibleText = (input.state.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 2500);
 
-    const systemPrompt = `You are driving a headless browser after a SaaS signup verification.
+    const loginGuidance = input.oauth
+      ? `- You are ALREADY signed in via Google — NEVER return {"kind":"login"}. If the page looks like a login wall, return {"kind":"navigate"} to the service's dashboard, or {"kind":"done"}.`
+      : `- If the page is a LOGIN form, or says you must sign in, or you've been signed out, return {"kind":"login"} — the bot signs in with the signup email + password. Do NOT return done on a login wall.`;
+
+    const systemPrompt = `You are driving a headless browser after a SaaS signup ${
+      input.oauth ? "via Google OAuth" : "verification"
+    }.
 Your goal: surface the user's API key (or any credential — token, secret, app id) so it can be extracted from the page.
 
 You may issue ONE step per turn. Reply with a single JSON object, no prose.
@@ -1564,7 +1873,7 @@ Strategy:
 - If the API key text is visible, return {"kind":"extract"}.
 - If there's a dashboard menu link like "API Keys" / "Tokens" / "Developer", click it.
 - If there's an onboarding modal blocking, dismiss it.
-- If the page is a LOGIN form, or says you must sign in, or you've been signed out, return {"kind":"login"} — the bot signs in with the signup email + password. Do NOT return done on a login wall.
+${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - If the page wants the user to create a project before showing keys, fill the minimum and click create.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
