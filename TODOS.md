@@ -293,20 +293,18 @@ mechanics. Ranked by leverage.
   the run. `signup()` now races a hard deadline
   (`UNIVERSAL_BOT_RUN_TIMEOUT_MS`, default 600s) and returns
   `run_timeout` instead of hanging. Test: `run-timeout.test.ts`.
-- [ ] **F3 — Two-stage signup forms. [P1]** Back4app / Netlify /
-  Together hide the form behind a "Sign up with email" button; one
-  wrong reveal selector cascades to total failure. Detect the chooser,
-  click email, re-plan against the revealed form.
-- [ ] **F4 — Checkbox robustness. [P1]** Generic `input[type=checkbox]`
-  hits cookie-consent decoys (Render → Osano marketing toggle),
-  off-viewport elements (Sentry), custom widgets. TOS-checkbox failures
-  in 7/16 runs.
-- [ ] **F5 — `<select>` support. [P1]** Sentry: the bot tried `.fill()`
-  on a `<select>`. The executor must detect `<select>` and use
-  `selectOption`.
-- [ ] **F6 — Cookie-consent dismissal. [P1]** Osano / OneTrust banners
-  block forms and confuse the planner (Mailjet's whole plan was "accept
-  cookies"; Render's checkbox hit Osano). Dismiss before planning.
+- [ ] **F3 — Planner/executor reliability rework. [P1]** Reviewed
+  2026-05-16 (`/plan-eng-review`). Confirmed by the re-sweep (0/14):
+  the planner guesses CSS selectors off a screenshot — it is fed a
+  `<form>`-regex scrape that returns marketing chrome on `<form>`-less
+  SPA pages — and the executor runs the plan blind. Fix: a DOM-grounded
+  element inventory the planner *picks* from (never invents a
+  selector), parse-time inventory validation, a unified
+  verify-and-replan loop with split error/progress caps, and
+  element-type-aware execution. **Subsumes the former F4 (checkbox),
+  F5 `<select>`, F6 (cookie-consent), and two-stage signup forms.**
+  Full reviewed plan:
+  `~/.gstack/projects/Trusty-Squire-trusty-squire/chode-main-planner-reliability-plan-20260516.md`.
 - [ ] **F7 — Multi-step / inline-code flows. [P2]** Mistral (email-first
   multi-step), DeepSeek (inline verification code typed into the page).
   The bot assumes single-page → submit → email-link.
@@ -321,7 +319,32 @@ Also observed: 3/16 (Appwrite, MongoDB Atlas, Koyeb) submitted cleanly
 and got no verification email — genuine S3 anti-abuse withholding,
 confirming S3 is real and common.
 
-**Process:** F1 + F2 shipped (P0, certain). Next: re-run the 16-service
-sweep as empirical validation, then `/plan-eng-review` scoped to
-whatever is still red (likely F3 + F7 — the genuine flow-shape
-architecture questions).
+**Process:** F1 + F2 shipped. Re-sweep ran (0/14 — confirmed the
+planner/executor diagnosis). F3 planned + reviewed. Next: implement
+F3, then re-sweep again (honest target ~8/14 — the rest are captcha /
+multi-step / withholding, out of F3's scope).
+
+## G — OAuth-gated services: managed identity + conversion loop
+
+Raised 2026-05-16 (planner/executor `/plan-eng-review`, Issue 4).
+**Product/strategy item — belongs in `/plan-ceo-review`, not eng.**
+
+Many SaaS make "Sign up with Google/GitHub" the only signup path. The
+Tier 0 anonymous bot cannot do those — no identity, and it cannot
+drive Google's login (harder than the captcha problem).
+
+- [ ] **G1 — Managed identity for OAuth signup.** Tier 1+ feature: the
+  user grants Trusty Squire one identity (their Google/GitHub via an
+  OAuth grant, or a dedicated bot identity, held in the vault). The bot
+  then completes "Sign up with Google" on a gated service via a single
+  consent click — OAuth flips from the bot's worst path to its best
+  (no form, no captcha). Needs Tier 1 pairing + vault.
+- [ ] **G2 — OAuth gate as the Tier 0 → Tier 1 conversion trigger.**
+  Make Trusty Squire's *own* pairing a "Sign in with Google", so the
+  Google auth that pairs the user IS the G1 managed identity. When the
+  Tier 0 bot hits an OAuth-gated service it can't do, that becomes the
+  conversion CTA: "this service needs Google signup — pair Trusty
+  Squire (one Google click) and I'll do it for you." Friction
+  converted into motivation — the design doc's Bot-as-Wedge logic.
+  Gated on spike/sweep data showing OAuth-only services are a
+  meaningful slice.
