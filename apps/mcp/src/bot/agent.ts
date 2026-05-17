@@ -2020,15 +2020,17 @@ ${formatInventory(input.inventory)}${
     // a naive regex.
     //
     // Two visible surfaces, in priority order:
-    //   1. Visible field values. A freshly-created key is usually
-    //      rendered into a readonly copy <input> — and an input's value
-    //      is absent from textContent, so this is the high-signal spot.
-    //      Hidden inputs (captcha tokens) are excluded by the browser.
-    //   2. The visible body text — keys shown as plain page text.
+    //   1. Discrete credential candidates — copy-input values and each
+    //      element's own direct text. A key is read whole here, un-glued
+    //      from adjacent buttons; captcha tokens (hidden inputs) are
+    //      excluded by the browser.
+    //   2. The whole visible body text — fallback for a key shown as
+    //      plain prose, accepting that body concatenation can glue
+    //      neighbours (the extractApiKeyFromText guards catch the worst).
     const credentials: Record<string, string> = {};
     let apiKey: string | null = null;
-    for (const value of await this.browser.extractVisibleFieldValues()) {
-      apiKey = extractApiKeyFromText(value);
+    for (const candidate of await this.browser.extractCredentialCandidates()) {
+      apiKey = extractApiKeyFromText(candidate);
       if (apiKey !== null) break;
     }
     if (apiKey === null) {

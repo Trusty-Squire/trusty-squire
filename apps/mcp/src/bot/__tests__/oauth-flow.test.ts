@@ -109,12 +109,13 @@ class FakeOAuthBrowser {
   async clickSubmit(): Promise<void> {}
 
   // Visible <input>/<textarea> values keyed by page index — a key in a
-  // copy-input lives here, not in extractText().
+  // copy-input / discrete-element credential candidates by page index —
+  // a key in a copy-input lives here, not in extractText().
   public fieldValuesByIdx: Record<number, string[]> = {};
   async extractText(): Promise<string> {
     return this.page().text;
   }
-  async extractVisibleFieldValues(): Promise<string[]> {
+  async extractCredentialCandidates(): Promise<string[]> {
     return this.fieldValuesByIdx[this.idx] ?? [];
   }
   async extractInteractiveElements(): Promise<InteractiveElement[]> {

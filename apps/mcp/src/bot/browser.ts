@@ -990,16 +990,28 @@ export class BrowserController {
     return await this.page.textContent("body") || "";
   }
 
-  // Collect the `.value` of every visible, non-hidden input/textarea.
-  // Services routinely render a freshly-created API key into a readonly
-  // <input> with a copy button — and an <input>'s value is NOT part of
-  // textContent, so extractText() misses it entirely. Hidden inputs
-  // (where captcha tokens like cf-turnstile-response live) and password
-  // fields are excluded, so this stays a clean credential surface.
-  async extractVisibleFieldValues(): Promise<string[]> {
+  // Discrete strings an API key might occupy — for credential
+  // extraction. Gathered so a key is read WHOLE and un-glued from its
+  // neighbours: extractText() concatenates the whole <body>, which
+  // fuses a key to an adjacent "Copy"/"Done" button with no separator.
+  //
+  // Two surfaces:
+  //   1. input/textarea VALUES — a copy-to-clipboard key field. An
+  //      input's value is not in textContent at all. Hidden and
+  //      password fields are excluded (captcha tokens / the signup
+  //      password), keeping this a clean credential surface.
+  //   2. Each element's OWN direct text — the text nodes that are its
+  //      immediate children, excluding descendants. A key in a
+  //      <code>/<span>/<div> yields its clean value here even when a
+  //      sibling button shares the same parent.
+  async extractCredentialCandidates(): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(() => {
       const out: string[] = [];
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        return r.width > 2 && r.height > 2;
+      };
       document.querySelectorAll("input, textarea").forEach((el) => {
         if (
           el instanceof HTMLInputElement &&
@@ -1011,9 +1023,18 @@ export class BrowserController {
           el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
             ? el.value
             : "";
-        if (value.trim().length === 0) return;
-        const r = el.getBoundingClientRect();
-        if (r.width > 2 && r.height > 2) out.push(value.trim());
+        if (value.trim().length > 0 && isVisible(el)) out.push(value.trim());
+      });
+      document.querySelectorAll("body *").forEach((el) => {
+        if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
+        if (!isVisible(el)) return;
+        let direct = "";
+        el.childNodes.forEach((n) => {
+          if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";
+        });
+        direct = direct.trim();
+        // A real key is short; a long blob is a paragraph, not a key.
+        if (direct.length > 0 && direct.length <= 256) out.push(direct);
       });
       return out;
     });
