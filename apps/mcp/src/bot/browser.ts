@@ -606,6 +606,13 @@ export class BrowserController {
     // Use force:true because TOS checkboxes are sometimes visually covered by
     // a custom label/styled wrapper but the underlying input is checkable.
     await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
+    // Bring it into the viewport first — MongoDB/Sentry signup
+    // checkboxes sit below the fold and a bezier mouse-click misses
+    // an off-screen element (F3 T6).
+    await this.page
+      .locator(selector)
+      .scrollIntoViewIfNeeded({ timeout: 5000 })
+      .catch(() => {});
     if (!this.humanize) {
       await this.page.check(selector, { force: true });
       return;
@@ -625,6 +632,28 @@ export class BrowserController {
     } catch {
       await this.page.check(selector, { force: true });
     }
+  }
+
+  // Pick a valid option for a <select> (F3 T6). The bot must not call
+  // type() on a <select> (Sentry: "Element is not an <input>").
+  // Signup <select>s are country / region / role pickers — any
+  // non-placeholder option satisfies the form. Throws (caught by the
+  // executor) when the select has no selectable option.
+  async selectOption(selector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
+    const values = await this.page
+      .locator(`${selector} option`)
+      .evaluateAll((opts) =>
+        opts
+          .map((o) => (o instanceof HTMLOptionElement ? o.value : ""))
+          .filter((v) => v.length > 0),
+      );
+    const first = values[0];
+    if (first === undefined) {
+      throw new Error(`<select> ${selector} has no selectable option`);
+    }
+    await this.page.selectOption(selector, first);
   }
 
   // ───────────── humanization internals ─────────────
@@ -948,6 +977,163 @@ export class BrowserController {
     }
   }
 
+  // Walk the live DOM (piercing open shadow roots) and return every
+  // visible interactive element with a bot-computed selector (F3 T1).
+  // The planner picks from this inventory instead of inventing
+  // selector strings. Selectors prefer #id then [name] — Playwright's
+  // CSS engine pierces open shadow roots, so those resolve for
+  // shadow-DOM fields too.
+  async extractInteractiveElements(): Promise<InteractiveElement[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const raw = await this.page.evaluate(() => {
+      const SELECTOR =
+        'input,textarea,select,button,a,[role="button"],[role="checkbox"],[contenteditable=""],[contenteditable="true"]';
+
+      // Collect candidates across the document and every open shadow
+      // root. Closed shadow roots are unreachable — accepted.
+      const collected: Element[] = [];
+      const walk = (root: Document | ShadowRoot): void => {
+        root.querySelectorAll(SELECTOR).forEach((n) => collected.push(n));
+        root.querySelectorAll("*").forEach((el) => {
+          if (el.shadowRoot !== null) walk(el.shadowRoot);
+        });
+      };
+      walk(document);
+
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) return false;
+        const s = window.getComputedStyle(el);
+        return (
+          s.display !== "none" &&
+          s.visibility !== "hidden" &&
+          parseFloat(s.opacity || "1") > 0.01
+        );
+      };
+
+      const clean = (s: string | null | undefined): string | null => {
+        if (s === null || s === undefined) return null;
+        const t = s.replace(/\s+/g, " ").trim();
+        return t.length === 0 ? null : t.slice(0, 120);
+      };
+
+      const labelFor = (el: Element): string | null => {
+        const id = el.getAttribute("id");
+        if (id !== null && id.length > 0) {
+          try {
+            const l = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+            if (l !== null) return clean(l.textContent);
+          } catch {
+            /* malformed id — fall through */
+          }
+        }
+        const anc = el.closest("label");
+        return anc !== null ? clean(anc.textContent) : null;
+      };
+
+      const inConsent = (el: Element): boolean =>
+        el.closest(
+          '[class*="osano"],[id*="onetrust"],[id*="cookie"],[class*="cookie-consent"],[class*="cookie-banner"],[class*="cookieConsent"]',
+        ) !== null;
+
+      const selectorFor = (el: Element): string => {
+        const tag = el.tagName.toLowerCase();
+        const id = el.getAttribute("id");
+        if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+        const name = el.getAttribute("name");
+        if (name !== null && name.length > 0) {
+          return `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
+        }
+        // Structural fallback — a short nth-of-type path.
+        const parts: string[] = [];
+        let node: Element | null = el;
+        for (let depth = 0; depth < 4 && node !== null; depth++) {
+          const cur: Element = node;
+          const t = cur.tagName.toLowerCase();
+          const parent: Element | null = cur.parentElement;
+          if (parent === null) {
+            parts.unshift(t);
+            break;
+          }
+          const sibs = Array.from(parent.children).filter(
+            (c) => c.tagName === cur.tagName,
+          );
+          const idx = sibs.indexOf(cur) + 1;
+          parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${idx})` : t);
+          node = parent;
+        }
+        return parts.join(" > ");
+      };
+
+      const seen = new Set<Element>();
+      const out: Array<{
+        tag: string;
+        type: string | null;
+        id: string | null;
+        name: string | null;
+        placeholder: string | null;
+        ariaLabel: string | null;
+        labelText: string | null;
+        visibleText: string | null;
+        selector: string;
+        visible: boolean;
+        inViewport: boolean;
+        inConsentWidget: boolean;
+      }> = [];
+      for (const el of collected) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (!isVisible(el)) continue;
+        const r = el.getBoundingClientRect();
+        out.push({
+          tag: el.tagName.toLowerCase(),
+          type: el.getAttribute("type"),
+          id: el.getAttribute("id"),
+          name: el.getAttribute("name"),
+          placeholder: el.getAttribute("placeholder"),
+          ariaLabel: el.getAttribute("aria-label"),
+          labelText: labelFor(el),
+          visibleText: clean(el.textContent),
+          selector: selectorFor(el),
+          visible: true,
+          inViewport:
+            r.top >= 0 &&
+            r.left >= 0 &&
+            r.bottom <= window.innerHeight &&
+            r.right <= window.innerWidth,
+          inConsentWidget: inConsent(el),
+        });
+      }
+      return out;
+    });
+    return raw.map((e, i) => ({ ...e, index: i }));
+  }
+
+  // Resolve a selector against the live page for the verify step
+  // (F3 T5). Returns the match count plus the first match's
+  // tag/id/name so the caller can confirm a still-resolving selector
+  // points at the element it was extracted from (not a recycled
+  // node). An invalid selector (e.g. a stray `:contains()`) is caught
+  // and reported as count 0 — never an uncaught throw.
+  async inspectSelector(
+    selector: string,
+  ): Promise<{ count: number; tag: string | null; id: string | null; name: string | null }> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      const loc = this.page.locator(selector);
+      const count = await loc.count();
+      if (count === 0) return { count: 0, tag: null, id: null, name: null };
+      const info = await loc.first().evaluate((el) => ({
+        tag: el.tagName.toLowerCase(),
+        id: el.getAttribute("id"),
+        name: el.getAttribute("name"),
+      }));
+      return { count, tag: info.tag, id: info.id, name: info.name };
+    } catch {
+      return { count: 0, tag: null, id: null, name: null };
+    }
+  }
+
   async close(): Promise<void> {
     if (this.page) await this.page.close();
     if (this.browser) await this.browser.close();
@@ -978,19 +1164,9 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
   let bestIndex: number | null = null;
   let bestScore = 0;
   texts.forEach((raw, i) => {
-    const t = raw.toLowerCase();
-    let score = 0;
-    if (t.includes("create account") || t.includes("create your account")) score += 12;
-    if (t.includes("sign up") || t.includes("signup")) score += 10;
-    if (t.includes("register")) score += 8;
-    if (t.includes("get started")) score += 6;
-    // "Continue" is often the real submit on single-field signup forms;
-    // weak positive so it wins over nothing but loses to OAuth markers.
-    if (t.includes("continue")) score += 2;
-    // OAuth / SSO buttons are submit-typed too — the provider name is
-    // the reliable discriminator, so drive those firmly negative.
-    if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso)\b/.test(t)) score -= 20;
-    if (t.includes("sign in") || t.includes("log in") || t.includes("login")) score -= 12;
+    // Shared scorer (F3 Issue 8) — one keyword set for submit
+    // disambiguation, the chooser pick, and inventory ranking.
+    const score = scoreSignupButton(raw);
     if (score > bestScore) {
       bestScore = score;
       bestIndex = i;
@@ -1099,4 +1275,96 @@ export function parseEgressGeo(text: string): EgressGeo | null {
     }
   }
   return geo;
+}
+
+// ───────────── element inventory (F3) ─────────────
+
+// One interactive element the planner can target. `selector` is
+// computed by the bot from the live DOM, so it is known to resolve —
+// the planner PICKS from these rather than inventing selector
+// strings (the bug behind the 0/14 sweep). `index` is assigned after
+// ranking, so it is a stable handle for the planner to reference.
+export interface InteractiveElement {
+  index: number;
+  tag: string;
+  type: string | null;
+  id: string | null;
+  name: string | null;
+  placeholder: string | null;
+  ariaLabel: string | null;
+  labelText: string | null;
+  visibleText: string | null;
+  selector: string;
+  visible: boolean;
+  inViewport: boolean;
+  inConsentWidget: boolean;
+}
+
+// Score a button/link by how much its text reads like a signup
+// action. Shared by submit-button disambiguation, the two-stage
+// chooser pick, and inventory button-ranking — one keyword set, no
+// drift (F3 Issue 8). OAuth provider names go firmly negative so the
+// bot never wanders into a Google/GitHub login dead end.
+export function scoreSignupButton(text: string): number {
+  const t = text.toLowerCase();
+  let score = 0;
+  if (t.includes("create account") || t.includes("create your account")) score += 12;
+  if (t.includes("sign up") || t.includes("signup")) score += 10;
+  if (t.includes("register")) score += 8;
+  if (t.includes("get started")) score += 6;
+  if (
+    t.includes("continue with email") ||
+    t.includes("sign up with email") ||
+    t.includes("email")
+  ) {
+    score += 5;
+  }
+  // Weak positive: "Continue" is often the real submit on single-field
+  // forms; it should beat nothing but lose to OAuth markers.
+  if (t.includes("continue")) score += 2;
+  // OAuth / SSO buttons are submit-typed too — the provider name is
+  // the reliable discriminator, so drive those firmly negative.
+  if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso|saml)\b/.test(t)) {
+    score -= 20;
+  }
+  if (t.includes("sign in") || t.includes("log in") || t.includes("login")) score -= 12;
+  return score;
+}
+
+// Rank + cap the raw inventory before it goes to the planner. Every
+// input/textarea/select is kept — they are the load-bearing form
+// fields and a page has few. Only buttons/links/role elements are
+// ranked (by signup-relevance) and capped, since a marketing page
+// carries dozens of nav/footer buttons (F3 Issue 3 + Tension 2: a
+// flat cap could truncate the real email field). Re-indexes the kept
+// set and reports how many buttons were dropped.
+export function rankAndCapInventory(
+  elements: readonly InteractiveElement[],
+  buttonCap = 25,
+): { inventory: InteractiveElement[]; buttonsDropped: number } {
+  const isButtonish = (e: InteractiveElement): boolean =>
+    e.tag === "button" ||
+    e.tag === "a" ||
+    e.type === "submit" ||
+    e.type === "button" ||
+    e.type === "reset";
+  const fields = elements.filter((e) => !isButtonish(e));
+  const ranked = elements
+    .filter(isButtonish)
+    .map((e) => ({
+      e,
+      score: scoreSignupButton(
+        `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+      ),
+    }))
+    .sort((a, b) => b.score - a.score);
+  const keptButtons = ranked.slice(0, buttonCap).map((x) => x.e);
+  const inventory = [...fields, ...keptButtons].map((e, i) => ({
+    ...e,
+    index: i,
+  }));
+  return {
+    inventory,
+    buttonsDropped: Math.max(0, ranked.length - keptButtons.length),
+  };
 }

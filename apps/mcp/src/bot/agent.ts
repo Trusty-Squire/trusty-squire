@@ -8,7 +8,13 @@
 // executor; the prompt is the contract. If a service breaks we tweak the
 // prompt rather than threading service-specific logic through the agent.
 
-import type { BrowserController, CaptchaKind, CaptchaVariant } from "./browser.js";
+import type {
+  BrowserController,
+  CaptchaKind,
+  CaptchaVariant,
+  InteractiveElement,
+} from "./browser.js";
+import { rankAndCapInventory, scoreSignupButton } from "./browser.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -133,6 +139,16 @@ export interface SignupPlan {
   confidence: "high" | "medium" | "low";
   notes?: string;
 }
+
+// Outcome of planExecuteWithRetry — the form-fill + submit phase (F3
+// T5). signup() maps each kind to a SignupResult, except `submitted`
+// which falls through to credential extraction.
+type PlanExecOutcome =
+  | { kind: "submitted" }
+  | { kind: "captcha_blocked"; captchaKind: string }
+  | { kind: "submit_failed"; reason: string }
+  | { kind: "planning_failed"; reason: string }
+  | { kind: "oauth_required" };
 
 // What to do next after the verification link is clicked. Most services
 // land you on a dashboard with the API key visible; some require one or
@@ -272,7 +288,10 @@ function validateAction(value: unknown, index: number): FillAction {
   }
 }
 
-export function parseSignupPlan(raw: string): SignupPlan {
+export function parseSignupPlan(
+  raw: string,
+  allowedSelectors?: ReadonlySet<string>,
+): SignupPlan {
   const obj = extractJsonObject(raw);
   const rawActions = obj["actions"];
   if (!Array.isArray(rawActions)) {
@@ -284,10 +303,88 @@ export function parseSignupPlan(raw: string): SignupPlan {
   if (confidence !== "high" && confidence !== "medium" && confidence !== "low") {
     throw new Error(`signup plan: invalid confidence ${JSON.stringify(confidence)}`);
   }
+  // F3 T4: when the page inventory is supplied, every selector the
+  // planner emits must be one the bot computed and put in the
+  // inventory. This makes selector hallucination a parse-time
+  // rejection (the throw triggers a re-plan) before any DOM
+  // round-trip — and an invalid selector like `:contains()` simply
+  // isn't in the inventory, so it is caught here too.
+  if (allowedSelectors !== undefined) {
+    for (const a of actions) {
+      if (!allowedSelectors.has(a.selector)) {
+        throw new Error(
+          `signup plan: action selector ${JSON.stringify(a.selector)} is not in the page inventory`,
+        );
+      }
+    }
+    if (!allowedSelectors.has(submitSelector)) {
+      throw new Error(
+        `signup plan: submit_selector ${JSON.stringify(submitSelector)} is not in the page inventory`,
+      );
+    }
+  }
   const notes = typeof obj["notes"] === "string" ? obj["notes"] : undefined;
   return notes !== undefined
     ? { actions, submit_selector: submitSelector, confidence, notes }
     : { actions, submit_selector: submitSelector, confidence };
+}
+
+// Render the element inventory as a compact text block for the
+// planner — one line per element, ending with the verified
+// `selector=` the planner must copy verbatim (F3 T3).
+export function formatInventory(inventory: readonly InteractiveElement[]): string {
+  if (inventory.length === 0) return "(no interactive elements found on the page)";
+  return inventory
+    .map((e) => {
+      const bits: string[] = [`[${e.index}] ${e.tag}`];
+      if (e.type !== null) bits.push(`type=${e.type}`);
+      if (e.name !== null) bits.push(`name=${e.name}`);
+      if (e.placeholder !== null) {
+        bits.push(`placeholder=${JSON.stringify(e.placeholder)}`);
+      }
+      const label = e.labelText ?? e.ariaLabel;
+      if (label !== null && label !== undefined) {
+        bits.push(`label=${JSON.stringify(label)}`);
+      }
+      if (
+        e.tag !== "input" &&
+        e.tag !== "textarea" &&
+        e.tag !== "select" &&
+        e.visibleText !== null
+      ) {
+        bits.push(`text=${JSON.stringify(e.visibleText)}`);
+      }
+      if (e.inConsentWidget) bits.push("[cookie-consent — avoid]");
+      bits.push(`selector=${e.selector}`);
+      return bits.join("  ");
+    })
+    .join("\n");
+}
+
+// True when the page has no fillable text input AND no button that
+// reads as an email-signup option — a genuinely OAuth/SSO-only
+// service with no form to automate (F3 Issue 4).
+export function isOauthOnlyChooser(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const TEXTLIKE = new Set<string | null>([
+    "text",
+    "email",
+    "password",
+    "tel",
+    null,
+  ]);
+  const hasFillableInput = inventory.some(
+    (e) => (e.tag === "input" && TEXTLIKE.has(e.type)) || e.tag === "textarea",
+  );
+  if (hasFillableInput) return false;
+  const hasEmailOption = inventory.some(
+    (e) =>
+      scoreSignupButton(
+        `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+      ) > 0,
+  );
+  return !hasEmailOption;
 }
 
 export function parsePostVerifyStep(raw: string): PostVerifyStep {
@@ -517,8 +614,17 @@ export class SignupAgent {
     plan: SignupPlan,
     fillValues: Record<FillValueKind, string>,
     steps: string[],
+    bySelector: Map<string, InteractiveElement>,
   ): Promise<void> {
     for (const action of plan.actions) {
+      const el = bySelector.get(action.selector);
+      // Belt-and-suspenders: the planner is told to skip
+      // cookie-consent elements; never act on one even if it slips
+      // through (Render's TOS check hit an Osano consent toggle).
+      if (el !== undefined && el.inConsentWidget) {
+        steps.push(`Skip ${action.kind} ${action.selector} — inside a cookie-consent widget`);
+        continue;
+      }
       try {
         if (action.kind === "fill") {
           // `literal` is per-action; everything else is a fixed value.
@@ -526,8 +632,14 @@ export class SignupAgent {
             action.value_kind === "literal"
               ? action.literal ?? ""
               : fillValues[action.value_kind];
-          steps.push(`Fill ${action.value_kind} → ${action.selector}`);
-          await this.browser.type(action.selector, value);
+          if (el !== undefined && el.tag === "select") {
+            // A <select> needs selectOption, not type() (Sentry bug).
+            steps.push(`Select ${action.selector}`);
+            await this.browser.selectOption(action.selector);
+          } else {
+            steps.push(`Fill ${action.value_kind} → ${action.selector}`);
+            await this.browser.type(action.selector, value);
+          }
         } else if (action.kind === "check") {
           steps.push(`Check ${action.selector} (${action.reason})`);
           await this.browser.check(action.selector);
@@ -542,6 +654,174 @@ export class SignupAgent {
         // continue — a missing optional field shouldn't abort the whole signup
       }
     }
+  }
+
+  // F3 T5: the verify-and-replan loop. Builds a DOM-grounded element
+  // inventory, has the planner pick from it, verifies the picks
+  // resolve, executes, and submits. A bad pick re-plans instead of
+  // cascading through 10s timeouts. Replan caps are split (Tension
+  // 3): a selector-miss ("the bot erred") is capped tight; a reveal
+  // click or a post-submit validation error ("the page advanced")
+  // gets more headroom. All bounded by the 15-call LLM breaker + the
+  // F2 top-level deadline.
+  private async planExecuteWithRetry(
+    task: SignupTask,
+    fillValues: Record<FillValueKind, string>,
+    steps: string[],
+  ): Promise<PlanExecOutcome> {
+    const MAX_ERROR_REPLANS = 2;
+    const MAX_PROGRESS_REPLANS = 4;
+    let errorReplans = 0;
+    let progressReplans = 0;
+    let hint: string | undefined;
+
+    for (;;) {
+      await this.browser.waitForFormReady();
+      await saveDebugSnapshot(this.browser, "before-fill");
+      const state = await this.browser.getState();
+      const inventory = await this.buildInventory(steps);
+
+      // OAuth-only: no fillable input AND no button that reads as an
+      // email-signup option — nothing to automate (Issue 4).
+      if (isOauthOnlyChooser(inventory)) {
+        return { kind: "oauth_required" };
+      }
+
+      steps.push("Asking Claude to plan the signup form fill...");
+      let plan: SignupPlan;
+      try {
+        plan = await this.planSignupForm({
+          service: task.service,
+          url: state.url,
+          inventory,
+          screenshot: state.screenshot,
+          ...(hint !== undefined ? { hint } : {}),
+        });
+      } catch (err) {
+        // Parse/validation failure — includes a hallucinated selector
+        // rejected by the inventory check. An error replan.
+        const reason = err instanceof Error ? err.message : String(err);
+        if (++errorReplans > MAX_ERROR_REPLANS) {
+          return { kind: "planning_failed", reason: `planner output never validated: ${reason}` };
+        }
+        steps.push(`⚠ plan rejected (${reason}) — re-planning`);
+        hint =
+          "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
+        continue;
+      }
+      steps.push(
+        `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
+          (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
+      );
+
+      // Verify the picks resolve on the live page — also catches a
+      // stale selector resolving to a recycled wrong node (Tension 4).
+      const bySelector = new Map(inventory.map((e) => [e.selector, e]));
+      const miss = await this.verifyPlan(plan, bySelector);
+      if (miss !== null) {
+        if (++errorReplans > MAX_ERROR_REPLANS) {
+          return { kind: "planning_failed", reason: `planned selectors kept missing: ${miss}` };
+        }
+        steps.push(`⚠ planned selectors did not verify (${miss}) — re-planning`);
+        hint = `These selectors did not resolve correctly: ${miss}. Pick different inventory entries.`;
+        continue;
+      }
+
+      await this.executePlan(plan, fillValues, steps, bySelector);
+
+      // A plan with no fill actions only revealed/advanced the page (a
+      // cookie banner, a two-stage "sign up with email" chooser) — the
+      // real form should now be present. Re-extract and plan it.
+      const hadFill = plan.actions.some((a) => a.kind === "fill");
+      if (!hadFill) {
+        if (++progressReplans > MAX_PROGRESS_REPLANS) {
+          return { kind: "planning_failed", reason: "never reached a fillable form" };
+        }
+        steps.push("Plan only revealed the page — re-planning the now-visible form");
+        hint =
+          "The previous step revealed or advanced the page. Plan the signup form that should now be visible.";
+        continue;
+      }
+
+      // Captcha gate + submit.
+      const preGate = await this.runCaptchaGate("Pre-submit", steps);
+      if (preGate.blocked) return { kind: "captcha_blocked", captchaKind: preGate.kind };
+
+      steps.push(`Submit → ${plan.submit_selector}`);
+      try {
+        await this.browser.clickSubmit(plan.submit_selector);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        steps.push(`⚠ submit click failed: ${reason}`);
+        return { kind: "submit_failed", reason };
+      }
+      await this.browser.wait(5);
+
+      const postGate = await this.runCaptchaGate("Post-submit", steps);
+      if (postGate.blocked) return { kind: "captcha_blocked", captchaKind: postGate.kind };
+      if (postGate.found && postGate.solved) {
+        // Re-click submit so the populated token ships with the form.
+        try {
+          await this.browser.click(plan.submit_selector);
+          await this.browser.wait(3);
+        } catch (err) {
+          steps.push(
+            `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      // Post-submit validation errors → the page advanced; re-plan
+      // against the new state (a progress replan).
+      const afterText = (await this.browser.extractText()).slice(0, 4000);
+      if (this.looksLikeValidationFailure(afterText)) {
+        if (++progressReplans > MAX_PROGRESS_REPLANS) {
+          // Out of replan headroom — proceed; credential extraction
+          // confirms whether the signup actually went through.
+          return { kind: "submitted" };
+        }
+        steps.push("Post-submit validation errors — re-planning");
+        hint = `The previous submit produced validation errors. Visible page text: ${afterText.slice(0, 600)}`;
+        continue;
+      }
+      return { kind: "submitted" };
+    }
+  }
+
+  // Extract + rank the page's interactive elements (F3 T1/T2).
+  private async buildInventory(steps: string[]): Promise<InteractiveElement[]> {
+    const raw = await this.browser.extractInteractiveElements();
+    const { inventory, buttonsDropped } = rankAndCapInventory(raw);
+    steps.push(
+      `Inventory: ${inventory.length} element(s)` +
+        (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
+    );
+    return inventory;
+  }
+
+  // Verify every selector the plan references still resolves on the
+  // live page, and — when the inventory entry had an id — that it
+  // resolves to that same element (Tension 4: a stale structural
+  // selector can resolve to a recycled wrong node). Returns a
+  // human-readable miss list, or null when every selector is good.
+  private async verifyPlan(
+    plan: SignupPlan,
+    bySelector: Map<string, InteractiveElement>,
+  ): Promise<string | null> {
+    const selectors = [...plan.actions.map((a) => a.selector), plan.submit_selector];
+    const misses: string[] = [];
+    for (const sel of new Set(selectors)) {
+      const info = await this.browser.inspectSelector(sel);
+      if (info.count === 0) {
+        misses.push(sel);
+        continue;
+      }
+      const inv = bySelector.get(sel);
+      if (inv !== undefined && inv.id !== null && info.id !== inv.id) {
+        misses.push(`${sel} (resolved to the wrong element)`);
+      }
+    }
+    return misses.length > 0 ? misses.join(", ") : null;
   }
 
   constructor(
@@ -763,142 +1043,53 @@ export class SignupAgent {
         }
       }
 
-      // Wait for the form to actually render before planning (F1) —
-      // SPA and two-stage signup pages render late, and screenshotting
-      // a skeleton makes the planner emit selectors that don't exist.
-      steps.push("Waiting for the signup form to render...");
-      await this.browser.waitForFormReady();
-
-      // Step 2: Plan the form fill with Claude.
-      steps.push("Asking Claude to plan the signup form fill...");
-      await saveDebugSnapshot(this.browser, "before-fill");
-      const state = await this.browser.getState();
-      const plan = await this.planSignupForm({
-        service: task.service,
-        url: state.url,
-        html: state.html,
-        screenshot: state.screenshot,
-      });
-      steps.push(`Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}${plan.notes !== undefined ? ` — ${plan.notes}` : ""}`);
-
-      // Step 3: Execute the plan.
+      // Steps 2-5: plan the form, fill it, submit — via the
+      // verify-and-replan loop (F3). The planner picks selectors from
+      // a DOM-grounded element inventory; a bad pick re-plans instead
+      // of cascading through 10s timeouts to total failure.
       const fillValues: Record<FillValueKind, string> = {
         email: task.email,
         password,
         name: displayName,
         username,
         company: "Trusty Squire",
-        // `literal` has no fixed value — resolved per-action below.
+        // `literal` has no fixed value — resolved per-action.
         literal: "",
       };
-      await this.executePlan(plan, fillValues, steps);
-
-      // Tier 2 captcha (pre-submit): check for a visible
-      // Turnstile/reCAPTCHA widget rendered inline with the form.
-      // Many sites render the widget alongside the form on first
-      // load; failing to interact with it leaves cf-turnstile-response
-      // empty and the submit gets server-side-rejected with a generic
-      // validation error we'd waste a re-plan trying to debug.
-      const preSubmitGate = await this.runCaptchaGate("Pre-submit", steps);
-      if (preSubmitGate.blocked) {
-        return {
-          success: false,
-          error: `captcha_blocked: visible ${preSubmitGate.kind} challenge did not resolve. The site flagged this session.`,
-          steps,
-          ...this.resultTail(),
-        };
+      const outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+      switch (outcome.kind) {
+        case "captcha_blocked":
+          return {
+            success: false,
+            error: `captcha_blocked: ${outcome.captchaKind} challenge did not resolve. The site flagged this session.`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "submit_failed":
+          return {
+            success: false,
+            error: `submit_failed: could not click the signup button — ${outcome.reason}`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "planning_failed":
+          return {
+            success: false,
+            error: `planning_failed: ${outcome.reason}`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "oauth_required":
+          return {
+            success: false,
+            error: `oauth_required: ${task.service} offers only OAuth/SSO signup — there is no email/password form to automate.`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "submitted":
+          break;
       }
-
-      // Step 4: Submit. clickSubmit() disambiguates when the planned
-      // selector matches several button[type=submit] (OAuth buttons are
-      // submit-typed too). A submit click that fails means the form was
-      // never submitted — fail fast here rather than fall through into
-      // the multi-minute verification-email poll for an email that can
-      // never arrive.
-      steps.push(`Submit → ${plan.submit_selector}`);
-      try {
-        await this.browser.clickSubmit(plan.submit_selector);
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        steps.push(`⚠ submit click failed: ${reason}`);
-        return {
-          success: false,
-          error: `submit_failed: could not click the signup button — ${reason}`,
-          steps,
-          ...this.resultTail(),
-        };
-      }
-      await this.browser.wait(5);
-
-      // Tier 2 captcha (post-submit): some services only render the
-      // challenge after form submission (deferred rendering). Same
-      // shape as the pre-submit check.
-      const postSubmitGate = await this.runCaptchaGate("Post-submit", steps);
-      if (postSubmitGate.blocked) {
-        return {
-          success: false,
-          error: `captcha_blocked: post-submit ${postSubmitGate.kind} challenge did not resolve.`,
-          steps,
-          ...this.resultTail(),
-        };
-      }
-      if (postSubmitGate.found && postSubmitGate.solved) {
-        // Re-click submit so the populated token ships with the form.
-        try {
-          await this.browser.click(plan.submit_selector);
-          await this.browser.wait(3);
-        } catch (err) {
-          steps.push(
-            `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-
       await saveDebugSnapshot(this.browser, "after-submit");
-
-      // Step 5: Detect post-submit validation errors — if visible text contains
-      // hints like "required", "must be between", "please accept", we re-plan
-      // once with the new state. This handles the Postmark-style server-side
-      // validation case.
-      const afterSubmitText = (await this.browser.extractText()).slice(0, 4000);
-      if (this.looksLikeValidationFailure(afterSubmitText)) {
-        steps.push("Post-submit text suggests validation errors — re-planning...");
-        const state2 = await this.browser.getState();
-        const plan2 = await this.planSignupForm({
-          service: task.service,
-          url: state2.url,
-          html: state2.html,
-          screenshot: state2.screenshot,
-          hint: `Previous submit produced validation errors. Visible page text snippet: ${afterSubmitText.slice(0, 800)}`,
-        });
-        await this.executePlan(plan2, fillValues, steps);
-        // Re-plan path: same captcha guard as initial submit. If the
-        // first submit triggered captcha rendering, the second pass
-        // sees it inline.
-        const replanGate = await this.runCaptchaGate("Re-plan", steps);
-        if (replanGate.blocked) {
-          return {
-            success: false,
-            error: `captcha_blocked: re-plan ${replanGate.kind} challenge did not resolve.`,
-            steps,
-            ...this.resultTail(),
-          };
-        }
-        try {
-          await this.browser.clickSubmit(plan2.submit_selector);
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          steps.push(`⚠ re-plan submit click failed: ${reason}`);
-          return {
-            success: false,
-            error: `submit_failed: re-plan submit could not click the signup button — ${reason}`,
-            steps,
-            ...this.resultTail(),
-          };
-        }
-        await this.browser.wait(5);
-        await saveDebugSnapshot(this.browser, "after-resubmit");
-      }
 
       // Step 6: Extract creds from page.
       steps.push("Extracting credentials from page...");
@@ -990,68 +1181,67 @@ export class SignupAgent {
   private async planSignupForm(input: {
     service: string;
     url: string;
-    html: string;
+    inventory: InteractiveElement[];
     screenshot: string; // base64
     hint?: string;
   }): Promise<SignupPlan> {
-    // Trim HTML to just <form>...</form> regions if possible — the prompt
-    // budget matters and most pages have a lot of marketing chrome.
-    const trimmedHtml = this.extractFormHtml(input.html);
+    const systemPrompt = `You plan how to fill a web signup form.
 
-    const systemPrompt = `You analyze a web signup form and emit a JSON plan describing how to fill it.
+You are given a screenshot of the page and an INVENTORY of its
+interactive elements — each line carries a precise \`selector=\` the
+bot has already verified resolves. Your job: pick which inventory
+elements to fill / check / click.
+
 Output rules:
 - Reply with ONE JSON object only. No prose, no markdown.
 - Schema:
   {
     "actions": [
-      {"kind":"fill","selector":"CSS_SELECTOR","value_kind":"email|password|name|username|company|literal","literal":"only when value_kind=literal","reason":"why"},
-      {"kind":"check","selector":"CSS_SELECTOR","reason":"TOS / marketing-opt-in / etc."},
-      {"kind":"click","selector":"CSS_SELECTOR","reason":"e.g. accept cookies before form is reachable"}
+      {"kind":"fill","selector":"<a selector= copied verbatim from the inventory>","value_kind":"email|password|name|username|company|literal","literal":"only when value_kind=literal","reason":"why"},
+      {"kind":"check","selector":"<from inventory>","reason":"TOS checkbox etc."},
+      {"kind":"click","selector":"<from inventory>","reason":"e.g. reveal the email form"}
     ],
-    "submit_selector": "CSS_SELECTOR for the primary signup button",
+    "submit_selector": "<a selector= from the inventory — the primary signup button>",
     "confidence": "high|medium|low",
-    "notes": "optional caveats"
+    "notes": "optional"
   }
-- Prefer stable selectors: name attributes, id, then aria-label. Avoid nth-child unless unavoidable.
-- Include the TOS/agree checkbox if one is required.
-- If a cookie banner is blocking the form, click "Accept" first.
-- Do NOT include password confirmation as a separate action unless the form has a visible second password field.
-- Skip optional/marketing-opt-in checkboxes.
-- For "name" use a realistic full name. For "username" generate a plausible 7-15 char handle.`;
+- CRITICAL: every "selector" you emit MUST be copied verbatim from a
+  \`selector=\` field in the inventory below. Never invent, guess, or
+  modify a selector. A selector not in the inventory is rejected and
+  you will be asked to re-plan.
+- Include the TOS/agree checkbox if the form has one.
+- Skip elements marked [cookie-consent — avoid], and skip optional
+  marketing-opt-in checkboxes.
+- Do NOT add a separate password-confirmation fill unless the
+  inventory shows a second password field.
+- Two-stage pages: if the inventory has only buttons (e.g. "Sign up
+  with email" / "Continue with Google") and no input fields, emit a
+  single click action on the EMAIL-signup button, and set
+  submit_selector to that same button.
+- For "name" use a realistic full name; for "username" a plausible
+  7-15 char handle.`;
 
+    const hintLine = input.hint !== undefined ? `\nHint: ${input.hint}` : "";
     const userBlocks: LLMBlock[] = [
       { kind: "image", media_type: "image/png", data_base64: input.screenshot },
       {
         kind: "text",
         text: `Service: ${input.service}
-URL: ${input.url}
-${input.hint !== undefined ? `Hint: ${input.hint}\n` : ""}
-Form HTML (trimmed):
-${trimmedHtml}`,
+URL: ${input.url}${hintLine}
+
+Interactive element inventory:
+${formatInventory(input.inventory)}`,
       },
     ];
 
+    // F3 T4: the planner may only pick selectors the bot supplied.
+    const allowed = new Set(input.inventory.map((e) => e.selector));
     return this.callLLM({
       system: systemPrompt,
       userBlocks,
       maxTokens: 1500,
-      parse: parseSignupPlan,
+      parse: (raw) => parseSignupPlan(raw, allowed),
     });
-  }
-
-  // Extract just <form> elements from the HTML — drops marketing + scripts.
-  private extractFormHtml(html: string): string {
-    const forms: string[] = [];
-    const re = /<form\b[\s\S]*?<\/form>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) forms.push(m[0]);
-    const joined = forms.join("\n");
-    if (joined.length === 0) {
-      // No <form> — fall back to body but cap aggressively
-      return html.slice(0, 20000);
-    }
-    // Cap at 20k chars (~5k tokens) to leave room for the screenshot and reply
-    return joined.slice(0, 20000);
   }
 
   private looksLikeValidationFailure(text: string): boolean {

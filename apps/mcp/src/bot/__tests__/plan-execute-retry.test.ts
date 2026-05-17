@@ -1,0 +1,239 @@
+// F3 T5 — the unified planExecuteWithRetry loop. Covers the four
+// behaviours the rework rests on:
+//   1. REGRESSION (IRON RULE): a post-submit validation error still
+//      triggers a re-plan — the path that used to be a standalone
+//      block and is now folded into the loop.
+//   2. a planned selector that resolves to the WRONG element re-plans
+//      (Tension 4 — the verify attribute-match).
+//   3. a reveal-only plan (two-stage chooser) re-plans the now-
+//      visible form.
+//   4. an OAuth-only page returns oauth_required before planning.
+//
+// planExecuteWithRetry is private — reflected here, the same
+// break-the-encapsulation pattern as captcha-short-circuit.test.ts.
+
+import { describe, expect, it } from "vitest";
+import { SignupAgent } from "../agent.js";
+import type {
+  BrowserController,
+  BrowserState,
+  CaptchaSolveResult,
+  InteractiveElement,
+} from "../browser.js";
+import type { LLMClient, LLMResponse } from "../llm-client.js";
+
+function mk(over: Partial<InteractiveElement>): InteractiveElement {
+  return {
+    index: 0,
+    tag: "input",
+    type: null,
+    id: null,
+    name: null,
+    placeholder: null,
+    ariaLabel: null,
+    labelText: null,
+    visibleText: null,
+    selector: "#x",
+    visible: true,
+    inViewport: true,
+    inConsentWidget: false,
+    ...over,
+  };
+}
+
+const fillPlan = (sel: string, submit: string): string =>
+  JSON.stringify({
+    actions: [{ kind: "fill", selector: sel, value_kind: "email", reason: "email" }],
+    submit_selector: submit,
+    confidence: "high",
+  });
+
+const clickPlan = (sel: string): string =>
+  JSON.stringify({
+    actions: [{ kind: "click", selector: sel, reason: "reveal the email form" }],
+    submit_selector: sel,
+    confidence: "high",
+  });
+
+// LLM stub that replays a queue of plan replies (last reply sticks).
+class QueueLLM implements LLMClient {
+  readonly name = "queue";
+  public calls = 0;
+  constructor(private readonly replies: string[]) {}
+  async createMessage(): Promise<LLMResponse> {
+    const r = this.replies[Math.min(this.calls, this.replies.length - 1)];
+    this.calls += 1;
+    return { text: r ?? "{}", backend: this.name };
+  }
+}
+
+// Browser stub: inventory + extractText are per-call queues so a test
+// can model the page changing between loop iterations. inspectSelector
+// defaults to "resolves cleanly"; tests override it to model a miss.
+class FakeBrowser {
+  public inventoryQueue: InteractiveElement[][] = [[]];
+  public extractTextValues: string[] = [""];
+  public inspectSelectorImpl: (sel: string) => {
+    count: number;
+    tag: string | null;
+    id: string | null;
+    name: string | null;
+  } = () => ({ count: 1, tag: null, id: null, name: null });
+  private invCalls = 0;
+  private textCalls = 0;
+
+  get channel(): string | null {
+    return null;
+  }
+  async prewarm(): Promise<void> {}
+  async goto(): Promise<void> {}
+  async wait(): Promise<void> {}
+  async waitForFormReady(): Promise<void> {}
+  async type(): Promise<void> {}
+  async check(): Promise<void> {}
+  async click(): Promise<void> {}
+  async clickSubmit(): Promise<void> {}
+  async selectOption(): Promise<void> {}
+  async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
+    return { found: false };
+  }
+  async getState(): Promise<BrowserState> {
+    return { url: "https://x.test/signup", title: "Sign up", html: "", screenshot: "" };
+  }
+  async extractText(): Promise<string> {
+    const i = Math.min(this.textCalls, this.extractTextValues.length - 1);
+    this.textCalls += 1;
+    return this.extractTextValues[i] ?? "";
+  }
+  async extractInteractiveElements(): Promise<InteractiveElement[]> {
+    const i = Math.min(this.invCalls, this.inventoryQueue.length - 1);
+    this.invCalls += 1;
+    return this.inventoryQueue[i] ?? [];
+  }
+  async inspectSelector(
+    selector: string,
+  ): Promise<{ count: number; tag: string | null; id: string | null; name: string | null }> {
+    return this.inspectSelectorImpl(selector);
+  }
+}
+
+interface Outcome {
+  kind: string;
+}
+
+function isController(_v: unknown): _v is BrowserController {
+  return true;
+}
+
+async function runLoop(
+  browser: FakeBrowser,
+  llm: QueueLLM,
+): Promise<{ outcome: Outcome; steps: string[] }> {
+  const asController: unknown = browser;
+  if (!isController(asController)) throw new Error("unreachable");
+  const agent = new SignupAgent(asController, llm);
+  const steps: string[] = [];
+  const fillValues = {
+    email: "bot@inbox.test",
+    password: "Pw-test-12345",
+    name: "Test Bot",
+    username: "testbot12",
+    company: "Trusty Squire",
+    literal: "",
+  };
+  const fn = (
+    agent as unknown as {
+      planExecuteWithRetry: (
+        t: { service: string; email: string },
+        fv: typeof fillValues,
+        s: string[],
+      ) => Promise<Outcome>;
+    }
+  ).planExecuteWithRetry.bind(agent);
+  const outcome = await fn({ service: "Test", email: "bot@inbox.test" }, fillValues, steps);
+  return { outcome, steps };
+}
+
+describe("planExecuteWithRetry", () => {
+  it("REGRESSION: a post-submit validation error re-plans (IRON RULE)", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    // First submit shows a validation error; the re-plan's submit is clean.
+    browser.extractTextValues = ["Email is required", ""];
+    const llm = new QueueLLM([fillPlan("#email", "#go"), fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /validation errors? — re-planning/i.test(s))).toBe(true);
+    expect(llm.calls).toBe(2); // re-planned once
+  });
+
+  it("re-plans when a planned selector resolves to the wrong element", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", id: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    // #email resolves, but to an element whose id != the inventory's
+    // on the first plan (a recycled node); the re-plan resolves clean.
+    let emailInspects = 0;
+    browser.inspectSelectorImpl = (sel) => {
+      if (sel === "#email") {
+        emailInspects += 1;
+        return emailInspects <= 1
+          ? { count: 1, tag: "input", id: "stale-other", name: null }
+          : { count: 1, tag: "input", id: "email", name: null };
+      }
+      return { count: 1, tag: "button", id: null, name: null };
+    };
+    const llm = new QueueLLM([fillPlan("#email", "#go"), fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /did not verify/i.test(s))).toBe(true);
+  });
+
+  it("re-plans the now-visible form after a reveal-only (two-stage) plan", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      // Stage 1: a chooser — only a "sign up with email" button.
+      [mk({ tag: "button", visibleText: "Sign up with email", selector: "#emailBtn" })],
+      // Stage 2: the revealed form.
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    const llm = new QueueLLM([clickPlan("#emailBtn"), fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /only revealed the page/i.test(s))).toBe(true);
+  });
+
+  it("returns oauth_required when the page has only OAuth buttons", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "button", visibleText: "Continue with Google", selector: "#g" }),
+        mk({ tag: "button", visibleText: "Continue with GitHub", selector: "#h" }),
+      ],
+    ];
+    const llm = new QueueLLM([fillPlan("#x", "#x")]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("oauth_required");
+    expect(llm.calls).toBe(0); // detected before any planner call
+  });
+});

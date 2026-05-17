@@ -7,7 +7,12 @@
 
 import { describe, expect, it } from "vitest";
 import { SignupAgent, type AgentInbox } from "../agent.js";
-import type { BrowserController, BrowserState, CaptchaSolveResult } from "../browser.js";
+import type {
+  BrowserController,
+  BrowserState,
+  CaptchaSolveResult,
+  InteractiveElement,
+} from "../browser.js";
 import type { LLMClient, LLMRequest, LLMResponse } from "../llm-client.js";
 
 // Returns a valid signup plan so signup() proceeds all the way to the
@@ -60,6 +65,50 @@ class SubmitFailsBrowser {
     throw new Error(
       `submit selector "${selector}" matched 3 buttons, none scoring as a signup button`,
     );
+  }
+  // A minimal inventory the planner's fixed plan (#email +
+  // button[type=submit]) validates against.
+  async extractInteractiveElements(): Promise<InteractiveElement[]> {
+    return [
+      {
+        index: 0,
+        tag: "input",
+        type: "email",
+        id: "email",
+        name: "email",
+        placeholder: null,
+        ariaLabel: null,
+        labelText: null,
+        visibleText: null,
+        selector: "#email",
+        visible: true,
+        inViewport: true,
+        inConsentWidget: false,
+      },
+      {
+        index: 1,
+        tag: "button",
+        type: "submit",
+        id: null,
+        name: null,
+        placeholder: null,
+        ariaLabel: null,
+        labelText: null,
+        visibleText: "Create account",
+        selector: "button[type=submit]",
+        visible: true,
+        inViewport: true,
+        inConsentWidget: false,
+      },
+    ];
+  }
+  async inspectSelector(
+    selector: string,
+  ): Promise<{ count: number; tag: string | null; id: string | null; name: string | null }> {
+    if (selector === "#email") {
+      return { count: 1, tag: "input", id: "email", name: "email" };
+    }
+    return { count: 1, tag: "button", id: null, name: null };
   }
 }
 

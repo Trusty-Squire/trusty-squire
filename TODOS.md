@@ -293,8 +293,10 @@ mechanics. Ranked by leverage.
   the run. `signup()` now races a hard deadline
   (`UNIVERSAL_BOT_RUN_TIMEOUT_MS`, default 600s) and returns
   `run_timeout` instead of hanging. Test: `run-timeout.test.ts`.
-- [ ] **F3 — Planner/executor reliability rework. [P1]** Reviewed
-  2026-05-16 (`/plan-eng-review`). Confirmed by the re-sweep (0/14):
+- [x] **F3 — Planner/executor reliability rework. — shipped in
+  `@trusty-squire/mcp@0.1.12`.** [P1] Reviewed + implemented
+  2026-05-16 (`/plan-eng-review`, 8 tasks T1-T8). Confirmed by the
+  re-sweep (0/14):
   the planner guesses CSS selectors off a screenshot — it is fed a
   `<form>`-regex scrape that returns marketing chrome on `<form>`-less
   SPA pages — and the executor runs the plan blind. Fix: a DOM-grounded

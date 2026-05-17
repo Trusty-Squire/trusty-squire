@@ -226,6 +226,22 @@ export const provisionAnyTool = {
       };
     }
 
+    // OAuth-only service: there is no email/password form to automate
+    // (F3 Issue 4). Surface it as its own status so the agent can tell
+    // the user plainly rather than reporting a generic failure.
+    if (result.error !== undefined && result.error.startsWith("oauth_required")) {
+      return {
+        status: "oauth_required",
+        service: input.service,
+        error: result.error,
+        steps: result.steps,
+        browser_channel: result.browser_channel ?? null,
+        message:
+          `${input.service} only offers Google/GitHub (OAuth) signup — there is no email form the bot can fill. ` +
+          `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+      };
+    }
+
     return {
       status: "failed",
       service: input.service,
