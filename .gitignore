@@ -10,6 +10,7 @@ out/
 
 *.tsbuildinfo
 *.log
+*.tgz
 coverage/
 .nyc_output/
 
