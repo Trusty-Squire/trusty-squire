@@ -7,6 +7,7 @@
     "src/**/__tests__/**",
     "src/bot/cli.ts",
     "src/bot/test-with-inbox.ts",
-    "src/bot/eval-planner.ts"
+    "src/bot/eval-planner.ts",
+    "src/bot/oauth-login-spike.ts"
   ]
 }
