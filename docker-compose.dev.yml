@@ -1,5 +1,9 @@
 # Local development services. Persisted volumes so data survives `down`.
 # Run via `docker compose -f docker-compose.dev.yml up -d`.
+#
+# Ports bind to 127.0.0.1 only — these are dev services (production runs
+# on Fly) and must never be reachable from the public internet. An
+# unauthenticated Redis or Postgres on 0.0.0.0 gets scanned and exploited.
 
 services:
   postgres:
@@ -11,7 +15,7 @@ services:
       POSTGRES_PASSWORD: dev
       POSTGRES_DB: trusty_squire
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # On first start, create the vault's separate database. Ignored on
@@ -28,7 +32,7 @@ services:
     container_name: trusty-squire-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -42,8 +46,8 @@ services:
     container_name: trusty-squire-mailhog
     restart: unless-stopped
     ports:
-      - "1025:1025"
-      - "8025:8025"
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
 
 volumes:
   postgres_data:
