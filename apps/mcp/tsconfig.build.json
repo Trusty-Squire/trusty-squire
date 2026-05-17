@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "comment": "cli.ts and test-with-inbox.ts are manual dev harnesses — they import the @trusty-squire/inbox devDependency, so they must not be compiled into the published dist.",
+  "comment": "cli.ts, test-with-inbox.ts, the spikes and the thin-slice harness are manual dev tools — they must not be compiled into the published dist.",
   "exclude": [
     "dist",
     "node_modules",
@@ -8,6 +8,7 @@
     "src/bot/cli.ts",
     "src/bot/test-with-inbox.ts",
     "src/bot/eval-planner.ts",
-    "src/bot/oauth-login-spike.ts"
+    "src/bot/oauth-login-spike.ts",
+    "src/bot/oauth-thin-slice.ts"
   ]
 }
