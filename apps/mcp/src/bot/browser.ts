@@ -23,9 +23,10 @@
 // agent.ts.
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, Locator, Page } from "playwright";
+import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
+import { CHROME_PROFILE_DIR } from "./profile.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -76,6 +77,10 @@ export interface BrowserControllerOptions {
   // and should be disabled in unit tests so they run fast and
   // deterministically.
   humanize?: boolean;
+  // Persistent Chrome profile directory. Signup runs launch from this
+  // profile so an OAuth signup reuses the Google session google-login.ts
+  // established. Defaults to CHROME_PROFILE_DIR.
+  profileDir?: string;
 }
 
 export type CaptchaKind = "turnstile" | "recaptcha";
@@ -201,7 +206,10 @@ async function detectChromiumChannel(): Promise<string | null> {
 }
 
 export class BrowserController {
-  private browser: Browser | null = null;
+  // The persistent browser context. Persistent (launchPersistentContext)
+  // rather than an ephemeral context so the profile carries the user's
+  // Google session across runs — see profile.ts / google-login.ts.
+  private context: BrowserContext | null = null;
   private page: Page | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
@@ -220,8 +228,11 @@ export class BrowserController {
   // different signal from the same failure on a raw datacenter IP.
   private proxyServer: string | null = null;
 
+  private readonly profileDir: string;
+
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
+    this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   }
 
   // Which browser channel the most recent .start() actually used.
@@ -229,7 +240,7 @@ export class BrowserController {
   // real installed browser of that channel. Throws if .start() hasn't
   // been called yet — there's no sensible default to return.
   get channel(): string | null {
-    if (this.browser === null) {
+    if (this.context === null) {
       throw new Error("BrowserController.channel read before .start()");
     }
     return this.launchedChannel;
@@ -239,7 +250,7 @@ export class BrowserController {
   // or null for a direct connection. Useful telemetry alongside
   // `channel`. Throws if .start() hasn't run — same reason as channel.
   get proxied(): string | null {
-    if (this.browser === null) {
+    if (this.context === null) {
       throw new Error("BrowserController.proxied read before .start()");
     }
     return this.proxyServer;
@@ -256,27 +267,12 @@ export class BrowserController {
       `[universal-bot] launching browser channel=${channel ?? "bundled-chromium"} ` +
         `proxy=${proxy?.server ?? "direct"}`,
     );
-    this.browser = await getChromium().launch({
-      headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
-      // `channel:` is a Playwright launch option that tells it to use a
-      // real installed browser instead of the bundled binary. When null
-      // we omit the key entirely so Playwright falls back to default.
-      ...(channel !== null ? { channel } : {}),
-      // `proxy:` routes all egress through a residential proxy. Omitted
-      // (direct connection) for the ~80% of users on residential
-      // networks — see resolveProxy().
-      ...(proxy !== null ? { proxy } : {}),
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-      ],
-    });
-    // T3.1: learn where this run's traffic actually exits (the proxy
-    // exit when proxied, the machine otherwise) so the browser's
-    // declared timezone matches its egress IP. A US-timezone browser
-    // on a foreign proxy IP is itself an anti-bot signal.
-    const geo = await this.probeEgressGeo();
+    // T3.1: probe where this run's traffic actually exits so the
+    // browser's declared timezone matches its egress IP (a US-timezone
+    // browser on a foreign proxy IP is itself an anti-bot signal).
+    // Done before the real launch: launchPersistentContext bakes the
+    // timezone in at creation, with no way to set it afterward.
+    const geo = await this.probeEgressGeo(channel, proxy);
     if (geo !== null) {
       console.error(
         `[universal-bot] egress geo: timezone=${geo.timezoneId}` +
@@ -285,60 +281,79 @@ export class BrowserController {
             : ""),
       );
     }
-    const context = await this.browser.newContext({
+    // T3: a PERSISTENT context. The profile dir carries the user's
+    // Google session (established by `mcp login` — see google-login.ts),
+    // so the OAuth-first signup path reuses it instead of starting
+    // logged-out. launchPersistentContext takes launch + context
+    // options in one call.
+    const context = await getChromium().launchPersistentContext(this.profileDir, {
+      headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
+      // `channel:` selects a real installed browser over the bundled
+      // binary; omitted entirely when null.
+      ...(channel !== null ? { channel } : {}),
+      // `proxy:` routes egress through a residential proxy — only for
+      // datacenter-class egress (see resolveProxy()).
+      ...(proxy !== null ? { proxy } : {}),
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+      ],
       viewport: { width: 1280, height: 720 },
       userAgent:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       // locale stays en-US deliberately: matching it to the proxy
       // country would render signup pages in that language, and the
-      // Claude vision form-planner expects English. timezone is the
-      // dominant IP-geo-mismatch signal; an English browser abroad is
-      // unremarkable, so locale is left as the weak, safe choice.
+      // Claude vision form-planner expects English.
       locale: "en-US",
-      // timezone + geolocation track the real egress (T3.1). Falls
-      // back to a fixed default when the probe fails — no worse than
-      // the pre-T3.1 hardcoded value.
+      // timezone + geolocation track the real egress (T3.1); a fixed
+      // default when the probe failed.
       timezoneId: geo?.timezoneId ?? "America/New_York",
       ...(geo?.geolocation !== undefined
         ? { geolocation: geo.geolocation, permissions: ["geolocation"] }
         : {}),
     });
+    this.context = context;
     // Patch the navigator.webdriver flag — most anti-bot heuristics look here.
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
-    this.page = await context.newPage();
+    this.page = context.pages()[0] ?? (await context.newPage());
   }
 
-  // Probe the run's actual egress geo by loading ipinfo.io through a
-  // throwaway context. The proxy (when active) is set at launch level,
-  // so every context inherits it — this reports the *proxy exit* geo,
-  // not the machine's. Best-effort: any failure returns null and
-  // start() keeps a default timezone. Adds one short navigation to
-  // run start-up.
-  private async probeEgressGeo(): Promise<EgressGeo | null> {
-    if (!this.browser) return null;
-    const browser = this.browser;
-    let ctx: Awaited<ReturnType<typeof browser.newContext>> | undefined;
-    let geo: EgressGeo | null = null;
+  // Probe the run's actual egress geo by loading ipinfo.io. Launches a
+  // throwaway browser: the persistent context isn't up yet, and its
+  // timezone has to be known before it is. The throwaway inherits the
+  // same channel + proxy so it reports the real egress. Best-effort —
+  // any failure returns null and start() keeps a default timezone.
+  private async probeEgressGeo(
+    channel: string | null,
+    proxy: ProxySettings | null,
+  ): Promise<EgressGeo | null> {
+    let probe: Browser | undefined;
     try {
-      ctx = await browser.newContext();
-      const page = await ctx.newPage();
+      probe = await getChromium().launch({
+        headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
+        ...(channel !== null ? { channel } : {}),
+        ...(proxy !== null ? { proxy } : {}),
+        args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      });
+      const page = await probe.newPage();
       await page.goto("https://ipinfo.io/json", {
         timeout: 10000,
         waitUntil: "domcontentloaded",
       });
       const body = await page.evaluate(() => document.body.innerText);
-      geo = parseEgressGeo(body);
+      return parseEgressGeo(body);
     } catch (err) {
       console.error(
         `[universal-bot] egress geo probe failed — using default ` +
           `timezone: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return null;
     } finally {
-      if (ctx !== undefined) await ctx.close();
+      if (probe !== undefined) await probe.close();
     }
-    return geo;
   }
 
   // Decide whether this run egresses through a residential proxy, and
@@ -1173,7 +1188,8 @@ export class BrowserController {
 
   async close(): Promise<void> {
     if (this.page) await this.page.close();
-    if (this.browser) await this.browser.close();
+    // Closing the persistent context shuts the browser down too.
+    if (this.context) await this.context.close();
   }
 }
 

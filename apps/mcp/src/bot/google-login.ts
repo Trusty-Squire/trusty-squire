@@ -26,8 +26,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { CHROME_PROFILE_DIR } from "./profile.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 
@@ -55,7 +55,6 @@ function resolveChromium(): PersistentLauncher {
 }
 
 // --- config ------------------------------------------------------------
-const DEFAULT_PROFILE_DIR = join(homedir(), ".trusty-squire", "chrome-profile");
 const GOOGLE_LOGIN_URL = "https://accounts.google.com/";
 // Auth cookies Google only sets after a completed login.
 const GOOGLE_AUTH_COOKIES = ["__Secure-1PSID", "SAPISID", "SID"];
@@ -306,7 +305,7 @@ export async function ensureGoogleSession(opts?: {
   profileDir?: string;
   timeoutMinutes?: number;
 }): Promise<LoginResult> {
-  const profileDir = opts?.profileDir ?? DEFAULT_PROFILE_DIR;
+  const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
