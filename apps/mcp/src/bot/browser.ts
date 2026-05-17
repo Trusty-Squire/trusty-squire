@@ -1055,31 +1055,49 @@ export class BrowserController {
 
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
+        let base: string;
         const id = el.getAttribute("id");
-        if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
         const name = el.getAttribute("name");
-        if (name !== null && name.length > 0) {
-          return `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
-        }
-        // Structural fallback — a short nth-of-type path.
-        const parts: string[] = [];
-        let node: Element | null = el;
-        for (let depth = 0; depth < 4 && node !== null; depth++) {
-          const cur: Element = node;
-          const t = cur.tagName.toLowerCase();
-          const parent: Element | null = cur.parentElement;
-          if (parent === null) {
-            parts.unshift(t);
-            break;
+        if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) {
+          base = `#${id}`;
+        } else if (name !== null && name.length > 0) {
+          base = `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
+        } else {
+          // Structural fallback — a short nth-of-type path.
+          const parts: string[] = [];
+          let node: Element | null = el;
+          for (let depth = 0; depth < 4 && node !== null; depth++) {
+            const cur: Element = node;
+            const t = cur.tagName.toLowerCase();
+            const parent: Element | null = cur.parentElement;
+            if (parent === null) {
+              parts.unshift(t);
+              break;
+            }
+            const sibs = Array.from(parent.children).filter(
+              (c) => c.tagName === cur.tagName,
+            );
+            const idx = sibs.indexOf(cur) + 1;
+            parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${idx})` : t);
+            node = parent;
           }
-          const sibs = Array.from(parent.children).filter(
-            (c) => c.tagName === cur.tagName,
-          );
-          const idx = sibs.indexOf(cur) + 1;
-          parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${idx})` : t);
-          node = parent;
+          base = parts.join(" > ");
         }
-        return parts.join(" > ");
+        // Guarantee the selector resolves to exactly this element. A
+        // 4-level path (or a stray duplicate id) can be ambiguous —
+        // Back4App's "Continue with email" path also matched a
+        // "Flexibility" tab, and Playwright strict mode then refuses
+        // to act. `>> nth=` is Playwright syntax that pins the exact
+        // match. (querySelectorAll can't see into shadow roots, so a
+        // shadow element's count reads 0 — fine, it returns base.)
+        try {
+          const matches = document.querySelectorAll(base);
+          if (matches.length <= 1) return base;
+          const idx = Array.prototype.indexOf.call(matches, el);
+          return idx >= 0 ? `${base} >> nth=${idx}` : base;
+        } catch {
+          return base;
+        }
       };
 
       const seen = new Set<Element>();

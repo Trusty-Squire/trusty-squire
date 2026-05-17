@@ -143,6 +143,14 @@ describe("parsePostVerifyStep — valid input", () => {
       reason: "loading",
     });
   });
+
+  it("parses a login step", () => {
+    const raw = JSON.stringify({ kind: "login", reason: "signed out — login wall" });
+    expect(parsePostVerifyStep(raw)).toEqual({
+      kind: "login",
+      reason: "signed out — login wall",
+    });
+  });
 });
 
 describe("parsePostVerifyStep — rejection", () => {

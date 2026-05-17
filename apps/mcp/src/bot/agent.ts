@@ -158,6 +158,7 @@ type PlanExecOutcome =
 export type PostVerifyStep =
   | { kind: "done"; reason: string }
   | { kind: "extract"; reason: string }
+  | { kind: "login"; reason: string }
   | { kind: "click"; selector: string; reason: string }
   | { kind: "fill"; selector: string; value: string; reason: string }
   | { kind: "navigate"; url: string; reason: string }
@@ -398,6 +399,8 @@ export function parsePostVerifyStep(raw: string): PostVerifyStep {
       return { kind: "done", reason };
     case "extract":
       return { kind: "extract", reason };
+    case "login":
+      return { kind: "login", reason };
     case "click":
       return {
         kind: "click",
@@ -1362,6 +1365,7 @@ ${formatInventory(input.inventory)}`,
     steps: string[];
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
+    let loginAttempts = 0;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
@@ -1400,6 +1404,13 @@ ${formatInventory(input.inventory)}`,
           await this.browser.wait(3);
         } else if (nextStep.kind === "wait") {
           await this.browser.wait(Math.min(nextStep.seconds, 15));
+        } else if (nextStep.kind === "login") {
+          if (loginAttempts >= 2) {
+            args.steps.push("Post-verify: already attempted login twice — stopping.");
+            break;
+          }
+          loginAttempts += 1;
+          await this.loginWithCredentials(args.email, args.password, args.steps);
         }
       } catch (err) {
         args.steps.push(
@@ -1410,6 +1421,58 @@ ${formatInventory(input.inventory)}`,
       credentials = await this.extractCredentials();
     }
     return credentials;
+  }
+
+  // Sign in with the credentials created during signup, so the
+  // post-verify flow can reach the authenticated dashboard (SendPulse:
+  // confirming the email doesn't establish a session — the API-key
+  // page is then login/CSRF-walled). DOM-grounded and LLM-free: a
+  // login form is just email + password + submit, identifiable from
+  // the F3 inventory by element type. Returns false when the page
+  // isn't a login form.
+  private async loginWithCredentials(
+    email: string,
+    password: string,
+    steps: string[],
+  ): Promise<boolean> {
+    const inv = await this.buildInventory(steps);
+    const emailEl =
+      inv.find((e) => e.tag === "input" && e.type === "email") ??
+      inv.find(
+        (e) => e.tag === "input" && (e.type === "text" || e.type === null),
+      );
+    const pwEl = inv.find((e) => e.tag === "input" && e.type === "password");
+    if (emailEl === undefined || pwEl === undefined) {
+      steps.push("Login: no email/password fields on the page — skipped.");
+      return false;
+    }
+    // Login submit: a submit-typed button, else one whose text reads
+    // like a sign-in action, else the first button. (scoreSignupButton
+    // drives "log in" negative — wrong scorer for a login form.)
+    const buttons = inv.filter((e) => e.tag === "button" || e.type === "submit");
+    const submitEl =
+      buttons.find((e) => e.type === "submit") ??
+      buttons.find((e) =>
+        /\b(log ?in|sign ?in|continue|next|submit)\b/i.test(
+          `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`,
+        ),
+      ) ??
+      buttons[0];
+    try {
+      await this.browser.type(emailEl.selector, email);
+      await this.browser.type(pwEl.selector, password);
+      steps.push("Login: filled the signup credentials");
+      if (submitEl !== undefined) {
+        await this.browser.clickSubmit(submitEl.selector);
+      }
+      await this.browser.wait(4);
+      return true;
+    } catch (err) {
+      steps.push(
+        `Login attempt failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   }
 
   private async planPostVerifyStep(input: {
@@ -1430,6 +1493,7 @@ You may issue ONE step per turn. Reply with a single JSON object, no prose.
 Schema:
   {"kind":"done","reason":"why we should stop"}
   {"kind":"extract","reason":"the API key is now visible on this page"}
+  {"kind":"login","reason":"the page is a login form / we were signed out"}
   {"kind":"click","selector":"CSS","reason":"e.g. dismiss onboarding modal / open API keys page"}
   {"kind":"fill","selector":"CSS","value":"value","reason":"unusual — only for required project-name etc."}
   {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api"}
@@ -1439,6 +1503,7 @@ Strategy:
 - If the API key text is visible, return {"kind":"extract"}.
 - If there's a dashboard menu link like "API Keys" / "Tokens" / "Developer", click it.
 - If there's an onboarding modal blocking, dismiss it.
+- If the page is a LOGIN form, or says you must sign in, or you've been signed out, return {"kind":"login"} — the bot signs in with the signup email + password. Do NOT return done on a login wall.
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - If the page wants the user to create a project before showing keys, fill the minimum and click create.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
