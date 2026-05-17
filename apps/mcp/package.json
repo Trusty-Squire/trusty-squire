@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API, with the bundled universal signup bot.",
   "main": "./dist/server.js",
