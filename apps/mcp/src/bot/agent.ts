@@ -53,6 +53,44 @@ const MAX_LLM_CALLS_PER_SIGNUP = Number.parseInt(
 // quality on tricky sites.
 const PREFER_CHEAP_LLM = process.env.UNIVERSAL_BOT_PREFER_CHEAP === "true";
 
+// S3: phrases a signup page shows when it genuinely expects the user to go
+// check their inbox. If none appear after submit, the service most likely
+// dispatched no verification email (anti-abuse withholding, or the submit
+// was rejected) — so the bot runs a short probe instead of blind-waiting
+// the full timeout for mail that is not coming.
+const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
+  "check your email",
+  "check your inbox",
+  "verify your email",
+  "verify your inbox",
+  "confirm your email",
+  "confirmation email",
+  "verification email",
+  "verification link",
+  "we sent",
+  "we've sent",
+  "we have sent",
+  "sent you an email",
+  "sent a link",
+  "activate your account",
+  "almost there",
+  "one more step",
+];
+
+// Short probe when the post-submit page never prompted the user to check
+// their email. Legitimate verification mail almost always lands inside a
+// minute; this catches the fast case without 300s of dead air.
+const VERIFICATION_PROBE_SECONDS = 45;
+
+// S3: does this post-submit page text indicate the service genuinely
+// expects the user to confirm via email? Drives whether the bot polls the
+// full verification timeout or runs only a short probe. Exported so the
+// keyword set is unit-tested directly.
+export function expectsVerificationEmail(pageText: string): boolean {
+  const lower = pageText.toLowerCase();
+  return VERIFICATION_EXPECTED_PATTERNS.some((p) => lower.includes(p));
+}
+
 export class LLMCallBudgetExceeded extends Error {
   constructor(budget: number) {
     super(`signup exceeded LLM call budget of ${budget}`);
@@ -1161,10 +1199,20 @@ export class SignupAgent {
       let credentials = await this.extractCredentials();
 
       // Step 7: Email verification + post-verification navigation.
+      let verificationFailed: string | undefined;
       if (credentials.api_key === undefined && credentials.username === undefined && task.inbox !== undefined) {
-        const verificationTimeoutSeconds = task.verificationTimeoutSeconds ?? 300;
+        // S3: don't blind-wait. Read the post-submit page first. If it
+        // explicitly tells the user to check their email, poll the full
+        // timeout. If it does not, the service most likely sent no
+        // verification email — run a short probe instead of dead air.
+        const expectsEmail = expectsVerificationEmail(await this.browser.extractText());
+        const verificationTimeoutSeconds = expectsEmail
+          ? (task.verificationTimeoutSeconds ?? 180)
+          : VERIFICATION_PROBE_SECONDS;
         steps.push(
-          `No credentials on page — polling inbox for verification email (up to ${verificationTimeoutSeconds}s)...`,
+          expectsEmail
+            ? `Post-submit page asks to check email — polling inbox (up to ${verificationTimeoutSeconds}s)...`
+            : `Post-submit page shows no "check your email" prompt — short ${verificationTimeoutSeconds}s probe (S3: the service likely sent no verification email)...`,
         );
         try {
           const email = await this.waitForVerificationEmail(
@@ -1204,7 +1252,11 @@ export class SignupAgent {
             steps.push("Email had no parsed links — skipping verification click.");
           }
         } catch (err) {
-          steps.push(`Inbox poll failed: ${err instanceof Error ? err.message : String(err)}`);
+          const detail = err instanceof Error ? err.message : String(err);
+          steps.push(`Inbox poll failed: ${detail}`);
+          verificationFailed = expectsEmail
+            ? `verification_not_sent: form submitted and the page asked to check email, but none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (anti-abuse) or requires manual signup`
+            : `verification_not_sent: form submitted but the page never prompted to check email and none arrived in the ${verificationTimeoutSeconds}s probe — the service most likely dispatched no verification email`;
         }
       }
 
@@ -1219,7 +1271,7 @@ export class SignupAgent {
 
       return {
         success: false,
-        error: "Could not find credentials on page or via email",
+        error: verificationFailed ?? "Could not find credentials on page or via email",
         steps,
         ...this.resultTail(),
       };
