@@ -66,6 +66,7 @@ function seedCases(): PlannerEvalCase[] {
     name: null,
     placeholder: null,
     ariaLabel: null,
+    role: null,
     labelText: null,
     visibleText: null,
     selector: "#x",

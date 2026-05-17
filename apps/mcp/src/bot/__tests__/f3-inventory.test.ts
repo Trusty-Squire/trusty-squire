@@ -24,6 +24,7 @@ function mk(over: Partial<InteractiveElement>): InteractiveElement {
     name: null,
     placeholder: null,
     ariaLabel: null,
+    role: null,
     labelText: null,
     visibleText: null,
     selector: "#x",

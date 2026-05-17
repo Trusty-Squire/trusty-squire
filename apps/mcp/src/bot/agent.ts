@@ -673,6 +673,7 @@ export class SignupAgent {
     const MAX_PROGRESS_REPLANS = 4;
     let errorReplans = 0;
     let progressReplans = 0;
+    let emptyPlans = 0;
     let hint: string | undefined;
 
     for (;;) {
@@ -729,15 +730,34 @@ export class SignupAgent {
 
       await this.executePlan(plan, fillValues, steps, bySelector);
 
-      // A plan with no fill actions only revealed/advanced the page (a
-      // cookie banner, a two-stage "sign up with email" chooser) — the
-      // real form should now be present. Re-extract and plan it.
+      // A plan with no fill actions either revealed/advanced the page
+      // (a cookie banner, a two-stage "sign up with email" chooser) —
+      // worth a re-plan — or found nothing actionable at all. A
+      // 0-action plan revealed *nothing*: re-extracting the same
+      // static page won't help, so a second consecutive empty plan is
+      // a dead end. (The 0.1.12 loop spun this 4x on Axiom.)
       const hadFill = plan.actions.some((a) => a.kind === "fill");
       if (!hadFill) {
+        if (plan.actions.length === 0) {
+          emptyPlans += 1;
+          if (emptyPlans >= 2) {
+            return {
+              kind: "planning_failed",
+              reason:
+                "no fillable form on the page — the planner found no input fields or actionable elements",
+            };
+          }
+        } else {
+          emptyPlans = 0;
+        }
         if (++progressReplans > MAX_PROGRESS_REPLANS) {
           return { kind: "planning_failed", reason: "never reached a fillable form" };
         }
-        steps.push("Plan only revealed the page — re-planning the now-visible form");
+        steps.push(
+          plan.actions.length === 0
+            ? "Plan found nothing to act on — re-checking once for a late render"
+            : "Plan only revealed the page — re-planning the now-visible form",
+        );
         hint =
           "The previous step revealed or advanced the page. Plan the signup form that should now be visible.";
         continue;
@@ -752,6 +772,20 @@ export class SignupAgent {
         await this.browser.clickSubmit(plan.submit_selector);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
+        // A disabled submit means the form filled but a required
+        // control gates submission — re-plan to satisfy it (a
+        // progress replan), don't fail the run outright.
+        if (reason.startsWith("submit_disabled")) {
+          if (++progressReplans > MAX_PROGRESS_REPLANS) {
+            return { kind: "submit_failed", reason };
+          }
+          steps.push(`⚠ ${reason} — re-planning to satisfy it`);
+          hint =
+            "The submit button is disabled — a required field or an agreement " +
+            "was not satisfied. Find the agreement CHECKBOX (an input of " +
+            "type=checkbox, NOT a link to the terms page) and check it.";
+          continue;
+        }
         steps.push(`⚠ submit click failed: ${reason}`);
         return { kind: "submit_failed", reason };
       }
@@ -819,6 +853,25 @@ export class SignupAgent {
       const inv = bySelector.get(sel);
       if (inv !== undefined && inv.id !== null && info.id !== inv.id) {
         misses.push(`${sel} (resolved to the wrong element)`);
+      }
+    }
+    // A `check` action must target an actual checkbox/radio. The
+    // planner sometimes picks the adjacent "Terms of Service" *link*
+    // (SendPulse) — page.check() can't tick a link, so reject it and
+    // force a re-plan onto the real agreement checkbox.
+    for (const a of plan.actions) {
+      if (a.kind !== "check") continue;
+      const el = bySelector.get(a.selector);
+      const checkable =
+        el !== undefined &&
+        ((el.tag === "input" &&
+          (el.type === "checkbox" || el.type === "radio")) ||
+          el.role === "checkbox" ||
+          el.role === "radio");
+      if (!checkable) {
+        misses.push(
+          `${a.selector} (not a checkbox — pick the actual agreement checkbox, not a link)`,
+        );
       }
     }
     return misses.length > 0 ? misses.join(", ") : null;

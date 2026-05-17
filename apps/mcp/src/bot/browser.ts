@@ -576,6 +576,23 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const locator = this.page.locator(selector);
     const count = await locator.count();
+    // A disabled submit means a required field or agreement checkbox
+    // wasn't satisfied — throw a distinct `submit_disabled` so the
+    // caller can re-plan to fix it, rather than wait out a generic
+    // visibility timeout (SendPulse: #btn-reg stays disabled +
+    // hidden until the TOS box is ticked).
+    if (count >= 1) {
+      const disabled = await locator
+        .first()
+        .isDisabled()
+        .catch(() => false);
+      if (disabled) {
+        throw new Error(
+          `submit_disabled: the submit button (${selector}) is disabled — a ` +
+            `required field or agreement checkbox was not satisfied`,
+        );
+      }
+    }
     // 0 or 1 match: the normal click path handles it (and surfaces a
     // clean "waiting for selector" timeout when the count is 0).
     if (count <= 1) {
@@ -1073,6 +1090,7 @@ export class BrowserController {
         name: string | null;
         placeholder: string | null;
         ariaLabel: string | null;
+        role: string | null;
         labelText: string | null;
         visibleText: string | null;
         selector: string;
@@ -1092,6 +1110,7 @@ export class BrowserController {
           name: el.getAttribute("name"),
           placeholder: el.getAttribute("placeholder"),
           ariaLabel: el.getAttribute("aria-label"),
+          role: el.getAttribute("role"),
           labelText: labelFor(el),
           visibleText: clean(el.textContent),
           selector: selectorFor(el),
@@ -1292,6 +1311,7 @@ export interface InteractiveElement {
   name: string | null;
   placeholder: string | null;
   ariaLabel: string | null;
+  role: string | null;
   labelText: string | null;
   visibleText: string | null;
   selector: string;

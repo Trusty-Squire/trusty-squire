@@ -31,6 +31,7 @@ function mk(over: Partial<InteractiveElement>): InteractiveElement {
     name: null,
     placeholder: null,
     ariaLabel: null,
+    role: null,
     labelText: null,
     visibleText: null,
     selector: "#x",
@@ -92,7 +93,10 @@ class FakeBrowser {
   async type(): Promise<void> {}
   async check(): Promise<void> {}
   async click(): Promise<void> {}
-  async clickSubmit(): Promise<void> {}
+  public clickSubmitImpl: () => void = () => {};
+  async clickSubmit(): Promise<void> {
+    this.clickSubmitImpl();
+  }
   async selectOption(): Promise<void> {}
   async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
     return { found: false };
@@ -119,6 +123,7 @@ class FakeBrowser {
 
 interface Outcome {
   kind: string;
+  reason?: string;
 }
 
 function isController(_v: unknown): _v is BrowserController {
@@ -235,5 +240,81 @@ describe("planExecuteWithRetry", () => {
 
     expect(outcome.kind).toBe("oauth_required");
     expect(llm.calls).toBe(0); // detected before any planner call
+  });
+
+  it("bails clean on repeated empty plans instead of spinning (Axiom 0-action loop)", async () => {
+    const browser = new FakeBrowser();
+    // Only a sign-up button, no fields — the page never reveals a form.
+    browser.inventoryQueue = [
+      [mk({ tag: "button", visibleText: "Sign up", selector: "#signup" })],
+    ];
+    const emptyPlan = JSON.stringify({
+      actions: [],
+      submit_selector: "#signup",
+      confidence: "medium",
+    });
+    const llm = new QueueLLM([emptyPlan]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("planning_failed");
+    expect(outcome.reason ?? "").toMatch(/no fillable form/i);
+    // Bails on the 2nd empty plan — does not spin to the progress cap.
+    expect(llm.calls).toBe(2);
+  });
+
+  it("re-plans when a check action targets a non-checkbox (SendPulse TOS link)", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "a", visibleText: "Terms of Service", selector: "#toslink" }),
+        mk({ tag: "input", type: "checkbox", labelText: "I agree", selector: "#agree" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    const withCheck = (checkSel: string): string =>
+      JSON.stringify({
+        actions: [
+          { kind: "fill", selector: "#email", value_kind: "email", reason: "email" },
+          { kind: "check", selector: checkSel, reason: "agree to TOS" },
+        ],
+        submit_selector: "#go",
+        confidence: "high",
+      });
+    // Plan 1 picks the <a> link; the re-plan picks the real checkbox.
+    const llm = new QueueLLM([withCheck("#toslink"), withCheck("#agree")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /not a checkbox/i.test(s))).toBe(true);
+  });
+
+  it("re-plans when the submit button is disabled, instead of failing", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    // First submit is disabled (a required control unsatisfied); the
+    // re-plan's submit goes through.
+    let submitCalls = 0;
+    browser.clickSubmitImpl = () => {
+      submitCalls += 1;
+      if (submitCalls === 1) {
+        throw new Error(
+          "submit_disabled: the submit button (#go) is disabled — a required field or agreement checkbox was not satisfied",
+        );
+      }
+    };
+    const llm = new QueueLLM([fillPlan("#email", "#go"), fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /submit_disabled/i.test(s))).toBe(true);
   });
 });
