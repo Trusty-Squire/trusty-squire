@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import {
   cancelTool,
+  checkProvisionStatusTool,
   getCredentialTool,
   getUsageTool,
   listServicesTool,
@@ -298,8 +299,22 @@ describe("wait_for_approval", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes 9 tools", () => {
-    expect(TOOLS).toHaveLength(9);
+  it("exposes 10 tools", () => {
+    expect(TOOLS).toHaveLength(10);
+  });
+
+  it("includes the async provision pair (start + status poll)", () => {
+    const names = TOOLS.map((t) => t.name);
+    expect(names).toContain("provision_any_service");
+    expect(names).toContain("check_provision_status");
+  });
+
+  it("check_provision_status reports unknown_run for an unrecognized run_id", async () => {
+    const res = (await checkProvisionStatusTool.handler(
+      { run_id: "no-such-run" },
+      null,
+    )) as { status: string };
+    expect(res.status).toBe("unknown_run");
   });
 
   it("every tool has a non-trivial description (helps the coding agent decide when to call)", () => {

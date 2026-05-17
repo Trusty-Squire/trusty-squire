@@ -5,10 +5,15 @@
 // pipeline (see apps/api/src/routes/ses-webhook.ts) can deliver
 // verification emails.
 //
+// ASYNC MODEL: a real signup takes 3-8 minutes — well past the ~60s hard
+// timeout Claude Code (and most MCP hosts) put on a single tool call. So
+// `provision_any_service` does NOT block: it starts the run in the
+// background inside this server process, returns a run_id immediately,
+// and the caller polls `check_provision_status` until the run leaves the
+// "running" state.
+//
 // Auth model: Tier 0 machine token from the session file. No account or
-// mandate required for free-tier signups. When the user hits their quota
-// the API returns a structured quota_exceeded response and we tell Claude
-// to surface a pairing CTA.
+// mandate required for free-tier signups.
 
 import { randomBytes } from "crypto";
 import { z } from "zod";
@@ -23,6 +28,8 @@ import {
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
 
+type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
+
 export const provisionAnyInputSchema = z.object({
   service: z.string().describe("Name of the service to sign up for (e.g., 'Postmark', 'Mailgun')"),
   signup_url: z.string().optional().describe("Direct URL to signup page (optional, will search if not provided)"),
@@ -30,17 +37,22 @@ export const provisionAnyInputSchema = z.object({
 
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
 
+export const checkProvisionStatusInputSchema = z.object({
+  run_id: z.string().describe("The run_id returned by provision_any_service."),
+});
+
+export type CheckProvisionStatusInput = z.infer<typeof checkProvisionStatusInputSchema>;
+
 // JSON Schema for MCP `tools/list`. The SDK forwards `inputSchema` verbatim
-// to the host agent (Claude Code, Goose, etc.); a zod object stringifies to
-// `{}` and leaves the LLM blind to required parameters. The schema here
-// must mirror `provisionAnyInputSchema` above.
+// to the host agent; a zod object stringifies to `{}` and leaves the LLM
+// blind to required parameters, so these mirror the zod schemas above.
 const PROVISION_ANY_JSON_SCHEMA = {
   type: "object",
   required: ["service"],
   properties: {
     service: {
       type: "string",
-      description: "Name of the service to sign up for (e.g., 'Postmark', 'Mailgun', 'IPInfo')",
+      description: "Name of the service to sign up for (e.g., 'Postmark', 'Mailgun', 'IPInfo').",
     },
     signup_url: {
       type: "string",
@@ -49,31 +61,69 @@ const PROVISION_ANY_JSON_SCHEMA = {
   },
 } as const;
 
-const DESCRIPTION = `Sign up for any free API service automatically using browser automation.
+const CHECK_STATUS_JSON_SCHEMA = {
+  type: "object",
+  required: ["run_id"],
+  properties: {
+    run_id: {
+      type: "string",
+      description: "The run_id returned by provision_any_service.",
+    },
+  },
+} as const;
+
+// --- background run store ---------------------------------------------
+// A signup runs in the background inside this MCP server process; the
+// caller polls check_provision_status by run_id. The store is in-memory
+// and lives only as long as the server process: if the server restarts
+// mid-run the run is lost and check_provision_status reports unknown_run.
+interface RunRecord {
+  service: string;
+  startedAt: number;
+  // undefined while the run is in flight; the final tool response once done.
+  result: Record<string, unknown> | undefined;
+}
+const runStore = new Map<string, RunRecord>();
+// Cap so a long session cannot leak memory; oldest run evicted first.
+const MAX_RUNS = 50;
+
+const PROVISION_DESCRIPTION = `Start signing up for any free API service using browser automation.
+
+ASYNC — IMPORTANT: a signup takes several minutes, longer than a single
+tool call may stay open. This tool does NOT wait for the signup. It
+starts the run and returns immediately with a run_id and status="started".
+You MUST then poll check_provision_status with that run_id (about once a
+minute) until its status is no longer "running".
 
 WHEN TO CALL THIS TOOL:
-- The user wants an account for a service Trusty Squire doesn't have a native adapter for
-- Call list_services first; if the service ISN'T in the directory, use this tool
-- Best for free-tier developer services with traditional email/password signup
+- The user wants an account for a service Trusty Squire has no native adapter for.
+- Best for free-tier developer services with email/password signup.
 
-BEHAVIOR:
-- Runs Playwright on the user's machine (uses their IP for captcha resilience)
-- Receives verification emails via Trusty Squire's SES inbound infrastructure
-- Returns API credentials directly on success
-- Free for the first N signups per machine (Tier 0); after that, returns a
-  pairing CTA the user clicks to upgrade
+IMMEDIATE RESPONSES (no run started):
+- status="started" + run_id → poll check_provision_status next.
+- status="quota_exceeded" + cta_pair_url → tell the user to run \`npx @trusty-squire/mcp pair\`.
+- status="not_installed" → Trusty Squire isn't installed; tell the user to run the installer.
+- status="error" → could not reach the API to set up the signup.`;
 
-POSSIBLE RESPONSES:
-- status="success" + credentials → use them immediately
-- status="quota_exceeded" + cta_pair_url → tell the user to run \`npx @trusty-squire/mcp pair\`
-  or open the URL to upgrade. Their next signup will work.
-- status="captcha_blocked" → the signup site uses captcha we can't bypass. Tell the user
-  to sign up manually at the service's signup URL.
-- status="failed" → the form filled but submission didn't yield credentials. Show steps[].`;
+const CHECK_DESCRIPTION = `Check the status of a signup started by provision_any_service.
+
+Pass the run_id from provision_any_service. Poll about once a minute
+until status is no longer "running".
+
+RESPONSES:
+- status="running" → still working; poll again in ~60s.
+- status="success" + credentials → signup done; show the credentials to the user.
+- status="verification_not_sent" → submitted, but the service sent no verification
+  email (anti-abuse withholding, or it needs manual signup).
+- status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
+- status="oauth_required" → the service only offers OAuth signup; manual signup.
+- status="failed" → the form filled but yielded no credentials; show steps[].
+- status="error" → the run crashed; show error.
+- status="unknown_run" → no such run (it expired, or the MCP server restarted).`;
 
 export const provisionAnyTool = {
   name: "provision_any_service",
-  description: DESCRIPTION,
+  description: PROVISION_DESCRIPTION,
   jsonInputSchema: PROVISION_ANY_JSON_SCHEMA,
   inputSchema: provisionAnyInputSchema,
   handler: async (input: ProvisionAnyInput, _api: ApiClient | null) => {
@@ -81,10 +131,6 @@ export const provisionAnyTool = {
     const storage = await openSessionStorage();
     const session = await storage.read();
     if (session === null || session.machine_token === undefined) {
-      // Production users hit this when they've never run the install CLI.
-      // Local-dev users hit this if their session.json only has an
-      // agent_session_token (Tier 1 pair without a machine_token issued).
-      // Surface both paths so the agent can route the user correctly.
       const hasPartialSession = session !== null && session.agent_session_token !== undefined;
       return {
         status: "not_installed",
@@ -94,17 +140,11 @@ export const provisionAnyTool = {
       };
     }
     const apiBase = session.api_base_url;
+    const inboxClient = new InboxClient({ baseUrl: apiBase, apiKey: session.machine_token });
 
-    // Create an alias through the API (consumes one quota slot for Tier 0).
-    const inboxClient = new InboxClient({
-      baseUrl: apiBase,
-      apiKey: session.machine_token,
-    });
-
-    // Random suffix, not just a ms timestamp: two concurrent signups
-    // in the same millisecond would otherwise share a run_id — and,
-    // for the same service, the same inbox alias — and cross-read
-    // each other's verification email.
+    // Random suffix, not just a ms timestamp: two concurrent signups in
+    // the same millisecond would otherwise share a run_id — and, for the
+    // same service, the same inbox alias.
     const runId = `mcp-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
     let alias: string;
     try {
@@ -117,7 +157,7 @@ export const provisionAnyTool = {
       console.error(`[provision-any] alias=${alias} apiBase=${apiBase}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // The createAlias error body has the structured payload; parse it back.
+      // The createAlias error body carries the structured payload; parse it back.
       if (/quota_exceeded/.test(message)) {
         const match = message.match(/\{.*\}/s);
         if (match !== null) {
@@ -146,54 +186,116 @@ export const provisionAnyTool = {
       };
     }
 
-    // Construct an LLMPair that routes through Trusty Squire's proxy.
+    // Register the run, evicting the oldest if the store is full.
+    if (runStore.size >= MAX_RUNS) {
+      const oldest = runStore.keys().next().value;
+      if (oldest !== undefined) runStore.delete(oldest);
+    }
+    runStore.set(runId, { service: input.service, startedAt: Date.now(), result: undefined });
+
+    // Start the signup in the background — do NOT await it. runSignupTask
+    // never rejects; it writes the final response into runStore, which
+    // check_provision_status then reads.
+    void runSignupTask(runId, input, {
+      apiBase,
+      machineToken: session.machine_token,
+      alias,
+      inboxClient,
+    });
+
+    return {
+      status: "started",
+      run_id: runId,
+      service: input.service,
+      message:
+        `Signup for ${input.service} started in the background. ` +
+        `Poll check_provision_status with run_id="${runId}" about once a minute ` +
+        `until its status is no longer "running" (typically 3-6 minutes).`,
+    };
+  },
+};
+
+export const checkProvisionStatusTool = {
+  name: "check_provision_status",
+  description: CHECK_DESCRIPTION,
+  jsonInputSchema: CHECK_STATUS_JSON_SCHEMA,
+  inputSchema: checkProvisionStatusInputSchema,
+  handler: async (input: CheckProvisionStatusInput, _api: ApiClient | null) => {
+    const record = runStore.get(input.run_id);
+    if (record === undefined) {
+      return {
+        status: "unknown_run",
+        run_id: input.run_id,
+        message:
+          "No signup run with that run_id. It may have finished and been evicted, " +
+          "or the MCP server restarted since it started. Start a new provision_any_service run.",
+      };
+    }
+    if (record.result === undefined) {
+      return {
+        status: "running",
+        run_id: input.run_id,
+        service: record.service,
+        elapsed_seconds: Math.round((Date.now() - record.startedAt) / 1000),
+        message: "Signup still in progress. Poll again in about 60 seconds.",
+      };
+    }
+    return record.result;
+  },
+};
+
+interface RunContext {
+  apiBase: string;
+  machineToken: string;
+  alias: string;
+  inboxClient: InboxClient;
+}
+
+// Runs the signup to completion and stores the final tool response in
+// runStore. Never rejects — any throw is captured as an error result.
+async function runSignupTask(
+  runId: string,
+  input: ProvisionAnyInput,
+  ctx: RunContext,
+): Promise<void> {
+  let response: Record<string, unknown>;
+  try {
     // The user pays nothing for LLM calls — the operator's OpenRouter
-    // key handles them server-side, gated by the machine token's
-    // rolling rate limit. Cheap mode (Gemini Flash) is the primary;
-    // Sonnet is the parse-failure fallback.
+    // key handles them server-side, gated by the machine token's rolling
+    // rate limit. Cheap tier is primary; premium is the fallback.
     const llmPair: LLMPair = {
       primary: new ProxyLLMClient({
-        apiBaseUrl: apiBase,
-        machineToken: session.machine_token,
+        apiBaseUrl: ctx.apiBase,
+        machineToken: ctx.machineToken,
         tier: "cheap",
       }),
       premium: new ProxyLLMClient({
-        apiBaseUrl: apiBase,
-        machineToken: session.machine_token,
+        apiBaseUrl: ctx.apiBase,
+        machineToken: ctx.machineToken,
         tier: "premium",
       }),
     };
 
-    // Run the bot locally with this alias. Bot uses the inboxClient to long-
-    // poll the API for any verification emails that arrive via SES.
     const bot = new UniversalSignupBot();
     const result = await bot.signup({
       service: input.service,
       ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
-      email: alias,
-      inbox: inboxClient,
+      email: ctx.alias,
+      inbox: ctx.inboxClient,
       llm: llmPair,
     });
 
-    // Best-effort cleanup of the alias once we're done with it. Failure is
-    // non-fatal — the alias TTL-expires anyway.
+    // Best-effort alias cleanup. Failure is non-fatal — the alias
+    // TTL-expires anyway.
     try {
-      await inboxClient.revokeAlias(alias);
+      await ctx.inboxClient.revokeAlias(ctx.alias);
     } catch {
       // noop
     }
 
-    // If a captcha was encountered (whether or not we got past it),
-    // report it to the API for the analytics ledger. The result.captcha
-    // field is set by the agent's pre/post-submit/re-plan gates. We do
-    // a fresh asn lookup at event time rather than relying on the
-    // install-time one — users move networks, and "where was the
-    // machine when this happened" is the analytically interesting bit.
+    // Report any captcha encounter to the analytics ledger. Fire-and-forget.
     if (result.captcha !== undefined) {
-      // Fire-and-forget; we don't want the captcha-event POST to
-      // affect what the user sees. Failures here are logged to stderr
-      // and otherwise ignored.
-      void postCaptchaEvent(apiBase, session.machine_token, {
+      void postCaptchaEvent(ctx.apiBase, ctx.machineToken, {
         service: input.service,
         captcha_kind: result.captcha.kind,
         blocked: result.captcha.blocked,
@@ -204,59 +306,91 @@ export const provisionAnyTool = {
       });
     }
 
-    if (result.success && result.credentials !== undefined) {
-      return {
-        status: "success",
-        service: input.service,
-        credentials: result.credentials,
-        steps: result.steps,
-        message: `Successfully signed up for ${input.service}. Credentials are in this response — show them to the user (or save to their .env).`,
-      };
-    }
-
-    // Authoritative: if the agent recorded a captcha encounter and
-    // marked it blocked, that's a captcha_blocked outcome. Replaces
-    // the earlier substring heuristic which had to scan steps[].
-    if (result.captcha !== undefined && result.captcha.blocked) {
-      return {
-        status: "captcha_blocked",
-        service: input.service,
-        error: result.error ?? "Captcha challenge blocked automated signup.",
-        steps: result.steps,
-        captcha_kind: result.captcha.kind,
-        browser_channel: result.browser_channel ?? null,
-        message:
-          `${input.service} blocked automated signup with a ${result.captcha.kind} captcha. ` +
-          `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
-      };
-    }
-
-    // OAuth-only service: there is no email/password form to automate
-    // (F3 Issue 4). Surface it as its own status so the agent can tell
-    // the user plainly rather than reporting a generic failure.
-    if (result.error !== undefined && result.error.startsWith("oauth_required")) {
-      return {
-        status: "oauth_required",
-        service: input.service,
-        error: result.error,
-        steps: result.steps,
-        browser_channel: result.browser_channel ?? null,
-        message:
-          `${input.service} only offers Google/GitHub (OAuth) signup — there is no email form the bot can fill. ` +
-          `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
-      };
-    }
-
-    return {
-      status: "failed",
+    response = buildSignupResponse(input, result);
+  } catch (err) {
+    response = {
+      status: "error",
       service: input.service,
-      error: result.error ?? "Unknown error",
+      error: err instanceof Error ? err.message : String(err),
+      message: `The signup run for ${input.service} crashed before completing.`,
+    };
+  }
+
+  const record = runStore.get(runId);
+  if (record !== undefined) record.result = response;
+}
+
+// Maps a finished SignupResult to the response the caller sees via
+// check_provision_status. Mirrors the status set documented on the tools.
+function buildSignupResponse(
+  input: ProvisionAnyInput,
+  result: SignupResult,
+): Record<string, unknown> {
+  if (result.success && result.credentials !== undefined) {
+    return {
+      status: "success",
+      service: input.service,
+      credentials: result.credentials,
+      steps: result.steps,
+      message: `Successfully signed up for ${input.service}. Credentials are in this response — show them to the user (or save to their .env).`,
+    };
+  }
+
+  // Authoritative: the agent recorded a captcha encounter and marked it
+  // blocked → captcha_blocked.
+  if (result.captcha !== undefined && result.captcha.blocked) {
+    return {
+      status: "captcha_blocked",
+      service: input.service,
+      error: result.error ?? "Captcha challenge blocked automated signup.",
+      steps: result.steps,
+      captcha_kind: result.captcha.kind,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service} blocked automated signup with a ${result.captcha.kind} captcha. ` +
+        `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  // OAuth-only service: no email/password form to automate.
+  if (result.error !== undefined && result.error.startsWith("oauth_required")) {
+    return {
+      status: "oauth_required",
+      service: input.service,
+      error: result.error,
       steps: result.steps,
       browser_channel: result.browser_channel ?? null,
-      message: `Couldn't finish signing up for ${input.service}. Show the user the steps[] for debugging.`,
+      message:
+        `${input.service} only offers Google/GitHub (OAuth) signup — there is no email form the bot can fill. ` +
+        `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
     };
-  },
-};
+  }
+
+  // S3: the bot tags "form submitted but no verification email" with a
+  // verification_not_sent: error prefix. Surface it as its own status.
+  if (result.error !== undefined && result.error.startsWith("verification_not_sent")) {
+    return {
+      status: "verification_not_sent",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service}'s form submitted, but no verification email arrived — the service most likely ` +
+        `withheld it (anti-abuse) or needs manual signup. Tell the user to finish at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  return {
+    status: "failed",
+    service: input.service,
+    error: result.error ?? "Unknown error",
+    steps: result.steps,
+    browser_channel: result.browser_channel ?? null,
+    message: `Couldn't finish signing up for ${input.service}. Show the user the steps[] for debugging.`,
+  };
+}
 
 // Best-effort POST to /v1/captcha-events. We don't care about the
 // response — at worst the event is lost, which is no worse than the

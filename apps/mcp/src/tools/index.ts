@@ -18,7 +18,7 @@ import { listSubscriptionsTool } from "./list-subscriptions.js";
 import { cancelTool } from "./cancel.js";
 import { getUsageTool } from "./get-usage.js";
 import { rotateCredentialTool } from "./rotate-credential.js";
-import { provisionAnyTool } from "./provision-any.js";
+import { provisionAnyTool, checkProvisionStatusTool } from "./provision-any.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -40,6 +40,7 @@ export function assertPaired(api: ApiClient | null): asserts api is ApiClient {
 
 export const TOOLS: Tool[] = [
   provisionAnyTool,
+  checkProvisionStatusTool,
   provisionTool,
   waitForApprovalTool,
   getCredentialTool,
@@ -60,6 +61,8 @@ export { z };
 // Per-tool re-exports so callers (tests, custom integrations) can
 // import a single tool without going through the TOOLS array.
 export {
+  provisionAnyTool,
+  checkProvisionStatusTool,
   provisionTool,
   waitForApprovalTool,
   getCredentialTool,

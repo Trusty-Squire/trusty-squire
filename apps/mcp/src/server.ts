@@ -45,8 +45,9 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
       return errorContent(`invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
     }
     try {
-      // provision_any_service doesn't need API client (anonymous mode)
-      if (tool.name === "provision_any_service") {
+      // provision_any_service + check_provision_status are the Tier 0
+      // escape hatch — they run on a machine token, no API client needed.
+      if (tool.name === "provision_any_service" || tool.name === "check_provision_status") {
         const result = await tool.handler(parsed.data, null);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
