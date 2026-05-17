@@ -15,9 +15,14 @@ primary_region = "iad"
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = true
+  # This API receives asynchronous inbound webhooks (SES verification mail via
+  # SNS -> /v1/webhooks/ses) that arrive seconds-to-minutes after a signup, when
+  # the API is otherwise idle. It must never scale to zero: a stopped machine
+  # 502s the inbound webhook during cold-start and drops the email. Keep one
+  # machine always running. (See the 2026-05-17 inbox-outage investigation.)
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   
   [http_service.concurrency]
     type = "requests"
