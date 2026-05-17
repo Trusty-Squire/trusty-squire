@@ -73,6 +73,10 @@ const BLOCK_MARKERS = [
   "couldn’t sign you in",
 ];
 
+// How long to wait for the human to complete the login. 5 min default;
+// override (e.g. for an awkward remote-desktop login) via env.
+const TIMEOUT_MIN = Math.max(1, Number(process.env.OAUTH_SPIKE_TIMEOUT_MIN ?? "5"));
+
 async function main(): Promise<void> {
   const { chromium, stealth } = resolveChromium();
   console.error(`[spike] profile dir : ${PROFILE_DIR}`);
@@ -119,10 +123,10 @@ async function main(): Promise<void> {
   console.error(
     "\n[spike] A Chrome window is open (view it via noVNC if this box is headless).\n" +
       "[spike] Log into your Google account in that window.\n" +
-      "[spike] The spike auto-detects the result — up to 5 minutes.\n",
+      `[spike] The spike auto-detects the result — up to ${TIMEOUT_MIN} minutes.\n`,
   );
 
-  const deadline = Date.now() + 5 * 60 * 1000;
+  const deadline = Date.now() + TIMEOUT_MIN * 60 * 1000;
   let verdict: "pass" | "blocked" | "timeout" = "timeout";
 
   while (Date.now() < deadline) {
@@ -162,7 +166,7 @@ async function main(): Promise<void> {
     );
   } else {
     console.error(
-      "[spike] TIMEOUT — no login completed in 5 min, no block page seen.\n" +
+      `[spike] TIMEOUT — no login completed in ${TIMEOUT_MIN} min, no block page seen.\n` +
         "        Inconclusive. Re-run; if it recurs, treat as a soft fail.",
     );
   }
