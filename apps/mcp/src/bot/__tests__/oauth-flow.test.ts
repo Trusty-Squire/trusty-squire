@@ -51,6 +51,7 @@ const GOOGLE_BTN = mk({
   selector: "#google-oauth",
 });
 const EMAIL_INPUT = mk({ tag: "input", type: "email", selector: "#email" });
+const API_LINK = mk({ tag: "a", visibleText: "API Keys", selector: "#api" });
 
 // One scripted page: the URL + visible body text the fake serves while
 // the run "sits" on it. Navigation steps advance the page pointer.
@@ -61,9 +62,10 @@ interface ScriptPage {
 
 // Fake browser driven by a page script. startOAuth / advanceGoogleConsent
 // / click / goto-navigate advance the pointer; everything else reads the
-// current page. extractInteractiveElements returns the signup-page
-// inventory at page 0 and `googlePageInventory` afterwards (empty = a
-// genuine consent screen; an input present = a Google login form).
+// current page. extractInteractiveElements returns: the signup-page
+// inventory at page 0; `consentPageInventory` at page 1 (empty = a
+// genuine consent screen, an input present = a Google login form); and
+// `dashboardInventory` at page 2+ (the post-OAuth onboarding surface).
 class FakeOAuthBrowser {
   public idx = 0;
   public typeCalls: Array<{ selector: string; text: string }> = [];
@@ -72,7 +74,8 @@ class FakeOAuthBrowser {
   public settleCalls = 0;
   public advanceResult = true;
   public signupInventory: InteractiveElement[] = [GOOGLE_BTN];
-  public googlePageInventory: InteractiveElement[] = [];
+  public consentPageInventory: InteractiveElement[] = [];
+  public dashboardInventory: InteractiveElement[] = [];
   public popupClosed = false;
 
   constructor(private readonly script: ScriptPage[]) {}
@@ -105,11 +108,19 @@ class FakeOAuthBrowser {
   async selectOption(): Promise<void> {}
   async clickSubmit(): Promise<void> {}
 
+  // Visible <input>/<textarea> values keyed by page index — a key in a
+  // copy-input lives here, not in extractText().
+  public fieldValuesByIdx: Record<number, string[]> = {};
   async extractText(): Promise<string> {
     return this.page().text;
   }
+  async extractVisibleFieldValues(): Promise<string[]> {
+    return this.fieldValuesByIdx[this.idx] ?? [];
+  }
   async extractInteractiveElements(): Promise<InteractiveElement[]> {
-    return this.idx === 0 ? this.signupInventory : this.googlePageInventory;
+    if (this.idx === 0) return this.signupInventory;
+    if (this.idx === 1) return this.consentPageInventory;
+    return this.dashboardInventory;
   }
   async getState(): Promise<BrowserState> {
     const p = this.page();
@@ -306,7 +317,9 @@ describe("OAuth signup — happy path (T6/T7)", () => {
         text: "API Key: rnd_onboard_abcdefghij1234567890",
       },
     ]);
-    // Round 0: click into the API keys page. Round 1: extract.
+    // The onboarding planner picks #api from the DOM inventory — not an
+    // invented selector. Round 0: click into the API keys page. Round 1: extract.
+    browser.dashboardInventory = [API_LINK];
     const llm = new QueueLLM([
       JSON.stringify({ kind: "click", selector: "#api", reason: "open API keys" }),
       JSON.stringify({ kind: "extract", reason: "key visible" }),
@@ -317,6 +330,32 @@ describe("OAuth signup — happy path (T6/T7)", () => {
     expect(result.success).toBe(true);
     expect(result.credentials?.api_key).toBe("rnd_onboard_abcdefghij1234567890");
     expect(browser.typeCalls).toHaveLength(0);
+  });
+
+  it("extracts a key rendered into a copy <input> (field-value scan)", async () => {
+    // Render shows a freshly-created key in a readonly copy-input —
+    // whose value is absent from textContent. extractCredentials must
+    // scan visible field values, not just page text.
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      CONSENT_BASIC,
+      PRODUCT_DASH("Dashboard — open the API Keys page"),
+      {
+        url: "https://dashboard.render.com/u/settings",
+        text: "API Keys — copy your new key:", // key NOT in the page text
+      },
+    ]);
+    browser.dashboardInventory = [API_LINK];
+    // The key lives only in a copy-input on the API page (idx 3).
+    browser.fieldValuesByIdx = { 3: ["rnd_fieldvalueabcdefghij1234567890"] };
+    const llm = new QueueLLM([
+      JSON.stringify({ kind: "click", selector: "#api", reason: "open API keys" }),
+      JSON.stringify({ kind: "extract", reason: "key visible in the copy field" }),
+    ]);
+    const result = await newAgent(browser, llm).signup(oauthTask());
+
+    expect(result.success).toBe(true);
+    expect(result.credentials?.api_key).toBe("rnd_fieldvalueabcdefghij1234567890");
   });
 });
 
@@ -366,7 +405,7 @@ describe("OAuth signup — the critical guarantee (D4)", () => {
         text: "Sign in to continue to Render",
       },
     ]);
-    browser.googlePageInventory = [EMAIL_INPUT];
+    browser.consentPageInventory = [EMAIL_INPUT];
     const result = await newAgent(browser).signup(oauthTask());
 
     expect(result.success).toBe(false);
@@ -442,10 +481,34 @@ describe("buildSignupResponse — OAuth statuses (T10)", () => {
   });
 });
 
-// A guard so the post-verify schema stays usable for the OAuth path.
+// A guard so the post-verify schema stays usable for the OAuth path,
+// plus the DOM-grounding gate: an invented click/fill selector is a
+// parse-time rejection (the onboarding planner's anti-hallucination).
 describe("parsePostVerifyStep", () => {
-  it("accepts the steps the OAuth onboarding loop emits", () => {
+  it("accepts the selector-free steps the onboarding loop emits", () => {
     expect(parsePostVerifyStep('{"kind":"extract","reason":"x"}').kind).toBe("extract");
     expect(parsePostVerifyStep('{"kind":"done","reason":"x"}').kind).toBe("done");
+    expect(parsePostVerifyStep('{"kind":"navigate","url":"https://x/api","reason":"x"}').kind).toBe(
+      "navigate",
+    );
+  });
+
+  it("accepts a click whose selector is in the inventory", () => {
+    const allowed = new Set(["#api"]);
+    const step = parsePostVerifyStep(
+      '{"kind":"click","selector":"#api","reason":"open keys"}',
+      allowed,
+    );
+    expect(step.kind).toBe("click");
+  });
+
+  it("rejects a click whose selector was invented (not in the inventory)", () => {
+    const allowed = new Set(["#api"]);
+    expect(() =>
+      parsePostVerifyStep(
+        '{"kind":"click","selector":"a[href*=\'api\']","reason":"guessed"}',
+        allowed,
+      ),
+    ).toThrow(/not in the page inventory/);
   });
 });

@@ -990,6 +990,35 @@ export class BrowserController {
     return await this.page.textContent("body") || "";
   }
 
+  // Collect the `.value` of every visible, non-hidden input/textarea.
+  // Services routinely render a freshly-created API key into a readonly
+  // <input> with a copy button — and an <input>'s value is NOT part of
+  // textContent, so extractText() misses it entirely. Hidden inputs
+  // (where captcha tokens like cf-turnstile-response live) and password
+  // fields are excluded, so this stays a clean credential surface.
+  async extractVisibleFieldValues(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const out: string[] = [];
+      document.querySelectorAll("input, textarea").forEach((el) => {
+        if (
+          el instanceof HTMLInputElement &&
+          (el.type === "hidden" || el.type === "password")
+        ) {
+          return;
+        }
+        const value =
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+            ? el.value
+            : "";
+        if (value.trim().length === 0) return;
+        const r = el.getBoundingClientRect();
+        if (r.width > 2 && r.height > 2) out.push(value.trim());
+      });
+      return out;
+    });
+  }
+
   // Wait for the signup form to actually render before the planner
   // screenshots the page (F1). SPA and two-stage signup pages render
   // the form after JS executes; planning against a pre-render

@@ -27,6 +27,13 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     const text = "api key: somethingelse re_abcdefGHIJKLmnop1234567";
     expect(extractApiKeyFromText(text)).toBe("re_abcdefGHIJKLmnop1234567");
   });
+
+  it("extracts a Render key by its rnd_ prefix", () => {
+    // The clean prefix match — needed for keys read out of a copy
+    // <input>, where there is no "API Key:" label to anchor on.
+    const key = "rnd_RenderKEYvalue000111222333";
+    expect(extractApiKeyFromText(`new key ${key} created`)).toBe(key);
+  });
 });
 
 describe("extractApiKeyFromText — labeled keys", () => {
@@ -84,6 +91,14 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
     const longCaptcha = "z".repeat(500);
     const text = `g-recaptcha-response value ${longCaptcha}\nYour API key: re_abcdefGHIJKLmnop1234567`;
     expect(extractApiKeyFromText(text)).toBe("re_abcdefGHIJKLmnop1234567");
+  });
+
+  it("rejects a labeled value that straddled glued dashboard text onto a key", () => {
+    // Render's API-keys list renders as concatenated text with no
+    // separators ("...Name bot-key Menu Key rnd_SsApfF") — the labeled
+    // regex would otherwise capture the whole glob as a credential.
+    const text = "API Keys Name1bot-keyMenuKeyrnd_SsApfFxxxxxx";
+    expect(extractApiKeyFromText(text)).toBeNull();
   });
 
   it("does not match a label far from its value across a newline", () => {

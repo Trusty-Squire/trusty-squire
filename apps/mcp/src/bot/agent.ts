@@ -495,12 +495,28 @@ export function findGoogleOAuthButton(
   return null;
 }
 
-export function parsePostVerifyStep(raw: string): PostVerifyStep {
+// Parse a post-verify step. When `allowedSelectors` is supplied, a
+// `click`/`fill` selector that is not in the page inventory is a
+// parse-time rejection — the same DOM-grounding F3 gave the signup
+// planner (parseSignupPlan). It stops the post-OAuth onboarding
+// planner from inventing CSS selectors that never resolve, which was
+// the dominant onboarding-navigation failure mode.
+export function parsePostVerifyStep(
+  raw: string,
+  allowedSelectors?: ReadonlySet<string>,
+): PostVerifyStep {
   const obj = extractJsonObject(raw);
   const kind = obj["kind"];
   // `reason` is required by the schema but advisory; default it so a
   // model omitting it doesn't trip a retry on an otherwise-valid step.
   const reason = typeof obj["reason"] === "string" ? obj["reason"] : "";
+  const checkSelector = (selector: string, context: string): void => {
+    if (allowedSelectors !== undefined && !allowedSelectors.has(selector)) {
+      throw new Error(
+        `${context}: selector ${JSON.stringify(selector)} is not in the page inventory`,
+      );
+    }
+  };
   switch (kind) {
     case "done":
       return { kind: "done", reason };
@@ -508,19 +524,21 @@ export function parsePostVerifyStep(raw: string): PostVerifyStep {
       return { kind: "extract", reason };
     case "login":
       return { kind: "login", reason };
-    case "click":
-      return {
-        kind: "click",
-        selector: requireString(obj, "selector", "post-verify click step"),
-        reason,
-      };
-    case "fill":
+    case "click": {
+      const selector = requireString(obj, "selector", "post-verify click step");
+      checkSelector(selector, "post-verify click step");
+      return { kind: "click", selector, reason };
+    }
+    case "fill": {
+      const selector = requireString(obj, "selector", "post-verify fill step");
+      checkSelector(selector, "post-verify fill step");
       return {
         kind: "fill",
-        selector: requireString(obj, "selector", "post-verify fill step"),
+        selector,
         value: requireString(obj, "value", "post-verify fill step"),
         reason,
       };
+    }
     case "navigate":
       return {
         kind: "navigate",
@@ -560,6 +578,23 @@ const CAPTCHA_TOKEN_MARKERS: readonly string[] = [
   "h-captcha-response",
 ];
 
+// Distinctive service key prefixes. If a *labeled* match's value
+// embeds one of these NOT at its start, the regex straddled glued UI
+// text on a dense dashboard (e.g. Render's API-keys list rendered as
+// "...Name bot-key Menu Key rnd_xxxx" with no separators) — the real
+// key starts at the prefix, so the labeled match is contaminated and
+// must be rejected. A clean labeled key either starts with its prefix
+// (then the prefixed patterns above already caught it) or carries no
+// known prefix at all.
+const EMBEDDED_KEY_PREFIXES: readonly string[] = [
+  "rnd_",
+  "phc_",
+  "sk_live_",
+  "sk_test_",
+  "pk_live_",
+  "pk_test_",
+];
+
 // Pull an API key out of the *visible* page text.
 //
 // Two strategies, in priority order:
@@ -584,6 +619,7 @@ export function extractApiKeyFromText(text: string): string | null {
     /\bkey-[a-f0-9]{32}\b/, // Mailgun
     /\bphc_[a-zA-Z0-9]{32,}\b/, // PostHog
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
+    /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
   ];
   for (const pattern of prefixed) {
     const match = text.match(pattern);
@@ -608,6 +644,9 @@ export function extractApiKeyFromText(text: string): string | null {
     if (candidate.length > MAX_CREDENTIAL_LENGTH) continue;
     const lower = candidate.toLowerCase();
     if (CAPTCHA_TOKEN_MARKERS.some((marker) => lower.includes(marker))) continue;
+    // Contaminated: the labeled match straddled glued dashboard text
+    // onto a real key (the key prefix sits mid-candidate, not at 0).
+    if (EMBEDDED_KEY_PREFIXES.some((p) => lower.indexOf(p) > 0)) continue;
     return candidate;
   }
 
@@ -966,12 +1005,17 @@ export class SignupAgent {
   // Extract + rank the page's interactive elements (F3 T1/T2).
   // `oauthFirst` keeps a Google OAuth affordance from being ranked out
   // of the capped inventory when an OAuth-first signup is requested (T6).
+  // `buttonCap` widens for the post-OAuth onboarding loop: a dashboard
+  // carries far more nav links than a signup form, and they do not
+  // score as signup buttons, so the default cap would drop the very
+  // "API Keys"/"Settings" links the onboarding planner must reach.
   private async buildInventory(
     steps: string[],
     oauthFirst = false,
+    buttonCap = 25,
   ): Promise<InteractiveElement[]> {
     const raw = await this.browser.extractInteractiveElements();
-    const { inventory, buttonsDropped } = rankAndCapInventory(raw, 25, oauthFirst);
+    const { inventory, buttonsDropped } = rankAndCapInventory(raw, buttonCap, oauthFirst);
     steps.push(
       `Inventory: ${inventory.length} element(s)` +
         (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
@@ -1717,12 +1761,22 @@ ${formatInventory(input.inventory)}`,
     let credentials = await this.extractCredentials();
     let loginAttempts = 0;
     const oauth = args.credentials === undefined;
+    // Re-plan hint for the next round — set when an `extract` step
+    // found no key, which means the visible key text is masked /
+    // truncated (the S3-class trap: the planner sees a key-shaped
+    // string and keeps asking to extract it forever).
+    let hint: string | undefined;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
         return credentials;
       }
       const state = await this.browser.getState();
+      // DOM-grounded inventory so the planner picks verified selectors
+      // instead of inventing CSS that never resolves. A dashboard has
+      // far more nav links than a signup form, so the button cap is
+      // widened (the "API Keys"/"Settings" links must survive ranking).
+      const inventory = await this.buildInventory(args.steps, false, 80);
       let nextStep: PostVerifyStep;
       try {
         nextStep = await this.planPostVerifyStep({
@@ -1731,6 +1785,8 @@ ${formatInventory(input.inventory)}`,
           maxRounds: args.maxRounds,
           state,
           oauth,
+          inventory,
+          ...(hint !== undefined ? { hint } : {}),
         });
       } catch (err) {
         args.steps.push(
@@ -1741,9 +1797,20 @@ ${formatInventory(input.inventory)}`,
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${nextStep.reason}`);
 
       if (nextStep.kind === "done") break;
+      hint = undefined;
       try {
         if (nextStep.kind === "extract") {
           credentials = await this.extractCredentials();
+          if (credentials.api_key === undefined) {
+            // The planner saw a key-shaped string but extraction got
+            // nothing — the on-page key is masked/truncated. Steer the
+            // next round off `extract` and toward creating a fresh key.
+            hint =
+              "Your last 'extract' found NO key — the key text on the page is " +
+              "masked or truncated (e.g. shows '...' or dots). A masked existing " +
+              "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
+              "generate a fresh one — its full value is shown once, on creation.";
+          }
         } else if (nextStep.kind === "click") {
           await this.browser.click(nextStep.selector);
           await this.browser.wait(2);
@@ -1846,6 +1913,12 @@ ${formatInventory(input.inventory)}`,
     // planner must never ask to log in. The email-verification path
     // (oauth=false) keeps the login-wall recovery guidance.
     oauth: boolean;
+    // DOM-grounded element inventory — `click`/`fill` selectors MUST be
+    // copied from it (parsePostVerifyStep rejects anything else).
+    inventory: InteractiveElement[];
+    // Carried from the previous round when it did not make progress
+    // (e.g. an `extract` that found only a masked key).
+    hint?: string;
   }): Promise<PostVerifyStep> {
     const visibleText = (input.state.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 2500);
 
@@ -1860,22 +1933,41 @@ Your goal: surface the user's API key (or any credential — token, secret, app 
 
 You may issue ONE step per turn. Reply with a single JSON object, no prose.
 
+You are given a screenshot and an INVENTORY of the page's interactive
+elements — each line ends with a precise \`selector=\` the bot has
+verified resolves.
+
 Schema:
   {"kind":"done","reason":"why we should stop"}
   {"kind":"extract","reason":"the API key is now visible on this page"}
   {"kind":"login","reason":"the page is a login form / we were signed out"}
-  {"kind":"click","selector":"CSS","reason":"e.g. dismiss onboarding modal / open API keys page"}
-  {"kind":"fill","selector":"CSS","value":"value","reason":"unusual — only for required project-name etc."}
-  {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api"}
+  {"kind":"click","selector":"<a selector= copied verbatim from the inventory>","reason":"e.g. open the API keys page"}
+  {"kind":"fill","selector":"<a selector= from the inventory>","value":"value","reason":"unusual — only for a required project-name etc."}
+  {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api-keys"}
   {"kind":"wait","seconds":N,"reason":"page is still loading"}
 
+- CRITICAL: every "selector" in a click/fill step MUST be copied
+  verbatim from a \`selector=\` field in the inventory below. Never
+  invent or guess a selector — one not in the inventory is rejected.
+- If the element you want is NOT in the inventory, use {"kind":"navigate"}
+  to a likely settings URL instead of guessing a selector.
+
 Strategy:
-- If the API key text is visible, return {"kind":"extract"}.
-- If there's a dashboard menu link like "API Keys" / "Tokens" / "Developer", click it.
-- If there's an onboarding modal blocking, dismiss it.
+- If a FULL, untruncated API key is visible, return {"kind":"extract"}.
+- A key shown masked or truncated (with "...", dots, or "•") is NOT
+  extractable — its full value is shown only once, at creation. Do NOT
+  return "extract" for a masked key, and do not return "extract" twice
+  in a row. Instead click "Create API Key" / "New API Key" / "Generate"
+  to make a fresh key, then extract its full value.
+- To reach API keys, prefer a {"kind":"navigate"} straight to the
+  service's API-keys settings URL — note these usually live under the
+  user/ACCOUNT settings, not a project or workspace's settings.
+- Otherwise click a dashboard menu link like "API Keys" / "Tokens" /
+  "Developer" / "Settings" — using its inventory selector.
+- If there's an onboarding modal or a "Skip" link blocking, dismiss it.
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
-- If the page wants the user to create a project before showing keys, fill the minimum and click create.
+- If the page wants the user to create a project/key before showing it, fill the minimum and click create.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [
@@ -1888,15 +1980,22 @@ Title: ${input.state.title}
 Round: ${input.round + 1}/${input.maxRounds}
 
 Visible text (truncated):
-${visibleText}`,
+${visibleText}
+
+Interactive element inventory:
+${formatInventory(input.inventory)}${
+          input.hint !== undefined ? `\n\nIMPORTANT — ${input.hint}` : ""
+        }`,
       },
     ];
 
+    // The planner may only pick click/fill selectors the bot supplied.
+    const allowed = new Set(input.inventory.map((e) => e.selector));
     return this.callLLM({
       system: systemPrompt,
       userBlocks,
       maxTokens: 500,
-      parse: parsePostVerifyStep,
+      parse: (raw) => parsePostVerifyStep(raw, allowed),
     });
   }
 
@@ -1915,13 +2014,26 @@ ${visibleText}`,
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
-    // IMPORTANT: pull credentials from the *visible* page text, not the raw
+    // IMPORTANT: pull credentials from the *visible* page, not the raw
     // HTML. Reading from HTML matches anti-bot challenge JS (Cloudflare
-    // Turnstile, hCaptcha) whose challenge tokens look like API keys to a
-    // naive regex.
-    const text = await this.browser.extractText();
+    // Turnstile, hCaptcha) whose challenge tokens look like API keys to
+    // a naive regex.
+    //
+    // Two visible surfaces, in priority order:
+    //   1. Visible field values. A freshly-created key is usually
+    //      rendered into a readonly copy <input> — and an input's value
+    //      is absent from textContent, so this is the high-signal spot.
+    //      Hidden inputs (captcha tokens) are excluded by the browser.
+    //   2. The visible body text — keys shown as plain page text.
     const credentials: Record<string, string> = {};
-    const apiKey = extractApiKeyFromText(text);
+    let apiKey: string | null = null;
+    for (const value of await this.browser.extractVisibleFieldValues()) {
+      apiKey = extractApiKeyFromText(value);
+      if (apiKey !== null) break;
+    }
+    if (apiKey === null) {
+      apiKey = extractApiKeyFromText(await this.browser.extractText());
+    }
     if (apiKey !== null) credentials.api_key = apiKey;
     return credentials;
   }
