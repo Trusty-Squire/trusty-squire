@@ -27,11 +27,14 @@ import type { BrowserContext } from "playwright";
 import {
   UniversalSignupBot,
   pickLLMPair,
+  OpenRouterClient,
   type LLMClient,
   type LLMPair,
   type LLMRequest,
   type LLMResponse,
 } from "./index.js";
+import { BrowserController } from "./browser.js";
+import { SignupAgent } from "./agent.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 
 const RENDER_SIGNUP_URL =
@@ -93,12 +96,72 @@ class NoLLM implements LLMClient {
 }
 
 function resolveLLM(): { llm: LLMClient | LLMPair; real: boolean } {
+  const orKey = process.env.OPENROUTER_API_KEY ?? "";
+  if (orKey.length > 0) {
+    // Build a single-model client directly. pickLLMPair's cheap tier
+    // ships a fallbackModels list that makes OpenRouter's `models`
+    // routing array exceed its 3-item cap (a 400). One vision model,
+    // no fallback array, sidesteps it. Claude 3.5 Sonnet is the most
+    // reliable at the structured-JSON planner output.
+    return {
+      llm: new OpenRouterClient({ apiKey: orKey, model: "anthropic/claude-sonnet-4.5" }),
+      real: true,
+    };
+  }
   const hasBackend =
-    (process.env.OPENROUTER_API_KEY ?? "").length > 0 ||
     (process.env.ANTHROPIC_API_KEY ?? "").length > 0 ||
     (process.env.TRUSTY_SQUIRE_MACHINE_TOKEN ?? "").length > 0;
   if (hasBackend) return { llm: pickLLMPair({ preferCheap: true }), real: true };
   return { llm: new NoLLM(), real: false };
+}
+
+// Onboarding-only mode (T12_ONBOARDING_ONLY=1). When the persistent
+// profile is ALREADY authenticated with the service — a service that
+// silent-SSOs you back in whenever the Google session is live, so its
+// signup URL never re-shows the OAuth button — the front-half handshake
+// can't be re-triggered. This mode skips it and exercises just the
+// piece that still needs proving: driving the authenticated dashboard
+// through post-OAuth onboarding to the API key. It reflects into the
+// agent's postVerifyLoop, the same machinery the OAuth path uses.
+async function runOnboardingOnly(llm: LLMClient | LLMPair): Promise<boolean> {
+  const dashboardUrl =
+    process.env.T12_DASHBOARD_URL ?? "https://dashboard.render.com/";
+  console.error(`[T12] onboarding-only mode — dashboard: ${dashboardUrl}`);
+  const browser = new BrowserController({ humanize: true });
+  const steps: string[] = [];
+  try {
+    await browser.start();
+    await browser.goto(dashboardUrl);
+    await browser.wait(3);
+    const agent = new SignupAgent(browser, llm);
+    // postVerifyLoop is private — reflected, the same break-the-
+    // encapsulation pattern the unit tests use.
+    const loop = (
+      agent as unknown as {
+        postVerifyLoop: (a: {
+          service: string;
+          maxRounds: number;
+          steps: string[];
+        }) => Promise<Record<string, string>>;
+      }
+    ).postVerifyLoop.bind(agent);
+    const credentials = await loop({ service: "Render", maxRounds: 10, steps });
+
+    const line = "=".repeat(64);
+    console.error(`\n${line}\n[T12] ONBOARDING RESULT\n${line}`);
+    const apiKey = credentials["api_key"];
+    if (apiKey !== undefined) {
+      console.error(`[T12] ✓ API key extracted: ${apiKey}`);
+    } else {
+      console.error(`[T12] no API key reached through onboarding`);
+    }
+    console.error(`[T12] steps:`);
+    steps.forEach((s, i) => console.error(`        ${i + 1}. ${s}`));
+    console.error(line);
+    return apiKey !== undefined;
+  } finally {
+    await browser.close();
+  }
 }
 
 async function main(): Promise<void> {
@@ -106,6 +169,18 @@ async function main(): Promise<void> {
   console.error(`${line}\n[T12] OAuth-first thin slice — Render\n${line}`);
   console.error(`[T12] profile dir : ${CHROME_PROFILE_DIR}`);
   console.error(`[T12] signup url  : ${RENDER_SIGNUP_URL}`);
+
+  if (process.env.T12_ONBOARDING_ONLY === "1") {
+    const { llm, real } = resolveLLM();
+    if (!real) {
+      console.error(`[T12] onboarding-only needs a real LLM backend — aborting.`);
+      process.exitCode = 1;
+      return;
+    }
+    const ok = await runOnboardingOnly(llm);
+    process.exitCode = ok ? 0 : 1;
+    return;
+  }
 
   // Step 1 — D8 close/reopen: is the spike's Google session still here?
   console.error(`[T12] verifying the persistent profile holds a Google session…`);
