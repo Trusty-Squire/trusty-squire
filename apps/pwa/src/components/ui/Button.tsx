@@ -10,7 +10,7 @@ export function Button({ variant = "primary", className = "", children, ...rest 
     "px-5 py-2.5 rounded-md font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
   const variants = {
     primary:
-      "bg-[color:var(--color-accent-deep)] text-[color:var(--color-accent-contrast)] hover:bg-[color:var(--color-accent)]",
+      "bg-[color:var(--color-accent-fill)] text-[color:var(--color-accent-contrast)] hover:bg-[color:var(--color-accent-fill-hover)]",
     secondary:
       "bg-[color:var(--color-surface)] text-[color:var(--color-text)] border border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-raised)] hover:border-[color:var(--color-border-strong)]",
     ghost:

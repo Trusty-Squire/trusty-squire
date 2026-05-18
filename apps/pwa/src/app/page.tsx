@@ -14,7 +14,7 @@ export default function HomePage() {
         <div className="flex justify-center gap-3">
           <Link
             href="/signup"
-            className="px-6 py-3 rounded-md bg-[color:var(--color-accent-deep)] text-[color:var(--color-accent-contrast)] no-underline transition-colors hover:bg-[color:var(--color-accent)]"
+            className="px-6 py-3 rounded-md bg-[color:var(--color-accent-fill)] text-[color:var(--color-accent-contrast)] no-underline transition-colors hover:bg-[color:var(--color-accent-fill-hover)]"
           >
             Get started
           </Link>

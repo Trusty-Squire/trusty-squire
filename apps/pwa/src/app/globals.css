@@ -18,13 +18,17 @@
   /* Text */
   --color-text: #ededef;
   --color-text-soft: rgba(237, 237, 239, 0.64);
-  --color-text-muted: rgba(237, 237, 239, 0.4);
+  --color-text-muted: rgba(237, 237, 239, 0.52);
 
   /* Accent — wine, lifted for legibility on near-black. The one accent;
-     the medieval hint lives here and in the shield mark, nowhere else. */
-  --color-accent: #cf3a52;
-  --color-accent-hover: #e0566c;
-  --color-accent-deep: #8a1a30;
+     the medieval hint lives here and in the shield mark, nowhere else.
+     `accent`/`accent-hover` are text-safe (WCAG AA 4.5:1 on surface);
+     `accent-fill`/`accent-fill-hover` are the darker wines that carry
+     white button text (white stays >=4.5:1 on them). */
+  --color-accent: #dd5266;
+  --color-accent-hover: #e8697b;
+  --color-accent-fill: #8a1a30;
+  --color-accent-fill-hover: #cf3a52;
   --color-accent-contrast: #ffffff;
 
   --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -63,7 +67,7 @@ button {
 }
 
 ::selection {
-  background: var(--color-accent-deep);
+  background: var(--color-accent-fill);
   color: #fff;
 }
 
