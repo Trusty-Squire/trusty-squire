@@ -465,7 +465,15 @@ async function loginHeadless(
       process.exit(130);
     };
     if (activeContext !== undefined) {
-      activeContext.close().then(finish, finish);
+      // Close the browser to release the persistent-profile lock — but
+      // cap the wait: a wedged Chrome under Xvfb can hang close()
+      // indefinitely, and the rig MUST still be torn down. Whichever
+      // wins (clean close, or the 3s cap), `finish` runs.
+      const capped = new Promise<void>((r) => setTimeout(r, 3000));
+      Promise.race([activeContext.close().catch(() => undefined), capped]).then(
+        finish,
+        finish,
+      );
     } else {
       finish();
     }
