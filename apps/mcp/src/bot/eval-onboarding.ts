@@ -23,6 +23,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SignupAgent, type PostVerifyStep } from "./agent.js";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { pickLLMPair } from "./llm-client.js";
@@ -253,13 +254,24 @@ function seedCases(): OnboardingEvalCase[] {
   ];
 }
 
-// Load curated corpus cases from ONBOARDING_EVAL_CORPUS — JSON files
-// captured by onboarding-capture.ts and then given a real `expect` by
-// a curator. Raw captures (still `expect: null`) are skipped: an eval
-// case is only scorable once a human has labelled the correct answer.
-function loadCorpus(): OnboardingEvalCase[] {
-  const dir = process.env.ONBOARDING_EVAL_CORPUS;
-  if (dir === undefined || dir.trim().length === 0) return [];
+// The committed corpus: raw captures from onboarding-capture.ts that a
+// curator trimmed to distinct states, compacted (screenshots dropped,
+// HTML reduced to its visible text) and labelled with a real `expect`.
+const COMMITTED_CORPUS_DIR = fileURLToPath(
+  new URL("../../corpus/onboarding", import.meta.url),
+);
+
+// Load curated corpus cases. ONBOARDING_EVAL_CORPUS overrides the
+// location (e.g. to point at a fresh raw-capture dir mid-curation);
+// unset, it falls back to the committed corpus. Raw captures (still
+// `expect: null`) are skipped: an eval case is only scorable once a
+// human has labelled the correct answer.
+export function loadCorpus(): OnboardingEvalCase[] {
+  const override = process.env.ONBOARDING_EVAL_CORPUS;
+  const dir =
+    override !== undefined && override.trim().length > 0
+      ? override
+      : COMMITTED_CORPUS_DIR;
   let files: string[];
   try {
     files = readdirSync(dir).filter((f) => f.endsWith(".json"));

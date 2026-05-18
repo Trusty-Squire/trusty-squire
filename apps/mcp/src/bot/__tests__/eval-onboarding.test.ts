@@ -6,7 +6,11 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { scoreOnboardingStep, type OnboardingExpectation } from "../eval-onboarding.js";
+import {
+  loadCorpus,
+  scoreOnboardingStep,
+  type OnboardingExpectation,
+} from "../eval-onboarding.js";
 import { captureOnboardingRound } from "../onboarding-capture.js";
 import type { PostVerifyStep } from "../agent.js";
 
@@ -81,6 +85,58 @@ describe("scoreOnboardingStep", () => {
       selectorsAnyOf: ["#create-key"],
     };
     expect(scoreOnboardingStep(navigate, exp).pass).toBe(true);
+  });
+});
+
+describe("committed onboarding corpus", () => {
+  // The kinds an OnboardingExpectation may reference — kept in sync
+  // with PostVerifyStep. A corpus file naming an unknown kind is a
+  // typo that would silently never match a planned step.
+  const STEP_KINDS = new Set([
+    "done",
+    "extract",
+    "login",
+    "click",
+    "fill",
+    "select",
+    "navigate",
+    "wait",
+  ]);
+  const cases = loadCorpus();
+
+  it("loads the curated corpus shipped in corpus/onboarding/", () => {
+    expect(cases.length).toBeGreaterThanOrEqual(14);
+  });
+
+  it("every case is structurally sound and scorable", () => {
+    for (const c of cases) {
+      expect(c.name, "name").toBeTruthy();
+      expect(c.service, `${c.name}: service`).toBeTruthy();
+      expect(c.inventory.length, `${c.name}: inventory`).toBeGreaterThan(0);
+      expect(c.state.url, `${c.name}: url`).toMatch(/^https?:\/\//);
+      expect(c.state.html.length, `${c.name}: html`).toBeGreaterThan(0);
+      expect(c.state.screenshot.length, `${c.name}: screenshot`).toBeGreaterThan(0);
+
+      const exp = c.expect;
+      expect(exp.acceptKinds.length, `${c.name}: acceptKinds`).toBeGreaterThan(0);
+      for (const k of [...exp.acceptKinds, ...(exp.rejectKinds ?? [])]) {
+        expect(STEP_KINDS.has(k), `${c.name}: unknown kind "${k}"`).toBe(true);
+      }
+      // accept and reject sets must not overlap — a kind can't be both.
+      for (const k of exp.rejectKinds ?? []) {
+        expect(exp.acceptKinds.includes(k), `${c.name}: "${k}" both accepted and rejected`).toBe(
+          false,
+        );
+      }
+      // A selectorsAnyOf entry must be a real selector from the
+      // inventory, otherwise no planned step could ever satisfy it.
+      for (const sel of exp.selectorsAnyOf ?? []) {
+        expect(
+          c.inventory.some((e) => e.selector === sel),
+          `${c.name}: selectorsAnyOf "${sel}" not in inventory`,
+        ).toBe(true);
+      }
+    }
   });
 });
 
