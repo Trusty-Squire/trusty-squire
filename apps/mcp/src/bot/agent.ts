@@ -858,6 +858,7 @@ export class SignupAgent {
     let errorReplans = 0;
     let progressReplans = 0;
     let emptyPlans = 0;
+    let oauthScanRetries = 0;
     let hint: string | undefined;
 
     const oauthProvider = task.oauthProvider;
@@ -882,6 +883,18 @@ export class SignupAgent {
               `— taking the OAuth path`,
           );
           return { kind: "oauth", selector: oauthButton.selector };
+        }
+        // SSO buttons frequently load async — Mistral renders its
+        // icon-only provider buttons after the email form. Re-extract
+        // a couple of times before giving up on the OAuth path.
+        if (oauthScanRetries < 2) {
+          oauthScanRetries += 1;
+          steps.push(
+            `OAuth-first: no ${label} affordance yet — waiting for an async ` +
+              `render (retry ${oauthScanRetries}/2)`,
+          );
+          await this.browser.wait(3);
+          continue;
         }
         steps.push(
           `OAuth-first requested but no ${label} affordance on the page — ` +
