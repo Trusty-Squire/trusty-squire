@@ -43,8 +43,11 @@ describe("bundled login asset — vnc.html", () => {
     }
   });
 
-  it("reads the VNC password from the URL so the user is never prompted", () => {
-    expect(html).toContain("URLSearchParams(location.search)");
+  it("reads the VNC password from the URL fragment, never the query string", () => {
+    // A fragment (#password=) is not sent to the server — keeps the
+    // secret out of cloudflared/proxy logs. The query string would not.
+    expect(html).toContain("location.hash");
+    expect(html).not.toContain("location.search");
     expect(html).toContain('params.get("password")');
     expect(html).toContain("credentials: { password }");
   });

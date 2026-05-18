@@ -366,15 +366,22 @@ function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildPro
 }
 
 // Read cloudflared's output until it prints its public trycloudflare URL.
+// Accumulates a rolling buffer rather than matching per-chunk — the URL
+// can straddle two `data` events, and a per-chunk match would miss it
+// and hang until the timeout.
 function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("cloudflared did not produce a URL in time")), timeoutMs);
+    let acc = "";
     const scan = (buf: Buffer): void => {
-      const m = buf.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      acc += buf.toString();
+      const m = acc.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
       if (m !== null) {
         clearTimeout(timer);
         resolve(m[0]);
       }
+      // Bound memory if cloudflared is chatty before the URL appears.
+      if (acc.length > 65536) acc = acc.slice(-4096);
     };
     cf.stdout?.on("data", scan);
     cf.stderr?.on("data", scan);
@@ -406,6 +413,16 @@ function teardown(rig: HeadlessRig): void {
 function buildVncWebDir(): string {
   const webDir = mkdtempSync(join(tmpdir(), "ts-novnc-"));
   cpSync(NOVNC_INSTALL_DIR, webDir, { recursive: true });
+  // The branded page imports `./core/rfb.js`. If the distro's novnc
+  // package put its core somewhere else, fail loudly here rather than
+  // serving a page that 404s its own script and shows a blank screen.
+  if (!existsSync(join(webDir, "core", "rfb.js"))) {
+    rmSync(webDir, { recursive: true, force: true });
+    throw new Error(
+      `noVNC core not found at ${NOVNC_INSTALL_DIR}/core/rfb.js — the ` +
+        `installed novnc package has an unexpected layout`,
+    );
+  }
   writeFileSync(
     join(webDir, "vnc.html"),
     readFileSync(loginAssetPath("vnc.html"), "utf8"),
@@ -428,17 +445,30 @@ async function loginHeadless(
   const webPort = await findFreePort();
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
+  // The persistent Chrome context is NOT a member of `rig` — it is a
+  // Playwright handle, closed via context.close(). Tracked here so the
+  // signal handler can release the profile lock before exiting.
+  let activeContext: BrowserContext | undefined;
 
-  // Ensure the rig is never orphaned if the process dies mid-login.
-  // `exit` covers a normal return; SIGTERM/SIGINT cover an interrupted
-  // run — once a signal listener is registered the default terminate
-  // is suppressed, so the handler must tear down AND exit itself.
-  // Folding login into `install` makes an interrupted run far more
-  // likely (a backgrounded terminal, a dropped SSH session).
+  // Ensure nothing is orphaned if the process dies mid-login. `exit`
+  // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
+  // once a signal listener is registered the default terminate is
+  // suppressed, so the handler must clean up AND exit itself. Folding
+  // login into `install` makes an interrupted run far more likely (a
+  // backgrounded terminal, a dropped SSH session). The handler closes
+  // the browser FIRST (releases the persistent-profile lock cleanly),
+  // then tears down the rig, then exits.
   const onExit = (): void => teardown(rig);
   const onSignal = (): void => {
-    teardown(rig);
-    process.exit(130);
+    const finish = (): void => {
+      teardown(rig);
+      process.exit(130);
+    };
+    if (activeContext !== undefined) {
+      activeContext.close().then(finish, finish);
+    } else {
+      finish();
+    }
   };
   process.once("exit", onExit);
   process.once("SIGTERM", onSignal);
@@ -464,6 +494,7 @@ async function loginHeadless(
         "--disable-dev-shm-usage",
       ],
     });
+    activeContext = context;
 
     try {
       if (await hasProviderSession(context, target)) {
@@ -502,13 +533,15 @@ async function loginHeadless(
       rig.procs.push(cf);
       const tunnelUrl = await awaitTunnelUrl(cf, 30000);
 
-      // The VNC password is embedded in the URL — the branded vnc.html
-      // reads it and connects with no password prompt. Still printed
-      // separately as a fallback for clients that strip query params.
+      // The VNC password rides in the URL *fragment* (#), not the query
+      // string — a fragment is never sent to the server, so it stays
+      // out of the cloudflared edge logs and any proxy in between. The
+      // branded vnc.html reads it from location.hash and connects with
+      // no prompt. Still printed separately as a fallback.
       console.error(
         "\n" + "=".repeat(64) + "\n" +
           "[login] Open this on any device, any network:\n" +
-          `        ${tunnelUrl}/vnc.html?password=${vncPassword}\n` +
+          `        ${tunnelUrl}/vnc.html#password=${vncPassword}\n` +
           `[login] (if asked for a VNC password: ${vncPassword})\n` +
           `[login] You'll see a Chrome window — log into your ${target.label} account.\n` +
           "=".repeat(64) + "\n",
@@ -522,6 +555,8 @@ async function loginHeadless(
         : { status: "timeout", detail: "no login completed before the deadline" };
     } finally {
       await context.close().catch(() => undefined);
+      // Closed — the signal handler must not double-close it.
+      activeContext = undefined;
     }
   } finally {
     teardown(rig);

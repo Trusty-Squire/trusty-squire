@@ -311,6 +311,11 @@ async function promptProvider(): Promise<OAuthProviderId[]> {
 function promptLine(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   return new Promise<string>((resolve) => {
+    // If stdin reaches EOF before an answer (closed or redirected
+    // mid-run), resolve empty rather than hang forever — the caller
+    // treats "" as the default. Promise resolve is idempotent, so the
+    // question callback and this close handler cannot both win.
+    rl.on("close", () => resolve(""));
     rl.question(question, (answer) => {
       rl.close();
       resolve(answer);

@@ -449,6 +449,14 @@ Findings (2026-05-18)" section.
   CEO + eng reviewed. Plan:
   `~/.gstack/projects/Trusty-Squire-trusty-squire/ceo-plans/2026-05-18-streamlined-oauth-onboarding.md`.
   Next: `/ship` (bump version, publish).
+- [ ] **G14 — Harden the headless-login VNC password handoff. [P3]**
+  `loginHeadless` passes the VNC password to `x11vnc` as a plaintext
+  `-passwd` argv argument, readable by any other local UID via `ps`.
+  Pre-existing and narrow (x11vnc binds `-localhost` only, so it needs
+  a co-resident attacker), but the streamlined-onboarding sprint's
+  theme is hardening this path. Fix: write the password to a `0600`
+  file in the rig's temp dir and use `x11vnc -passwdfile`. Surfaced by
+  the /ship adversarial review 2026-05-18.
 
 ## H — Concurrency: the bot is single-flight
 

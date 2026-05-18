@@ -43,7 +43,10 @@
   <script type="module">
     import RFB from "./core/rfb.js";
 
-    const params = new URLSearchParams(location.search);
+    // The VNC password rides in the URL fragment (#password=...), never
+    // the query string — a fragment is never sent to the server, so the
+    // secret stays out of the cloudflared edge logs and any proxy.
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
     const password = params.get("password") || "";
     const dot = document.getElementById("dot");
     const msg = document.getElementById("msg");

@@ -70,6 +70,8 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
   "check your inbox",
   "verify your email",
   "verify your inbox",
+  "verify your account",
+  "confirm your account",
   "confirm your email",
   "confirmation email",
   "verification email",
