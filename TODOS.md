@@ -354,13 +354,15 @@ drive Google's login (harder than the captcha problem).
 From the OAuth-first verification sweep — see the plan's "Post-Build
 Findings (2026-05-18)" section.
 
-- [ ] **G3 — Publish `0.2.1`.** Every fix since `0.2.0` — post-OAuth
-  onboarding hardening (scroll-into-view, the `select` step,
-  navigation-resilience, re-plan-on-rejection, async SSO re-extract),
-  `findOAuthButton` icon/href detection, and the extraction fixes
-  (`pk_`/`phc_` dropped, `re_` charset, the label-separator guard) —
-  is committed and unpublished. `rm -rf dist` before packing so no
-  dev-harness artifact leaks into the tarball.
+- [x] **G3 — Publish `0.2.1`. — done 2026-05-18.** Every fix since
+  `0.2.0` — post-OAuth onboarding hardening (scroll-into-view, the
+  `select` step, navigation-resilience, re-plan-on-rejection, async
+  SSO re-extract), `findOAuthButton` icon/href detection, the
+  extraction fixes (`pk_`/`phc_` dropped, `re_` charset, the
+  label-separator guard), plus G5 (eval corpus) and G6 (`check`
+  step) — shipped as `@trusty-squire/mcp@0.2.1`. dist cleaned before
+  packing; the `corpus/` dir is not in the tarball (143 KB packed,
+  123 files). CLAUDE.md's published-version line updated.
 - [ ] **G4 — Capture pass for the 8 handshake-needed services**
   (Plunk, Hunter, IPInfo, PostHog, Koyeb, Netlify, SendPulse,
   Back4App). **BLOCKED** — G7 measured that the OAuth handshake is
@@ -370,16 +372,34 @@ Findings (2026-05-18)" section.
   Unblocking needs the handshakes done from a residential IP + a
   headed browser (a developer's own machine), once per service, to
   capture the post-OAuth state — then G5.
-- [ ] **G5 — Curate the raw onboarding captures into the E1 eval
-  corpus.** 34 raw round-captures sit in
-  `apps/mcp/.onboarding-corpus-raw/` (Sentry, Mistral, Resend) shaped
-  as `OnboardingEvalCase` minus `expect`. Add the `expect` labels,
-  trim to distinct states, commit as the corpus `eval-onboarding.ts`
-  loads via `ONBOARDING_EVAL_CORPUS`.
-- [ ] **G6 — `postVerifyLoop` needs a `check` step.** It has `select`
-  but no `check`; Mistral's custom TOS "checkbox" (not a plain
-  `<input>`) stalls the onboarding loop. Mirror the form planner's
-  `browser.check` (force + scrollIntoView + verify).
+- [x] **G5 — Curate the raw onboarding captures into the E1 eval
+  corpus. — done 2026-05-18.** 46 raw round-captures (Sentry,
+  Mistral, Resend, SendPulse) trimmed to **14 distinct, labelled
+  cases** under `apps/mcp/corpus/onboarding/`. Each keeps the full
+  DOM inventory, drops the screenshot for a 1×1 placeholder, and
+  reduces HTML to the visible text the planner consumes. Cases cover
+  the T12 sequences: Resend dashboard→keys→modal→reveal→extract,
+  Sentry issues→settings→tokens→create, Mistral's org-creation gate,
+  SendPulse's 404 dead-end. `loadCorpus()` defaults to the committed
+  dir; `ONBOARDING_EVAL_CORPUS` still overrides. A test asserts the
+  corpus loads and every case is structurally scorable.
+- [x] **G6 — `postVerifyLoop` `check` step. — done 2026-05-18.**
+  Added `PostVerifyStep` `check`: `parsePostVerifyStep` parses it,
+  the loop executes via `browser.check` (force + scrollIntoView +
+  verify), the planner prompt documents it for a disabled-button TOS
+  gate, and the parse callback rejects a `check` that targets a link
+  instead of a real checkbox. **Caveat:** Mistral's specific TOS
+  checkbox is a visually-hidden `<input>` that
+  `extractInteractiveElements` filters out, so it never reaches the
+  inventory — `check` cannot target what isn't surfaced. Surfacing
+  hidden-but-checkable inputs is a separate browser.ts fix → G12.
+- [ ] **G12 — Surface visually-hidden checkboxes in the inventory.**
+  `extractInteractiveElements` drops `visible:false` elements, but a
+  custom-styled TOS checkbox is a real `<input type=checkbox>` with
+  `opacity:0`/`sr-only` behind a styled label. It is checkable and
+  must reach the inventory so the G6 `check` step can target it
+  (Mistral's org-creation gate). Include a hidden input when it is
+  `type=checkbox`/`radio` and inside/adjacent a visible label.
 - [x] **G7 — Measure the Google anti-abuse threshold. — done
   2026-05-18.** Two batches: an aged account (`lunchboxfortwo`) got
   exactly **1** clean handshake then challenged; a fresh dev account
