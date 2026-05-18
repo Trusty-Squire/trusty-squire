@@ -163,13 +163,11 @@ poll is never entered). universal-bot 65 tests + mcp 36 tests pass.
 
 ## S3 — provision_any_service: detect withheld verification, don't blind-wait
 
-Diagnosed 2026-05-16. **Not yet implemented — now load-bearing (see M1).**
-With the SES inbound pipeline mothballed (M1), the form-fill fallback
-has no inbox at all: a no-OAuth service that needs email verification
-will *always* time out. The bot must not blind-poll — it must detect
-"email verification needed, no inbox" and return
-`manual_signup_required` + the signup URL immediately. S3 graduates
-from a polish item to a correctness requirement for the fallback path.
+Diagnosed 2026-05-16. **Done — 2026-05-18 (with M2).** Two parts:
+(1) the post-submit page-state detection (`expectsVerificationEmail` +
+a short 45s probe when the page never says "check your email") shipped
+earlier; (2) the no-inbox fast-fail shipped 2026-05-18 with M2 — see
+below.
 
 When a signup submits successfully but the service withholds the
 verification email (anti-abuse — observed with Resend: form submitted,
@@ -504,13 +502,19 @@ withholds verification mail from <30-day-old domains.
   leave the code/DB/route in place (do not delete yet) but treat it as
   out-of-MVP-scope. The form-fill *form* logic stays — only its email
   step is dead. No effort spent on a replacement domain or subdomain.
-- [ ] **M2 — Form-fill must fail fast to manual signup. [P2]** With no
-  inbox (M1), a no-OAuth service needing email verification will
-  always time out. The bot must detect "no OAuth + email verification
-  needed + no inbox" and return `manual_signup_required` + the signup
-  URL immediately, instead of the 300s blind poll. This is exactly the
-  **S3** item — promoted from polish to a correctness requirement by
-  M1. Do S3/M2 as one task.
+- [x] **M2 — Form-fill fails fast to manual signup. — done
+  2026-05-18.** `provision-any.ts` no longer passes an `inbox` to
+  `bot.signup()` (M1 — the SES pipeline is mothballed). `agent.ts`
+  signup() now branches: credentials missing + post-submit page asks
+  for email verification + no inbox → returns a `verification_not_sent`
+  error immediately with the signup URL, no poll. Reused the existing
+  `verification_not_sent` status (it already means "submitted, can't
+  confirm by email → sign up manually") rather than adding a new
+  `manual_signup_required` — same user action, one fewer status. The
+  status message + CHECK_DESCRIPTION were made cause-agnostic (covers
+  both "service withheld the mail" and "no inbox"). Tests:
+  `verification-no-inbox.test.ts` — fast-fail fires, and does not
+  over-trigger when the page shows no email prompt.
 - [ ] **M3 — Future fallback: read verification mail from the user's
   own Gmail via the OAuth profile. [P3]** The streamlined-onboarding
   flow (G13) logs the bot's Chrome profile into the user's Google
