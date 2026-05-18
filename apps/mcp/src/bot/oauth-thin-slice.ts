@@ -148,7 +148,7 @@ async function runOnboardingOnly(llm: LLMClient | LLMPair): Promise<boolean> {
         }) => Promise<Record<string, string>>;
       }
     ).postVerifyLoop.bind(agent);
-    const credentials = await loop({ service: SERVICE, maxRounds: 10, steps });
+    const credentials = await loop({ service: SERVICE, maxRounds: 12, steps });
 
     const line = "=".repeat(64);
     console.error(`\n${line}\n[T12] ONBOARDING RESULT\n${line}`);

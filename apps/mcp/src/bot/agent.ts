@@ -10,6 +10,7 @@
 
 import type {
   BrowserController,
+  BrowserState,
   CaptchaKind,
   CaptchaVariant,
   InteractiveElement,
@@ -234,6 +235,10 @@ export type PostVerifyStep =
   | { kind: "login"; reason: string }
   | { kind: "click"; selector: string; reason: string }
   | { kind: "fill"; selector: string; value: string; reason: string }
+  // `select` — pick a valid option for a native <select> (a region /
+  // role / country dropdown on a post-OAuth onboarding form). A plain
+  // `click` cannot satisfy a <select>; this picks the first real option.
+  | { kind: "select"; selector: string; reason: string }
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
@@ -558,6 +563,11 @@ export function parsePostVerifyStep(
         reason,
       };
     }
+    case "select": {
+      const selector = requireString(obj, "selector", "post-verify select step");
+      checkSelector(selector, "post-verify select step");
+      return { kind: "select", selector, reason };
+    }
     case "navigate":
       return {
         kind: "navigate",
@@ -634,11 +644,17 @@ export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9]{20,}\b/, // Resend
     /\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe secret
-    /\bpk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe public
+    // NOTE: Stripe PUBLISHABLE keys (pk_live_/pk_test_) are deliberately
+    // NOT matched. A publishable key is public by design — it ships in
+    // the client-side JS of every site that uses Stripe — so finding
+    // one on a page means "this service embeds Stripe", not "here is
+    // the user's API credential". Matching it produced a false success
+    // on Mistral (its billing pk_live_ key, surfaced as the api_key).
     /\bkey-[a-f0-9]{32}\b/, // Mailgun
     /\bphc_[a-zA-Z0-9]{32,}\b/, // PostHog
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
     /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
+    /\bsntry[su]_[A-Za-z0-9_=\-]{20,}/, // Sentry org/user auth token
   ];
   for (const pattern of prefixed) {
     const match = text.match(pattern);
@@ -1585,7 +1601,7 @@ export class SignupAgent {
     if (credentials.api_key === undefined) {
       credentials = await this.postVerifyLoop({
         service: task.service,
-        maxRounds: task.postVerifyMaxRounds ?? 8,
+        maxRounds: task.postVerifyMaxRounds ?? 12,
         steps,
       });
     }
@@ -1791,23 +1807,43 @@ ${formatInventory(input.inventory)}`,
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     let loginAttempts = 0;
+    let planFailures = 0;
     const oauth = args.credentials === undefined;
     // Re-plan hint for the next round — set when an `extract` step
     // found no key, which means the visible key text is masked /
     // truncated (the S3-class trap: the planner sees a key-shaped
-    // string and keeps asking to extract it forever).
+    // string and keeps asking to extract it forever), or when the
+    // planner's last step was rejected.
     let hint: string | undefined;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
         return credentials;
       }
-      const state = await this.browser.getState();
+      // Settle the page first — the previous round's click may have
+      // triggered a navigation, and reading a page mid-navigation
+      // throws "execution context destroyed". waitForFormReady is
+      // best-effort (swallows its own timeouts).
+      await this.browser.waitForFormReady();
       // DOM-grounded inventory so the planner picks verified selectors
       // instead of inventing CSS that never resolves. A dashboard has
       // far more nav links than a signup form, so the button cap is
       // widened (the "API Keys"/"Settings" links must survive ranking).
-      const inventory = await this.buildInventory(args.steps, undefined, 80);
+      // Reading state can still race a navigation — a transient throw
+      // burns the round rather than crashing the whole run.
+      let state: BrowserState;
+      let inventory: InteractiveElement[];
+      try {
+        state = await this.browser.getState();
+        inventory = await this.buildInventory(args.steps, undefined, 80);
+      } catch (err) {
+        args.steps.push(
+          `Post-verify round ${round}: page was mid-navigation ` +
+            `(${err instanceof Error ? err.message : String(err)}) — retrying`,
+        );
+        await this.browser.wait(2);
+        continue;
+      }
       let nextStep: PostVerifyStep;
       try {
         nextStep = await this.planPostVerifyStep({
@@ -1820,10 +1856,27 @@ ${formatInventory(input.inventory)}`,
           ...(hint !== undefined ? { hint } : {}),
         });
       } catch (err) {
-        args.steps.push(
-          `Post-verify round ${round}: planner failed (${err instanceof Error ? err.message : String(err)}). Stopping.`,
-        );
-        break;
+        // The planner's output did not validate — most often a
+        // selector not in the inventory (the model copied the whole
+        // line, not just the `selector=` value). Re-plan with a hint
+        // rather than abandon the run, the same resilience the
+        // form-fill planner has. Bounded so a persistently broken
+        // planner still terminates.
+        const reason = err instanceof Error ? err.message : String(err);
+        planFailures += 1;
+        if (planFailures > 3) {
+          args.steps.push(
+            `Post-verify round ${round}: planner failed ${planFailures}x (${reason}) — stopping.`,
+          );
+          break;
+        }
+        args.steps.push(`Post-verify round ${round}: planner output rejected (${reason}) — re-planning.`);
+        hint =
+          "Your previous step was REJECTED. A click/fill/select `selector` must be " +
+          "EXACTLY the value after `selector=` on one inventory line — copy only that " +
+          "value (it runs to the end of the line), never the leading `[n] tag …` part " +
+          "and never the whole line.";
+        continue;
       }
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${nextStep.reason}`);
 
@@ -1847,6 +1900,9 @@ ${formatInventory(input.inventory)}`,
           await this.browser.wait(2);
         } else if (nextStep.kind === "fill") {
           await this.browser.type(nextStep.selector, nextStep.value);
+        } else if (nextStep.kind === "select") {
+          await this.browser.selectOption(nextStep.selector);
+          await this.browser.wait(1);
         } else if (nextStep.kind === "navigate") {
           await this.browser.goto(nextStep.url);
           await this.browser.wait(3);
@@ -1878,7 +1934,13 @@ ${formatInventory(input.inventory)}`,
         );
         // Don't bail — Claude may recover on the next round.
       }
-      credentials = await this.extractCredentials();
+      // Re-extract — but tolerate the page still navigating from the
+      // step just taken; the next round settles and re-reads.
+      try {
+        credentials = await this.extractCredentials();
+      } catch {
+        // page mid-navigation — next round's waitForFormReady handles it
+      }
     }
     return credentials;
   }
@@ -1974,6 +2036,7 @@ Schema:
   {"kind":"login","reason":"the page is a login form / we were signed out"}
   {"kind":"click","selector":"<a selector= copied verbatim from the inventory>","reason":"e.g. open the API keys page"}
   {"kind":"fill","selector":"<a selector= from the inventory>","value":"value","reason":"unusual — only for a required project-name etc."}
+  {"kind":"select","selector":"<a selector= from the inventory, tag=select>","reason":"pick an option for a dropdown — region, role, country"}
   {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api-keys"}
   {"kind":"wait","seconds":N,"reason":"page is still loading"}
 
@@ -1999,6 +2062,10 @@ Strategy:
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - If the page wants the user to create a project/key before showing it, fill the minimum and click create.
+- For a required dropdown (an inventory entry with tag=select — region, role, country), use {"kind":"select"} — a "click" cannot pick a <select> option, so do not click it repeatedly.
+- A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
+- Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
+- On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST use a select step to set a non-default permission on at least one dropdown BEFORE clicking the create button — creating with all-default permissions does nothing. Do not click the create button repeatedly; set a permission first.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [

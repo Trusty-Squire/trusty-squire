@@ -28,11 +28,26 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(text)).toBe("re_abcdefGHIJKLmnop1234567");
   });
 
+  it("ignores a Stripe publishable key — public, not a credential", () => {
+    // pk_live_ ships in client-side JS on every Stripe-using site;
+    // matching it surfaced Mistral's billing key as a false api_key.
+    const pubKey = "pk_" + "live_examplePUBkey0000000000abcd";
+    expect(extractApiKeyFromText(`checkout uses ${pubKey} here`)).toBeNull();
+  });
+
   it("extracts a Render key by its rnd_ prefix", () => {
     // The clean prefix match — needed for keys read out of a copy
     // <input>, where there is no "API Key:" label to anchor on.
     const key = "rnd_RenderKEYvalue000111222333";
     expect(extractApiKeyFromText(`new key ${key} created`)).toBe(key);
+  });
+
+  it("extracts a Sentry org auth token by its sntrys_ prefix", () => {
+    // Sentry org tokens are sntrys_ + a long base64url payload, shown
+    // once in a copy field — too long for the labeled-pattern ceiling,
+    // but the prefix path has no length cap.
+    const key = "sntrys_" + "eyJpYXQiOjE3Nzkw".repeat(6) + "abcd";
+    expect(extractApiKeyFromText(key)).toBe(key);
   });
 });
 

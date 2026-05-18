@@ -712,6 +712,14 @@ export class BrowserController {
   private async humanClickLocator(locator: Locator): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await locator.waitFor({ state: "visible", timeout: 10000 });
+    // Scroll the element into the viewport BEFORE measuring it. A
+    // humanized click is a raw page.mouse.click(x, y) at viewport
+    // coordinates — boundingBox() of a below-the-fold element returns
+    // an off-screen y, and the click then lands on nothing (it was
+    // why a Sentry OAuth button below the fold never navigated). The
+    // regular .click() path auto-scrolls; the humanized path must too
+    // — same fix check() already carries.
+    await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
     const box = await locator.boundingBox();
     if (box === null) {
       // Element exists but isn't in the layout (e.g., display:none).
