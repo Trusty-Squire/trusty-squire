@@ -3,6 +3,10 @@ interface LogoProps {
   title?: string;
 }
 
+// A minimal monochrome shield — the medieval hint, rendered in the
+// Linear/Obsidian idiom: a single-weight outline, no fill, no
+// ornament. The `{ }` glyph (the developer-identity tie-in) is the one
+// spot of accent. Two colors, both from the theme tokens.
 export function Logo({ className, title = "Trusty Squire" }: LogoProps) {
   return (
     <svg
@@ -14,25 +18,18 @@ export function Logo({ className, title = "Trusty Squire" }: LogoProps) {
     >
       <title>{title}</title>
       <path
-        d="M 18 14 L 82 14 L 82 46 Q 82 70 50 88 Q 18 70 18 46 Z"
-        fill="var(--color-mustard)"
-        stroke="var(--color-wine)"
-        strokeWidth="3.5"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M 22 18 L 78 18 L 78 46 Q 78 67 50 83 Q 22 67 22 46 Z"
+        d="M 18 16 L 82 16 L 82 48 Q 82 72 50 88 Q 18 72 18 48 Z"
         fill="none"
-        stroke="var(--color-wine)"
-        strokeWidth="1"
-        opacity="0.25"
+        stroke="var(--color-text)"
+        strokeWidth="5.5"
+        strokeLinejoin="round"
       />
       <text
         x="50"
-        y="56"
+        y="58"
         fontFamily="var(--font-mono)"
-        fontSize="32"
-        fill="var(--color-wine)"
+        fontSize="30"
+        fill="var(--color-accent)"
         fontWeight="700"
         textAnchor="middle"
       >

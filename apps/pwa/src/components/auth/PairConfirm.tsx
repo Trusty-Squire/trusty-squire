@@ -102,14 +102,14 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
   }
 
   if (status.kind === "loading") {
-    return <p className="text-[color:var(--color-ink-soft)]">Loading pairing request…</p>;
+    return <p className="text-[color:var(--color-text-soft)]">Loading pairing request…</p>;
   }
   if (status.kind === "not_found") {
-    return <p className="text-[color:var(--color-wine)]">No such pairing request.</p>;
+    return <p className="text-[color:var(--color-accent)]">No such pairing request.</p>;
   }
   if (status.kind === "expired") {
     return (
-      <p className="text-[color:var(--color-wine)]">
+      <p className="text-[color:var(--color-accent)]">
         This pairing request has expired. Re-run <code>squire-mcp install</code> from your terminal.
       </p>
     );
@@ -117,8 +117,8 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
   if (status.kind === "done") {
     return (
       <div className="space-y-3">
-        <p className="text-[color:var(--color-amber-black)]">Pairing complete. You can close this tab.</p>
-        <a href="/dashboard" className="text-[color:var(--color-wine)]">Open the dashboard →</a>
+        <p className="text-[color:var(--color-text)]">Pairing complete. You can close this tab.</p>
+        <a href="/dashboard" className="text-[color:var(--color-accent)]">Open the dashboard →</a>
       </div>
     );
   }
@@ -127,17 +127,17 @@ export function PairConfirm({ token, email }: PairConfirmProps) {
 
   return (
     <div className="space-y-5">
-      <p className="text-[color:var(--color-ink-soft)]">
-        Trusty Squire wants to pair with <strong className="text-[color:var(--color-amber-black)]">{agentLabel}</strong>{" "}
+      <p className="text-[color:var(--color-text-soft)]">
+        Trusty Squire wants to pair with <strong className="text-[color:var(--color-text)]">{agentLabel}</strong>{" "}
         on this machine.
       </p>
-      <p className="text-sm text-[color:var(--color-ink-soft)]">
+      <p className="text-sm text-[color:var(--color-text-soft)]">
         Approving will give that agent permission to act under your mandate. You can revoke it any
         time from Settings.
       </p>
       {error !== null ? (
         <div className="space-y-2">
-          <p role="alert" className="text-[color:var(--color-wine)] text-sm">
+          <p role="alert" className="text-[color:var(--color-accent)] text-sm">
             {error}
           </p>
           <VouchflowDiagnostics err={errorObj} />

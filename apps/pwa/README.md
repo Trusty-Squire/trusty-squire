@@ -6,7 +6,9 @@ MCP install, dashboard, ledger, policy editor.
 ## Stack
 
 - **Next.js 15** App Router, Server Components where the work is static.
-- **Tailwind v4** with theme tokens (wine, mustard, cream, amber-black).
+- **Tailwind v4** with dark-first theme tokens (`--color-bg`, `-surface`,
+  `-text`, `-accent`, …). One `@theme` block in `globals.css` is the
+  single source of truth — see `DESIGN.md`.
 - **Vouchflow Web SDK** (`@vouchflow/web@0.2.1`) for all WebAuthn
   ceremonies — login, account register, mandate signing, pairing.
 - **Vitest + Testing Library** for component tests, **Playwright** for
@@ -50,7 +52,7 @@ Playwright (config sets `NEXT_PUBLIC_API_BASE` to the mock prefix).
 - **Icons:** real PNGs (192, 512, 512-maskable, 180 apple-touch) rasterized from `logo.svg` via `scripts/rasterize-icons.ts` (`pnpm rasterize-icons`). Committed under `public/icons/`.
 - **Service worker:** hand-rolled `public/sw.js`. Precaches shell + brand assets; stale-while-revalidate for static assets; never caches `/v1/*` or `/auth/*`. Version bump in `SHELL_VERSION`/`RUNTIME_VERSION` purges old caches on activate.
 - **SW registration:** `src/lib/sw-register.ts` registers in production only (localhost is skipped). New-version events trigger `SKIP_WAITING` so users get the update on next navigation.
-- **Fonts:** Fraunces + Inter self-hosted via `next/font/google` (downloaded at build time, served from `/_next/static/media/`). Zero runtime CDN.
+- **Fonts:** Inter self-hosted via `next/font/google` (downloaded at build time, served from `/_next/static/media/`). One family, body and headings. Zero runtime CDN.
 - **Bundle:** Vouchflow Web SDK lives in route-split chunk `960-*.js` (~24 kB minified, ~6 kB gzip). Loaded only on `/signup/*`, `/login`, `/pair`, `/policy`. Dashboard, ledger, subscriptions, settings never pull it.
 
 ### Lighthouse (local audit against `pnpm build && pnpm start`)

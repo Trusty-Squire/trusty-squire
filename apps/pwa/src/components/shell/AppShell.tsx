@@ -18,11 +18,11 @@ const NAV = [
 export function AppShell({ children, active }: AppShellProps) {
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="border-b border-[color:var(--color-rule)] bg-[color:var(--color-cream-soft)]">
+      <header className="border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]">
         <div className="mx-auto max-w-6xl px-6 py-4 flex items-center gap-8">
           <Link href="/dashboard" className="flex items-center gap-2 no-underline">
             <Logo className="h-8 w-8" />
-            <span className="font-medium text-[color:var(--color-amber-black)]">Trusty Squire</span>
+            <span className="font-medium text-[color:var(--color-text)]">Trusty Squire</span>
           </Link>
           <nav className="flex gap-1 ml-auto">
             {NAV.map((item) => {
@@ -33,8 +33,8 @@ export function AppShell({ children, active }: AppShellProps) {
                   href={item.href}
                   className={`px-3 py-1.5 rounded-md no-underline text-sm ${
                     isActive
-                      ? "bg-[color:var(--color-cream)] text-[color:var(--color-wine)]"
-                      : "text-[color:var(--color-ink-soft)] hover:text-[color:var(--color-amber-black)]"
+                      ? "bg-[color:var(--color-surface)] text-[color:var(--color-text)]"
+                      : "text-[color:var(--color-text-soft)] hover:text-[color:var(--color-text)]"
                   }`}
                 >
                   {item.label}

@@ -36,7 +36,7 @@ export function DashboardClient() {
     };
   }, []);
 
-  if (state.kind === "loading") return <p className="text-[color:var(--color-ink-soft)]">Loading…</p>;
+  if (state.kind === "loading") return <p className="text-[color:var(--color-text-soft)]">Loading…</p>;
   if (state.kind === "unauthenticated") {
     return (
       <p>
@@ -45,7 +45,7 @@ export function DashboardClient() {
     );
   }
   if (state.kind === "error") {
-    return <p className="text-[color:var(--color-wine)]">Failed to load dashboard: {state.message}</p>;
+    return <p className="text-[color:var(--color-accent)]">Failed to load dashboard: {state.message}</p>;
   }
 
   const { usage, subs, ledger } = state;
@@ -56,12 +56,12 @@ export function DashboardClient() {
       <Card className="md:col-span-2">
         <h2 className="text-xl mb-3">Spending this month</h2>
         <div className="flex items-baseline gap-3">
-          <span className="text-3xl text-[color:var(--color-wine)]">{formatCents(usage.total_spend_cents)}</span>
-          <span className="text-[color:var(--color-ink-soft)]">of {formatCents(usage.budget_cents)} budget</span>
+          <span className="text-3xl text-[color:var(--color-accent)]">{formatCents(usage.total_spend_cents)}</span>
+          <span className="text-[color:var(--color-text-soft)]">of {formatCents(usage.budget_cents)} budget</span>
         </div>
-        <div className="mt-3 h-2 rounded bg-[color:var(--color-cream)] overflow-hidden">
+        <div className="mt-3 h-2 rounded bg-[color:var(--color-surface-raised)] overflow-hidden">
           <div
-            className="h-full bg-[color:var(--color-mustard)]"
+            className="h-full bg-[color:var(--color-accent)]"
             style={{ width: `${pct}%` }}
             role="progressbar"
             aria-valuenow={Math.round(pct)}
@@ -73,7 +73,7 @@ export function DashboardClient() {
           <ul className="mt-4 text-sm space-y-1">
             {usage.by_category.map((c) => (
               <li key={c.category} className="flex justify-between">
-                <span className="text-[color:var(--color-ink-soft)]">{c.category}</span>
+                <span className="text-[color:var(--color-text-soft)]">{c.category}</span>
                 <span>{formatCents(c.spend_cents)}</span>
               </li>
             ))}
@@ -84,13 +84,13 @@ export function DashboardClient() {
       <Card>
         <h2 className="text-xl mb-3">Active subscriptions</h2>
         {subs.length === 0 ? (
-          <p className="text-[color:var(--color-ink-soft)] text-sm">None yet. Your squire will sign up as needed.</p>
+          <p className="text-[color:var(--color-text-soft)] text-sm">None yet. Your squire will sign up as needed.</p>
         ) : (
           <ul className="space-y-2">
             {subs.map((s) => (
               <li key={s.id} className="flex justify-between text-sm">
                 <span>{s.service_name}</span>
-                <span className="text-[color:var(--color-ink-soft)]">
+                <span className="text-[color:var(--color-text-soft)]">
                   {s.monthly_cost_cents !== null ? `${formatCents(s.monthly_cost_cents)}/mo` : "free"}
                 </span>
               </li>
@@ -102,12 +102,12 @@ export function DashboardClient() {
       <Card>
         <h2 className="text-xl mb-3">Recent activity</h2>
         {ledger.length === 0 ? (
-          <p className="text-[color:var(--color-ink-soft)] text-sm">Nothing yet.</p>
+          <p className="text-[color:var(--color-text-soft)] text-sm">Nothing yet.</p>
         ) : (
           <ul className="space-y-2">
             {ledger.map((row) => (
               <li key={row.id} className="text-sm">
-                <span className="text-[color:var(--color-ink-soft)] mr-2">
+                <span className="text-[color:var(--color-text-soft)] mr-2">
                   {new Date(row.ts).toLocaleDateString()}
                 </span>
                 <span>{row.summary}</span>

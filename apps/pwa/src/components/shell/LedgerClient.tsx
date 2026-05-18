@@ -31,13 +31,13 @@ export function LedgerClient() {
     };
   }, []);
 
-  if (error !== null) return <p className="text-[color:var(--color-wine)]">{error}</p>;
-  if (rows === null) return <p className="text-[color:var(--color-ink-soft)]">Loading…</p>;
-  if (rows.length === 0) return <p className="text-[color:var(--color-ink-soft)]">No entries yet.</p>;
+  if (error !== null) return <p className="text-[color:var(--color-accent)]">{error}</p>;
+  if (rows === null) return <p className="text-[color:var(--color-text-soft)]">Loading…</p>;
+  if (rows.length === 0) return <p className="text-[color:var(--color-text-soft)]">No entries yet.</p>;
 
   return (
     <table className="w-full text-sm">
-      <thead className="text-left text-[color:var(--color-ink-soft)] border-b border-[color:var(--color-rule)]">
+      <thead className="text-left text-[color:var(--color-text-soft)] border-b border-[color:var(--color-border)]">
         <tr>
           <th className="py-2 pr-4 font-normal">When</th>
           <th className="py-2 pr-4 font-normal">Kind</th>
@@ -47,8 +47,8 @@ export function LedgerClient() {
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={row.id} className="border-b border-[color:var(--color-rule)]">
-            <td className="py-2 pr-4 text-[color:var(--color-ink-soft)]">
+          <tr key={row.id} className="border-b border-[color:var(--color-border)]">
+            <td className="py-2 pr-4 text-[color:var(--color-text-soft)]">
               {new Date(row.ts).toLocaleString()}
             </td>
             <td className="py-2 pr-4 font-mono text-xs">{row.kind}</td>

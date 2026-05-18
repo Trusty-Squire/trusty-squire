@@ -14,7 +14,7 @@ export default async function PairPage({ searchParams }: PairPageProps) {
   if (token === undefined || token.length === 0) {
     return (
       <AuthLayout title="Pair your coding agent">
-        <p className="text-[color:var(--color-wine)]">
+        <p className="text-[color:var(--color-accent)]">
           Missing pairing token. Re-run <code>squire-mcp install</code>.
         </p>
       </AuthLayout>
