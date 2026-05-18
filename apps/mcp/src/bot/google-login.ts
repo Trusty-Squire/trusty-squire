@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
+import type { OAuthProviderId } from "./oauth-providers.js";
 
 const require = createRequire(import.meta.url);
 
@@ -55,9 +56,32 @@ function resolveChromium(): PersistentLauncher {
 }
 
 // --- config ------------------------------------------------------------
-const GOOGLE_LOGIN_URL = "https://accounts.google.com/";
-// Auth cookies Google only sets after a completed login.
-const GOOGLE_AUTH_COOKIES = ["__Secure-1PSID", "SAPISID", "SID"];
+// Per-provider login targets for `mcp login` (T13). `cookies` are ones
+// the provider only sets after a completed login — polling for them is
+// how the flow detects the user finished.
+interface LoginTarget {
+  provider: OAuthProviderId;
+  label: string;
+  loginUrl: string;
+  cookieOrigin: string;
+  cookies: readonly string[];
+}
+const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
+  google: {
+    provider: "google",
+    label: "Google",
+    loginUrl: "https://accounts.google.com/",
+    cookieOrigin: "https://www.google.com",
+    cookies: ["__Secure-1PSID", "SAPISID", "SID"],
+  },
+  github: {
+    provider: "github",
+    label: "GitHub",
+    loginUrl: "https://github.com/login",
+    cookieOrigin: "https://github.com",
+    cookies: ["user_session", "__Host-user_session_same_site"],
+  },
+};
 // Phone-shaped virtual display — small and portrait so it scales cleanly
 // onto a phone via noVNC (the spike's 1920x1080 was the UX mistake).
 const HEADLESS_W = 540;
@@ -69,17 +93,21 @@ export interface LoginResult {
 }
 
 // --- session detection -------------------------------------------------
-async function hasGoogleSession(context: BrowserContext): Promise<boolean> {
-  const cookies = await context.cookies("https://www.google.com");
-  return cookies.some((c) => GOOGLE_AUTH_COOKIES.includes(c.name));
+async function hasProviderSession(
+  context: BrowserContext,
+  target: LoginTarget,
+): Promise<boolean> {
+  const cookies = await context.cookies(target.cookieOrigin);
+  return cookies.some((c) => target.cookies.includes(c.name));
 }
 
 async function pollForSession(
   context: BrowserContext,
   deadline: number,
+  target: LoginTarget,
 ): Promise<boolean> {
   while (Date.now() < deadline) {
-    if (await hasGoogleSession(context)) return true;
+    if (await hasProviderSession(context, target)) return true;
     await new Promise((r) => setTimeout(r, 3000));
   }
   return false;
@@ -259,6 +287,7 @@ export function binaryOnPath(bin: string): boolean {
 async function loginWithDisplay(
   profileDir: string,
   deadline: number,
+  target: LoginTarget,
 ): Promise<LoginResult> {
   const chromium = resolveChromium();
   const context = await chromium.launchPersistentContext(profileDir, {
@@ -268,13 +297,15 @@ async function loginWithDisplay(
     args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
   });
   try {
-    if (await hasGoogleSession(context)) {
+    if (await hasProviderSession(context, target)) {
       return { status: "already_valid" };
     }
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(GOOGLE_LOGIN_URL, { waitUntil: "domcontentloaded" });
-    console.error("\n[login] A Chrome window has opened. Log into your Google account there.\n");
-    const ok = await pollForSession(context, deadline);
+    await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
+    console.error(
+      `\n[login] A Chrome window has opened. Log into your ${target.label} account there.\n`,
+    );
+    const ok = await pollForSession(context, deadline, target);
     return ok
       ? { status: "logged_in" }
       : { status: "timeout", detail: "no login completed before the deadline" };
@@ -324,7 +355,11 @@ function teardown(rig: HeadlessRig): void {
   }
 }
 
-async function loginHeadless(profileDir: string, deadline: number): Promise<LoginResult> {
+async function loginHeadless(
+  profileDir: string,
+  deadline: number,
+  target: LoginTarget,
+): Promise<LoginResult> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -362,11 +397,11 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
     });
 
     try {
-      if (await hasGoogleSession(context)) {
+      if (await hasProviderSession(context, target)) {
         return { status: "already_valid" };
       }
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(GOOGLE_LOGIN_URL, { waitUntil: "domcontentloaded" });
+      await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
 
       // 3. x11vnc on the display — localhost-only, password-gated, -noshm
       //    (the box's X server lacks the shared-memory extension).
@@ -400,12 +435,12 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
           "[login] Open this on any device, any network:\n" +
           `        ${tunnelUrl}/vnc.html?scale=true\n` +
           `[login] VNC password: ${vncPassword}\n` +
-          "[login] You'll see a Chrome window — log into your Google account.\n" +
+          `[login] You'll see a Chrome window — log into your ${target.label} account.\n` +
           "=".repeat(64) + "\n",
       );
 
       // 6. Wait for the login, then tear the whole stack down.
-      const ok = await pollForSession(context, deadline);
+      const ok = await pollForSession(context, deadline, target);
       await context.close();
       return ok
         ? { status: "logged_in" }
@@ -420,21 +455,25 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
 }
 
 // --- public entry ------------------------------------------------------
-// Ensures `profileDir` holds a valid Google session, doing whichever
-// login flow the environment calls for. Returns when the session is
-// present, the deadline passes, or setup fails.
-export async function ensureGoogleSession(opts?: {
+// Ensures `profileDir` holds a valid session for `provider`, doing
+// whichever login flow the environment calls for. Returns when the
+// session is present, the deadline passes, or setup fails. T13: the
+// provider defaults to Google; `mcp login --provider=github` reuses
+// the same flow against github.com.
+export async function ensureOAuthSession(opts?: {
+  provider?: OAuthProviderId;
   profileDir?: string;
   timeoutMinutes?: number;
 }): Promise<LoginResult> {
+  const target = LOGIN_TARGETS[opts?.provider ?? "google"];
   const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
   try {
     return hasDisplay()
-      ? await loginWithDisplay(profileDir, deadline)
-      : await loginHeadless(profileDir, deadline);
+      ? await loginWithDisplay(profileDir, deadline, target)
+      : await loginHeadless(profileDir, deadline, target);
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   }

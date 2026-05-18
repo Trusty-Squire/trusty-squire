@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SignupAgent,
-  findGoogleOAuthButton,
+  findOAuthButton,
   parsePostVerifyStep,
   type AgentInbox,
 } from "../agent.js";
@@ -49,6 +49,11 @@ const GOOGLE_BTN = mk({
   tag: "button",
   visibleText: "Continue with Google",
   selector: "#google-oauth",
+});
+const GITHUB_BTN = mk({
+  tag: "button",
+  visibleText: "Continue with GitHub",
+  selector: "#github-oauth",
 });
 const EMAIL_INPUT = mk({ tag: "input", type: "email", selector: "#email" });
 const API_LINK = mk({ tag: "a", visibleText: "API Keys", selector: "#api" });
@@ -144,7 +149,7 @@ class FakeOAuthBrowser {
   oauthPageClosed(): boolean {
     return this.popupClosed;
   }
-  async advanceGoogleConsent(): Promise<boolean> {
+  async advanceOAuthConsent(): Promise<boolean> {
     this.advanceCalls += 1;
     if (this.advanceResult) this.advance();
     return this.advanceResult;
@@ -194,50 +199,65 @@ const CONSENT_BASIC: ScriptPage = {
   url: "https://accounts.google.com/signin/oauth/consent?scope=openid+email+profile&client_id=abc",
   text: "Render wants access to your Google Account",
 };
+const CONSENT_GITHUB: ScriptPage = {
+  url: "https://github.com/login/oauth/authorize?client_id=abc&scope=read:user+user:email",
+  text: "Authorize Render — Render by render wants to access your account",
+};
 const PRODUCT_DASH = (text: string): ScriptPage => ({
   url: "https://dashboard.render.com/",
   text,
 });
 
-// ───────────────────── findGoogleOAuthButton ─────────────────────
+// ───────────────────── findOAuthButton ─────────────────────
 
-describe("findGoogleOAuthButton", () => {
+describe("findOAuthButton", () => {
   it("matches a 'Continue with Google' button", () => {
-    expect(findGoogleOAuthButton([GOOGLE_BTN])?.selector).toBe("#google-oauth");
+    expect(findOAuthButton([GOOGLE_BTN], "google")?.selector).toBe("#google-oauth");
   });
 
   it("matches a 'Sign up with Google' link and an aria-labelled icon button", () => {
     const link = mk({ tag: "a", visibleText: "Sign up with Google", selector: "#a" });
     const icon = mk({ tag: "button", ariaLabel: "Sign in with Google", selector: "#b" });
-    expect(findGoogleOAuthButton([link])?.selector).toBe("#a");
-    expect(findGoogleOAuthButton([icon])?.selector).toBe("#b");
+    expect(findOAuthButton([link], "google")?.selector).toBe("#a");
+    expect(findOAuthButton([icon], "google")?.selector).toBe("#b");
   });
 
-  it("returns null for a page with no Google affordance", () => {
+  it("matches a 'Continue with GitHub' button when the provider is github", () => {
+    const gh = mk({ tag: "button", visibleText: "Continue with GitHub", selector: "#gh" });
+    expect(findOAuthButton([gh], "github")?.selector).toBe("#gh");
+    // ...but not when the requested provider is Google.
+    expect(findOAuthButton([gh], "google")).toBeNull();
+  });
+
+  it("returns null for a page with no matching affordance", () => {
     expect(
-      findGoogleOAuthButton([
-        EMAIL_INPUT,
-        mk({ tag: "button", visibleText: "Create account", selector: "#go" }),
-      ]),
+      findOAuthButton(
+        [EMAIL_INPUT, mk({ tag: "button", visibleText: "Create account", selector: "#go" })],
+        "google",
+      ),
     ).toBeNull();
   });
 
-  it("ignores a non-auth link that merely mentions Google", () => {
+  it("ignores a non-auth link that merely mentions the provider", () => {
     const docs = mk({ tag: "a", visibleText: "Powered by Google Cloud", selector: "#d" });
-    expect(findGoogleOAuthButton([docs])).toBeNull();
+    expect(findOAuthButton([docs], "google")).toBeNull();
+    const ghDocs = mk({ tag: "a", visibleText: "View on GitHub", selector: "#g" });
+    expect(findOAuthButton([ghDocs], "github")).toBeNull();
   });
 });
 
-// ───────────────────── scoreSignupButton oauthFirst ─────────────────────
+// ───────────────────── scoreSignupButton oauthProvider ─────────────────────
 
 describe("scoreSignupButton — OAuth-first flip", () => {
-  it("scores a Google button negative by default, positive under OAuth-first", () => {
+  it("scores a Google button negative by default, positive when google is requested", () => {
     expect(scoreSignupButton("Continue with Google")).toBeLessThan(0);
-    expect(scoreSignupButton("Continue with Google", true)).toBeGreaterThan(0);
+    expect(scoreSignupButton("Continue with Google", "google")).toBeGreaterThan(0);
   });
 
-  it("keeps other OAuth providers negative even under OAuth-first (Phase 1 is Google-only)", () => {
-    expect(scoreSignupButton("Continue with GitHub", true)).toBeLessThan(0);
+  it("flips only the REQUESTED provider — the other stays negative", () => {
+    expect(scoreSignupButton("Continue with GitHub", "google")).toBeLessThan(0);
+    expect(scoreSignupButton("Continue with GitHub", "github")).toBeGreaterThan(0);
+    expect(scoreSignupButton("Continue with Google", "github")).toBeLessThan(0);
   });
 });
 
@@ -435,6 +455,67 @@ describe("OAuth signup — consent scope gate (T7)", () => {
     // Broad scope is never auto-approved.
     expect(browser.advanceCalls).toBe(0);
     expect(browser.typeCalls).toHaveLength(0);
+  });
+});
+
+// ───────────────────── GitHub provider (T13) ─────────────────────
+
+describe("GitHub OAuth signup (T13)", () => {
+  it("completes a GitHub OAuth signup — clicks GitHub, authorizes, extracts the key", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      CONSENT_GITHUB,
+      PRODUCT_DASH("Dashboard — Your API Key: ts_ghkey_abcdefghijklmnop12345"),
+    ]);
+    browser.signupInventory = [GITHUB_BTN];
+    const result = await newAgent(browser).signup({
+      ...oauthTask(),
+      oauthProvider: "github",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.credentials?.api_key).toBe("ts_ghkey_abcdefghijklmnop12345");
+    expect(browser.advanceCalls).toBe(1); // one authorize screen, auto-approved
+    expect(browser.typeCalls).toHaveLength(0);
+    expect(result.steps.some((s) => /GitHub auth state = consent/i.test(s))).toBe(true);
+  });
+
+  it("aborts oauth_consent_needs_review on a broad GitHub scope (repo)", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      {
+        url: "https://github.com/login/oauth/authorize?client_id=abc&scope=read:user+repo",
+        text: "Authorize Render",
+      },
+    ]);
+    browser.signupInventory = [GITHUB_BTN];
+    const result = await newAgent(browser).signup({
+      ...oauthTask(),
+      oauthProvider: "github",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/^oauth_consent_needs_review:/);
+    expect(result.error ?? "").toMatch(/repo/);
+    expect(browser.advanceCalls).toBe(0);
+    expect(browser.typeCalls).toHaveLength(0);
+  });
+
+  it("hands back needs_login on the GitHub login page — never types", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      { url: "https://github.com/login?return_to=x", text: "Sign in to GitHub" },
+    ]);
+    browser.signupInventory = [GITHUB_BTN];
+    const result = await newAgent(browser).signup({
+      ...oauthTask(),
+      oauthProvider: "github",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/^needs_login:/);
+    expect(browser.typeCalls).toHaveLength(0);
+    expect(browser.advanceCalls).toBe(0);
   });
 });
 

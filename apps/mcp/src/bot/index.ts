@@ -6,10 +6,12 @@ import { BrowserController } from "./browser.js";
 import { SignupAgent, type SignupResult, LLMCallBudgetExceeded } from "./agent.js";
 import type { AgentInbox } from "./agent.js";
 import { withOAuthLock } from "./oauth-lock.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 
 export { type SignupResult, LLMCallBudgetExceeded };
 export { withOAuthLock } from "./oauth-lock.js";
+export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export type { CaptchaVariant } from "./browser.js";
 export { InboxClient } from "./inbox-client.js";
 export type { AgentInbox };
@@ -45,13 +47,13 @@ export interface UniversalSignupRequest {
   // OpenRouter > Anthropic). Set this when you want explicit control
   // (e.g., from the MCP tool handler that knows the machine token).
   llm?: LLMClient | LLMPair | undefined;
-  // OAuth-first signup (T6). When set, the bot prefers the provider's
-  // OAuth path — clicking "Sign in with <provider>" and riding the
-  // session in the persistent Chrome profile — over form-filling.
-  // Phase 1 is Google-only (D7). OAuth runs are serialized (T8/D2):
+  // OAuth-first signup (T6/T13). When set, the bot prefers the
+  // provider's OAuth path — clicking "Sign in with <provider>" and
+  // riding the session in the persistent Chrome profile — over
+  // form-filling. Google or GitHub. OAuth runs are serialized (T8/D2):
   // they share the one persistent profile, which Chrome single-
   // instances, so a second OAuth run queues behind the first.
-  oauthProvider?: "google" | undefined;
+  oauthProvider?: OAuthProviderId | undefined;
 }
 
 export class UniversalSignupBot {

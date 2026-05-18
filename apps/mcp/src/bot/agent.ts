@@ -16,10 +16,10 @@ import type {
 } from "./browser.js";
 import { rankAndCapInventory, scoreSignupButton } from "./browser.js";
 import {
-  classifyGoogleAuthState,
+  OAUTH_PROVIDERS,
   extractOAuthScopes,
-  scopesAreBasic,
-} from "./google-login.js";
+  type OAuthProviderId,
+} from "./oauth-providers.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -140,9 +140,9 @@ export interface SignupTask {
   // matching "Sign in with <provider>" affordance, the bot takes the
   // OAuth path — clicking through the provider's consent screen using
   // the session in the persistent profile — instead of form-filling.
-  // Absent (or no affordance found) → the form-fill path. Phase 1 is
-  // Google-only (D7).
-  oauthProvider?: "google" | undefined;
+  // Absent (or no affordance found) → the form-fill path. T13 added
+  // GitHub alongside Google.
+  oauthProvider?: OAuthProviderId | undefined;
 }
 
 export interface SignupResult {
@@ -461,17 +461,21 @@ export function isOauthOnlyChooser(
   return !hasEmailOption;
 }
 
-// Find a "Sign in with Google" affordance in the page inventory — the
-// entry point for the OAuth-first path (T6). Matches a button/link
-// whose visible text or accessible label names Google AND reads as an
-// auth action ("sign in/up with Google", "Continue with Google"), so a
-// stray "Google Cloud" marketing link is not mistaken for the OAuth
-// button. Returns null when the page has no Google OAuth affordance —
-// the planner then falls back to the form-fill path. Exported for
-// unit testing — the match heuristic is the load-bearing logic.
-export function findGoogleOAuthButton(
+// Find a "Sign in with <provider>" affordance in the page inventory —
+// the entry point for the OAuth-first path (T6/T13). Matches a
+// button/link whose visible text or accessible label names the
+// provider AND reads as an auth action ("sign in/up with GitHub",
+// "Continue with Google"), so a stray "Google Cloud" / "GitHub repo"
+// marketing link is not mistaken for the OAuth button. Returns null
+// when the page has no such affordance — the planner then falls back
+// to form-fill. Exported for unit testing — the heuristic is the
+// load-bearing logic.
+export function findOAuthButton(
   inventory: readonly InteractiveElement[],
+  provider: OAuthProviderId,
 ): InteractiveElement | null {
+  const keyword = OAUTH_PROVIDERS[provider].buttonKeyword;
+  const keywordRe = new RegExp(`\\b${keyword}\\b`);
   for (const e of inventory) {
     const isButtonish =
       e.tag === "button" ||
@@ -484,11 +488,14 @@ export function findGoogleOAuthButton(
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
-    if (!/\bgoogle\b/.test(text)) continue;
-    // Require an auth verb so a non-auth link mentioning Google is not
-    // picked. An icon-only button whose entire accessible name is just
-    // "Google" also qualifies.
-    if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text) || text === "google") {
+    if (!keywordRe.test(text)) continue;
+    // Require an auth verb so a non-auth link naming the provider is
+    // not picked. An icon-only button whose entire accessible name is
+    // just the provider name also qualifies.
+    if (
+      /\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text) ||
+      text === keyword
+    ) {
       return e;
     }
   }
@@ -825,31 +832,32 @@ export class SignupAgent {
     let emptyPlans = 0;
     let hint: string | undefined;
 
-    const oauthFirst = task.oauthProvider === "google";
+    const oauthProvider = task.oauthProvider;
     for (;;) {
       await this.browser.waitForFormReady();
       await saveDebugSnapshot(this.browser, "before-fill");
       const state = await this.browser.getState();
-      const inventory = await this.buildInventory(steps, oauthFirst);
+      const inventory = await this.buildInventory(steps, oauthProvider);
 
-      // T6 — OAuth-first: when an OAuth signup is requested and the
-      // page carries a "Sign in with Google" affordance, the OAuth
+      // T6/T13 — OAuth-first: when an OAuth signup is requested and the
+      // page carries a "Sign in with <provider>" affordance, the OAuth
       // button unconditionally outranks any form field (a rule, not
       // score arithmetic — spec refinement). Hand off to the OAuth
       // consent flow. Absent the affordance, fall through to form-fill.
-      if (oauthFirst) {
-        const googleButton = findGoogleOAuthButton(inventory);
-        if (googleButton !== null) {
+      if (oauthProvider !== undefined) {
+        const oauthButton = findOAuthButton(inventory, oauthProvider);
+        const label = OAUTH_PROVIDERS[oauthProvider].label;
+        if (oauthButton !== null) {
           steps.push(
-            `OAuth-first: found a Google sign-in affordance ` +
-              `(${JSON.stringify(googleButton.visibleText ?? googleButton.ariaLabel ?? "Google")}) ` +
+            `OAuth-first: found a ${label} sign-in affordance ` +
+              `(${JSON.stringify(oauthButton.visibleText ?? oauthButton.ariaLabel ?? label)}) ` +
               `— taking the OAuth path`,
           );
-          return { kind: "oauth", selector: googleButton.selector };
+          return { kind: "oauth", selector: oauthButton.selector };
         }
         steps.push(
-          "OAuth-first requested but no Google affordance on the page — " +
-            "falling back to form-fill",
+          `OAuth-first requested but no ${label} affordance on the page — ` +
+            `falling back to form-fill`,
         );
       }
 
@@ -1003,19 +1011,20 @@ export class SignupAgent {
   }
 
   // Extract + rank the page's interactive elements (F3 T1/T2).
-  // `oauthFirst` keeps a Google OAuth affordance from being ranked out
-  // of the capped inventory when an OAuth-first signup is requested (T6).
-  // `buttonCap` widens for the post-OAuth onboarding loop: a dashboard
-  // carries far more nav links than a signup form, and they do not
-  // score as signup buttons, so the default cap would drop the very
-  // "API Keys"/"Settings" links the onboarding planner must reach.
+  // `oauthProvider` keeps that provider's OAuth affordance from being
+  // ranked out of the capped inventory when an OAuth-first signup is
+  // requested (T6/T13). `buttonCap` widens for the post-OAuth
+  // onboarding loop: a dashboard carries far more nav links than a
+  // signup form, and they do not score as signup buttons, so the
+  // default cap would drop the "API Keys"/"Settings" links the
+  // onboarding planner must reach.
   private async buildInventory(
     steps: string[],
-    oauthFirst = false,
+    oauthProvider?: OAuthProviderId,
     buttonCap = 25,
   ): Promise<InteractiveElement[]> {
     const raw = await this.browser.extractInteractiveElements();
-    const { inventory, buttonsDropped } = rankAndCapInventory(raw, buttonCap, oauthFirst);
+    const { inventory, buttonsDropped } = rankAndCapInventory(raw, buttonCap, oauthProvider);
     steps.push(
       `Inventory: ${inventory.length} element(s)` +
         (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
@@ -1437,25 +1446,31 @@ export class SignupAgent {
     }
   }
 
-  // ------------ OAuth-first signup (T6/T7) ------------
+  // ------------ OAuth-first signup (T6/T7/T13) ------------
 
-  // Drive a Google OAuth signup to a terminal SignupResult. Entered
-  // from runSignup when planExecuteWithRetry found a Google affordance
-  // (T6). Steps: click the button → walk the consent screens →
-  // scope-gate them → drive post-OAuth onboarding to the API key.
+  // Drive an OAuth signup (Google or GitHub) to a terminal
+  // SignupResult. Entered from runSignup when planExecuteWithRetry
+  // found the provider's affordance (T6). Steps: click the button →
+  // walk the consent screens → scope-gate them → drive post-OAuth
+  // onboarding to the API key.
   //
   // THE CRITICAL GUARANTEE (D4 / eng-review critical gap): if the flow
-  // lands on a Google credential form (expired/missing session) or a
-  // security challenge, it hands back `needs_login` and NEVER types
-  // into Google's form. Driving Google's login is exactly what trips
-  // its automation detection — and there is no password to give.
+  // lands on the provider's credential form (expired/missing session)
+  // or a security challenge, it hands back `needs_login` and NEVER
+  // types into that form. Driving the provider's login is exactly what
+  // trips its automation detection — and there is no password to give.
   private async runOAuthFlow(
     task: SignupTask,
-    googleSelector: string,
+    oauthSelector: string,
     steps: string[],
   ): Promise<SignupResult> {
-    steps.push("OAuth: clicking the Google sign-in affordance");
-    await this.browser.startOAuth(googleSelector);
+    const provider = OAUTH_PROVIDERS[task.oauthProvider ?? "google"];
+    const loginCmd =
+      provider.id === "github"
+        ? "npx @trusty-squire/mcp login --provider=github"
+        : "npx @trusty-squire/mcp login";
+    steps.push(`OAuth: clicking the ${provider.label} sign-in affordance`);
+    await this.browser.startOAuth(oauthSelector);
     await this.browser.wait(3);
     await saveDebugSnapshot(this.browser, "oauth-after-click");
 
@@ -1464,7 +1479,9 @@ export class SignupAgent {
     const MAX_OAUTH_NAV = 6;
     for (let i = 0; i < MAX_OAUTH_NAV; i++) {
       if (this.browser.oauthPageClosed()) {
-        steps.push("OAuth: the Google window closed — handshake returned to the service");
+        steps.push(
+          `OAuth: the ${provider.label} window closed — handshake returned to the service`,
+        );
         break;
       }
       const url = this.browser.currentUrl();
@@ -1472,28 +1489,28 @@ export class SignupAgent {
       try {
         body = (await this.browser.extractText()).slice(0, 4000);
       } catch {
-        // The page is navigating between Google screens — re-read.
+        // The page is navigating between provider screens — re-read.
         await this.browser.wait(1);
         continue;
       }
-      const authState = classifyGoogleAuthState(url, body);
-      steps.push(`OAuth: Google auth state = ${authState}`);
+      const authState = provider.classifyAuthState(url, body);
+      steps.push(`OAuth: ${provider.label} auth state = ${authState}`);
 
-      if (authState === "not_google") break; // flow left Google — back on the service
+      if (authState === "not_provider") break; // flow left the provider — back on the service
 
       if (authState === "challenge") {
         return this.oauthAbort(
           "needs_login",
-          `Google interrupted the sign-in with a security challenge ("verify it's you"). ` +
-            `Re-run \`npx @trusty-squire/mcp login\`, clear the challenge in the window, then retry.`,
+          `${provider.label} interrupted the sign-in with a security challenge ("verify it's you"). ` +
+            `Re-run \`${loginCmd}\`, clear the challenge in the window, then retry.`,
           steps,
         );
       }
       if (authState === "needs_login") {
         return this.oauthAbort(
           "needs_login",
-          `the bot's Google session is missing or expired — no consent screen was reached. ` +
-            `Re-run \`npx @trusty-squire/mcp login\` to re-establish it, then retry.`,
+          `the bot's ${provider.label} session is missing or expired — no consent screen was reached. ` +
+            `Re-run \`${loginCmd}\` to re-establish it, then retry.`,
           steps,
         );
       }
@@ -1503,11 +1520,11 @@ export class SignupAgent {
       // field it is a login form (the text classifier can catch a
       // login page that says "to continue to <app>"). Hand back —
       // never type into it.
-      if (await this.googleLoginFormPresent()) {
+      if (await this.oauthLoginFormPresent()) {
         return this.oauthAbort(
           "needs_login",
-          `landed on a Google sign-in form — the session is missing or expired. ` +
-            `Re-run \`npx @trusty-squire/mcp login\`, then retry. The bot will not type into Google's login form.`,
+          `landed on a ${provider.label} sign-in form — the session is missing or expired. ` +
+            `Re-run \`${loginCmd}\`, then retry. The bot will not type into ${provider.label}'s login form.`,
           steps,
         );
       }
@@ -1517,25 +1534,25 @@ export class SignupAgent {
       if (scopes === null) {
         return this.oauthAbort(
           "oauth_consent_needs_review",
-          `reached a Google consent screen but could not read its requested scopes from the URL — ` +
-            `pausing for manual review rather than approving blind.`,
+          `reached a ${provider.label} consent screen but could not read its requested scopes ` +
+            `from the URL — pausing for manual review rather than approving blind.`,
           steps,
         );
       }
-      if (!scopesAreBasic(scopes)) {
+      if (!provider.scopesAreBasic(scopes)) {
         return this.oauthAbort(
           "oauth_consent_needs_review",
           `the consent screen requests scopes beyond basic identity (${scopes.join(", ")}). ` +
-            `Approve it manually — the bot only auto-approves openid/email/profile.`,
+            `Approve it manually — the bot only auto-approves basic-identity scopes.`,
           steps,
         );
       }
       steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
-      const advanced = await this.browser.advanceGoogleConsent();
+      const advanced = await this.browser.advanceOAuthConsent(provider.id);
       if (!advanced) {
         return this.oauthAbort(
           "oauth_consent_needs_review",
-          `reached a Google consent screen but found no Continue/Allow control to click — ` +
+          `reached a ${provider.label} consent screen but found no approve control to click — ` +
             `approve it manually.`,
           steps,
         );
@@ -1548,7 +1565,9 @@ export class SignupAgent {
     await this.browser.settleAfterOAuth();
     await this.browser.wait(2);
     await saveDebugSnapshot(this.browser, "oauth-post-consent");
-    steps.push("OAuth: signed in via Google — driving post-OAuth onboarding to the API key");
+    steps.push(
+      `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
+    );
 
     let credentials = await this.extractCredentials();
     if (credentials.api_key === undefined) {
@@ -1583,8 +1602,8 @@ export class SignupAgent {
     return {
       success: false,
       error:
-        `oauth_onboarding_failed: signed in to ${task.service} via Google but could not ` +
-        `reach an API key through post-OAuth onboarding.`,
+        `oauth_onboarding_failed: signed in to ${task.service} via ${provider.label} but ` +
+        `could not reach an API key through post-OAuth onboarding.`,
       steps,
       ...this.resultTail(),
     };
@@ -1604,10 +1623,10 @@ export class SignupAgent {
   }
 
   // Backstop for the critical guarantee (D4): true when the active
-  // Google page carries a credential-entry field — an expired/missing
+  // provider page carries a credential-entry field — an expired/missing
   // session dropped the bot on a login form. A genuine consent screen
   // or account chooser has buttons/tiles only, no text inputs.
-  private async googleLoginFormPresent(): Promise<boolean> {
+  private async oauthLoginFormPresent(): Promise<boolean> {
     const inv = await this.browser.extractInteractiveElements();
     return inv.some(
       (e) =>
@@ -1776,7 +1795,7 @@ ${formatInventory(input.inventory)}`,
       // instead of inventing CSS that never resolves. A dashboard has
       // far more nav links than a signup form, so the button cap is
       // widened (the "API Keys"/"Settings" links must survive ranking).
-      const inventory = await this.buildInventory(args.steps, false, 80);
+      const inventory = await this.buildInventory(args.steps, undefined, 80);
       let nextStep: PostVerifyStep;
       try {
         nextStep = await this.planPostVerifyStep({

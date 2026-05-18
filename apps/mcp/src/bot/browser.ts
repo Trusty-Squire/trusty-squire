@@ -27,6 +27,7 @@ import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -1282,16 +1283,30 @@ export class BrowserController {
     return this.page === null || this.page.isClosed();
   }
 
-  // Advance a Google consent / account-chooser screen by one click —
-  // the scope-gated auto-approve (T7). Tries, in order: the first
-  // signed-in account tile (the chooser), then the "Continue"/"Allow"
-  // approve button (the consent screen). Returns false when neither is
-  // present — the agent then aborts rather than hang. Clicks only;
-  // never types (the critical guarantee holds here too).
-  async advanceGoogleConsent(): Promise<boolean> {
+  // Advance a provider's consent / account-chooser screen by one click
+  // — the scope-gated auto-approve (T7/T13). Returns false when no
+  // approve control is present — the agent then aborts rather than
+  // hang. Clicks only; never types (the critical guarantee holds here).
+  async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
-    // Account chooser: Google renders each account with a stable
-    // data-identifier attribute (the account email).
+    if (provider === "github") {
+      // GitHub's authorize screen: a single green "Authorize <app>"
+      // button. The accessible name starts with "Authorize".
+      const authorize = this.page
+        .getByRole("button", { name: /^authorize\b/i })
+        .first();
+      if ((await authorize.count().catch(() => 0)) > 0) {
+        try {
+          await authorize.click({ timeout: 8000 });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    }
+    // Google. Account chooser: Google renders each account with a
+    // stable data-identifier attribute (the account email).
     const tile = this.page.locator("[data-identifier]").first();
     if ((await tile.count().catch(() => 0)) > 0) {
       try {
@@ -1514,14 +1529,17 @@ export interface InteractiveElement {
 // drift (F3 Issue 8). OAuth provider names go firmly negative so the
 // bot never wanders into a Google/GitHub login dead end.
 //
-// `oauthFirst` (T6) inverts that for Google: when an OAuth-first
-// signup is requested, a "Sign in with Google" affordance is the
-// PRIMARY target, not a dead end — so it must score positive enough to
-// survive inventory ranking/capping. Stated as a rule, not arithmetic
-// (spec refinement): under OAuth-first the Google button outranks any
-// form field. Phase 1 is Google-only (D7); other providers stay
-// negative.
-export function scoreSignupButton(text: string, oauthFirst = false): number {
+// `oauthProvider` (T6/T13) inverts that for the requested provider:
+// when an OAuth-first signup is requested, the "Sign in with
+// <provider>" affordance is the PRIMARY target, not a dead end — so it
+// must score positive enough to survive inventory ranking/capping.
+// Stated as a rule, not arithmetic (spec refinement): under OAuth-first
+// the provider's button outranks any form field. Only the REQUESTED
+// provider flips positive; the others stay negative.
+export function scoreSignupButton(
+  text: string,
+  oauthProvider?: OAuthProviderId,
+): number {
   const t = text.toLowerCase();
   let score = 0;
   if (t.includes("create account") || t.includes("create your account")) score += 12;
@@ -1538,9 +1556,9 @@ export function scoreSignupButton(text: string, oauthFirst = false): number {
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
   if (t.includes("continue")) score += 2;
-  if (oauthFirst && /\bgoogle\b/.test(t)) {
-    // OAuth-first: the Google button is the goal. Score it above every
-    // form-field-class button so ranking never caps it out.
+  if (oauthProvider !== undefined && new RegExp(`\\b${oauthProvider}\\b`).test(t)) {
+    // OAuth-first: the requested provider's button is the goal. Score
+    // it above every form-field-class button so ranking never caps it out.
     score += 50;
   } else if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso|saml)\b/.test(t)) {
     // OAuth / SSO buttons are submit-typed too — the provider name is
@@ -1561,7 +1579,7 @@ export function scoreSignupButton(text: string, oauthFirst = false): number {
 export function rankAndCapInventory(
   elements: readonly InteractiveElement[],
   buttonCap = 25,
-  oauthFirst = false,
+  oauthProvider?: OAuthProviderId,
 ): { inventory: InteractiveElement[]; buttonsDropped: number } {
   const isButtonish = (e: InteractiveElement): boolean =>
     e.tag === "button" ||
@@ -1576,7 +1594,7 @@ export function rankAndCapInventory(
       e,
       score: scoreSignupButton(
         `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
-        oauthFirst,
+        oauthProvider,
       ),
     }))
     .sort((a, b) => b.score - a.score);

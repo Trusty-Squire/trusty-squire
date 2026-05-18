@@ -27,7 +27,8 @@ import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
-import { ensureGoogleSession } from "../bot/google-login.js";
+import { ensureOAuthSession } from "../bot/google-login.js";
+import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -41,6 +42,8 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
+  // OAuth provider for the `login` command (T13). Defaults to Google.
+  provider?: OAuthProviderId;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -50,6 +53,7 @@ function parseArgs(argv: string[]): Argv {
   let apiBase = DEFAULT_API_BASE;
   let withPair = false;
   let proxyUrl: string | undefined;
+  let provider: OAuthProviderId | undefined;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -58,6 +62,9 @@ function parseArgs(argv: string[]): Argv {
       apiBase = arg.slice("--api-base=".length);
     } else if (arg.startsWith("--proxy-url=")) {
       proxyUrl = arg.slice("--proxy-url=".length);
+    } else if (arg.startsWith("--provider=")) {
+      const p = arg.slice("--provider=".length);
+      if (isOAuthProviderId(p)) provider = p;
     } else if (arg === "--pair") {
       withPair = true;
     }
@@ -65,6 +72,7 @@ function parseArgs(argv: string[]): Argv {
   const args: Argv = { command, apiBase, withPair };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
+  if (provider !== undefined) args.provider = provider;
   return args;
 }
 
@@ -98,7 +106,7 @@ export async function runCli(argv: string[]): Promise<void> {
       await logout();
       return;
     case "login":
-      await login();
+      await login(args);
       return;
     case "help":
       printHelp();
@@ -279,22 +287,28 @@ async function logout(): Promise<void> {
   console.warn(`✓ Cleared local session (${storage.backendName()}).`);
 }
 
-// Establish (or confirm) a Google session in the bot's persistent Chrome
-// profile — the one-time interactive login the OAuth-first signup path
-// needs. With a display this opens a Chrome window; headless, it prints
-// a URL to log in from any browser. See bot/google-login.ts.
-async function login(): Promise<void> {
-  console.warn(`Establishing a Google session for the bot…`);
-  const result = await ensureGoogleSession();
+// Establish (or confirm) a provider session in the bot's persistent
+// Chrome profile — the one-time interactive login the OAuth-first
+// signup path needs. With a display this opens a Chrome window;
+// headless, it prints a URL to log in from any browser. T13: the
+// provider defaults to Google; `login --provider=github` logs the
+// same profile into GitHub. See bot/google-login.ts.
+async function login(args: Argv): Promise<void> {
+  const provider: OAuthProviderId = args.provider ?? "google";
+  const label = provider === "github" ? "GitHub" : "Google";
+  console.warn(`Establishing a ${label} session for the bot…`);
+  const result = await ensureOAuthSession({ provider });
   switch (result.status) {
     case "already_valid":
-      console.warn(`✓ Already logged in — the bot's Chrome profile has a valid Google session.`);
+      console.warn(`✓ Already logged in — the bot's Chrome profile has a valid ${label} session.`);
       return;
     case "logged_in":
-      console.warn(`✓ Logged in. The bot can now do OAuth signups with your Google identity.`);
+      console.warn(`✓ Logged in. The bot can now do OAuth signups with your ${label} identity.`);
       return;
     case "timeout":
-      console.error(`Login timed out — no login completed. Re-run \`npx @trusty-squire/mcp login\`.`);
+      console.error(
+        `Login timed out — no login completed. Re-run \`npx @trusty-squire/mcp login\`.`,
+      );
       process.exit(1);
     case "error":
       console.error(`Login failed: ${result.detail ?? "unknown error"}`);
@@ -308,7 +322,7 @@ function printHelp(): void {
   console.warn(`Commands:`);
   console.warn(`  install [--target=<agent>] [--api-base=<url>] [--pair] [--proxy-url=<url>]`);
   console.warn(`  pair [--target=<agent>] [--api-base=<url>]`);
-  console.warn(`  login    one-time Google sign-in for OAuth-based signups`);
+  console.warn(`  login [--provider=google|github]   one-time sign-in for OAuth-based signups`);
   console.warn(`  logout`);
   console.warn(``);
   console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);

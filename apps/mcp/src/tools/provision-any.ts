@@ -33,11 +33,11 @@ type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
 export const provisionAnyInputSchema = z.object({
   service: z.string().describe("Name of the service to sign up for (e.g., 'Postmark', 'Mailgun')"),
   signup_url: z.string().optional().describe("Direct URL to signup page (optional, will search if not provided)"),
-  oauth_first: z
-    .boolean()
+  oauth_provider: z
+    .enum(["google", "github"])
     .optional()
     .describe(
-      "Prefer Google OAuth signup: if the page has a 'Sign in with Google' button, sign up through it using the bot's Google session instead of filling a form. Requires a one-time `npx @trusty-squire/mcp login` first.",
+      "Prefer OAuth signup with this provider: if the page has a 'Sign in with Google/GitHub' button, sign up through it using the bot's saved session instead of filling a form. Requires a one-time `npx @trusty-squire/mcp login [--provider=github]` first.",
     ),
 });
 
@@ -64,10 +64,11 @@ const PROVISION_ANY_JSON_SCHEMA = {
       type: "string",
       description: "Direct URL to the service's signup page. Optional — the bot will navigate from the service name if omitted.",
     },
-    oauth_first: {
-      type: "boolean",
+    oauth_provider: {
+      type: "string",
+      enum: ["google", "github"],
       description:
-        "Prefer Google OAuth signup. When true and the page has a 'Sign in with Google' affordance, the bot signs up through Google (using the session established by `npx @trusty-squire/mcp login`) instead of filling a form.",
+        "Prefer OAuth signup with this provider. When set and the page has a matching 'Sign in with Google/GitHub' affordance, the bot signs up through it (using the session established by `npx @trusty-squire/mcp login [--provider=github]`) instead of filling a form.",
     },
   },
 } as const;
@@ -300,9 +301,9 @@ async function runSignupTask(
       email: ctx.alias,
       inbox: ctx.inboxClient,
       llm: llmPair,
-      // T6: route through the Google OAuth path when the caller asked
-      // for it. Phase 1 is Google-only (D7).
-      ...(input.oauth_first === true ? { oauthProvider: "google" as const } : {}),
+      // T6/T13: route through the provider's OAuth path when the
+      // caller asked for it (Google or GitHub).
+      ...(input.oauth_provider !== undefined ? { oauthProvider: input.oauth_provider } : {}),
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -399,9 +400,9 @@ export function buildSignupResponse(
       steps: result.steps,
       browser_channel: result.browser_channel ?? null,
       message:
-        `The bot has no usable Google session for an OAuth signup. Tell the user to run ` +
-        `\`npx @trusty-squire/mcp login\` once (it opens a browser to sign into Google), ` +
-        `then retry provision_any_service with oauth_first.`,
+        `The bot has no usable provider session for an OAuth signup. Tell the user to run ` +
+        `\`npx @trusty-squire/mcp login\` once (add \`--provider=github\` for a GitHub signup), ` +
+        `then retry provision_any_service with oauth_provider. The error field names the exact command.`,
     };
   }
 
