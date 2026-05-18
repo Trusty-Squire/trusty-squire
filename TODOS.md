@@ -335,21 +335,76 @@ Many SaaS make "Sign up with Google/GitHub" the only signup path. The
 Tier 0 anonymous bot cannot do those — no identity, and it cannot
 drive Google's login (harder than the captcha problem).
 
-- [ ] **G1 — Managed identity for OAuth signup.** Tier 1+ feature: the
-  user grants Trusty Squire one identity (their Google/GitHub via an
-  OAuth grant, or a dedicated bot identity, held in the vault). The bot
-  then completes "Sign up with Google" on a gated service via a single
-  consent click — OAuth flips from the bot's worst path to its best
-  (no form, no captcha). Needs Tier 1 pairing + vault.
-- [ ] **G2 — OAuth gate as the Tier 0 → Tier 1 conversion trigger.**
-  Make Trusty Squire's *own* pairing a "Sign in with Google", so the
-  Google auth that pairs the user IS the G1 managed identity. When the
-  Tier 0 bot hits an OAuth-gated service it can't do, that becomes the
-  conversion CTA: "this service needs Google signup — pair Trusty
-  Squire (one Google click) and I'll do it for you." Friction
-  converted into motivation — the design doc's Bot-as-Wedge logic.
-  Gated on spike/sweep data showing OAuth-only services are a
-  meaningful slice.
+- [x] **G1 — Managed identity for OAuth signup. — SHIPPED.**
+  OAuth-first signup shipped as `@trusty-squire/mcp@0.2.0` (Phase 1
+  T1–T14 + the GitHub provider T13). The bot rides a Google/GitHub
+  session in a persistent Chrome profile through a service's consent
+  screen — clicking the affordance, scope-gating the consent, driving
+  the post-OAuth onboarding to the API key. Plan:
+  `ceo-plans/2026-05-17-oauth-first-signup.md`.
+- [ ] **G2 — API-side identity model (Tier 0 → Tier 1 funnel).** The
+  OAuth-first *signup path* shipped (G1); what remains of G2 is the
+  API side — replace the anonymous machine token with the OAuth
+  identity, build the identified conversion funnel. Deferred per the
+  plan ("API-side identity model, B phase 2 — a fast-follow, not a
+  blocker").
+
+### Post-build follow-ups (2026-05-18)
+
+From the OAuth-first verification sweep — see the plan's "Post-Build
+Findings (2026-05-18)" section.
+
+- [ ] **G3 — Publish `0.2.1`.** Every fix since `0.2.0` — post-OAuth
+  onboarding hardening (scroll-into-view, the `select` step,
+  navigation-resilience, re-plan-on-rejection, async SSO re-extract),
+  `findOAuthButton` icon/href detection, and the extraction fixes
+  (`pk_`/`phc_` dropped, `re_` charset, the label-separator guard) —
+  is committed and unpublished. `rm -rf dist` before packing so no
+  dev-harness artifact leaks into the tarball.
+- [ ] **G4 — Capture pass for the 8 handshake-needed services**
+  (Plunk, Hunter, IPInfo, PostHog, Koyeb, Netlify, SendPulse,
+  Back4App). *In progress.* Each needs a fresh OAuth handshake —
+  gated on G7 (a dedicated dev Google account, anti-abuse).
+- [ ] **G5 — Curate the raw onboarding captures into the E1 eval
+  corpus.** 34 raw round-captures sit in
+  `apps/mcp/.onboarding-corpus-raw/` (Sentry, Mistral, Resend) shaped
+  as `OnboardingEvalCase` minus `expect`. Add the `expect` labels,
+  trim to distinct states, commit as the corpus `eval-onboarding.ts`
+  loads via `ONBOARDING_EVAL_CORPUS`.
+- [ ] **G6 — `postVerifyLoop` needs a `check` step.** It has `select`
+  but no `check`; Mistral's custom TOS "checkbox" (not a plain
+  `<input>`) stalls the onboarding loop. Mirror the form planner's
+  `browser.check` (force + scrollIntoView + verify).
+- [ ] **G7 — Measure the Google anti-abuse threshold / dev-account
+  pool.** *In progress* (dedicated dev Google account
+  `methoxine@gmail.com`). Rapid OAuth handshakes trigger Google's
+  "verify it's you" challenge — one data point only: 5-in-10-minutes
+  → 1 through, 4 challenged. Threshold (rate vs count vs heuristic),
+  cooldown, and any safe cadence are all UNMEASURED. The robust dev
+  loop does not depend on the number — capture each service once
+  (G4/G5), then iterate onboarding offline.
+- [ ] **G8 — `mcp login --provider=github`.** The persistent profile
+  is logged into Google only. The 8 of 11 reachable services that
+  also expose GitHub OAuth need a one-time GitHub login first.
+- [x] **G9 — Re-probe the affordance probe's inconclusive services.
+  — done.** Brevo (corrected URL) loaded fully — **no OAuth**
+  affordance (email-only; joins Postmark/Mailgun/DeepSeek). Loops,
+  MailerSend, Axiom still render only 2–3 elements for the headless
+  throwaway-profile probe even with 18s of waits — a headless-render
+  problem, not an OAuth question; resolving them needs a headed
+  probe. Coverage holds at 11/18 OAuth-first-reachable.
+- [x] **G10 — DeepSeek offers no Google OAuth. — confirmed, note
+  only.** No affordance, no GIS iframe, zero OAuth references in the
+  DOM at `/sign_up` or `/sign_in`. OAuth-first is N/A for DeepSeek;
+  form-fill is its only (walled) path.
+- [ ] **G11 — Explore improving the headless-login VNC tool UX.** The
+  one-time `mcp login` on a display-less box bridges Chrome out via
+  Xvfb + x11vnc + noVNC + cloudflared (`google-login.ts`). noVNC's
+  client UI is dated; KasmVNC is a more modern drop-in (modern
+  client, built-in clipboard sync) — it replaces the VNC *server*
+  layer, a contained one-time packaging change. Evaluate the swap:
+  this is a human-facing one-shot login screen, so its UX is the
+  product there.
 
 ## H — Concurrency: the bot is single-flight
 

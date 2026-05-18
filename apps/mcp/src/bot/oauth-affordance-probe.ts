@@ -23,7 +23,7 @@ const TARGETS: ReadonlyArray<{ name: string; url: string }> = [
   { name: "Resend", url: "https://resend.com/signup" },
   { name: "Loops", url: "https://app.loops.so/signup" },
   { name: "Plunk", url: "https://app.useplunk.com/signup" },
-  { name: "Brevo", url: "https://login.brevo.com/account/register" },
+  { name: "Brevo", url: "https://www.brevo.com/free-account/" },
   { name: "MailerSend", url: "https://app.mailersend.com/signup" },
   { name: "Postmark", url: "https://account.postmarkapp.com/sign_up" },
   { name: "Mailgun", url: "https://signup.mailgun.com/new/signup" },
@@ -46,20 +46,26 @@ async function main(): Promise<void> {
     humanize: false,
   });
   await browser.start();
+  // Optional comma-separated name filter — re-probe a subset.
+  const filter = process.argv[2]?.toLowerCase().split(",").filter((s) => s.length > 0);
+  const targets = filter
+    ? TARGETS.filter((t) => filter.some((f) => t.name.toLowerCase().includes(f)))
+    : TARGETS;
   let reachable = 0;
   try {
-    for (const t of TARGETS) {
+    for (const t of targets) {
       let row: string;
       try {
         await browser.goto(t.url);
-        await browser.wait(3);
+        await browser.wait(6);
         await browser.waitForFormReady();
         let inv = await browser.extractInteractiveElements();
         let google = findOAuthButton(inv, "google");
         let github = findOAuthButton(inv, "github");
         // Mirror the bot's async-retry — SSO buttons often load late.
-        if (google === null && github === null) {
-          await browser.wait(3);
+        // Two extra passes: slow SPAs can take 10s+ to paint the form.
+        for (let r = 0; r < 2 && google === null && github === null; r++) {
+          await browser.wait(6);
           inv = await browser.extractInteractiveElements();
           google = findOAuthButton(inv, "google");
           github = findOAuthButton(inv, "github");
@@ -84,7 +90,7 @@ async function main(): Promise<void> {
   }
   console.error(
     `\nOAuth-first reachable (a Google/GitHub affordance detected): ` +
-      `${reachable}/${TARGETS.length}`,
+      `${reachable}/${targets.length}`,
   );
 }
 
