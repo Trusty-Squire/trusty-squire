@@ -37,7 +37,10 @@ import { BrowserController } from "./browser.js";
 import { SignupAgent } from "./agent.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 
-const RENDER_SIGNUP_URL =
+// Service + signup URL — overridable so the harness can be pointed at
+// any previously-failed candidate, not just Render.
+const SERVICE = process.env.T12_SERVICE ?? "Render";
+const SIGNUP_URL =
   process.env.T12_SIGNUP_URL ?? "https://dashboard.render.com/register";
 // Auth cookies Google only sets after a completed login.
 const GOOGLE_AUTH_COOKIES = ["__Secure-1PSID", "SAPISID", "SID"];
@@ -145,7 +148,7 @@ async function runOnboardingOnly(llm: LLMClient | LLMPair): Promise<boolean> {
         }) => Promise<Record<string, string>>;
       }
     ).postVerifyLoop.bind(agent);
-    const credentials = await loop({ service: "Render", maxRounds: 10, steps });
+    const credentials = await loop({ service: SERVICE, maxRounds: 10, steps });
 
     const line = "=".repeat(64);
     console.error(`\n${line}\n[T12] ONBOARDING RESULT\n${line}`);
@@ -168,7 +171,8 @@ async function main(): Promise<void> {
   const line = "=".repeat(64);
   console.error(`${line}\n[T12] OAuth-first thin slice — Render\n${line}`);
   console.error(`[T12] profile dir : ${CHROME_PROFILE_DIR}`);
-  console.error(`[T12] signup url  : ${RENDER_SIGNUP_URL}`);
+  console.error(`[T12] service     : ${SERVICE}`);
+  console.error(`[T12] signup url  : ${SIGNUP_URL}`);
 
   if (process.env.T12_ONBOARDING_ONLY === "1") {
     const { llm, real } = resolveLLM();
@@ -211,8 +215,8 @@ async function main(): Promise<void> {
 
   const bot = new UniversalSignupBot();
   const result = await bot.signup({
-    service: "Render",
-    signupUrl: RENDER_SIGNUP_URL,
+    service: SERVICE,
+    signupUrl: SIGNUP_URL,
     oauthProvider: "google",
     llm,
   });
