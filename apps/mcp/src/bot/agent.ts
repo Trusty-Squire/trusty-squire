@@ -643,16 +643,16 @@ const EMBEDDED_KEY_PREFIXES: readonly string[] = [
 // bearing logic and deserves direct coverage.
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
-    /\bre_[a-zA-Z0-9]{20,}\b/, // Resend
+    /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
     /\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe secret
-    // NOTE: Stripe PUBLISHABLE keys (pk_live_/pk_test_) are deliberately
-    // NOT matched. A publishable key is public by design — it ships in
-    // the client-side JS of every site that uses Stripe — so finding
-    // one on a page means "this service embeds Stripe", not "here is
-    // the user's API credential". Matching it produced a false success
-    // on Mistral (its billing pk_live_ key, surfaced as the api_key).
+    // NOTE: client-embedded PUBLIC keys are deliberately NOT matched —
+    // Stripe publishable (pk_live_/pk_test_) and PostHog project
+    // (phc_) keys ship in the client-side JS of every site that uses
+    // those vendors, so finding one on a page means "this service
+    // embeds Stripe/PostHog", not "here is the user's credential".
+    // Each produced a false success on Mistral (its billing pk_live_,
+    // then its analytics phc_, surfaced as the api_key).
     /\bkey-[a-f0-9]{32}\b/, // Mailgun
-    /\bphc_[a-zA-Z0-9]{32,}\b/, // PostHog
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
     /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
     /\bsntry[su]_[A-Za-z0-9_=\-]{20,}/, // Sentry org/user auth token

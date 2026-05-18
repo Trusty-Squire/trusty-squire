@@ -13,6 +13,13 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(text)).toBe("re_abcdefGHIJKLmnop1234567");
   });
 
+  it("extracts a Resend key whose body contains underscores", () => {
+    // Real Resend keys carry an underscore mid-body — the prefix
+    // charset must include it (a live capture key had one).
+    const key = "re_eDGaLe7W_J9biUJyA9z43NenTJH36ZrsV";
+    expect(extractApiKeyFromText(`shown once: ${key}`)).toBe(key);
+  });
+
   it("extracts a Stripe secret key", () => {
     // Built by concatenation on purpose: a contiguous sk_live_<value>
     // literal trips GitHub push protection's Stripe-key detector even
@@ -33,6 +40,14 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     // matching it surfaced Mistral's billing key as a false api_key.
     const pubKey = "pk_" + "live_examplePUBkey0000000000abcd";
     expect(extractApiKeyFromText(`checkout uses ${pubKey} here`)).toBeNull();
+  });
+
+  it("ignores a PostHog project key — public analytics key, not a credential", () => {
+    // phc_ project keys ship in client-side analytics JS on every
+    // PostHog-using site; matching one surfaced Mistral's embedded
+    // analytics key as a false api_key.
+    const phc = "phc_" + "exampleANALYTICSkey00000000000000abcd";
+    expect(extractApiKeyFromText(`window.posthog.init('${phc}')`)).toBeNull();
   });
 
   it("extracts a Render key by its rnd_ prefix", () => {
