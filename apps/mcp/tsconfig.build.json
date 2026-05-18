@@ -8,6 +8,7 @@
     "src/bot/cli.ts",
     "src/bot/test-with-inbox.ts",
     "src/bot/eval-planner.ts",
+    "src/bot/eval-onboarding.ts",
     "src/bot/oauth-login-spike.ts",
     "src/bot/oauth-thin-slice.ts"
   ]
