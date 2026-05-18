@@ -29,11 +29,16 @@ OpenRouter for LLM, AWS SES for inbound mail.
 ### Production, deployed, verified end-to-end
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
-- **Inbound mail pipeline.** SES → S3 → SNS → `/v1/webhooks/ses` →
-  Prisma. 4 domains configured (`trustysquire.ai`, `helmpoint.ai`,
-  `vouchflow.dev`, `speakeasyapp.xyz`). Catch-all + Gmail forwarding
-  for personal aliases (`dani@`, `hello@`, `info@`,
-  `partnerships@`); the rest land in the inbox store.
+- **Inbound mail pipeline — MOTHBALLED 2026-05-18 (TODOS M1).** SES →
+  S3 → SNS → `/v1/webhooks/ses` → Prisma. The code/DB/route still
+  exist but the pipeline is no longer a live dependency: the
+  OAuth-first MVP has no email-verification step, and the form-fill
+  fallback's email step is structurally walled (young-domain
+  withholding). `trustysquire.ai` MX now points at Google Workspaces
+  for company email — do NOT restore SES on it, and do NOT move SES to
+  a new domain (a new domain is a new young domain). Personal aliases
+  (`dani@`, `hello@`, …) are handled by Workspaces directly. See
+  TODOS section M.
 - **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
   Prisma schemas live in **two separate databases** on one cluster —
   they cannot share a database (`prisma db push` drops any table

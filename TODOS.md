@@ -163,7 +163,13 @@ poll is never entered). universal-bot 65 tests + mcp 36 tests pass.
 
 ## S3 — provision_any_service: detect withheld verification, don't blind-wait
 
-Diagnosed 2026-05-16. **Not yet implemented.**
+Diagnosed 2026-05-16. **Not yet implemented — now load-bearing (see M1).**
+With the SES inbound pipeline mothballed (M1), the form-fill fallback
+has no inbox at all: a no-OAuth service that needs email verification
+will *always* time out. The bot must not blind-poll — it must detect
+"email verification needed, no inbox" and return
+`manual_signup_required` + the signup URL immediately. S3 graduates
+from a polish item to a correctness requirement for the fallback path.
 
 When a signup submits successfully but the service withholds the
 verification email (anti-abuse — observed with Resend: form submitted,
@@ -473,3 +479,45 @@ fixed; the rest is deferred.
   (concurrent writes corrupt it); `MACHINE_TOKEN_QUOTA` and the LLM
   rate-limit counter are both check-then-act (concurrent runs can slip
   past the cap). Fix when concurrency becomes real.
+
+## M — Inbound mail strategy (decided 2026-05-18)
+
+trustysquire.ai's MX was rerouted to Google Workspaces for company
+email. That conflicts with SES inbound on the apex — but the decision
+below makes the conflict moot rather than something to work around.
+
+**Context.** The SES inbound pipeline (SES → S3 → SNS →
+`/v1/webhooks/ses` → inbox DB) did two jobs: (a) catch-all inboxes for
+the form-fill bot's verification emails, (b) forwarding personal
+aliases (dani@, hello@, …) to Gmail. Workspaces now does (b) natively.
+Job (a) feeds the form-fill bot — which the OAuth-first pivot demoted
+to a fallback, and whose email-verification step Gate 1 measured
+failing **7/7** (`verification_not_sent`): anti-fraud silently
+withholds verification mail from <30-day-old domains.
+
+- [x] **M1 — Do NOT move SES to trustysquire.com. SES inbound is
+  mothballed. — decided 2026-05-18.** A new domain is a new *young*
+  domain — it rebuilds the exact known-failing system (the wall is
+  domain age, not the domain name). The OAuth-first MVP has no
+  email-verification step at all, so the SES pipeline is off the
+  critical path. Decision: stop depending on the SES inbound pipeline;
+  leave the code/DB/route in place (do not delete yet) but treat it as
+  out-of-MVP-scope. The form-fill *form* logic stays — only its email
+  step is dead. No effort spent on a replacement domain or subdomain.
+- [ ] **M2 — Form-fill must fail fast to manual signup. [P2]** With no
+  inbox (M1), a no-OAuth service needing email verification will
+  always time out. The bot must detect "no OAuth + email verification
+  needed + no inbox" and return `manual_signup_required` + the signup
+  URL immediately, instead of the 300s blind poll. This is exactly the
+  **S3** item — promoted from polish to a correctness requirement by
+  M1. Do S3/M2 as one task.
+- [ ] **M3 — Future fallback: read verification mail from the user's
+  own Gmail via the OAuth profile. [P3]** The streamlined-onboarding
+  flow (G13) logs the bot's Chrome profile into the user's Google
+  account — so that profile is also logged into Gmail. For a no-OAuth
+  service, the bot can sign up with the user's own aged Gmail (or a
+  `+alias`) and read the verification email by driving Gmail in the
+  same profile: an aged, real, readable inbox that does not get
+  withheld. This supersedes SES inbound entirely and costs no new
+  infrastructure. Future work, not MVP — but it is the reason M1's
+  mothballed pipeline should eventually be deleted, not revived.
