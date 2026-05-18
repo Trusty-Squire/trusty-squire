@@ -240,6 +240,11 @@ export type PostVerifyStep =
   // role / country dropdown on a post-OAuth onboarding form). A plain
   // `click` cannot satisfy a <select>; this picks the first real option.
   | { kind: "select"; selector: string; reason: string }
+  // `check` — tick a checkbox (a post-OAuth onboarding form's
+  // terms-of-service / agreement box). A `click` lands on the box's
+  // styled label or its TOS *link* and does not flip the input;
+  // browser.check() force-ticks the underlying checkbox.
+  | { kind: "check"; selector: string; reason: string }
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
@@ -568,6 +573,11 @@ export function parsePostVerifyStep(
       const selector = requireString(obj, "selector", "post-verify select step");
       checkSelector(selector, "post-verify select step");
       return { kind: "select", selector, reason };
+    }
+    case "check": {
+      const selector = requireString(obj, "selector", "post-verify check step");
+      checkSelector(selector, "post-verify check step");
+      return { kind: "check", selector, reason };
     }
     case "navigate":
       return {
@@ -1934,6 +1944,11 @@ ${formatInventory(input.inventory)}`,
         } else if (nextStep.kind === "select") {
           await this.browser.selectOption(nextStep.selector);
           await this.browser.wait(1);
+        } else if (nextStep.kind === "check") {
+          // browser.check force-ticks + scrolls into view + verifies —
+          // a styled TOS checkbox a plain click can't flip.
+          await this.browser.check(nextStep.selector);
+          await this.browser.wait(1);
         } else if (nextStep.kind === "navigate") {
           await this.browser.goto(nextStep.url);
           await this.browser.wait(3);
@@ -2068,6 +2083,7 @@ Schema:
   {"kind":"click","selector":"<a selector= copied verbatim from the inventory>","reason":"e.g. open the API keys page"}
   {"kind":"fill","selector":"<a selector= from the inventory>","value":"value","reason":"unusual — only for a required project-name etc."}
   {"kind":"select","selector":"<a selector= from the inventory, tag=select>","reason":"pick an option for a dropdown — region, role, country"}
+  {"kind":"check","selector":"<a selector= from the inventory, type=checkbox>","reason":"tick a terms-of-service / agreement checkbox"}
   {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api-keys"}
   {"kind":"wait","seconds":N,"reason":"page is still loading"}
 
@@ -2095,6 +2111,7 @@ ${loginGuidance}
 - If the page wants the user to create a project/key before showing it, fill the minimum and click create.
 - For a required dropdown (an inventory entry with tag=select — region, role, country), use {"kind":"select"} — a "click" cannot pick a <select> option, so do not click it repeatedly.
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
+- If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
 - Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
 - On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST use a select step to set a non-default permission on at least one dropdown BEFORE clicking the create button — creating with all-default permissions does nothing. Do not click the create button repeatedly; set a permission first.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
@@ -2124,7 +2141,28 @@ ${formatInventory(input.inventory)}${
       system: systemPrompt,
       userBlocks,
       maxTokens: 500,
-      parse: (raw) => parsePostVerifyStep(raw, allowed),
+      parse: (raw) => {
+        const step = parsePostVerifyStep(raw, allowed);
+        // A `check` must land on a real checkbox/radio — the planner
+        // otherwise picks the adjacent "Terms of Service" *link*, which
+        // page.check() cannot tick. Reject it so the round re-plans.
+        if (step.kind === "check") {
+          const el = input.inventory.find((e) => e.selector === step.selector);
+          const checkable =
+            el !== undefined &&
+            ((el.tag === "input" &&
+              (el.type === "checkbox" || el.type === "radio")) ||
+              el.role === "checkbox" ||
+              el.role === "radio");
+          if (!checkable) {
+            throw new Error(
+              `post-verify check step: ${JSON.stringify(step.selector)} is not a ` +
+                `checkbox — pick the actual agreement checkbox, not its label or link`,
+            );
+          }
+        }
+        return step;
+      },
     });
   }
 

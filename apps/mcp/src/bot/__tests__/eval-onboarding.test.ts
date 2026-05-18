@@ -99,6 +99,7 @@ describe("committed onboarding corpus", () => {
     "click",
     "fill",
     "select",
+    "check",
     "navigate",
     "wait",
   ]);

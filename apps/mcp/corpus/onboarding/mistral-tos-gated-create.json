@@ -103,6 +103,7 @@
   "expect": {
     "acceptKinds": [
       "click",
+      "check",
       "fill"
     ],
     "rejectKinds": [
