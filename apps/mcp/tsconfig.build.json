@@ -11,6 +11,7 @@
     "src/bot/eval-onboarding.ts",
     "src/bot/oauth-login-spike.ts",
     "src/bot/oauth-thin-slice.ts",
-    "src/bot/oauth-affordance-probe.ts"
+    "src/bot/oauth-affordance-probe.ts",
+    "src/bot/oauth-batch.ts"
   ]
 }
