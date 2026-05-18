@@ -363,8 +363,13 @@ Findings (2026-05-18)" section.
   dev-harness artifact leaks into the tarball.
 - [ ] **G4 — Capture pass for the 8 handshake-needed services**
   (Plunk, Hunter, IPInfo, PostHog, Koyeb, Netlify, SendPulse,
-  Back4App). *In progress.* Each needs a fresh OAuth handshake —
-  gated on G7 (a dedicated dev Google account, anti-abuse).
+  Back4App). **BLOCKED** — G7 measured that the OAuth handshake is
+  challenge-gated from this headless datacenter box for any account.
+  Of the 8: SendPulse's handshake completed but its API key is
+  paywalled (`onboarding_blocked`); the other 7 were all challenged.
+  Unblocking needs the handshakes done from a residential IP + a
+  headed browser (a developer's own machine), once per service, to
+  capture the post-OAuth state — then G5.
 - [ ] **G5 — Curate the raw onboarding captures into the E1 eval
   corpus.** 34 raw round-captures sit in
   `apps/mcp/.onboarding-corpus-raw/` (Sentry, Mistral, Resend) shaped
@@ -375,14 +380,18 @@ Findings (2026-05-18)" section.
   but no `check`; Mistral's custom TOS "checkbox" (not a plain
   `<input>`) stalls the onboarding loop. Mirror the form planner's
   `browser.check` (force + scrollIntoView + verify).
-- [ ] **G7 — Measure the Google anti-abuse threshold / dev-account
-  pool.** *In progress* (dedicated dev Google account
-  `methoxine@gmail.com`). Rapid OAuth handshakes trigger Google's
-  "verify it's you" challenge — one data point only: 5-in-10-minutes
-  → 1 through, 4 challenged. Threshold (rate vs count vs heuristic),
-  cooldown, and any safe cadence are all UNMEASURED. The robust dev
-  loop does not depend on the number — capture each service once
-  (G4/G5), then iterate onboarding offline.
+- [x] **G7 — Measure the Google anti-abuse threshold. — done
+  2026-05-18.** Two batches: an aged account (`lunchboxfortwo`) got
+  exactly **1** clean handshake then challenged; a fresh dev account
+  (`methoxine`) was challenged on **8 of 9**, including run #1. A
+  fresh account is treated as MORE suspicious — no history + headless
+  + datacenter IP = "verify it's you" on the first OAuth. **The
+  dev-account-pool idea is dead** — fresh accounts add no headroom.
+  Reliable handshakes need an aged account on a residential IP at low
+  volume (the production case). The dev escape is NOT more handshakes
+  — it is capturing each service's post-OAuth state once (from a
+  residential/headed environment) and iterating onboarding offline
+  (G5). See the plan's Post-Build Findings.
 - [ ] **G8 — `mcp login --provider=github`.** The persistent profile
   is logged into Google only. The 8 of 11 reachable services that
   also expose GitHub OAuth need a one-time GitHub login first.
