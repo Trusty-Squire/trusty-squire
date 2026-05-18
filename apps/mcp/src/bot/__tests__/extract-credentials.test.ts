@@ -108,6 +108,14 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
     expect(extractApiKeyFromText(text)).toBe("re_abcdefGHIJKLmnop1234567");
   });
 
+  it("rejects a label glued to nav text with no separator (Resend false-positive)", () => {
+    // Resend's post-OAuth dashboard sidebar — "API Keys" "Webhooks"
+    // "Settings" "<account>" as adjacent links — concatenates with no
+    // separator. The labeled pattern must NOT capture the glued run.
+    const text = "API KeysWebhooksSettingslunchboxfortwoProjects";
+    expect(extractApiKeyFromText(text)).toBeNull();
+  });
+
   it("rejects a labeled value that straddled glued dashboard text onto a key", () => {
     // Render's API-keys list renders as concatenated text with no
     // separators ("...Name bot-key Menu Key rnd_SsApfF") — the labeled

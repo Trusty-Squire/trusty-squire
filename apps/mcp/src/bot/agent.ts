@@ -661,13 +661,17 @@ export function extractApiKeyFromText(text: string): string | null {
     if (match !== null) return match[0];
   }
 
-  // Labeled patterns. The gap between label and value is
-  // `[ \t]*[:=]?[ \t]*` — only spaces/tabs, never a newline — so the
-  // value must be adjacent to its label. The value charset excludes
-  // the captcha-token shape implicitly via the length ceiling, and we
-  // re-check markers explicitly below for the dot-bearing bearer case.
+  // Labeled patterns. The label and value MUST be separated by a real
+  // separator — a colon/equals, or whitespace — `(?:[ \t]*[:=][ \t]*|[ \t]+)`,
+  // never a newline. A MANDATORY separator is what keeps the regex from
+  // latching the label onto glued dashboard nav text: a sidebar
+  // rendering "API Keys" "Webhooks" "Settings" as adjacent links
+  // concatenates in textContent to "API KeysWebhooksSettings…", and an
+  // optional-gap regex would capture "sWebhooksSettings…" as the key
+  // (Resend false-positive). Requiring `:`/`=`/space means "API Key"
+  // followed immediately by a letter does not match.
   const labeled: readonly RegExp[] = [
-    /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)[ \t]*[:=]?[ \t]*([a-zA-Z0-9_\-]{20,})/i,
+    /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)(?:[ \t]*[:=][ \t]*|[ \t]+)([a-zA-Z0-9_\-]{20,})/i,
     /\b[Bb]earer[ \t]+([a-zA-Z0-9_\-.]{30,})/,
   ];
   for (const pattern of labeled) {
