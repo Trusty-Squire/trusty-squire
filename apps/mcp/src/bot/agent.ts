@@ -462,20 +462,30 @@ export function isOauthOnlyChooser(
 }
 
 // Find a "Sign in with <provider>" affordance in the page inventory —
-// the entry point for the OAuth-first path (T6/T13). Matches a
-// button/link whose visible text or accessible label names the
-// provider AND reads as an auth action ("sign in/up with GitHub",
-// "Continue with Google"), so a stray "Google Cloud" / "GitHub repo"
-// marketing link is not mistaken for the OAuth button. Returns null
-// when the page has no such affordance — the planner then falls back
-// to form-fill. Exported for unit testing — the heuristic is the
-// load-bearing logic.
+// the entry point for the OAuth-first path (T6/T13). Three signals, in
+// confidence order — derived from a live sweep where the text-only
+// heuristic missed real buttons:
+//   1. href — an <a> whose link routes through the provider's OAuth
+//      endpoint (/identity/login/google, /auth/github/callback, …).
+//      Unambiguous: a marketing link to policies.google.com does not.
+//   2. iconLabel — an icon-only button with no text at all, named only
+//      by a descendant <img alt="Google"> / <svg><title> (Mistral).
+//   3. text + an auth verb — "Continue with Google", "Sign up with
+//      GitHub". The auth verb is what keeps a bare "Google" nav link
+//      or "Google's Privacy Policy" out.
+// Returns null when the page has no such affordance — the planner then
+// falls back to form-fill. Exported for unit testing.
 export function findOAuthButton(
   inventory: readonly InteractiveElement[],
   provider: OAuthProviderId,
 ): InteractiveElement | null {
   const keyword = OAUTH_PROVIDERS[provider].buttonKeyword;
   const keywordRe = new RegExp(`\\b${keyword}\\b`);
+  const hrefRe = new RegExp(
+    `(?:login|signin|sign-in|auth|oauth|connect|sso)[/_-]*${keyword}` +
+      `|${keyword}[/_-]*(?:login|signin|auth|oauth|connect)`,
+    "i",
+  );
   for (const e of inventory) {
     const isButtonish =
       e.tag === "button" ||
@@ -484,18 +494,20 @@ export function findOAuthButton(
       e.type === "submit" ||
       e.type === "button";
     if (!isButtonish) continue;
+    // 1. An <a> whose href routes through the provider's OAuth endpoint.
+    const href = (e.href ?? "").toLowerCase();
+    if (href.length > 0 && hrefRe.test(href)) return e;
+    // 2. Icon-only button — named only by a descendant img/svg.
+    if (keywordRe.test((e.iconLabel ?? "").toLowerCase())) return e;
+    // 3. Visible text / accessible label naming the provider + an
+    //    auth verb. The auth verb requirement rejects nav and policy
+    //    links that merely mention the provider.
     const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
     if (!keywordRe.test(text)) continue;
-    // Require an auth verb so a non-auth link naming the provider is
-    // not picked. An icon-only button whose entire accessible name is
-    // just the provider name also qualifies.
-    if (
-      /\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text) ||
-      text === keyword
-    ) {
+    if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text)) {
       return e;
     }
   }

@@ -244,6 +244,37 @@ describe("findOAuthButton", () => {
     const ghDocs = mk({ tag: "a", visibleText: "View on GitHub", selector: "#g" });
     expect(findOAuthButton([ghDocs], "github")).toBeNull();
   });
+
+  it("matches an icon-only button named only by a descendant img alt (Mistral)", () => {
+    // <button><img alt="Google"></button> — no text, no aria-label.
+    const iconBtn = mk({ tag: "button", iconLabel: "Google", selector: "#sso-g" });
+    expect(findOAuthButton([iconBtn], "google")?.selector).toBe("#sso-g");
+    // The sibling Apple icon button must not match.
+    const apple = mk({ tag: "button", iconLabel: "Apple", selector: "#sso-a" });
+    expect(findOAuthButton([apple], "google")).toBeNull();
+  });
+
+  it("matches an <a> by an OAuth href even with no visible text (Sentry)", () => {
+    const oauthLink = mk({
+      tag: "a",
+      visibleText: "",
+      href: "https://sentry.io/identity/login/google/?href=https%3A%2F%2Fsentry.io%2Fsignup",
+      selector: "#gh-a",
+    });
+    expect(findOAuthButton([oauthLink], "google")?.selector).toBe("#gh-a");
+  });
+
+  it("rejects a policy link to the provider's own domain", () => {
+    // policies.google.com/privacy names Google and is an <a>, but its
+    // href does not route through an OAuth endpoint.
+    const policy = mk({
+      tag: "a",
+      visibleText: "Google's Privacy Policy",
+      href: "https://policies.google.com/privacy",
+      selector: "#pp",
+    });
+    expect(findOAuthButton([policy], "google")).toBeNull();
+  });
 });
 
 // ───────────────────── scoreSignupButton oauthProvider ─────────────────────

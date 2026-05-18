@@ -1125,6 +1125,28 @@ export class BrowserController {
           '[class*="osano"],[id*="onetrust"],[id*="cookie"],[class*="cookie-consent"],[class*="cookie-banner"],[class*="cookieConsent"]',
         ) !== null;
 
+      // Accessible label of a descendant icon — an icon-only "Sign in
+      // with Google" button carries no text, but its <img alt>, its
+      // <svg><title>, or a descendant [aria-label] names the provider.
+      const iconLabelFor = (el: Element): string | null => {
+        const img = el.querySelector("img[alt]");
+        if (img !== null) {
+          const alt = clean(img.getAttribute("alt"));
+          if (alt !== null) return alt;
+        }
+        const svgTitle = el.querySelector("svg title");
+        if (svgTitle !== null) {
+          const t = clean(svgTitle.textContent);
+          if (t !== null) return t;
+        }
+        const labelled = el.querySelector("[aria-label]");
+        if (labelled !== null) {
+          const l = clean(labelled.getAttribute("aria-label"));
+          if (l !== null) return l;
+        }
+        return null;
+      };
+
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
         let base: string;
@@ -1187,6 +1209,8 @@ export class BrowserController {
         visible: boolean;
         inViewport: boolean;
         inConsentWidget: boolean;
+        href: string | null;
+        iconLabel: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -1211,6 +1235,8 @@ export class BrowserController {
             r.bottom <= window.innerHeight &&
             r.right <= window.innerWidth,
           inConsentWidget: inConsent(el),
+          href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
+          iconLabel: iconLabelFor(el),
         });
       }
       return out;
@@ -1521,6 +1547,14 @@ export interface InteractiveElement {
   visible: boolean;
   inViewport: boolean;
   inConsentWidget: boolean;
+  // T13 follow-up — OAuth-affordance signals. `href` is the link
+  // target (an OAuth <a> points at e.g. /identity/login/google/);
+  // `iconLabel` folds in a descendant <img alt> / <svg><title> /
+  // [aria-label] so an icon-only "Sign in with Google" button — no
+  // visible text at all — is still discoverable. Optional: only the
+  // live extractInteractiveElements sets them; test fixtures omit them.
+  href?: string | null;
+  iconLabel?: string | null;
 }
 
 // Score a button/link by how much its text reads like a signup
