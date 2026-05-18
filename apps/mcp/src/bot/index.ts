@@ -5,9 +5,13 @@ import { randomBytes } from "crypto";
 import { BrowserController } from "./browser.js";
 import { SignupAgent, type SignupResult, LLMCallBudgetExceeded } from "./agent.js";
 import type { AgentInbox } from "./agent.js";
+import { withOAuthLock } from "./oauth-lock.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 
 export { type SignupResult, LLMCallBudgetExceeded };
+export { withOAuthLock } from "./oauth-lock.js";
+export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export type { CaptchaVariant } from "./browser.js";
 export { InboxClient } from "./inbox-client.js";
 export type { AgentInbox };
@@ -43,6 +47,13 @@ export interface UniversalSignupRequest {
   // OpenRouter > Anthropic). Set this when you want explicit control
   // (e.g., from the MCP tool handler that knows the machine token).
   llm?: LLMClient | LLMPair | undefined;
+  // OAuth-first signup (T6/T13). When set, the bot prefers the
+  // provider's OAuth path — clicking "Sign in with <provider>" and
+  // riding the session in the persistent Chrome profile — over
+  // form-filling. Google or GitHub. OAuth runs are serialized (T8/D2):
+  // they share the one persistent profile, which Chrome single-
+  // instances, so a second OAuth run queues behind the first.
+  oauthProvider?: OAuthProviderId | undefined;
 }
 
 export class UniversalSignupBot {
@@ -63,6 +74,17 @@ export class UniversalSignupBot {
   }
 
   async signup(request: UniversalSignupRequest): Promise<SignupResult> {
+    // T8/D2 — OAuth runs all launch Chrome from the one shared
+    // persistent profile, which Chrome single-instances. Serialize
+    // them so a second concurrent run queues rather than corrupting
+    // the profile lock. Form-fill runs are unaffected.
+    if (request.oauthProvider !== undefined) {
+      return withOAuthLock(() => this.runSession(request));
+    }
+    return this.runSession(request);
+  }
+
+  private async runSession(request: UniversalSignupRequest): Promise<SignupResult> {
     // Defaults: humanize=true (production behavior — we want to pass
     // Cloudflare/reCAPTCHA scoring). Tests can pass `humanize: false`
     // to skip the behavior-simulation overhead.
@@ -91,6 +113,7 @@ export class UniversalSignupBot {
         email,
         generatePassword: () => this.generatePassword(),
         inbox: request.inbox,
+        oauthProvider: request.oauthProvider,
       });
 
       console.error(`[UniversalBot] Result: ${result.success ? "SUCCESS" : "FAILED"}`);

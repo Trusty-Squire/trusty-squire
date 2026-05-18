@@ -29,11 +29,16 @@ OpenRouter for LLM, AWS SES for inbound mail.
 ### Production, deployed, verified end-to-end
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
-- **Inbound mail pipeline.** SES → S3 → SNS → `/v1/webhooks/ses` →
-  Prisma. 4 domains configured (`trustysquire.ai`, `helmpoint.ai`,
-  `vouchflow.dev`, `speakeasyapp.xyz`). Catch-all + Gmail forwarding
-  for personal aliases (`dani@`, `hello@`, `info@`,
-  `partnerships@`); the rest land in the inbox store.
+- **Inbound mail pipeline — MOTHBALLED 2026-05-18 (TODOS M1).** SES →
+  S3 → SNS → `/v1/webhooks/ses` → Prisma. The code/DB/route still
+  exist but the pipeline is no longer a live dependency: the
+  OAuth-first MVP has no email-verification step, and the form-fill
+  fallback's email step is structurally walled (young-domain
+  withholding). `trustysquire.ai` MX now points at Google Workspaces
+  for company email — do NOT restore SES on it, and do NOT move SES to
+  a new domain (a new domain is a new young domain). Personal aliases
+  (`dani@`, `hello@`, …) are handled by Workspaces directly. See
+  TODOS section M.
 - **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
   Prisma schemas live in **two separate databases** on one cluster —
   they cannot share a database (`prisma db push` drops any table
@@ -64,8 +69,13 @@ OpenRouter for LLM, AWS SES for inbound mail.
     navigation loop
   - Hard cap of 15 LLM calls per signup (circuit breaker)
 - **Tier 0 install flow.** `npx @trusty-squire/mcp install` issues a
-  machine token, writes the host-agent MCP config. No account, no
-  mandate. 10 free signups per machine, then pair-CTA.
+  machine token, writes the host-agent MCP config, then runs the
+  one-time OAuth login (folds in `mcp login` — Google/GitHub browser
+  session into the bot profile; non-fatal, `--skip-login` opts out).
+  No account, no mandate — MVP provisions free-tier services only.
+  Headed (laptop/desktop) is the recommended environment; a headless
+  box does a one-time remote-browser login (noVNC). See the
+  2026-05-18 streamlined-oauth-onboarding CEO plan.
 - **LLM proxy** (`/v1/llm/chat`). User's machine talks to our API,
   which forwards to OpenRouter using the operator's key. Per-machine
   rolling rate limit (150/hour, default). Cost per IPInfo signup:
@@ -184,7 +194,7 @@ stale (they reference a `prisma:generate` script that no longer exists)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.1.18`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.2.1`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was

@@ -33,6 +33,12 @@ type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
 export const provisionAnyInputSchema = z.object({
   service: z.string().describe("Name of the service to sign up for (e.g., 'Postmark', 'Mailgun')"),
   signup_url: z.string().optional().describe("Direct URL to signup page (optional, will search if not provided)"),
+  oauth_provider: z
+    .enum(["google", "github"])
+    .optional()
+    .describe(
+      "Prefer OAuth signup with this provider: if the page has a 'Sign in with Google/GitHub' button, sign up through it using the bot's saved session instead of filling a form. Requires a one-time `npx @trusty-squire/mcp login [--provider=github]` first.",
+    ),
 });
 
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
@@ -57,6 +63,12 @@ const PROVISION_ANY_JSON_SCHEMA = {
     signup_url: {
       type: "string",
       description: "Direct URL to the service's signup page. Optional — the bot will navigate from the service name if omitted.",
+    },
+    oauth_provider: {
+      type: "string",
+      enum: ["google", "github"],
+      description:
+        "Prefer OAuth signup with this provider. When set and the page has a matching 'Sign in with Google/GitHub' affordance, the bot signs up through it (using the session established by `npx @trusty-squire/mcp login [--provider=github]`) instead of filling a form.",
     },
   },
 } as const;
@@ -113,10 +125,16 @@ until status is no longer "running".
 RESPONSES:
 - status="running" → still working; poll again in ~60s.
 - status="success" + credentials → signup done; show the credentials to the user.
-- status="verification_not_sent" → submitted, but the service sent no verification
-  email (anti-abuse withholding, or it needs manual signup).
+- status="verification_not_sent" → the service needs an email verification the bot
+  can't complete; show the message and tell the user to sign up manually.
 - status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
+- status="needs_login" → an OAuth signup needs the bot's one-time Google login;
+  tell the user to run \`npx @trusty-squire/mcp login\`, then retry.
+- status="oauth_consent_needs_review" → the Google consent screen asked for more than
+  basic profile access; the user must complete the OAuth signup manually.
+- status="onboarding_blocked" → signed in via Google, but the API key is behind a
+  billing/payment wall; the user must add a payment method.
 - status="failed" → the form filled but yielded no credentials; show steps[].
 - status="error" → the run crashed; show error.
 - status="unknown_run" → no such run (it expired, or the MCP server restarted).`;
@@ -281,8 +299,14 @@ async function runSignupTask(
       service: input.service,
       ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
       email: ctx.alias,
-      inbox: ctx.inboxClient,
+      // No `inbox`: the SES inbound pipeline is mothballed (TODOS M1).
+      // Without an inbox, signup() fast-fails an email-verifying form
+      // to `verification_not_sent` instead of a blind poll (M2/S3).
+      // The OAuth path needs no inbox at all.
       llm: llmPair,
+      // T6/T13: route through the provider's OAuth path when the
+      // caller asked for it (Google or GitHub).
+      ...(input.oauth_provider !== undefined ? { oauthProvider: input.oauth_provider } : {}),
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -321,8 +345,10 @@ async function runSignupTask(
 }
 
 // Maps a finished SignupResult to the response the caller sees via
-// check_provision_status. Mirrors the status set documented on the tools.
-function buildSignupResponse(
+// check_provision_status. Mirrors the status set documented on the
+// tools. Exported for unit testing — the error-prefix → status
+// mapping is the load-bearing logic.
+export function buildSignupResponse(
   input: ProvisionAnyInput,
   result: SignupResult,
 ): Record<string, unknown> {
@@ -366,8 +392,60 @@ function buildSignupResponse(
     };
   }
 
-  // S3: the bot tags "form submitted but no verification email" with a
-  // verification_not_sent: error prefix. Surface it as its own status.
+  // T7/T10 — OAuth: the bot's Google session is missing/expired, or
+  // Google interrupted with a security challenge. The remedy for both
+  // is the one-time interactive login.
+  if (result.error !== undefined && result.error.startsWith("needs_login")) {
+    return {
+      status: "needs_login",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `The bot has no usable provider session for an OAuth signup. Tell the user to run ` +
+        `\`npx @trusty-squire/mcp login\` once (add \`--provider=github\` for a GitHub signup), ` +
+        `then retry provision_any_service with oauth_provider. The error field names the exact command.`,
+    };
+  }
+
+  // T7/T10 — OAuth: the consent screen requested broader-than-basic
+  // scopes (or its scopes could not be read). The bot deliberately
+  // does not auto-approve — a human must review it.
+  if (result.error !== undefined && result.error.startsWith("oauth_consent_needs_review")) {
+    return {
+      status: "oauth_consent_needs_review",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service}'s Google consent screen needs human review (it asked for more than ` +
+        `basic profile access). Tell the user to complete the OAuth signup manually at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  // T7/T10 — OAuth: signed in fine, but the API key sits behind a
+  // billing / payment-method wall the bot will not cross.
+  if (result.error !== undefined && result.error.startsWith("onboarding_blocked")) {
+    return {
+      status: "onboarding_blocked",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service} signed up via Google, but its API key is behind a billing/payment wall. ` +
+        `Tell the user to add a payment method at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`} to finish.`,
+    };
+  }
+
+  // S3/M2: the bot tags a signup it can't confirm by email with a
+  // verification_not_sent: error prefix — either the service withheld
+  // the mail, or (M1) there is no inbox to receive it. Either way the
+  // user finishes manually. Surface it as its own status.
   if (result.error !== undefined && result.error.startsWith("verification_not_sent")) {
     return {
       status: "verification_not_sent",
@@ -376,8 +454,8 @@ function buildSignupResponse(
       steps: result.steps,
       browser_channel: result.browser_channel ?? null,
       message:
-        `${input.service}'s form submitted, but no verification email arrived — the service most likely ` +
-        `withheld it (anti-abuse) or needs manual signup. Tell the user to finish at ` +
+        `${input.service} requires an email verification that Trusty Squire's automated ` +
+        `signup couldn't complete. Tell the user to finish signing up manually at ` +
         `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
     };
   }

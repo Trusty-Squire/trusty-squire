@@ -163,7 +163,11 @@ poll is never entered). universal-bot 65 tests + mcp 36 tests pass.
 
 ## S3 — provision_any_service: detect withheld verification, don't blind-wait
 
-Diagnosed 2026-05-16. **Not yet implemented.**
+Diagnosed 2026-05-16. **Done — 2026-05-18 (with M2).** Two parts:
+(1) the post-submit page-state detection (`expectsVerificationEmail` +
+a short 45s probe when the page never says "check your email") shipped
+earlier; (2) the no-inbox fast-fail shipped 2026-05-18 with M2 — see
+below.
 
 When a signup submits successfully but the service withholds the
 verification email (anti-abuse — observed with Resend: form submitted,
@@ -335,21 +339,124 @@ Many SaaS make "Sign up with Google/GitHub" the only signup path. The
 Tier 0 anonymous bot cannot do those — no identity, and it cannot
 drive Google's login (harder than the captcha problem).
 
-- [ ] **G1 — Managed identity for OAuth signup.** Tier 1+ feature: the
-  user grants Trusty Squire one identity (their Google/GitHub via an
-  OAuth grant, or a dedicated bot identity, held in the vault). The bot
-  then completes "Sign up with Google" on a gated service via a single
-  consent click — OAuth flips from the bot's worst path to its best
-  (no form, no captcha). Needs Tier 1 pairing + vault.
-- [ ] **G2 — OAuth gate as the Tier 0 → Tier 1 conversion trigger.**
-  Make Trusty Squire's *own* pairing a "Sign in with Google", so the
-  Google auth that pairs the user IS the G1 managed identity. When the
-  Tier 0 bot hits an OAuth-gated service it can't do, that becomes the
-  conversion CTA: "this service needs Google signup — pair Trusty
-  Squire (one Google click) and I'll do it for you." Friction
-  converted into motivation — the design doc's Bot-as-Wedge logic.
-  Gated on spike/sweep data showing OAuth-only services are a
-  meaningful slice.
+- [x] **G1 — Managed identity for OAuth signup. — SHIPPED.**
+  OAuth-first signup shipped as `@trusty-squire/mcp@0.2.0` (Phase 1
+  T1–T14 + the GitHub provider T13). The bot rides a Google/GitHub
+  session in a persistent Chrome profile through a service's consent
+  screen — clicking the affordance, scope-gating the consent, driving
+  the post-OAuth onboarding to the API key. Plan:
+  `ceo-plans/2026-05-17-oauth-first-signup.md`.
+- [ ] **G2 — API-side identity model (Tier 0 → Tier 1 funnel).** The
+  OAuth-first *signup path* shipped (G1); what remains of G2 is the
+  API side — replace the anonymous machine token with the OAuth
+  identity, build the identified conversion funnel. Deferred per the
+  plan ("API-side identity model, B phase 2 — a fast-follow, not a
+  blocker").
+
+### Post-build follow-ups (2026-05-18)
+
+From the OAuth-first verification sweep — see the plan's "Post-Build
+Findings (2026-05-18)" section.
+
+- [x] **G3 — Publish `0.2.1`. — done 2026-05-18.** Every fix since
+  `0.2.0` — post-OAuth onboarding hardening (scroll-into-view, the
+  `select` step, navigation-resilience, re-plan-on-rejection, async
+  SSO re-extract), `findOAuthButton` icon/href detection, the
+  extraction fixes (`pk_`/`phc_` dropped, `re_` charset, the
+  label-separator guard), plus G5 (eval corpus) and G6 (`check`
+  step) — shipped as `@trusty-squire/mcp@0.2.1`. dist cleaned before
+  packing; the `corpus/` dir is not in the tarball (143 KB packed,
+  123 files). CLAUDE.md's published-version line updated.
+- [ ] **G4 — Capture pass for the 8 handshake-needed services**
+  (Plunk, Hunter, IPInfo, PostHog, Koyeb, Netlify, SendPulse,
+  Back4App). **BLOCKED** — G7 measured that the OAuth handshake is
+  challenge-gated from this headless datacenter box for any account.
+  Of the 8: SendPulse's handshake completed but its API key is
+  paywalled (`onboarding_blocked`); the other 7 were all challenged.
+  Unblocking needs the handshakes done from a residential IP + a
+  headed browser (a developer's own machine), once per service, to
+  capture the post-OAuth state — then G5.
+- [x] **G5 — Curate the raw onboarding captures into the E1 eval
+  corpus. — done 2026-05-18.** 46 raw round-captures (Sentry,
+  Mistral, Resend, SendPulse) trimmed to **14 distinct, labelled
+  cases** under `apps/mcp/corpus/onboarding/`. Each keeps the full
+  DOM inventory, drops the screenshot for a 1×1 placeholder, and
+  reduces HTML to the visible text the planner consumes. Cases cover
+  the T12 sequences: Resend dashboard→keys→modal→reveal→extract,
+  Sentry issues→settings→tokens→create, Mistral's org-creation gate,
+  SendPulse's 404 dead-end. `loadCorpus()` defaults to the committed
+  dir; `ONBOARDING_EVAL_CORPUS` still overrides. A test asserts the
+  corpus loads and every case is structurally scorable.
+- [x] **G6 — `postVerifyLoop` `check` step. — done 2026-05-18.**
+  Added `PostVerifyStep` `check`: `parsePostVerifyStep` parses it,
+  the loop executes via `browser.check` (force + scrollIntoView +
+  verify), the planner prompt documents it for a disabled-button TOS
+  gate, and the parse callback rejects a `check` that targets a link
+  instead of a real checkbox. **Caveat:** Mistral's specific TOS
+  checkbox is a visually-hidden `<input>` that
+  `extractInteractiveElements` filters out, so it never reaches the
+  inventory — `check` cannot target what isn't surfaced. Surfacing
+  hidden-but-checkable inputs is a separate browser.ts fix → G12.
+- [ ] **G12 — Surface visually-hidden checkboxes in the inventory.**
+  `extractInteractiveElements` drops `visible:false` elements, but a
+  custom-styled TOS checkbox is a real `<input type=checkbox>` with
+  `opacity:0`/`sr-only` behind a styled label. It is checkable and
+  must reach the inventory so the G6 `check` step can target it
+  (Mistral's org-creation gate). Include a hidden input when it is
+  `type=checkbox`/`radio` and inside/adjacent a visible label.
+- [x] **G7 — Measure the Google anti-abuse threshold. — done
+  2026-05-18.** Two batches: an aged account (`lunchboxfortwo`) got
+  exactly **1** clean handshake then challenged; a fresh dev account
+  (`methoxine`) was challenged on **8 of 9**, including run #1. A
+  fresh account is treated as MORE suspicious — no history + headless
+  + datacenter IP = "verify it's you" on the first OAuth. **The
+  dev-account-pool idea is dead** — fresh accounts add no headroom.
+  Reliable handshakes need an aged account on a residential IP at low
+  volume (the production case). The dev escape is NOT more handshakes
+  — it is capturing each service's post-OAuth state once (from a
+  residential/headed environment) and iterating onboarding offline
+  (G5). See the plan's Post-Build Findings.
+- [ ] **G8 — `mcp login --provider=github`.** The persistent profile
+  is logged into Google only. The 8 of 11 reachable services that
+  also expose GitHub OAuth need a one-time GitHub login first.
+- [x] **G9 — Re-probe the affordance probe's inconclusive services.
+  — done.** Brevo (corrected URL) loaded fully — **no OAuth**
+  affordance (email-only; joins Postmark/Mailgun/DeepSeek). Loops,
+  MailerSend, Axiom still render only 2–3 elements for the headless
+  throwaway-profile probe even with 18s of waits — a headless-render
+  problem, not an OAuth question; resolving them needs a headed
+  probe. Coverage holds at 11/18 OAuth-first-reachable.
+- [x] **G10 — DeepSeek offers no Google OAuth. — confirmed, note
+  only.** No affordance, no GIS iframe, zero OAuth references in the
+  DOM at `/sign_up` or `/sign_in`. OAuth-first is N/A for DeepSeek;
+  form-fill is its only (walled) path.
+- [x] **G11 — Explore improving the headless-login VNC tool UX. —
+  done: folded into the G13 plan.** The /plan-ceo-review of
+  2026-05-18 evaluated the KasmVNC swap and **rejected it** — KasmVNC
+  replaces the VNC *server* and ships as a `.deb`/container an npm
+  package can't bundle, failing on exactly the constrained boxes that
+  need the flow. Chosen instead: a custom branded `vnc.html` served
+  off the existing x11vnc + websockify + noVNC stack. See G13.
+- [x] **G13 — Streamlined OAuth onboarding. — built 2026-05-18,
+  awaiting publish.** Folded the one-time OAuth login into `install`
+  (non-fatal final stage), reworked the headless login UX (custom
+  branded `vnc.html` served from a temp dir holding the installed
+  noVNC core — no new binary), dropped email+password+mandate from the
+  advertised onboarding (free-only MVP; mandate-validator stays
+  armed/fail-closed). Cherry-picks shipped: headed interstitial,
+  `--provider` choice, closing nudge. 8 tasks T1-T8, 250 tests pass.
+  On branch `streamlined-oauth-onboarding` (commit `0cd919a`) —
+  CEO + eng reviewed. Plan:
+  `~/.gstack/projects/Trusty-Squire-trusty-squire/ceo-plans/2026-05-18-streamlined-oauth-onboarding.md`.
+  Next: `/ship` (bump version, publish).
+- [ ] **G14 — Harden the headless-login VNC password handoff. [P3]**
+  `loginHeadless` passes the VNC password to `x11vnc` as a plaintext
+  `-passwd` argv argument, readable by any other local UID via `ps`.
+  Pre-existing and narrow (x11vnc binds `-localhost` only, so it needs
+  a co-resident attacker), but the streamlined-onboarding sprint's
+  theme is hardening this path. Fix: write the password to a `0600`
+  file in the rig's temp dir and use `x11vnc -passwdfile`. Surfaced by
+  the /ship adversarial review 2026-05-18.
 
 ## H — Concurrency: the bot is single-flight
 
@@ -378,3 +485,51 @@ fixed; the rest is deferred.
   (concurrent writes corrupt it); `MACHINE_TOKEN_QUOTA` and the LLM
   rate-limit counter are both check-then-act (concurrent runs can slip
   past the cap). Fix when concurrency becomes real.
+
+## M — Inbound mail strategy (decided 2026-05-18)
+
+trustysquire.ai's MX was rerouted to Google Workspaces for company
+email. That conflicts with SES inbound on the apex — but the decision
+below makes the conflict moot rather than something to work around.
+
+**Context.** The SES inbound pipeline (SES → S3 → SNS →
+`/v1/webhooks/ses` → inbox DB) did two jobs: (a) catch-all inboxes for
+the form-fill bot's verification emails, (b) forwarding personal
+aliases (dani@, hello@, …) to Gmail. Workspaces now does (b) natively.
+Job (a) feeds the form-fill bot — which the OAuth-first pivot demoted
+to a fallback, and whose email-verification step Gate 1 measured
+failing **7/7** (`verification_not_sent`): anti-fraud silently
+withholds verification mail from <30-day-old domains.
+
+- [x] **M1 — Do NOT move SES to trustysquire.com. SES inbound is
+  mothballed. — decided 2026-05-18.** A new domain is a new *young*
+  domain — it rebuilds the exact known-failing system (the wall is
+  domain age, not the domain name). The OAuth-first MVP has no
+  email-verification step at all, so the SES pipeline is off the
+  critical path. Decision: stop depending on the SES inbound pipeline;
+  leave the code/DB/route in place (do not delete yet) but treat it as
+  out-of-MVP-scope. The form-fill *form* logic stays — only its email
+  step is dead. No effort spent on a replacement domain or subdomain.
+- [x] **M2 — Form-fill fails fast to manual signup. — done
+  2026-05-18.** `provision-any.ts` no longer passes an `inbox` to
+  `bot.signup()` (M1 — the SES pipeline is mothballed). `agent.ts`
+  signup() now branches: credentials missing + post-submit page asks
+  for email verification + no inbox → returns a `verification_not_sent`
+  error immediately with the signup URL, no poll. Reused the existing
+  `verification_not_sent` status (it already means "submitted, can't
+  confirm by email → sign up manually") rather than adding a new
+  `manual_signup_required` — same user action, one fewer status. The
+  status message + CHECK_DESCRIPTION were made cause-agnostic (covers
+  both "service withheld the mail" and "no inbox"). Tests:
+  `verification-no-inbox.test.ts` — fast-fail fires, and does not
+  over-trigger when the page shows no email prompt.
+- [ ] **M3 — Future fallback: read verification mail from the user's
+  own Gmail via the OAuth profile. [P3]** The streamlined-onboarding
+  flow (G13) logs the bot's Chrome profile into the user's Google
+  account — so that profile is also logged into Gmail. For a no-OAuth
+  service, the bot can sign up with the user's own aged Gmail (or a
+  `+alias`) and read the verification email by driving Gmail in the
+  same profile: an aged, real, readable inbox that does not get
+  withheld. This supersedes SES inbound entirely and costs no new
+  infrastructure. Future work, not MVP — but it is the reason M1's
+  mothballed pipeline should eventually be deleted, not revived.

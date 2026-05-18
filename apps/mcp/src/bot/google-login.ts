@@ -25,11 +25,21 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { existsSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
+import type { OAuthProviderId } from "./oauth-providers.js";
 
 const require = createRequire(import.meta.url);
 
@@ -55,13 +65,48 @@ function resolveChromium(): PersistentLauncher {
 }
 
 // --- config ------------------------------------------------------------
-const GOOGLE_LOGIN_URL = "https://accounts.google.com/";
-// Auth cookies Google only sets after a completed login.
-const GOOGLE_AUTH_COOKIES = ["__Secure-1PSID", "SAPISID", "SID"];
+// Per-provider login targets for `mcp login` (T13). `cookies` are ones
+// the provider only sets after a completed login — polling for them is
+// how the flow detects the user finished.
+interface LoginTarget {
+  provider: OAuthProviderId;
+  label: string;
+  loginUrl: string;
+  cookieOrigin: string;
+  cookies: readonly string[];
+}
+const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
+  google: {
+    provider: "google",
+    label: "Google",
+    loginUrl: "https://accounts.google.com/",
+    cookieOrigin: "https://www.google.com",
+    cookies: ["__Secure-1PSID", "SAPISID", "SID"],
+  },
+  github: {
+    provider: "github",
+    label: "GitHub",
+    loginUrl: "https://github.com/login",
+    cookieOrigin: "https://github.com",
+    cookies: ["user_session", "__Host-user_session_same_site"],
+  },
+};
 // Phone-shaped virtual display — small and portrait so it scales cleanly
 // onto a phone via noVNC (the spike's 1920x1080 was the UX mistake).
 const HEADLESS_W = 540;
 const HEADLESS_H = 960;
+
+// The Debian/Ubuntu `novnc` package installs its web assets here — the
+// `core/` RFB library our branded page reuses (see loginHeadless).
+const NOVNC_INSTALL_DIR = "/usr/share/novnc";
+
+// Resolve a bundled login asset (the branded vnc.html / interstitial).
+// `../../assets/login/` from this module resolves to apps/mcp/assets/
+// whether running from src/ (tsx) or dist/ (compiled) — assets/ sits
+// beside both. Shipped via the package.json `files` allowlist.
+function loginAssetPath(name: string): string {
+  return fileURLToPath(new URL(`../../assets/login/${name}`, import.meta.url));
+}
 
 export interface LoginResult {
   status: "logged_in" | "already_valid" | "timeout" | "error";
@@ -69,17 +114,21 @@ export interface LoginResult {
 }
 
 // --- session detection -------------------------------------------------
-async function hasGoogleSession(context: BrowserContext): Promise<boolean> {
-  const cookies = await context.cookies("https://www.google.com");
-  return cookies.some((c) => GOOGLE_AUTH_COOKIES.includes(c.name));
+async function hasProviderSession(
+  context: BrowserContext,
+  target: LoginTarget,
+): Promise<boolean> {
+  const cookies = await context.cookies(target.cookieOrigin);
+  return cookies.some((c) => target.cookies.includes(c.name));
 }
 
 async function pollForSession(
   context: BrowserContext,
   deadline: number,
+  target: LoginTarget,
 ): Promise<boolean> {
   while (Date.now() < deadline) {
-    if (await hasGoogleSession(context)) return true;
+    if (await hasProviderSession(context, target)) return true;
     await new Promise((r) => setTimeout(r, 3000));
   }
   return false;
@@ -141,6 +190,72 @@ export function classifyGoogleAuthState(url: string, bodyText: string): GoogleAu
   return "needs_login";
 }
 
+// --- T7: OAuth consent scope gate --------------------------------------
+// After the bot clicks "Sign in with Google" and lands on a consent
+// screen, the OAuth signup flow auto-approves it ONLY when every scope
+// the service requested is a basic-identity scope. Anything broader
+// (Gmail/Drive/contacts) aborts the run for human review — a
+// prompt-injected or confused agent must not be able to grant a wide
+// OAuth scope on the user's behalf (see the plan's Security Boundary).
+//
+// The allowlist is Google-OIDC vocabulary. GitHub (Phase 2, D7) gets
+// its own provider-aware allowlist when that provider lands.
+const BASIC_OAUTH_SCOPES: ReadonlySet<string> = new Set([
+  "openid",
+  "email",
+  "profile",
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+]);
+
+// Pull the OAuth `scope` parameter off a Google consent URL. Robust by
+// design (a spec refinement): a query-param read, never a DOM scrape or
+// a vision call. Google nests the real authorize request inside a
+// `continue=` (or similar) param on the consent/chooser URL, so this
+// walks nested URL-valued params up to a small depth to find `scope`.
+//
+// Returns the parsed scope list, or null when no `scope` param is
+// present anywhere — the caller treats "can't read the scopes" as
+// "can't confirm they're basic" and pauses for human review.
+//
+// Exported for unit testing — the nested-URL walk is the error-prone bit.
+export function extractOAuthScopes(rawUrl: string): string[] | null {
+  const scopes: string[] = [];
+  const visit = (urlStr: string, depth: number): void => {
+    if (scopes.length > 0 || depth > 4) return;
+    let u: URL;
+    try {
+      u = new URL(urlStr);
+    } catch {
+      return;
+    }
+    const scope = u.searchParams.get("scope");
+    if (scope !== null && scope.trim().length > 0) {
+      // Google separates scopes with spaces; tolerate "+" and "," too.
+      for (const s of scope.split(/[\s,+]+/)) {
+        const trimmed = s.trim();
+        if (trimmed.length > 0) scopes.push(trimmed);
+      }
+      return;
+    }
+    // Recurse into any param whose value is itself a URL (Google's
+    // `continue`, `authError`, etc. carry the nested authorize request).
+    for (const value of u.searchParams.values()) {
+      if (/^https?:\/\//i.test(value.trim())) visit(value, depth + 1);
+    }
+  };
+  visit(rawUrl, 0);
+  return scopes.length > 0 ? scopes : null;
+}
+
+// True when EVERY requested scope is in the basic-identity allowlist —
+// the gate for auto-approving a consent screen. An empty list returns
+// false: no scopes parsed means we could not confirm, so we do not
+// auto-approve. Exported for unit testing.
+export function scopesAreBasic(scopes: readonly string[]): boolean {
+  return scopes.length > 0 && scopes.every((s) => BASIC_OAUTH_SCOPES.has(s));
+}
+
 // --- environment helpers ----------------------------------------------
 export function hasDisplay(): boolean {
   if (process.env.TRUSTY_SQUIRE_FORCE_HEADLESS === "true") return false;
@@ -193,6 +308,7 @@ export function binaryOnPath(bin: string): boolean {
 async function loginWithDisplay(
   profileDir: string,
   deadline: number,
+  target: LoginTarget,
 ): Promise<LoginResult> {
   const chromium = resolveChromium();
   const context = await chromium.launchPersistentContext(profileDir, {
@@ -202,13 +318,27 @@ async function loginWithDisplay(
     args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
   });
   try {
-    if (await hasGoogleSession(context)) {
+    if (await hasProviderSession(context, target)) {
       return { status: "already_valid" };
     }
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(GOOGLE_LOGIN_URL, { waitUntil: "domcontentloaded" });
-    console.error("\n[login] A Chrome window has opened. Log into your Google account there.\n");
-    const ok = await pollForSession(context, deadline);
+    // Show a branded interstitial first — a tool opening a browser to
+    // ask for a Google/GitHub password is the scariest moment of the
+    // flow; the interstitial explains it before the user is asked to
+    // trust it. Best-effort: any failure falls back to going straight
+    // to the provider's login page.
+    try {
+      const interstitial = readFileSync(loginAssetPath("interstitial.html"), "utf8")
+        .split("{{PROVIDER}}").join(target.label)
+        .split("{{URL}}").join(target.loginUrl);
+      await page.setContent(interstitial, { waitUntil: "domcontentloaded" });
+    } catch {
+      await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
+    }
+    console.error(
+      `\n[login] A Chrome window has opened. Log into your ${target.label} account there.\n`,
+    );
+    const ok = await pollForSession(context, deadline, target);
     return ok
       ? { status: "logged_in" }
       : { status: "timeout", detail: "no login completed before the deadline" };
@@ -221,6 +351,9 @@ async function loginWithDisplay(
 interface HeadlessRig {
   procs: ChildProcess[];
   display: string;
+  // Temp dir websockify serves (branded vnc.html + the installed
+  // noVNC core). Removed on teardown.
+  webDir?: string;
 }
 
 function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
@@ -233,15 +366,22 @@ function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildPro
 }
 
 // Read cloudflared's output until it prints its public trycloudflare URL.
+// Accumulates a rolling buffer rather than matching per-chunk — the URL
+// can straddle two `data` events, and a per-chunk match would miss it
+// and hang until the timeout.
 function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("cloudflared did not produce a URL in time")), timeoutMs);
+    let acc = "";
     const scan = (buf: Buffer): void => {
-      const m = buf.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      acc += buf.toString();
+      const m = acc.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
       if (m !== null) {
         clearTimeout(timer);
         resolve(m[0]);
       }
+      // Bound memory if cloudflared is chatty before the URL appears.
+      if (acc.length > 65536) acc = acc.slice(-4096);
     };
     cf.stdout?.on("data", scan);
     cf.stderr?.on("data", scan);
@@ -256,9 +396,45 @@ function teardown(rig: HeadlessRig): void {
       // best-effort
     }
   }
+  if (rig.webDir !== undefined) {
+    try {
+      rmSync(rig.webDir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
 }
 
-async function loginHeadless(profileDir: string, deadline: number): Promise<LoginResult> {
+// Assemble the directory websockify serves: a copy of the installed
+// noVNC web assets (for the `core/` RFB library) with our branded
+// vnc.html written over the stock one. A temp dir, NOT the package's
+// own assets/ — under `npx` the package runs from a read-only cache,
+// so the noVNC core cannot be copied into it. Torn down with the rig.
+function buildVncWebDir(): string {
+  const webDir = mkdtempSync(join(tmpdir(), "ts-novnc-"));
+  cpSync(NOVNC_INSTALL_DIR, webDir, { recursive: true });
+  // The branded page imports `./core/rfb.js`. If the distro's novnc
+  // package put its core somewhere else, fail loudly here rather than
+  // serving a page that 404s its own script and shows a blank screen.
+  if (!existsSync(join(webDir, "core", "rfb.js"))) {
+    rmSync(webDir, { recursive: true, force: true });
+    throw new Error(
+      `noVNC core not found at ${NOVNC_INSTALL_DIR}/core/rfb.js — the ` +
+        `installed novnc package has an unexpected layout`,
+    );
+  }
+  writeFileSync(
+    join(webDir, "vnc.html"),
+    readFileSync(loginAssetPath("vnc.html"), "utf8"),
+  );
+  return webDir;
+}
+
+async function loginHeadless(
+  profileDir: string,
+  deadline: number,
+  target: LoginTarget,
+): Promise<LoginResult> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -269,10 +445,42 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
   const webPort = await findFreePort();
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
+  // The persistent Chrome context is NOT a member of `rig` — it is a
+  // Playwright handle, closed via context.close(). Tracked here so the
+  // signal handler can release the profile lock before exiting.
+  let activeContext: BrowserContext | undefined;
 
-  // Ensure the rig is never orphaned if the process dies mid-login.
+  // Ensure nothing is orphaned if the process dies mid-login. `exit`
+  // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
+  // once a signal listener is registered the default terminate is
+  // suppressed, so the handler must clean up AND exit itself. Folding
+  // login into `install` makes an interrupted run far more likely (a
+  // backgrounded terminal, a dropped SSH session). The handler closes
+  // the browser FIRST (releases the persistent-profile lock cleanly),
+  // then tears down the rig, then exits.
   const onExit = (): void => teardown(rig);
+  const onSignal = (): void => {
+    const finish = (): void => {
+      teardown(rig);
+      process.exit(130);
+    };
+    if (activeContext !== undefined) {
+      // Close the browser to release the persistent-profile lock — but
+      // cap the wait: a wedged Chrome under Xvfb can hang close()
+      // indefinitely, and the rig MUST still be torn down. Whichever
+      // wins (clean close, or the 3s cap), `finish` runs.
+      const capped = new Promise<void>((r) => setTimeout(r, 3000));
+      Promise.race([activeContext.close().catch(() => undefined), capped]).then(
+        finish,
+        finish,
+      );
+    } else {
+      finish();
+    }
+  };
   process.once("exit", onExit);
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
 
   try {
     // 1. Virtual display — phone-shaped.
@@ -294,13 +502,14 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
         "--disable-dev-shm-usage",
       ],
     });
+    activeContext = context;
 
     try {
-      if (await hasGoogleSession(context)) {
+      if (await hasProviderSession(context, target)) {
         return { status: "already_valid" };
       }
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(GOOGLE_LOGIN_URL, { waitUntil: "domcontentloaded" });
+      await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
 
       // 3. x11vnc on the display — localhost-only, password-gated, -noshm
       //    (the box's X server lacks the shared-memory extension).
@@ -314,10 +523,13 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
       );
       await new Promise((r) => setTimeout(r, 1500));
 
-      // 4. noVNC web bridge — localhost only; cloudflared reaches it.
+      // 4. noVNC web bridge — serves our branded vnc.html plus the
+      //    installed noVNC core from a temp dir; localhost only,
+      //    cloudflared reaches it.
+      rig.webDir = buildVncWebDir();
       rig.procs.push(
         spawnBg("websockify", [
-          "--web=/usr/share/novnc",
+          `--web=${rig.webDir}`,
           `127.0.0.1:${webPort}`,
           `localhost:${vncPort}`,
         ]),
@@ -329,46 +541,59 @@ async function loginHeadless(profileDir: string, deadline: number): Promise<Logi
       rig.procs.push(cf);
       const tunnelUrl = await awaitTunnelUrl(cf, 30000);
 
+      // The VNC password rides in the URL *fragment* (#), not the query
+      // string — a fragment is never sent to the server, so it stays
+      // out of the cloudflared edge logs and any proxy in between. The
+      // branded vnc.html reads it from location.hash and connects with
+      // no prompt. Still printed separately as a fallback.
       console.error(
         "\n" + "=".repeat(64) + "\n" +
           "[login] Open this on any device, any network:\n" +
-          `        ${tunnelUrl}/vnc.html?scale=true\n` +
-          `[login] VNC password: ${vncPassword}\n` +
-          "[login] You'll see a Chrome window — log into your Google account.\n" +
+          `        ${tunnelUrl}/vnc.html#password=${vncPassword}\n` +
+          `[login] (if asked for a VNC password: ${vncPassword})\n` +
+          `[login] You'll see a Chrome window — log into your ${target.label} account.\n` +
           "=".repeat(64) + "\n",
       );
 
       // 6. Wait for the login, then tear the whole stack down.
-      const ok = await pollForSession(context, deadline);
+      const ok = await pollForSession(context, deadline, target);
       await context.close();
       return ok
         ? { status: "logged_in" }
         : { status: "timeout", detail: "no login completed before the deadline" };
     } finally {
       await context.close().catch(() => undefined);
+      // Closed — the signal handler must not double-close it.
+      activeContext = undefined;
     }
   } finally {
     teardown(rig);
     process.removeListener("exit", onExit);
+    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSignal);
   }
 }
 
 // --- public entry ------------------------------------------------------
-// Ensures `profileDir` holds a valid Google session, doing whichever
-// login flow the environment calls for. Returns when the session is
-// present, the deadline passes, or setup fails.
-export async function ensureGoogleSession(opts?: {
+// Ensures `profileDir` holds a valid session for `provider`, doing
+// whichever login flow the environment calls for. Returns when the
+// session is present, the deadline passes, or setup fails. T13: the
+// provider defaults to Google; `mcp login --provider=github` reuses
+// the same flow against github.com.
+export async function ensureOAuthSession(opts?: {
+  provider?: OAuthProviderId;
   profileDir?: string;
   timeoutMinutes?: number;
 }): Promise<LoginResult> {
+  const target = LOGIN_TARGETS[opts?.provider ?? "google"];
   const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
   try {
     return hasDisplay()
-      ? await loginWithDisplay(profileDir, deadline)
-      : await loginHeadless(profileDir, deadline);
+      ? await loginWithDisplay(profileDir, deadline, target)
+      : await loginHeadless(profileDir, deadline, target);
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   }

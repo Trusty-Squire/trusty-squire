@@ -1,0 +1,115 @@
+{
+  "name": "mistral-tos-gated-create",
+  "service": "Mistral",
+  "oauth": true,
+  "state": {
+    "url": "https://admin.mistral.ai/join",
+    "title": "Admin - Mistral AI",
+    "html": "Admin - Mistral AI window['__ENV'] = {\"NEXT_PUBLIC_BUILD_ID\":\"0.1.139\",\"NEXT_PUBLIC_RBAC_CUSTOMER_ALLOWLIST\":\"566d47bd-2d81-42df-9153-c36aa2e5237f,9c146498-01c3-4246-9bed-e105c0ab516a\",\"NEXT_PUBLIC_STRIPE_API_KEY\":\"pk_live_51O7wyUBYKjiYB8m0Yqxsl4CBynQH6dPe2YRbLJ7852H4lbLFQB6te2KXIFpy3hVZCFUnSVes7cmlUw3kKNkVpHWc00kcFfFqa7\",\"NEXT_PUBLIC_DOMAIN\":\"mistral.ai\",\"NEXT_PUBLIC_ORY_API_URL\":\"https://auth.mistral.ai\",\"NEXT_PUBLIC_SETTINGS_URL\":\"https://admin.mistral.ai\",\"NEXT_PUBLIC_STRIPE_API_KEY_USD\":\"pk_live_51OXmPYJVYnTkVDT62rlV1FhcrLaqzSenvN6879thCz9fXFccV1x8XWwyLKgDhW66VX8uhgWCDULKe9dHZGpNAWyj00vdhBgOQP\",\"NEXT_PUBLIC_ENVIRONMENT\":\"production\",\"NEXT_PUBLIC_POSTHOG_HOST\":\"https://eu.posthog.com\",\"NEXT_PUBLIC_DASHBOARD_URL\":\"https://console.mistral.ai\",\"NEXT_PUBLIC_IDP_PROVIDER\":\"ory\",\"NEXT_PUBLIC_POSTHOG_KEY\":\"phc_LLfNt9uWG1mkaG0PuBQTJT8gLUuCQ4B3Mpc9HGmpiOe\",\"NEXT_PUBLIC_LE_CHAT_URL\":\"https://chat.mistral.ai\",\"NEXT_PUBLIC_SENTRY_DSN\":\"https://baba797b7b553b609945355df26bb80c@o4507101628137472.ingest.de.sentry.io/4508636797796432\"} [data-sonner-toaster][dir=ltr],html[dir=ltr]{--toast-icon-margin-start:-3px;--toast-icon-margin-end:4px;--toast-svg-margin-start:-1px;--toast-svg-margin-end:0px;--toast-button-margin-start:auto;--toast-button-margin-end:0;--toast-close-button-start:0;--toast-close-button-end:unset;--toast-close-button-transform:translate(-35%, -35%)}[data-sonner-toaster][dir=rtl],html[dir=rtl]{--toast-icon-margin-start:4px;--toast-icon-margin-end:-3px;--toast-svg-margin-start:0px;--toast-svg-margin-end:-1px;--toast-button-margin-start:0;--toast-button-margin-end:auto;--toast-close-button-start:unset;--toast-close-button-end:0;--toast-close-button-transform:translate(35%, -35%)}[data-sonner-toaster]{position:fixed;width:var(--width);font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica Neue,Arial,Noto Sans,sans-serif,Apple Color Emoji,Segoe UI Emoji,Segoe UI Symbol,Noto Color Emoji;--gray1:hsl(0, 0%, 99%);--gray2:hsl(0, 0%, 97.3%);--gray3:hsl(0, 0%, 95.1%);--gray4:hsl(0, 0%, 93%);--gray5:hsl(0, 0%, 90.9%);--gray6:hsl(0, 0%, 88.7%);--gray7:hsl(0, 0%, 85.8%);--gray8:hsl(0, 0%, 78%);--gray9:hsl(0, 0%, 56.1%);--gray10:hsl(0, 0%, 52.3%);--gray11:hsl(0, 0%, 43.5%);--gray12:hsl(0, 0%, 9%);--border-radius:8px;box-sizing:border-box;padding:0;margin:0;list-style:none;outline:0;z-index:999999999;transition:transform .4s ease}@media (hover:none) and (pointer:coarse){[data-sonner-toaster][data-lifted=true]{transform:none}}[dat",
+    "screenshot": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+  },
+  "inventory": [
+    {
+      "tag": "input",
+      "type": null,
+      "id": "_r_0_",
+      "name": "name",
+      "placeholder": "My organization",
+      "ariaLabel": null,
+      "role": null,
+      "labelText": "Organization name",
+      "visibleText": null,
+      "selector": "input[name=\"name\"]",
+      "visible": true,
+      "inViewport": true,
+      "inConsentWidget": false,
+      "href": null,
+      "iconLabel": null,
+      "index": 0
+    },
+    {
+      "tag": "button",
+      "type": "button",
+      "id": null,
+      "name": null,
+      "placeholder": null,
+      "ariaLabel": null,
+      "role": null,
+      "labelText": null,
+      "visibleText": "Log out",
+      "selector": "main > div > div:nth-of-type(1) > button",
+      "visible": true,
+      "inViewport": true,
+      "inConsentWidget": false,
+      "href": null,
+      "iconLabel": null,
+      "index": 1
+    },
+    {
+      "tag": "a",
+      "type": null,
+      "id": null,
+      "name": null,
+      "placeholder": null,
+      "ariaLabel": null,
+      "role": null,
+      "labelText": "I accept the Mistral AI Terms of Service and Privacy Policy.",
+      "visibleText": "Terms of Service",
+      "selector": "div > label > span > a:nth-of-type(1)",
+      "visible": true,
+      "inViewport": true,
+      "inConsentWidget": false,
+      "href": "https://mistral.ai/terms/#terms-of-service-la-plateforme",
+      "iconLabel": null,
+      "index": 2
+    },
+    {
+      "tag": "a",
+      "type": null,
+      "id": null,
+      "name": null,
+      "placeholder": null,
+      "ariaLabel": null,
+      "role": null,
+      "labelText": "I accept the Mistral AI Terms of Service and Privacy Policy.",
+      "visibleText": "Privacy Policy",
+      "selector": "div > label > span > a:nth-of-type(2)",
+      "visible": true,
+      "inViewport": true,
+      "inConsentWidget": false,
+      "href": "https://mistral.ai/terms/#privacy-policy",
+      "iconLabel": null,
+      "index": 3
+    },
+    {
+      "tag": "button",
+      "type": "submit",
+      "id": null,
+      "name": null,
+      "placeholder": null,
+      "ariaLabel": null,
+      "role": null,
+      "labelText": null,
+      "visibleText": "Create organization",
+      "selector": "div:nth-of-type(2) > form > div:nth-of-type(2) > button",
+      "visible": true,
+      "inViewport": true,
+      "inConsentWidget": false,
+      "href": null,
+      "iconLabel": null,
+      "index": 4
+    }
+  ],
+  "expect": {
+    "acceptKinds": [
+      "click",
+      "check",
+      "fill"
+    ],
+    "rejectKinds": [
+      "done",
+      "extract",
+      "login"
+    ]
+  }
+}
