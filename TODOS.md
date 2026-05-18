@@ -426,14 +426,25 @@ Findings (2026-05-18)" section.
   only.** No affordance, no GIS iframe, zero OAuth references in the
   DOM at `/sign_up` or `/sign_in`. OAuth-first is N/A for DeepSeek;
   form-fill is its only (walled) path.
-- [ ] **G11 — Explore improving the headless-login VNC tool UX.** The
-  one-time `mcp login` on a display-less box bridges Chrome out via
-  Xvfb + x11vnc + noVNC + cloudflared (`google-login.ts`). noVNC's
-  client UI is dated; KasmVNC is a more modern drop-in (modern
-  client, built-in clipboard sync) — it replaces the VNC *server*
-  layer, a contained one-time packaging change. Evaluate the swap:
-  this is a human-facing one-shot login screen, so its UX is the
-  product there.
+- [x] **G11 — Explore improving the headless-login VNC tool UX. —
+  done: folded into the G13 plan.** The /plan-ceo-review of
+  2026-05-18 evaluated the KasmVNC swap and **rejected it** — KasmVNC
+  replaces the VNC *server* and ships as a `.deb`/container an npm
+  package can't bundle, failing on exactly the constrained boxes that
+  need the flow. Chosen instead: a custom branded `vnc.html` served
+  off the existing x11vnc + websockify + noVNC stack. See G13.
+- [x] **G13 — Streamlined OAuth onboarding. — built 2026-05-18,
+  awaiting publish.** Folded the one-time OAuth login into `install`
+  (non-fatal final stage), reworked the headless login UX (custom
+  branded `vnc.html` served from a temp dir holding the installed
+  noVNC core — no new binary), dropped email+password+mandate from the
+  advertised onboarding (free-only MVP; mandate-validator stays
+  armed/fail-closed). Cherry-picks shipped: headed interstitial,
+  `--provider` choice, closing nudge. 8 tasks T1-T8, 250 tests pass.
+  On branch `streamlined-oauth-onboarding` (commit `0cd919a`) —
+  CEO + eng reviewed. Plan:
+  `~/.gstack/projects/Trusty-Squire-trusty-squire/ceo-plans/2026-05-18-streamlined-oauth-onboarding.md`.
+  Next: `/ship` (bump version, publish).
 
 ## H — Concurrency: the bot is single-flight
 
