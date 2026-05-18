@@ -2,8 +2,12 @@
 // post-OAuth onboarding eval harness. The runner itself needs a live
 // LLM and is exercised by running eval-onboarding.ts directly.
 
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { scoreOnboardingStep, type OnboardingExpectation } from "../eval-onboarding.js";
+import { captureOnboardingRound } from "../onboarding-capture.js";
 import type { PostVerifyStep } from "../agent.js";
 
 const extract: PostVerifyStep = { kind: "extract", reason: "key visible" };
@@ -77,5 +81,47 @@ describe("scoreOnboardingStep", () => {
       selectorsAnyOf: ["#create-key"],
     };
     expect(scoreOnboardingStep(navigate, exp).pass).toBe(true);
+  });
+});
+
+describe("captureOnboardingRound", () => {
+  const sample = {
+    service: "Acme",
+    round: 0,
+    oauth: true,
+    state: { url: "https://acme.test/x", title: "T", html: "<html></html>", screenshot: "" },
+    inventory: [],
+    observed: { kind: "extract", reason: "key visible" } as PostVerifyStep,
+  };
+
+  it("is a no-op when TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset", () => {
+    const saved = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    try {
+      expect(() => captureOnboardingRound(sample)).not.toThrow();
+    } finally {
+      if (saved !== undefined) process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = saved;
+    }
+  });
+
+  it("writes an eval-corpus-shaped file with expect:null when the dir is set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-capture-"));
+    const saved = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = dir;
+    try {
+      captureOnboardingRound(sample);
+      const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+      expect(files).toHaveLength(1);
+      const parsed = JSON.parse(readFileSync(join(dir, files[0] ?? ""), "utf8"));
+      expect(parsed.service).toBe("Acme");
+      expect(parsed.oauth).toBe(true);
+      expect(parsed.expect).toBeNull(); // a curator fills this in
+      expect(parsed.observed.kind).toBe("extract");
+      expect(parsed.state.url).toBe("https://acme.test/x");
+    } finally {
+      if (saved === undefined) delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+      else process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = saved;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

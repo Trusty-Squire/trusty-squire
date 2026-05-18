@@ -22,6 +22,7 @@ import {
   type OAuthProviderId,
 } from "./oauth-providers.js";
 import { saveDebugSnapshot } from "./debug.js";
+import { captureOnboardingRound } from "./onboarding-capture.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
   pickLLMPair,
@@ -1896,6 +1897,19 @@ ${formatInventory(input.inventory)}`,
         continue;
       }
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${nextStep.reason}`);
+
+      // Dev-only (env-gated): dump this round's real page state +
+      // inventory into the E1 eval-corpus format, so onboarding
+      // adapters can be iterated offline without re-running the
+      // rate-limited OAuth handshake.
+      captureOnboardingRound({
+        service: args.service,
+        round,
+        oauth,
+        state,
+        inventory,
+        observed: nextStep,
+      });
 
       if (nextStep.kind === "done") break;
       hint = undefined;

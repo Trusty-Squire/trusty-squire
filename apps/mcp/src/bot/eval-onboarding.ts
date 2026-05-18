@@ -21,6 +21,8 @@
 // needs a live LLM and runs only from main().
 //   Run:  OPENROUTER_API_KEY=... npx tsx src/bot/eval-onboarding.ts
 
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { SignupAgent, type PostVerifyStep } from "./agent.js";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { pickLLMPair } from "./llm-client.js";
@@ -251,8 +253,40 @@ function seedCases(): OnboardingEvalCase[] {
   ];
 }
 
+// Load curated corpus cases from ONBOARDING_EVAL_CORPUS — JSON files
+// captured by onboarding-capture.ts and then given a real `expect` by
+// a curator. Raw captures (still `expect: null`) are skipped: an eval
+// case is only scorable once a human has labelled the correct answer.
+function loadCorpus(): OnboardingEvalCase[] {
+  const dir = process.env.ONBOARDING_EVAL_CORPUS;
+  if (dir === undefined || dir.trim().length === 0) return [];
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    console.error(`[eval] corpus dir not readable: ${dir}`);
+    return [];
+  }
+  const cases: OnboardingEvalCase[] = [];
+  for (const f of files) {
+    try {
+      const raw = JSON.parse(readFileSync(join(dir, f), "utf8")) as Record<string, unknown>;
+      // Curated only: a real `expect`, plus the structural fields the
+      // runner needs. A light shape check — this is a dev harness.
+      const exp = raw["expect"];
+      if (exp === null || exp === undefined || typeof exp !== "object") continue;
+      if (typeof raw["state"] !== "object" || !Array.isArray(raw["inventory"])) continue;
+      cases.push(raw as unknown as OnboardingEvalCase);
+    } catch {
+      console.error(`[eval] skipped malformed corpus file: ${f}`);
+    }
+  }
+  if (cases.length > 0) console.error(`[eval] loaded ${cases.length} curated corpus case(s)`);
+  return cases;
+}
+
 async function main(): Promise<void> {
-  const cases = seedCases();
+  const cases = [...seedCases(), ...loadCorpus()];
   // planPostVerifyStep never touches the browser — a dummy controller
   // is safe (dev harness only), same as eval-planner.ts.
   const dummyBrowser = {} as unknown as BrowserController;
