@@ -64,8 +64,13 @@ OpenRouter for LLM, AWS SES for inbound mail.
     navigation loop
   - Hard cap of 15 LLM calls per signup (circuit breaker)
 - **Tier 0 install flow.** `npx @trusty-squire/mcp install` issues a
-  machine token, writes the host-agent MCP config. No account, no
-  mandate. 10 free signups per machine, then pair-CTA.
+  machine token, writes the host-agent MCP config, then runs the
+  one-time OAuth login (folds in `mcp login` — Google/GitHub browser
+  session into the bot profile; non-fatal, `--skip-login` opts out).
+  No account, no mandate — MVP provisions free-tier services only.
+  Headed (laptop/desktop) is the recommended environment; a headless
+  box does a one-time remote-browser login (noVNC). See the
+  2026-05-18 streamlined-oauth-onboarding CEO plan.
 - **LLM proxy** (`/v1/llm/chat`). User's machine talks to our API,
   which forwards to OpenRouter using the operator's key. Per-machine
   rolling rate limit (150/hour, default). Cost per IPInfo signup:

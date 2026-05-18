@@ -10,15 +10,27 @@ npx @trusty-squire/mcp install
 npx @trusty-squire/mcp install --target=claude-code
 ```
 
-The CLI:
-1. Detects installed coding agents (when `--target` is omitted).
-2. Generates a one-time pairing token via `POST /v1/mcp/pair/initiate`.
-3. Opens your browser to `https://app.trustysquire.ai/pair?token=…`.
-4. Polls the API. Once you complete the browser flow with a passkey, the CLI receives the agent session token.
-5. Saves the session to your OS keychain (or a `0600` file fallback when keytar isn't available).
-6. Writes the MCP server config into the target agent's config file. Existing entries are preserved.
+Best run on a laptop or desktop. `install`:
+1. Detects your coding agent (when `--target` is omitted) and writes its MCP
+   config. Existing entries are preserved.
+2. Issues an anonymous machine token — a handful of free signups, no account.
+3. Connects your Google (or GitHub) account: a Chrome window opens, you sign
+   in once. The bot reuses that browser session to sign you up for services,
+   so there is no separate Trusty Squire account or password.
 
-After install, restart your coding agent to pick up the eight squire tools.
+On a headless box (Codespaces, Replit, an SSH server) there is no display, so
+step 3 prints a one-time remote-login URL you open from any browser — including
+a phone. Headless is supported, but a laptop/desktop is the smoother path.
+
+Flags:
+- `--provider=google|github|both` — which identity to connect (default: prompt
+  on a terminal, otherwise Google).
+- `--skip-login` — write the config + token only; run
+  `npx @trusty-squire/mcp login` later. For CI / scripted installs.
+
+Re-run the sign-in any time with `npx @trusty-squire/mcp login`.
+
+After install, restart your coding agent to pick up the squire tools.
 
 ## Tools
 
@@ -78,6 +90,9 @@ npx @trusty-squire/mcp install --target=claude-code --api-base=http://localhost:
 ## What this server does NOT do
 
 - Fork the coding agent. We write configs only.
-- Implement OAuth. One-time pairing is the entire flow.
+- Store your Google/GitHub password. You enter it only on the provider's own
+  sign-in page; the bot reuses the resulting browser session, never the
+  password.
 - Bundle the API runtime. Separate apps for separate processes.
-- Implement tier-2 fallbacks. The API drives execution.
+- Charge you, in this MVP. Provisioning is free-tier services only; the
+  spending-mandate flow lands with paid provisioning.
