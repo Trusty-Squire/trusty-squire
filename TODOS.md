@@ -410,6 +410,35 @@ multi-step / withholding, out of F3's scope).
 
 - [x] **F13 — Headed signups on a headless box (on-demand Xvfb). [P1]
   — shipped 0.6.0-rc.16.**
+
+- [ ] **F14 — Planner loop break: penalize repeat-selector picks. [P2]**
+  Surfaced 2026-05-20 by a Railway run. The planner picked the same
+  selector (`div:nth-of-type(4) > ul > li:nth-of-type(5) > a`,
+  pointing at a footer "Email" link, not the actual "Log in using
+  email" CTA) on 5 consecutive replans. Each click was a no-op (the
+  footer link didn't navigate), each re-plan returned the same
+  guess, eventually run_timeout. The planner has the right shape
+  (verify-and-replan) but no memory of which selectors it has
+  already tried unsuccessfully.
+
+  Fix: planExecuteWithRetry maintains a per-run `triedSelectors`
+  set; pass it into the planner's system prompt as "AVOID these
+  selectors you already clicked without progress" and reject any
+  plan that picks one. Bounded — after 2 consecutive same-selector
+  picks, fail with `planning_failed: stuck on <selector>` instead
+  of looping.
+
+- [ ] **F15 — Inventory selector disambiguation for repeated
+  link text. [P2]** Same Railway run: the "Email" text appeared
+  twice on the page — once as the body's "Log in using email"
+  CTA, once as a footer Contact > Email link. The inventory's
+  ranked output gave the planner both, but the CSS selectors
+  generated for each were similar enough that the planner picked
+  the wrong one. Inventory should attach disambiguating context
+  to selectors when the visible-text is non-unique: nearby
+  heading, parent landmark, position-in-section. Pairs with F14
+  — if the planner has memory of bad picks AND inventory gives
+  it discriminative selectors, the loop class goes away.
   Surfaced 2026-05-20 by a Cloudflare signup. The bot landed on
   `dash.cloudflare.com/sign-up` correctly (rc.14's known-domains fix),
   but Cloudflare's React signup gates the OAuth buttons + email form
