@@ -149,7 +149,10 @@ const KNOWN_DOMAINS: Record<string, string> = {
   axiom: "axiom.co",
   loops: "loops.so",
   e2b: "e2b.dev",
-  railway: "railway.app",
+  // railway.app + railway.com both 404 on /signup; the real entry
+  // point is /login (which handles both signup and sign-in via an
+  // OAuth chooser). railway.app permanent-redirects to railway.com.
+  railway: "https://railway.com/login",
   supabase: "supabase.com",
   replicate: "replicate.com",
   modal: "modal.com",

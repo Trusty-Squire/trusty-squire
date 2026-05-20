@@ -35,7 +35,7 @@ describe("guessSignupUrl", () => {
     expect(guessSignupUrl("Mistral")).toBe("https://mistral.ai/signup");
     expect(guessSignupUrl("Mailtrap")).toBe("https://mailtrap.io/signup");
     expect(guessSignupUrl("E2B")).toBe("https://e2b.dev/signup");
-    expect(guessSignupUrl("Railway")).toBe("https://railway.app/signup");
+    // (Railway moved to a full-URL override — see the next describe block.)
   });
 
   // Full-URL overrides for services whose signup lives on a subdomain
@@ -43,6 +43,9 @@ describe("guessSignupUrl", () => {
   // signup form — it CTAs into the dashboard.
   it("honors full-URL entries verbatim", () => {
     expect(guessSignupUrl("Cloudflare")).toBe("https://dash.cloudflare.com/sign-up");
+    // Railway's /signup is a 404 on both .app and .com; the real
+    // signup-or-login entry point is /login.
+    expect(guessSignupUrl("Railway")).toBe("https://railway.com/login");
   });
 });
 
