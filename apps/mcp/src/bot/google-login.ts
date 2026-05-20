@@ -346,11 +346,15 @@ function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
 
 function teardown(rig: HeadlessRig): void {
   for (const p of rig.procs) {
-    try {
-      p.kill("SIGTERM");
-    } catch {
-      // best-effort
-    }
+    try { p.kill("SIGTERM"); } catch { /* best-effort */ }
+    // SIGTERM is the polite request; the child may take a moment to
+    // exit. Meanwhile the parent's stdio pipes to the child keep
+    // Node's event loop alive — destroy them so Node can exit even
+    // if the child is mid-shutdown. unref() tells Node "this child
+    // doesn't count toward keeping the process alive."
+    try { p.stdout?.destroy(); } catch { /* best-effort */ }
+    try { p.stderr?.destroy(); } catch { /* best-effort */ }
+    try { p.unref(); } catch { /* best-effort */ }
   }
   if (rig.webDir !== undefined) {
     try {

@@ -20,15 +20,27 @@ import { runServer } from "./server.js";
 const argv = process.argv.slice(2);
 const isServer = argv[0] === "server";
 
-(isServer ? runServer() : runCli(argv)).catch((err: unknown) => {
-  // stderr lands in the host agent's MCP log; keep it useful.
-  if (err instanceof MissingSessionError) {
-    console.error(err.message);
-  } else {
-    console.error(
-      `[trusty-squire] ${isServer ? "server" : "cli"} failed: ` +
-        (err instanceof Error ? err.message : String(err)),
-    );
-  }
-  process.exit(1);
-});
+(isServer ? runServer() : runCli(argv))
+  .then(() => {
+    // `server` is a stdio loop that runs until the host agent kills
+    // it — never returns. The CLI commands (install/login/logout) DO
+    // return, and we force an exit afterwards: the headless install
+    // rig spawns several long-running processes (Xvfb, x11vnc,
+    // websockify, cloudflared, Chrome), and even after teardown
+    // SIGTERMs them, Node's event loop can stay alive a beat longer
+    // waiting for the kernel to actually reap them. Without this
+    // exit the CLI appears to hang after printing "You're done."
+    if (!isServer) process.exit(0);
+  })
+  .catch((err: unknown) => {
+    // stderr lands in the host agent's MCP log; keep it useful.
+    if (err instanceof MissingSessionError) {
+      console.error(err.message);
+    } else {
+      console.error(
+        `[trusty-squire] ${isServer ? "server" : "cli"} failed: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    process.exit(1);
+  });
