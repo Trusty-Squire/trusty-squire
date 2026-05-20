@@ -396,10 +396,14 @@ async function runInstallClaim(
 
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
   // in there once; that sign-in does both the trustysquire claim AND
-  // the bot's provider-session seeding in one event.
+  // the bot's provider-session seeding in one event. apiBaseUrl
+  // threads through to the headless rig so it can shorten the
+  // cloudflared tunnel URL to `trustysquire.ai/g/<slug>` before
+  // printing it in the banner (G15).
   const result = await openInstallConfirmInBotChrome({
     confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
+    apiBaseUrl: apiBase,
   });
 
   if (result.status !== "claimed" || state.value === null) {
@@ -452,7 +456,7 @@ async function login(args: Argv): Promise<void> {
     args.providerArg === "github" ? "github" : "google";
   const label = provider === "github" ? "GitHub" : "Google";
   console.warn(`Establishing a ${label} session for the bot…`);
-  const result = await ensureOAuthSession({ provider });
+  const result = await ensureOAuthSession({ provider, apiBaseUrl: args.apiBase });
   switch (result.status) {
     case "already_valid":
       console.warn(`✓ Already logged in — the bot's Chrome profile has a valid ${label} session.`);

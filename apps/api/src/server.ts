@@ -26,6 +26,7 @@ import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerReadViewsRoute } from "./routes/read-views.js";
 import { registerRunsRoute } from "./routes/runs.js";
+import { registerShortRoute } from "./routes/short.js";
 import {
   buildInMemoryDeps,
   type ApiDeps,
@@ -182,6 +183,14 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps,
     requireAny: auth.requireAny,
     requireWeb: auth.requireWeb,
+  });
+  // G15: tiny noVNC-tunnel URL shortener. webBaseUrl is the host
+  // that will serve the /g/:slug redirect — the web app, not the API.
+  await fastify.register(registerShortRoute, {
+    deps: {
+      webBaseUrl: defaultPwaBaseUrl(),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
   });
 
   fastify.get("/health", async () => ({ ok: true }));

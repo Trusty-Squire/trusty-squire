@@ -38,6 +38,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import boxen from "boxen";
 import chalk from "chalk";
+import { shortenVncUrl } from "../api-client.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
@@ -446,6 +447,11 @@ interface RunInBotChromeOpts {
   // profile right after close is racy (profile lock contention) and
   // can silently fail.
   onSuccess?: (context: BrowserContext) => Promise<void>;
+  // G15: API base URL used to shorten the cloudflared tunnel URL
+  // before printing it in the headless banner. When undefined, the
+  // long cloudflared URL is printed verbatim. The headless path is
+  // the only consumer; the display path skips the banner entirely.
+  apiBaseUrl?: string;
 }
 
 async function runInBotChrome(
@@ -593,14 +599,30 @@ async function runHeadlessChrome(
       const cf = spawnBg("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${webPort}`]);
       rig.procs.push(cf);
       const tunnelUrl = await awaitTunnelUrl(cf, 30000);
+      const longVncUrl = `${tunnelUrl}/vnc.html#password=${vncPassword}`;
+
+      // G15: shorten the cloudflared URL through the API
+      // (`trustysquire.ai/g/<slug>`) when we have an API base — much
+      // less transcription-hostile on a phone than the raw
+      // cloudflared subdomain. The shortener stores the long URL
+      // verbatim (fragment included); the /g/[slug] route 302s the
+      // browser to it, preserving the password fragment.
+      //
+      // shortenVncUrl returns the original long URL on any failure
+      // path (network blip, API down), so this is never a hard
+      // dependency — degrades to printing the cloudflared URL.
+      let bannerUrl = longVncUrl;
+      if (opts.apiBaseUrl !== undefined) {
+        bannerUrl = await shortenVncUrl(opts.apiBaseUrl, longVncUrl);
+      }
 
       // The VNC password rides in the URL *fragment* (#), not the query
       // string — a fragment is never sent to the server, so it stays
       // out of the cloudflared edge logs and any proxy in between. The
       // branded vnc.html reads it from location.hash and connects with
-      // no prompt. Still printed separately as a fallback.
+      // no prompt.
       printBanner({
-        tunnelUrl: `${tunnelUrl}/vnc.html#password=${vncPassword}`,
+        tunnelUrl: bannerUrl,
         vncPassword,
         label: opts.bannerLabel,
       });
@@ -649,6 +671,7 @@ export async function ensureOAuthSession(opts?: {
   provider?: OAuthProviderId;
   profileDir?: string;
   timeoutMinutes?: number;
+  apiBaseUrl?: string;
 }): Promise<LoginResult> {
   const provider: OAuthProviderId = opts?.provider ?? "google";
   const target = LOGIN_TARGETS[provider];
@@ -664,6 +687,7 @@ export async function ensureOAuthSession(opts?: {
       bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
       preflight: (ctx) => hasProviderSession(ctx, target),
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
+      ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
     let mapped: LoginResult;
@@ -699,6 +723,10 @@ export async function openInstallConfirmInBotChrome(opts: {
   pollUntilClaimed: () => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
+  // G15: API base URL used to shorten the headless cloudflared
+  // tunnel URL before printing it in the banner. Same value the
+  // install handshake calls against; threaded down to the rig.
+  apiBaseUrl?: string;
 }): Promise<{ status: "claimed" | "timeout" | "error"; detail?: string }> {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
@@ -713,6 +741,7 @@ export async function openInstallConfirmInBotChrome(opts: {
         `You'll see a Chrome window with the Trusty Squire install page. ` +
         `Sign in there to connect this machine — you only sign in once.`,
       pollUntilDone: () => opts.pollUntilClaimed(),
+      ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       // The user's sign-in inside this Chrome leaves a provider session
       // in the persistent profile. We don't know WHICH provider they
       // used (Google or GitHub), so probe both cookie sets and mark
