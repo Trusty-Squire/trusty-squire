@@ -279,8 +279,6 @@ async function runInstallClaim(
     target,
     baseSession.machine_token ?? null,
   );
-  console.warn(`Open this URL in your browser to sign in and confirm:`);
-  console.warn(`  ${initiate.confirm_url}`);
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -304,7 +302,15 @@ async function runInstallClaim(
 
   if (skipBrowser) {
     // CI / scripted: best-effort open() into the user's default browser,
-    // poll the API directly. Bot Chrome stays unbothered.
+    // poll the API directly. Bot Chrome stays unbothered. This is the
+    // ONLY branch that prints the trustysquire URL — in the default
+    // branch the bot's Chrome opens it for the user, and printing it
+    // here too would suggest "sign in here OR there" and the user
+    // would sign in twice (or sign in via their laptop, leaving the
+    // bot's Chrome profile empty — no Google session for future OAuth
+    // signups).
+    console.warn(`Open this URL in your browser to sign in and confirm:`);
+    console.warn(`  ${initiate.confirm_url}`);
     try {
       const openMod = await import("open");
       await openMod.default(initiate.confirm_url);
