@@ -1,36 +1,45 @@
 // Setup CLI — install / logout / login subcommands.
 //
 //   npx @trusty-squire/mcp install --target=claude-code
-//     issues a machine token, opens the browser to connect this machine
-//     to your account, writes the MCP config. One step.
+//     Issues a machine token, opens the browser to connect this machine
+//     to your account, writes the MCP config, then runs the one-time
+//     OAuth login (Google/GitHub) the signup bot rides. One command.
 //
 //   npx @trusty-squire/mcp login [--provider=google|github]
-//     one-time browser sign-in for the bot's persistent Chrome profile.
-//     Different from `install`: this is for OAuth-based signups, not
-//     for the API session.
+//     Re-runs the OAuth sign-in for the bot's persistent Chrome
+//     profile. Different from the login stage inside `install` —
+//     this one fails loud on timeout/error, so it's the right
+//     command to use when you're explicitly retrying login.
 //
 //   npx @trusty-squire/mcp logout
 //
 // Flags:
-//   --target=<agent>     skip auto-detection
-//   --api-base=<url>     override the API base URL
-//   --proxy-url=<url>    bake a residential proxy into the MCP config's env
-//                        (UNIVERSAL_BOT_PROXY_URL) — set once, never hand-edit
+//   --target=<agent>             skip auto-detection
+//   --api-base=<url>             override the API base URL
+//   --provider=google|github|both  pick the OAuth identity to connect
+//                                during the install login stage
+//   --skip-login                 skip the install login stage entirely
+//                                (CI / scripted installs)
+//   --proxy-url=<url>            bake a residential proxy into the MCP
+//                                config's env (UNIVERSAL_BOT_PROXY_URL)
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
 
 import process from "node:process";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
-import { ensureOAuthSession } from "../bot/google-login.js";
-import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
+import { ensureOAuthSession, type LoginResult } from "../bot/google-login.js";
+import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
+
+type ProviderArg = "google" | "github" | "both";
 
 type Argv = {
   command: string;
@@ -40,8 +49,13 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
-  // OAuth provider for the `login` command. Defaults to Google.
-  provider?: OAuthProviderId;
+  // OAuth provider selection. "both" connects Google then GitHub.
+  // Absent → `install` prompts on a TTY / defaults to Google without
+  // one; `login` defaults to Google.
+  providerArg?: ProviderArg;
+  // --skip-login: `install` writes the config + machine token but does
+  // not run the OAuth login stage. For CI / scripted installs.
+  skipLogin: boolean;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -50,7 +64,8 @@ function parseArgs(argv: string[]): Argv {
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
-  let provider: OAuthProviderId | undefined;
+  let providerArg: ProviderArg | undefined;
+  let skipLogin = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -70,13 +85,15 @@ function parseArgs(argv: string[]): Argv {
       proxyUrl = arg.slice("--proxy-url=".length);
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
-      if (isOAuthProviderId(p)) provider = p;
+      if (p === "google" || p === "github" || p === "both") providerArg = p;
+    } else if (arg === "--skip-login") {
+      skipLogin = true;
     }
   }
-  const args: Argv = { command, apiBase };
+  const args: Argv = { command, apiBase, skipLogin };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
-  if (provider !== undefined) args.provider = provider;
+  if (providerArg !== undefined) args.providerArg = providerArg;
   return args;
 }
 
@@ -204,8 +221,18 @@ async function install(args: Argv): Promise<void> {
   if (args.proxyUrl !== undefined) {
     console.warn(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
+
+  // ── Connect the OAuth identity the signup bot rides ───────
+  // Folded into `install` so the friction lands at setup time, not
+  // mid-task on the user's first provision. Non-fatal by contract —
+  // see runLoginStage; the MCP config above is the durable artifact.
+  await runLoginStage(args);
+
   console.warn(``);
   console.warn(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
+  console.warn(``);
+  console.warn(`Try it now — ask your agent:`);
+  console.warn(`  "sign me up for Resend"`);
 }
 
 // Runs the browser-based install confirm flow. Returns a session with
@@ -243,6 +270,103 @@ async function runInstallClaim(
   };
 }
 
+// The OAuth login stage of `install`. Non-fatal by contract: it never
+// throws and never exits the process — a timed-out, errored or skipped
+// login still leaves a working install (the MCP config is the durable
+// artifact). `loginFn` is injectable so the contract is unit-testable
+// without launching a real browser.
+export async function runLoginStage(
+  args: Argv,
+  loginFn: (opts: {
+    provider: OAuthProviderId;
+  }) => Promise<LoginResult> = ensureOAuthSession,
+): Promise<void> {
+  if (args.skipLogin) {
+    console.warn(``);
+    console.warn(`Skipping the OAuth login (--skip-login).`);
+    console.warn(
+      `Run \`npx @trusty-squire/mcp login\` before your first provision — ` +
+        `without it the bot can't sign you up via Google/GitHub.`,
+    );
+    return;
+  }
+  const providers = await resolveLoginProviders(args);
+  for (const provider of providers) {
+    const label = provider === "github" ? "GitHub" : "Google";
+    console.warn(``);
+    console.warn(`Connecting your ${label} account…`);
+    let result: LoginResult;
+    try {
+      result = await loginFn({ provider });
+    } catch (err) {
+      result = {
+        status: "error",
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+    switch (result.status) {
+      case "already_valid":
+        console.warn(`✓ ${label} already connected.`);
+        break;
+      case "logged_in":
+        console.warn(`✓ ${label} connected — the bot can now sign you up with it.`);
+        break;
+      case "timeout":
+        console.warn(`⚠ ${label} login didn't finish in time. Install is otherwise complete.`);
+        console.warn(`  Finish it later: \`npx @trusty-squire/mcp login --provider=${provider}\``);
+        break;
+      case "error":
+        console.warn(`⚠ ${label} login couldn't run: ${result.detail ?? "unknown error"}`);
+        console.warn(
+          `  Install is otherwise complete. Retry: ` +
+            `\`npx @trusty-squire/mcp login --provider=${provider}\``,
+        );
+        break;
+    }
+  }
+}
+
+// Which providers `install` connects: an explicit --provider wins;
+// otherwise prompt on an interactive terminal, or default to Google
+// when there is no TTY (CI / scripted installs must never block).
+async function resolveLoginProviders(args: Argv): Promise<OAuthProviderId[]> {
+  if (args.providerArg === "both") return ["google", "github"];
+  if (args.providerArg === "github") return ["github"];
+  if (args.providerArg === "google") return ["google"];
+  if (process.stdin.isTTY !== true) return ["google"];
+  return promptProvider();
+}
+
+async function promptProvider(): Promise<OAuthProviderId[]> {
+  console.warn(``);
+  console.warn(
+    `Trusty Squire signs you up to services by riding your Google or GitHub login.`,
+  );
+  const answer = (await promptLine(`Connect which? [google] / github / both: `))
+    .trim()
+    .toLowerCase();
+  if (answer === "github") return ["github"];
+  if (answer === "both") return ["google", "github"];
+  return ["google"];
+}
+
+// Read one line from stdin. The prompt goes to stderr so it never
+// pollutes stdout, which the host agent may parse.
+function promptLine(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise<string>((resolve) => {
+    // If stdin reaches EOF before an answer (closed or redirected
+    // mid-run), resolve empty rather than hang forever — the caller
+    // treats "" as the default. Promise resolve is idempotent, so the
+    // question callback and this close handler cannot both win.
+    rl.on("close", () => resolve(""));
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
 async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {
   if (explicit !== undefined) return explicit;
   const detected = await detectInstalledAgents();
@@ -273,8 +397,11 @@ async function logout(): Promise<void> {
 // signup path needs. With a display this opens a Chrome window;
 // headless, it prints a URL to log in from any browser. Defaults to
 // Google; `login --provider=github` logs the same profile into GitHub.
+// Unlike the login stage inside `install`, this command fails loud on
+// timeout/error — it's the explicit retry path.
 async function login(args: Argv): Promise<void> {
-  const provider: OAuthProviderId = args.provider ?? "google";
+  const provider: OAuthProviderId =
+    args.providerArg === "github" ? "github" : "google";
   const label = provider === "github" ? "GitHub" : "Google";
   console.warn(`Establishing a ${label} session for the bot…`);
   const result = await ensureOAuthSession({ provider });
@@ -297,18 +424,23 @@ async function login(args: Argv): Promise<void> {
 }
 
 function printHelp(): void {
-  console.warn(`mcp — install Trusty Squire MCP into a coding agent`);
+  console.warn(`mcp — install Trusty Squire into a coding agent`);
   console.warn(``);
   console.warn(`Commands:`);
-  console.warn(`  install [--target=<agent>] [--api-base=<url>] [--proxy-url=<url>]`);
-  console.warn(`     Sets up the squire on this machine. Opens a browser so you can`);
-  console.warn(`     sign in (Google or GitHub) and confirm this machine.`);
-  console.warn(`  login [--provider=google|github]`);
-  console.warn(`     One-time browser sign-in for the bot's persistent profile —`);
-  console.warn(`     enables OAuth-based signups (Resend, Postmark, etc.).`);
+  console.warn(
+    `  install [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>]`,
+  );
+  console.warn(`  login [--provider=google|github]   re-run the one-time OAuth sign-in`);
   console.warn(`  logout`);
   console.warn(``);
   console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);
+  console.warn(``);
+  console.warn(`\`install\` writes the MCP config, opens a browser so you can sign in`);
+  console.warn(`(Google or GitHub) to confirm this machine, and then connects the`);
+  console.warn(`OAuth identity the bot rides when it signs you up for services.`);
+  console.warn(`Best run on a laptop or desktop — a headless box does a one-time`);
+  console.warn(`remote-browser login instead. Use --skip-login for CI / scripted`);
+  console.warn(`installs and run \`login\` later.`);
 }
 
 interface ClaimResult {

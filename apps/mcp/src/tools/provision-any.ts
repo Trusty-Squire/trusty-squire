@@ -132,8 +132,8 @@ until status is no longer "running".
 RESPONSES:
 - status="running" → still working; poll again in ~60s.
 - status="success" + credentials → signup done; show the credentials to the user.
-- status="verification_not_sent" → submitted, but the service sent no verification
-  email (anti-abuse withholding, or it needs manual signup).
+- status="verification_not_sent" → the service needs an email verification the bot
+  can't complete; show the message and tell the user to sign up manually.
 - status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
 - status="needs_login" → an OAuth signup needs the bot's one-time Google login;
@@ -323,7 +323,10 @@ async function runSignupTask(
       service: input.service,
       ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
       email: ctx.alias,
-      inbox: ctx.inboxClient,
+      // No `inbox`: the SES inbound pipeline is mothballed (TODOS M1).
+      // Without an inbox, signup() fast-fails an email-verifying form
+      // to `verification_not_sent` instead of a blind poll (M2/S3).
+      // The OAuth path needs no inbox at all.
       llm: llmPair,
       // T6/T13: route through the provider's OAuth path when the
       // caller asked for it (Google or GitHub).
@@ -475,8 +478,10 @@ export function buildSignupResponse(
     };
   }
 
-  // S3: the bot tags "form submitted but no verification email" with a
-  // verification_not_sent: error prefix. Surface it as its own status.
+  // S3/M2: the bot tags a signup it can't confirm by email with a
+  // verification_not_sent: error prefix — either the service withheld
+  // the mail, or (M1) there is no inbox to receive it. Either way the
+  // user finishes manually. Surface it as its own status.
   if (result.error !== undefined && result.error.startsWith("verification_not_sent")) {
     return {
       status: "verification_not_sent",
@@ -485,8 +490,8 @@ export function buildSignupResponse(
       steps: result.steps,
       browser_channel: result.browser_channel ?? null,
       message:
-        `${input.service}'s form submitted, but no verification email arrived — the service most likely ` +
-        `withheld it (anti-abuse) or needs manual signup. Tell the user to finish at ` +
+        `${input.service} requires an email verification that Trusty Squire's automated ` +
+        `signup couldn't complete. Tell the user to finish signing up manually at ` +
         `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
     };
   }

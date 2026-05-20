@@ -71,6 +71,8 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
   "check your inbox",
   "verify your email",
   "verify your inbox",
+  "verify your account",
+  "confirm your account",
   "confirm your email",
   "confirmation email",
   "verification email",
@@ -1469,62 +1471,85 @@ export class SignupAgent {
 
       // Step 7: Email verification + post-verification navigation.
       let verificationFailed: string | undefined;
-      if (credentials.api_key === undefined && credentials.username === undefined && task.inbox !== undefined) {
-        // S3: don't blind-wait. Read the post-submit page first. If it
-        // explicitly tells the user to check their email, poll the full
-        // timeout. If it does not, the service most likely sent no
-        // verification email — run a short probe instead of dead air.
+      if (credentials.api_key === undefined && credentials.username === undefined) {
+        // S3: read the post-submit page first. Whether it is actually
+        // asking the user to confirm by email decides both the no-inbox
+        // bail (M2) and, when an inbox exists, the poll duration.
         const expectsEmail = expectsVerificationEmail(await this.browser.extractText());
-        const verificationTimeoutSeconds = expectsEmail
-          ? (task.verificationTimeoutSeconds ?? 180)
-          : VERIFICATION_PROBE_SECONDS;
-        steps.push(
-          expectsEmail
-            ? `Post-submit page asks to check email — polling inbox (up to ${verificationTimeoutSeconds}s)...`
-            : `Post-submit page shows no "check your email" prompt — short ${verificationTimeoutSeconds}s probe (S3: the service likely sent no verification email)...`,
-        );
-        try {
-          const email = await this.waitForVerificationEmail(
-            task.inbox,
-            task.email,
-            verificationTimeoutSeconds,
+        if (task.inbox === undefined) {
+          // M2/S3: no inbox to receive a verification email (the SES
+          // inbound pipeline is mothballed — TODOS M1). If the page is
+          // asking for email confirmation the bot cannot finish this
+          // signup, so bail FAST to a manual-signup result rather than
+          // a poll that could only ever time out. If the page is NOT
+          // asking for email, the credentials simply are not on it —
+          // fall through to the generic not-found result below.
+          if (expectsEmail) {
+            const where = task.signupUrl !== undefined ? ` at ${task.signupUrl}` : "";
+            steps.push(
+              "Post-submit page asks for email verification, but no inbox is " +
+                "configured — stopping for manual signup (no blind poll).",
+            );
+            verificationFailed =
+              `verification_not_sent: ${task.service} requires email verification, ` +
+              `which the automated signup cannot complete — finish signing up ` +
+              `manually${where}.`;
+          }
+        } else {
+          // S3: don't blind-wait. If the page explicitly tells the user
+          // to check their email, poll the full timeout; if not, the
+          // service most likely sent nothing — run a short probe.
+          const verificationTimeoutSeconds = expectsEmail
+            ? (task.verificationTimeoutSeconds ?? 180)
+            : VERIFICATION_PROBE_SECONDS;
+          steps.push(
+            expectsEmail
+              ? `Post-submit page asks to check email — polling inbox (up to ${verificationTimeoutSeconds}s)...`
+              : `Post-submit page shows no "check your email" prompt — short ${verificationTimeoutSeconds}s probe (S3: the service likely sent no verification email)...`,
           );
-          steps.push(`Received: "${email.subject}" from ${email.from_address}`);
+          try {
+            const email = await this.waitForVerificationEmail(
+              task.inbox,
+              task.email,
+              verificationTimeoutSeconds,
+            );
+            steps.push(`Received: "${email.subject}" from ${email.from_address}`);
 
-          if (email.parsed_links.length > 0) {
-            const verifyLink = this.pickVerificationLink(Array.from(email.parsed_links));
-            if (verifyLink !== null) {
-              steps.push(`Following verification link: ${verifyLink}`);
-              await this.browser.goto(verifyLink);
-              await this.browser.wait(3);
-              await saveDebugSnapshot(this.browser, "after-verify");
+            if (email.parsed_links.length > 0) {
+              const verifyLink = this.pickVerificationLink(Array.from(email.parsed_links));
+              if (verifyLink !== null) {
+                steps.push(`Following verification link: ${verifyLink}`);
+                await this.browser.goto(verifyLink);
+                await this.browser.wait(3);
+                await saveDebugSnapshot(this.browser, "after-verify");
 
-              // Try extracting first — many services drop the API key
-              // straight onto the landing page after verification.
-              credentials = await this.extractCredentials();
+                // Try extracting first — many services drop the API key
+                // straight onto the landing page after verification.
+                credentials = await this.extractCredentials();
 
-              // If no creds yet, run the Claude-planned navigation loop.
-              if (credentials.api_key === undefined && credentials.username === undefined) {
-                const maxRounds = task.postVerifyMaxRounds ?? 6;
-                credentials = await this.postVerifyLoop({
-                  service: task.service,
-                  credentials: { email: task.email, password },
-                  maxRounds,
-                  steps,
-                });
+                // If no creds yet, run the Claude-planned navigation loop.
+                if (credentials.api_key === undefined && credentials.username === undefined) {
+                  const maxRounds = task.postVerifyMaxRounds ?? 6;
+                  credentials = await this.postVerifyLoop({
+                    service: task.service,
+                    credentials: { email: task.email, password },
+                    maxRounds,
+                    steps,
+                  });
+                }
+              } else {
+                steps.push("Email had no usable verification link.");
               }
             } else {
-              steps.push("Email had no usable verification link.");
+              steps.push("Email had no parsed links — skipping verification click.");
             }
-          } else {
-            steps.push("Email had no parsed links — skipping verification click.");
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            steps.push(`Inbox poll failed: ${detail}`);
+            verificationFailed = expectsEmail
+              ? `verification_not_sent: form submitted and the page asked to check email, but none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (anti-abuse) or requires manual signup`
+              : `verification_not_sent: form submitted but the page never prompted to check email and none arrived in the ${verificationTimeoutSeconds}s probe — the service most likely dispatched no verification email`;
           }
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          steps.push(`Inbox poll failed: ${detail}`);
-          verificationFailed = expectsEmail
-            ? `verification_not_sent: form submitted and the page asked to check email, but none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (anti-abuse) or requires manual signup`
-            : `verification_not_sent: form submitted but the page never prompted to check email and none arrived in the ${verificationTimeoutSeconds}s probe — the service most likely dispatched no verification email`;
         }
       }
 

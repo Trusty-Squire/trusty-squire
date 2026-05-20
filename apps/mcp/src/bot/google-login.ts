@@ -25,8 +25,17 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { existsSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
@@ -87,6 +96,18 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
 // onto a phone via noVNC (the spike's 1920x1080 was the UX mistake).
 const HEADLESS_W = 540;
 const HEADLESS_H = 960;
+
+// The Debian/Ubuntu `novnc` package installs its web assets here — the
+// `core/` RFB library our branded page reuses (see loginHeadless).
+const NOVNC_INSTALL_DIR = "/usr/share/novnc";
+
+// Resolve a bundled login asset (the branded vnc.html / interstitial).
+// `../../assets/login/` from this module resolves to apps/mcp/assets/
+// whether running from src/ (tsx) or dist/ (compiled) — assets/ sits
+// beside both. Shipped via the package.json `files` allowlist.
+function loginAssetPath(name: string): string {
+  return fileURLToPath(new URL(`../../assets/login/${name}`, import.meta.url));
+}
 
 export interface LoginResult {
   status: "logged_in" | "already_valid" | "timeout" | "error";
@@ -302,7 +323,19 @@ async function loginWithDisplay(
       return { status: "already_valid" };
     }
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
+    // Show a branded interstitial first — a tool opening a browser to
+    // ask for a Google/GitHub password is the scariest moment of the
+    // flow; the interstitial explains it before the user is asked to
+    // trust it. Best-effort: any failure falls back to going straight
+    // to the provider's login page.
+    try {
+      const interstitial = readFileSync(loginAssetPath("interstitial.html"), "utf8")
+        .split("{{PROVIDER}}").join(target.label)
+        .split("{{URL}}").join(target.loginUrl);
+      await page.setContent(interstitial, { waitUntil: "domcontentloaded" });
+    } catch {
+      await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
+    }
     console.error(
       `\n[login] A Chrome window has opened. Log into your ${target.label} account there.\n`,
     );
@@ -319,6 +352,9 @@ async function loginWithDisplay(
 interface HeadlessRig {
   procs: ChildProcess[];
   display: string;
+  // Temp dir websockify serves (branded vnc.html + the installed
+  // noVNC core). Removed on teardown.
+  webDir?: string;
 }
 
 function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
@@ -331,15 +367,22 @@ function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildPro
 }
 
 // Read cloudflared's output until it prints its public trycloudflare URL.
+// Accumulates a rolling buffer rather than matching per-chunk — the URL
+// can straddle two `data` events, and a per-chunk match would miss it
+// and hang until the timeout.
 function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("cloudflared did not produce a URL in time")), timeoutMs);
+    let acc = "";
     const scan = (buf: Buffer): void => {
-      const m = buf.toString().match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      acc += buf.toString();
+      const m = acc.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
       if (m !== null) {
         clearTimeout(timer);
         resolve(m[0]);
       }
+      // Bound memory if cloudflared is chatty before the URL appears.
+      if (acc.length > 65536) acc = acc.slice(-4096);
     };
     cf.stdout?.on("data", scan);
     cf.stderr?.on("data", scan);
@@ -354,6 +397,38 @@ function teardown(rig: HeadlessRig): void {
       // best-effort
     }
   }
+  if (rig.webDir !== undefined) {
+    try {
+      rmSync(rig.webDir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+// Assemble the directory websockify serves: a copy of the installed
+// noVNC web assets (for the `core/` RFB library) with our branded
+// vnc.html written over the stock one. A temp dir, NOT the package's
+// own assets/ — under `npx` the package runs from a read-only cache,
+// so the noVNC core cannot be copied into it. Torn down with the rig.
+function buildVncWebDir(): string {
+  const webDir = mkdtempSync(join(tmpdir(), "ts-novnc-"));
+  cpSync(NOVNC_INSTALL_DIR, webDir, { recursive: true });
+  // The branded page imports `./core/rfb.js`. If the distro's novnc
+  // package put its core somewhere else, fail loudly here rather than
+  // serving a page that 404s its own script and shows a blank screen.
+  if (!existsSync(join(webDir, "core", "rfb.js"))) {
+    rmSync(webDir, { recursive: true, force: true });
+    throw new Error(
+      `noVNC core not found at ${NOVNC_INSTALL_DIR}/core/rfb.js — the ` +
+        `installed novnc package has an unexpected layout`,
+    );
+  }
+  writeFileSync(
+    join(webDir, "vnc.html"),
+    readFileSync(loginAssetPath("vnc.html"), "utf8"),
+  );
+  return webDir;
 }
 
 async function loginHeadless(
@@ -371,10 +446,42 @@ async function loginHeadless(
   const webPort = await findFreePort();
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
+  // The persistent Chrome context is NOT a member of `rig` — it is a
+  // Playwright handle, closed via context.close(). Tracked here so the
+  // signal handler can release the profile lock before exiting.
+  let activeContext: BrowserContext | undefined;
 
-  // Ensure the rig is never orphaned if the process dies mid-login.
+  // Ensure nothing is orphaned if the process dies mid-login. `exit`
+  // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
+  // once a signal listener is registered the default terminate is
+  // suppressed, so the handler must clean up AND exit itself. Folding
+  // login into `install` makes an interrupted run far more likely (a
+  // backgrounded terminal, a dropped SSH session). The handler closes
+  // the browser FIRST (releases the persistent-profile lock cleanly),
+  // then tears down the rig, then exits.
   const onExit = (): void => teardown(rig);
+  const onSignal = (): void => {
+    const finish = (): void => {
+      teardown(rig);
+      process.exit(130);
+    };
+    if (activeContext !== undefined) {
+      // Close the browser to release the persistent-profile lock — but
+      // cap the wait: a wedged Chrome under Xvfb can hang close()
+      // indefinitely, and the rig MUST still be torn down. Whichever
+      // wins (clean close, or the 3s cap), `finish` runs.
+      const capped = new Promise<void>((r) => setTimeout(r, 3000));
+      Promise.race([activeContext.close().catch(() => undefined), capped]).then(
+        finish,
+        finish,
+      );
+    } else {
+      finish();
+    }
+  };
   process.once("exit", onExit);
+  process.once("SIGTERM", onSignal);
+  process.once("SIGINT", onSignal);
 
   try {
     // 1. Virtual display — phone-shaped.
@@ -396,6 +503,7 @@ async function loginHeadless(
         "--disable-dev-shm-usage",
       ],
     });
+    activeContext = context;
 
     try {
       if (await hasProviderSession(context, target)) {
@@ -416,10 +524,13 @@ async function loginHeadless(
       );
       await new Promise((r) => setTimeout(r, 1500));
 
-      // 4. noVNC web bridge — localhost only; cloudflared reaches it.
+      // 4. noVNC web bridge — serves our branded vnc.html plus the
+      //    installed noVNC core from a temp dir; localhost only,
+      //    cloudflared reaches it.
+      rig.webDir = buildVncWebDir();
       rig.procs.push(
         spawnBg("websockify", [
-          "--web=/usr/share/novnc",
+          `--web=${rig.webDir}`,
           `127.0.0.1:${webPort}`,
           `localhost:${vncPort}`,
         ]),
@@ -431,11 +542,16 @@ async function loginHeadless(
       rig.procs.push(cf);
       const tunnelUrl = await awaitTunnelUrl(cf, 30000);
 
+      // The VNC password rides in the URL *fragment* (#), not the query
+      // string — a fragment is never sent to the server, so it stays
+      // out of the cloudflared edge logs and any proxy in between. The
+      // branded vnc.html reads it from location.hash and connects with
+      // no prompt. Still printed separately as a fallback.
       console.error(
         "\n" + "=".repeat(64) + "\n" +
           "[login] Open this on any device, any network:\n" +
-          `        ${tunnelUrl}/vnc.html?scale=true\n` +
-          `[login] VNC password: ${vncPassword}\n` +
+          `        ${tunnelUrl}/vnc.html#password=${vncPassword}\n` +
+          `[login] (if asked for a VNC password: ${vncPassword})\n` +
           `[login] You'll see a Chrome window — log into your ${target.label} account.\n` +
           "=".repeat(64) + "\n",
       );
@@ -448,10 +564,14 @@ async function loginHeadless(
         : { status: "timeout", detail: "no login completed before the deadline" };
     } finally {
       await context.close().catch(() => undefined);
+      // Closed — the signal handler must not double-close it.
+      activeContext = undefined;
     }
   } finally {
     teardown(rig);
     process.removeListener("exit", onExit);
+    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSignal);
   }
 }
 

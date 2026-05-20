@@ -163,7 +163,11 @@ poll is never entered). universal-bot 65 tests + mcp 36 tests pass.
 
 ## S3 — provision_any_service: detect withheld verification, don't blind-wait
 
-Diagnosed 2026-05-16. **Not yet implemented.**
+Diagnosed 2026-05-16. **Done — 2026-05-18 (with M2).** Two parts:
+(1) the post-submit page-state detection (`expectsVerificationEmail` +
+a short 45s probe when the page never says "check your email") shipped
+earlier; (2) the no-inbox fast-fail shipped 2026-05-18 with M2 — see
+below.
 
 When a signup submits successfully but the service withholds the
 verification email (anti-abuse — observed with Resend: form submitted,
@@ -426,14 +430,33 @@ Findings (2026-05-18)" section.
   only.** No affordance, no GIS iframe, zero OAuth references in the
   DOM at `/sign_up` or `/sign_in`. OAuth-first is N/A for DeepSeek;
   form-fill is its only (walled) path.
-- [ ] **G11 — Explore improving the headless-login VNC tool UX.** The
-  one-time `mcp login` on a display-less box bridges Chrome out via
-  Xvfb + x11vnc + noVNC + cloudflared (`google-login.ts`). noVNC's
-  client UI is dated; KasmVNC is a more modern drop-in (modern
-  client, built-in clipboard sync) — it replaces the VNC *server*
-  layer, a contained one-time packaging change. Evaluate the swap:
-  this is a human-facing one-shot login screen, so its UX is the
-  product there.
+- [x] **G11 — Explore improving the headless-login VNC tool UX. —
+  done: folded into the G13 plan.** The /plan-ceo-review of
+  2026-05-18 evaluated the KasmVNC swap and **rejected it** — KasmVNC
+  replaces the VNC *server* and ships as a `.deb`/container an npm
+  package can't bundle, failing on exactly the constrained boxes that
+  need the flow. Chosen instead: a custom branded `vnc.html` served
+  off the existing x11vnc + websockify + noVNC stack. See G13.
+- [x] **G13 — Streamlined OAuth onboarding. — built 2026-05-18,
+  awaiting publish.** Folded the one-time OAuth login into `install`
+  (non-fatal final stage), reworked the headless login UX (custom
+  branded `vnc.html` served from a temp dir holding the installed
+  noVNC core — no new binary), dropped email+password+mandate from the
+  advertised onboarding (free-only MVP; mandate-validator stays
+  armed/fail-closed). Cherry-picks shipped: headed interstitial,
+  `--provider` choice, closing nudge. 8 tasks T1-T8, 250 tests pass.
+  On branch `streamlined-oauth-onboarding` (commit `0cd919a`) —
+  CEO + eng reviewed. Plan:
+  `~/.gstack/projects/Trusty-Squire-trusty-squire/ceo-plans/2026-05-18-streamlined-oauth-onboarding.md`.
+  Next: `/ship` (bump version, publish).
+- [ ] **G14 — Harden the headless-login VNC password handoff. [P3]**
+  `loginHeadless` passes the VNC password to `x11vnc` as a plaintext
+  `-passwd` argv argument, readable by any other local UID via `ps`.
+  Pre-existing and narrow (x11vnc binds `-localhost` only, so it needs
+  a co-resident attacker), but the streamlined-onboarding sprint's
+  theme is hardening this path. Fix: write the password to a `0600`
+  file in the rig's temp dir and use `x11vnc -passwdfile`. Surfaced by
+  the /ship adversarial review 2026-05-18.
 
 ## H — Concurrency: the bot is single-flight
 
@@ -462,6 +485,54 @@ fixed; the rest is deferred.
   (concurrent writes corrupt it); `MACHINE_TOKEN_QUOTA` and the LLM
   rate-limit counter are both check-then-act (concurrent runs can slip
   past the cap). Fix when concurrency becomes real.
+
+## M — Inbound mail strategy (decided 2026-05-18)
+
+trustysquire.ai's MX was rerouted to Google Workspaces for company
+email. That conflicts with SES inbound on the apex — but the decision
+below makes the conflict moot rather than something to work around.
+
+**Context.** The SES inbound pipeline (SES → S3 → SNS →
+`/v1/webhooks/ses` → inbox DB) did two jobs: (a) catch-all inboxes for
+the form-fill bot's verification emails, (b) forwarding personal
+aliases (dani@, hello@, …) to Gmail. Workspaces now does (b) natively.
+Job (a) feeds the form-fill bot — which the OAuth-first pivot demoted
+to a fallback, and whose email-verification step Gate 1 measured
+failing **7/7** (`verification_not_sent`): anti-fraud silently
+withholds verification mail from <30-day-old domains.
+
+- [x] **M1 — Do NOT move SES to trustysquire.com. SES inbound is
+  mothballed. — decided 2026-05-18.** A new domain is a new *young*
+  domain — it rebuilds the exact known-failing system (the wall is
+  domain age, not the domain name). The OAuth-first MVP has no
+  email-verification step at all, so the SES pipeline is off the
+  critical path. Decision: stop depending on the SES inbound pipeline;
+  leave the code/DB/route in place (do not delete yet) but treat it as
+  out-of-MVP-scope. The form-fill *form* logic stays — only its email
+  step is dead. No effort spent on a replacement domain or subdomain.
+- [x] **M2 — Form-fill fails fast to manual signup. — done
+  2026-05-18.** `provision-any.ts` no longer passes an `inbox` to
+  `bot.signup()` (M1 — the SES pipeline is mothballed). `agent.ts`
+  signup() now branches: credentials missing + post-submit page asks
+  for email verification + no inbox → returns a `verification_not_sent`
+  error immediately with the signup URL, no poll. Reused the existing
+  `verification_not_sent` status (it already means "submitted, can't
+  confirm by email → sign up manually") rather than adding a new
+  `manual_signup_required` — same user action, one fewer status. The
+  status message + CHECK_DESCRIPTION were made cause-agnostic (covers
+  both "service withheld the mail" and "no inbox"). Tests:
+  `verification-no-inbox.test.ts` — fast-fail fires, and does not
+  over-trigger when the page shows no email prompt.
+- [ ] **M3 — Future fallback: read verification mail from the user's
+  own Gmail via the OAuth profile. [P3]** The streamlined-onboarding
+  flow (G13) logs the bot's Chrome profile into the user's Google
+  account — so that profile is also logged into Gmail. For a no-OAuth
+  service, the bot can sign up with the user's own aged Gmail (or a
+  `+alias`) and read the verification email by driving Gmail in the
+  same profile: an aged, real, readable inbox that does not get
+  withheld. This supersedes SES inbound entirely and costs no new
+  infrastructure. Future work, not MVP — but it is the reason M1's
+  mothballed pipeline should eventually be deleted, not revived.
 
 ## P — Product roadmap: vault → credential broker → agent commerce
 

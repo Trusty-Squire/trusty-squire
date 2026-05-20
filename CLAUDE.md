@@ -29,11 +29,16 @@ OpenRouter for LLM, AWS SES for inbound mail.
 ### Production, deployed, verified end-to-end
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
-- **Inbound mail pipeline.** SES → S3 → SNS → `/v1/webhooks/ses` →
-  Prisma. 4 domains configured (`trustysquire.ai`, `helmpoint.ai`,
-  `vouchflow.dev`, `speakeasyapp.xyz`). Catch-all + Gmail forwarding
-  for personal aliases (`dani@`, `hello@`, `info@`,
-  `partnerships@`); the rest land in the inbox store.
+- **Inbound mail pipeline — MOTHBALLED 2026-05-18 (TODOS M1).** SES →
+  S3 → SNS → `/v1/webhooks/ses` → Prisma. The code/DB/route still
+  exist but the pipeline is no longer a live dependency: the
+  OAuth-first MVP has no email-verification step, and the form-fill
+  fallback's email step is structurally walled (young-domain
+  withholding). `trustysquire.ai` MX now points at Google Workspaces
+  for company email — do NOT restore SES on it, and do NOT move SES to
+  a new domain (a new domain is a new young domain). Personal aliases
+  (`dani@`, `hello@`, …) are handled by Workspaces directly. See
+  TODOS section M.
 - **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
   Prisma schemas live in **two separate databases** on one cluster —
   they cannot share a database (`prisma db push` drops any table
@@ -63,13 +68,22 @@ OpenRouter for LLM, AWS SES for inbound mail.
   - Long-poll inbox client, verification-link click, post-verify
     navigation loop
   - Hard cap of 15 LLM calls per signup (circuit breaker)
-- **Single-tier install flow.** `npx @trusty-squire/mcp install` issues
-  a machine token, opens a browser so the user signs in (Google/GitHub)
-  and confirms the machine, writes the host-agent MCP config, persists
-  both the machine token and the account-bound agent_session_token to
-  the local session file. Every install is account-bound — there is no
-  anonymous tier. Free up to `ACCOUNT_FREE_QUOTA` signups (default 10),
-  then `payment_required` + `cta_billing_url`.
+- **Single-tier install flow.** `npx @trusty-squire/mcp install` does
+  three things in one command:
+  1. Issues a machine token (bot-internal credential for LLM proxy +
+     inbox alias service).
+  2. Opens a browser so the user signs in (Google/GitHub) and confirms
+     the machine — binds the install to the account, writes the
+     account-bound `agent_session_token` to the local session file.
+  3. Runs the one-time OAuth login (the `mcp login` flow folded in —
+     Google/GitHub session into the bot's Chrome profile; non-fatal,
+     `--skip-login` opts out for CI). Headed (laptop/desktop) is the
+     recommended environment; a headless box does a one-time remote-
+     browser login (noVNC).
+  Every install is account-bound — there is no anonymous tier. Free up
+  to `ACCOUNT_FREE_QUOTA` signups (default 10), then `payment_required`
+  + `cta_billing_url`. See the 2026-05-18 streamlined-oauth-onboarding
+  CEO plan (now combined with the 2026-05-19 single-tier collapse).
 - **LLM proxy** (`/v1/llm/chat`). User's machine talks to our API,
   which forwards to OpenRouter using the operator's key. Per-machine
   rolling rate limit (150/hour, default). Cost per IPInfo signup:

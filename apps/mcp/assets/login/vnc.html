@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Trusty Squire — sign in</title>
+  <!--
+    Trusty Squire branded noVNC client. Served by websockify from a
+    temp dir that also holds the installed noVNC `core/` (see
+    google-login.ts loginHeadless). Deliberately uses ONLY noVNC's
+    stable RFB API — the `RFB` default export, its constructor, the
+    `scaleViewport`/`resizeSession` properties, and the
+    connect/disconnect/securityfailure events — all stable across
+    every noVNC 1.x release, so it survives whatever version the
+    host distro's `novnc` package pinned.
+  -->
+  <style>
+    html, body { margin: 0; height: 100%; background: #0f1115; color: #e6e8ec;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #bar { display: flex; align-items: center; gap: 8px; padding: 9px 13px;
+      background: #171a21; border-bottom: 1px solid #272b35; font-size: 13px;
+      line-height: 1.3; }
+    #bar b { color: #fff; }
+    #bar span.sub { color: #9aa0ab; }
+    #dot { width: 8px; height: 8px; border-radius: 50%; background: #e0a23a;
+      flex: none; }
+    #dot.ok { background: #3fb950; }
+    #dot.err { background: #f85149; }
+    #screen { position: absolute; top: 39px; left: 0; right: 0; bottom: 0;
+      background: #0f1115; }
+    #msg { position: absolute; top: 50%; left: 0; right: 0; text-align: center;
+      transform: translateY(-50%); color: #9aa0ab; font-size: 14px; padding: 0 24px; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <span id="dot"></span>
+    <b>Trusty Squire</b>
+    <span class="sub">— sign in to your account, then return to your terminal.</span>
+  </div>
+  <div id="screen"></div>
+  <div id="msg">Connecting to the secure login window&hellip;</div>
+  <script type="module">
+    import RFB from "./core/rfb.js";
+
+    // The VNC password rides in the URL fragment (#password=...), never
+    // the query string — a fragment is never sent to the server, so the
+    // secret stays out of the cloudflared edge logs and any proxy.
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const password = params.get("password") || "";
+    const dot = document.getElementById("dot");
+    const msg = document.getElementById("msg");
+    const screen = document.getElementById("screen");
+
+    const wsUrl =
+      (location.protocol === "https:" ? "wss://" : "ws://") +
+      location.host +
+      "/websockify";
+
+    let rfb;
+    try {
+      rfb = new RFB(screen, wsUrl, { credentials: { password }, shared: true });
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+    } catch (err) {
+      dot.className = "err";
+      msg.textContent = "Could not start the login window: " + err;
+    }
+
+    if (rfb) {
+      rfb.addEventListener("connect", () => {
+        dot.className = "ok";
+        msg.style.display = "none";
+      });
+      rfb.addEventListener("disconnect", () => {
+        dot.className = "err";
+        msg.style.display = "";
+        msg.textContent =
+          "Login window closed. If you finished signing in, return to " +
+          "your terminal — you can close this tab.";
+      });
+      rfb.addEventListener("securityfailure", () => {
+        dot.className = "err";
+        msg.style.display = "";
+        msg.textContent = "Could not authenticate to the login window.";
+      });
+    }
+  </script>
+</body>
+</html>
