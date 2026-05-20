@@ -229,6 +229,16 @@ export interface SignupTask {
   // should set this only after the USER has confirmed the scopes —
   // pushing the consent decision up to the user, not the LLM.
   allowExtraOAuthScopes?: readonly string[] | undefined;
+  // For consent screens whose scopes can't be parsed from the URL —
+  // notably GitHub Apps (client_id prefix `Iv1.`) and similar opaque-
+  // permission OAuth flows — the URL scope walk returns null and the
+  // bot would normally abort with oauth_consent_needs_review. With
+  // this flag set, the bot auto-approves the consent IF the page
+  // also doesn't visibly list scope-grant verb phrases ("See your
+  // contacts", "Manage your Drive", etc. — the same defense-in-depth
+  // scraper used elsewhere). User explicitly opted in for this run;
+  // never set automatically.
+  allowBlindOAuthConsent?: boolean | undefined;
 }
 
 export interface SignupResult {
@@ -2012,6 +2022,28 @@ export class SignupAgent {
               `[${dangerPhrases.join(" | ")}]. Pausing for manual review.`,
             steps,
           );
+        }
+        // GitHub App / opaque-OAuth blind-approve: user explicitly opted
+        // in for this run with allow_blind_oauth_consent=true. The DOM
+        // scraper above is the safety net — if no dangerous-verb phrase
+        // appears, we honor the user's opt-in and approve.
+        if (task.allowBlindOAuthConsent === true) {
+          steps.push(
+            `OAuth: blind consent approved (user opted in via allow_blind_oauth_consent; ` +
+              `no scope-grant verb phrases detected in page DOM)`,
+          );
+          const advanced = await this.browser.advanceOAuthConsent(provider.id);
+          if (!advanced) {
+            return this.oauthAbort(
+              "oauth_consent_needs_review",
+              `blind-consent approved but no approve control found on the ` +
+                `${provider.label} consent page — sign up manually.`,
+              steps,
+            );
+          }
+          consentAlreadyApproved = true;
+          await this.browser.wait(3);
+          continue;
         }
         if (consentAlreadyApproved) {
           // We already validated and auto-approved a scope-grant

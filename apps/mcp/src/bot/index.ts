@@ -65,6 +65,9 @@ export interface UniversalSignupRequest {
   // Extra OAuth scopes the caller has pre-approved beyond the
   // basic-identity allowlist. Surfaces in the consent gate (T7).
   allowExtraOAuthScopes?: readonly string[] | undefined;
+  // Blind-approve opaque consent (GitHub Apps; scopes not in URL).
+  // DOM danger-phrase scraper still gates.
+  allowBlindOAuthConsent?: boolean | undefined;
 }
 
 export class UniversalSignupBot {
@@ -128,6 +131,7 @@ export class UniversalSignupBot {
         scopeHint: request.scopeHint,
         stepsSink: request.stepsSink,
         allowExtraOAuthScopes: request.allowExtraOAuthScopes,
+        allowBlindOAuthConsent: request.allowBlindOAuthConsent,
       });
 
       console.error(`[UniversalBot] Result: ${result.success ? "SUCCESS" : "FAILED"}`);

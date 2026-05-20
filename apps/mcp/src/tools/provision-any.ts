@@ -59,6 +59,15 @@ export const provisionAnyInputSchema = z.object({
         "Use this ONLY after asking the user — if a previous run returned status=oauth_consent_needs_review with a requested_scopes list, ask the user 'Service X is requesting these scopes: [...] — approve?', and if they say yes, re-run provision_any_service with the same exact scope strings here. " +
         "Do NOT preemptively pass scopes the user hasn't seen. The bot enforces the consent boundary; this parameter is how the user lifts it.",
     ),
+  allow_blind_oauth_consent: z
+    .boolean()
+    .optional()
+    .describe(
+      "Blind-approve a GitHub-App-class OAuth consent screen whose scopes cannot be parsed from the URL (e.g. client_id prefix `Iv1.`). " +
+        "Use ONLY after the user has explicitly told you they trust this service for OAuth — the bot can't show them what's being granted because GitHub Apps declare permissions in the app manifest, not the consent URL. " +
+        "A safety scraper still aborts if the consent page visibly lists scope-grant verb phrases (Drive/Gmail/contacts/etc.). " +
+        "Pass this when a previous run returned status=oauth_consent_needs_review with `requested_scopes=[]` and the user confirmed they trust the service.",
+    ),
 });
 
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
@@ -101,6 +110,11 @@ const PROVISION_ANY_JSON_SCHEMA = {
       items: { type: "string" },
       description:
         "OAuth scopes the user has EXPLICITLY approved beyond basic identity (openid/email/profile). Use this ONLY after asking the user. If a previous run returned status=oauth_consent_needs_review with requested_scopes, show that list to the user, get their approval, and re-run with the approved scope strings here. The bot enforces the consent boundary; this parameter is how the user lifts it. Do NOT preemptively pass scopes the user hasn't seen.",
+    },
+    allow_blind_oauth_consent: {
+      type: "boolean",
+      description:
+        "Blind-approve a GitHub-App-class OAuth consent screen whose scopes can't be parsed from the URL. Use ONLY after the user explicitly confirmed they trust the service — the bot can't show them what's being granted because GitHub Apps declare permissions in their app manifest, not the consent URL. A DOM safety scraper still aborts if the consent page visibly lists scope-grant verb phrases. Pass this when a previous run returned status=oauth_consent_needs_review with requested_scopes=[] AND the user confirmed trust.",
     },
   },
 } as const;
@@ -184,12 +198,15 @@ RESPONSES:
   Tell the user to sign up manually.
 - status="needs_login" → an OAuth signup needs the bot's one-time Google login;
   tell the user to run \`npx @trusty-squire/mcp login\`, then retry.
-- status="oauth_consent_needs_review" → the OAuth consent screen requested scopes beyond
-  basic identity (openid/email/profile). Response carries requested_scopes (the full list)
-  and unauthorized_scopes (the ones blocking the run). SHOW unauthorized_scopes to the
-  user, ask "approve these scopes?", and if they say yes call provision_any_service AGAIN
-  with allow_extra_oauth_scopes set to that list. If they say no, tell them to sign up
-  manually.
+- status="oauth_consent_needs_review" → the OAuth consent screen needs a human call. Two sub-cases:
+  (a) requested_scopes is non-empty (URL-parseable scopes): SHOW unauthorized_scopes to the
+      user, ask "approve these scopes?", and if yes call provision_any_service AGAIN with
+      allow_extra_oauth_scopes set to that list.
+  (b) requested_scopes is EMPTY (GitHub Apps and similar — permissions in the app manifest,
+      not the URL): tell the user "Service X uses an OAuth flow where I can't read the
+      requested permissions in advance — do you trust them?". If yes, call
+      provision_any_service AGAIN with allow_blind_oauth_consent=true. A DOM safety scraper
+      still aborts the run if the consent page visibly lists scope-grant verb phrases.
 - status="onboarding_blocked" → signed in via Google, but the API key is behind a
   billing/payment wall; the user must add a payment method.
 - status="failed" → the form filled but yielded no credentials; show steps[].
@@ -414,6 +431,10 @@ async function runSignupTask(
       // through user dialog). Default empty → strict basic-only gate.
       ...(input.allow_extra_oauth_scopes !== undefined
         ? { allowExtraOAuthScopes: input.allow_extra_oauth_scopes }
+        : {}),
+      // GitHub-App / opaque-OAuth blind approval — user opted in.
+      ...(input.allow_blind_oauth_consent !== undefined
+        ? { allowBlindOAuthConsent: input.allow_blind_oauth_consent }
         : {}),
       // Share the in-flight step trail so check_provision_status can
       // surface live progress (the bot pushes into ctx.stepsSink).
