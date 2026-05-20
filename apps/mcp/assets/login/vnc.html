@@ -38,30 +38,44 @@
        can't tell there's a typeable field, so a normal tap inside the
        remote Chrome doesn't pop the soft keyboard. This button focuses
        the hidden #kbInput element below; the OS sees an actual editable
-       input gain focus and pops the keyboard. Each character the user
-       types into #kbInput is forwarded to the VNC stream via
-       rfb.sendKey() and the input is cleared, so the local input
-       never accumulates the user's password. */
-    #kb { position: absolute; right: 16px; bottom: 16px; width: 52px; height: 52px;
+       input gain focus and pops the keyboard. Each character typed
+       into #kbInput is forwarded to the VNC stream via rfb.sendKey()
+       and the input is cleared, so the local input never accumulates
+       the user's password.
+
+       Button is positioned 88px above the bottom edge to clear Android
+       gesture-navigation zones and iOS home indicators (bottom: 16px
+       used to fail on some phones because the tap landed on the OS
+       nav instead of the button). 64px target is comfortably above the
+       44pt minimum tap-target size both platforms recommend. */
+    #kb { position: absolute; right: 16px; bottom: max(88px, env(safe-area-inset-bottom, 16px));
+      width: 64px; height: 64px;
       border-radius: 50%; border: none; background: #4f46e5; color: #fff;
-      font-size: 24px; line-height: 1; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      font-size: 28px; line-height: 1; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
       cursor: pointer; z-index: 10; display: none;
       -webkit-tap-highlight-color: transparent; touch-action: manipulation;
     }
-    #kb:active { transform: scale(0.96); }
+    #kb:active { transform: scale(0.94); }
     /* Only show the button on touch-capable devices — desktops already
-       have a hardware keyboard and the button just clutters the view. */
+       have a hardware keyboard and the button just clutters the view.
+       Always-on once the page loads; previously gated on RFB's connect
+       event, but if connect fired before the listener attached (or if
+       the user was reconnecting), the button stayed hidden forever. */
     @media (hover: none) and (pointer: coarse) {
-      #kb.ready { display: flex; align-items: center; justify-content: center; }
+      #kb { display: flex; align-items: center; justify-content: center; }
     }
-    /* The hidden input the button focuses. Positioned in the viewport
-       so iOS scrolls to it on focus (off-screen positioning is known to
-       break focus() on iOS Safari), but visually neutered. */
+    /* Hidden input the button focuses. The noVNC-canonical pattern:
+       1×1 px, positioned off-screen, matching foreground+background so
+       any flicker is invisible, z-index: -1 so it can't intercept any
+       tap. iOS Safari refuses to pop the soft keyboard for an element
+       it considers "invisible" — opacity:0 is one of those triggers —
+       but a 1px element positioned off-screen counts as visible enough. */
     #kbInput {
-      position: absolute; right: 16px; bottom: 16px; width: 52px; height: 52px;
-      opacity: 0; pointer-events: none; border: none; padding: 0; margin: 0;
-      caret-color: transparent; background: transparent; color: transparent;
-      z-index: 5;
+      position: absolute; left: -40px; top: 0;
+      width: 1px; height: 1px;
+      background: #fff; color: #fff; caret-color: transparent;
+      border: 0; padding: 0; margin: 0;
+      z-index: -1;
     }
   </style>
 </head>
@@ -114,11 +128,6 @@
       rfb.addEventListener("connect", () => {
         dot.className = "ok";
         msg.style.display = "none";
-        // Reveal the soft-keyboard button (CSS gates it to touch
-        // devices via the pointer:coarse media query). Connection
-        // success is the right moment — earlier and the button would
-        // suggest a typing target that isn't connected yet.
-        kbBtn.classList.add("ready");
       });
       rfb.addEventListener("disconnect", () => {
         dot.className = "err";
@@ -126,7 +135,6 @@
         msg.textContent =
           "Login window closed. If you finished signing in, return to " +
           "your terminal — you can close this tab.";
-        kbBtn.classList.remove("ready");
       });
       rfb.addEventListener("securityfailure", () => {
         dot.className = "err";
@@ -134,14 +142,17 @@
         msg.textContent = "Could not authenticate to the login window.";
       });
 
-      // Tap → kbInput.focus() inside the click handler so the focus
-      // happens synchronously in response to a user gesture. iOS /
-      // Android browsers won't pop the soft keyboard for a programmatic
-      // focus outside a gesture, so this MUST stay inline. Focusing
-      // a real <input> is what triggers the OS keyboard — focusing
-      // the RFB div (rfb.focus() in noVNC 1.x) wouldn't.
+      // Tap → soft keyboard pop. The blur+focus dance is the load-
+      // bearing trick: focus() on an already-focused element is a
+      // no-op and the OS won't re-trigger the keyboard, but blur first
+      // forces a fresh focus event. The whole sequence stays inside
+      // the click handler so iOS Safari and Android Chrome both
+      // accept the focus() as gesture-bound. Focusing a real <input>
+      // is what triggers the OS keyboard — focusing the RFB div
+      // (rfb.focus() in noVNC 1.x) wouldn't.
       kbBtn.addEventListener("click", (e) => {
         e.preventDefault();
+        kbInput.blur();
         kbInput.value = "";
         kbInput.focus();
       });
