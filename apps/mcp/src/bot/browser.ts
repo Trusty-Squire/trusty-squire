@@ -1763,19 +1763,71 @@ export class BrowserController {
   async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     if (provider === "github") {
-      // GitHub's authorize screen: a single green "Authorize <app>"
-      // button. The accessible name starts with "Authorize".
-      const authorize = this.page
-        .getByRole("button", { name: /^authorize\b/i })
-        .first();
-      if ((await authorize.count().catch(() => 0)) > 0) {
+      // GitHub consent screen variants:
+      //   Classic OAuth: "Authorize <app>"
+      //   GitHub App (install + auth): "Authorize <app>", "Install",
+      //                                "Install & authorize"
+      //   Some flows show "Continue" or "Approve"
+      // Negative match excludes Cancel/Deny.
+      const startUrl = this.page.url();
+      const patterns: RegExp[] = [
+        /^authorize(\b|\s)/i,
+        /^install\s*(&|and)\s*authorize\b/i,
+        /^install\b/i,
+        /^approve\b/i,
+        /^continue\b/i,
+        /^grant\b/i,
+      ];
+      for (const re of patterns) {
+        const btn = this.page.getByRole("button", { name: re }).first();
+        const count = await btn.count().catch(() => 0);
+        if (count === 0) continue;
         try {
-          await authorize.click({ timeout: 8000 });
-          return true;
+          await btn.click({ timeout: 8000 });
         } catch {
-          return false;
+          continue;
         }
+        // Verify the click actually advanced — GitHub's consent click
+        // navigates within ~2s. If the URL is unchanged after 4s the
+        // click silently failed (wrong element, or button disabled
+        // behind a hidden iframe). Return false so the caller knows.
+        const advanced = await this.page
+          .waitForFunction(
+            (s) => window.location.href !== s,
+            startUrl,
+            { timeout: 4000 },
+          )
+          .then(() => true)
+          .catch(() => false);
+        if (advanced) return true;
+        // Click logged but URL didn't change — fall through to try the
+        // next pattern (rare but covers misnamed candidates).
       }
+      // Diagnostic: nothing matched OR every match failed to advance.
+      // Log the visible button names so the failure trail tells us
+      // what GitHub actually rendered.
+      const seen = await this.page
+        .evaluate(() => {
+          const buttons = Array.from(
+            document.querySelectorAll('button, input[type="submit"], [role="button"]'),
+          ) as HTMLElement[];
+          return buttons
+            .filter((b) => {
+              const r = b.getBoundingClientRect();
+              return r.width > 1 && r.height > 1;
+            })
+            .slice(0, 8)
+            .map((b) => {
+              const t = (b.textContent || (b as HTMLInputElement).value || "").trim();
+              return t.slice(0, 50);
+            })
+            .filter((t) => t.length > 0);
+        })
+        .catch(() => [] as string[]);
+      console.error(
+        `[universal-bot] GitHub advanceOAuthConsent failed — visible buttons: ` +
+          `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
+      );
       return false;
     }
     // Google. Account chooser: Google renders each account with a
