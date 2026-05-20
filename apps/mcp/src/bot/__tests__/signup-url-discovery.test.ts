@@ -23,6 +23,20 @@ describe("guessSignupUrl", () => {
   it("handles single-word lowercase already", () => {
     expect(guessSignupUrl("resend")).toBe("https://resend.com/signup");
   });
+
+  // F9.1 — known-domains map. .com isn't universal; these services
+  // live on .io / .ai / .dev / etc. The .com guess would either 404
+  // or redirect to the right TLD weirdly (Sentry's sentry.com → sentry.io
+  // redirect drops the /signup path), which broke the post-navigate
+  // looksLikeSignupPage check and dumped the bot into Google search.
+  it("looks up known services on their non-.com TLDs", () => {
+    expect(guessSignupUrl("Sentry")).toBe("https://sentry.io/signup");
+    expect(guessSignupUrl("OpenRouter")).toBe("https://openrouter.ai/signup");
+    expect(guessSignupUrl("Mistral")).toBe("https://mistral.ai/signup");
+    expect(guessSignupUrl("Mailtrap")).toBe("https://mailtrap.io/signup");
+    expect(guessSignupUrl("E2B")).toBe("https://e2b.dev/signup");
+    expect(guessSignupUrl("Railway")).toBe("https://railway.app/signup");
+  });
 });
 
 describe("isGoogleSearchUrl", () => {

@@ -129,14 +129,34 @@ export class LLMCallBudgetExceeded extends Error {
 
 // Best-effort canonical signup URL for a service when the caller
 // didn't pass one. Most dev-SaaS targets (Resend, Postmark, Mailgun,
-// MailerSend, IPInfo, Stripe, PostHog) live at <name>.com/signup; the
-// few that don't (services with hyphens, non-.com TLDs, or non-canonical
-// paths) get auto-recovered by looksLikeSignupPage's fallback to the
-// Google-search path. Normalization: strip everything that isn't a
-// letter/digit, lowercase. Exported for unit testing.
+// MailerSend, IPInfo, Stripe, PostHog) live at <name>.com/signup —
+// the .com default catches them. The exceptions — services on .io,
+// .ai, .dev — live in KNOWN_DOMAINS so a Sentry signup doesn't waste
+// the long Google-search fallback path looking for sentry.com (which
+// redirects weirdly to sentry.io and breaks looksLikeSignupPage).
+// Anything still wrong falls through to the search-and-find path.
+// Exported for unit testing.
+const KNOWN_DOMAINS: Record<string, string> = {
+  sentry: "sentry.io",
+  openrouter: "openrouter.ai",
+  mistral: "mistral.ai",
+  anthropic: "anthropic.com",
+  mailtrap: "mailtrap.io",
+  axiom: "axiom.co",
+  loops: "loops.so",
+  e2b: "e2b.dev",
+  railway: "railway.app",
+  supabase: "supabase.com",
+  replicate: "replicate.com",
+  modal: "modal.com",
+  // PostHog uses posthog.com but the dashboard lives at us.posthog.com /
+  // eu.posthog.com — signup is on the marketing site, .com is right.
+  posthog: "posthog.com",
+};
 export function guessSignupUrl(service: string): string {
   const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return `https://${slug}.com/signup`;
+  const host = KNOWN_DOMAINS[slug] ?? `${slug}.com`;
+  return `https://${host}/signup`;
 }
 
 // True when the URL is a Google search results page — used to gate
@@ -1492,7 +1512,7 @@ export class SignupAgent {
 
       if (signupUrl !== guessed || isGoogleSearchUrl(signupUrl)) {
         steps.push("Searching for signup page...");
-        const found = await this.findSignupLink();
+        const found = await this.findSignupLink(task.service);
         if (found !== null) {
           // Now that we know the real signup origin, prewarm it before
           // the deep navigation. Same rationale as above.
@@ -2348,33 +2368,108 @@ ${formatInventory(input.inventory)}${
     });
   }
 
-  private async findSignupLink(): Promise<string | null> {
+  // Pick a signup link out of the current page's HTML. Used as the
+  // fallback after a Google-search navigation.
+  //
+  // The naive version (regex /href="[^"]*signup[^"]*"/) failed badly
+  // on Google search results: it matched URLs like
+  // accounts.google.com/SignOutOptions?continue=...search?q=Sentry%20signup
+  // — Google's own nav, whose ?continue= query param leaks the
+  // original search query (with "signup" in it) and gets matched.
+  // The bot then navigated to a Google sign-out page and gave up.
+  //
+  // This version:
+  //   - parses each href as a real URL
+  //   - rejects google.com / accounts.google.com / support.google.com
+  //     and other Google nav infra (we're ON a google search page, so
+  //     any google.com href is search-nav, not the service)
+  //   - matches against host+path only — never query params
+  //   - scores candidates: hosts that contain the service name win
+  //     over generic matches. Means "sentry.io/signup" beats
+  //     "github.com/sentry/sentry/blob/...signup..." (the github
+  //     source-code result that mentions signup in a path).
+  //   - returns the highest-scoring candidate, or null.
+  private async findSignupLink(serviceName?: string): Promise<string | null> {
     const html = (await this.browser.getState()).html;
-    const re = /href="([^"]*(?:signup|register|sign-up|create-account|join)[^"]*)"/gi;
+    const serviceSlug = serviceName?.toLowerCase().replace(/[^a-z0-9]/g, "") ?? "";
+    const candidates: Array<{ url: string; score: number }> = [];
+
+    const hrefRe = /href="([^"]+)"/g;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(html)) !== null) {
-      const href = m[1];
-      if (href === undefined) continue;
-      if (href.includes("signin") || href.includes("login")) continue;
-      if (href.startsWith("http")) return href;
-      if (href.startsWith("//")) return `https:${href}`;
+    while ((m = hrefRe.exec(html)) !== null) {
+      const raw = m[1];
+      if (raw === undefined) continue;
+
+      let url: URL;
+      try {
+        url = new URL(raw.startsWith("//") ? `https:${raw}` : raw);
+      } catch {
+        continue;
+      }
+      if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+
+      // Reject Google's own navigation infrastructure — that's what
+      // tripped the naive regex on the Sentry run.
+      if (/(?:^|\.)google\.com$/.test(url.hostname)) continue;
+      if (/(?:^|\.)googleusercontent\.com$/.test(url.hostname)) continue;
+      if (/(?:^|\.)gstatic\.com$/.test(url.hostname)) continue;
+
+      // Match against host+path ONLY. Query params can carry the
+      // original search query text and would re-introduce the
+      // junk-link bug.
+      const hostPath = (url.hostname + url.pathname).toLowerCase();
+      if (!/(?:^|\.|\/)(?:signup|register|sign-up|create-account|join)\b/.test(hostPath)) {
+        continue;
+      }
+      // Negative: signin/login/logout in host+path.
+      if (/(?:^|\/)(?:signin|login|logout|sign-in|log-in)\b/.test(hostPath)) continue;
+
+      // Score: a host containing the service slug is a strong match.
+      // Without a slug to compare against, every match scores 1.
+      const hostLower = url.hostname.toLowerCase();
+      const score = serviceSlug.length > 0 && hostLower.includes(serviceSlug) ? 10 : 1;
+
+      candidates.push({ url: url.toString(), score });
     }
-    return null;
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.url ?? null;
   }
 
   // Heuristic: does the currently-loaded page LOOK like a real signup
   // page? Used to decide whether the guessed canonical URL
   // (<service>.com/signup) worked or we need to fall back to a Google
-  // search. "Looks like a signup page" = the inventory has at least
-  // one text/email input OR a Google/GitHub OAuth button, AND the
-  // page title / heading don't shout 404. Deliberately permissive —
-  // a marketing page with an embedded email-capture form would pass,
-  // which is fine because the form-filler will then realize there's
-  // no submit-button-that-takes-an-email-to-a-real-signup and replan.
+  // search.
+  //
+  // Three signals, in order:
+  //   1. URL-path shortcut: if the page's pathname matches
+  //      /signup|register|sign-up|create-account|join/, trust it —
+  //      we navigated to a signup-shaped URL and the redirect chain
+  //      kept us on one. Catches Sentry-style cross-TLD redirects
+  //      (sentry.com → sentry.io/signup) where the inventory looks
+  //      different from a typical signup page but the URL is correct.
+  //   2. 404 guard: drop pages whose title shouts 404 / not found.
+  //   3. Content check: inventory has at least one text/email input
+  //      OR a button whose text mentions Google/GitHub (broad on
+  //      purpose — a "Continue with Google" / "Login with Google" /
+  //      icon-only Google button all count when the bot has a
+  //      provider session).
   private async looksLikeSignupPage(): Promise<boolean> {
     const state = await this.browser.getState();
-    // Cheap 404-ish guard before we go to the trouble of building an
-    // inventory. Catches the most common "wrong guess" outcome.
+
+    // 1. URL-path shortcut. If we navigated to a signup-shaped path
+    //    and the browser kept us on one, that's a strong signal —
+    //    redirect chains often preserve the path across TLD changes.
+    try {
+      const path = new URL(state.url).pathname.toLowerCase();
+      if (/(?:^|\/)(?:signup|register|sign-up|create-account|join)\b/.test(path)) {
+        return true;
+      }
+    } catch {
+      // Malformed state.url — skip the shortcut, fall through.
+    }
+
+    // 2. 404 guard.
     const titleLower = (state.title ?? "").toLowerCase();
     if (
       titleLower.includes("404") ||
@@ -2383,12 +2478,12 @@ ${formatInventory(input.inventory)}${
     ) {
       return false;
     }
+
+    // 3. Inventory check.
     let inventory: InteractiveElement[];
     try {
       inventory = await this.browser.extractInteractiveElements();
     } catch {
-      // Inventory failure means we can't tell — assume it worked and
-      // let the downstream planExecuteWithRetry give the verdict.
       return true;
     }
     const hasInput = inventory.some(
@@ -2397,16 +2492,20 @@ ${formatInventory(input.inventory)}${
         (e.type === "email" || e.type === "text" || e.type === null || e.type === undefined),
     );
     if (hasInput) return true;
-    // Sometimes the form is gated behind a "Sign in with Google /
-    // GitHub" button (Resend, Vercel, etc.). Those count as a usable
-    // signup page when the bot has a provider session.
-    const hasOAuthButton = inventory.some((e) => {
+
+    // Broad OAuth-button detection: any element whose visible text or
+    // aria-label mentions "google" or "github" as a word. Covers
+    // "Continue with Google", "Login with Google", "Use Google",
+    // "Sign in with GitHub", and icon-only buttons with
+    // aria-label="Google" — all common on OAuth-only signup pages.
+    // False positives (e.g. a "Google Tag Manager" footer link)
+    // are unlikely on a real signup view and harmless: the worst
+    // case is we trust this page and the downstream planner gives
+    // up cleanly later.
+    return inventory.some((e) => {
       const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
-      return /(?:^|\s)(?:sign(?:\s|-)?in|sign(?:\s|-)?up|continue)\s+with\s+(?:google|github)/i.test(
-        text,
-      );
+      return /\b(?:google|github)\b/.test(text);
     });
-    return hasOAuthButton;
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
