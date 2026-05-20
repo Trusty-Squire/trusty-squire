@@ -160,6 +160,53 @@ describe("parsePostVerifyStep — valid input", () => {
       reason: "accept terms",
     });
   });
+
+  // F11
+  it("parses a select step WITHOUT option_text (first-option behavior)", () => {
+    const raw = JSON.stringify({
+      kind: "select",
+      selector: "#region",
+      reason: "pick a region",
+    });
+    expect(parsePostVerifyStep(raw)).toEqual({
+      kind: "select",
+      selector: "#region",
+      reason: "pick a region",
+    });
+  });
+
+  it("parses a select step WITH option_text — F11 combobox value matching", () => {
+    const raw = JSON.stringify({
+      kind: "select",
+      selector: "[role='combobox']#permission",
+      option_text: "Project: Read",
+      reason: "Sentry combobox permissions",
+    });
+    expect(parsePostVerifyStep(raw)).toEqual({
+      kind: "select",
+      selector: "[role='combobox']#permission",
+      option_text: "Project: Read",
+      reason: "Sentry combobox permissions",
+    });
+  });
+
+  it("treats an empty-string option_text as absent", () => {
+    // A model emitting `"option_text": ""` would otherwise be saying
+    // "match an option whose text contains the empty string" — every
+    // option matches, behavior identical to omitting it. Normalize to
+    // omit so the executor's "first option" fallback fires cleanly.
+    const raw = JSON.stringify({
+      kind: "select",
+      selector: "#x",
+      option_text: "",
+      reason: "",
+    });
+    expect(parsePostVerifyStep(raw)).toEqual({
+      kind: "select",
+      selector: "#x",
+      reason: "",
+    });
+  });
 });
 
 describe("parsePostVerifyStep — rejection", () => {

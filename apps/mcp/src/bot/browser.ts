@@ -684,26 +684,125 @@ export class BrowserController {
     }
   }
 
-  // Pick a valid option for a <select> (F3 T6). The bot must not call
-  // type() on a <select> (Sentry: "Element is not an <input>").
-  // Signup <select>s are country / region / role pickers — any
-  // non-placeholder option satisfies the form. Throws (caught by the
-  // executor) when the select has no selectable option.
-  async selectOption(selector: string): Promise<void> {
+  // Pick a valid option for either a native <select> OR a custom
+  // ARIA combobox (Radix, Headless UI, React Aria, cmdk — F11). The
+  // bot must not call type() on a select-shaped element (Sentry,
+  // legacy form path: "Element is not an <input>"); modern dashboards
+  // increasingly render permission / role / region pickers as
+  // <button role="combobox"> that open a <ul role="listbox"> with
+  // <li role="option"> children, so Playwright's selectOption fails
+  // with "no selectable option" on them.
+  //
+  // Dispatch: read the element's tag. <select> → native path
+  // (existing behavior, picks the first non-placeholder option).
+  // Anything else → combobox path (click to open, find role=option,
+  // click the chosen one).
+  //
+  // `optionMatcher` is the planner-supplied text of the option to
+  // pick (e.g. "Project: Read"). Case-insensitive substring match
+  // against the option's visible text. When undefined, picks the
+  // first option — preserves the existing behavior for native
+  // selects whose contents are interchangeable (country pickers).
+  async selectOption(selector: string, optionMatcher?: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
-    const values = await this.page
-      .locator(`${selector} option`)
-      .evaluateAll((opts) =>
-        opts
-          .map((o) => (o instanceof HTMLOptionElement ? o.value : ""))
-          .filter((v) => v.length > 0),
-      );
-    const first = values[0];
-    if (first === undefined) {
-      throw new Error(`<select> ${selector} has no selectable option`);
+    const tagName = await this.page
+      .locator(selector)
+      .first()
+      .evaluate((node) => node.tagName.toLowerCase());
+
+    if (tagName === "select") {
+      // Native path — unchanged.
+      const values = await this.page
+        .locator(`${selector} option`)
+        .evaluateAll((opts) =>
+          opts
+            .map((o) => (o instanceof HTMLOptionElement ? o.value : ""))
+            .filter((v) => v.length > 0),
+        );
+      const first = values[0];
+      if (first === undefined) {
+        throw new Error(`<select> ${selector} has no selectable option`);
+      }
+      // When the planner specified an option, prefer the one whose
+      // visible text matches it; fall back to first.
+      let chosenValue = first;
+      if (optionMatcher !== undefined) {
+        const matcherLower = optionMatcher.toLowerCase();
+        const matched = await this.page
+          .locator(`${selector} option`)
+          .evaluateAll(
+            (opts, needle) =>
+              opts
+                .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
+                .find((o) => o.textContent?.toLowerCase().includes(needle))
+                ?.value ?? null,
+            matcherLower,
+          );
+        if (typeof matched === "string" && matched.length > 0) {
+          chosenValue = matched;
+        }
+      }
+      await this.page.selectOption(selector, chosenValue);
+      return;
     }
-    await this.page.selectOption(selector, first);
+
+    // Custom combobox path. Sentry, Radix, Headless UI, React Aria
+    // — every modern React picker emits role=option on its items.
+    await this.selectFromCombobox(selector, optionMatcher);
+  }
+
+  // F11: click a combobox trigger, wait for the listbox to open,
+  // click an option. Generic across Radix / Headless UI / React Aria
+  // / cmdk because they all emit role=option on item elements.
+  private async selectFromCombobox(
+    triggerSelector: string,
+    optionMatcher?: string,
+  ): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    // Open the dropdown. humanClick scrolls into view + bezier-paths
+    // the click so it lands inside the trigger.
+    await this.humanClick(triggerSelector);
+    // Wait for option elements to appear. Some libraries (Radix) mount
+    // the listbox in a portal at body root, so we scan the whole
+    // document, not the trigger's subtree.
+    try {
+      await this.page.waitForSelector('[role="option"]', {
+        state: "visible",
+        timeout: 5000,
+      });
+    } catch {
+      throw new Error(
+        `combobox ${triggerSelector}: no [role=option] appeared within 5s — ` +
+          `the trigger may not be a combobox, or the listbox uses a non-ARIA pattern`,
+      );
+    }
+
+    const options = await this.page.locator('[role="option"]:visible').all();
+    if (options.length === 0) {
+      throw new Error(
+        `combobox ${triggerSelector}: opened but found 0 visible options`,
+      );
+    }
+
+    // Pick: matcher-by-text if provided, first otherwise.
+    let chosen = options[0]!;
+    if (optionMatcher !== undefined) {
+      const matcherLower = optionMatcher.toLowerCase();
+      for (const o of options) {
+        const text = ((await o.textContent()) ?? "").toLowerCase();
+        if (text.includes(matcherLower)) {
+          chosen = o;
+          break;
+        }
+      }
+    }
+
+    await this.humanClickLocator(chosen);
+    // Small settle — most comboboxes animate the close and update the
+    // form state on the same tick, but a few (Headless UI Transition)
+    // run a 150-200ms exit before the form sees the new value.
+    await this.wait(0.5);
   }
 
   // ───────────── humanization internals ─────────────

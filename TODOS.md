@@ -327,39 +327,47 @@ mechanics. Ranked by leverage.
   the fallback and the brittle regex; full fix is to either codify a
   known-services map or teach `findSignupLink` to click CTAs.
 
-- [ ] **F10 — Capture API keys hidden behind a Copy button. [P1]**
-  Surfaced 2026-05-20 by an OpenRouter signup: the OAuth flow
-  completed, the bot navigated to the keys page and created a key,
-  but the displayed value was truncated (`sk-or-v1-1687b94c0e589f34
-  ea46ae2c3f4e124a8...`) and the full secret only existed on the
-  clipboard via the Copy button. `extractCredentials` reads visible
-  text only, captured the truncated value, the verify-and-replan
-  loop spun 6 times re-reading the same truncation, then gave up.
-  Nothing in the vault.
+- [x] **F10 — Capture API keys hidden behind a Copy button. [P1]
+  — shipped 0.6.0-rc.1 → -rc.4.** Three-pass extraction:
+  visible scan → Copy-button + clipboard recovery → hidden-input
+  fallback. Plus a `api_key_truncated` last-resort persistence so
+  the host agent can surface a partial. New prefix recognitions for
+  `sk-or-v1-` / `sk-ant-` / `sk-proj-` / `sk-<48>`. Validated live
+  on an OpenRouter signup 2026-05-20: full key landed in vault.
 
-  This is the dominant failure mode for OAuth-completed signups
-  going forward — OpenRouter, Anthropic, OpenAI, Stripe, and most
-  modern services use the same one-time-reveal-modal-with-Copy
-  pattern. Worse than other F-items because the bot DID the work
-  successfully; it falls at the last step and the user can't
-  re-extract (the modal is one-time; recovery means creating a new
-  key).
+- [ ] **F11 — Custom React combobox / Radix dropdown support. [P1]**
+  Surfaced 2026-05-20 by a Sentry signup. The bot navigated through
+  the OAuth handshake, reached the auth-tokens settings page, started
+  creating a token, and got stuck on the permissions dropdown.
+  Sentry uses a Radix-style combobox (a `<button role="combobox">`
+  that opens a `[role="listbox"]` with `[role="option"]` children),
+  not a native `<select>`. The bot's `select` executor only knows
+  Playwright's `selectOption()` which requires a real `<select>`
+  parent of `<option>` children — it threw "no selectable option"
+  on 9 consecutive replans and gave up before clicking "Create."
 
-  Fix path: when an extracted candidate ends with `…`/`...` or the
-  surrounding text contains the truncation marker, look for the
-  nearest button matching `/^copy|copy.*key|copy.*secret/i`, click
-  it, read the clipboard via `navigator.clipboard.readText()`
-  (Playwright grants `clipboard-read` permission to the context),
-  validate against a known key-prefix pattern (sk-or-*, sk-ant-*,
-  sk-*, re_*, phc_*, etc.) before accepting it. Fallback path: walk
-  all `<input>` elements including `visible:false` and check `.value`
-  — some modals stash the full value in a hidden input the visible
-  display reads from.
+  Increasingly common pattern — Radix UI, Headless UI, React Aria,
+  cmdk, every modern React component library does this. Native
+  `<select>` is rare on new dashboards.
 
-  Realistic scope: half-day. Two parts — `readClipboard()` helper on
-  `BrowserController` with permission grant + an
-  extract-credentials-via-copy-button code path in `agent.ts` that
-  triggers when the visible extraction returns a truncated value.
+  Fix path: in `BrowserController.selectOption()`, check the target
+  element's tag. If `<select>`, existing native path. Otherwise treat
+  as a combobox: click the trigger, wait for `[role="option"]` to
+  appear (canonical ARIA — Radix, Headless UI, React Aria all emit
+  it), click the chosen option. Choice: when the planner specifies
+  an option text (new optional `option_text` field on the select
+  step), match by text; otherwise pick the first option.
+
+  Realistic scope: half-day. Two pieces — combobox detection +
+  click-find-click helper in browser.ts; optional `option_text`
+  field on PostVerifyStep + main signup-plan `select` action.
+
+  Caveat once shipped: "first option" may not be the right choice
+  for Sentry's permissions dropdown (the user probably wants
+  Project: Read or similar — not whatever Sentry orders first).
+  Adding the `option_text` field lets the planner request the
+  specific option; without it, the bot makes a token but possibly
+  with surprising permissions. The user can adjust manually.
 
 Also observed: 3/16 (Appwrite, MongoDB Atlas, Koyeb) submitted cleanly
 and got no verification email — genuine S3 anti-abuse withholding,

@@ -265,10 +265,18 @@ export type PostVerifyStep =
   | { kind: "login"; reason: string }
   | { kind: "click"; selector: string; reason: string }
   | { kind: "fill"; selector: string; value: string; reason: string }
-  // `select` — pick a valid option for a native <select> (a region /
-  // role / country dropdown on a post-OAuth onboarding form). A plain
-  // `click` cannot satisfy a <select>; this picks the first real option.
-  | { kind: "select"; selector: string; reason: string }
+  // `select` — pick an option for a dropdown (native <select> OR a
+  // custom ARIA combobox: Radix, Headless UI, React Aria, cmdk).
+  // When `option_text` is given, the executor matches by visible text
+  // (case-insensitive substring); otherwise picks the first real
+  // option. Sentry's permissions picker is the canonical combobox
+  // case — F11 added combobox support so this step works there.
+  | {
+      kind: "select";
+      selector: string;
+      reason: string;
+      option_text?: string;
+    }
   // `check` — tick a checkbox (a post-OAuth onboarding form's
   // terms-of-service / agreement box). A `click` lands on the box's
   // styled label or its TOS *link* and does not flip the input;
@@ -615,7 +623,18 @@ export function parsePostVerifyStep(
     case "select": {
       const selector = requireString(obj, "selector", "post-verify select step");
       checkSelector(selector, "post-verify select step");
-      return { kind: "select", selector, reason };
+      // F11: `option_text` is optional — when present, the executor
+      // picks the option whose visible text contains it (case-
+      // insensitive substring). When absent, picks the first option.
+      const optionText = obj["option_text"];
+      return {
+        kind: "select",
+        selector,
+        reason,
+        ...(typeof optionText === "string" && optionText.length > 0
+          ? { option_text: optionText }
+          : {}),
+      };
     }
     case "check": {
       const selector = requireString(obj, "selector", "post-verify check step");
@@ -2104,7 +2123,7 @@ ${formatInventory(input.inventory)}`,
         } else if (nextStep.kind === "fill") {
           await this.browser.type(nextStep.selector, nextStep.value);
         } else if (nextStep.kind === "select") {
-          await this.browser.selectOption(nextStep.selector);
+          await this.browser.selectOption(nextStep.selector, nextStep.option_text);
           await this.browser.wait(1);
         } else if (nextStep.kind === "check") {
           // browser.check force-ticks + scrolls into view + verifies —
@@ -2244,7 +2263,7 @@ Schema:
   {"kind":"login","reason":"the page is a login form / we were signed out"}
   {"kind":"click","selector":"<a selector= copied verbatim from the inventory>","reason":"e.g. open the API keys page"}
   {"kind":"fill","selector":"<a selector= from the inventory>","value":"value","reason":"unusual — only for a required project-name etc."}
-  {"kind":"select","selector":"<a selector= from the inventory, tag=select>","reason":"pick an option for a dropdown — region, role, country"}
+  {"kind":"select","selector":"<a selector= from the inventory>","option_text":"<visible label of the option to pick — optional>","reason":"pick an option for a dropdown — region, role, country, or a permission/scope on a token form"}
   {"kind":"check","selector":"<a selector= from the inventory, type=checkbox>","reason":"tick a terms-of-service / agreement checkbox"}
   {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api-keys"}
   {"kind":"wait","seconds":N,"reason":"page is still loading"}
@@ -2271,7 +2290,8 @@ Strategy:
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - If the page wants the user to create a project/key before showing it, fill the minimum and click create.
-- For a required dropdown (an inventory entry with tag=select — region, role, country), use {"kind":"select"} — a "click" cannot pick a <select> option, so do not click it repeatedly.
+- For ANY dropdown — native (tag=select) OR a custom combobox (role=combobox / aria-haspopup=listbox, common on modern React apps like Sentry / Stripe / Vercel) — use {"kind":"select"}. "click" on a combobox trigger opens it but does not pick an option; do not click it repeatedly.
+- When you need a SPECIFIC option from the dropdown — e.g. "Project: Read" on Sentry's permissions picker, or a specific region — include "option_text" with the visible label. The executor matches it case-insensitively as a substring. Omit "option_text" when any option is fine (a placeholder country picker).
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
 - If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
 - Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
