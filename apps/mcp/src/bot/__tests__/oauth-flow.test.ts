@@ -103,6 +103,7 @@ class FakeOAuthBrowser {
   async goto(): Promise<void> {}
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
+  async dismissConsentBanner(): Promise<string | null> { return null; }
   async type(selector: string, text: string): Promise<void> {
     this.typeCalls.push({ selector, text });
   }

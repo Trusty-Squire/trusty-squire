@@ -1052,6 +1052,14 @@ export class SignupAgent {
     const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
     for (;;) {
       await this.browser.waitForFormReady();
+      // Dismiss any cookie/consent banner so its overlay doesn't hide
+      // the OAuth chooser or signup form. Only fires when a button
+      // matching the canonical CTA vocabulary is visible — silent
+      // when no banner is present.
+      const dismissed = await this.browser.dismissConsentBanner();
+      if (dismissed !== null) {
+        steps.push(`Dismissed cookie consent: "${dismissed}"`);
+      }
       await saveDebugSnapshot(this.browser, "before-fill");
       const state = await this.browser.getState();
       const inventory = await this.buildInventory(steps, oauthCandidates);

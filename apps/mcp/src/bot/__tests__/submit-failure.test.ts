@@ -44,6 +44,7 @@ class SubmitFailsBrowser {
   async goto(): Promise<void> {}
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
+  async dismissConsentBanner(): Promise<string | null> { return null; }
   async type(): Promise<void> {}
   async check(): Promise<void> {}
   async click(): Promise<void> {}
