@@ -395,7 +395,7 @@ function buildVncWebDir(): string {
 // bot's profile) AND `install` (poll the API for the install claim)
 // share the same browser-launch infrastructure — one Chrome instance,
 // one Google login event for both use cases.
-async function runInBotChrome(opts: {
+interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
   deadline: number;
@@ -409,21 +409,27 @@ async function runInBotChrome(opts: {
   // all (e.g. an existing session covers it). Returns true to short-
   // circuit before launching Chrome.
   preflight?: (context: BrowserContext) => Promise<boolean>;
-}): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  // Optional hook called AFTER pollUntilDone returns true, while the
+  // Chrome context is still open. Use this to inspect the freshly-
+  // mutated profile (e.g. read which provider cookies got set) before
+  // tear-down — opening a second persistent context to the same
+  // profile right after close is racy (profile lock contention) and
+  // can silently fail.
+  onSuccess?: (context: BrowserContext) => Promise<void>;
+}
+
+async function runInBotChrome(
+  opts: RunInBotChromeOpts,
+): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   if (hasDisplay()) {
     return await runDisplayedChrome(opts);
   }
   return await runHeadlessChrome(opts);
 }
 
-async function runDisplayedChrome(opts: {
-  profileDir: string;
-  url: string;
-  deadline: number;
-  pollUntilDone: (context: BrowserContext) => Promise<boolean>;
-  bannerLabel: string;
-  preflight?: (context: BrowserContext) => Promise<boolean>;
-}): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+async function runDisplayedChrome(
+  opts: RunInBotChromeOpts,
+): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   const chromium = resolveChromium();
   const context = await chromium.launchPersistentContext(opts.profileDir, {
     channel: "chrome",
@@ -441,20 +447,21 @@ async function runDisplayedChrome(opts: {
       `\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`,
     );
     const ok = await pollUntil(opts.deadline, () => opts.pollUntilDone(context));
+    if (ok && opts.onSuccess !== undefined) {
+      // Best-effort: a hook failure must not pretend the user's login
+      // didn't happen. They did the work; the caller will read the
+      // session marker (or not) on the next signup.
+      try { await opts.onSuccess(context); } catch { /* swallow */ }
+    }
     return { status: ok ? "completed" : "timeout" };
   } finally {
     await context.close().catch(() => undefined);
   }
 }
 
-async function runHeadlessChrome(opts: {
-  profileDir: string;
-  url: string;
-  deadline: number;
-  pollUntilDone: (context: BrowserContext) => Promise<boolean>;
-  bannerLabel: string;
-  preflight?: (context: BrowserContext) => Promise<boolean>;
-}): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+async function runHeadlessChrome(
+  opts: RunInBotChromeOpts,
+): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -571,8 +578,15 @@ async function runHeadlessChrome(opts: {
           "=".repeat(64) + "\n",
       );
 
-      // 6. Wait for the side effect, then tear the whole stack down.
+      // 6. Wait for the side effect, run the success hook against the
+      //    live context (e.g. inspect cookies that the user's sign-in
+      //    set — opening a second context after teardown is racy and
+      //    silently fails on profile lock), then tear the whole stack
+      //    down.
       const ok = await pollUntil(opts.deadline, () => opts.pollUntilDone(context));
+      if (ok && opts.onSuccess !== undefined) {
+        try { await opts.onSuccess(context); } catch { /* swallow */ }
+      }
       await context.close();
       return { status: ok ? "completed" : "timeout" };
     } finally {
@@ -672,48 +686,41 @@ export async function openInstallConfirmInBotChrome(opts: {
         `You'll see a Chrome window with the Trusty Squire install page. ` +
         `Sign in there to connect this machine — you only sign in once.`,
       pollUntilDone: () => opts.pollUntilClaimed(),
+      // The user's sign-in inside this Chrome leaves a provider session
+      // in the persistent profile. We don't know WHICH provider they
+      // used (Google or GitHub), so probe both cookie sets and mark
+      // whichever has live cookies. Runs while the context is still
+      // open — opening a second persistent context to the same profile
+      // right after teardown is racy and silently fails on profile-
+      // lock contention, which would leave the marker file empty and
+      // make the signup bot fall back to manual on every subsequent
+      // OAuth-only service.
+      onSuccess: async (context) => {
+        for (const provider of ["google", "github"] as const) {
+          const target = LOGIN_TARGETS[provider];
+          // Probe BOTH cookie origins — modern Google cookies are
+          // `.google.com` domain so visible at www.google.com, but
+          // some get set on accounts.google.com specifically. Checking
+          // both catches the OAuth-redirect case (the user came
+          // through accounts.google.com, never visited www.google.com).
+          const origins = [target.cookieOrigin, "https://accounts.google.com"];
+          let hit = false;
+          for (const origin of origins) {
+            const cookies = await context.cookies(origin);
+            if (cookies.some((c) => target.cookies.includes(c.name))) {
+              hit = true;
+              break;
+            }
+          }
+          if (hit) markProviderLoggedIn(provider, profileDir);
+        }
+      },
     });
-    // The user's sign-in inside this Chrome leaves a provider session
-    // in the persistent profile — record both so the signup bot can
-    // ride either when the user later runs `provision_any_service`.
-    // (We don't know WHICH provider they used, so probe the profile
-    // by checking each target's cookies.)
     if (result.status === "completed") {
-      // hasProviderSession needs a context, but the rig tore down
-      // already. Re-open headless quickly to probe. Cheaper than
-      // refactoring runInBotChrome to expose a post-close hook.
-      await markProvidersFromProfile(profileDir);
       return { status: "claimed" };
     }
     return { status: "timeout", detail: "no install completed before the deadline" };
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-// Probe the bot's profile to see which providers (Google, GitHub) have
-// a live session after a completed install confirm — and mark each so
-// the signup bot's auto-OAuth path uses it without a round-trip.
-// Best-effort: probe failures are non-fatal.
-async function markProvidersFromProfile(profileDir: string): Promise<void> {
-  let context: BrowserContext | undefined;
-  try {
-    const chromium = resolveChromium();
-    context = await chromium.launchPersistentContext(profileDir, {
-      channel: "chrome",
-      headless: true,
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
-    });
-    for (const provider of ["google", "github"] as const) {
-      const target = LOGIN_TARGETS[provider];
-      if (await hasProviderSession(context, target)) {
-        markProviderLoggedIn(provider, profileDir);
-      }
-    }
-  } catch {
-    // Probe failures are non-fatal — the user can rerun `mcp login`
-    // if the signup bot's OAuth-first path can't see the session.
-  } finally {
-    await context?.close().catch(() => undefined);
   }
 }
