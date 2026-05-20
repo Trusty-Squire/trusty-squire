@@ -788,6 +788,42 @@ for the roadmap view; tracked as A1.2.
   (start assisted). Routing: detect "this service now has an adapter"
   and prefer it over the bot.
 
+### P1.1 — Living service router (signup URL registry) [MEDIUM]
+
+**Why this exists.** 2026-05-20 sweep burned a release each on
+`cloudflare`, `vercel`, `railway` discovering that the canonical
+`https://<service>.com/signup` guess hit a 404 / redirect / wrong
+page. The map of "where does service X actually sign up" is
+**living** — services rename pages, move from .app to .com, migrate
+between auth providers — and the only thing harder than maintaining a
+hardcoded table is the silent breakage when you don't. Today this
+lives as `KNOWN_DOMAINS` in `agent.ts`; every entry I add is one
+service that breaks for everyone else's release.
+
+- **What.** A central, API-served map of `service → signup_url +
+  metadata` that the universal bot reads on each run rather than
+  baking into the npm package. Updates ship without an npm release.
+  Each entry carries provenance — when it last verified, who/what
+  added it, whether the page is JS-heavy / has a cookie wall / etc.
+- **Where.** Lives in `apps/registry-api` (already exists for the
+  native-adapter cluster). New table: `ServiceRoute(slug, url,
+  notes, verified_at, source)`. Endpoint: `GET /v1/service/<slug>/
+  signup-url` → `{ url, notes }`. Bot calls it before navigation.
+- **Self-healing.** When `guessSignupUrl` lands on a 404 or
+  immediately-redirecting page, the bot reports back to the
+  registry: `POST /v1/service/<slug>/signup-url/health` with the
+  observed status. A human (or auto-curation) updates the entry.
+  Pairs with the F8/F9 inventory diagnostic that already flags
+  small-inventory / interstitial states.
+- **Depends on.** Nothing hard — the registry skeleton exists. The
+  bot already has an HTTP client (`api-client.ts`). One field on
+  `KNOWN_DOMAINS` replaces the whole hardcoded map.
+- **Pairs with [P1 — Closed feedback loop](#p1--closed-feedback-loop-skillify-signups-into-adapters-medium).**
+  Same shape: capture-from-real-runs → persist to registry →
+  serve to future runs. P1 captures the form-fill plan; P1.1
+  captures the URL. Both turn "the bot has to LLM-rediscover this
+  every time" into "the bot reads it from a table."
+
 ### P2 — Provision SaaS directly from the vault UI [MEDIUM]
 
 - **What.** A web flow in the vault to trigger a signup directly — pick
