@@ -7,29 +7,52 @@
   <!--
     Trusty Squire branded noVNC client. Served by websockify from a
     temp dir that also holds the installed noVNC `core/` (see
-    google-login.ts loginHeadless). Deliberately uses ONLY noVNC's
+    google-login.ts runHeadlessChrome). Deliberately uses ONLY noVNC's
     stable RFB API — the `RFB` default export, its constructor, the
-    `scaleViewport`/`resizeSession` properties, and the
-    connect/disconnect/securityfailure events — all stable across
-    every noVNC 1.x release, so it survives whatever version the
-    host distro's `novnc` package pinned.
+    `scaleViewport`/`resizeSession` properties, the
+    connect/disconnect/securityfailure events, and `rfb.focus()` (used
+    to pop the mobile soft keyboard) — all stable across every noVNC
+    1.x release, so this page survives whatever version the host
+    distro's `novnc` package pinned.
   -->
   <style>
     html, body { margin: 0; height: 100%; background: #0f1115; color: #e6e8ec;
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-    #bar { display: flex; align-items: center; gap: 8px; padding: 9px 13px;
-      background: #171a21; border-bottom: 1px solid #272b35; font-size: 13px;
-      line-height: 1.3; }
+    /* Flex column so the header takes whatever height it needs (a long
+       sub-line on narrow phones wraps to a second row instead of being
+       truncated by a hard-coded 39px), and #screen fills the rest. */
+    body { display: flex; flex-direction: column; overflow: hidden; }
+    #bar { flex: none; display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; background: #171a21; border-bottom: 1px solid #272b35;
+      font-size: 13px; line-height: 1.35; flex-wrap: wrap; }
     #bar b { color: #fff; }
     #bar span.sub { color: #9aa0ab; }
     #dot { width: 8px; height: 8px; border-radius: 50%; background: #e0a23a;
       flex: none; }
     #dot.ok { background: #3fb950; }
     #dot.err { background: #f85149; }
-    #screen { position: absolute; top: 39px; left: 0; right: 0; bottom: 0;
-      background: #0f1115; }
+    #screen { flex: 1; position: relative; background: #0f1115; min-height: 0; }
     #msg { position: absolute; top: 50%; left: 0; right: 0; text-align: center;
       transform: translateY(-50%); color: #9aa0ab; font-size: 14px; padding: 0 24px; }
+    /* Show-keyboard button. The remote VNC view is just pixels — the OS
+       can't tell there's a typeable field, so a normal tap into the
+       Chrome address bar inside the remote window doesn't pop the soft
+       keyboard. This button calls rfb.focus(), which focuses noVNC's
+       internal hidden textarea — the OS sees an editable element gain
+       focus and pops the keyboard. Each keystroke into the textarea is
+       forwarded to the VNC stream by noVNC's keyboard handler. */
+    #kb { position: absolute; right: 16px; bottom: 16px; width: 52px; height: 52px;
+      border-radius: 50%; border: none; background: #4f46e5; color: #fff;
+      font-size: 24px; line-height: 1; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+      cursor: pointer; z-index: 10; display: none;
+      -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+    }
+    #kb:active { transform: scale(0.96); }
+    /* Only show the button on touch-capable devices — desktops already
+       have a hardware keyboard and the button just clutters the view. */
+    @media (hover: none) and (pointer: coarse) {
+      #kb.ready { display: flex; align-items: center; justify-content: center; }
+    }
   </style>
 </head>
 <body>
@@ -38,8 +61,10 @@
     <b>Trusty Squire</b>
     <span class="sub">— sign in to your account, then return to your terminal.</span>
   </div>
-  <div id="screen"></div>
-  <div id="msg">Connecting to the secure login window&hellip;</div>
+  <div id="screen">
+    <div id="msg">Connecting to the secure login window&hellip;</div>
+    <button id="kb" type="button" aria-label="Show keyboard">⌨</button>
+  </div>
   <script type="module">
     import RFB from "./core/rfb.js";
 
@@ -51,6 +76,7 @@
     const dot = document.getElementById("dot");
     const msg = document.getElementById("msg");
     const screen = document.getElementById("screen");
+    const kbBtn = document.getElementById("kb");
 
     const wsUrl =
       (location.protocol === "https:" ? "wss://" : "ws://") +
@@ -71,6 +97,11 @@
       rfb.addEventListener("connect", () => {
         dot.className = "ok";
         msg.style.display = "none";
+        // Reveal the soft-keyboard button (CSS gates it to touch
+        // devices via the pointer:coarse media query). Connection
+        // success is the right moment — earlier and the button would
+        // suggest a typing target that isn't connected yet.
+        kbBtn.classList.add("ready");
       });
       rfb.addEventListener("disconnect", () => {
         dot.className = "err";
@@ -78,11 +109,21 @@
         msg.textContent =
           "Login window closed. If you finished signing in, return to " +
           "your terminal — you can close this tab.";
+        kbBtn.classList.remove("ready");
       });
       rfb.addEventListener("securityfailure", () => {
         dot.className = "err";
         msg.style.display = "";
         msg.textContent = "Could not authenticate to the login window.";
+      });
+
+      // Tap → rfb.focus() inside the click handler so the focus happens
+      // synchronously in response to a user gesture. iOS / Android
+      // browsers won't pop the soft keyboard for a programmatic focus
+      // outside a gesture, so this MUST stay inline.
+      kbBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        rfb.focus();
       });
     }
   </script>

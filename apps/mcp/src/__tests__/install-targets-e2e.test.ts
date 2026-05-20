@@ -108,9 +108,10 @@ describe("install --target=<agent> writes a valid config", () => {
         command: "install",
         target,
         apiBase: "https://test.invalid",
-        // Skip the OAuth login stage — irrelevant to "does install
-        // write a config for this target."
-        skipLogin: true,
+        // Skip the bot's Chrome — `open()` the URL in the default
+        // browser instead. Irrelevant to "does install write a config
+        // for this target," and keeps the test fast (no Chrome boot).
+        skipBrowser: true,
       });
 
       const configPath = AGENTS[target].config_path();

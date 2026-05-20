@@ -98,7 +98,7 @@ const HEADLESS_W = 540;
 const HEADLESS_H = 960;
 
 // The Debian/Ubuntu `novnc` package installs its web assets here — the
-// `core/` RFB library our branded page reuses (see loginHeadless).
+// `core/` RFB library our branded page reuses (see runHeadlessChrome).
 const NOVNC_INSTALL_DIR = "/usr/share/novnc";
 
 // Resolve a bundled login asset (the branded vnc.html / interstitial).
@@ -121,18 +121,6 @@ async function hasProviderSession(
 ): Promise<boolean> {
   const cookies = await context.cookies(target.cookieOrigin);
   return cookies.some((c) => target.cookies.includes(c.name));
-}
-
-async function pollForSession(
-  context: BrowserContext,
-  deadline: number,
-  target: LoginTarget,
-): Promise<boolean> {
-  while (Date.now() < deadline) {
-    if (await hasProviderSession(context, target)) return true;
-    await new Promise((r) => setTimeout(r, 3000));
-  }
-  return false;
 }
 
 // --- T5: Google auth-page state detection ------------------------------
@@ -305,49 +293,6 @@ export function binaryOnPath(bin: string): boolean {
   return paths.some((p) => p.length > 0 && existsSync(join(p, bin)));
 }
 
-// --- path 1: a display is available -----------------------------------
-async function loginWithDisplay(
-  profileDir: string,
-  deadline: number,
-  target: LoginTarget,
-): Promise<LoginResult> {
-  const chromium = resolveChromium();
-  const context = await chromium.launchPersistentContext(profileDir, {
-    channel: "chrome",
-    headless: false,
-    viewport: { width: 1280, height: 800 },
-    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
-  });
-  try {
-    if (await hasProviderSession(context, target)) {
-      return { status: "already_valid" };
-    }
-    const page = context.pages()[0] ?? (await context.newPage());
-    // Show a branded interstitial first — a tool opening a browser to
-    // ask for a Google/GitHub password is the scariest moment of the
-    // flow; the interstitial explains it before the user is asked to
-    // trust it. Best-effort: any failure falls back to going straight
-    // to the provider's login page.
-    try {
-      const interstitial = readFileSync(loginAssetPath("interstitial.html"), "utf8")
-        .split("{{PROVIDER}}").join(target.label)
-        .split("{{URL}}").join(target.loginUrl);
-      await page.setContent(interstitial, { waitUntil: "domcontentloaded" });
-    } catch {
-      await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
-    }
-    console.error(
-      `\n[login] A Chrome window has opened. Log into your ${target.label} account there.\n`,
-    );
-    const ok = await pollForSession(context, deadline, target);
-    return ok
-      ? { status: "logged_in" }
-      : { status: "timeout", detail: "no login completed before the deadline" };
-  } finally {
-    await context.close();
-  }
-}
-
 // --- path 2: headless — virtual display + noVNC + cloudflared ----------
 interface HeadlessRig {
   procs: ChildProcess[];
@@ -431,11 +376,75 @@ function buildVncWebDir(): string {
   return webDir;
 }
 
-async function loginHeadless(
-  profileDir: string,
-  deadline: number,
-  target: LoginTarget,
-): Promise<LoginResult> {
+// Open the bot's Chrome at `url`, on whichever platform path applies
+// (with-display or headless+noVNC+cloudflared), and run `pollUntilDone`
+// against the live context until it resolves true OR the deadline
+// passes. Returns whether the poll succeeded.
+//
+// Extracted so both `mcp login` (poll for Google/GitHub cookies in the
+// bot's profile) AND `install` (poll the API for the install claim)
+// share the same browser-launch infrastructure — one Chrome instance,
+// one Google login event for both use cases.
+async function runInBotChrome(opts: {
+  profileDir: string;
+  url: string;
+  deadline: number;
+  // Returns true once the desired side effect has happened (cookies
+  // present, install claimed, etc.). Re-polled every ~3s.
+  pollUntilDone: (context: BrowserContext) => Promise<boolean>;
+  // Optional: short label used in the headless VNC banner so the user
+  // knows what they're being asked to do in the remote Chrome window.
+  bannerLabel: string;
+  // Optional pre-flight check that decides we don't need a browser at
+  // all (e.g. an existing session covers it). Returns true to short-
+  // circuit before launching Chrome.
+  preflight?: (context: BrowserContext) => Promise<boolean>;
+}): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  if (hasDisplay()) {
+    return await runDisplayedChrome(opts);
+  }
+  return await runHeadlessChrome(opts);
+}
+
+async function runDisplayedChrome(opts: {
+  profileDir: string;
+  url: string;
+  deadline: number;
+  pollUntilDone: (context: BrowserContext) => Promise<boolean>;
+  bannerLabel: string;
+  preflight?: (context: BrowserContext) => Promise<boolean>;
+}): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  const chromium = resolveChromium();
+  const context = await chromium.launchPersistentContext(opts.profileDir, {
+    channel: "chrome",
+    headless: false,
+    viewport: { width: 1280, height: 800 },
+    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
+  });
+  try {
+    if (opts.preflight !== undefined && await opts.preflight(context)) {
+      return { status: "preflight_satisfied" };
+    }
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto(opts.url, { waitUntil: "domcontentloaded" });
+    console.error(
+      `\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`,
+    );
+    const ok = await pollUntil(opts.deadline, () => opts.pollUntilDone(context));
+    return { status: ok ? "completed" : "timeout" };
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
+
+async function runHeadlessChrome(opts: {
+  profileDir: string;
+  url: string;
+  deadline: number;
+  pollUntilDone: (context: BrowserContext) => Promise<boolean>;
+  bannerLabel: string;
+  preflight?: (context: BrowserContext) => Promise<boolean>;
+}): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -451,14 +460,10 @@ async function loginHeadless(
   // signal handler can release the profile lock before exiting.
   let activeContext: BrowserContext | undefined;
 
-  // Ensure nothing is orphaned if the process dies mid-login. `exit`
+  // Ensure nothing is orphaned if the process dies mid-flow. `exit`
   // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
   // once a signal listener is registered the default terminate is
-  // suppressed, so the handler must clean up AND exit itself. Folding
-  // login into `install` makes an interrupted run far more likely (a
-  // backgrounded terminal, a dropped SSH session). The handler closes
-  // the browser FIRST (releases the persistent-profile lock cleanly),
-  // then tears down the rig, then exits.
+  // suppressed, so the handler must clean up AND exit itself.
   const onExit = (): void => teardown(rig);
   const onSignal = (): void => {
     const finish = (): void => {
@@ -490,7 +495,7 @@ async function loginHeadless(
 
     // 2. Chrome on that display, persistent profile, window filling the display.
     const chromium = resolveChromium();
-    const context = await chromium.launchPersistentContext(profileDir, {
+    const context = await chromium.launchPersistentContext(opts.profileDir, {
       channel: "chrome",
       headless: false,
       viewport: null, // use the real window size
@@ -506,11 +511,11 @@ async function loginHeadless(
     activeContext = context;
 
     try {
-      if (await hasProviderSession(context, target)) {
-        return { status: "already_valid" };
+      if (opts.preflight !== undefined && await opts.preflight(context)) {
+        return { status: "preflight_satisfied" };
       }
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(target.loginUrl, { waitUntil: "domcontentloaded" });
+      await page.goto(opts.url, { waitUntil: "domcontentloaded" });
 
       // 3. x11vnc on the display — localhost-only, password-gated, -noshm
       //    (the box's X server lacks the shared-memory extension).
@@ -552,16 +557,14 @@ async function loginHeadless(
           "[login] Open this on any device, any network:\n" +
           `        ${tunnelUrl}/vnc.html#password=${vncPassword}\n` +
           `[login] (if asked for a VNC password: ${vncPassword})\n` +
-          `[login] You'll see a Chrome window — log into your ${target.label} account.\n` +
+          `[login] ${opts.bannerLabel}\n` +
           "=".repeat(64) + "\n",
       );
 
-      // 6. Wait for the login, then tear the whole stack down.
-      const ok = await pollForSession(context, deadline, target);
+      // 6. Wait for the side effect, then tear the whole stack down.
+      const ok = await pollUntil(opts.deadline, () => opts.pollUntilDone(context));
       await context.close();
-      return ok
-        ? { status: "logged_in" }
-        : { status: "timeout", detail: "no login completed before the deadline" };
+      return { status: ok ? "completed" : "timeout" };
     } finally {
       await context.close().catch(() => undefined);
       // Closed — the signal handler must not double-close it.
@@ -573,6 +576,16 @@ async function loginHeadless(
     process.removeListener("SIGTERM", onSignal);
     process.removeListener("SIGINT", onSignal);
   }
+}
+
+// Shared timed-poll helper. `check` is invoked every 3s until it
+// resolves true or the deadline passes.
+async function pollUntil(deadline: number, check: () => Promise<boolean>): Promise<boolean> {
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return false;
 }
 
 // --- public entry ------------------------------------------------------
@@ -593,16 +606,104 @@ export async function ensureOAuthSession(opts?: {
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
   try {
-    const result = hasDisplay()
-      ? await loginWithDisplay(profileDir, deadline, target)
-      : await loginHeadless(profileDir, deadline, target);
+    const result = await runInBotChrome({
+      profileDir,
+      url: target.loginUrl,
+      deadline,
+      bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
+      preflight: (ctx) => hasProviderSession(ctx, target),
+      pollUntilDone: (ctx) => hasProviderSession(ctx, target),
+    });
+    // Map runInBotChrome's status set to ensureOAuthSession's contract.
+    let mapped: LoginResult;
+    if (result.status === "preflight_satisfied") {
+      mapped = { status: "already_valid" };
+    } else if (result.status === "completed") {
+      mapped = { status: "logged_in" };
+    } else {
+      mapped = { status: "timeout", detail: "no login completed before the deadline" };
+    }
     // A confirmed session — record it so the signup bot can auto-prefer
     // this provider's OAuth path without a probe round-trip.
-    if (result.status === "logged_in" || result.status === "already_valid") {
+    if (mapped.status === "logged_in" || mapped.status === "already_valid") {
       markProviderLoggedIn(provider, profileDir);
     }
-    return result;
+    return mapped;
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Public entry for the install flow: opens the trustysquire /install
+// confirm URL in the bot's persistent Chrome profile, runs the
+// user-supplied check until the install is claimed (or the deadline
+// passes), then tears down. The user's Google/GitHub sign-in happens
+// inside this Chrome instance — so the bot's profile gets a provider
+// session as a free side effect, and there's no separate "log into
+// Google for the bot" step after install.
+export async function openInstallConfirmInBotChrome(opts: {
+  confirmUrl: string;
+  // Returns true once the API has flipped the install to claimed.
+  // Re-polled every 3s while Chrome is open.
+  pollUntilClaimed: () => Promise<boolean>;
+  profileDir?: string;
+  timeoutMinutes?: number;
+}): Promise<{ status: "claimed" | "timeout" | "error"; detail?: string }> {
+  const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
+  const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
+  const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+
+  try {
+    const result = await runInBotChrome({
+      profileDir,
+      url: opts.confirmUrl,
+      deadline,
+      bannerLabel:
+        `You'll see a Chrome window with the Trusty Squire install page. ` +
+        `Sign in there to connect this machine — you only sign in once.`,
+      pollUntilDone: () => opts.pollUntilClaimed(),
+    });
+    // The user's sign-in inside this Chrome leaves a provider session
+    // in the persistent profile — record both so the signup bot can
+    // ride either when the user later runs `provision_any_service`.
+    // (We don't know WHICH provider they used, so probe the profile
+    // by checking each target's cookies.)
+    if (result.status === "completed") {
+      // hasProviderSession needs a context, but the rig tore down
+      // already. Re-open headless quickly to probe. Cheaper than
+      // refactoring runInBotChrome to expose a post-close hook.
+      await markProvidersFromProfile(profileDir);
+      return { status: "claimed" };
+    }
+    return { status: "timeout", detail: "no install completed before the deadline" };
+  } catch (err) {
+    return { status: "error", detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Probe the bot's profile to see which providers (Google, GitHub) have
+// a live session after a completed install confirm — and mark each so
+// the signup bot's auto-OAuth path uses it without a round-trip.
+// Best-effort: probe failures are non-fatal.
+async function markProvidersFromProfile(profileDir: string): Promise<void> {
+  let context: BrowserContext | undefined;
+  try {
+    const chromium = resolveChromium();
+    context = await chromium.launchPersistentContext(profileDir, {
+      channel: "chrome",
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
+    for (const provider of ["google", "github"] as const) {
+      const target = LOGIN_TARGETS[provider];
+      if (await hasProviderSession(context, target)) {
+        markProviderLoggedIn(provider, profileDir);
+      }
+    }
+  } catch {
+    // Probe failures are non-fatal — the user can rerun `mcp login`
+    // if the signup bot's OAuth-first path can't see the session.
+  } finally {
+    await context?.close().catch(() => undefined);
   }
 }

@@ -1,27 +1,31 @@
 // Setup CLI — install / logout / login subcommands.
 //
 //   npx @trusty-squire/mcp install --target=claude-code
-//     Issues a machine token, opens the browser to connect this machine
-//     to your account, writes the MCP config, then runs the one-time
-//     OAuth login (Google/GitHub) the signup bot rides. One command.
+//     Issues a machine token, then opens the trustysquire install-
+//     confirm page in the bot's own Chrome. The user signs in there
+//     once (Google or GitHub) — that single sign-in does TWO things:
+//       (a) trustysquire claims the install and binds the machine to
+//           the user's account, and
+//       (b) the bot's Chrome profile gains a provider session it can
+//           ride on future signups (Resend, Postmark, etc.).
+//     One Google login, both jobs done.
 //
 //   npx @trusty-squire/mcp login [--provider=google|github]
-//     Re-runs the OAuth sign-in for the bot's persistent Chrome
-//     profile. Different from the login stage inside `install` —
-//     this one fails loud on timeout/error, so it's the right
-//     command to use when you're explicitly retrying login.
+//     Add an additional provider session to the bot's profile. If you
+//     signed in to install with Google but want the bot to also sign
+//     you up via GitHub-only services, run this.
 //
 //   npx @trusty-squire/mcp logout
 //
 // Flags:
-//   --target=<agent>             skip auto-detection
-//   --api-base=<url>             override the API base URL
-//   --provider=google|github|both  pick the OAuth identity to connect
-//                                during the install login stage
-//   --skip-login                 skip the install login stage entirely
-//                                (CI / scripted installs)
-//   --proxy-url=<url>            bake a residential proxy into the MCP
-//                                config's env (UNIVERSAL_BOT_PROXY_URL)
+//   --target=<agent>     skip auto-detection
+//   --api-base=<url>     override the API base URL
+//   --provider=google|github   choose provider for `login`
+//   --skip-browser       don't launch the bot's Chrome; just print the
+//                        confirm URL and expect the user to open it in
+//                        their own browser (CI / scripted installs)
+//   --proxy-url=<url>    bake a residential proxy into the MCP config's
+//                        env (UNIVERSAL_BOT_PROXY_URL)
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -33,13 +37,16 @@ import { installInitiate, installPoll, issueMachineToken } from "../api-client.j
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
-import { ensureOAuthSession, type LoginResult } from "../bot/google-login.js";
+import {
+  ensureOAuthSession,
+  openInstallConfirmInBotChrome,
+} from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 
-type ProviderArg = "google" | "github" | "both";
+type ProviderArg = "google" | "github";
 
 type Argv = {
   command: string;
@@ -49,13 +56,17 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
-  // OAuth provider selection. "both" connects Google then GitHub.
-  // Absent → `install` prompts on a TTY / defaults to Google without
-  // one; `login` defaults to Google.
+  // OAuth provider — for `login`, picks which provider to sign in to.
+  // For `install`, the provider is chosen by the user inside the
+  // trustysquire confirm page (Google or GitHub button), so this flag
+  // is ignored there.
   providerArg?: ProviderArg;
-  // --skip-login: `install` writes the config + machine token but does
-  // not run the OAuth login stage. For CI / scripted installs.
-  skipLogin: boolean;
+  // --skip-browser (also accepts the legacy --skip-login spelling):
+  // don't launch the bot's Chrome at the confirm URL. Print the URL
+  // for the user to open in their own browser, then poll for claim.
+  // The bot's Chrome profile won't gain a provider session — the user
+  // will need `mcp login` before their first OAuth-based signup.
+  skipBrowser: boolean;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -65,7 +76,7 @@ function parseArgs(argv: string[]): Argv {
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
   let providerArg: ProviderArg | undefined;
-  let skipLogin = false;
+  let skipBrowser = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -85,12 +96,14 @@ function parseArgs(argv: string[]): Argv {
       proxyUrl = arg.slice("--proxy-url=".length);
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
-      if (p === "google" || p === "github" || p === "both") providerArg = p;
-    } else if (arg === "--skip-login") {
-      skipLogin = true;
+      if (p === "google" || p === "github") providerArg = p;
+    } else if (arg === "--skip-browser" || arg === "--skip-login") {
+      // --skip-login kept as an alias for the 0.5.0 spelling so any
+      // scripted callers still work.
+      skipBrowser = true;
     }
   }
-  const args: Argv = { command, apiBase, skipLogin };
+  const args: Argv = { command, apiBase, skipBrowser };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
@@ -168,16 +181,19 @@ async function install(args: Argv): Promise<void> {
     printAsnWarning(asn);
   }
 
-  // ── Browser confirm: bind this machine to the user's account ─
-  // Opens a URL where the user signs in (Google/GitHub) and confirms
-  // the machine. We poll for the agent_session_token and write it to
-  // the local session alongside the machine_token.
+  // ── Browser confirm: bind this machine + seed the bot's Chrome ─
+  // The user signs into trustysquire from inside the bot's persistent
+  // Chrome profile (with display, or noVNC on a headless box). That
+  // single sign-in does TWO things: trustysquire claims the install
+  // (sets agent_session_token), AND the provider session lands in the
+  // bot's Chrome profile so future OAuth-based signups can ride it.
+  // No separate "log into Google for the bot" step afterwards.
   const baseSession: SessionData = {
     api_base_url: args.apiBase,
     saved_at: new Date().toISOString(),
     machine_token: machine.machine_token,
   };
-  const session = await runInstallClaim(args.apiBase, target, baseSession);
+  const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser);
   if (session === null) {
     console.error(
       "Install didn't complete — the browser confirm step never finished. " +
@@ -221,12 +237,14 @@ async function install(args: Argv): Promise<void> {
   if (args.proxyUrl !== undefined) {
     console.warn(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
-
-  // ── Connect the OAuth identity the signup bot rides ───────
-  // Folded into `install` so the friction lands at setup time, not
-  // mid-task on the user's first provision. Non-fatal by contract —
-  // see runLoginStage; the MCP config above is the durable artifact.
-  await runLoginStage(args);
+  if (args.skipBrowser) {
+    console.warn(``);
+    console.warn(
+      `Note: --skip-browser was set, so the bot's Chrome didn't observe ` +
+        `your sign-in. Before your first OAuth-based signup, run:`,
+    );
+    console.warn(`  npx @trusty-squire/mcp login [--provider=google|github]`);
+  }
 
   console.warn(``);
   console.warn(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
@@ -235,12 +253,25 @@ async function install(args: Argv): Promise<void> {
   console.warn(`  "sign me up for Resend"`);
 }
 
-// Runs the browser-based install confirm flow. Returns a session with
-// agent_session_token + account_id set on success, null on timeout/expiry.
+// Runs the browser-based install confirm flow.
+//
+// Default path (`skipBrowser=false`): opens the trustysquire confirm
+// URL in the bot's OWN persistent Chrome profile. The user signs in
+// once — that single sign-in claims the install AND seeds the bot's
+// profile with a provider session for future OAuth signups. The
+// pollUntilClaimed callback closes the Chrome window as soon as the
+// API flips the install to claimed.
+//
+// Fallback (`skipBrowser=true`): prints the URL, attempts a best-
+// effort `open()` to the user's default browser, polls the API for
+// claim. The bot's Chrome never starts, so the bot won't have a
+// provider session afterwards — the user must run `mcp login` before
+// their first OAuth signup. This path is for CI / scripted installs.
 async function runInstallClaim(
   apiBase: string,
   target: AgentTarget,
   baseSession: SessionData,
+  skipBrowser: boolean,
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(
@@ -251,120 +282,65 @@ async function runInstallClaim(
   console.warn(`Open this URL in your browser to sign in and confirm:`);
   console.warn(`  ${initiate.confirm_url}`);
 
-  try {
-    const openMod = await import("open");
-    await openMod.default(initiate.confirm_url);
-  } catch {
-    // ignore — user copies the URL
+  // Track the claimed token outside the poll closure so the in-Chrome
+  // flow's pollUntilClaimed can read it once the API reports claimed.
+  // Wrapper object so TS can narrow `state.value` after a `=== null`
+  // check at the call site — bare closure-captured `let` doesn't.
+  const state: { value: { token: string; account_id: string } | null } = { value: null };
+  const pollOnce = async (): Promise<boolean> => {
+    if (state.value !== null) return true;
+    const status = await installPoll(apiBase, initiate.setup_code);
+    if (status.status === "claimed" && status.agent_session_token !== undefined) {
+      state.value = {
+        token: status.agent_session_token,
+        account_id: status.account_id ?? "",
+      };
+      return true;
+    }
+    // Expired: also stop Chrome (returning true) — the outer check
+    // sees state.value === null and reports the install failed.
+    return status.status === "expired";
+  };
+
+  if (skipBrowser) {
+    // CI / scripted: best-effort open() into the user's default browser,
+    // poll the API directly. Bot Chrome stays unbothered.
+    try {
+      const openMod = await import("open");
+      await openMod.default(initiate.confirm_url);
+    } catch {
+      // ignore — user copies the URL
+    }
+    const ok = await pollForClaim(apiBase, initiate.setup_code);
+    if (ok === null) return null;
+    return {
+      ...baseSession,
+      api_base_url: apiBase,
+      saved_at: new Date().toISOString(),
+      agent_session_token: ok.token,
+      account_id: ok.account_id,
+    };
   }
 
-  const claim = await pollForClaim(apiBase, initiate.setup_code);
-  if (claim === null) return null;
+  // Default: run the confirm INSIDE the bot's Chrome. The user signs
+  // in there once; that sign-in does both the trustysquire claim AND
+  // the bot's provider-session seeding in one event.
+  const result = await openInstallConfirmInBotChrome({
+    confirmUrl: initiate.confirm_url,
+    pollUntilClaimed: pollOnce,
+  });
+
+  if (result.status !== "claimed" || state.value === null) {
+    return null;
+  }
 
   return {
     ...baseSession,
     api_base_url: apiBase,
     saved_at: new Date().toISOString(),
-    agent_session_token: claim.token,
-    account_id: claim.account_id,
+    agent_session_token: state.value.token,
+    account_id: state.value.account_id,
   };
-}
-
-// The OAuth login stage of `install`. Non-fatal by contract: it never
-// throws and never exits the process — a timed-out, errored or skipped
-// login still leaves a working install (the MCP config is the durable
-// artifact). `loginFn` is injectable so the contract is unit-testable
-// without launching a real browser.
-export async function runLoginStage(
-  args: Argv,
-  loginFn: (opts: {
-    provider: OAuthProviderId;
-  }) => Promise<LoginResult> = ensureOAuthSession,
-): Promise<void> {
-  if (args.skipLogin) {
-    console.warn(``);
-    console.warn(`Skipping the OAuth login (--skip-login).`);
-    console.warn(
-      `Run \`npx @trusty-squire/mcp login\` before your first provision — ` +
-        `without it the bot can't sign you up via Google/GitHub.`,
-    );
-    return;
-  }
-  const providers = await resolveLoginProviders(args);
-  for (const provider of providers) {
-    const label = provider === "github" ? "GitHub" : "Google";
-    console.warn(``);
-    console.warn(`Connecting your ${label} account…`);
-    let result: LoginResult;
-    try {
-      result = await loginFn({ provider });
-    } catch (err) {
-      result = {
-        status: "error",
-        detail: err instanceof Error ? err.message : String(err),
-      };
-    }
-    switch (result.status) {
-      case "already_valid":
-        console.warn(`✓ ${label} already connected.`);
-        break;
-      case "logged_in":
-        console.warn(`✓ ${label} connected — the bot can now sign you up with it.`);
-        break;
-      case "timeout":
-        console.warn(`⚠ ${label} login didn't finish in time. Install is otherwise complete.`);
-        console.warn(`  Finish it later: \`npx @trusty-squire/mcp login --provider=${provider}\``);
-        break;
-      case "error":
-        console.warn(`⚠ ${label} login couldn't run: ${result.detail ?? "unknown error"}`);
-        console.warn(
-          `  Install is otherwise complete. Retry: ` +
-            `\`npx @trusty-squire/mcp login --provider=${provider}\``,
-        );
-        break;
-    }
-  }
-}
-
-// Which providers `install` connects: an explicit --provider wins;
-// otherwise prompt on an interactive terminal, or default to Google
-// when there is no TTY (CI / scripted installs must never block).
-async function resolveLoginProviders(args: Argv): Promise<OAuthProviderId[]> {
-  if (args.providerArg === "both") return ["google", "github"];
-  if (args.providerArg === "github") return ["github"];
-  if (args.providerArg === "google") return ["google"];
-  if (process.stdin.isTTY !== true) return ["google"];
-  return promptProvider();
-}
-
-async function promptProvider(): Promise<OAuthProviderId[]> {
-  console.warn(``);
-  console.warn(
-    `Trusty Squire signs you up to services by riding your Google or GitHub login.`,
-  );
-  const answer = (await promptLine(`Connect which? [google] / github / both: `))
-    .trim()
-    .toLowerCase();
-  if (answer === "github") return ["github"];
-  if (answer === "both") return ["google", "github"];
-  return ["google"];
-}
-
-// Read one line from stdin. The prompt goes to stderr so it never
-// pollutes stdout, which the host agent may parse.
-function promptLine(question: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  return new Promise<string>((resolve) => {
-    // If stdin reaches EOF before an answer (closed or redirected
-    // mid-run), resolve empty rather than hang forever — the caller
-    // treats "" as the default. Promise resolve is idempotent, so the
-    // question callback and this close handler cannot both win.
-    rl.on("close", () => resolve(""));
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer);
-    });
-  });
 }
 
 async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {
