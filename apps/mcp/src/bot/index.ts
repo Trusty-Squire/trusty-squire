@@ -54,6 +54,17 @@ export interface UniversalSignupRequest {
   // they share the one persistent profile, which Chrome single-
   // instances, so a second OAuth run queues behind the first.
   oauthProvider?: OAuthProviderId | undefined;
+  // Free-text permission/scope hint that flows down to the post-verify
+  // planner so it can pick option_text on token-permission dropdowns
+  // intentionally. Default (undefined) → "max permissions" guidance.
+  scopeHint?: string | undefined;
+  // Shared step trail for live progress. Pushed-to by the bot in
+  // place — read it from another tool call (check_provision_status)
+  // to surface mid-run prompts like Google number-match.
+  stepsSink?: string[] | undefined;
+  // Extra OAuth scopes the caller has pre-approved beyond the
+  // basic-identity allowlist. Surfaces in the consent gate (T7).
+  allowExtraOAuthScopes?: readonly string[] | undefined;
 }
 
 export class UniversalSignupBot {
@@ -114,6 +125,9 @@ export class UniversalSignupBot {
         generatePassword: () => this.generatePassword(),
         inbox: request.inbox,
         oauthProvider: request.oauthProvider,
+        scopeHint: request.scopeHint,
+        stepsSink: request.stepsSink,
+        allowExtraOAuthScopes: request.allowExtraOAuthScopes,
       });
 
       console.error(`[UniversalBot] Result: ${result.success ? "SUCCESS" : "FAILED"}`);

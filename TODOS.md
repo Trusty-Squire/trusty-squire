@@ -369,6 +369,36 @@ mechanics. Ranked by leverage.
   specific option; without it, the bot makes a token but possibly
   with surprising permissions. The user can adjust manually.
 
+- [ ] **F12 — User-relayed SMS verification. [P1]** Surfaced 2026-05-20
+  by a Vercel signup. The bot signed in via Google OAuth as
+  `lunchboxfortwo@gmail.com`, landed in Vercel's onboarding, and hit a
+  phone-number entry + SMS-code wall — common on Vercel, Twilio, AWS,
+  Stripe-on-Stripe, etc. New-account anti-fraud, gates the API token.
+
+  Twilio/Plivo/Vonage numbers don't help — every major SMS gate runs a
+  carrier lookup (Twilio Lookup, NumVerify) and rejects VoIP. The
+  numbers that pass are real consumer SIMs from a mobile carrier;
+  provisioning those programmatically is the opposite of cheap, and
+  re-using one across users gets it shadow-banned in days.
+
+  Fix path: don't try to be SMS infrastructure. Add a relay loop:
+
+  1. Bot detects phone-entry → returns `status="phone_verification_required"`
+     with `phone_entry_url` (noVNC if headless) and a `run_id`.
+  2. The MCP tool description tells the host LLM: "ask the user for
+     their phone number, then call `provide_phone_number` with it."
+  3. New MCP tool `provide_phone_number(run_id, phone)` types the phone
+     into the signup form via the existing bot session and clicks send.
+  4. Bot waits for the SMS-code field to appear → returns
+     `status="phone_code_required"`.
+  5. The user gets the SMS on their real phone, reads it back to Goose.
+  6. New MCP tool `provide_sms_code(run_id, code)` types the code into
+     the field and clicks verify; bot continues to the API key.
+
+  Half-day to build. SMS-gated services go from "manual signup" to
+  "two-step tap on your phone." Doesn't touch the security boundary:
+  the user's phone is the gate, and the bot just relays.
+
 Also observed: 3/16 (Appwrite, MongoDB Atlas, Koyeb) submitted cleanly
 and got no verification email — genuine S3 anti-abuse withholding,
 confirming S3 is real and common.
@@ -377,6 +407,31 @@ confirming S3 is real and common.
 planner/executor diagnosis). F3 planned + reviewed. Next: implement
 F3, then re-sweep again (honest target ~8/14 — the rest are captcha /
 multi-step / withholding, out of F3's scope).
+
+- [x] **F13 — Headed signups on a headless box (on-demand Xvfb). [P1]
+  — shipped 0.6.0-rc.16.**
+  Surfaced 2026-05-20 by a Cloudflare signup. The bot landed on
+  `dash.cloudflare.com/sign-up` correctly (rc.14's known-domains fix),
+  but Cloudflare's React signup gates the OAuth buttons + email form
+  behind JS that doesn't render under Chromium-headless. The bot's
+  `BrowserController.start()` uses `headless: true` by default — only
+  `mcp login` runs against Xvfb + headed Chrome.
+
+  Increasing fraction of modern SaaS does this. Stytch, Clerk, Auth0,
+  WorkOS-fronted signups all do heavy JS-detection that catches
+  `navigator.webdriver`, missing window.chrome, etc. Stealth plugin
+  helps but not always.
+
+  Fix: have the signup rig spin up a temporary Xvfb on demand when
+  the host has no display, exactly like `runHeadlessChrome` does for
+  login — minus the noVNC/cloudflared stack the user never needs to
+  SEE (signups don't need a viewer; only login does). One Xvfb per
+  signup run, torn down at the end. Or: one long-running Xvfb the
+  MCP server owns, all signups attach.
+
+  Realistic scope: half-day. Mostly factoring out the Xvfb startup
+  helper from google-login.ts and calling it from BrowserController
+  before `launchPersistentContext` when DISPLAY is unset.
 
 ## G — OAuth-gated services: managed identity + conversion loop
 
@@ -541,6 +596,36 @@ Findings (2026-05-18)" section.
       web app — cleanest brand.
   (c) dedicated short domain like `ts.sh` — most flexible, extra
       registration step.
+
+- [ ] **G16 — Dedicated Cloudflare named tunnel for noVNC. [P3]**
+  Surfaced 2026-05-20. Today the headless install spawns
+  `cloudflared tunnel --url <local>` which provisions a random
+  `*.trycloudflare.com` subdomain on demand. Two costs: ~5-10s cold
+  start to allocate the subdomain + start the tunnel pod, and an
+  orphaned cloudflared instance is possible if teardown is racy.
+
+  A named tunnel (`cloudflared tunnel run <name>`) with a hostname
+  bound to `vnc.trustysquire.ai` (or similar) keeps the routing
+  pre-allocated on Cloudflare's edge — startup is ~1s, teardown is
+  clean disconnect. Free tier, no usage cost.
+
+  Tradeoffs:
+  (a) **Single shared hostname for all users** — simplest, but ALL
+      noVNC traffic globally goes through one identifiable hostname.
+      Cloudflare can still see the traffic (they always could —
+      that's what tunnels are), but it gives observers a single
+      target. Probably fine given low volume + the password gate.
+  (b) **Per-machine named tunnels** — each install provisions its
+      own subdomain via Cloudflare API. Best isolation. Requires
+      operator to manage tunnel tokens at scale; cloudflared
+      tunnel-token machinery is involved.
+
+  Recommendation when this gets prioritized: option (a). The latency
+  win matters most on first-install, where the user is staring at
+  the CLI waiting for the URL — shaving 5-10s there is noticeable.
+  Once install preflight (rc.15) is in, noVNC fires rarely enough
+  that the marginal latency improvement may not be worth the ops
+  burden.
 
 ## H — Concurrency: the bot is single-flight
 

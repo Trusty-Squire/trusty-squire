@@ -5,7 +5,7 @@
 // live; these are the deterministic pieces unit tests can pin.
 
 import { describe, expect, it } from "vitest";
-import { guessSignupUrl, isGoogleSearchUrl } from "../agent.js";
+import { detectAntiBotBlock, guessSignupUrl, isGoogleSearchUrl } from "../agent.js";
 
 describe("guessSignupUrl", () => {
   it("returns https://<name>.com/signup for the common dev-SaaS pattern", () => {
@@ -36,6 +36,41 @@ describe("guessSignupUrl", () => {
     expect(guessSignupUrl("Mailtrap")).toBe("https://mailtrap.io/signup");
     expect(guessSignupUrl("E2B")).toBe("https://e2b.dev/signup");
     expect(guessSignupUrl("Railway")).toBe("https://railway.app/signup");
+  });
+
+  // Full-URL overrides for services whose signup lives on a subdomain
+  // or uses a non-standard path. Cloudflare's marketing site has no
+  // signup form — it CTAs into the dashboard.
+  it("honors full-URL entries verbatim", () => {
+    expect(guessSignupUrl("Cloudflare")).toBe("https://dash.cloudflare.com/sign-up");
+  });
+});
+
+describe("detectAntiBotBlock", () => {
+  it("detects Cloudflare 'Just a moment...' interstitial", () => {
+    expect(
+      detectAntiBotBlock(
+        '<title>Just a moment...</title><body class="cf-challenge">Performing security verification</body>',
+      ),
+    ).toBe("Cloudflare");
+    expect(
+      detectAntiBotBlock("<body>Just a moment... dash.cloudflare.com</body>"),
+    ).toBe("Cloudflare");
+  });
+
+  it("detects Sucuri / DataDome / Imperva interstitials", () => {
+    expect(detectAntiBotBlock("<body>Sucuri Website Firewall</body>")).toBe("Sucuri");
+    expect(detectAntiBotBlock('<div class="dd-captcha">solve me</div>')).toBe("DataDome");
+    expect(detectAntiBotBlock("<title>Powered by Imperva</title>")).toBe("Imperva");
+  });
+
+  it("returns null on a normal signup page", () => {
+    expect(
+      detectAntiBotBlock(
+        '<form><input type="email" name="email" /><button>Sign up</button></form>',
+      ),
+    ).toBeNull();
+    expect(detectAntiBotBlock("")).toBeNull();
   });
 });
 

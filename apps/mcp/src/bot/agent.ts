@@ -21,6 +21,7 @@ import {
   extractOAuthScopes,
   type OAuthProviderId,
 } from "./oauth-providers.js";
+import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
 import { loggedInProviders } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
@@ -136,6 +137,9 @@ export class LLMCallBudgetExceeded extends Error {
 // redirects weirdly to sentry.io and breaks looksLikeSignupPage).
 // Anything still wrong falls through to the search-and-find path.
 // Exported for unit testing.
+// Either a hostname (default path: /signup) or a full URL (when the
+// service's signup lives on a subdomain or uses a non-standard path —
+// e.g. Cloudflare's dash.cloudflare.com/sign-up).
 const KNOWN_DOMAINS: Record<string, string> = {
   sentry: "sentry.io",
   openrouter: "openrouter.ai",
@@ -152,10 +156,18 @@ const KNOWN_DOMAINS: Record<string, string> = {
   // PostHog uses posthog.com but the dashboard lives at us.posthog.com /
   // eu.posthog.com — signup is on the marketing site, .com is right.
   posthog: "posthog.com",
+  // Cloudflare's marketing site has no signup form — it CTAs into the
+  // dashboard. Skip the redirect chase and land on the real form.
+  cloudflare: "https://dash.cloudflare.com/sign-up",
+  // Vercel: marketing /signup redirects through OAuth provider tiles
+  // but the actual email form sits on the dashboard.
+  vercel: "https://vercel.com/signup",
 };
 export function guessSignupUrl(service: string): string {
   const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const host = KNOWN_DOMAINS[slug] ?? `${slug}.com`;
+  const entry = KNOWN_DOMAINS[slug];
+  if (entry !== undefined && /^https?:\/\//i.test(entry)) return entry;
+  const host = entry ?? `${slug}.com`;
   return `https://${host}/signup`;
 }
 
@@ -194,6 +206,26 @@ export interface SignupTask {
   // Absent (or no affordance found) → the form-fill path. T13 added
   // GitHub alongside Google.
   oauthProvider?: OAuthProviderId | undefined;
+  // Free-text guidance the post-verify planner uses when filling
+  // permission/scope dropdowns on token-creation forms (Sentry et al).
+  // Default (undefined) → planner is told to pick MAX permissions
+  // (Admin > Write > Read). When supplied, planner picks option_text
+  // values aligned with the hint ("read-only" / "write access" /
+  // specific scopes).
+  scopeHint?: string | undefined;
+  // Shared step trail. When provided, the bot pushes step entries
+  // into this exact array instead of allocating its own — the caller
+  // can read it mid-run to surface progress (e.g., the Google
+  // number-match prompt) without waiting for the final result.
+  stepsSink?: string[] | undefined;
+  // Extra OAuth scopes the caller has pre-approved beyond the
+  // basic-identity allowlist (BASIC_OAUTH_SCOPES in google-login.ts /
+  // GITHUB_BASIC_SCOPES in oauth-providers.ts). When the consent
+  // screen requests any of these (plus basics), the bot auto-approves
+  // instead of aborting with oauth_consent_needs_review. The LLM
+  // should set this only after the USER has confirmed the scopes —
+  // pushing the consent decision up to the user, not the LLM.
+  allowExtraOAuthScopes?: readonly string[] | undefined;
 }
 
 export interface SignupResult {
@@ -269,6 +301,12 @@ type PlanExecOutcome =
   | { kind: "submit_failed"; reason: string }
   | { kind: "planning_failed"; reason: string }
   | { kind: "oauth_required" }
+  // Cloudflare / Sucuri / DataDome / Imperva "Just a moment..." holding
+  // page that the bot can't clear — usually a fingerprint/IP/ASN risk
+  // score block, not a Turnstile challenge to solve. Surfaced as its
+  // own status so the user gets accurate guidance (manual signup) vs.
+  // the misleading oauth_required ("there is no form").
+  | { kind: "anti_bot_blocked"; vendor: string }
   // T6: an OAuth-first signup found its provider affordance — the
   // selector of the "Sign in with Google" button to click. signup()
   // hands off to the OAuth consent flow instead of credential extraction.
@@ -501,6 +539,28 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
       return bits.join("  ");
     })
     .join("\n");
+}
+
+// Recognize a full-page anti-bot interstitial that's still up. Returns
+// the vendor name (for the status message) or null. Pattern matching
+// on visible text rather than markers — most vendors use the same UX
+// template, and matching the user-visible copy is robust to the actual
+// implementation underneath. Exported for unit testing.
+export function detectAntiBotBlock(html: string): string | null {
+  const text = html.toLowerCase();
+  // Cloudflare "Just a moment..." / Turnstile pre-clear page. Strong
+  // signal: the literal text + the cf-* class names + the title.
+  if (
+    /just a moment|cf-(challenge|browser-verification|turnstile)|performing security verification/i.test(
+      text,
+    )
+  ) {
+    return "Cloudflare";
+  }
+  if (/sucuri|sucuri website firewall/i.test(text)) return "Sucuri";
+  if (/datadome|dd-captcha/i.test(text)) return "DataDome";
+  if (/incapsula|imperva/i.test(text)) return "Imperva";
+  return null;
 }
 
 // True when the page has no fillable text input AND no button that
@@ -1036,6 +1096,24 @@ export class SignupAgent {
         );
       }
 
+      // Anti-bot interstitial that didn't clear (Cloudflare/Sucuri/
+      // DataDome "Just a moment..." pages that BrowserController has
+      // already attempted to wait + reload through). Detect by page
+      // text — the inventory will be tiny because the interstitial
+      // intentionally has 0 interactive elements. Surface as its own
+      // status, not as oauth_required: the latter implies "service is
+      // OAuth-only", which is wrong for Cloudflare et al.
+      if (inventory.length < 5) {
+        const block = detectAntiBotBlock(state.html);
+        if (block !== null) {
+          steps.push(
+            `Anti-bot block: ${block} interstitial would not clear after retries — ` +
+              `the bot's fingerprint/IP did not pass ${block}'s server-side risk score`,
+          );
+          return { kind: "anti_bot_blocked", vendor: block };
+        }
+      }
+
       // OAuth-only: no fillable input AND no button that reads as an
       // email-signup option — nothing to automate (Issue 4).
       if (isOauthOnlyChooser(inventory)) {
@@ -1207,6 +1285,34 @@ export class SignupAgent {
       `Inventory: ${inventory.length} element(s)` +
         (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
     );
+    // Diagnostic: a suspiciously tiny inventory usually means the page
+    // either didn't finish rendering OR an anti-bot interstitial (CF
+    // Turnstile, "Just a moment...", reCAPTCHA wall) is up. Surface the
+    // page state into the step trail so the failure is debuggable from
+    // outside the bot host.
+    if (inventory.length < 5 && raw.length < 5) {
+      try {
+        const state = await this.browser.getState();
+        const text = state.html
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 240);
+        const antiBot =
+          /just a moment|verify you are human|attention required|cloudflare|cf-challenge|cf-turnstile|recaptcha|are you a robot/i.test(
+            state.html,
+          );
+        steps.push(
+          `Inventory diagnostic: title=${JSON.stringify(state.title.slice(0, 80))} ` +
+            `url=${state.url.slice(0, 120)} text=${JSON.stringify(text)}` +
+            (antiBot ? " ⚠ anti-bot interstitial detected" : ""),
+        );
+      } catch {
+        // best-effort diagnostic; never abort on its failure
+      }
+    }
     return inventory;
   }
 
@@ -1420,7 +1526,11 @@ export class SignupAgent {
   // call hung. Override the 10-minute default with
   // UNIVERSAL_BOT_RUN_TIMEOUT_MS.
   async signup(task: SignupTask): Promise<SignupResult> {
-    const steps: string[] = [];
+    // task.stepsSink lets a caller (provision-any) share the live step
+    // trail so check_provision_status can surface mid-run prompts
+    // (Google number-match etc.). Without it, the run still works —
+    // steps are just only visible in the final result.
+    const steps: string[] = task.stepsSink ?? [];
     const rawTimeout = Number(process.env.UNIVERSAL_BOT_RUN_TIMEOUT_MS);
     const timeoutMs =
       Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 600_000;
@@ -1453,6 +1563,16 @@ export class SignupAgent {
     const password = task.generatePassword();
     const displayName = "Trusty Squire Bot";
     const username = `tsbot${Date.now().toString().slice(-7)}`;
+
+    // F13 diagnostic: which Chrome launch mode start() chose, and
+    // whether egress went through the configured proxy. Lets us tell
+    // from outside the box whether the bot actually got an X display
+    // surface AND whether the residential-proxy path engaged.
+    steps.push(
+      `Browser: launched mode=${this.browser.launchMode} ` +
+        `proxy=${this.browser.proxied ?? "direct"} ` +
+        `channel=${this.browser.channel ?? "bundled-chromium"}`,
+    );
 
     try {
       // Step 1: Navigate to signup page
@@ -1566,6 +1686,17 @@ export class SignupAgent {
             steps,
             ...this.resultTail(),
           };
+        case "anti_bot_blocked":
+          return {
+            success: false,
+            error:
+              `anti_bot_blocked: ${task.service}'s ${outcome.vendor} anti-bot interstitial would ` +
+              `not clear — the bot's IP/fingerprint did not pass ${outcome.vendor}'s server-side ` +
+              `risk score. This is a soft block (no challenge to solve); the user should sign up ` +
+              `manually.`,
+            steps,
+            ...this.resultTail(),
+          };
         case "oauth":
           // T6/T7 — OAuth-first path. runOAuthFlow drives the consent
           // handshake and post-OAuth onboarding to its own terminal
@@ -1651,6 +1782,7 @@ export class SignupAgent {
                     credentials: { email: task.email, password },
                     maxRounds,
                     steps,
+                    ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
                   });
                 }
               } else {
@@ -1734,6 +1866,12 @@ export class SignupAgent {
     // Bounded consent walk — handles account-chooser → consent as two
     // steps without ever spinning. Each iteration re-reads the page.
     const MAX_OAUTH_NAV = 6;
+    // True once a clean scope-grant consent has already been
+    // auto-approved on this flow. Subsequent unreadable-scope consent
+    // pages (post-grant confirmation, account chooser routed through
+    // /consent, etc.) get the soft-advance path instead of an abort —
+    // because the scope-grant decision was already made and validated.
+    let consentAlreadyApproved = false;
     for (let i = 0; i < MAX_OAUTH_NAV; i++) {
       if (this.browser.oauthPageClosed()) {
         steps.push(
@@ -1751,11 +1889,38 @@ export class SignupAgent {
         continue;
       }
       const authState = provider.classifyAuthState(url, body);
-      steps.push(`OAuth: ${provider.label} auth state = ${authState}`);
+      steps.push(`OAuth: ${provider.label} auth state = ${authState} (url=${url.slice(0, 120)})`);
 
       if (authState === "not_provider") break; // flow left the provider — back on the service
 
       if (authState === "challenge") {
+        // Google's number-match challenge ("Tap N on your phone") is
+        // resolvable by the user without re-running the login flow —
+        // surface the number and wait for them to complete it.
+        if (provider.id === "google") {
+          const matchNum = extractGoogleNumberMatch(body);
+          if (matchNum !== null) {
+            steps.push(
+              `Google: match the number ${matchNum} on your phone — ` +
+                `open the Google app on your phone and tap ${matchNum}`,
+            );
+            const cleared = await this.waitForGoogleChallenge(provider, steps);
+            if (!cleared) {
+              return this.oauthAbort(
+                "needs_login",
+                `Google number-match challenge timed out after 2 minutes. ` +
+                  `Re-run \`${loginCmd}\`, complete the challenge in the window, then retry.`,
+                steps,
+              );
+            }
+            steps.push("Google: challenge cleared — continuing OAuth");
+            // Re-classify on the next iteration without burning the
+            // OAuth-navigation budget (which assumes continuous
+            // browser progress, not a 2-minute human pause).
+            i--;
+            continue;
+          }
+        }
         return this.oauthAbort(
           "needs_login",
           `${provider.label} interrupted the sign-in with a security challenge ("verify it's you"). ` +
@@ -1788,7 +1953,48 @@ export class SignupAgent {
 
       // Genuine consent screen / account chooser — scope-gate it (T7).
       const scopes = extractOAuthScopes(url);
+      // Always surface the parsed scopes so the user / debug logs see
+      // exactly what tripped the gate (or what was allowed through).
+      steps.push(
+        `OAuth: parsed consent scopes = [${scopes === null ? "<unreadable>" : scopes.join(", ")}]`,
+      );
       if (scopes === null) {
+        // Defense-in-depth: scrape the page DOM for known scope-grant
+        // verb phrases ("See your", "Manage your contacts", "Send email
+        // on your behalf", etc.). A real scope-grant consent always
+        // lists each scope visually with one of these patterns. An
+        // intermediate page (account chooser, post-grant confirmation,
+        // safety review) does not.
+        const dangerPhrases =
+          provider.id === "google" ? scrapeGoogleScopePhrases(body) : [];
+        if (dangerPhrases.length > 0) {
+          return this.oauthAbort(
+            "oauth_consent_needs_review",
+            `${provider.label} consent page (URL unparseable) lists scope-grant phrases: ` +
+              `[${dangerPhrases.join(" | ")}]. Pausing for manual review.`,
+            steps,
+          );
+        }
+        if (consentAlreadyApproved) {
+          // We already validated and auto-approved a scope-grant
+          // consent earlier in this flow. This second consent-classed
+          // page has no parseable scopes AND no visible scope-grant
+          // verb phrases — it's a post-grant confirmation / safety
+          // review / account chooser routed through /consent. Soft
+          // advance: try the approve control, and if it isn't there
+          // the loop will re-classify on the next iteration.
+          steps.push(
+            "OAuth: post-grant consent page (no parseable scopes, no scope phrases) — advancing",
+          );
+          const advanced = await this.browser.advanceOAuthConsent(provider.id);
+          if (!advanced) {
+            steps.push(
+              "OAuth: no approve control on the post-grant page — waiting for natural navigation",
+            );
+          }
+          await this.browser.wait(3);
+          continue;
+        }
         return this.oauthAbort(
           "oauth_consent_needs_review",
           `reached a ${provider.label} consent screen but could not read its requested scopes ` +
@@ -1796,15 +2002,29 @@ export class SignupAgent {
           steps,
         );
       }
-      if (!provider.scopesAreBasic(scopes)) {
+      const extraAllowed = new Set(task.allowExtraOAuthScopes ?? []);
+      const nonBasic = scopes.filter((s) => !provider.scopesAreBasic([s]));
+      const unauthorized = nonBasic.filter((s) => !extraAllowed.has(s));
+      if (unauthorized.length > 0) {
+        // Encode requested scopes into the error so the MCP tool layer
+        // can extract them and show the user what to approve.
         return this.oauthAbort(
           "oauth_consent_needs_review",
-          `the consent screen requests scopes beyond basic identity (${scopes.join(", ")}). ` +
-            `Approve it manually — the bot only auto-approves basic-identity scopes.`,
+          `${provider.label} consent requests non-basic scopes: [${unauthorized.join(", ")}]. ` +
+            `All requested scopes: [${scopes.join(", ")}]. ` +
+            `To proceed, re-run provision_any_service with allow_extra_oauth_scopes set to ` +
+            `the scopes the user has explicitly approved.`,
           steps,
         );
       }
-      steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
+      if (nonBasic.length > 0) {
+        steps.push(
+          `OAuth: user pre-approved extra scopes [${nonBasic.join(", ")}] — auto-approving`,
+        );
+      } else {
+        steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
+      }
+      consentAlreadyApproved = true;
       const advanced = await this.browser.advanceOAuthConsent(provider.id);
       if (!advanced) {
         return this.oauthAbort(
@@ -1832,6 +2052,7 @@ export class SignupAgent {
         service: task.service,
         maxRounds: task.postVerifyMaxRounds ?? 12,
         steps,
+        ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
       });
     }
     if (credentials.api_key !== undefined) {
@@ -1877,6 +2098,33 @@ export class SignupAgent {
       steps,
       ...this.resultTail(),
     };
+  }
+
+  // Poll the provider page until the challenge clears (the user
+  // completed it on their phone) or 2 minutes elapse. Returns true on
+  // resolution, false on timeout. The 2-minute cap is enough time to
+  // unlock a phone, open the Google app, and tap a number; longer
+  // would mask a stuck/abandoned flow.
+  private async waitForGoogleChallenge(
+    provider: { id: OAuthProviderId; label: string; classifyAuthState: (url: string, body: string) => string },
+    steps: string[],
+  ): Promise<boolean> {
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      await this.browser.wait(3);
+      if (this.browser.oauthPageClosed()) return true;
+      const url = this.browser.currentUrl();
+      let body: string;
+      try {
+        body = (await this.browser.extractText()).slice(0, 4000);
+      } catch {
+        continue;
+      }
+      const state = provider.classifyAuthState(url, body);
+      if (state !== "challenge") return true;
+    }
+    steps.push("Google: challenge wait timed out after 2 minutes");
+    return false;
   }
 
   // Backstop for the critical guarantee (D4): true when the active
@@ -2033,6 +2281,7 @@ ${formatInventory(input.inventory)}`,
     credentials?: { email: string; password: string } | undefined;
     maxRounds: number;
     steps: string[];
+    scopeHint?: string | undefined;
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     let loginAttempts = 0;
@@ -2083,6 +2332,7 @@ ${formatInventory(input.inventory)}`,
           oauth,
           inventory,
           ...(hint !== undefined ? { hint } : {}),
+          ...(args.scopeHint !== undefined ? { scopeHint: args.scopeHint } : {}),
         });
       } catch (err) {
         // The planner's output did not validate — most often a
@@ -2259,6 +2509,12 @@ ${formatInventory(input.inventory)}`,
     // Carried from the previous round when it did not make progress
     // (e.g. an `extract` that found only a masked key).
     hint?: string;
+    // Free-text permission scope hint from the host agent. When
+    // present, the planner aligns option_text picks on permission
+    // dropdowns with it. When absent, the planner is told to default
+    // to MAX permissions (Admin > Write > Read) on token-creation
+    // forms.
+    scopeHint?: string;
   }): Promise<PostVerifyStep> {
     const visibleText = (input.state.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 2500);
 
@@ -2315,7 +2571,11 @@ ${loginGuidance}
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
 - If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
 - Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
-- On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST use a select step to set a non-default permission on at least one dropdown BEFORE clicking the create button — creating with all-default permissions does nothing. Do not click the create button repeatedly; set a permission first.
+- On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST set permissions BEFORE clicking the create button.
+- **PERMISSION SCOPE — default is MAXIMUM.** ${input.scopeHint !== undefined
+  ? `The user provided a scope hint: "${input.scopeHint}". Pick option_text values aligned with this on each permission dropdown.`
+  : `No scope hint was provided. Default to the HIGHEST available permission level on EVERY permission dropdown (Admin > Write > Read > anything lower). Most agent use-cases need write access; a read-only token will fail downstream when the agent tries to push data. Set "Admin" if offered; "Write" otherwise. Explicitly use option_text to specify — do NOT rely on first-option behavior, which often picks Read.`}
+- On a form with MULTIPLE permission rows (Sentry: Project, Team, Member, Issue, Event, Release, Organization), set EACH ONE before clicking Create. One step per turn — return to this turn-by-turn until every row is set.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [

@@ -28,6 +28,7 @@ import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -237,6 +238,23 @@ export class BrowserController {
   // Google handshake completes.
   private oauthProductPage: Page | null = null;
 
+  // F13 — on-demand Xvfb. Set when start() determined the host has no
+  // display surface but Xvfb is available, so Chrome can run with
+  // `headless: false` against a virtual display (Cloudflare/Stytch et
+  // al. detect Chromium-headless and block their signup forms). Torn
+  // down by close().
+  private xvfb: XvfbRig | null = null;
+
+  // F13 — which launch path start() took. Surfaced via .launchMode so
+  // the agent can push it into the run's step trail and we can see
+  // (from outside the box) whether the bot ran headed.
+  private launchedMode: "display" | "xvfb" | "headless" | "unknown" =
+    "unknown";
+
+  get launchMode(): "display" | "xvfb" | "headless" | "unknown" {
+    return this.launchedMode;
+  }
+
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
     this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
@@ -288,13 +306,74 @@ export class BrowserController {
             : ""),
       );
     }
+    // F13 — decide whether to spin up Xvfb and run Chrome headed.
+    // Modern SaaS signups (Cloudflare/Stytch, Clerk, Auth0) detect
+    // Chromium-headless via JS fingerprints and gate their forms
+    // behind the check. Running headed against Xvfb defeats the gate
+    // — the user never sees the display.
+    //
+    // The decision matrix:
+    //   - UNIVERSAL_BOT_HEADLESS=true (explicit opt-in): keep true
+    //     headless. CI / Codespaces that lack Xvfb.
+    //   - UNIVERSAL_BOT_HEADLESS=false (explicit opt-out): the
+    //     current pre-F13 behavior — DISPLAY must exist already.
+    //   - default + DISPLAY set: run headed against the existing
+    //     display (laptop/desktop install).
+    //   - default + no DISPLAY + Xvfb on PATH: spawn Xvfb, run
+    //     headed against it (the headless-server install — what
+    //     Cloudflare needed).
+    //   - default + no DISPLAY + no Xvfb: fall back to true
+    //     headless with a clear stderr warning.
+    let chromeEnv: NodeJS.ProcessEnv | undefined;
+    let chromeHeadless: boolean;
+    const explicitHeadless = process.env.UNIVERSAL_BOT_HEADLESS;
+    const hostHasDisplay =
+      process.platform === "darwin" ||
+      process.platform === "win32" ||
+      (typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0);
+    if (explicitHeadless === "true") {
+      chromeHeadless = true;
+      this.launchedMode = "headless";
+    } else if (explicitHeadless === "false") {
+      chromeHeadless = false;
+      this.launchedMode = "display";
+    } else if (hostHasDisplay) {
+      chromeHeadless = false;
+      this.launchedMode = "display";
+    } else if (xvfbAvailable()) {
+      try {
+        this.xvfb = await startXvfb({ width: 1280, height: 720 });
+        chromeEnv = { ...process.env, DISPLAY: this.xvfb.display };
+        chromeHeadless = false;
+        this.launchedMode = "xvfb";
+        console.error(
+          `[universal-bot] no DISPLAY — spawned Xvfb at ${this.xvfb.display} for headed Chrome`,
+        );
+      } catch (err) {
+        console.error(
+          `[universal-bot] Xvfb failed (${err instanceof Error ? err.message : String(err)}) — ` +
+            `falling back to true headless; Cloudflare/Stytch-class signups may fail`,
+        );
+        chromeHeadless = true;
+        this.launchedMode = "headless";
+      }
+    } else {
+      console.error(
+        `[universal-bot] no DISPLAY and Xvfb not installed — running true headless. ` +
+          `For Cloudflare/Stytch-class signups install xvfb: apt-get install -y xvfb`,
+      );
+      chromeHeadless = true;
+      this.launchedMode = "headless";
+    }
+
     // T3: a PERSISTENT context. The profile dir carries the user's
     // Google session (established by `mcp login` — see google-login.ts),
     // so the OAuth-first signup path reuses it instead of starting
     // logged-out. launchPersistentContext takes launch + context
     // options in one call.
     const context = await getChromium().launchPersistentContext(this.profileDir, {
-      headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
+      headless: chromeHeadless,
+      ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
       // `channel:` selects a real installed browser over the bundled
       // binary; omitted entirely when null.
       ...(channel !== null ? { channel } : {}),
@@ -1266,6 +1345,14 @@ export class BrowserController {
       // networkidle never settles on pages with analytics sockets or
       // long-poll — not fatal, fall through to the element wait.
     }
+    // F13 follow-up — if we landed on a full-page anti-bot interstitial
+    // (Cloudflare "Just a moment..." / Turnstile pre-clear / similar),
+    // wait for it to clear and the real page to render. networkidle
+    // sometimes fires DURING the interstitial because Cloudflare keeps
+    // the connection quiet between the verify-handshake and the
+    // redirect to the real page. Without this, the bot snapshots a
+    // 2-element interstitial inventory and bails.
+    await this.waitForAntiBotInterstitialToClear(timeoutMs);
     try {
       await this.page.waitForSelector("input, button", {
         state: "visible",
@@ -1275,6 +1362,75 @@ export class BrowserController {
       // No interactive element appeared in time — let the planner run
       // anyway; it fails cleanly rather than hanging.
     }
+  }
+
+  // Cloudflare and similar gateways serve a full-page interstitial
+  // ("Just a moment..." / Turnstile pre-clear) before the real page.
+  // The challenge usually clears within ~5-10s — the bot just needs
+  // to wait. Detected from page text patterns rather than URL: the
+  // URL stays the same; the body replaces.
+  //
+  // Returns when the interstitial is gone, or after `timeoutMs` if it
+  // never cleared. Best-effort: any unexpected error returns early
+  // rather than failing the whole signup.
+  private async waitForAntiBotInterstitialToClear(timeoutMs: number): Promise<void> {
+    if (!this.page) return;
+    let detected = await this.pollUntilInterstitialClears(timeoutMs);
+    if (!detected) {
+      // We either never saw an interstitial, or we saw one and it
+      // cleared on its own. Nothing more to do.
+      return;
+    }
+    // The interstitial outlived the wait. Cloudflare frequently shows
+    // "Verification successful. Wait" but then never fires the JS
+    // redirect — the challenge passed, but the redirect script got
+    // stuck or the cookie set is racing the navigation. A single
+    // reload, now that the cf_clearance cookie is set, often lets the
+    // real page render. (If the issue is a server-side risk-score
+    // block — fingerprint/IP — reload won't help, but the caller's
+    // inventory diagnostic will still surface the block.)
+    try {
+      await this.page.reload({ waitUntil: "networkidle", timeout: 10_000 });
+    } catch {
+      // reload failed — proceed with what's there
+    }
+    await this.pollUntilInterstitialClears(Math.max(5000, timeoutMs / 2));
+  }
+
+  // One poll loop. Returns true if an interstitial was ever observed
+  // (cleared or still there at timeout), false if never seen.
+  private async pollUntilInterstitialClears(timeoutMs: number): Promise<boolean> {
+    if (!this.page) return false;
+    const deadline = Date.now() + timeoutMs;
+    let detected = false;
+    while (Date.now() < deadline) {
+      let title = "";
+      let bodyText = "";
+      try {
+        title = await this.page.title();
+        bodyText = await this.page.evaluate(() =>
+          (document.body?.innerText ?? "").slice(0, 500),
+        );
+      } catch {
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+      const onInterstitial =
+        /just a moment|performing security verification|verifying you are human|checking your browser|attention required/i.test(
+          title + " " + bodyText,
+        );
+      if (!onInterstitial) {
+        if (detected) {
+          // Give the freshly-revealed page a tick to hydrate before
+          // the inventory scan.
+          await new Promise((r) => setTimeout(r, 800));
+        }
+        return detected;
+      }
+      detected = true;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return detected;
   }
 
   // Walk the live DOM (piercing open shadow roots) and return every
@@ -1596,6 +1752,13 @@ export class BrowserController {
     if (this.page) await this.page.close();
     // Closing the persistent context shuts the browser down too.
     if (this.context) await this.context.close();
+    // F13 — release the on-demand Xvfb if we spawned one. Order
+    // matters: kill Chrome (context.close) first so it has its
+    // display until it exits, THEN kill Xvfb.
+    if (this.xvfb !== null) {
+      this.xvfb.stop();
+      this.xvfb = null;
+    }
   }
 }
 

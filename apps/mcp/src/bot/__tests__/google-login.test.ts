@@ -7,10 +7,12 @@ import { describe, expect, it } from "vitest";
 import {
   binaryOnPath,
   classifyGoogleAuthState,
+  extractGoogleNumberMatch,
   extractOAuthScopes,
   findFreePort,
   hasDisplay,
   scopesAreBasic,
+  scrapeGoogleScopePhrases,
 } from "../google-login.js";
 
 describe("google-login env helpers", () => {
@@ -118,6 +120,72 @@ describe("classifyGoogleAuthState (T5)", () => {
     expect(classifyGoogleAuthState("https://accounts.google.com/odd/page", "")).toBe(
       "needs_login",
     );
+  });
+});
+
+describe("extractGoogleNumberMatch", () => {
+  it("reads the number from the 'tap N on your phone' phrasing", () => {
+    expect(
+      extractGoogleNumberMatch(
+        "Verify it's you — Tap 28 on your phone to sign in",
+      ),
+    ).toBe("28");
+  });
+
+  it("reads the number from the '<N> on your other device' phrasing", () => {
+    expect(
+      extractGoogleNumberMatch(
+        "Match the number — 47 on your other device. Google wants to make sure it's really you",
+      ),
+    ).toBe("47");
+  });
+
+  it("falls back to a 2-digit number on a recognized challenge page", () => {
+    expect(
+      extractGoogleNumberMatch(
+        "Match the number  Google wants to make sure it's really you  89",
+      ),
+    ).toBe("89");
+  });
+
+  it("returns null on unrelated pages", () => {
+    expect(extractGoogleNumberMatch("Sign in with your password")).toBeNull();
+    expect(extractGoogleNumberMatch("")).toBeNull();
+  });
+});
+
+describe("scrapeGoogleScopePhrases", () => {
+  it("flags a Drive read scope", () => {
+    const phrases = scrapeGoogleScopePhrases(
+      "Vercel will get to: See and download all your Google Drive files. Continue",
+    );
+    expect(phrases.length).toBeGreaterThan(0);
+    expect(phrases[0]).toMatch(/see and download/i);
+  });
+
+  it("flags a contacts manage scope", () => {
+    const phrases = scrapeGoogleScopePhrases(
+      "App will be able to: Manage your contacts. Allow",
+    );
+    expect(phrases.length).toBeGreaterThan(0);
+    expect(phrases[0]).toMatch(/manage your contacts/i);
+  });
+
+  it("flags a send-mail-as-you scope", () => {
+    const phrases = scrapeGoogleScopePhrases(
+      "Send email on your behalf to anyone you choose",
+    );
+    expect(phrases.length).toBeGreaterThan(0);
+  });
+
+  it("returns empty on a basic-only consent / chooser / confirmation page", () => {
+    expect(
+      scrapeGoogleScopePhrases(
+        "Continue to Vercel. Vercel wants access to your Google Account. Allow",
+      ),
+    ).toEqual([]);
+    expect(scrapeGoogleScopePhrases("Choose an account to continue to Vercel")).toEqual([]);
+    expect(scrapeGoogleScopePhrases("")).toEqual([]);
   });
 });
 

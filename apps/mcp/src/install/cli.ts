@@ -45,6 +45,7 @@ import {
   openInstallConfirmInBotChrome,
 } from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
+import { loggedInProviders } from "../bot/login-state.js";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
 
@@ -71,6 +72,11 @@ type Argv = {
   // The bot's Chrome profile won't gain a provider session — the user
   // will need `mcp login` before their first OAuth-based signup.
   skipBrowser: boolean;
+  // --force-relogin: skip the install preflight that short-circuits
+  // when an existing session + bot Google login are already valid.
+  // Use this to switch the bound Google account or recover a
+  // suspect-stale session.
+  forceRelogin: boolean;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -81,6 +87,7 @@ function parseArgs(argv: string[]): Argv {
   let proxyUrl: string | undefined;
   let providerArg: ProviderArg | undefined;
   let skipBrowser = false;
+  let forceRelogin = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -105,9 +112,11 @@ function parseArgs(argv: string[]): Argv {
       // --skip-login kept as an alias for the 0.5.0 spelling so any
       // scripted callers still work.
       skipBrowser = true;
+    } else if (arg === "--force-relogin") {
+      forceRelogin = true;
     }
   }
-  const args: Argv = { command, apiBase, skipBrowser };
+  const args: Argv = { command, apiBase, skipBrowser, forceRelogin };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
@@ -229,6 +238,24 @@ async function install(args: Argv): Promise<void> {
   const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
 
+  // Preflight: an existing install that's fully provisioned (machine
+  // token + agent session token + a bot Google session marker) doesn't
+  // need to redo the browser confirm. Just rewrite the MCP config in
+  // place so the host agent picks up the latest server entrypoint and
+  // env. Pass --force-relogin to bypass (e.g. to switch Google account).
+  if (!args.forceRelogin) {
+    const preflight = await checkAlreadyProvisioned();
+    if (preflight !== null) {
+      await writeAgentConfig(target, agent, args);
+      ui.success(
+        `Already provisioned (machine + ${preflight.providers.join("/")} session) — ` +
+          `refreshed ${agent.display_name} MCP config without re-running the browser flow`,
+      );
+      ui.hint(`Pass ${ui.code("--force-relogin")} if you want to switch the bound account.`);
+      return;
+    }
+  }
+
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
   // Best-effort: a failure returns null and the install continues.
@@ -282,27 +309,7 @@ async function install(args: Argv): Promise<void> {
   await storage.write(session);
   ui.success(`Session saved (${storage.backendName()})`);
 
-  // Write the MCP config into the host agent. The tokens themselves
-  // are NOT in the env — the MCP server reads them from session
-  // storage (keychain / file), which keeps them out of any
-  // child-process listing or shell history.
-  const launch = resolveServerLaunch();
-  const env: Record<string, string> = {
-    TRUSTY_SQUIRE_AGENT_IDENTITY: target,
-    UNIVERSAL_BOT_PREFER_CHEAP: "true",
-  };
-  if (args.proxyUrl !== undefined) {
-    env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
-  }
-  await agent.writeConfig({
-    command: launch.command,
-    args: launch.args,
-    env,
-  });
-  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
-  if (args.proxyUrl !== undefined) {
-    ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
-  }
+  await writeAgentConfig(target, agent, args);
   if (args.skipBrowser) {
     ui.panel(
       `--skip-browser was set, so the bot's Chrome didn't observe your sign-in. ` +
@@ -333,6 +340,60 @@ async function install(args: Argv): Promise<void> {
 // claim. The bot's Chrome never starts, so the bot won't have a
 // provider session afterwards — the user must run `mcp login` before
 // their first OAuth signup. This path is for CI / scripted installs.
+// True when the local session + bot profile already carry everything
+// install would establish. Returns the list of provider sessions
+// detected, or null when anything's missing. Best-effort: any read
+// error returns null and the caller proceeds with the normal flow.
+async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[] } | null> {
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (
+      session === null ||
+      session.machine_token === undefined ||
+      session.agent_session_token === undefined ||
+      session.account_id === undefined
+    ) {
+      return null;
+    }
+    const providers = loggedInProviders();
+    if (providers.length === 0) return null;
+    return { providers };
+  } catch {
+    return null;
+  }
+}
+
+// Writes the host agent's MCP config — extracted so both the normal
+// install path and the preflight-already-provisioned shortcut share
+// one implementation.
+async function writeAgentConfig(
+  target: AgentTarget,
+  agent: (typeof AGENTS)[AgentTarget],
+  args: Argv,
+): Promise<void> {
+  // Tokens themselves are NOT in the env — the MCP server reads them
+  // from session storage (keychain / file), which keeps them out of
+  // any child-process listing or shell history.
+  const launch = resolveServerLaunch();
+  const env: Record<string, string> = {
+    TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+    UNIVERSAL_BOT_PREFER_CHEAP: "true",
+  };
+  if (args.proxyUrl !== undefined) {
+    env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
+  }
+  await agent.writeConfig({
+    command: launch.command,
+    args: launch.args,
+    env,
+  });
+  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
+  if (args.proxyUrl !== undefined) {
+    ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
+  }
+}
+
 async function runInstallClaim(
   apiBase: string,
   target: AgentTarget,
@@ -480,7 +541,7 @@ function printHelp(): void {
   console.warn(``);
   console.warn(`Commands:`);
   console.warn(
-    `  install [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>]`,
+    `  install [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>] [--force-relogin]`,
   );
   console.warn(`  login [--provider=google|github]   re-run the one-time OAuth sign-in`);
   console.warn(`  logout`);

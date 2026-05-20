@@ -112,6 +112,7 @@ describe("install --target=<agent> writes a valid config", () => {
         // browser instead. Irrelevant to "does install write a config
         // for this target," and keeps the test fast (no Chrome boot).
         skipBrowser: true,
+        forceRelogin: false,
       });
 
       const configPath = AGENTS[target].config_path();

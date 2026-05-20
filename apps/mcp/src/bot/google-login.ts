@@ -95,10 +95,12 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     cookies: ["user_session", "__Host-user_session_same_site"],
   },
 };
-// Phone-shaped virtual display — small and portrait so it scales cleanly
-// onto a phone via noVNC (the spike's 1920x1080 was the UX mistake).
-const HEADLESS_W = 540;
-const HEADLESS_H = 960;
+// Phone-shaped virtual display — portrait so it scales cleanly onto a
+// phone via noVNC (the spike's 1920x1080 was the UX mistake). 720x1280
+// is the smallest size that doesn't look pixel-y on a 1080p+ phone
+// screen, and stays bandwidth-friendly compared to 1080x1920.
+const HEADLESS_W = 720;
+const HEADLESS_H = 1280;
 
 // The Debian/Ubuntu `novnc` package installs its web assets here — the
 // `core/` RFB library our branded page reuses (see runHeadlessChrome).
@@ -214,7 +216,7 @@ const BASIC_OAUTH_SCOPES: ReadonlySet<string> = new Set([
 export function extractOAuthScopes(rawUrl: string): string[] | null {
   const scopes: string[] = [];
   const visit = (urlStr: string, depth: number): void => {
-    if (scopes.length > 0 || depth > 4) return;
+    if (scopes.length > 0 || depth > 8) return;
     let u: URL;
     try {
       u = new URL(urlStr);
@@ -246,6 +248,63 @@ export function extractOAuthScopes(rawUrl: string): string[] | null {
 // auto-approve. Exported for unit testing.
 export function scopesAreBasic(scopes: readonly string[]): boolean {
   return scopes.length > 0 && scopes.every((s) => BASIC_OAUTH_SCOPES.has(s));
+}
+
+// Defense-in-depth for the case where extractOAuthScopes returns null
+// (no parseable scope= param) but the page IS a real scope-grant
+// consent. Google's consent screen lists each scope visually with a
+// templated verb phrase: "See your", "Manage your", "Edit your", "Send
+// email", etc. A scope-summary / account-chooser / post-grant
+// confirmation does not include these phrases. So when the URL gives
+// us nothing, the visible-text phrases are the next best signal.
+//
+// Returns the list of suspicious phrases found (each capped at 80 chars
+// so a runaway match cannot blow up the response). Empty list = the
+// page does not appear to grant any sensitive scope.
+export function scrapeGoogleScopePhrases(text: string): string[] {
+  const patterns: RegExp[] = [
+    /see\s+(?:and\s+download|and\s+manage)\s+[^.\n]+/gi,
+    /manage\s+(?:your|all|all\s+your)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files|account|youtube)[^.\n]*/gi,
+    /edit\s+(?:your|all)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files)[^.\n]*/gi,
+    /send\s+(?:email|mail|messages)\s+(?:on\s+your\s+behalf|as\s+you)[^.\n]*/gi,
+    /view\s+(?:your|all|all\s+your)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files|youtube|location\s+history)[^.\n]*/gi,
+    /access\s+your\s+(?:google\s+drive|gmail|contacts|calendars?|photos|youtube)[^.\n]*/gi,
+    /delete\s+(?:your|all)\s+[^.\n]+/gi,
+  ];
+  const matches = new Set<string>();
+  for (const p of patterns) {
+    for (const m of text.matchAll(p)) {
+      matches.add(m[0].slice(0, 80).trim());
+    }
+  }
+  return Array.from(matches);
+}
+
+// Google's "number-match" challenge (URL: /signin/challenge/dp) shows
+// ONE big number on the desktop browser; the user's phone shows three
+// options and they tap the matching one. The number is the only piece
+// of state the user needs to complete the challenge — extract it from
+// the page text so the bot can surface it to the user. Returns null
+// when the text isn't a number-match page.
+//
+// Exported for unit testing — phrasing varies by locale/version.
+export function extractGoogleNumberMatch(text: string): string | null {
+  const m1 = text.match(/tap\s+(\d{1,3})\s+on\s+your/i);
+  if (m1 && m1[1] !== undefined) return m1[1];
+  const m2 = text.match(/\b(\d{1,3})\s+on\s+your\s+(?:phone|other\s+device)/i);
+  if (m2 && m2[1] !== undefined) return m2[1];
+  // Fallback: text mentions the number-match challenge but used a
+  // phrasing we don't know yet. Pull the most plausible digit group —
+  // a 2-digit number is the current Google pattern.
+  if (/match the number|tap the number|google wants to make sure/i.test(text)) {
+    const digits = text.match(/\b\d{1,3}\b/g);
+    if (digits) {
+      const twoDigit = digits.find((d) => d.length === 2);
+      if (twoDigit !== undefined) return twoDigit;
+      if (digits[0] !== undefined) return digits[0];
+    }
+  }
+  return null;
 }
 
 // --- environment helpers ----------------------------------------------

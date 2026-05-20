@@ -40,6 +40,25 @@ export const provisionAnyInputSchema = z.object({
     .describe(
       "Force OAuth signup through a specific provider. Usually unnecessary — the bot already auto-prefers OAuth when the service offers Google/GitHub sign-in and a login session exists. Set this only to pin one provider. OAuth needs a one-time `npx @trusty-squire/mcp login [--provider=github]`.",
     ),
+  scope_hint: z
+    .string()
+    .max(200)
+    .optional()
+    .describe(
+      "Optional permission/scope guidance for the API key the bot creates. Free text the LLM passes through to the signup planner. " +
+        "Examples: 'admin' / 'read-only' / 'write access to upload source maps' / 'just enough to send emails'. " +
+        "Without this hint, the bot defaults to MAXIMUM available permissions on token-creation forms (Admin > Write > Read), since most agent use-cases need write access and a too-restrictive key fails downstream. " +
+        "Pass this when the user explicitly asked for a limited token or when the use-case clearly only needs read.",
+    ),
+  allow_extra_oauth_scopes: z
+    .array(z.string())
+    .max(20)
+    .optional()
+    .describe(
+      "OAuth scopes the user has EXPLICITLY approved beyond basic identity (openid/email/profile). " +
+        "Use this ONLY after asking the user — if a previous run returned status=oauth_consent_needs_review with a requested_scopes list, ask the user 'Service X is requesting these scopes: [...] — approve?', and if they say yes, re-run provision_any_service with the same exact scope strings here. " +
+        "Do NOT preemptively pass scopes the user hasn't seen. The bot enforces the consent boundary; this parameter is how the user lifts it.",
+    ),
 });
 
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
@@ -71,6 +90,18 @@ const PROVISION_ANY_JSON_SCHEMA = {
       description:
         "Force OAuth signup through a specific provider. Usually unnecessary — the bot auto-prefers OAuth whenever the service offers Google/GitHub sign-in and a session exists (`npx @trusty-squire/mcp login`). Set this only to pin one provider.",
     },
+    scope_hint: {
+      type: "string",
+      description:
+        "Optional permission/scope guidance for the API key. Free-text hint the LLM passes through to the signup planner. Examples: 'admin', 'read-only', 'write access to upload source maps', 'just enough to send emails'. " +
+        "Default WITHOUT this hint: MAXIMUM available permissions on token-creation forms (Admin > Write > Read) — most agent use-cases need write access and a too-restrictive key fails downstream. Pass this only when the user explicitly asked for a limited token or the use-case clearly only needs read.",
+    },
+    allow_extra_oauth_scopes: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "OAuth scopes the user has EXPLICITLY approved beyond basic identity (openid/email/profile). Use this ONLY after asking the user. If a previous run returned status=oauth_consent_needs_review with requested_scopes, show that list to the user, get their approval, and re-run with the approved scope strings here. The bot enforces the consent boundary; this parameter is how the user lifts it. Do NOT preemptively pass scopes the user hasn't seen.",
+    },
   },
 } as const;
 
@@ -95,6 +126,9 @@ interface RunRecord {
   startedAt: number;
   // undefined while the run is in flight; the final tool response once done.
   result: Record<string, unknown> | undefined;
+  // Mutable, shared with the bot. Surfaces mid-run prompts (Google
+  // number-match etc.) via check_provision_status's recent_steps.
+  stepsSink: string[];
 }
 const runStore = new Map<string, RunRecord>();
 // Cap so a long session cannot leak memory; oldest run evicted first.
@@ -129,17 +163,33 @@ const CHECK_DESCRIPTION = `Check the status of a signup started by provision_any
 Pass the run_id from provision_any_service. Poll about once a minute
 until status is no longer "running".
 
+A "running" response carries recent_steps (the bot's live progress trail)
+and user_action_required (true when the latest steps include a
+user-action prompt). When user_action_required is true, IMMEDIATELY
+relay the latest recent_steps entry to the user — common case is
+"Google: match the number 28 on your phone — open the Google app and
+tap 28" — then keep polling.
+
 RESPONSES:
-- status="running" → still working; poll again in ~60s.
+- status="running" → still working. Read recent_steps; if
+  user_action_required is true, relay the latest prompt to the user
+  and poll again in ~10s. Otherwise poll again in ~30-60s.
 - status="success" + credentials → signup done; show the credentials to the user.
 - status="verification_not_sent" → the service needs an email verification the bot
   can't complete; show the message and tell the user to sign up manually.
 - status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
+- status="anti_bot_blocked" → the site's anti-bot gateway (Cloudflare/Sucuri/DataDome/Imperva)
+  held the bot on its "Just a moment..." page indefinitely. IP/fingerprint risk-score block.
+  Tell the user to sign up manually.
 - status="needs_login" → an OAuth signup needs the bot's one-time Google login;
   tell the user to run \`npx @trusty-squire/mcp login\`, then retry.
-- status="oauth_consent_needs_review" → the Google consent screen asked for more than
-  basic profile access; the user must complete the OAuth signup manually.
+- status="oauth_consent_needs_review" → the OAuth consent screen requested scopes beyond
+  basic identity (openid/email/profile). Response carries requested_scopes (the full list)
+  and unauthorized_scopes (the ones blocking the run). SHOW unauthorized_scopes to the
+  user, ask "approve these scopes?", and if they say yes call provision_any_service AGAIN
+  with allow_extra_oauth_scopes set to that list. If they say no, tell them to sign up
+  manually.
 - status="onboarding_blocked" → signed in via Google, but the API key is behind a
   billing/payment wall; the user must add a payment method.
 - status="failed" → the form filled but yielded no credentials; show steps[].
@@ -227,7 +277,13 @@ export const provisionAnyTool = {
       const oldest = runStore.keys().next().value;
       if (oldest !== undefined) runStore.delete(oldest);
     }
-    runStore.set(runId, { service: input.service, startedAt: Date.now(), result: undefined });
+    const stepsSink: string[] = [];
+    runStore.set(runId, {
+      service: input.service,
+      startedAt: Date.now(),
+      result: undefined,
+      stepsSink,
+    });
 
     // Start the signup in the background — do NOT await it. runSignupTask
     // never rejects; it writes the final response into runStore, which
@@ -238,6 +294,7 @@ export const provisionAnyTool = {
       alias,
       inboxClient,
       agentSessionToken: session.agent_session_token,
+      stepsSink,
     });
 
     return {
@@ -269,12 +326,25 @@ export const checkProvisionStatusTool = {
       };
     }
     if (record.result === undefined) {
+      // Surface the live step trail so the host LLM can read mid-run
+      // prompts (Google number-match, captcha, oauth nav, etc.) and
+      // relay them to the user without waiting for the final result.
+      // Last 15 is plenty for context — older entries are usually
+      // navigation noise.
+      const recentSteps = record.stepsSink.slice(-15);
+      const userActionRequired = recentSteps.some((s) =>
+        /match the number|tap \d+ on your phone|verify it's you|captcha/i.test(s),
+      );
       return {
         status: "running",
         run_id: input.run_id,
         service: record.service,
         elapsed_seconds: Math.round((Date.now() - record.startedAt) / 1000),
-        message: "Signup still in progress. Poll again in about 60 seconds.",
+        recent_steps: recentSteps,
+        user_action_required: userActionRequired,
+        message: userActionRequired
+          ? "Signup is waiting on a user action — read recent_steps and relay the prompt to the user. Poll again in ~10 seconds."
+          : "Signup still in progress. Poll again in about 30 seconds.",
       };
     }
     return record.result;
@@ -291,6 +361,9 @@ interface RunContext {
   // install CLI requires a successful browser confirm before writing
   // the session.
   agentSessionToken: string;
+  // Shared step trail the bot pushes into in place; check_provision_status
+  // reads it for live mid-run progress (Google number-match etc.).
+  stepsSink: string[];
 }
 
 // Runs the signup to completion and stores the final tool response in
@@ -331,6 +404,19 @@ async function runSignupTask(
       // T6/T13: route through the provider's OAuth path when the
       // caller asked for it (Google or GitHub).
       ...(input.oauth_provider !== undefined ? { oauthProvider: input.oauth_provider } : {}),
+      // Forward the LLM's scope hint to the post-verify planner so
+      // it can pick option_text values on permission dropdowns
+      // (Sentry, similar) intentionally instead of defaulting to
+      // first option / minimum scope.
+      ...(input.scope_hint !== undefined ? { scopeHint: input.scope_hint } : {}),
+      // OAuth scopes the user has pre-approved (lifted up by the LLM
+      // through user dialog). Default empty → strict basic-only gate.
+      ...(input.allow_extra_oauth_scopes !== undefined
+        ? { allowExtraOAuthScopes: input.allow_extra_oauth_scopes }
+        : {}),
+      // Share the in-flight step trail so check_provision_status can
+      // surface live progress (the bot pushes into ctx.stepsSink).
+      stepsSink: ctx.stepsSink,
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -428,6 +514,25 @@ export function buildSignupResponse(
     };
   }
 
+  // Anti-bot interstitial (Cloudflare/Sucuri/DataDome/Imperva) that
+  // wouldn't clear after retries + reload. Distinct from
+  // oauth_required: there IS a form behind the gate, the bot just
+  // can't get to it. Common on Cloudflare's own dashboard (the most
+  // aggressive bot-detection on the internet, by their own product).
+  if (result.error !== undefined && result.error.startsWith("anti_bot_blocked")) {
+    return {
+      status: "anti_bot_blocked",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service}'s anti-bot gateway refused to let the bot through — IP/fingerprint risk ` +
+        `score too high. Tell the user to sign up manually at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
   // T7/T10 — OAuth: the bot's Google session is missing/expired, or
   // Google interrupted with a security challenge. The remedy for both
   // is the one-time interactive login.
@@ -447,18 +552,30 @@ export function buildSignupResponse(
 
   // T7/T10 — OAuth: the consent screen requested broader-than-basic
   // scopes (or its scopes could not be read). The bot deliberately
-  // does not auto-approve — a human must review it.
+  // does not auto-approve — surface the parsed scope list so the LLM
+  // can ask the user to approve them, then re-run with
+  // allow_extra_oauth_scopes.
   if (result.error !== undefined && result.error.startsWith("oauth_consent_needs_review")) {
+    const { allRequested, unauthorized } = parseConsentScopes(result.error, result.steps);
     return {
       status: "oauth_consent_needs_review",
       service: input.service,
       error: result.error,
       steps: result.steps,
       browser_channel: result.browser_channel ?? null,
+      requested_scopes: allRequested,
+      unauthorized_scopes: unauthorized,
       message:
-        `${input.service}'s Google consent screen needs human review (it asked for more than ` +
-        `basic profile access). Tell the user to complete the OAuth signup manually at ` +
-        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+        unauthorized.length > 0
+          ? `${input.service}'s OAuth consent screen requested scopes the user has not approved: ` +
+            `[${unauthorized.join(", ")}]. Show the full requested list to the user, ask for ` +
+            `explicit approval, and if granted re-run provision_any_service with ` +
+            `allow_extra_oauth_scopes=${JSON.stringify(unauthorized)}. ` +
+            `Otherwise tell the user to sign up manually at ` +
+            `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`
+          : `${input.service}'s OAuth consent screen could not be parsed for scopes. Tell the user ` +
+            `to complete the OAuth signup manually at ` +
+            `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
     };
   }
 
@@ -504,6 +621,38 @@ export function buildSignupResponse(
     browser_channel: result.browser_channel ?? null,
     message: `Couldn't finish signing up for ${input.service}. Show the user the steps[] for debugging.`,
   };
+}
+
+// Extract the scope lists encoded in the oauth_consent_needs_review
+// error message authored by agent.ts. The two bracketed lists are:
+//   [<unauthorized scopes>] in "non-basic scopes: [...]"
+//   [<all requested>]       in "All requested scopes: [...]"
+// Falls back to a step-trail scan ("parsed consent scopes = [...]") so
+// even the unreadable-scope abort path can surface what the bot saw.
+function parseConsentScopes(
+  errorMessage: string,
+  steps: readonly string[],
+): { allRequested: string[]; unauthorized: string[] } {
+  const splitList = (raw: string): string[] =>
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && s !== "<unreadable>");
+
+  const allMatch = errorMessage.match(/All requested scopes: \[([^\]]*)\]/);
+  const unauthorizedMatch = errorMessage.match(/non-basic scopes: \[([^\]]*)\]/);
+  const allRequested = allMatch?.[1] !== undefined ? splitList(allMatch[1]) : [];
+  const unauthorized = unauthorizedMatch?.[1] !== undefined ? splitList(unauthorizedMatch[1]) : [];
+
+  if (allRequested.length === 0) {
+    for (const step of steps) {
+      const m = step.match(/parsed consent scopes = \[([^\]]*)\]/);
+      if (m?.[1] !== undefined) {
+        return { allRequested: splitList(m[1]), unauthorized };
+      }
+    }
+  }
+  return { allRequested, unauthorized };
 }
 
 // Best-effort POST to /v1/captcha-events. We don't care about the
