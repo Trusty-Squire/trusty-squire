@@ -498,6 +498,42 @@ Findings (2026-05-18)" section.
   file in the rig's temp dir and use `x11vnc -passwdfile`. Surfaced by
   the /ship adversarial review 2026-05-18.
 
+- [ ] **G15 — Short URL for the noVNC tunnel link. [P2]** Raised
+  2026-05-20. The headless install prints a cloudflared tunnel URL
+  like `https://shouts-clean-mediawiki-cookies.trycloudflare.com/
+  vnc.html#password=25f4cc35` (~80 chars). On a phone the long
+  random-words subdomain is unreadable; shortening to something like
+  `trustysquire.ai/g/abc12#password=25f4cc35` would be ~40 chars and
+  brand-anchored.
+
+  **Implementation** (~3 hours):
+  - API: `POST /v1/short` body `{url}` → `{slug}` with a 15-min TTL
+    (matches the install token expiry — both die at the same time).
+    `GET /g/:slug` → 302 to the long URL. In-memory store is fine
+    given the short TTL.
+  - CLI: after the cloudflared tunnel is up, call `POST /v1/short`,
+    print the shortened URL in the noVNC banner instead of the
+    cloudflared one.
+  - Fly deploy of the API change.
+
+  **Fragment handling note:** the VNC password rides in the URL
+  fragment (`#password=…`), which never reaches a server, so it
+  can't be stored on the shortener — the SLUG resolves only the
+  long URL prefix. Modern browsers preserve the original fragment
+  across an HTTP 302 redirect (when the redirect target has no
+  fragment of its own), so the password reaches the bot's vnc.html
+  unchanged. Worth a quick smoke check across Chrome / Safari /
+  Firefox Mobile because behavior at the spec edge has historically
+  varied.
+
+  **Domain decision required:** the user spec'd "trusty.ai/xxx"
+  but the actual project domain is trustysquire.ai. Options:
+  (a) use `trustysquire.ai/g/<slug>` — works today, no new domain.
+  (b) register `trusty.ai` (if available) and attach to the Fly
+      web app — cleanest brand.
+  (c) dedicated short domain like `ts.sh` — most flexible, extra
+      registration step.
+
 ## H — Concurrency: the bot is single-flight
 
 Raised 2026-05-16. `provision_any_service` has no concurrency story —

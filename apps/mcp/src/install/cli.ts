@@ -154,27 +154,51 @@ function resolveServerLaunch(): { command: string; args: string[] } {
   if (!isPrerelease) {
     return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
   }
-  // Prerelease from GitHub Releases — copy the package out so the
-  // launch survives npx cache eviction.
-  const stableRoot = join(homedir(), ".trusty-squire", "lib", "mcp");
-  const pkgRoot = dirname(dirname(binPath)); // dist/bin.js → package root
+  // Prerelease from GitHub Releases — copy the package PLUS the
+  // ephemeral cache's entire `node_modules` to a stable location.
+  //
+  // We need both because the package imports @modelcontextprotocol/sdk,
+  // playwright, etc. at runtime. Node's resolver walks up the directory
+  // tree looking for `node_modules/<dep>`; if we copy only the package
+  // dir, the resolver finds nothing and fails ERR_MODULE_NOT_FOUND on
+  // the first import. Mirroring the cache's `node_modules` structure
+  // means the same walk-up resolution works from the stable location.
+  //
+  // npx cache layout we depend on:
+  //   <cache>/
+  //     node_modules/
+  //       @trusty-squire/mcp/dist/bin.js   ← binPath
+  //       @modelcontextprotocol/sdk/...    ← peer at the same level
+  //       ...                              ← every other transitive dep
+  //
+  // We copy the whole `<cache>/node_modules` tree to
+  // `~/.trusty-squire/lib/node_modules`, then launch
+  // `node .../node_modules/@trusty-squire/mcp/dist/bin.js server`.
+  const stableLib = join(homedir(), ".trusty-squire", "lib");
+  const stableNodeModules = join(stableLib, "node_modules");
+  const pkgRoot = dirname(dirname(binPath)); // dist/bin.js → @trusty-squire/mcp/
+  const cacheNodeModules = dirname(dirname(pkgRoot)); // → node_modules/
+  const stableBin = join(
+    stableNodeModules,
+    "@trusty-squire",
+    "mcp",
+    "dist",
+    "bin.js",
+  );
   try {
-    cpSync(pkgRoot, stableRoot, { recursive: true, force: true });
+    cpSync(cacheNodeModules, stableNodeModules, { recursive: true, force: true });
   } catch (err) {
     // If the copy fails (unlikely — write access to $HOME is the
     // bar), fall back to the in-cache absolute path. Works until
     // npx clears it, which is acceptable for a test build.
     console.warn(
-      `[trusty-squire] couldn't copy package to ~/.trusty-squire/lib/mcp ` +
+      `[trusty-squire] couldn't copy node_modules to ~/.trusty-squire/lib ` +
         `(${err instanceof Error ? err.message : String(err)}); using cache path. ` +
         `Re-run install if the MCP server stops working.`,
     );
     return { command: process.execPath, args: [binPath, "server"] };
   }
-  return {
-    command: process.execPath,
-    args: [join(stableRoot, "dist", "bin.js"), "server"],
-  };
+  return { command: process.execPath, args: [stableBin, "server"] };
 }
 
 export async function runCli(argv: string[]): Promise<void> {
