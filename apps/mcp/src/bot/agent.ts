@@ -10,12 +10,20 @@
 
 import type {
   BrowserController,
+  BrowserState,
   CaptchaKind,
   CaptchaVariant,
   InteractiveElement,
 } from "./browser.js";
 import { rankAndCapInventory, scoreSignupButton } from "./browser.js";
+import {
+  OAUTH_PROVIDERS,
+  extractOAuthScopes,
+  type OAuthProviderId,
+} from "./oauth-providers.js";
+import { loggedInProviders } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
+import { captureOnboardingRound } from "./onboarding-capture.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
   pickLLMPair,
@@ -82,6 +90,25 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
 // minute; this catches the fast case without 300s of dead air.
 const VERIFICATION_PROBE_SECONDS = 45;
 
+// T7: page text that means the post-OAuth API key sits behind a
+// billing / payment-method wall. When the OAuth onboarding loop ends
+// without a key and the page reads like this, the run ends
+// `onboarding_blocked` rather than grep-looping a wall it cannot
+// satisfy (the S3-class trap named in the plan's failure modes).
+const ONBOARDING_PAYWALL_PATTERNS: readonly string[] = [
+  "add a payment method",
+  "add a credit card",
+  "add credit card",
+  "payment method required",
+  "a payment method is required",
+  "credit card required",
+  "enter your card",
+  "enter your payment",
+  "enter payment details",
+  "upgrade your plan to",
+  "start your paid plan",
+];
+
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
 // full verification timeout or runs only a short probe. Exported so the
@@ -112,6 +139,13 @@ export interface SignupTask {
   // Each round = one Claude vision call + a browser action. Set to 0
   // to disable the post-verification navigation loop entirely.
   postVerifyMaxRounds?: number | undefined;
+  // OAuth-first signup (T6). When set, and the signup page carries a
+  // matching "Sign in with <provider>" affordance, the bot takes the
+  // OAuth path — clicking through the provider's consent screen using
+  // the session in the persistent profile — instead of form-filling.
+  // Absent (or no affordance found) → the form-fill path. T13 added
+  // GitHub alongside Google.
+  oauthProvider?: OAuthProviderId | undefined;
 }
 
 export interface SignupResult {
@@ -186,7 +220,11 @@ type PlanExecOutcome =
   | { kind: "captcha_blocked"; captchaKind: string }
   | { kind: "submit_failed"; reason: string }
   | { kind: "planning_failed"; reason: string }
-  | { kind: "oauth_required" };
+  | { kind: "oauth_required" }
+  // T6: an OAuth-first signup found its provider affordance — the
+  // selector of the "Sign in with Google" button to click. signup()
+  // hands off to the OAuth consent flow instead of credential extraction.
+  | { kind: "oauth"; selector: string; provider: OAuthProviderId };
 
 // What to do next after the verification link is clicked. Most services
 // land you on a dashboard with the API key visible; some require one or
@@ -199,6 +237,15 @@ export type PostVerifyStep =
   | { kind: "login"; reason: string }
   | { kind: "click"; selector: string; reason: string }
   | { kind: "fill"; selector: string; value: string; reason: string }
+  // `select` — pick a valid option for a native <select> (a region /
+  // role / country dropdown on a post-OAuth onboarding form). A plain
+  // `click` cannot satisfy a <select>; this picks the first real option.
+  | { kind: "select"; selector: string; reason: string }
+  // `check` — tick a checkbox (a post-OAuth onboarding form's
+  // terms-of-service / agreement box). A `click` lands on the box's
+  // styled label or its TOS *link* and does not flip the input;
+  // browser.check() force-ticks the underlying checkbox.
+  | { kind: "check"; selector: string; reason: string }
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
@@ -426,12 +473,95 @@ export function isOauthOnlyChooser(
   return !hasEmailOption;
 }
 
-export function parsePostVerifyStep(raw: string): PostVerifyStep {
+// Find a "Sign in with <provider>" affordance in the page inventory —
+// the entry point for the OAuth-first path (T6/T13). Three signals, in
+// confidence order — derived from a live sweep where the text-only
+// heuristic missed real buttons:
+//   1. href — an <a> whose link routes through the provider's OAuth
+//      endpoint (/identity/login/google, /auth/github/callback, …).
+//      Unambiguous: a marketing link to policies.google.com does not.
+//   2. iconLabel — an icon-only button with no text at all, named only
+//      by a descendant <img alt="Google"> / <svg><title> (Mistral).
+//   3. text + an auth verb — "Continue with Google", "Sign up with
+//      GitHub". The auth verb is what keeps a bare "Google" nav link
+//      or "Google's Privacy Policy" out.
+// Returns null when the page has no such affordance — the planner then
+// falls back to form-fill. Exported for unit testing.
+export function findOAuthButton(
+  inventory: readonly InteractiveElement[],
+  provider: OAuthProviderId,
+): InteractiveElement | null {
+  const keyword = OAUTH_PROVIDERS[provider].buttonKeyword;
+  const keywordRe = new RegExp(`\\b${keyword}\\b`);
+  const hrefRe = new RegExp(
+    `(?:login|signin|sign-in|auth|oauth|connect|sso)[/_-]*${keyword}` +
+      `|${keyword}[/_-]*(?:login|signin|auth|oauth|connect)`,
+    "i",
+  );
+  for (const e of inventory) {
+    const isButtonish =
+      e.tag === "button" ||
+      e.tag === "a" ||
+      e.role === "button" ||
+      e.type === "submit" ||
+      e.type === "button";
+    if (!isButtonish) continue;
+    // 1. An <a> whose href routes through the provider's OAuth endpoint.
+    const href = (e.href ?? "").toLowerCase();
+    if (href.length > 0 && hrefRe.test(href)) return e;
+    // 2. Icon-only button — named only by a descendant img/svg.
+    if (keywordRe.test((e.iconLabel ?? "").toLowerCase())) return e;
+    // 3. Visible text / accessible label naming the provider + an
+    //    auth verb. The auth verb requirement rejects nav and policy
+    //    links that merely mention the provider.
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!keywordRe.test(text)) continue;
+    if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text)) {
+      return e;
+    }
+  }
+  return null;
+}
+
+// Scan the inventory for the first OAuth affordance among `providers`,
+// in order — the auto-prefer decision passes every provider the
+// profile has a session for. Returns the matched provider + element.
+export function findFirstOAuthButton(
+  inventory: readonly InteractiveElement[],
+  providers: readonly OAuthProviderId[],
+): { provider: OAuthProviderId; button: InteractiveElement } | null {
+  for (const provider of providers) {
+    const button = findOAuthButton(inventory, provider);
+    if (button !== null) return { provider, button };
+  }
+  return null;
+}
+
+// Parse a post-verify step. When `allowedSelectors` is supplied, a
+// `click`/`fill` selector that is not in the page inventory is a
+// parse-time rejection — the same DOM-grounding F3 gave the signup
+// planner (parseSignupPlan). It stops the post-OAuth onboarding
+// planner from inventing CSS selectors that never resolve, which was
+// the dominant onboarding-navigation failure mode.
+export function parsePostVerifyStep(
+  raw: string,
+  allowedSelectors?: ReadonlySet<string>,
+): PostVerifyStep {
   const obj = extractJsonObject(raw);
   const kind = obj["kind"];
   // `reason` is required by the schema but advisory; default it so a
   // model omitting it doesn't trip a retry on an otherwise-valid step.
   const reason = typeof obj["reason"] === "string" ? obj["reason"] : "";
+  const checkSelector = (selector: string, context: string): void => {
+    if (allowedSelectors !== undefined && !allowedSelectors.has(selector)) {
+      throw new Error(
+        `${context}: selector ${JSON.stringify(selector)} is not in the page inventory`,
+      );
+    }
+  };
   switch (kind) {
     case "done":
       return { kind: "done", reason };
@@ -439,19 +569,31 @@ export function parsePostVerifyStep(raw: string): PostVerifyStep {
       return { kind: "extract", reason };
     case "login":
       return { kind: "login", reason };
-    case "click":
-      return {
-        kind: "click",
-        selector: requireString(obj, "selector", "post-verify click step"),
-        reason,
-      };
-    case "fill":
+    case "click": {
+      const selector = requireString(obj, "selector", "post-verify click step");
+      checkSelector(selector, "post-verify click step");
+      return { kind: "click", selector, reason };
+    }
+    case "fill": {
+      const selector = requireString(obj, "selector", "post-verify fill step");
+      checkSelector(selector, "post-verify fill step");
       return {
         kind: "fill",
-        selector: requireString(obj, "selector", "post-verify fill step"),
+        selector,
         value: requireString(obj, "value", "post-verify fill step"),
         reason,
       };
+    }
+    case "select": {
+      const selector = requireString(obj, "selector", "post-verify select step");
+      checkSelector(selector, "post-verify select step");
+      return { kind: "select", selector, reason };
+    }
+    case "check": {
+      const selector = requireString(obj, "selector", "post-verify check step");
+      checkSelector(selector, "post-verify check step");
+      return { kind: "check", selector, reason };
+    }
     case "navigate":
       return {
         kind: "navigate",
@@ -491,6 +633,23 @@ const CAPTCHA_TOKEN_MARKERS: readonly string[] = [
   "h-captcha-response",
 ];
 
+// Distinctive service key prefixes. If a *labeled* match's value
+// embeds one of these NOT at its start, the regex straddled glued UI
+// text on a dense dashboard (e.g. Render's API-keys list rendered as
+// "...Name bot-key Menu Key rnd_xxxx" with no separators) — the real
+// key starts at the prefix, so the labeled match is contaminated and
+// must be rejected. A clean labeled key either starts with its prefix
+// (then the prefixed patterns above already caught it) or carries no
+// known prefix at all.
+const EMBEDDED_KEY_PREFIXES: readonly string[] = [
+  "rnd_",
+  "phc_",
+  "sk_live_",
+  "sk_test_",
+  "pk_live_",
+  "pk_test_",
+];
+
 // Pull an API key out of the *visible* page text.
 //
 // Two strategies, in priority order:
@@ -509,25 +668,36 @@ const CAPTCHA_TOKEN_MARKERS: readonly string[] = [
 // bearing logic and deserves direct coverage.
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
-    /\bre_[a-zA-Z0-9]{20,}\b/, // Resend
+    /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
     /\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe secret
-    /\bpk_(?:live|test)_[a-zA-Z0-9]{20,}\b/, // Stripe public
+    // NOTE: client-embedded PUBLIC keys are deliberately NOT matched —
+    // Stripe publishable (pk_live_/pk_test_) and PostHog project
+    // (phc_) keys ship in the client-side JS of every site that uses
+    // those vendors, so finding one on a page means "this service
+    // embeds Stripe/PostHog", not "here is the user's credential".
+    // Each produced a false success on Mistral (its billing pk_live_,
+    // then its analytics phc_, surfaced as the api_key).
     /\bkey-[a-f0-9]{32}\b/, // Mailgun
-    /\bphc_[a-zA-Z0-9]{32,}\b/, // PostHog
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
+    /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
+    /\bsntry[su]_[A-Za-z0-9_=\-]{20,}/, // Sentry org/user auth token
   ];
   for (const pattern of prefixed) {
     const match = text.match(pattern);
     if (match !== null) return match[0];
   }
 
-  // Labeled patterns. The gap between label and value is
-  // `[ \t]*[:=]?[ \t]*` — only spaces/tabs, never a newline — so the
-  // value must be adjacent to its label. The value charset excludes
-  // the captcha-token shape implicitly via the length ceiling, and we
-  // re-check markers explicitly below for the dot-bearing bearer case.
+  // Labeled patterns. The label and value MUST be separated by a real
+  // separator — a colon/equals, or whitespace — `(?:[ \t]*[:=][ \t]*|[ \t]+)`,
+  // never a newline. A MANDATORY separator is what keeps the regex from
+  // latching the label onto glued dashboard nav text: a sidebar
+  // rendering "API Keys" "Webhooks" "Settings" as adjacent links
+  // concatenates in textContent to "API KeysWebhooksSettings…", and an
+  // optional-gap regex would capture "sWebhooksSettings…" as the key
+  // (Resend false-positive). Requiring `:`/`=`/space means "API Key"
+  // followed immediately by a letter does not match.
   const labeled: readonly RegExp[] = [
-    /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)[ \t]*[:=]?[ \t]*([a-zA-Z0-9_\-]{20,})/i,
+    /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)(?:[ \t]*[:=][ \t]*|[ \t]+)([a-zA-Z0-9_\-]{20,})/i,
     /\b[Bb]earer[ \t]+([a-zA-Z0-9_\-.]{30,})/,
   ];
   for (const pattern of labeled) {
@@ -539,6 +709,9 @@ export function extractApiKeyFromText(text: string): string | null {
     if (candidate.length > MAX_CREDENTIAL_LENGTH) continue;
     const lower = candidate.toLowerCase();
     if (CAPTCHA_TOKEN_MARKERS.some((marker) => lower.includes(marker))) continue;
+    // Contaminated: the labeled match straddled glued dashboard text
+    // onto a real key (the key prefix sits mid-candidate, not at 0).
+    if (EMBEDDED_KEY_PREFIXES.some((p) => lower.indexOf(p) > 0)) continue;
     return candidate;
   }
 
@@ -715,13 +888,55 @@ export class SignupAgent {
     let errorReplans = 0;
     let progressReplans = 0;
     let emptyPlans = 0;
+    let oauthScanRetries = 0;
     let hint: string | undefined;
 
+    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
     for (;;) {
       await this.browser.waitForFormReady();
       await saveDebugSnapshot(this.browser, "before-fill");
       const state = await this.browser.getState();
-      const inventory = await this.buildInventory(steps);
+      const inventory = await this.buildInventory(steps, oauthCandidates);
+
+      // OAuth-first (T6/T13 + auto-prefer): when the page carries a
+      // "Sign in with <provider>" affordance for a provider the bot can
+      // use, that button unconditionally outranks any form field — hand
+      // off to the OAuth consent flow. `oauthCandidates` is the explicit
+      // provider when one was requested, else every provider the profile
+      // has a session for. Absent any affordance, fall through to
+      // form-fill.
+      if (oauthCandidates.length > 0) {
+        const hit = findFirstOAuthButton(inventory, oauthCandidates);
+        if (hit !== null) {
+          const label = OAUTH_PROVIDERS[hit.provider].label;
+          steps.push(
+            `OAuth-first: found a ${label} sign-in affordance ` +
+              `(${JSON.stringify(hit.button.visibleText ?? hit.button.ariaLabel ?? label)}) ` +
+              `— taking the OAuth path`,
+          );
+          return {
+            kind: "oauth",
+            selector: hit.button.selector,
+            provider: hit.provider,
+          };
+        }
+        // SSO buttons frequently load async — Mistral renders its
+        // icon-only provider buttons after the email form. Re-extract
+        // a couple of times before giving up on the OAuth path.
+        if (oauthScanRetries < 2) {
+          oauthScanRetries += 1;
+          steps.push(
+            `OAuth-first: no provider affordance yet — waiting for an ` +
+              `async render (retry ${oauthScanRetries}/2)`,
+          );
+          await this.browser.wait(3);
+          continue;
+        }
+        steps.push(
+          "OAuth-first: no usable provider affordance on the page — " +
+            "falling back to form-fill",
+        );
+      }
 
       // OAuth-only: no fillable input AND no button that reads as an
       // email-signup option — nothing to automate (Issue 4).
@@ -873,14 +1088,58 @@ export class SignupAgent {
   }
 
   // Extract + rank the page's interactive elements (F3 T1/T2).
-  private async buildInventory(steps: string[]): Promise<InteractiveElement[]> {
+  // `oauthProviders` keeps those providers' OAuth affordances from
+  // being ranked out of the capped inventory (T6/T13 + auto-prefer).
+  // `buttonCap` widens for the post-OAuth onboarding loop: a dashboard
+  // carries far more nav links than a signup form, and they do not
+  // score as signup buttons, so the default cap would drop the "API
+  // Keys"/"Settings" links the onboarding planner must reach.
+  private async buildInventory(
+    steps: string[],
+    oauthProviders?: readonly OAuthProviderId[],
+    buttonCap = 25,
+  ): Promise<InteractiveElement[]> {
     const raw = await this.browser.extractInteractiveElements();
-    const { inventory, buttonsDropped } = rankAndCapInventory(raw);
+    const { inventory, buttonsDropped } = rankAndCapInventory(
+      raw,
+      buttonCap,
+      oauthProviders,
+    );
     steps.push(
       `Inventory: ${inventory.length} element(s)` +
         (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
     );
     return inventory;
+  }
+
+  // Which OAuth providers may this signup take? An explicit
+  // task.oauthProvider forces that one. Otherwise the bot auto-prefers
+  // OAuth — it returns every provider the persistent profile has a
+  // login session for, so a "Continue with Google/GitHub" affordance is
+  // used instead of a form-fill (which OAuth-gated dev services
+  // routinely anti-abuse-flag).
+  //
+  // No datacenter gate (reversed from the 0.4.0 design): yes, Google /
+  // GitHub may challenge OAuth from a datacenter IP (G7), but form-fill
+  // on datacenter fails just as often — silent verification withholding,
+  // the Resend-on-Hetzner case. An OAuth challenge at least surfaces a
+  // clear `needs_login` the host agent can act on, vs. a silent 45-second
+  // form-fill timeout. Better failure mode wins; the original gate was
+  // protecting the bot from the wrong loss.
+  private async resolveOAuthCandidates(
+    task: SignupTask,
+    steps: string[],
+  ): Promise<OAuthProviderId[]> {
+    if (task.oauthProvider !== undefined) {
+      return [task.oauthProvider];
+    }
+    const loggedIn = loggedInProviders();
+    if (loggedIn.length === 0) return [];
+    steps.push(
+      `Auto-OAuth: profile has a session for ${loggedIn.join(", ")} — ` +
+        "preferring OAuth if the page offers it",
+    );
+    return loggedIn;
   }
 
   // Verify every selector the plan references still resolves on the
@@ -1189,6 +1448,16 @@ export class SignupAgent {
             steps,
             ...this.resultTail(),
           };
+        case "oauth":
+          // T6/T7 — OAuth-first path. runOAuthFlow drives the consent
+          // handshake and post-OAuth onboarding to its own terminal
+          // SignupResult; there is no form submit / email verification.
+          return await this.runOAuthFlow(
+            task,
+            outcome.selector,
+            outcome.provider,
+            steps,
+          );
         case "submitted":
           break;
       }
@@ -1239,8 +1508,7 @@ export class SignupAgent {
                 const maxRounds = task.postVerifyMaxRounds ?? 6;
                 credentials = await this.postVerifyLoop({
                   service: task.service,
-                  email: task.email,
-                  password,
+                  credentials: { email: task.email, password },
                   maxRounds,
                   steps,
                 });
@@ -1291,6 +1559,200 @@ export class SignupAgent {
         ...this.resultTail(),
       };
     }
+  }
+
+  // ------------ OAuth-first signup (T6/T7/T13) ------------
+
+  // Drive an OAuth signup (Google or GitHub) to a terminal
+  // SignupResult. Entered from runSignup when planExecuteWithRetry
+  // found the provider's affordance (T6). Steps: click the button →
+  // walk the consent screens → scope-gate them → drive post-OAuth
+  // onboarding to the API key.
+  //
+  // THE CRITICAL GUARANTEE (D4 / eng-review critical gap): if the flow
+  // lands on the provider's credential form (expired/missing session)
+  // or a security challenge, it hands back `needs_login` and NEVER
+  // types into that form. Driving the provider's login is exactly what
+  // trips its automation detection — and there is no password to give.
+  private async runOAuthFlow(
+    task: SignupTask,
+    oauthSelector: string,
+    providerId: OAuthProviderId,
+    steps: string[],
+  ): Promise<SignupResult> {
+    const provider = OAUTH_PROVIDERS[providerId];
+    const loginCmd =
+      provider.id === "github"
+        ? "npx @trusty-squire/mcp login --provider=github"
+        : "npx @trusty-squire/mcp login";
+    steps.push(`OAuth: clicking the ${provider.label} sign-in affordance`);
+    await this.browser.startOAuth(oauthSelector);
+    await this.browser.wait(3);
+    await saveDebugSnapshot(this.browser, "oauth-after-click");
+
+    // Bounded consent walk — handles account-chooser → consent as two
+    // steps without ever spinning. Each iteration re-reads the page.
+    const MAX_OAUTH_NAV = 6;
+    for (let i = 0; i < MAX_OAUTH_NAV; i++) {
+      if (this.browser.oauthPageClosed()) {
+        steps.push(
+          `OAuth: the ${provider.label} window closed — handshake returned to the service`,
+        );
+        break;
+      }
+      const url = this.browser.currentUrl();
+      let body: string;
+      try {
+        body = (await this.browser.extractText()).slice(0, 4000);
+      } catch {
+        // The page is navigating between provider screens — re-read.
+        await this.browser.wait(1);
+        continue;
+      }
+      const authState = provider.classifyAuthState(url, body);
+      steps.push(`OAuth: ${provider.label} auth state = ${authState}`);
+
+      if (authState === "not_provider") break; // flow left the provider — back on the service
+
+      if (authState === "challenge") {
+        return this.oauthAbort(
+          "needs_login",
+          `${provider.label} interrupted the sign-in with a security challenge ("verify it's you"). ` +
+            `Re-run \`${loginCmd}\`, clear the challenge in the window, then retry.`,
+          steps,
+        );
+      }
+      if (authState === "needs_login") {
+        return this.oauthAbort(
+          "needs_login",
+          `the bot's ${provider.label} session is missing or expired — no consent screen was reached. ` +
+            `Re-run \`${loginCmd}\` to re-establish it, then retry.`,
+          steps,
+        );
+      }
+
+      // authState === "consent". Backstop the page classifier with a
+      // live-DOM check: if the page actually carries a credential
+      // field it is a login form (the text classifier can catch a
+      // login page that says "to continue to <app>"). Hand back —
+      // never type into it.
+      if (await this.oauthLoginFormPresent()) {
+        return this.oauthAbort(
+          "needs_login",
+          `landed on a ${provider.label} sign-in form — the session is missing or expired. ` +
+            `Re-run \`${loginCmd}\`, then retry. The bot will not type into ${provider.label}'s login form.`,
+          steps,
+        );
+      }
+
+      // Genuine consent screen / account chooser — scope-gate it (T7).
+      const scopes = extractOAuthScopes(url);
+      if (scopes === null) {
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `reached a ${provider.label} consent screen but could not read its requested scopes ` +
+            `from the URL — pausing for manual review rather than approving blind.`,
+          steps,
+        );
+      }
+      if (!provider.scopesAreBasic(scopes)) {
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `the consent screen requests scopes beyond basic identity (${scopes.join(", ")}). ` +
+            `Approve it manually — the bot only auto-approves basic-identity scopes.`,
+          steps,
+        );
+      }
+      steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
+      const advanced = await this.browser.advanceOAuthConsent(provider.id);
+      if (!advanced) {
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `reached a ${provider.label} consent screen but found no approve control to click — ` +
+            `approve it manually.`,
+          steps,
+        );
+      }
+      await this.browser.wait(3);
+    }
+
+    // Handshake done — restore the product page (popup flow is a no-op
+    // for same-tab redirects) and drive post-OAuth onboarding.
+    await this.browser.settleAfterOAuth();
+    await this.browser.wait(2);
+    await saveDebugSnapshot(this.browser, "oauth-post-consent");
+    steps.push(
+      `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
+    );
+
+    let credentials = await this.extractCredentials();
+    if (credentials.api_key === undefined) {
+      credentials = await this.postVerifyLoop({
+        service: task.service,
+        maxRounds: task.postVerifyMaxRounds ?? 12,
+        steps,
+      });
+    }
+    if (credentials.api_key !== undefined) {
+      return {
+        success: true,
+        credentials: { ...credentials },
+        steps,
+        ...this.resultTail(),
+      };
+    }
+
+    // No API key. Distinguish a billing/card wall (onboarding_blocked)
+    // from a generic navigation miss — never grep-loop a paid wall.
+    const finalText = (await this.browser.extractText().catch(() => "")).toLowerCase();
+    if (ONBOARDING_PAYWALL_PATTERNS.some((p) => finalText.includes(p))) {
+      return {
+        success: false,
+        error:
+          `onboarding_blocked: ${task.service}'s API key sits behind a billing or ` +
+          `payment-method wall the bot will not cross — finish the signup manually.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
+    return {
+      success: false,
+      error:
+        `oauth_onboarding_failed: signed in to ${task.service} via ${provider.label} but ` +
+        `could not reach an API key through post-OAuth onboarding.`,
+      steps,
+      ...this.resultTail(),
+    };
+  }
+
+  // Build a terminal SignupResult for an aborted OAuth run. `prefix`
+  // is the error tag provision-any.ts maps to a tool status
+  // (needs_login, oauth_consent_needs_review).
+  private oauthAbort(prefix: string, detail: string, steps: string[]): SignupResult {
+    steps.push(`OAuth aborted (${prefix}): ${detail}`);
+    return {
+      success: false,
+      error: `${prefix}: ${detail}`,
+      steps,
+      ...this.resultTail(),
+    };
+  }
+
+  // Backstop for the critical guarantee (D4): true when the active
+  // provider page carries a credential-entry field — an expired/missing
+  // session dropped the bot on a login form. A genuine consent screen
+  // or account chooser has buttons/tiles only, no text inputs.
+  private async oauthLoginFormPresent(): Promise<boolean> {
+    const inv = await this.browser.extractInteractiveElements();
+    return inv.some(
+      (e) =>
+        e.tag === "input" &&
+        (e.type === "email" ||
+          e.type === "password" ||
+          e.type === "text" ||
+          e.type === "tel" ||
+          e.type === null),
+    );
   }
 
   // ------------ Claude planner ------------
@@ -1414,64 +1876,163 @@ ${formatInventory(input.inventory)}`,
     throw lastErr ?? new Error("verification email did not arrive in time");
   }
 
-  // After verification, drive the browser toward the API key. Each round
-  // asks Claude what to do next given the current page; we stop when
-  // Claude says "done" or when we extract a credential. Bounded by
-  // maxRounds so a confused agent can't burn the whole context window.
+  // Drive the browser toward the API key after the account exists —
+  // used by BOTH the email-verification path and the OAuth path (T9).
+  // Each round asks Claude what to do next given the current page; we
+  // stop when Claude says "done" or when we extract a credential.
+  // Bounded by maxRounds so a confused agent can't burn the context.
+  //
+  // T9 — decoupled from email+password. `credentials` is present only
+  // on the email-verification path, where the loop may need to sign in
+  // with the just-created account (SendPulse). On the OAuth path it is
+  // absent: there is no password, and the Google session already
+  // authenticated the user — a `login` step is then a no-op.
   private async postVerifyLoop(args: {
     service: string;
-    email: string;
-    password: string;
+    credentials?: { email: string; password: string } | undefined;
     maxRounds: number;
     steps: string[];
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     let loginAttempts = 0;
+    let planFailures = 0;
+    const oauth = args.credentials === undefined;
+    // Re-plan hint for the next round — set when an `extract` step
+    // found no key, which means the visible key text is masked /
+    // truncated (the S3-class trap: the planner sees a key-shaped
+    // string and keeps asking to extract it forever), or when the
+    // planner's last step was rejected.
+    let hint: string | undefined;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
         return credentials;
       }
-      const state = await this.browser.getState();
+      // Settle the page first — the previous round's click may have
+      // triggered a navigation, and reading a page mid-navigation
+      // throws "execution context destroyed". waitForFormReady is
+      // best-effort (swallows its own timeouts).
+      await this.browser.waitForFormReady();
+      // DOM-grounded inventory so the planner picks verified selectors
+      // instead of inventing CSS that never resolves. A dashboard has
+      // far more nav links than a signup form, so the button cap is
+      // widened (the "API Keys"/"Settings" links must survive ranking).
+      // Reading state can still race a navigation — a transient throw
+      // burns the round rather than crashing the whole run.
+      let state: BrowserState;
+      let inventory: InteractiveElement[];
+      try {
+        state = await this.browser.getState();
+        inventory = await this.buildInventory(args.steps, undefined, 80);
+      } catch (err) {
+        args.steps.push(
+          `Post-verify round ${round}: page was mid-navigation ` +
+            `(${err instanceof Error ? err.message : String(err)}) — retrying`,
+        );
+        await this.browser.wait(2);
+        continue;
+      }
       let nextStep: PostVerifyStep;
       try {
         nextStep = await this.planPostVerifyStep({
           service: args.service,
-          email: args.email,
-          password: args.password,
           round,
           maxRounds: args.maxRounds,
           state,
+          oauth,
+          inventory,
+          ...(hint !== undefined ? { hint } : {}),
         });
       } catch (err) {
-        args.steps.push(
-          `Post-verify round ${round}: planner failed (${err instanceof Error ? err.message : String(err)}). Stopping.`,
-        );
-        break;
+        // The planner's output did not validate — most often a
+        // selector not in the inventory (the model copied the whole
+        // line, not just the `selector=` value). Re-plan with a hint
+        // rather than abandon the run, the same resilience the
+        // form-fill planner has. Bounded so a persistently broken
+        // planner still terminates.
+        const reason = err instanceof Error ? err.message : String(err);
+        planFailures += 1;
+        if (planFailures > 3) {
+          args.steps.push(
+            `Post-verify round ${round}: planner failed ${planFailures}x (${reason}) — stopping.`,
+          );
+          break;
+        }
+        args.steps.push(`Post-verify round ${round}: planner output rejected (${reason}) — re-planning.`);
+        hint =
+          "Your previous step was REJECTED. A click/fill/select `selector` must be " +
+          "EXACTLY the value after `selector=` on one inventory line — copy only that " +
+          "value (it runs to the end of the line), never the leading `[n] tag …` part " +
+          "and never the whole line.";
+        continue;
       }
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${nextStep.reason}`);
 
+      // Dev-only (env-gated): dump this round's real page state +
+      // inventory into the E1 eval-corpus format, so onboarding
+      // adapters can be iterated offline without re-running the
+      // rate-limited OAuth handshake.
+      captureOnboardingRound({
+        service: args.service,
+        round,
+        oauth,
+        state,
+        inventory,
+        observed: nextStep,
+      });
+
       if (nextStep.kind === "done") break;
+      hint = undefined;
       try {
         if (nextStep.kind === "extract") {
           credentials = await this.extractCredentials();
+          if (credentials.api_key === undefined) {
+            // The planner saw a key-shaped string but extraction got
+            // nothing — the on-page key is masked/truncated. Steer the
+            // next round off `extract` and toward creating a fresh key.
+            hint =
+              "Your last 'extract' found NO key — the key text on the page is " +
+              "masked or truncated (e.g. shows '...' or dots). A masked existing " +
+              "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
+              "generate a fresh one — its full value is shown once, on creation.";
+          }
         } else if (nextStep.kind === "click") {
           await this.browser.click(nextStep.selector);
           await this.browser.wait(2);
         } else if (nextStep.kind === "fill") {
           await this.browser.type(nextStep.selector, nextStep.value);
+        } else if (nextStep.kind === "select") {
+          await this.browser.selectOption(nextStep.selector);
+          await this.browser.wait(1);
+        } else if (nextStep.kind === "check") {
+          // browser.check force-ticks + scrolls into view + verifies —
+          // a styled TOS checkbox a plain click can't flip.
+          await this.browser.check(nextStep.selector);
+          await this.browser.wait(1);
         } else if (nextStep.kind === "navigate") {
           await this.browser.goto(nextStep.url);
           await this.browser.wait(3);
         } else if (nextStep.kind === "wait") {
           await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {
-          if (loginAttempts >= 2) {
+          if (args.credentials === undefined) {
+            // OAuth run — no password to give, and the Google session
+            // already authenticated us. Treat `login` as a no-op note.
+            args.steps.push(
+              "Post-verify: planner asked to log in, but this is an OAuth run — " +
+                "already authenticated via Google; skipping.",
+            );
+          } else if (loginAttempts >= 2) {
             args.steps.push("Post-verify: already attempted login twice — stopping.");
             break;
+          } else {
+            loginAttempts += 1;
+            await this.loginWithCredentials(
+              args.credentials.email,
+              args.credentials.password,
+              args.steps,
+            );
           }
-          loginAttempts += 1;
-          await this.loginWithCredentials(args.email, args.password, args.steps);
         }
       } catch (err) {
         args.steps.push(
@@ -1479,7 +2040,13 @@ ${formatInventory(input.inventory)}`,
         );
         // Don't bail — Claude may recover on the next round.
       }
-      credentials = await this.extractCredentials();
+      // Re-extract — but tolerate the page still navigating from the
+      // step just taken; the next round settles and re-reads.
+      try {
+        credentials = await this.extractCredentials();
+      } catch {
+        // page mid-navigation — next round's waitForFormReady handles it
+      }
     }
     return credentials;
   }
@@ -1538,35 +2105,75 @@ ${formatInventory(input.inventory)}`,
 
   private async planPostVerifyStep(input: {
     service: string;
-    email: string;
-    password: string;
     round: number;
     maxRounds: number;
     state: { url: string; title: string; html: string; screenshot: string };
+    // T9: an OAuth run is already authenticated via Google — the
+    // planner must never ask to log in. The email-verification path
+    // (oauth=false) keeps the login-wall recovery guidance.
+    oauth: boolean;
+    // DOM-grounded element inventory — `click`/`fill` selectors MUST be
+    // copied from it (parsePostVerifyStep rejects anything else).
+    inventory: InteractiveElement[];
+    // Carried from the previous round when it did not make progress
+    // (e.g. an `extract` that found only a masked key).
+    hint?: string;
   }): Promise<PostVerifyStep> {
     const visibleText = (input.state.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 2500);
 
-    const systemPrompt = `You are driving a headless browser after a SaaS signup verification.
+    const loginGuidance = input.oauth
+      ? `- You are ALREADY signed in via Google — NEVER return {"kind":"login"}. If the page looks like a login wall, return {"kind":"navigate"} to the service's dashboard, or {"kind":"done"}.`
+      : `- If the page is a LOGIN form, or says you must sign in, or you've been signed out, return {"kind":"login"} — the bot signs in with the signup email + password. Do NOT return done on a login wall.`;
+
+    const systemPrompt = `You are driving a headless browser after a SaaS signup ${
+      input.oauth ? "via Google OAuth" : "verification"
+    }.
 Your goal: surface the user's API key (or any credential — token, secret, app id) so it can be extracted from the page.
 
 You may issue ONE step per turn. Reply with a single JSON object, no prose.
+
+You are given a screenshot and an INVENTORY of the page's interactive
+elements — each line ends with a precise \`selector=\` the bot has
+verified resolves.
 
 Schema:
   {"kind":"done","reason":"why we should stop"}
   {"kind":"extract","reason":"the API key is now visible on this page"}
   {"kind":"login","reason":"the page is a login form / we were signed out"}
-  {"kind":"click","selector":"CSS","reason":"e.g. dismiss onboarding modal / open API keys page"}
-  {"kind":"fill","selector":"CSS","value":"value","reason":"unusual — only for required project-name etc."}
-  {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api"}
+  {"kind":"click","selector":"<a selector= copied verbatim from the inventory>","reason":"e.g. open the API keys page"}
+  {"kind":"fill","selector":"<a selector= from the inventory>","value":"value","reason":"unusual — only for a required project-name etc."}
+  {"kind":"select","selector":"<a selector= from the inventory, tag=select>","reason":"pick an option for a dropdown — region, role, country"}
+  {"kind":"check","selector":"<a selector= from the inventory, type=checkbox>","reason":"tick a terms-of-service / agreement checkbox"}
+  {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api-keys"}
   {"kind":"wait","seconds":N,"reason":"page is still loading"}
 
+- CRITICAL: every "selector" in a click/fill step MUST be copied
+  verbatim from a \`selector=\` field in the inventory below. Never
+  invent or guess a selector — one not in the inventory is rejected.
+- If the element you want is NOT in the inventory, use {"kind":"navigate"}
+  to a likely settings URL instead of guessing a selector.
+
 Strategy:
-- If the API key text is visible, return {"kind":"extract"}.
-- If there's a dashboard menu link like "API Keys" / "Tokens" / "Developer", click it.
-- If there's an onboarding modal blocking, dismiss it.
-- If the page is a LOGIN form, or says you must sign in, or you've been signed out, return {"kind":"login"} — the bot signs in with the signup email + password. Do NOT return done on a login wall.
+- If a FULL, untruncated API key is visible, return {"kind":"extract"}.
+- A key shown masked or truncated (with "...", dots, or "•") is NOT
+  extractable — its full value is shown only once, at creation. Do NOT
+  return "extract" for a masked key, and do not return "extract" twice
+  in a row. Instead click "Create API Key" / "New API Key" / "Generate"
+  to make a fresh key, then extract its full value.
+- To reach API keys, prefer a {"kind":"navigate"} straight to the
+  service's API-keys settings URL — note these usually live under the
+  user/ACCOUNT settings, not a project or workspace's settings.
+- Otherwise click a dashboard menu link like "API Keys" / "Tokens" /
+  "Developer" / "Settings" — using its inventory selector.
+- If there's an onboarding modal or a "Skip" link blocking, dismiss it.
+${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
-- If the page wants the user to create a project before showing keys, fill the minimum and click create.
+- If the page wants the user to create a project/key before showing it, fill the minimum and click create.
+- For a required dropdown (an inventory entry with tag=select — region, role, country), use {"kind":"select"} — a "click" cannot pick a <select> option, so do not click it repeatedly.
+- A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
+- If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
+- Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
+- On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST use a select step to set a non-default permission on at least one dropdown BEFORE clicking the create button — creating with all-default permissions does nothing. Do not click the create button repeatedly; set a permission first.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [
@@ -1579,15 +2186,43 @@ Title: ${input.state.title}
 Round: ${input.round + 1}/${input.maxRounds}
 
 Visible text (truncated):
-${visibleText}`,
+${visibleText}
+
+Interactive element inventory:
+${formatInventory(input.inventory)}${
+          input.hint !== undefined ? `\n\nIMPORTANT — ${input.hint}` : ""
+        }`,
       },
     ];
 
+    // The planner may only pick click/fill selectors the bot supplied.
+    const allowed = new Set(input.inventory.map((e) => e.selector));
     return this.callLLM({
       system: systemPrompt,
       userBlocks,
       maxTokens: 500,
-      parse: parsePostVerifyStep,
+      parse: (raw) => {
+        const step = parsePostVerifyStep(raw, allowed);
+        // A `check` must land on a real checkbox/radio — the planner
+        // otherwise picks the adjacent "Terms of Service" *link*, which
+        // page.check() cannot tick. Reject it so the round re-plans.
+        if (step.kind === "check") {
+          const el = input.inventory.find((e) => e.selector === step.selector);
+          const checkable =
+            el !== undefined &&
+            ((el.tag === "input" &&
+              (el.type === "checkbox" || el.type === "radio")) ||
+              el.role === "checkbox" ||
+              el.role === "radio");
+          if (!checkable) {
+            throw new Error(
+              `post-verify check step: ${JSON.stringify(step.selector)} is not a ` +
+                `checkbox — pick the actual agreement checkbox, not its label or link`,
+            );
+          }
+        }
+        return step;
+      },
     });
   }
 
@@ -1606,13 +2241,28 @@ ${visibleText}`,
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
-    // IMPORTANT: pull credentials from the *visible* page text, not the raw
+    // IMPORTANT: pull credentials from the *visible* page, not the raw
     // HTML. Reading from HTML matches anti-bot challenge JS (Cloudflare
-    // Turnstile, hCaptcha) whose challenge tokens look like API keys to a
-    // naive regex.
-    const text = await this.browser.extractText();
+    // Turnstile, hCaptcha) whose challenge tokens look like API keys to
+    // a naive regex.
+    //
+    // Two visible surfaces, in priority order:
+    //   1. Discrete credential candidates — copy-input values and each
+    //      element's own direct text. A key is read whole here, un-glued
+    //      from adjacent buttons; captcha tokens (hidden inputs) are
+    //      excluded by the browser.
+    //   2. The whole visible body text — fallback for a key shown as
+    //      plain prose, accepting that body concatenation can glue
+    //      neighbours (the extractApiKeyFromText guards catch the worst).
     const credentials: Record<string, string> = {};
-    const apiKey = extractApiKeyFromText(text);
+    let apiKey: string | null = null;
+    for (const candidate of await this.browser.extractCredentialCandidates()) {
+      apiKey = extractApiKeyFromText(candidate);
+      if (apiKey !== null) break;
+    }
+    if (apiKey === null) {
+      apiKey = extractApiKeyFromText(await this.browser.extractText());
+    }
     if (apiKey !== null) credentials.api_key = apiKey;
     return credentials;
   }

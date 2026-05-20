@@ -28,7 +28,7 @@ export function SignupStepConnect() {
 
   return (
     <div className="space-y-6">
-      <p className="text-[color:var(--color-ink-soft)]">
+      <p className="text-[color:var(--color-text-soft)]">
         Install the Trusty Squire MCP server in your coding agent. Run one of the commands below;
         it will open a browser tab to confirm pairing.
       </p>
@@ -38,16 +38,16 @@ export function SignupStepConnect() {
           return (
             <li
               key={a.key}
-              className="flex items-center justify-between gap-4 p-3 rounded-lg bg-[color:var(--color-cream)] border border-[color:var(--color-rule)]"
+              className="flex items-center justify-between gap-4 p-3 rounded-lg bg-[color:var(--color-surface)] border border-[color:var(--color-border)]"
             >
               <div>
                 <p className="font-medium">{a.name}</p>
-                <code className="text-xs font-mono text-[color:var(--color-ink-soft)]">{cmd}</code>
+                <code className="text-xs font-mono text-[color:var(--color-text-soft)]">{cmd}</code>
               </div>
               <button
                 type="button"
                 onClick={() => copy(cmd, a.key)}
-                className="px-3 py-1.5 text-sm rounded-md border border-[color:var(--color-rule)] bg-white"
+                className="px-3 py-1.5 text-sm rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-raised)] text-[color:var(--color-text)] hover:border-[color:var(--color-border-strong)]"
               >
                 {copied === a.key ? "Copied" : "Copy"}
               </button>
@@ -55,7 +55,7 @@ export function SignupStepConnect() {
           );
         })}
       </ul>
-      <p className="text-sm text-[color:var(--color-ink-soft)]">
+      <p className="text-sm text-[color:var(--color-text-soft)]">
         Already paired? <a href="/dashboard">Open the dashboard.</a>
       </p>
     </div>

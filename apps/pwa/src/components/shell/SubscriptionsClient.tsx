@@ -29,22 +29,22 @@ export function SubscriptionsClient() {
     };
   }, []);
 
-  if (error !== null) return <p className="text-[color:var(--color-wine)]">{error}</p>;
-  if (rows === null) return <p className="text-[color:var(--color-ink-soft)]">Loading…</p>;
+  if (error !== null) return <p className="text-[color:var(--color-accent)]">{error}</p>;
+  if (rows === null) return <p className="text-[color:var(--color-text-soft)]">Loading…</p>;
   if (rows.length === 0)
-    return <p className="text-[color:var(--color-ink-soft)]">No subscriptions yet.</p>;
+    return <p className="text-[color:var(--color-text-soft)]">No subscriptions yet.</p>;
 
   return (
-    <ul className="divide-y divide-[color:var(--color-rule)]">
+    <ul className="divide-y divide-[color:var(--color-border)]">
       {rows.map((row) => (
         <li key={row.id} className="py-4 flex items-center justify-between">
           <div>
             <p className="font-medium">{row.service_name}</p>
-            <p className="text-xs text-[color:var(--color-ink-soft)] font-mono">{row.service_reference}</p>
+            <p className="text-xs text-[color:var(--color-text-soft)] font-mono">{row.service_reference}</p>
           </div>
           <div className="text-right">
             <p className="text-sm">{row.monthly_cost_cents !== null ? `${formatCents(row.monthly_cost_cents)}/mo` : "free"}</p>
-            <p className="text-xs text-[color:var(--color-ink-soft)]">{row.status}</p>
+            <p className="text-xs text-[color:var(--color-text-soft)]">{row.status}</p>
           </div>
         </li>
       ))}

@@ -135,3 +135,137 @@ model PairingToken {
   @@index([machine_token])
   @@index([status, expires_at])
 }
+
+// ── Tier 1 account layer ─────────────────────────────────────
+// Paired accounts and their auth/session state. Until now these
+// lived only in restart-volatile in-memory stores; persisting them
+// is what makes OAuth login, CLI pairing, and the vault durable
+// across deploys.
+
+// One paired account. `id` is a ULID.
+model Account {
+  id            String   @id @db.VarChar(26)
+  email         String   @unique
+  display_name  String
+  default_vault String?
+  created_at    DateTime @default(now())
+
+  oauth_identities OAuthIdentity[]
+  devices          Device[]
+  web_sessions     WebSession[]
+  agent_sessions   AgentSession[]
+  active_mandate   ActiveMandate?
+}
+
+// A linked OAuth provider identity. The (provider, provider_user_id)
+// pair is the stable external identifier we match logins against.
+model OAuthIdentity {
+  id               String   @id @db.VarChar(26)
+  account_id       String   @db.VarChar(26)
+  provider         String   // "google" | "github"
+  provider_user_id String
+  email            String
+  created_at       DateTime @default(now())
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@unique([provider, provider_user_id])
+  @@index([account_id])
+}
+
+// Vouchflow signing devices observed on bundles. OAuth logins do not
+// produce devices; this stays for the passkey login path + ledger UI.
+model Device {
+  id            String    @id // signing_device_id from Vouchflow
+  account_id    String    @db.VarChar(26)
+  first_seen_at DateTime  @default(now())
+  last_seen_at  DateTime
+  platform      String    // "ios" | "android" | "web"
+  revoked_at    DateTime?
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
+}
+
+// The account's current active mandate (latest signed replaces prior).
+// `mandate` is the full Mandate object as JSON. OAuth signup writes a
+// stub mandate here so mandate-aware code keeps working.
+model ActiveMandate {
+  account_id             String   @id @db.VarChar(26)
+  mandate                Json
+  signed_by_device       String
+  vouchflow_device_token String
+  session_id             String
+  installed_at           DateTime @default(now())
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+}
+
+// Web sessions — JWT in an HTTP-only cookie. `jwt_id` is looked up on
+// every authed request so revocation works without changing the
+// cookie format.
+model WebSession {
+  id                  String    @id @db.VarChar(26)
+  account_id          String    @db.VarChar(26)
+  jwt_id              String    @unique
+  issued_at           DateTime  @default(now())
+  last_active_at      DateTime
+  absolute_expires_at DateTime
+  revoked_at          DateTime?
+  revocation_reason   String?
+  ip                  String?
+  user_agent          String?
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
+}
+
+// Agent (MCP/CLI) sessions — the bearer token a paired CLI carries.
+// Only SHA-256(token) is stored. This is the table the "connected
+// agents" view lists and revokes.
+model AgentSession {
+  id                String    @id @db.VarChar(26)
+  account_id        String    @db.VarChar(26)
+  token_hash        String    @unique
+  agent_identity    String?
+  agent_version     String?
+  issued_at         DateTime  @default(now())
+  expires_at        DateTime
+  last_used_at      DateTime?
+  use_count         Int       @default(0)
+  revoked_at        DateTime?
+  revocation_reason String?
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
+}
+
+// Encrypted SaaS credentials the squire collects — the "vault". The
+// AES-256-GCM envelope encryption is done by @trusty-squire/vault's
+// CredentialVault; this table is just the at-rest store. account_id is
+// indexed, not a foreign key — the vault is conceptually its own
+// service with an independent lifecycle.
+model Credential {
+  id                 String    @id @db.VarChar(26)
+  reference          String    @unique
+  account_id         String    @db.VarChar(26)
+  subscription_id    String
+  type               String
+  env_var_suggestion String?
+  ciphertext         Bytes
+  encrypted_dek      Bytes
+  account_kek_blob   Bytes
+  algorithm          String    @default("AES-256-GCM")
+  metadata           Json      @default("{}")
+  rotated_at         DateTime?
+  retrieval_count    Int       @default(0)
+  last_retrieved_at  DateTime?
+  deleted_at         DateTime?
+  created_at         DateTime  @default(now())
+
+  @@index([account_id])
+  @@index([subscription_id])
+}

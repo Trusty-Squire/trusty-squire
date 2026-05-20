@@ -335,21 +335,105 @@ Many SaaS make "Sign up with Google/GitHub" the only signup path. The
 Tier 0 anonymous bot cannot do those — no identity, and it cannot
 drive Google's login (harder than the captcha problem).
 
-- [ ] **G1 — Managed identity for OAuth signup.** Tier 1+ feature: the
-  user grants Trusty Squire one identity (their Google/GitHub via an
-  OAuth grant, or a dedicated bot identity, held in the vault). The bot
-  then completes "Sign up with Google" on a gated service via a single
-  consent click — OAuth flips from the bot's worst path to its best
-  (no form, no captcha). Needs Tier 1 pairing + vault.
-- [ ] **G2 — OAuth gate as the Tier 0 → Tier 1 conversion trigger.**
-  Make Trusty Squire's *own* pairing a "Sign in with Google", so the
-  Google auth that pairs the user IS the G1 managed identity. When the
-  Tier 0 bot hits an OAuth-gated service it can't do, that becomes the
-  conversion CTA: "this service needs Google signup — pair Trusty
-  Squire (one Google click) and I'll do it for you." Friction
-  converted into motivation — the design doc's Bot-as-Wedge logic.
-  Gated on spike/sweep data showing OAuth-only services are a
-  meaningful slice.
+- [x] **G1 — Managed identity for OAuth signup. — SHIPPED.**
+  OAuth-first signup shipped as `@trusty-squire/mcp@0.2.0` (Phase 1
+  T1–T14 + the GitHub provider T13). The bot rides a Google/GitHub
+  session in a persistent Chrome profile through a service's consent
+  screen — clicking the affordance, scope-gating the consent, driving
+  the post-OAuth onboarding to the API key. Plan:
+  `ceo-plans/2026-05-17-oauth-first-signup.md`.
+- [ ] **G2 — API-side identity model (Tier 0 → Tier 1 funnel).** The
+  OAuth-first *signup path* shipped (G1); what remains of G2 is the
+  API side — replace the anonymous machine token with the OAuth
+  identity, build the identified conversion funnel. Deferred per the
+  plan ("API-side identity model, B phase 2 — a fast-follow, not a
+  blocker").
+
+### Post-build follow-ups (2026-05-18)
+
+From the OAuth-first verification sweep — see the plan's "Post-Build
+Findings (2026-05-18)" section.
+
+- [x] **G3 — Publish `0.2.1`. — done 2026-05-18.** Every fix since
+  `0.2.0` — post-OAuth onboarding hardening (scroll-into-view, the
+  `select` step, navigation-resilience, re-plan-on-rejection, async
+  SSO re-extract), `findOAuthButton` icon/href detection, the
+  extraction fixes (`pk_`/`phc_` dropped, `re_` charset, the
+  label-separator guard), plus G5 (eval corpus) and G6 (`check`
+  step) — shipped as `@trusty-squire/mcp@0.2.1`. dist cleaned before
+  packing; the `corpus/` dir is not in the tarball (143 KB packed,
+  123 files). CLAUDE.md's published-version line updated.
+- [ ] **G4 — Capture pass for the 8 handshake-needed services**
+  (Plunk, Hunter, IPInfo, PostHog, Koyeb, Netlify, SendPulse,
+  Back4App). **BLOCKED** — G7 measured that the OAuth handshake is
+  challenge-gated from this headless datacenter box for any account.
+  Of the 8: SendPulse's handshake completed but its API key is
+  paywalled (`onboarding_blocked`); the other 7 were all challenged.
+  Unblocking needs the handshakes done from a residential IP + a
+  headed browser (a developer's own machine), once per service, to
+  capture the post-OAuth state — then G5.
+- [x] **G5 — Curate the raw onboarding captures into the E1 eval
+  corpus. — done 2026-05-18.** 46 raw round-captures (Sentry,
+  Mistral, Resend, SendPulse) trimmed to **14 distinct, labelled
+  cases** under `apps/mcp/corpus/onboarding/`. Each keeps the full
+  DOM inventory, drops the screenshot for a 1×1 placeholder, and
+  reduces HTML to the visible text the planner consumes. Cases cover
+  the T12 sequences: Resend dashboard→keys→modal→reveal→extract,
+  Sentry issues→settings→tokens→create, Mistral's org-creation gate,
+  SendPulse's 404 dead-end. `loadCorpus()` defaults to the committed
+  dir; `ONBOARDING_EVAL_CORPUS` still overrides. A test asserts the
+  corpus loads and every case is structurally scorable.
+- [x] **G6 — `postVerifyLoop` `check` step. — done 2026-05-18.**
+  Added `PostVerifyStep` `check`: `parsePostVerifyStep` parses it,
+  the loop executes via `browser.check` (force + scrollIntoView +
+  verify), the planner prompt documents it for a disabled-button TOS
+  gate, and the parse callback rejects a `check` that targets a link
+  instead of a real checkbox. **Caveat:** Mistral's specific TOS
+  checkbox is a visually-hidden `<input>` that
+  `extractInteractiveElements` filters out, so it never reaches the
+  inventory — `check` cannot target what isn't surfaced. Surfacing
+  hidden-but-checkable inputs is a separate browser.ts fix → G12.
+- [ ] **G12 — Surface visually-hidden checkboxes in the inventory.**
+  `extractInteractiveElements` drops `visible:false` elements, but a
+  custom-styled TOS checkbox is a real `<input type=checkbox>` with
+  `opacity:0`/`sr-only` behind a styled label. It is checkable and
+  must reach the inventory so the G6 `check` step can target it
+  (Mistral's org-creation gate). Include a hidden input when it is
+  `type=checkbox`/`radio` and inside/adjacent a visible label.
+- [x] **G7 — Measure the Google anti-abuse threshold. — done
+  2026-05-18.** Two batches: an aged account (`lunchboxfortwo`) got
+  exactly **1** clean handshake then challenged; a fresh dev account
+  (`methoxine`) was challenged on **8 of 9**, including run #1. A
+  fresh account is treated as MORE suspicious — no history + headless
+  + datacenter IP = "verify it's you" on the first OAuth. **The
+  dev-account-pool idea is dead** — fresh accounts add no headroom.
+  Reliable handshakes need an aged account on a residential IP at low
+  volume (the production case). The dev escape is NOT more handshakes
+  — it is capturing each service's post-OAuth state once (from a
+  residential/headed environment) and iterating onboarding offline
+  (G5). See the plan's Post-Build Findings.
+- [ ] **G8 — `mcp login --provider=github`.** The persistent profile
+  is logged into Google only. The 8 of 11 reachable services that
+  also expose GitHub OAuth need a one-time GitHub login first.
+- [x] **G9 — Re-probe the affordance probe's inconclusive services.
+  — done.** Brevo (corrected URL) loaded fully — **no OAuth**
+  affordance (email-only; joins Postmark/Mailgun/DeepSeek). Loops,
+  MailerSend, Axiom still render only 2–3 elements for the headless
+  throwaway-profile probe even with 18s of waits — a headless-render
+  problem, not an OAuth question; resolving them needs a headed
+  probe. Coverage holds at 11/18 OAuth-first-reachable.
+- [x] **G10 — DeepSeek offers no Google OAuth. — confirmed, note
+  only.** No affordance, no GIS iframe, zero OAuth references in the
+  DOM at `/sign_up` or `/sign_in`. OAuth-first is N/A for DeepSeek;
+  form-fill is its only (walled) path.
+- [ ] **G11 — Explore improving the headless-login VNC tool UX.** The
+  one-time `mcp login` on a display-less box bridges Chrome out via
+  Xvfb + x11vnc + noVNC + cloudflared (`google-login.ts`). noVNC's
+  client UI is dated; KasmVNC is a more modern drop-in (modern
+  client, built-in clipboard sync) — it replaces the VNC *server*
+  layer, a contained one-time packaging change. Evaluate the swap:
+  this is a human-facing one-shot login screen, so its UX is the
+  product there.
 
 ## H — Concurrency: the bot is single-flight
 
@@ -378,3 +462,184 @@ fixed; the rest is deferred.
   (concurrent writes corrupt it); `MACHINE_TOKEN_QUOTA` and the LLM
   rate-limit counter are both check-then-act (concurrent runs can slip
   past the cap). Fix when concurrency becomes real.
+
+## P — Product roadmap: vault → credential broker → agent commerce
+
+Six large buckets raised by the founder 2026-05-19, after the OAuth +
+pairing + web-vault work shipped. These are multi-day product buckets,
+not single-PR tasks. Founder's first-pass labels in brackets;
+recommended slot + rationale below.
+
+### The strategic read
+
+The core loop is: **agent needs a key → Squire provisions it → key
+lands in the vault → agent uses the key.** Today the *populate* half
+works (the bot writes credentials into the vault); the *read* half
+does not — nothing pulls keys back out programmatically. So the vault
+is currently a write-only sink, and an agent re-provisions a service
+it already has a key for.
+
+**P3 closes that loop and is the keystone.** Everything else either
+hardens it (P4), widens its entry points (P1, P2), or monetizes on top
+of it (P5, P6).
+
+The **spine** of the long-term vision — *secure credential broker for
+agents, including paid SaaS* — is **P3 → P4 → P6**. P1, P2, P5 hang off
+the side and are independently shippable (parallel-track / filler
+work; "LOW" = low coupling, not "blocked").
+
+### Recommended sequencing
+
+| Slot | Bucket | Founder label | Why here |
+|------|--------|---------------|----------|
+| 1 | **P3** — agent reads the vault | HIGH | Keystone. Makes the vault a real broker. Read API already half-built. |
+| 2 | **P4** — Vouchflow secures the vault | MEDIUM | Harden P3's *new* read surface before it sees traffic — retrofitting later reworks the reveal path twice. Unblocks P6. |
+| 3 | **P2** — provision from the vault UI | MEDIUM | Widens provisioning to the web. Gated on one architecture call (where the bot runs). |
+| 4 | **P1** — skillify signups → adapters | MEDIUM | Compounding cost/quality win; no urgency — can skillify retroactively from logs. = the open half of A1.2. |
+| 5 | **P5** — Stripe billing for Squire | LOW | Monetizes the product. Fully independent — parallelizable anytime. |
+| 6 | **P6** — paid-SaaS via Stripe Issuing + mandate tab | LOW | Heaviest; most dependencies; Stripe Issuing has external approval lead time. |
+
+**Deviation from the founder's labels:** P4 is pulled ahead of P1/P2
+(all three MEDIUM) because it is coupled to P3's new surface — ship P3
+unsecured and the reveal path gets built twice. If P6 is committed,
+**start the Stripe Issuing application now** regardless of code slot —
+its approval lead time is the long pole.
+
+---
+
+### P1 — Closed feedback loop: skillify signups into adapters [MEDIUM]
+
+**This is the open half of A1.2** (see the A1 section) — restated here
+for the roadmap view; tracked as A1.2.
+
+- **What.** When `provision_any_service` (the universal browser bot)
+  completes a signup for a service with no native adapter, capture the
+  run — the DOM-grounded step trail, field map, verification flow —
+  and codify it into a native `defineAdapter` adapter registered in
+  `registry-api`. Future signups take the deterministic `provision`
+  fast path.
+- **Why.** The bot is slow, LLM-metered, captcha-fragile; native
+  adapters are free, fast, deterministic. Every skillified service is
+  a permanent win — the product compounds, getting better the more it
+  is used. `adapters/resend/manifest.ts` already anticipates this.
+- **Depends on.** Nothing hard — the bot already emits a structured
+  step trail (F3's DOM-grounded inventory makes it clean enough to
+  codegen from).
+- **Scope.** Persist successful runs' trails → adapter-codegen step
+  (LLM-assisted scaffold, offline) → human review → register. Start
+  human-in-the-loop; do not auto-ship generated adapter code to prod.
+- **Open Q.** Fully-automated codegen vs. assisted-scaffold-then-review
+  (start assisted). Routing: detect "this service now has an adapter"
+  and prefer it over the bot.
+
+### P2 — Provision SaaS directly from the vault UI [MEDIUM]
+
+- **What.** A web flow in the vault to trigger a signup directly — pick
+  / enter a service, watch it run (Linear-style tabs + the landing
+  page's signup animation), the key lands in the vault.
+- **Why.** Today provisioning is only agent-triggered via MCP. A web
+  entry point lets a user provision without a coding agent in the
+  loop, and turns the web app into a place you *do* things.
+- **Depends on.** A web-triggerable provision path. **Architecture
+  decision required** — the bot runs Playwright in the user's *local*
+  MCP process; a web-triggered signup has no local process:
+  - **(a)** Run the bot server-side on Fly (Playwright-in-container).
+    Heavier, and **loses the residential-IP advantage** — S1/T3
+    findings show datacenter egress is scored as bot-likely.
+  - **(b)** Dispatch the job to the user's *paired CLI/MCP* if one is
+    connected (reuse the agent-session channel). Preserves the
+    residential-IP model; web is just the trigger + live view.
+  Recommend **(b)** when a paired agent exists, (a) as fallback.
+- **Decided 2026-05-19: (b)** — dispatch the signup job to the paired
+  CLI/MCP; the web is the trigger + live view. Server-side (a) is a
+  fallback only, for when no agent is paired.
+
+### P3 — Agent sessions fetch existing keys from the vault [HIGH] ★ keystone
+
+> **Status — 2026-05-19: discovery path shipped.** The fetch half
+> already existed (`GET /v1/credentials/:reference` + `get_credential`,
+> agent-auth); the missing piece was *discovery*. Now: `GET
+> /v1/vault/credentials` accepts agent-session auth (`requireAny`) and
+> returns the vault `reference`; new MCP `list_credentials` tool closes
+> the loop with `get_credential`; `provision` / `provision_any`
+> descriptions nudge check-vault-first. Tests green (MCP 237, API 69).
+> API deployed. **MCP republished — `@trusty-squire/mcp@0.3.0`**
+> (2026-05-19). Remaining: per-service / per-agent access scoping —
+> deferred, shipped per-account.
+
+- **What.** A coding agent (via MCP, authed by its `mcp_session_*`
+  agent-session token) can list and retrieve credentials already in
+  the vault. Provision flows check the vault *first* and reuse what is
+  there before signing up for a new key.
+- **Why.** THE keystone. The vault is write-only from the agent side
+  today — the bot pushes keys in, nothing reads them back — so an agent
+  re-provisions a service it already has. P3 makes the vault a real
+  broker: provision once, reuse everywhere, across machines and
+  sessions. The core value proposition, currently a dead end.
+- **Depends on.** The vault read API exists from the Phase-1 work
+  (`GET /v1/vault/credentials`, `POST /v1/vault/credentials/:id/
+  reveal`) but is **web-session-auth only** — it must also accept
+  agent-session bearer auth.
+- **Scope.** Extend the vault API auth to agent sessions; add MCP tools
+  (`list_credentials` / `get_credential`); wire provision flows to
+  check-vault-first; audit every agent-side reveal (`VaultAuditEvent`
+  already exists).
+- **Open Q.** Access scope — can any paired agent read *all* the
+  account's keys, or per-service / per-agent scoping? Ship per-account
+  now, design the schema for scoping (also the reason to do P4 next).
+
+### P4 — Vouchflow secures the vault credentials [MEDIUM]
+
+- **What.** Wire the Vouchflow web SDK so credential access requires a
+  Vouchflow-signed proof (`signPayload()`), not just a session/bearer
+  token.
+- **Why.** The vault already has AES-256-GCM envelope encryption + KMS.
+  Vouchflow adds an *authorization/attestation* layer: every reveal
+  becomes a signed, attestable action. It is the security story behind
+  the landing pitch — and dogfoods the founder's own product. It
+  should land right after P3: P3 opens a new "secrets-flow-to-agents"
+  surface, and that surface is exactly what you want gated by signed
+  proof before it sees real traffic.
+- **Depends on.** P3 defines the surface. Vouchflow SDK capabilities
+  (review needed). `config/vouchflow.ts` + `VOUCHFLOW_READ_KEY` (see
+  the deploy-follow-ups section) are the existing hooks.
+- **Open Q.** What exactly does Vouchflow attest — the user approving a
+  reveal? the agent identity? the spend? Map `signPayload()` to a
+  concrete gate. Also unblocks P6's `signPayload()` requirement.
+
+### P5 — Stripe billing for Trusty Squire subscriptions [LOW]
+
+- **What.** Users pay for Trusty Squire itself — Stripe Checkout,
+  plans, webhooks, billing state on the `Account`.
+- **Why.** Monetizes the product. Fully independent of the vault work
+  — a well-trodden Stripe Checkout integration. "LOW" here means low
+  coupling: it can run on a parallel track whenever capacity exists.
+- **Depends on.** Nothing technical. Needs a pricing/tier decision (the
+  Tier 0 free → paid model in CLAUDE.md's quota design is the start).
+
+### P6 — Paid-SaaS signup via Stripe Issuing + mandate tab [LOW]
+
+- **What.** The agent signs up for *paid* SaaS using a Stripe Issuing
+  virtual card, bounded by a user-set spending mandate. The web app
+  gains a three-tab structure — **Vault / Provision / Mandate**. The
+  Mandate tab is policy guardrails (spend caps, per-service limits,
+  approval thresholds). Every spend is gated by Vouchflow
+  `signPayload()`.
+- **Why.** Unlocks the full vision — an agent that provisions
+  *anything*, including paid services, within provable limits. Also
+  the heaviest bucket with the most dependencies.
+- **Depends on.** P3 (vault read), P4 (Vouchflow signing), a Stripe
+  relationship (P5-adjacent), AND the existing mandate concept in
+  `packages/runtime` (`mandate-validator`) — **stubbed** during the
+  OAuth work, needs un-stubbing/rebuilding. There must be **one**
+  mandate model, not a new "Mandate tab" model alongside the
+  runtime's.
+- **External lead time.** Stripe **Issuing** requires separate Stripe
+  approval/onboarding (compliance, KYC) — the long pole. Founder is
+  filing that application (decided 2026-05-19); code start is
+  independent of approval.
+- **MVP scope (decided 2026-05-19).** Paid API services with *no free
+  tier* are **out of the MVP** — the MVP covers services that have a
+  free tier. ~A few weeks of runway.
+- **Open Q.** Reconcile the Mandate tab with the runtime
+  `mandate-validator` into one model.

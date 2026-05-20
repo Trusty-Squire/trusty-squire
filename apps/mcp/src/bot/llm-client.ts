@@ -70,7 +70,7 @@ export class AnthropicDirectClient implements LLMClient {
 
   constructor(opts: { apiKey: string; model?: string }) {
     this.client = new Anthropic({ apiKey: opts.apiKey });
-    this.model = opts.model ?? "claude-3-5-sonnet-20241022";
+    this.model = opts.model ?? "claude-sonnet-4-6";
     this.name = `anthropic:${this.model}`;
   }
 
@@ -110,9 +110,9 @@ export class AnthropicDirectClient implements LLMClient {
 export interface OpenRouterClientOpts {
   apiKey: string;
   // The model slug to use. Examples:
-  //   "anthropic/claude-3-haiku"          ← cheap, vision-capable
-  //   "google/gemini-flash-1.5"           ← cheaper, vision-capable
-  //   "openai/gpt-4o-mini"                ← middle, vision-capable
+  //   "google/gemini-2.0-flash-001"       ← cheap, vision-capable
+  //   "openai/gpt-4o-mini"                ← cheap, vision-capable
+  //   "anthropic/claude-sonnet-4.5"       ← premium, vision-capable
   //   "openrouter/auto"                   ← let OR pick
   // When omitted, defaults to OPENROUTER_MODEL env or "openrouter/auto".
   model?: string;
@@ -163,7 +163,11 @@ export class OpenRouterClient implements LLMClient {
       ],
     };
     if (this.fallbackModels.length > 0) {
-      body["models"] = [this.model, ...this.fallbackModels];
+      // OpenRouter caps the `models` routing array at 3 items — a
+      // longer list is a hard 400 ("'models' array must have 3 items
+      // or fewer"). Cap defensively so an over-long fallback list
+      // degrades to "first 3" instead of failing the whole call.
+      body["models"] = [this.model, ...this.fallbackModels].slice(0, 3);
     }
 
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -202,7 +206,7 @@ export class OpenRouterClient implements LLMClient {
 //
 // For users who haven't BYOK'd an LLM provider, the bot talks to a proxy
 // endpoint we host that forwards to OpenRouter (or any provider we wire
-// up server-side). The user pays nothing for LLM calls in Tier 0 because
+// up server-side). The user pays nothing for LLM calls in active-mode because
 // the proxy uses the operator's OpenRouter key — but the server enforces
 // a rolling rate limit per machine token so a single user can't drain
 // our wallet.
@@ -302,14 +306,16 @@ export interface LLMPair {
 }
 
 // "Cheapest serviceable" for our use case: needs vision + good JSON
-// adherence + reasonable speed. The list is ordered by cost-per-1M-input
-// tokens ascending (rates as of mid-2025; OpenRouter updates daily so
-// this is approximate but the relative order is stable).
+// adherence + reasonable speed. Ordered by cost-per-1M-input tokens
+// ascending (rates approximate, late-2025; OpenRouter updates daily,
+// the relative order is what matters). Kept to exactly 3 entries:
+// OpenRouter's `models` routing array caps at 3 (see OpenRouterClient),
+// so a 4th would be silently dropped anyway. The previous list
+// (gemini-flash-1.5*) was retired from OpenRouter — keep these current.
 const CHEAP_VISION_MODELS_OR: string[] = [
-  "google/gemini-flash-1.5-8b",   // ~$0.04/1M input — vision OK, fast
-  "google/gemini-flash-1.5",      // ~$0.075/1M input — vision, solid
-  "anthropic/claude-3-haiku",     // ~$0.25/1M input — vision, JSON great
-  "openai/gpt-4o-mini",           // ~$0.15/1M input — vision, JSON great
+  "google/gemini-2.0-flash-001", // ~$0.10/1M input — vision, fast, solid JSON
+  "openai/gpt-4o-mini",          // ~$0.15/1M input — vision, excellent JSON
+  "google/gemini-2.5-flash",     // ~$0.30/1M input — vision, strongest of the three
 ];
 
 export function pickLLMClient(opts: PickLLMClientOpts = {}): LLMClient {
@@ -360,11 +366,12 @@ export function pickLLMPair(opts: PickLLMClientOpts = {}): LLMPair {
         ...(primaryModel !== undefined ? { model: primaryModel } : {}),
         fallbackModels: fallbacks,
       });
-      // Premium fallback: Claude 3.5 Sonnet via OR. ~$0.15/signup, but
-      // only triggers on parse failures, so amortized cost is small.
+      // Premium fallback: Claude Sonnet via OR — only triggers on parse
+      // failures, so amortized cost is small. (anthropic/claude-3.5-sonnet
+      // was retired from OpenRouter; claude-sonnet-4.5 is the current id.)
       const premium = new OpenRouterClient({
         apiKey: orKey,
-        model: "anthropic/claude-3.5-sonnet",
+        model: "anthropic/claude-sonnet-4.5",
       });
       return { primary, premium };
     }

@@ -12,8 +12,9 @@
 // and the caller polls `check_provision_status` until the run leaves the
 // "running" state.
 //
-// Auth model: Tier 0 machine token from the session file. No account or
-// mandate required for free-tier signups.
+// Auth model: every install is account-bound. The session file carries
+// the machine_token (for the bot's LLM proxy + inbox alias) and the
+// agent_session_token (for vault writes), both bound to one account.
 
 import { randomBytes } from "crypto";
 import { z } from "zod";
@@ -33,6 +34,12 @@ type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
 export const provisionAnyInputSchema = z.object({
   service: z.string().describe("Name of the service to sign up for (e.g., 'Postmark', 'Mailgun')"),
   signup_url: z.string().optional().describe("Direct URL to signup page (optional, will search if not provided)"),
+  oauth_provider: z
+    .enum(["google", "github"])
+    .optional()
+    .describe(
+      "Force OAuth signup through a specific provider. Usually unnecessary — the bot already auto-prefers OAuth when the service offers Google/GitHub sign-in and a login session exists. Set this only to pin one provider. OAuth needs a one-time `npx @trusty-squire/mcp login [--provider=github]`.",
+    ),
 });
 
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
@@ -57,6 +64,12 @@ const PROVISION_ANY_JSON_SCHEMA = {
     signup_url: {
       type: "string",
       description: "Direct URL to the service's signup page. Optional — the bot will navigate from the service name if omitted.",
+    },
+    oauth_provider: {
+      type: "string",
+      enum: ["google", "github"],
+      description:
+        "Force OAuth signup through a specific provider. Usually unnecessary — the bot auto-prefers OAuth whenever the service offers Google/GitHub sign-in and a session exists (`npx @trusty-squire/mcp login`). Set this only to pin one provider.",
     },
   },
 } as const;
@@ -96,13 +109,19 @@ You MUST then poll check_provision_status with that run_id (about once a
 minute) until its status is no longer "running".
 
 WHEN TO CALL THIS TOOL:
-- The user wants an account for a service Trusty Squire has no native adapter for.
-- Best for free-tier developer services with email/password signup.
+- The user needs an account or API key for any SaaS service.
+- Free-tier developer services. The bot auto-signs-up via Google/GitHub
+  OAuth when the service offers it and the user has run
+  \`npx @trusty-squire/mcp login\` once; otherwise it fills the email form.
+
+Call list_credentials first — reuse an existing key rather than signing
+up again.
 
 IMMEDIATE RESPONSES (no run started):
 - status="started" + run_id → poll check_provision_status next.
-- status="quota_exceeded" + cta_pair_url → tell the user to run \`npx @trusty-squire/mcp pair\`.
-- status="not_installed" → Trusty Squire isn't installed; tell the user to run the installer.
+- status="payment_required" + cta_billing_url → the account hit the free
+  signup limit; the user can upgrade at cta_billing_url.
+- status="not_installed" → Trusty Squire isn't installed; tell the user to run \`npx @trusty-squire/mcp install\`.
 - status="error" → could not reach the API to set up the signup.`;
 
 const CHECK_DESCRIPTION = `Check the status of a signup started by provision_any_service.
@@ -117,6 +136,12 @@ RESPONSES:
   email (anti-abuse withholding, or it needs manual signup).
 - status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
+- status="needs_login" → an OAuth signup needs the bot's one-time Google login;
+  tell the user to run \`npx @trusty-squire/mcp login\`, then retry.
+- status="oauth_consent_needs_review" → the Google consent screen asked for more than
+  basic profile access; the user must complete the OAuth signup manually.
+- status="onboarding_blocked" → signed in via Google, but the API key is behind a
+  billing/payment wall; the user must add a payment method.
 - status="failed" → the form filled but yielded no credentials; show steps[].
 - status="error" → the run crashed; show error.
 - status="unknown_run" → no such run (it expired, or the MCP server restarted).`;
@@ -127,16 +152,24 @@ export const provisionAnyTool = {
   jsonInputSchema: PROVISION_ANY_JSON_SCHEMA,
   inputSchema: provisionAnyInputSchema,
   handler: async (input: ProvisionAnyInput, _api: ApiClient | null) => {
-    // Pull the machine token from session storage. The install CLI writes it.
+    // Every install is account-bound. The CLI writes machine_token,
+    // agent_session_token, and account_id together; if any is missing
+    // the install is from before the single-tier collapse and needs
+    // re-running.
     const storage = await openSessionStorage();
     const session = await storage.read();
-    if (session === null || session.machine_token === undefined) {
-      const hasPartialSession = session !== null && session.agent_session_token !== undefined;
+    if (
+      session === null ||
+      session.machine_token === undefined ||
+      session.agent_session_token === undefined ||
+      session.account_id === undefined
+    ) {
       return {
         status: "not_installed",
-        message: hasPartialSession
-          ? "This machine is paired (Tier 1) but has no Tier 0 machine_token, which provision_any_service requires. Run `node /home/chode/trusty-squire/apps/mcp/dist/install/cli.js install --target=goose` to issue one, or in production run `npx @trusty-squire/mcp install`."
-          : "Trusty Squire isn't installed on this machine. In production run `npx @trusty-squire/mcp install`. For local dev against this repo run `node /home/chode/trusty-squire/apps/mcp/dist/install/cli.js install --target=goose`.",
+        message:
+          "Trusty Squire isn't fully installed on this machine. " +
+          "Run `npx @trusty-squire/mcp install` to set up the squire (or reconnect " +
+          "an install from before single-tier auth).",
       };
     }
     const apiBase = session.api_base_url;
@@ -149,7 +182,7 @@ export const provisionAnyTool = {
     let alias: string;
     try {
       alias = await inboxClient.createAlias({
-        account_id: session.account_id ?? "anonymous",
+        account_id: session.account_id,
         service: input.service,
         run_id: runId,
       });
@@ -158,20 +191,23 @@ export const provisionAnyTool = {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // The createAlias error body carries the structured payload; parse it back.
-      if (/quota_exceeded/.test(message)) {
+      // The API may still emit the old `quota_exceeded` error code during a
+      // rollout window — accept both shapes and surface a single
+      // payment_required status to the LLM.
+      if (/quota_exceeded|payment_required/.test(message)) {
         const match = message.match(/\{.*\}/s);
         if (match !== null) {
           try {
             const parsed = JSON.parse(match[0]) as Record<string, unknown>;
             return {
-              status: "quota_exceeded",
+              status: "payment_required",
               service: input.service,
               quota_limit: parsed["quota_limit"],
               quota_used: parsed["quota_used"],
-              cta_pair_url: parsed["cta_pair_url"],
+              cta_billing_url: parsed["cta_billing_url"] ?? parsed["cta_pair_url"],
               message:
-                "You've used your free signups on this machine. " +
-                "Run `npx @trusty-squire/mcp pair` (or open the cta_pair_url) to upgrade.",
+                "Your account has hit the free signup limit. " +
+                "Open cta_billing_url to upgrade — until then signups are paused.",
             };
           } catch {
             // fall through
@@ -201,6 +237,7 @@ export const provisionAnyTool = {
       machineToken: session.machine_token,
       alias,
       inboxClient,
+      agentSessionToken: session.agent_session_token,
     });
 
     return {
@@ -249,6 +286,11 @@ interface RunContext {
   machineToken: string;
   alias: string;
   inboxClient: InboxClient;
+  // Account-bound bearer token used to write captured credentials to
+  // the user's vault. Always present in the single-tier model — the
+  // install CLI requires a successful browser confirm before writing
+  // the session.
+  agentSessionToken: string;
 }
 
 // Runs the signup to completion and stores the final tool response in
@@ -283,6 +325,9 @@ async function runSignupTask(
       email: ctx.alias,
       inbox: ctx.inboxClient,
       llm: llmPair,
+      // T6/T13: route through the provider's OAuth path when the
+      // caller asked for it (Google or GitHub).
+      ...(input.oauth_provider !== undefined ? { oauthProvider: input.oauth_provider } : {}),
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -307,6 +352,18 @@ async function runSignupTask(
     }
 
     response = buildSignupResponse(input, result);
+
+    // Persist the collected keys into the account's vault. Fire-and-
+    // forget — the credentials are already in `response`, so a vault
+    // write failure is non-fatal.
+    if (result.success && result.credentials !== undefined) {
+      void postCredentialsToVault(
+        ctx.apiBase,
+        ctx.agentSessionToken,
+        input.service,
+        result.credentials,
+      );
+    }
   } catch (err) {
     response = {
       status: "error",
@@ -321,8 +378,10 @@ async function runSignupTask(
 }
 
 // Maps a finished SignupResult to the response the caller sees via
-// check_provision_status. Mirrors the status set documented on the tools.
-function buildSignupResponse(
+// check_provision_status. Mirrors the status set documented on the
+// tools. Exported for unit testing — the error-prefix → status
+// mapping is the load-bearing logic.
+export function buildSignupResponse(
   input: ProvisionAnyInput,
   result: SignupResult,
 ): Record<string, unknown> {
@@ -363,6 +422,56 @@ function buildSignupResponse(
       message:
         `${input.service} only offers Google/GitHub (OAuth) signup — there is no email form the bot can fill. ` +
         `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  // T7/T10 — OAuth: the bot's Google session is missing/expired, or
+  // Google interrupted with a security challenge. The remedy for both
+  // is the one-time interactive login.
+  if (result.error !== undefined && result.error.startsWith("needs_login")) {
+    return {
+      status: "needs_login",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `The bot has no usable provider session for an OAuth signup. Tell the user to run ` +
+        `\`npx @trusty-squire/mcp login\` once (add \`--provider=github\` for a GitHub signup), ` +
+        `then retry provision_any_service with oauth_provider. The error field names the exact command.`,
+    };
+  }
+
+  // T7/T10 — OAuth: the consent screen requested broader-than-basic
+  // scopes (or its scopes could not be read). The bot deliberately
+  // does not auto-approve — a human must review it.
+  if (result.error !== undefined && result.error.startsWith("oauth_consent_needs_review")) {
+    return {
+      status: "oauth_consent_needs_review",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service}'s Google consent screen needs human review (it asked for more than ` +
+        `basic profile access). Tell the user to complete the OAuth signup manually at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+    };
+  }
+
+  // T7/T10 — OAuth: signed in fine, but the API key sits behind a
+  // billing / payment-method wall the bot will not cross.
+  if (result.error !== undefined && result.error.startsWith("onboarding_blocked")) {
+    return {
+      status: "onboarding_blocked",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service} signed up via Google, but its API key is behind a billing/payment wall. ` +
+        `Tell the user to add a payment method at ` +
+        `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`} to finish.`,
     };
   }
 
@@ -440,5 +549,46 @@ async function postCaptchaEvent(
         err instanceof Error ? err.message : String(err)
       }`,
     );
+  }
+}
+
+// Stores the keys a signup yielded into the paired account's vault via
+// POST /v1/vault/credentials (agent-authenticated). Best-effort, one
+// request per credential — a failure logs and is dropped, since the
+// keys are still returned to the caller in the tool response.
+async function postCredentialsToVault(
+  apiBase: string,
+  agentSessionToken: string,
+  service: string,
+  credentials: Record<string, string | undefined>,
+): Promise<void> {
+  // "Resend" → "RESEND"; used to build an env-var-style key name.
+  const prefix = service
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  for (const [name, value] of Object.entries(credentials)) {
+    if (value === undefined || value.length === 0) continue;
+    try {
+      await fetch(`${apiBase}/v1/vault/credentials`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${agentSessionToken}`,
+        },
+        body: JSON.stringify({
+          service,
+          value,
+          env_var_suggestion: `${prefix}_${name.toUpperCase()}`,
+          type: "api_key",
+        }),
+      });
+    } catch (err) {
+      console.error(
+        `[provision-any] vault store failed for ${service}/${name} (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 }

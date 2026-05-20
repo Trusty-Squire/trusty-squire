@@ -27,6 +27,7 @@ import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -229,6 +230,12 @@ export class BrowserController {
   private proxyServer: string | null = null;
 
   private readonly profileDir: string;
+
+  // T6/T7 — OAuth handshake bookkeeping. When startOAuth() adopts a
+  // popup window as the active page, the original product page is
+  // parked here so settleAfterOAuth() can switch back to it once the
+  // Google handshake completes.
+  private oauthProductPage: Page | null = null;
 
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
@@ -705,6 +712,14 @@ export class BrowserController {
   private async humanClickLocator(locator: Locator): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await locator.waitFor({ state: "visible", timeout: 10000 });
+    // Scroll the element into the viewport BEFORE measuring it. A
+    // humanized click is a raw page.mouse.click(x, y) at viewport
+    // coordinates — boundingBox() of a below-the-fold element returns
+    // an off-screen y, and the click then lands on nothing (it was
+    // why a Sentry OAuth button below the fold never navigated). The
+    // regular .click() path auto-scrolls; the humanized path must too
+    // — same fix check() already carries.
+    await locator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
     const box = await locator.boundingBox();
     if (box === null) {
       // Element exists but isn't in the layout (e.g., display:none).
@@ -984,6 +999,56 @@ export class BrowserController {
     return await this.page.textContent("body") || "";
   }
 
+  // Discrete strings an API key might occupy — for credential
+  // extraction. Gathered so a key is read WHOLE and un-glued from its
+  // neighbours: extractText() concatenates the whole <body>, which
+  // fuses a key to an adjacent "Copy"/"Done" button with no separator.
+  //
+  // Two surfaces:
+  //   1. input/textarea VALUES — a copy-to-clipboard key field. An
+  //      input's value is not in textContent at all. Hidden and
+  //      password fields are excluded (captcha tokens / the signup
+  //      password), keeping this a clean credential surface.
+  //   2. Each element's OWN direct text — the text nodes that are its
+  //      immediate children, excluding descendants. A key in a
+  //      <code>/<span>/<div> yields its clean value here even when a
+  //      sibling button shares the same parent.
+  async extractCredentialCandidates(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const out: string[] = [];
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        return r.width > 2 && r.height > 2;
+      };
+      document.querySelectorAll("input, textarea").forEach((el) => {
+        if (
+          el instanceof HTMLInputElement &&
+          (el.type === "hidden" || el.type === "password")
+        ) {
+          return;
+        }
+        const value =
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+            ? el.value
+            : "";
+        if (value.trim().length > 0 && isVisible(el)) out.push(value.trim());
+      });
+      document.querySelectorAll("body *").forEach((el) => {
+        if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
+        if (!isVisible(el)) return;
+        let direct = "";
+        el.childNodes.forEach((n) => {
+          if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";
+        });
+        direct = direct.trim();
+        // A real key is short; a long blob is a paragraph, not a key.
+        if (direct.length > 0 && direct.length <= 256) out.push(direct);
+      });
+      return out;
+    });
+  }
+
   // Wait for the signup form to actually render before the planner
   // screenshots the page (F1). SPA and two-stage signup pages render
   // the form after JS executes; planning against a pre-render
@@ -1068,6 +1133,28 @@ export class BrowserController {
           '[class*="osano"],[id*="onetrust"],[id*="cookie"],[class*="cookie-consent"],[class*="cookie-banner"],[class*="cookieConsent"]',
         ) !== null;
 
+      // Accessible label of a descendant icon — an icon-only "Sign in
+      // with Google" button carries no text, but its <img alt>, its
+      // <svg><title>, or a descendant [aria-label] names the provider.
+      const iconLabelFor = (el: Element): string | null => {
+        const img = el.querySelector("img[alt]");
+        if (img !== null) {
+          const alt = clean(img.getAttribute("alt"));
+          if (alt !== null) return alt;
+        }
+        const svgTitle = el.querySelector("svg title");
+        if (svgTitle !== null) {
+          const t = clean(svgTitle.textContent);
+          if (t !== null) return t;
+        }
+        const labelled = el.querySelector("[aria-label]");
+        if (labelled !== null) {
+          const l = clean(labelled.getAttribute("aria-label"));
+          if (l !== null) return l;
+        }
+        return null;
+      };
+
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
         let base: string;
@@ -1130,6 +1217,8 @@ export class BrowserController {
         visible: boolean;
         inViewport: boolean;
         inConsentWidget: boolean;
+        href: string | null;
+        iconLabel: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -1154,6 +1243,8 @@ export class BrowserController {
             r.bottom <= window.innerHeight &&
             r.right <= window.innerWidth,
           inConsentWidget: inConsent(el),
+          href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
+          iconLabel: iconLabelFor(el),
         });
       }
       return out;
@@ -1183,6 +1274,118 @@ export class BrowserController {
       return { count, tag: info.tag, id: info.id, name: info.name };
     } catch {
       return { count: 0, tag: null, id: null, name: null };
+    }
+  }
+
+  // ───────────── OAuth handshake (T6/T7) ─────────────
+
+  // Click an OAuth provider button and adopt whichever page now
+  // carries the handshake. Google OAuth either redirects the current
+  // tab or opens a popup window; this normalizes both so the agent's
+  // consent loop can treat `this.page` as "the page showing Google's
+  // screens" without caring which transport the service chose.
+  // settleAfterOAuth() restores the product page afterwards.
+  async startOAuth(selector: string): Promise<void> {
+    if (!this.page || !this.context) throw new Error("Browser not started");
+    this.oauthProductPage = this.page;
+    // Race a popup `page` event against the click. context-level
+    // "page" fires for both window.open popups and target=_blank.
+    const popupPromise = this.context
+      .waitForEvent("page", { timeout: 8000 })
+      .catch(() => null);
+    await this.click(selector);
+    const popup = await popupPromise;
+    if (popup !== null && popup !== this.page && !popup.isClosed()) {
+      this.page = popup;
+    }
+    try {
+      await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
+    } catch {
+      // best-effort — the agent's consent loop re-reads state regardless
+    }
+  }
+
+  // URL of the active page (the OAuth page mid-handshake, the product
+  // page otherwise). Cheap — no screenshot, unlike getState().
+  currentUrl(): string {
+    return this.page !== null ? this.page.url() : "";
+  }
+
+  // True when the active OAuth page is gone — for the popup flow, the
+  // popup closing IS the signal the handshake finished.
+  oauthPageClosed(): boolean {
+    return this.page === null || this.page.isClosed();
+  }
+
+  // Advance a provider's consent / account-chooser screen by one click
+  // — the scope-gated auto-approve (T7/T13). Returns false when no
+  // approve control is present — the agent then aborts rather than
+  // hang. Clicks only; never types (the critical guarantee holds here).
+  async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    if (provider === "github") {
+      // GitHub's authorize screen: a single green "Authorize <app>"
+      // button. The accessible name starts with "Authorize".
+      const authorize = this.page
+        .getByRole("button", { name: /^authorize\b/i })
+        .first();
+      if ((await authorize.count().catch(() => 0)) > 0) {
+        try {
+          await authorize.click({ timeout: 8000 });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    }
+    // Google. Account chooser: Google renders each account with a
+    // stable data-identifier attribute (the account email).
+    const tile = this.page.locator("[data-identifier]").first();
+    if ((await tile.count().catch(() => 0)) > 0) {
+      try {
+        await tile.click({ timeout: 8000 });
+        return true;
+      } catch {
+        // fall through to the approve-button path
+      }
+    }
+    // Consent screen: the approve control's accessible name is
+    // "Continue" or "Allow". A full-match regex excludes "Cancel".
+    const approve = this.page
+      .getByRole("button", { name: /^(continue|allow)$/i })
+      .first();
+    if ((await approve.count().catch(() => 0)) > 0) {
+      try {
+        await approve.click({ timeout: 8000 });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  // Restore the product page once the OAuth handshake completes. A
+  // no-op for the same-tab redirect flow (the active page already IS
+  // the product page); for the popup flow, waits briefly for the popup
+  // to close, then switches `this.page` back to the product tab.
+  async settleAfterOAuth(): Promise<void> {
+    const product = this.oauthProductPage;
+    this.oauthProductPage = null;
+    if (product === null || product === this.page) return; // same-tab
+    for (let i = 0; i < 12 && this.page !== null && !this.page.isClosed(); i++) {
+      await this.sleep(1000);
+    }
+    if (this.page !== null && !this.page.isClosed()) {
+      await this.page.close().catch(() => undefined);
+    }
+    this.page = product;
+    await this.page.bringToFront().catch(() => undefined);
+    try {
+      await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
+    } catch {
+      // best-effort
     }
   }
 
@@ -1352,6 +1555,14 @@ export interface InteractiveElement {
   visible: boolean;
   inViewport: boolean;
   inConsentWidget: boolean;
+  // T13 follow-up — OAuth-affordance signals. `href` is the link
+  // target (an OAuth <a> points at e.g. /identity/login/google/);
+  // `iconLabel` folds in a descendant <img alt> / <svg><title> /
+  // [aria-label] so an icon-only "Sign in with Google" button — no
+  // visible text at all — is still discoverable. Optional: only the
+  // live extractInteractiveElements sets them; test fixtures omit them.
+  href?: string | null;
+  iconLabel?: string | null;
 }
 
 // Score a button/link by how much its text reads like a signup
@@ -1359,7 +1570,18 @@ export interface InteractiveElement {
 // chooser pick, and inventory button-ranking — one keyword set, no
 // drift (F3 Issue 8). OAuth provider names go firmly negative so the
 // bot never wanders into a Google/GitHub login dead end.
-export function scoreSignupButton(text: string): number {
+//
+// `oauthProviders` (T6/T13 + auto-prefer) inverts that for OAuth-
+// candidate providers: the "Sign in with <provider>" affordance is a
+// PRIMARY target, not a dead end — so it must score positive enough to
+// survive inventory ranking/capping. Stated as a rule, not arithmetic:
+// a candidate provider's button outranks any form field. Only the
+// candidate providers flip positive; every other OAuth/SSO button
+// stays negative.
+export function scoreSignupButton(
+  text: string,
+  oauthProviders?: readonly OAuthProviderId[],
+): number {
   const t = text.toLowerCase();
   let score = 0;
   if (t.includes("create account") || t.includes("create your account")) score += 12;
@@ -1376,9 +1598,16 @@ export function scoreSignupButton(text: string): number {
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
   if (t.includes("continue")) score += 2;
-  // OAuth / SSO buttons are submit-typed too — the provider name is
-  // the reliable discriminator, so drive those firmly negative.
-  if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso|saml)\b/.test(t)) {
+  if (
+    oauthProviders !== undefined &&
+    oauthProviders.some((p) => new RegExp(`\\b${p}\\b`).test(t))
+  ) {
+    // OAuth-first: a candidate provider's button is the goal. Score it
+    // above every form-field-class button so ranking never caps it out.
+    score += 50;
+  } else if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso|saml)\b/.test(t)) {
+    // OAuth / SSO buttons are submit-typed too — the provider name is
+    // the reliable discriminator, so drive those firmly negative.
     score -= 20;
   }
   if (t.includes("sign in") || t.includes("log in") || t.includes("login")) score -= 12;
@@ -1395,6 +1624,7 @@ export function scoreSignupButton(text: string): number {
 export function rankAndCapInventory(
   elements: readonly InteractiveElement[],
   buttonCap = 25,
+  oauthProviders?: readonly OAuthProviderId[],
 ): { inventory: InteractiveElement[]; buttonsDropped: number } {
   const isButtonish = (e: InteractiveElement): boolean =>
     e.tag === "button" ||
@@ -1409,6 +1639,7 @@ export function rankAndCapInventory(
       e,
       score: scoreSignupButton(
         `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+        oauthProviders,
       ),
     }))
     .sort((a, b) => b.score - a.score);

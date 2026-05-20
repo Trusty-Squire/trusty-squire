@@ -23,27 +23,29 @@ const here = dirname(fileURLToPath(import.meta.url));
 const out = resolve(here, "..", "public", "icons");
 mkdirSync(out, { recursive: true });
 
+// Dark icon tile: near-black background, white shield outline, wine
+// `{ }` glyph — matches the app's dark-first rebrand. The background
+// rect is essential: a fill-less outline would be invisible on a
+// light tab strip or home screen.
 const LOGO_SVG = `<svg width="1024" height="1024" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 18 14 L 82 14 L 82 46 Q 82 70 50 88 Q 18 70 18 46 Z"
-        fill="#d4a82c" stroke="#8a1a30" stroke-width="3.5" stroke-linejoin="round"/>
-  <path d="M 22 18 L 78 18 L 78 46 Q 78 67 50 83 Q 22 67 22 46 Z"
-        fill="none" stroke="#8a1a30" stroke-width="1" opacity="0.25"/>
-  <text x="50" y="56" font-family="ui-monospace, monospace" font-size="32"
-        fill="#8a1a30" font-weight="700" text-anchor="middle">{ }</text>
+  <rect width="100" height="100" fill="#0d0d10"/>
+  <path d="M 18 16 L 82 16 L 82 48 Q 82 72 50 88 Q 18 72 18 48 Z"
+        fill="none" stroke="#ededef" stroke-width="5.5" stroke-linejoin="round"/>
+  <text x="50" y="58" font-family="ui-monospace, monospace" font-size="30"
+        fill="#cf3a52" font-weight="700" text-anchor="middle">{ }</text>
 </svg>`;
 
 // Maskable: the shield must fit inside a "safe zone" that is 80% of the
 // canvas (Web App Manifest spec). We render the logo at 80% scale and
-// pad with cream so the OS can crop to any shape without clipping it.
+// pad with the canvas near-black so the OS can crop to any shape
+// without clipping the shield.
 const MASKABLE_SVG = `<svg width="1024" height="1024" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <rect width="100" height="100" fill="#f3ead7"/>
+  <rect width="100" height="100" fill="#0d0d10"/>
   <g transform="translate(10 10) scale(0.8)">
-    <path d="M 18 14 L 82 14 L 82 46 Q 82 70 50 88 Q 18 70 18 46 Z"
-          fill="#d4a82c" stroke="#8a1a30" stroke-width="3.5" stroke-linejoin="round"/>
-    <path d="M 22 18 L 78 18 L 78 46 Q 78 67 50 83 Q 22 67 22 46 Z"
-          fill="none" stroke="#8a1a30" stroke-width="1" opacity="0.25"/>
-    <text x="50" y="56" font-family="ui-monospace, monospace" font-size="32"
-          fill="#8a1a30" font-weight="700" text-anchor="middle">{ }</text>
+    <path d="M 18 16 L 82 16 L 82 48 Q 82 72 50 88 Q 18 72 18 48 Z"
+          fill="none" stroke="#ededef" stroke-width="5.5" stroke-linejoin="round"/>
+    <text x="50" y="58" font-family="ui-monospace, monospace" font-size="30"
+          fill="#cf3a52" font-weight="700" text-anchor="middle">{ }</text>
   </g>
 </svg>`;
 

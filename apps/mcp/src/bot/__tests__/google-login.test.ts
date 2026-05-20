@@ -7,8 +7,10 @@ import { describe, expect, it } from "vitest";
 import {
   binaryOnPath,
   classifyGoogleAuthState,
+  extractOAuthScopes,
   findFreePort,
   hasDisplay,
+  scopesAreBasic,
 } from "../google-login.js";
 
 describe("google-login env helpers", () => {
@@ -81,5 +83,58 @@ describe("classifyGoogleAuthState (T5)", () => {
     expect(classifyGoogleAuthState("https://accounts.google.com/odd/page", "")).toBe(
       "needs_login",
     );
+  });
+});
+
+describe("extractOAuthScopes (T7)", () => {
+  it("reads space-separated scopes off the consent URL", () => {
+    expect(
+      extractOAuthScopes(
+        "https://accounts.google.com/signin/oauth/consent?scope=openid%20email%20profile",
+      ),
+    ).toEqual(["openid", "email", "profile"]);
+  });
+
+  it("tolerates '+' as the scope separator", () => {
+    expect(
+      extractOAuthScopes("https://accounts.google.com/o/oauth2/v2/auth?scope=openid+email"),
+    ).toEqual(["openid", "email"]);
+  });
+
+  it("finds scopes nested inside a `continue` param", () => {
+    const inner = encodeURIComponent(
+      "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&scope=openid%20email",
+    );
+    expect(
+      extractOAuthScopes(`https://accounts.google.com/signin/oauth/consent?continue=${inner}`),
+    ).toEqual(["openid", "email"]);
+  });
+
+  it("returns null when no scope param is present anywhere", () => {
+    expect(extractOAuthScopes("https://accounts.google.com/signin/oauth/consent?client_id=x")).toBeNull();
+    expect(extractOAuthScopes("not-a-url")).toBeNull();
+  });
+});
+
+describe("scopesAreBasic (T7)", () => {
+  it("accepts only the basic-identity allowlist", () => {
+    expect(scopesAreBasic(["openid", "email", "profile"])).toBe(true);
+    expect(
+      scopesAreBasic([
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+      ]),
+    ).toBe(true);
+  });
+
+  it("rejects any broader scope", () => {
+    expect(
+      scopesAreBasic(["openid", "https://www.googleapis.com/auth/gmail.readonly"]),
+    ).toBe(false);
+    expect(scopesAreBasic(["https://www.googleapis.com/auth/drive"])).toBe(false);
+  });
+
+  it("rejects an empty scope list — absence is not confirmation", () => {
+    expect(scopesAreBasic([])).toBe(false);
   });
 });

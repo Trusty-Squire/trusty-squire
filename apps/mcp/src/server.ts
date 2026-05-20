@@ -5,6 +5,11 @@
 // `runServer()` is invoked by bin.ts for the `server` subcommand. This
 // file is a pure module — no shebang, no entrypoint guard, no top-level
 // execution. The host agent launches `mcp server`; bin.ts dispatches.
+//
+// Single-tier auth (post-Tier-0 collapse): every session is account-
+// bound. Sessions that pre-date the single-tier change (only a
+// machine_token, no agent_session_token) fail loud at tool-call time
+// with a re-install instruction. There is no anonymous mode.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -40,33 +45,20 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     if (tool === null) {
       return errorContent(`unknown tool '${req.params.name}'`);
     }
+    // Stale install gate runs before zod parsing: telling the user
+    // "you have invalid arguments" is worse than telling them "your
+    // install needs reconnecting" when both are true.
+    if (api === null) {
+      return errorContent(
+        `This install is from before single-tier auth and isn't bound to an account. ` +
+          `Run \`npx @trusty-squire/mcp install\` to reconnect.`,
+      );
+    }
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
       return errorContent(`invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
     }
     try {
-      // provision_any_service + check_provision_status are the Tier 0
-      // escape hatch — they run on a machine token, no API client needed.
-      if (tool.name === "provision_any_service" || tool.name === "check_provision_status") {
-        const result = await tool.handler(parsed.data, null);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        };
-      }
-
-      // Other tools require an authenticated (Tier 1+) agent_session_token.
-      // provision_any_service is the Tier 0 escape hatch and handles its own
-      // session check above, so users who only need universal signup don't
-      // need to pair at all.
-      if (api === null) {
-        return errorContent(
-          `This tool requires pairing (Tier 1+). Run ` +
-          `\`npx @trusty-squire/mcp install --target=<agent> --pair\` to enable it. ` +
-          `If you just want to sign up for a free service, call \`provision_any_service\` instead — ` +
-          `it works with a Tier 0 machine_token and doesn't need pairing.`
-        );
-      }
-
       const result = await tool.handler(parsed.data, api);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -98,10 +90,9 @@ export async function runServer(): Promise<void> {
   const storage = await openSessionStorage();
   const session = await storage.read();
 
-  // Tier-aware ApiClient: only paired (Tier 1+) sessions can call the
-  // authenticated API. Tier 0 machine-token-only sessions get a null
-  // ApiClient — provision_any_service uses session.machine_token via the
-  // InboxClient directly, no agent session required.
+  // Single-tier: every session is account-bound. A session with just a
+  // machine_token (pre-collapse install) yields api=null, and every
+  // tool call returns the re-install instruction.
   const api =
     session !== null && session.agent_session_token !== undefined
       ? new ApiClient({

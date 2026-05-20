@@ -7,7 +7,7 @@
 export class MissingSessionError extends Error {
   constructor() {
     super(
-      "No active Trusty Squire session. Run `npx @trusty-squire/mcp install --target=<agent>` to pair this machine.",
+      "No active Trusty Squire session. Run `npx @trusty-squire/mcp install --target=<agent>` to set up this machine.",
     );
     this.name = "MissingSessionError";
   }
@@ -70,6 +70,20 @@ export interface CredentialResponse {
   retrieved_at: string;
 }
 
+// Metadata for one vault credential — no secret value. The agent lists
+// these to discover what keys exist, then passes `reference` to
+// getCredential() to retrieve the actual secret.
+export interface VaultCredentialSummary {
+  id: string;
+  reference: string;
+  service: string | null;
+  key_name: string | null;
+  type: string;
+  created_at: string;
+  last_retrieved_at: string | null;
+  retrieval_count: number;
+}
+
 export interface DirectoryEntry {
   service: string;
   latest_version: string;
@@ -107,6 +121,14 @@ export class ApiClient {
   async getCredential(reference: string, purpose: string): Promise<CredentialResponse> {
     return this.get<CredentialResponse>(
       `/v1/credentials/${encodeURIComponent(reference)}?purpose=${encodeURIComponent(purpose)}`,
+    );
+  }
+
+  // Metadata list of every credential in the account's vault — no
+  // secret values. The discovery half of the credential loop.
+  async listCredentials(): Promise<{ credentials: VaultCredentialSummary[] }> {
+    return this.get<{ credentials: VaultCredentialSummary[] }>(
+      "/v1/vault/credentials",
     );
   }
 
@@ -208,24 +230,25 @@ function isErrorBody(b: unknown): b is { error: string } {
   );
 }
 
-// Stand-alone pairing helpers — used by the install CLI. Don't need a
-// session token (initiate + poll are unauthenticated by design).
+// Stand-alone install-claim helpers — used by the install CLI to run
+// the browser confirm step. Initiate + poll are unauthenticated by
+// design: the CLI has no credentials yet, only the one-time setup_code.
 
-export interface PairInitiateResponse {
-  pair_token: string;
-  pair_url: string;
+export interface InstallInitiateResponse {
+  setup_code: string;
+  confirm_url: string;
   expires_at: string;
 }
 
-export async function pairInitiate(
+export async function installInitiate(
   apiBaseUrl: string,
   agentIdentity: string,
-  // Optional Tier-0 machine token. When supplied the eventual claim
-  // links it to the new account so quota stops applying.
+  // The machine token issued seconds earlier via /v1/install — bound
+  // to the account at claim time so quota tracks against the account.
   machineToken: string | null = null,
   fetchImpl: typeof fetch = fetch,
-): Promise<PairInitiateResponse> {
-  const res = await fetchImpl(`${apiBaseUrl}/v1/mcp/pair/initiate`, {
+): Promise<InstallInitiateResponse> {
+  const res = await fetchImpl(`${apiBaseUrl}/v1/mcp/install/initiate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -233,37 +256,40 @@ export async function pairInitiate(
       ...(machineToken !== null ? { machine_token: machineToken } : {}),
     }),
   });
-  if (!res.ok) throw new ApiCallError(res.status, "pair_initiate_failed", "pairing failed");
-  return (await res.json()) as PairInitiateResponse;
+  if (!res.ok) throw new ApiCallError(res.status, "install_initiate_failed", "install handshake failed");
+  return (await res.json()) as InstallInitiateResponse;
 }
 
-export interface PairStatusResponse {
+export interface InstallStatusResponse {
   status: "pending" | "claimed" | "expired";
   agent_session_token?: string;
   account_id?: string;
 }
 
-export async function pairPoll(
+export async function installPoll(
   apiBaseUrl: string,
-  token: string,
+  setupCode: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<PairStatusResponse> {
+): Promise<InstallStatusResponse> {
   const res = await fetchImpl(
-    `${apiBaseUrl}/v1/mcp/pair/${encodeURIComponent(token)}/status`,
+    `${apiBaseUrl}/v1/mcp/install/${encodeURIComponent(setupCode)}/status`,
   );
   // 200 + status === 'pending' | 'claimed'; 410 → expired (return shape rather than throw).
   if (res.status === 410) return { status: "expired" };
-  if (!res.ok) throw new ApiCallError(res.status, "pair_poll_failed", "pairing poll failed");
-  return (await res.json()) as PairStatusResponse;
+  if (!res.ok) throw new ApiCallError(res.status, "install_poll_failed", "install poll failed");
+  return (await res.json()) as InstallStatusResponse;
 }
 
-// ── Tier 0 machine-token install ───────────────────────────
+// ── Machine-token issuance ─────────────────────────────────
+// The MCP install CLI calls /v1/install to mint a machine_token for
+// the bot's LLM-proxy + inbox-alias use. The machine_token is not the
+// user's auth — it's a bot-internal credential — and it gets bound to
+// the user's account immediately after via the install-claim flow.
 
 export interface MachineInstallResponse {
   machine_token: string;
   quota_limit: number;
   quota_used: number;
-  tier: "anonymous" | "paired";
   message?: string;
 }
 
@@ -294,12 +320,11 @@ export async function issueMachineToken(
 }
 
 export interface MachineStatusResponse {
-  tier: "anonymous" | "paired";
   quota_limit: number;
   quota_used: number;
   quota_remaining: number;
   over_quota: boolean;
-  paired_account_id: string | null;
+  account_id: string | null;
   created_at: string;
   last_used_at: string | null;
 }

@@ -20,15 +20,13 @@ describe("parseArgs --proxy-url", () => {
     expect(parseArgs(["install", "--proxy-url="]).proxyUrl).toBeUndefined();
   });
 
-  it("parses --proxy-url alongside --target and --pair", () => {
+  it("parses --proxy-url alongside --target", () => {
     const a = parseArgs([
       "install",
       "--target=claude-code",
-      "--pair",
       "--proxy-url=http://user:pass@host:8080",
     ]);
     expect(a.target).toBe("claude-code");
-    expect(a.withPair).toBe(true);
     expect(a.proxyUrl).toBe("http://user:pass@host:8080");
   });
 });

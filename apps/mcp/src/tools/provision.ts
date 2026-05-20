@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assertPaired, type Tool } from "./index.js";
+import { assertApi, type Tool } from "./index.js";
 
 const inputSchema = z.object({
   service: z.string().min(1),
@@ -27,6 +27,10 @@ WHEN TO CALL THIS TOOL:
 - You need a service-specific credential the user does not yet have
 - The user mentions needing hosting, a database, email, monitoring,
   auth, AI APIs, payments, analytics, error tracking, or similar
+
+FIRST call list_credentials — if the account already has a working key
+for this service, reuse it via get_credential instead of provisioning a
+duplicate.
 
 DO NOT instruct the user to sign up manually if a Squire adapter exists.
 Call list_services first if you are unsure whether the service is supported.
@@ -66,7 +70,7 @@ export const provisionTool: Tool<z.infer<typeof inputSchema>> = {
     },
   },
   async handler(args, api) {
-    assertPaired(api);
+    assertApi(api);
     // If the caller didn't supply category, look it up in the registry.
     let category = args.category;
     if (category === undefined) {

@@ -151,6 +151,15 @@ describe("parsePostVerifyStep — valid input", () => {
       reason: "signed out — login wall",
     });
   });
+
+  it("parses a check step", () => {
+    const raw = JSON.stringify({ kind: "check", selector: "#tos", reason: "accept terms" });
+    expect(parsePostVerifyStep(raw)).toEqual({
+      kind: "check",
+      selector: "#tos",
+      reason: "accept terms",
+    });
+  });
 });
 
 describe("parsePostVerifyStep — rejection", () => {
@@ -172,6 +181,11 @@ describe("parsePostVerifyStep — rejection", () => {
   it("rejects a wait step with non-numeric seconds", () => {
     const raw = JSON.stringify({ kind: "wait", seconds: "soon", reason: "" });
     expect(() => parsePostVerifyStep(raw)).toThrow(/seconds/i);
+  });
+
+  it("rejects a check step with no selector", () => {
+    const raw = JSON.stringify({ kind: "check", reason: "accept terms" });
+    expect(() => parsePostVerifyStep(raw)).toThrow(/selector/i);
   });
 
   it("rejects an unknown step kind", () => {

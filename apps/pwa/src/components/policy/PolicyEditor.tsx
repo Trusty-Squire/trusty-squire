@@ -22,7 +22,7 @@ export function PolicyEditor({ value, onChange }: PolicyEditorProps) {
     <div className="space-y-6">
       <fieldset className="space-y-2">
         <legend className="font-medium">Monthly spend limit</legend>
-        <p className="text-sm text-[color:var(--color-ink-soft)]">
+        <p className="text-sm text-[color:var(--color-text-soft)]">
           Current: {formatCents(value.spend_limit_cents_per_month)}
         </p>
         <input
@@ -57,7 +57,7 @@ export function PolicyEditor({ value, onChange }: PolicyEditorProps) {
 
       <fieldset className="space-y-2">
         <legend className="font-medium">Silent signup ceiling</legend>
-        <p className="text-sm text-[color:var(--color-ink-soft)]">
+        <p className="text-sm text-[color:var(--color-text-soft)]">
           Your squire can sign up without asking when the cost is at or under this amount.
         </p>
         <input
@@ -75,10 +75,10 @@ export function PolicyEditor({ value, onChange }: PolicyEditorProps) {
               },
             })
           }
-          className="w-32 px-3 py-2 border border-[color:var(--color-rule)] rounded-lg bg-white"
+          className="w-32 px-3 py-2 border border-[color:var(--color-border)] rounded-md bg-[color:var(--color-surface)] text-[color:var(--color-text)] focus:border-[color:var(--color-accent)] focus:outline-none"
           aria-label="Silent signup ceiling in cents per month"
         />
-        <span className="ml-2 text-sm text-[color:var(--color-ink-soft)]">
+        <span className="ml-2 text-sm text-[color:var(--color-text-soft)]">
           ({formatCents(value.silent_signup.max_monthly_cost_cents)} / month)
         </span>
       </fieldset>
