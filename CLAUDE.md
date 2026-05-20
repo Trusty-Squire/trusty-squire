@@ -29,16 +29,27 @@ OpenRouter for LLM, AWS SES for inbound mail.
 ### Production, deployed, verified end-to-end
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
-- **Inbound mail pipeline — MOTHBALLED 2026-05-18 (TODOS M1).** SES →
-  S3 → SNS → `/v1/webhooks/ses` → Prisma. The code/DB/route still
-  exist but the pipeline is no longer a live dependency: the
-  OAuth-first MVP has no email-verification step, and the form-fill
-  fallback's email step is structurally walled (young-domain
-  withholding). `trustysquire.ai` MX now points at Google Workspaces
-  for company email — do NOT restore SES on it, and do NOT move SES to
-  a new domain (a new domain is a new young domain). Personal aliases
-  (`dani@`, `hello@`, …) are handled by Workspaces directly. See
-  TODOS section M.
+- **Inbound mail pipeline — REVIVED 2026-05-20 on `trustysquire.com`.**
+  SES → S3 → SNS → `/v1/webhooks/ses` → Prisma. End-to-end verified
+  (Cloudflare MX → SES inbound rule → SNS → webhook → ReceivedEmail).
+  Alias domain is now `INBOX_ALIAS_DOMAIN=trustysquire.com` (set on
+  `trusty-squire-api`). The previous mothball decision (2026-05-18,
+  TODOS M1) was reverted after the Render-class form-fill path shipped
+  via F3 — verification email is the only remaining bottleneck for
+  those signups.
+  - **DO NOT restore SES on `trustysquire.ai`.** Its MX is at Google
+    Workspaces and bouncing it breaks personal email (`dani@`, `hello@`,
+    …).
+  - **Young-domain caveat:** `trustysquire.com` is a fresh-MX domain;
+    some services (Resend, Postmark, historically) still silently
+    withhold verification mails to fresh-MX. Render-class services
+    don't gate on this. Diagnose via the bot's
+    `verification_not_sent` status.
+  - **AWS SES account is in sandbox** (pending production access
+    review, submitted 2026-05-20). Sandbox restricts OUTBOUND only;
+    inbound works unconditionally. Self-tests via `aws ses send-email`
+    will appear to silently drop — that's the sandbox + self-loop, not
+    the pipeline.
 - **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
   Prisma schemas live in **two separate databases** on one cluster —
   they cannot share a database (`prisma db push` drops any table
@@ -84,18 +95,47 @@ OpenRouter for LLM, AWS SES for inbound mail.
   to `ACCOUNT_FREE_QUOTA` signups (default 10), then `payment_required`
   + `cta_billing_url`. See the 2026-05-18 streamlined-oauth-onboarding
   CEO plan (now combined with the 2026-05-19 single-tier collapse).
+  - **0.6.0 — install preflight (rc.15).** Re-installs with a valid
+    session file + bot Google session skip the browser dance entirely
+    and just rewrite the MCP config. Pass `--force-relogin` to bypass.
+  - **0.6.0 — writeConfig env merge (rc.21/rc.22).** All five host
+    agents now merge env on top of any previously-set vars rather
+    than replacing wholesale. A re-install that omits a flag (e.g.
+    forgets `--proxy-url=`) no longer wipes the previously-set value.
+- **F13 — headed signups via on-demand Xvfb (0.6.0).** Modern SaaS
+  (Cloudflare/Stytch, Clerk, Auth0) detect Chromium-headless and gate
+  their signup forms. `BrowserController.start()` now spawns a
+  temporary Xvfb at 1280x720x24 when DISPLAY is unset and Xvfb is
+  available, launches Chrome with `headless: false`, and tears Xvfb
+  down on `close()`. The user never sees it — it exists only so Chrome
+  has a real display surface to render against. Falls back to true
+  headless (with a stderr warning) when Xvfb isn't installed.
+- **Anti-bot interstitial handling (0.6.0).** `BrowserController.
+  waitForFormReady` now polls for "Just a moment..." / "Verifying
+  you are human" / "Checking your browser" text patterns and waits
+  up to 15s for them to clear, with a `page.reload()` retry when the
+  interstitial outlasts the first wait. When it still won't clear
+  AND no scope-grant verb phrases are visible in the page DOM, the
+  bot returns `anti_bot_blocked` (distinct from the misleading
+  `oauth_required` it used to return). Vendors detected: Cloudflare,
+  Sucuri, DataDome, Imperva.
 - **LLM proxy** (`/v1/llm/chat`). User's machine talks to our API,
   which forwards to OpenRouter using the operator's key. Per-machine
   rolling rate limit (150/hour, default). Cost per IPInfo signup:
   ~$0.0006.
 
-### Verified by real signups this session
+### Verified by real signups
 | Service     | Result | Notes                                        |
 |-------------|--------|----------------------------------------------|
 | IPInfo      | ✅ full | API key extracted, verified via live API     |
 | Postmark    | ✅ post-captcha | Previously blocked by reCAPTCHA v3; passes  |
 | Resend      | ✅ post-captcha | Previously blocked by Turnstile; passes     |
-| MailerSend  | ⚠ phone gate | Signup completes, stops at phone verification |
+| Sentry      | ✅ full | OAuth + multi-row permission grid (scope_hint) |
+| OpenRouter  | ✅ full | Copy-button extraction (F10)                 |
+| Render      | ⚠ verification mail | Form-fill OK; inbox revival on `trustysquire.com` 2026-05-20 unlocks |
+| Vercel      | ⚠ SMS gate | OAuth completes, phone verification (F12) — user-relayed SMS pending |
+| Cloudflare  | ⚠ anti-bot | Their own dashboard runs maximum Turnstile + IP risk-score; manual signup is the realistic call |
+| MailerSend  | ⚠ phone gate | Signup completes, stops at phone verification (F12) |
 | PostHog     | ⚠ slow SPA | Form load races our planner; not captcha    |
 
 ### In-memory (not persisted, restart-vulnerable)

@@ -670,15 +670,25 @@ to a fallback, and whose email-verification step Gate 1 measured
 failing **7/7** (`verification_not_sent`): anti-fraud silently
 withholds verification mail from <30-day-old domains.
 
-- [x] **M1 — Do NOT move SES to trustysquire.com. SES inbound is
-  mothballed. — decided 2026-05-18.** A new domain is a new *young*
-  domain — it rebuilds the exact known-failing system (the wall is
-  domain age, not the domain name). The OAuth-first MVP has no
-  email-verification step at all, so the SES pipeline is off the
-  critical path. Decision: stop depending on the SES inbound pipeline;
-  leave the code/DB/route in place (do not delete yet) but treat it as
-  out-of-MVP-scope. The form-fill *form* logic stays — only its email
-  step is dead. No effort spent on a replacement domain or subdomain.
+- [x] **M1 — Inbound mail revived on `trustysquire.com`. — done
+  2026-05-20.** The 2026-05-18 mothball decision was reverted after
+  the form-fill cluster shipped (F3 + planner reliability work) and a
+  Render signup confirmed that verification email is the only
+  remaining bottleneck for that class of services. Set up:
+  Cloudflare MX → `inbound-smtp.us-east-1.amazonses.com`, SES domain
+  + DKIM verified, SES inbound rule extended to include
+  `trustysquire.com`, `INBOX_ALIAS_DOMAIN=trustysquire.com` on
+  `trusty-squire-api`. End-to-end verified via the
+  AMAZON_SES_SETUP_NOTIFICATION roundtrip (Cloudflare MX → SES → SNS
+  → `/v1/webhooks/ses` → DB lookup). `trustysquire.ai` MX stays at
+  Google Workspaces (do NOT touch it). Sandbox is fine for inbound;
+  production-access request submitted for outbound parity (review
+  pending).
+  - **Young-domain caveat still applies** to Resend-class services
+    that withhold verification mail to fresh-MX domains. Diagnosed
+    via `verification_not_sent`. Acceptable: those services were
+    already in manual-signup territory; the revival unblocks Render
+    + similar that don't gate on MX age.
 - [x] **M2 — Form-fill fails fast to manual signup. — done
   2026-05-18.** `provision-any.ts` no longer passes an `inbox` to
   `bot.signup()` (M1 — the SES pipeline is mothballed). `agent.ts`
@@ -692,6 +702,12 @@ withholds verification mail from <30-day-old domains.
   both "service withheld the mail" and "no inbox"). Tests:
   `verification-no-inbox.test.ts` — fast-fail fires, and does not
   over-trigger when the page shows no email prompt.
+- [ ] **M2.1 — SES production-access approval. [P2]** Submitted via
+  `put-account-details` 2026-05-20; AWS auto-review usually completes
+  within 24h. Inbound works fine in sandbox so this isn't blocking;
+  production unlocks outbound from `noreply@trustysquire.com` for
+  receipt/notification flows. Status visible in the SES console under
+  Account dashboard.
 - [ ] **M3 — Future fallback: read verification mail from the user's
   own Gmail via the OAuth profile. [P3]** The streamlined-onboarding
   flow (G13) logs the bot's Chrome profile into the user's Google

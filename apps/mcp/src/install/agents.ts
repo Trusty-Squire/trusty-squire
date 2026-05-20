@@ -97,16 +97,42 @@ async function writeJson(filePath: string, data: unknown): Promise<void> {
 
 // Merge a `squire` entry into the standard mcpServers map without
 // clobbering other entries the user has added.
+// Read the env block off a previously-written server entry, if any.
+// Used so a re-install that omits a flag (e.g. forgets --proxy-url=)
+// preserves the prior value instead of clobbering it. The install CLI
+// conditionally puts env keys into input.env when their flag is
+// present — so the merge contract is: present-flag wins, absent-flag
+// preserves prior. Env-key field names differ across agents ("env"
+// vs "envs"); caller passes the right one.
+function priorServerEnv(
+  existing: unknown,
+  field: "env" | "envs",
+): Record<string, string> {
+  if (existing === undefined || existing === null || typeof existing !== "object") {
+    return {};
+  }
+  const prior = (existing as Record<string, unknown>)[field];
+  if (prior === undefined || prior === null || typeof prior !== "object") {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(prior as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
 async function mergeMcpServersJson(filePath: string, input: WriteConfigInput): Promise<void> {
   const existing = await readJsonIfExists(filePath);
   const servers =
     existing.mcpServers !== undefined && typeof existing.mcpServers === "object"
       ? (existing.mcpServers as Record<string, unknown>)
       : {};
+  const priorEnv = priorServerEnv(servers[SERVER_KEY], "env");
   servers[SERVER_KEY] = {
     command: input.command,
     args: input.args,
-    env: input.env,
+    env: { ...priorEnv, ...input.env },
   };
   existing.mcpServers = servers;
   await writeJson(filePath, existing);
@@ -168,12 +194,16 @@ const goose: AgentDefinition = {
       data.extensions !== undefined && typeof data.extensions === "object"
         ? (data.extensions as Record<string, unknown>)
         : {};
+    // Merge env on top of any previously-set vars rather than replacing
+    // wholesale. Same regression class as the JSON-mcp-servers path —
+    // see priorServerEnv() comment.
+    const priorEnvs = priorServerEnv(extensions[SERVER_KEY], "envs");
     extensions[SERVER_KEY] = {
       type: "stdio",
       name: SERVER_KEY,
       cmd: input.command,
       args: input.args,
-      envs: input.env,
+      envs: { ...priorEnvs, ...input.env },
       // goose treats a missing `enabled` as not-loaded and surfaces the
       // extension by `name` — both are required for it to appear.
       enabled: true,
@@ -231,12 +261,16 @@ const continueAgent: AgentDefinition = {
       data.mcpServers !== undefined && Array.isArray(data.mcpServers)
         ? (data.mcpServers as Array<Record<string, unknown>>)
         : [];
+    // Merge env from any prior entry — same env-clobber regression
+    // class as the JSON-mcp-servers path; see priorServerEnv().
+    const priorEntry = mcpServers.find((s) => s.name === SERVER_KEY);
+    const priorEnv = priorServerEnv(priorEntry, "env");
     const filtered = mcpServers.filter((s) => s.name !== SERVER_KEY);
     filtered.push({
       name: SERVER_KEY,
       command: input.command,
       args: input.args,
-      env: input.env,
+      env: { ...priorEnv, ...input.env },
     });
     data.mcpServers = filtered;
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -272,10 +306,12 @@ const codex: AgentDefinition = {
       data.mcp_servers !== undefined && typeof data.mcp_servers === "object"
         ? (data.mcp_servers as Record<string, unknown>)
         : {};
+    // Merge env — see priorServerEnv() comment.
+    const priorEnv = priorServerEnv(servers[SERVER_KEY], "env");
     servers[SERVER_KEY] = {
       command: input.command,
       args: input.args,
-      env: input.env,
+      env: { ...priorEnv, ...input.env },
     };
     data.mcp_servers = servers;
     await fs.mkdir(path.dirname(filePath), { recursive: true });
