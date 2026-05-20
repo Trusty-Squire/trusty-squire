@@ -54,6 +54,13 @@ Supported agents: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`
 
 After install, restart your agent to pick up the new tools.
 
+> **Developers only** — if you've cloned this repo and are running the
+> command from inside `~/trusty-squire/apps/mcp/`, npm 10's npx will
+> mistake the local workspace for the install target and fail with
+> `sh: 1: mcp: not found`. Always `cd ~` (or anywhere outside the
+> repo) before running the install command. End users don't hit this
+> because they don't have the source checked out.
+
 ## Example
 
 Once installed, ask your agent in plain English:

@@ -279,6 +279,17 @@ npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /t
 rm -f /tmp/np
 ```
 
+**npx workspace-collision gotcha (don't lose this).** Never run
+`npx @trusty-squire/mcp <cmd>` from inside `~/trusty-squire/apps/mcp/`
+(or any cwd whose `package.json` declares `"name":
+"@trusty-squire/mcp"`). npm 10's npx then treats the dev workspace as
+the source and tries to run the bin via the local `.bin/` shim —
+which pnpm workspaces don't create — and you get
+`sh: 1: mcp: not found`. Solution: `cd ~` (or anywhere outside the
+repo) first. Not fixable in our package; this is npm 10's workspace-
+resolution behavior. End users don't hit it because they don't have
+the source repo locally.
+
 **MCP package launch model (hardened in 0.1.4 — don't regress it).**
 The package has exactly **one bin**, `mcp` → `dist/bin.js`, matching
 the unscoped package name so `npx @trusty-squire/mcp <subcommand>`
