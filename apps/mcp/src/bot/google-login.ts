@@ -248,6 +248,16 @@ export function scopesAreBasic(scopes: readonly string[]): boolean {
 // --- environment helpers ----------------------------------------------
 export function hasDisplay(): boolean {
   if (process.env.TRUSTY_SQUIRE_FORCE_HEADLESS === "true") return false;
+  // macOS (Aqua) and Windows (Win32) have native windowing — Chrome
+  // opens a real window without an X server. DISPLAY is a Unix concept
+  // they don't set, so a DISPLAY-only check would have wrongly routed
+  // every Mac/Windows install into the headless+noVNC+cloudflared rig
+  // (which needs Xvfb/x11vnc/etc. that aren't installed on those
+  // platforms).
+  if (process.platform === "darwin" || process.platform === "win32") return true;
+  // Linux: a non-empty DISPLAY means there's an X server we can draw to.
+  // Headless boxes (Hetzner, Codespaces, Docker, SSH) won't have it
+  // and fall through to the noVNC path.
   return typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0;
 }
 

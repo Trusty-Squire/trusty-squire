@@ -35,6 +35,41 @@ describe("google-login env helpers", () => {
       else process.env.TRUSTY_SQUIRE_FORCE_HEADLESS = saved;
     }
   });
+
+  it("hasDisplay returns true on macOS and Windows without DISPLAY", () => {
+    // The pre-0.5.3 regression: DISPLAY is a Unix concept that Mac
+    // (Aqua) and Windows (Win32) don't set, so a DISPLAY-only check
+    // would have routed both platforms into the headless noVNC rig
+    // and failed at the missing Xvfb binary check.
+    const savedDisplay = process.env.DISPLAY;
+    const savedPlatform = process.platform;
+    delete process.env.DISPLAY;
+    try {
+      for (const platform of ["darwin", "win32"]) {
+        Object.defineProperty(process, "platform", { value: platform });
+        expect(hasDisplay(), `${platform} should report a display`).toBe(true);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", { value: savedPlatform });
+      if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
+    }
+  });
+
+  it("hasDisplay returns true on Linux only when DISPLAY is set", () => {
+    const savedDisplay = process.env.DISPLAY;
+    const savedPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    try {
+      delete process.env.DISPLAY;
+      expect(hasDisplay()).toBe(false);
+      process.env.DISPLAY = ":0";
+      expect(hasDisplay()).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", { value: savedPlatform });
+      if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
+      else delete process.env.DISPLAY;
+    }
+  });
 });
 
 describe("classifyGoogleAuthState (T5)", () => {
