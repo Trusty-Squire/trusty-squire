@@ -305,8 +305,9 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     opts.vouchflowVerifier ?? new VouchflowVerifier({ customerId: opts.customerId });
   const mandateValidator = new MandateValidator(validatorDeps, vouchflowVerifier);
 
-  // Tier 0 machine tokens for anonymous MCP installs. Quota-limited; no
-  // account required. See machine-tokens.ts for the model.
+  // Machine tokens — the bot-internal credential for LLM proxy + inbox
+  // alias service. Bound to an account at install-claim time; free up
+  // to ACCOUNT_FREE_QUOTA signups before payment_required.
   const machineTokenStore: MachineTokenStore =
     authPrisma !== null
       ? new PrismaMachineTokenStore(authPrisma)

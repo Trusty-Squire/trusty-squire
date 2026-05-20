@@ -1,18 +1,17 @@
-// Tier 0 anonymous install endpoints.
+// Machine-token issuance for the MCP install flow.
 //
-// Product principle (decided 2026-05-13): users get value before signing
-// anything. /v1/install issues a machine token at MCP install time; the
-// machine then gets N free signups before any pairing/mandate flow is
-// required.
+// The MCP CLI calls POST /v1/install at install time to mint a
+// machine_token for the bot's LLM-proxy + inbox-alias use. This token
+// is unauthenticated at issuance — it's just a bot-internal credential
+// that gets bound to the user's account during the install-claim
+// handshake (see routes/mcp-install.ts) seconds later.
 //
-// These endpoints are intentionally unauthenticated. Their abuse surface
-// is bounded by:
-//   1. Each token is good for QUOTA_LIMIT signups, then needs pairing
-//   2. SES inbound costs us ~$0.0001 per email — negligible at any
-//      realistic abuse volume
-//   3. Captcha solving (when we add it) is per-signup paid, so abusers
-//      hit that cost wall too
-// If abuse becomes a real problem, add IP-based rate-limiting on /install.
+// Abuse surface is bounded by:
+//   1. Quota — each token is good for QUOTA_LIMIT free signups before
+//      payment_required kicks in.
+//   2. SES inbound costs us ~$0.0001 per email — negligible.
+//   3. The install-claim binds the token to an account; unbound tokens
+//      stop accruing usage when their TTL expires.
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import {
@@ -50,10 +49,9 @@ export async function registerInstallRoute(
       machine_token: record.token,
       quota_limit: defaultQuota(),
       quota_used: 0,
-      tier: "anonymous",
       message:
-        "Welcome to Trusty Squire. You have free signups available — no account needed yet. " +
-        "When you hit your limit (or want to provision paid services), we'll prompt to pair this machine.",
+        "Machine token issued. The MCP install CLI will now open a " +
+        "browser to bind this machine to your account.",
     });
   });
 
@@ -73,12 +71,11 @@ export async function registerInstallRoute(
     }
     const quota = defaultQuota();
     reply.send({
-      tier: record.paired_account_id !== null ? "paired" : "anonymous",
       quota_limit: quota,
       quota_used: record.signup_count,
       quota_remaining: Math.max(0, quota - record.signup_count),
       over_quota: isOverQuota(record, quota),
-      paired_account_id: record.paired_account_id,
+      account_id: record.paired_account_id,
       created_at: record.created_at.toISOString(),
       last_used_at: record.last_used_at?.toISOString() ?? null,
     });
@@ -125,9 +122,9 @@ function extractAsnFromBody(body: unknown): AsnFingerprint | null {
   };
 }
 
-// Helper used by other routes (inbox.ts) to authorize a request as a Tier 0
-// caller. Returns the record on success; writes the error response and
-// returns null on failure.
+// Helper used by other routes (inbox.ts) to authorize a machine-token
+// request. Returns the record on success; writes the error response
+// and returns null on failure.
 export async function authorizeMachineToken(
   req: FastifyRequest,
   reply: FastifyReply,

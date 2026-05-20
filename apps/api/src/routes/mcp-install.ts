@@ -1,14 +1,20 @@
-// MCP install pairing flow.
+// MCP install handshake — the browser-confirm step that binds a local
+// machine to an account.
 //
-//   POST /v1/mcp/pair/initiate  → CLI mints a token + browser URL.
-//   GET  /v1/mcp/pair/:token/status  → CLI polls; once `claimed`,
-//        response delivers the raw bearer token exactly once.
-//   POST /v1/mcp/pair/:token/claim   → PWA (web auth) marks the token
-//        claimed, creates an AgentSession, returns success.
+//   POST /v1/mcp/install/initiate         CLI mints a setup_code +
+//                                         browser confirm_url.
+//   GET  /v1/mcp/install/:code/status     CLI polls; once `claimed`,
+//                                         delivers the raw bearer token
+//                                         exactly once.
+//   GET  /v1/mcp/install/:code/state      Browser polls; status only —
+//                                         never delivers the token.
+//   POST /v1/mcp/install/:code/claim      PWA (web auth) marks the
+//                                         setup_code claimed, creates
+//                                         an AgentSession, returns ok.
 //
-// Initiate + status are unauthenticated by design (CLI has no
-// credentials yet). The TTL + single-use semantics bound the
-// attack surface.
+// Initiate + status + state are unauthenticated by design (the CLI has
+// no credentials yet). The TTL + single-use semantics bound the attack
+// surface.
 
 import { z } from "zod";
 import type {
@@ -24,9 +30,9 @@ const initiateBody = z
   .object({
     target: z.string().min(1).max(60).optional(),
     agent_identity: z.string().min(1).max(60).optional(),
-    // Optional Tier-0 machine token. When present, the eventual claim
-    // links the machine token to the new account so the quota counter
-    // stops applying.
+    // The machine token issued seconds earlier via /v1/install — the
+    // claim step binds it to the account so quota and rate-limits
+    // accrue against that account.
     machine_token: z.string().min(8).max(128).optional(),
   })
   .optional();
@@ -38,14 +44,14 @@ const claimBody = z
   })
   .optional();
 
-export const registerMcpPairRoute: FastifyPluginAsync<{
+export const registerMcpInstallRoute: FastifyPluginAsync<{
   deps: ApiDeps;
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
-  pairBaseUrl?: string;
+  installBaseUrl?: string;
 }> = async (fastify, opts) => {
-  const pairBaseUrl = opts.pairBaseUrl ?? "https://trustysquire.ai/pair";
+  const installBaseUrl = opts.installBaseUrl ?? "https://trustysquire.ai/install";
 
-  fastify.post("/v1/mcp/pair/initiate", async (req, reply) => {
+  fastify.post("/v1/mcp/install/initiate", async (req, reply) => {
     // Body is optional; if invalid we surface 400 rather than silently
     // accepting — keeps the contract honest for the CLI.
     const parsed = initiateBody.safeParse(req.body ?? {});
@@ -61,17 +67,17 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
     const record = issuePairingToken(now, agentIdentity, machineToken);
     await opts.deps.pairingTokenStore.insert(record);
     return reply.code(201).send({
-      pair_token: record.token,
-      pair_url: `${pairBaseUrl}?token=${encodeURIComponent(record.token)}`,
+      setup_code: record.token,
+      confirm_url: `${installBaseUrl}?token=${encodeURIComponent(record.token)}`,
       expires_at: record.expires_at.toISOString(),
     });
   });
 
-  fastify.get<{ Params: { token: string } }>(
-    "/v1/mcp/pair/:token/status",
+  fastify.get<{ Params: { code: string } }>(
+    "/v1/mcp/install/:code/status",
     async (req, reply) => {
       const now = opts.deps.now?.() ?? new Date();
-      const record = await opts.deps.pairingTokenStore.find(req.params.token);
+      const record = await opts.deps.pairingTokenStore.find(req.params.code);
       if (record === null) {
         reply.code(404).send({ error: "not_found" });
         return;
@@ -88,7 +94,7 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
       }
       if (record.status === "claimed") {
         // First poll after claim — deliver the raw token (exactly once).
-        const raw = await opts.deps.pairingTokenStore.deliverAndMarkUsed(req.params.token, now);
+        const raw = await opts.deps.pairingTokenStore.deliverAndMarkUsed(req.params.code, now);
         if (raw === null) {
           reply.code(410).send({ status: "expired" });
           return;
@@ -104,15 +110,15 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
     },
   );
 
-  // Browser-side status check — used by the /pair web page. Unlike
-  // /status, this NEVER delivers the one-time agent token: that delivery
-  // is reserved exclusively for the CLI's /status poll, so a page load
-  // can't consume the token out from under the CLI.
-  fastify.get<{ Params: { token: string } }>(
-    "/v1/mcp/pair/:token/state",
+  // Browser-side status check — used by the /install web page. Unlike
+  // /status, this NEVER delivers the one-time agent token: that
+  // delivery is reserved exclusively for the CLI's /status poll, so a
+  // page load can't consume the token out from under the CLI.
+  fastify.get<{ Params: { code: string } }>(
+    "/v1/mcp/install/:code/state",
     async (req, reply) => {
       const now = opts.deps.now?.() ?? new Date();
-      const record = await opts.deps.pairingTokenStore.find(req.params.token);
+      const record = await opts.deps.pairingTokenStore.find(req.params.code);
       if (record === null) {
         reply.code(404).send({ error: "not_found" });
         return;
@@ -126,13 +132,13 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
           agent_identity: record.agent_identity,
         });
       }
-      // claimed or delivered — pairing is done from the browser's POV.
+      // claimed or delivered — install is confirmed from the browser's POV.
       return reply.code(200).send({ status: record.status });
     },
   );
 
-  fastify.post<{ Params: { token: string } }>(
-    "/v1/mcp/pair/:token/claim",
+  fastify.post<{ Params: { code: string } }>(
+    "/v1/mcp/install/:code/claim",
     { preHandler: opts.requireWeb },
     async (req, reply) => {
       const auth = req.auth!;
@@ -144,7 +150,7 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
       }
 
       const now = opts.deps.now?.() ?? new Date();
-      const record = await opts.deps.pairingTokenStore.find(req.params.token);
+      const record = await opts.deps.pairingTokenStore.find(req.params.code);
       if (record === null) {
         reply.code(404).send({ error: "not_found" });
         return;
@@ -166,7 +172,7 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
       await opts.deps.agentSessionStore.insert(agentRecord);
 
       const claimed = await opts.deps.pairingTokenStore.claim(
-        req.params.token,
+        req.params.code,
         auth.account_id,
         raw_token,
         now,
@@ -176,9 +182,10 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
         return;
       }
 
-      // Tier 0 → Tier 1 upgrade: if a machine token was declared at
-      // /initiate, link it to the account so subsequent quota checks
-      // skip this token.
+      // Bind the machine_token declared at /initiate to this account.
+      // Subsequent quota + rate-limit checks are per-account, so the
+      // bot's LLM-proxy + inbox calls (which authenticate with the
+      // machine_token) credit the right account.
       if (record.machine_token !== null) {
         try {
           await opts.deps.machineTokenStore.markPaired(
@@ -186,8 +193,11 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
             auth.account_id,
           );
         } catch (err) {
-          // Non-fatal: pairing already succeeded. Log and continue.
-          fastify.log.warn({ err, machine_token_prefix: record.machine_token.slice(0, 8) }, "markPaired failed");
+          // Non-fatal: claim already succeeded. Log and continue.
+          fastify.log.warn(
+            { err, machine_token_prefix: record.machine_token.slice(0, 8) },
+            "machine_token bind failed",
+          );
         }
       }
 

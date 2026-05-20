@@ -15,7 +15,7 @@ type Phase =
   | "expired"
   | "error";
 
-interface PairStatus {
+interface InstallStatus {
   status: string;
   agent_identity?: string | null;
 }
@@ -27,13 +27,13 @@ const loadingStyle = {
   gap: "9px",
 } as const;
 
-export default function PairPage() {
+export default function InstallPage() {
   const token = useQueryParam("token");
   // Set when the user signed in mid-flow — the OAuth round-trip carries
-  // `&pair=1` back. They already consented (clicked Approve before the
-  // sign-in detour), so pairing finishes automatically on return rather
-  // than dumping them on the pairing screen again.
-  const autoPair = useQueryParam("pair") === "1";
+  // `&claim=1` back. They already consented (clicked Approve before the
+  // sign-in detour), so the install finishes automatically on return
+  // rather than dumping them on the confirm screen again.
+  const autoClaim = useQueryParam("claim") === "1";
   const [phase, setPhase] = useState<Phase>("loading");
   const [agent, setAgent] = useState<string | null>(null);
   const [errorText, setErrorText] = useState("");
@@ -43,8 +43,8 @@ export default function PairPage() {
     let cancelled = false;
     (async () => {
       try {
-        const status = await apiGet<PairStatus>(
-          `/v1/mcp/pair/${encodeURIComponent(token)}/state`,
+        const status = await apiGet<InstallStatus>(
+          `/v1/mcp/install/${encodeURIComponent(token)}/state`,
         );
         if (cancelled) return;
         if (status.status === "expired") {
@@ -56,7 +56,7 @@ export default function PairPage() {
           return;
         }
         setAgent(status.agent_identity ?? null);
-        if (!autoPair) {
+        if (!autoClaim) {
           setPhase("ready");
           return;
         }
@@ -64,7 +64,7 @@ export default function PairPage() {
         setPhase("claiming");
         try {
           await apiPost(
-            `/v1/mcp/pair/${encodeURIComponent(token)}/claim`,
+            `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
             status.agent_identity
               ? { agent_identity: status.agent_identity }
               : {},
@@ -77,7 +77,7 @@ export default function PairPage() {
           } else {
             setPhase("error");
             setErrorText(
-              err instanceof Error ? err.message : "Pairing failed. Try again.",
+              err instanceof Error ? err.message : "Install failed. Try again.",
             );
           }
         }
@@ -87,21 +87,21 @@ export default function PairPage() {
         setErrorText(
           err instanceof Error
             ? err.message
-            : "Couldn't load this pairing request.",
+            : "Couldn't load this install request.",
         );
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [token, autoPair]);
+  }, [token, autoClaim]);
 
-  const claimPair = useCallback(async () => {
+  const claimInstall = useCallback(async () => {
     if (token === null) return;
     setPhase("claiming");
     try {
       await apiPost(
-        `/v1/mcp/pair/${encodeURIComponent(token)}/claim`,
+        `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
         agent !== null ? { agent_identity: agent } : {},
       );
       setPhase("done");
@@ -112,7 +112,7 @@ export default function PairPage() {
       }
       setPhase("error");
       setErrorText(
-        err instanceof Error ? err.message : "Pairing failed. Try again.",
+        err instanceof Error ? err.message : "Install failed. Try again.",
       );
     }
   }, [token, agent]);
@@ -126,10 +126,11 @@ export default function PairPage() {
 
         {token === null ? (
           <>
-            <h1>Invalid pairing link</h1>
+            <h1>Invalid install link</h1>
             <p className="auth-sub">
-              This link is missing its pairing token. Run{" "}
-              <code>npx @trusty-squire/mcp pair</code> again for a fresh one.
+              This link is missing its setup token. Run{" "}
+              <code>npx @trusty-squire/mcp install</code> again for a fresh
+              one.
             </p>
           </>
         ) : (
@@ -138,8 +139,8 @@ export default function PairPage() {
               <p className="auth-sub" style={loadingStyle}>
                 <span className="spinner" />
                 {phase === "loading"
-                  ? "Loading pairing request…"
-                  : "Pairing…"}
+                  ? "Loading install request…"
+                  : "Connecting…"}
               </p>
             )}
 
@@ -147,7 +148,7 @@ export default function PairPage() {
               <>
                 <h1>Connect a CLI</h1>
                 <p className="auth-sub">
-                  An agent on your machine wants to pair with your Trusty
+                  An agent on your machine wants to connect to your Trusty
                   Squire account.
                 </p>
                 <div className="pair-agent">
@@ -164,9 +165,9 @@ export default function PairPage() {
                 <button
                   className="btn-primary"
                   type="button"
-                  onClick={claimPair}
+                  onClick={claimInstall}
                 >
-                  Approve &amp; pair
+                  Approve &amp; connect
                 </button>
               </>
             )}
@@ -174,7 +175,7 @@ export default function PairPage() {
             {phase === "done" && (
               <>
                 <h1>
-                  <span className="pair-ok">✓</span> Paired
+                  <span className="pair-ok">✓</span> Connected
                 </h1>
                 <p className="auth-sub">
                   Your CLI is connected. Head back to your terminal — or open
@@ -193,21 +194,21 @@ export default function PairPage() {
                 <h1>Sign in to approve</h1>
                 <p className="auth-sub">
                   Sign in and we&apos;ll bring you right back to finish
-                  pairing.
+                  connecting your CLI.
                 </p>
                 <OAuthButtons
-                  next={`/pair?token=${encodeURIComponent(token)}&pair=1`}
+                  next={`/install?token=${encodeURIComponent(token)}&claim=1`}
                 />
               </>
             )}
 
             {phase === "expired" && (
               <>
-                <h1>Pairing link expired</h1>
+                <h1>Install link expired</h1>
                 <p className="auth-sub">
-                  Pairing links last 10 minutes. Run{" "}
-                  <code>npx @trusty-squire/mcp pair</code> again for a fresh
-                  one.
+                  Install links last 10 minutes. Run{" "}
+                  <code>npx @trusty-squire/mcp install</code> again for a
+                  fresh one.
                 </p>
               </>
             )}

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assertPaired, type Tool } from "./index.js";
+import { assertApi, type Tool } from "./index.js";
 
 const inputSchema = z.object({
   reference: z.string().min(1),
@@ -35,7 +35,7 @@ export const getCredentialTool: Tool<z.infer<typeof inputSchema>> = {
     },
   },
   async handler(args, api) {
-    assertPaired(api);
+    assertApi(api);
     const res = await api.getCredential(args.reference, args.purpose);
     return {
       value: res.value,

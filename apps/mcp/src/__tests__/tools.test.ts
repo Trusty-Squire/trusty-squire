@@ -153,13 +153,13 @@ describe("list_credentials", () => {
       credentials: { reference: string }[];
     };
     expect(res.credentials).toHaveLength(1);
-    expect(res.credentials[0].reference).toBe("vault://acct/c1");
+    expect(res.credentials[0]?.reference).toBe("vault://acct/c1");
     expect(listCredentials).toHaveBeenCalledOnce();
   });
 
-  it("requires a paired session", async () => {
+  it("requires an active session", async () => {
     await expect(listCredentialsTool.handler({}, null)).rejects.toThrow(
-      /paired/,
+      /Trusty Squire session/,
     );
   });
 });

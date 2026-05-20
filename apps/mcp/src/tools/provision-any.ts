@@ -12,8 +12,9 @@
 // and the caller polls `check_provision_status` until the run leaves the
 // "running" state.
 //
-// Auth model: Tier 0 machine token from the session file. No account or
-// mandate required for free-tier signups.
+// Auth model: every install is account-bound. The session file carries
+// the machine_token (for the bot's LLM proxy + inbox alias) and the
+// agent_session_token (for vault writes), both bound to one account.
 
 import { randomBytes } from "crypto";
 import { z } from "zod";
@@ -113,13 +114,14 @@ WHEN TO CALL THIS TOOL:
   OAuth when the service offers it and the user has run
   \`npx @trusty-squire/mcp login\` once; otherwise it fills the email form.
 
-If the user has a paired Trusty Squire account, call list_credentials
-first — reuse an existing key rather than signing up again.
+Call list_credentials first — reuse an existing key rather than signing
+up again.
 
 IMMEDIATE RESPONSES (no run started):
 - status="started" + run_id → poll check_provision_status next.
-- status="quota_exceeded" + cta_pair_url → tell the user to run \`npx @trusty-squire/mcp pair\`.
-- status="not_installed" → Trusty Squire isn't installed; tell the user to run the installer.
+- status="payment_required" + cta_billing_url → the account hit the free
+  signup limit; the user can upgrade at cta_billing_url.
+- status="not_installed" → Trusty Squire isn't installed; tell the user to run \`npx @trusty-squire/mcp install\`.
 - status="error" → could not reach the API to set up the signup.`;
 
 const CHECK_DESCRIPTION = `Check the status of a signup started by provision_any_service.
@@ -150,16 +152,24 @@ export const provisionAnyTool = {
   jsonInputSchema: PROVISION_ANY_JSON_SCHEMA,
   inputSchema: provisionAnyInputSchema,
   handler: async (input: ProvisionAnyInput, _api: ApiClient | null) => {
-    // Pull the machine token from session storage. The install CLI writes it.
+    // Every install is account-bound. The CLI writes machine_token,
+    // agent_session_token, and account_id together; if any is missing
+    // the install is from before the single-tier collapse and needs
+    // re-running.
     const storage = await openSessionStorage();
     const session = await storage.read();
-    if (session === null || session.machine_token === undefined) {
-      const hasPartialSession = session !== null && session.agent_session_token !== undefined;
+    if (
+      session === null ||
+      session.machine_token === undefined ||
+      session.agent_session_token === undefined ||
+      session.account_id === undefined
+    ) {
       return {
         status: "not_installed",
-        message: hasPartialSession
-          ? "This machine is paired (Tier 1) but has no Tier 0 machine_token, which provision_any_service requires. Run `node /home/chode/trusty-squire/apps/mcp/dist/install/cli.js install --target=goose` to issue one, or in production run `npx @trusty-squire/mcp install`."
-          : "Trusty Squire isn't installed on this machine. In production run `npx @trusty-squire/mcp install`. For local dev against this repo run `node /home/chode/trusty-squire/apps/mcp/dist/install/cli.js install --target=goose`.",
+        message:
+          "Trusty Squire isn't fully installed on this machine. " +
+          "Run `npx @trusty-squire/mcp install` to set up the squire (or reconnect " +
+          "an install from before single-tier auth).",
       };
     }
     const apiBase = session.api_base_url;
@@ -172,7 +182,7 @@ export const provisionAnyTool = {
     let alias: string;
     try {
       alias = await inboxClient.createAlias({
-        account_id: session.account_id ?? "anonymous",
+        account_id: session.account_id,
         service: input.service,
         run_id: runId,
       });
@@ -181,20 +191,23 @@ export const provisionAnyTool = {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // The createAlias error body carries the structured payload; parse it back.
-      if (/quota_exceeded/.test(message)) {
+      // The API may still emit the old `quota_exceeded` error code during a
+      // rollout window — accept both shapes and surface a single
+      // payment_required status to the LLM.
+      if (/quota_exceeded|payment_required/.test(message)) {
         const match = message.match(/\{.*\}/s);
         if (match !== null) {
           try {
             const parsed = JSON.parse(match[0]) as Record<string, unknown>;
             return {
-              status: "quota_exceeded",
+              status: "payment_required",
               service: input.service,
               quota_limit: parsed["quota_limit"],
               quota_used: parsed["quota_used"],
-              cta_pair_url: parsed["cta_pair_url"],
+              cta_billing_url: parsed["cta_billing_url"] ?? parsed["cta_pair_url"],
               message:
-                "You've used your free signups on this machine. " +
-                "Run `npx @trusty-squire/mcp pair` (or open the cta_pair_url) to upgrade.",
+                "Your account has hit the free signup limit. " +
+                "Open cta_billing_url to upgrade — until then signups are paused.",
             };
           } catch {
             // fall through
@@ -224,7 +237,7 @@ export const provisionAnyTool = {
       machineToken: session.machine_token,
       alias,
       inboxClient,
-      agentSessionToken: session.agent_session_token ?? null,
+      agentSessionToken: session.agent_session_token,
     });
 
     return {
@@ -273,9 +286,11 @@ interface RunContext {
   machineToken: string;
   alias: string;
   inboxClient: InboxClient;
-  // Tier 1 agent-session bearer token, when this machine is paired.
-  // Null for Tier 0 (anonymous) installs — no account, no vault.
-  agentSessionToken: string | null;
+  // Account-bound bearer token used to write captured credentials to
+  // the user's vault. Always present in the single-tier model — the
+  // install CLI requires a successful browser confirm before writing
+  // the session.
+  agentSessionToken: string;
 }
 
 // Runs the signup to completion and stores the final tool response in
@@ -338,14 +353,10 @@ async function runSignupTask(
 
     response = buildSignupResponse(input, result);
 
-    // Tier 1 (paired) accounts: persist the collected keys into the
-    // account's vault. Fire-and-forget — the credentials are already in
-    // `response`, so a vault write failure is non-fatal.
-    if (
-      result.success &&
-      result.credentials !== undefined &&
-      ctx.agentSessionToken !== null
-    ) {
+    // Persist the collected keys into the account's vault. Fire-and-
+    // forget — the credentials are already in `response`, so a vault
+    // write failure is non-fatal.
+    if (result.success && result.credentials !== undefined) {
       void postCredentialsToVault(
         ctx.apiBase,
         ctx.agentSessionToken,

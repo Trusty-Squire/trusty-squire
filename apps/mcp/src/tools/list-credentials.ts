@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assertPaired, type Tool } from "./index.js";
+import { assertApi, type Tool } from "./index.js";
 
 const inputSchema = z.object({});
 
@@ -28,7 +28,7 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
     properties: {},
   },
   async handler(_args, api) {
-    assertPaired(api);
+    assertApi(api);
     const res = await api.listCredentials();
     return { credentials: res.credentials };
   },

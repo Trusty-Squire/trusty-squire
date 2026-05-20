@@ -1,17 +1,18 @@
-// Pairing-token store for the MCP install flow.
+// Setup-token store for the MCP install handshake.
 //
-// Lifecycle:
-//   1. CLI POSTs /v1/mcp/pair/initiate (no auth) → server mints a
-//      pairing token (base64url 32 bytes), returns to CLI + the
-//      browser URL the user should visit.
-//   2. Browser hits /pair?token=<>, PWA POSTs /v1/mcp/pair/:token/claim
-//      with the user's web session. Server creates an AgentSession and
-//      stashes the raw bearer on the pairing record.
-//   3. CLI polls GET /v1/mcp/pair/:token/status. Once `claimed`, the
-//      response carries the raw bearer (one-time: subsequent polls
-//      return `expired`).
+// Lifecycle (single-tier auth):
+//   1. CLI POSTs /v1/mcp/install/initiate (no auth) → server mints a
+//      setup token (base64url 32 bytes), returns it to the CLI as
+//      `setup_code` plus the browser confirm URL.
+//   2. Browser hits /install?token=<>, PWA POSTs /v1/mcp/install/:code/
+//      claim with the user's web session. Server creates an
+//      AgentSession and stashes the raw bearer on the setup record.
+//   3. CLI polls GET /v1/mcp/install/:code/status. Once `claimed`, the
+//      response carries the raw bearer exactly once; subsequent polls
+//      return `expired`.
 //
-// 10-minute TTL; single-use claim.
+// 10-minute TTL; single-use claim. The model name is "PairingToken"
+// for now — internal-only, can be renamed in a follow-up DB migration.
 
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
@@ -34,9 +35,9 @@ export interface PairingTokenRecord {
   // it ONCE (status flips to `delivered` after the first delivery).
   agent_session_raw_token: string | null;
   account_id: string | null;
-  // Tier 0 → Tier 1 upgrade hook. When the CLI declared a machine token
-  // at /initiate, we associate it on /claim so the server can flip the
-  // machine token's paired_account_id and stop counting its quota.
+  // Machine token declared by the CLI at /initiate. On /claim the
+  // server binds it to the authenticating account so the bot's
+  // LLM-proxy + inbox calls credit the right account.
   machine_token: string | null;
 }
 

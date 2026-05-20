@@ -1,20 +1,23 @@
-// Machine token store for Tier 0 anonymous MCP users.
+// Machine token store. A machine_token is the bot-internal credential
+// the universal signup bot uses for the LLM proxy + the inbox alias
+// service; it's bound to the user's account during the install-claim
+// handshake (see routes/mcp-install.ts).
 //
-// Product principle: the user shouldn't sign anything or create an account
-// before they get value. A machine token is issued at MCP install time,
-// stays bound to one device, and is good for up to QUOTA_LIMIT free
-// signups. When the quota is hit, the tool surfaces a "pair this machine"
-// CTA — that's where the account+mandate model kicks in (Tier 1+).
-//
-// In-memory backing for v1. Losing the count on API restart means a
-// generous user gets a few extra free signups, which is acceptable.
-// Persist to Postgres when we get there (the schema is one table:
-// machine_tokens(token, created_at, signup_count, last_used_at)).
+// Quota: each machine_token gets ACCOUNT_FREE_QUOTA free signups before
+// the alias-create path returns payment_required. Per-account
+// aggregation (sum across all machine_tokens for an account) is a
+// follow-up; today the count tracks per machine_token, which lines up
+// with the typical one-account-one-machine case.
 
 import { randomBytes } from "node:crypto";
 
 const TOKEN_PREFIX = "tsm_";
-const DEFAULT_QUOTA = Number.parseInt(process.env.MACHINE_TOKEN_QUOTA ?? "10", 10);
+// ACCOUNT_FREE_QUOTA is the new env name; MACHINE_TOKEN_QUOTA stays as
+// a transitional fallback so existing deploys keep working.
+const DEFAULT_QUOTA = Number.parseInt(
+  process.env.ACCOUNT_FREE_QUOTA ?? process.env.MACHINE_TOKEN_QUOTA ?? "10",
+  10,
+);
 
 // Network classification recorded at install time. Used downstream to
 // correlate captcha failures with egress reputation — see CaptchaEvent
@@ -32,9 +35,9 @@ export interface MachineTokenRecord {
   created_at: Date;
   signup_count: number;
   last_used_at: Date | null;
-  // Once a machine token is "paired" (linked to a Tier 1 account), the
-  // quota stops applying. We keep the token around so the MCP doesn't
-  // need to roll its session; it just stops counting.
+  // The account this machine token is bound to (set by the install-
+  // claim handshake). Internal field name retains the `paired_` prefix
+  // for now to limit DB-migration scope; rename in a follow-up.
   paired_account_id: string | null;
   // Captured once at issue() time. Null when the install-time lookup
   // failed or the installer was on an older client.
@@ -97,9 +100,10 @@ export function isMachineToken(value: string): boolean {
   return value.startsWith(TOKEN_PREFIX);
 }
 
-// Quota check helper. Paired tokens have unlimited usage (they're acting
-// on behalf of an account that has its own mandate-level controls).
+// Quota check helper. Single-tier: every machine_token is account-bound
+// (or about to be), so the free-signup limit applies uniformly. The
+// account upgrades to paid by signing for billing — quota_enforcement
+// stops at that point, not at the pairing step.
 export function isOverQuota(record: MachineTokenRecord, quota: number): boolean {
-  if (record.paired_account_id !== null) return false;
   return record.signup_count >= quota;
 }

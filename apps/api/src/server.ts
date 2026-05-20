@@ -22,7 +22,7 @@ import { registerApprovalsRoute } from "./routes/approvals.js";
 import { registerCredentialsRoute } from "./routes/credentials.js";
 import { registerVaultRoute } from "./routes/vault.js";
 import { registerMandatesRoute } from "./routes/mandates.js";
-import { registerMcpPairRoute } from "./routes/mcp-pair.js";
+import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerReadViewsRoute } from "./routes/read-views.js";
 import { registerRunsRoute } from "./routes/runs.js";
@@ -36,11 +36,11 @@ export interface BuildServerOpts {
   deps?: ApiDeps;
   buildDeps?: BuildInMemoryDepsOpts;
   approvalBaseUrl?: string;
-  pairBaseUrl?: string;
+  installBaseUrl?: string;
 }
 
-// Base URL of the web app that pair/approval links point at. The app
-// surface is folded into the trustysquire.ai apex (login, /pair, the
+// Base URL of the web app that install/approval links point at. The
+// app surface lives on the trustysquire.ai apex (login, /install, the
 // vault). PWA_BASE_URL overrides for local dev or staging.
 function defaultPwaBaseUrl(): string {
   if (process.env.PWA_BASE_URL !== undefined) return process.env.PWA_BASE_URL;
@@ -168,11 +168,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireAgent: auth.requireAgent,
     requireAny: auth.requireAny,
   });
-  const pairBaseUrl = opts.pairBaseUrl ?? `${defaultPwaBaseUrl()}/pair`;
-  await fastify.register(registerMcpPairRoute, {
+  const installBaseUrl = opts.installBaseUrl ?? `${defaultPwaBaseUrl()}/install`;
+  await fastify.register(registerMcpInstallRoute, {
     deps,
     requireWeb: auth.requireWeb,
-    pairBaseUrl,
+    installBaseUrl,
   });
   await fastify.register(registerMcpSessionsRoute, {
     deps,

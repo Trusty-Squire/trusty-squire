@@ -29,19 +29,23 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   handler: (args: TArgs, api: ApiClient | null) => Promise<unknown>;
 }
 
-// Auth-requiring tools receive `api: ApiClient | null` per the registry
-// contract; server.ts only invokes them after confirming a paired session.
-// This assertion makes that invariant explicit so each handler narrows to a
-// non-null ApiClient without repeating the guard.
-export function assertPaired(api: ApiClient | null): asserts api is ApiClient {
+// All tools receive `api: ApiClient | null`. In the single-tier model
+// server.ts only invokes a handler after confirming a non-null api, but
+// the registry contract still types it as nullable so handlers like
+// check_provision_status (which doesn't need the API) don't have to
+// fake-narrow. assertApi() is the one-liner that asserts the
+// non-nullability for handlers that DO need the API.
+export function assertApi(api: ApiClient | null): asserts api is ApiClient {
   if (api === null) {
-    throw new Error("This tool requires a paired (Tier 1+) session.");
+    throw new Error(
+      "This tool requires an active Trusty Squire session. Run `npx @trusty-squire/mcp install`.",
+    );
   }
 }
 
 // The agent-facing tool registry. Only tools with a live backend are
-// exposed: the Tier-0 universal signup bot + its status poll, and the
-// vault read path (P3). The native-`provision` cluster — provisionTool,
+// exposed: the universal signup bot + its status poll, and the vault
+// read path. The native-`provision` cluster — provisionTool,
 // waitForApprovalTool, listServicesTool, listSubscriptionsTool,
 // cancelTool, getUsageTool, rotateCredentialTool — is still defined and
 // re-exported below but deliberately NOT registered: that subsystem

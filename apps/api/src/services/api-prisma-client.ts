@@ -28,7 +28,7 @@ interface MachineTokenRow {
   asn_country?: string | null;
 }
 
-// ── Tier 1 account-layer row shapes ──────────────────────────
+// ── account account-layer row shapes ──────────────────────────
 // Hand-typed structural rows for the account/session/agent stores,
 // matching the new Prisma models. Same narrow-surface discipline as
 // MachineTokenRow above.
@@ -165,7 +165,7 @@ export interface ApiPrismaClient {
     updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
   };
 
-  // ── Tier 1 account layer ─────────────────────────────────────
+  // ── account account layer ─────────────────────────────────────
   account: {
     create(args: { data: Record<string, unknown> }): Promise<AccountRow>;
     findUnique(args: {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assertPaired, type Tool } from "./index.js";
+import { assertApi, type Tool } from "./index.js";
 
 const inputSchema = z.object({
   service: z.string().min(1),
@@ -70,7 +70,7 @@ export const provisionTool: Tool<z.infer<typeof inputSchema>> = {
     },
   },
   async handler(args, api) {
-    assertPaired(api);
+    assertApi(api);
     // If the caller didn't supply category, look it up in the registry.
     let category = args.category;
     if (category === undefined) {
