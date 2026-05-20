@@ -43,6 +43,7 @@ import {
 } from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import { VERSION } from "../version.js";
+import * as ui from "./ui.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 
@@ -153,41 +154,46 @@ export async function runCli(argv: string[]): Promise<void> {
 }
 
 async function install(args: Argv): Promise<void> {
+  ui.heading("Setting up Trusty Squire on this machine");
+
   const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
 
-  // ── Detect egress class ───────────────────────────────────
-  // Done before the install handshake so the asn class can ride along
-  // in the initiate payload — lets the API correlate captcha failures
-  // with network class for analytics. Best-effort.
-  const asn = await detectAsn();
+  // Detect egress class so the asn rides along in the install payload
+  // (API uses it to correlate captcha failures with network class).
+  // Best-effort: a failure returns null and the install continues.
+  const asn = await ui.withSpinner({
+    start: "Detecting your network…",
+    done: "Network detected",
+    fail: () => "Network detection failed (continuing anyway)",
+    task: () => detectAsn(),
+  });
 
-  // ── Issue a machine token for the bot's inbox + LLM-proxy ─
   // The machine token is the bot-internal credential the universal
   // signup bot uses for the LLM proxy and the inbox alias service. It
   // is NOT the user's auth — the agent_session_token (issued via the
   // browser confirm flow below) is. The MCP server reads both from the
   // session file.
-  console.warn(`Setting up Trusty Squire on this machine…`);
-  const machine = await issueMachineToken(args.apiBase, fetch, asn ?? undefined);
+  const machine = await ui.withSpinner({
+    start: "Issuing a machine token…",
+    done: "Machine token issued",
+    task: () => issueMachineToken(args.apiBase, fetch, asn ?? undefined),
+  });
 
-  // ── Warn datacenter users explicitly ──────────────────────
-  // The whole captcha-bypass story depends on a residential egress IP.
-  // Datacenter ASNs (Hetzner, AWS, Codespaces) get auto-rejected by
-  // reCAPTCHA v2 regardless of fingerprint quality. Better to set
-  // expectations now than have the user file a "Postmark doesn't work"
-  // bug later.
+  // Warn datacenter users explicitly. The whole captcha-bypass story
+  // depends on a residential egress IP — Hetzner / AWS / Codespaces
+  // get rejected by reCAPTCHA v2 regardless of fingerprint quality.
   if (asn !== null) {
     printAsnWarning(asn);
   }
 
-  // ── Browser confirm: bind this machine + seed the bot's Chrome ─
+  // Browser confirm: bind this machine + seed the bot's Chrome.
   // The user signs into trustysquire from inside the bot's persistent
   // Chrome profile (with display, or noVNC on a headless box). That
-  // single sign-in does TWO things: trustysquire claims the install
-  // (sets agent_session_token), AND the provider session lands in the
-  // bot's Chrome profile so future OAuth-based signups can ride it.
-  // No separate "log into Google for the bot" step afterwards.
+  // single sign-in does TWO things at once: trustysquire claims the
+  // install (sets agent_session_token), AND the provider session
+  // lands in the bot's Chrome profile so future OAuth-based signups
+  // can ride it.
   const baseSession: SessionData = {
     api_base_url: args.apiBase,
     saved_at: new Date().toISOString(),
@@ -195,36 +201,26 @@ async function install(args: Argv): Promise<void> {
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser);
   if (session === null) {
-    console.error(
+    ui.fail(
       "Install didn't complete — the browser confirm step never finished. " +
-        "Try again with `npx @trusty-squire/mcp install`.",
+        `Try again with ${ui.code("npx @trusty-squire/mcp install")}.`,
     );
     process.exit(1);
   }
 
   const storage = await openSessionStorage();
   await storage.write(session);
-  console.warn(`✓ Session saved (${storage.backendName()}).`);
+  ui.success(`Session saved (${storage.backendName()})`);
 
-  // ── Write the MCP config into the host agent ──────────────
-  //
-  // Env vars passed to the MCP child:
-  //   - TRUSTY_SQUIRE_AGENT_IDENTITY: which host agent we're running under
-  //   - UNIVERSAL_BOT_PREFER_CHEAP=true: the proxy enforces this server
-  //     side too, but setting it here means users who run the bot CLI
-  //     directly (outside MCP) also get the cheap path by default.
-  //
-  // The tokens themselves are NOT in the env — the MCP server reads
-  // them from session storage (keychain / file), which keeps them out
-  // of any child-process listing or shell history.
+  // Write the MCP config into the host agent. The tokens themselves
+  // are NOT in the env — the MCP server reads them from session
+  // storage (keychain / file), which keeps them out of any
+  // child-process listing or shell history.
   const launch = resolveServerLaunch();
   const env: Record<string, string> = {
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
     UNIVERSAL_BOT_PREFER_CHEAP: "true",
   };
-  // --proxy-url bakes the residential proxy into the config so the user
-  // never hand-edits env. The bot still gates it at runtime — only
-  // datacenter-class egress actually routes through it.
   if (args.proxyUrl !== undefined) {
     env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
   }
@@ -233,24 +229,24 @@ async function install(args: Argv): Promise<void> {
     args: launch.args,
     env,
   });
-  console.warn(`✓ Wrote ${agent.display_name} MCP config at ${agent.config_path()}.`);
+  ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
   if (args.proxyUrl !== undefined) {
-    console.warn(`  Residential proxy baked in: ${args.proxyUrl}`);
+    ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
   if (args.skipBrowser) {
-    console.warn(``);
-    console.warn(
-      `Note: --skip-browser was set, so the bot's Chrome didn't observe ` +
-        `your sign-in. Before your first OAuth-based signup, run:`,
+    ui.panel(
+      `--skip-browser was set, so the bot's Chrome didn't observe your sign-in. ` +
+        `Before your first OAuth-based signup, run:\n\n` +
+        `  ${ui.code("npx @trusty-squire/mcp login [--provider=google|github]")}`,
+      { title: "Heads up", color: "yellow" },
     );
-    console.warn(`  npx @trusty-squire/mcp login [--provider=google|github]`);
   }
 
-  console.warn(``);
-  console.warn(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
-  console.warn(``);
-  console.warn(`Try it now — ask your agent:`);
-  console.warn(`  "sign me up for Resend"`);
+  console.warn("");
+  ui.success(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
+  console.warn("");
+  ui.hint("Try it now — ask your agent:");
+  ui.hint(`  "sign me up for Resend"`);
 }
 
 // Runs the browser-based install confirm flow.
@@ -464,25 +460,28 @@ function printAsnWarning(asn: AsnInfo): void {
   const orgDisplay = asn.org ?? "(unknown ASN)";
   switch (asn.class) {
     case "datacenter":
-      console.warn(``);
-      console.warn(`⚠  Detected network: ${orgDisplay}`);
-      console.warn(`   This looks like a datacenter / cloud network (Codespaces, AWS,`);
-      console.warn(`   Hetzner, etc.). Some signups — especially those gated by`);
-      console.warn(`   reCAPTCHA v2 — are likely to be blocked because anti-bot`);
-      console.warn(`   scoring weighs network reputation heavily.`);
-      console.warn(``);
-      console.warn(`   For best results: run Trusty Squire from a laptop/desktop`);
-      console.warn(`   on a home or office network. Cloud dev environments can`);
-      console.warn(`   still provision services that don't gate signup with`);
-      console.warn(`   reCAPTCHA (Resend, IPInfo, etc.), but Postmark/MailerSend`);
-      console.warn(`   and similar will likely fail.`);
-      console.warn(``);
+      ui.panel(
+        `Detected network: ${ui.code(orgDisplay)}\n\n` +
+          `This looks like a datacenter / cloud network (Codespaces, AWS, ` +
+          `Hetzner, etc.). Some signups — especially those gated by ` +
+          `reCAPTCHA v2 — are likely to be blocked because anti-bot scoring ` +
+          `weighs network reputation heavily.\n\n` +
+          `For best results: run Trusty Squire from a laptop/desktop on a ` +
+          `home or office network. Cloud dev environments can still provision ` +
+          `services that don't gate signup with reCAPTCHA (Resend, IPInfo, ` +
+          `etc.), but Postmark/MailerSend and similar will likely fail.`,
+        { title: "⚠  Datacenter network", color: "yellow" },
+      );
       return;
     case "residential":
-      console.warn(`✓ Detected network: ${orgDisplay} (residential — captchas should pass cleanly).`);
+      ui.success(
+        `Detected network: ${orgDisplay} (residential — captchas should pass cleanly)`,
+      );
       return;
     case "unknown":
-      console.warn(`ℹ Detected network: ${orgDisplay} (couldn't classify — proceed and we'll see).`);
+      ui.info(
+        `Detected network: ${orgDisplay} (couldn't classify — proceed and we'll see)`,
+      );
       return;
   }
 }

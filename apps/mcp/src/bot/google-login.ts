@@ -36,6 +36,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import boxen from "boxen";
+import chalk from "chalk";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
@@ -344,6 +346,30 @@ function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
   });
 }
 
+// Width-aware, boxed VNC banner. Replaces the old hardcoded
+// `"=".repeat(64)` lines that looked broken on narrow phone-via-SSH
+// terminals and lost on wide ones. boxen handles the reflow.
+function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: string }): void {
+  const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
+  const body =
+    `Open this on any device, any network:\n\n` +
+    `  ${chalk.cyan.underline(opts.tunnelUrl)}\n\n` +
+    `If asked for a VNC password:  ${chalk.bold(opts.vncPassword)}\n\n` +
+    opts.label;
+  console.error(
+    "\n" +
+      boxen(body, {
+        title: "Sign in with Trusty Squire",
+        titleAlignment: "left",
+        padding: { top: 0, bottom: 0, left: 2, right: 2 },
+        borderStyle: "round",
+        borderColor: "cyan",
+        width,
+      }) +
+      "\n",
+  );
+}
+
 function teardown(rig: HeadlessRig): void {
   for (const p of rig.procs) {
     try { p.kill("SIGTERM"); } catch { /* best-effort */ }
@@ -573,14 +599,11 @@ async function runHeadlessChrome(
       // out of the cloudflared edge logs and any proxy in between. The
       // branded vnc.html reads it from location.hash and connects with
       // no prompt. Still printed separately as a fallback.
-      console.error(
-        "\n" + "=".repeat(64) + "\n" +
-          "[login] Open this on any device, any network:\n" +
-          `        ${tunnelUrl}/vnc.html#password=${vncPassword}\n` +
-          `[login] (if asked for a VNC password: ${vncPassword})\n` +
-          `[login] ${opts.bannerLabel}\n` +
-          "=".repeat(64) + "\n",
-      );
+      printBanner({
+        tunnelUrl: `${tunnelUrl}/vnc.html#password=${vncPassword}`,
+        vncPassword,
+        label: opts.bannerLabel,
+      });
 
       // 6. Wait for the side effect, run the success hook against the
       //    live context (e.g. inspect cookies that the user's sign-in

@@ -127,6 +127,32 @@ export class LLMCallBudgetExceeded extends Error {
   }
 }
 
+// Best-effort canonical signup URL for a service when the caller
+// didn't pass one. Most dev-SaaS targets (Resend, Postmark, Mailgun,
+// MailerSend, IPInfo, Stripe, PostHog) live at <name>.com/signup; the
+// few that don't (services with hyphens, non-.com TLDs, or non-canonical
+// paths) get auto-recovered by looksLikeSignupPage's fallback to the
+// Google-search path. Normalization: strip everything that isn't a
+// letter/digit, lowercase. Exported for unit testing.
+export function guessSignupUrl(service: string): string {
+  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return `https://${slug}.com/signup`;
+}
+
+// True when the URL is a Google search results page — used to gate
+// the prewarm + the post-load "did we land somewhere useful?" check.
+export function isGoogleSearchUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      (u.hostname === "www.google.com" || u.hostname === "google.com") &&
+      u.pathname.startsWith("/search")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
@@ -1360,8 +1386,21 @@ export class SignupAgent {
 
     try {
       // Step 1: Navigate to signup page
-      const signupUrl =
-        task.signupUrl ?? `https://www.google.com/search?q=${encodeURIComponent(`${task.service} signup`)}`;
+      //
+      // When no signup_url is provided, GUESS the canonical
+      // `https://<service>.com/signup` first — most dev-SaaS targets
+      // (Resend, Postmark, Mailgun, IPInfo, MailerSend, ...) live
+      // there. Falls back to a Google search + findSignupLink only if
+      // the guess doesn't look like a usable signup page after load
+      // (404, marketing page with no inputs/OAuth, etc.). The old
+      // default ALWAYS started on Google search, which on top of
+      // being slower had its own failure mode: the search-result
+      // extractor often returned a docs URL or marketing root rather
+      // than the signup page, and the bot would bail with
+      // oauth_required when it landed on a page that didn't show the
+      // OAuth buttons until you clicked "Sign up" first.
+      const guessed = task.signupUrl ?? guessSignupUrl(task.service);
+      let signupUrl = guessed;
 
       // Prewarm the target origin before hitting the (often-strict) signup
       // page. Two things this buys us:
@@ -1375,18 +1414,9 @@ export class SignupAgent {
       //      Turnstile that scores the whole session, not just the
       //      submit moment.
       //
-      // Mode selection: the heavy "referrer-chain" prewarm is what
-      // actually moves the v3 score (~30-45s of wall clock; google
-      // search → click → scroll → navigate). The light "fast" mode
-      // is dwell-only (~2s). We use the cache to decide: cold cache
-      // means do the heavy one and cache the result; warm cache means
-      // we've recently established cookies for this domain and the
-      // light version is enough.
-      //
-      // Skip entirely when the URL is a Google-search fallback (no
-      // real origin to warm) or when prewarm itself fails (don't fail
-      // the run just because the marketing site is down).
-      if (task.signupUrl !== undefined) {
+      // The prewarm runs against the guessed (or explicit) origin —
+      // skipped only when the URL is a Google-search URL itself.
+      if (!isGoogleSearchUrl(signupUrl)) {
         await this.runPrewarm(signupUrl, steps);
       }
 
@@ -1394,7 +1424,23 @@ export class SignupAgent {
       await this.browser.goto(signupUrl);
       await this.browser.wait(2);
 
-      if (task.signupUrl === undefined) {
+      // When we *guessed* (no signup_url provided) and the page after
+      // load doesn't look like a signup page — no inputs, no OAuth
+      // affordance, or an obvious 404/error title — fall back to the
+      // search-and-find-link path. This is the safety net that lets
+      // the bot recover from a wrong canonical guess (e.g. a service
+      // that uses /register or a non-`.com` TLD).
+      if (task.signupUrl === undefined && !(await this.looksLikeSignupPage())) {
+        steps.push(
+          `${guessed} didn't look like a signup page — searching for the real one`,
+        );
+        const fallbackSearch = `https://www.google.com/search?q=${encodeURIComponent(`${task.service} signup`)}`;
+        await this.browser.goto(fallbackSearch);
+        await this.browser.wait(2);
+        signupUrl = fallbackSearch;
+      }
+
+      if (signupUrl !== guessed || isGoogleSearchUrl(signupUrl)) {
         steps.push("Searching for signup page...");
         const found = await this.findSignupLink();
         if (found !== null) {
@@ -2263,6 +2309,53 @@ ${formatInventory(input.inventory)}${
       if (href.startsWith("//")) return `https:${href}`;
     }
     return null;
+  }
+
+  // Heuristic: does the currently-loaded page LOOK like a real signup
+  // page? Used to decide whether the guessed canonical URL
+  // (<service>.com/signup) worked or we need to fall back to a Google
+  // search. "Looks like a signup page" = the inventory has at least
+  // one text/email input OR a Google/GitHub OAuth button, AND the
+  // page title / heading don't shout 404. Deliberately permissive —
+  // a marketing page with an embedded email-capture form would pass,
+  // which is fine because the form-filler will then realize there's
+  // no submit-button-that-takes-an-email-to-a-real-signup and replan.
+  private async looksLikeSignupPage(): Promise<boolean> {
+    const state = await this.browser.getState();
+    // Cheap 404-ish guard before we go to the trouble of building an
+    // inventory. Catches the most common "wrong guess" outcome.
+    const titleLower = (state.title ?? "").toLowerCase();
+    if (
+      titleLower.includes("404") ||
+      titleLower.includes("not found") ||
+      titleLower.includes("page not found")
+    ) {
+      return false;
+    }
+    let inventory: InteractiveElement[];
+    try {
+      inventory = await this.browser.extractInteractiveElements();
+    } catch {
+      // Inventory failure means we can't tell — assume it worked and
+      // let the downstream planExecuteWithRetry give the verdict.
+      return true;
+    }
+    const hasInput = inventory.some(
+      (e) =>
+        e.tag === "input" &&
+        (e.type === "email" || e.type === "text" || e.type === null || e.type === undefined),
+    );
+    if (hasInput) return true;
+    // Sometimes the form is gated behind a "Sign in with Google /
+    // GitHub" button (Resend, Vercel, etc.). Those count as a usable
+    // signup page when the bot has a provider session.
+    const hasOAuthButton = inventory.some((e) => {
+      const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+      return /(?:^|\s)(?:sign(?:\s|-)?in|sign(?:\s|-)?up|continue)\s+with\s+(?:google|github)/i.test(
+        text,
+      );
+    });
+    return hasOAuthButton;
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
