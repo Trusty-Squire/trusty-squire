@@ -1,11 +1,15 @@
 // Covers extractApiKeyFromText — the pure credential-scraping logic
-// behind SignupAgent.extractCredentials. The load-bearing concern is
-// rejecting captcha challenge tokens (g-recaptcha-response,
-// cf-turnstile-response) and session tokens that a naive labeled
-// regex would otherwise surface as credentials.api_key.
+// behind SignupAgent.extractCredentials. The load-bearing concerns:
+//   - rejecting captcha challenge tokens (g-recaptcha-response,
+//     cf-turnstile-response) and session tokens that a naive labeled
+//     regex would otherwise surface as credentials.api_key.
+//   - F10: detecting truncated displays (modal shows the masked
+//     prefix + "…" while the full secret lives only on the clipboard).
+//     This is the dominant failure mode for OpenRouter / Anthropic /
+//     OpenAI / Stripe key modals.
 
 import { describe, expect, it } from "vitest";
-import { extractApiKeyFromText } from "../agent.js";
+import { extractApiKeyFromText, isTruncatedCapture } from "../agent.js";
 
 describe("extractApiKeyFromText — prefixed keys", () => {
   it("extracts a Resend key", () => {
@@ -146,5 +150,69 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
     // other page section and must not be picked up.
     const text = "API key:\n\nsomeUnrelatedToken1234567890";
     expect(extractApiKeyFromText(text)).toBeNull();
+  });
+});
+
+describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F10)", () => {
+  it("extracts a full OpenRouter sk-or-v1-… key", () => {
+    // Synthetic, not a live key — F10's whole point is that the
+    // sk-or-v1- prefix is recognized so the Copy+clipboard recovery
+    // path's clipboard contents can be parsed.
+    const key = "sk-or-v1-" + "0".repeat(63);
+    expect(extractApiKeyFromText(`Your key: ${key}`)).toBe(key);
+  });
+
+  it("extracts an Anthropic sk-ant-… key", () => {
+    const key = "sk-ant-" + "abcdef0123456789".repeat(4);
+    expect(extractApiKeyFromText(key)).toBe(key);
+  });
+
+  it("extracts an OpenAI sk-proj-… project key", () => {
+    const key = "sk-proj-" + "abcdef0123456789".repeat(3) + "abcdef";
+    expect(extractApiKeyFromText(key)).toBe(key);
+  });
+
+  it("extracts an OpenAI legacy sk-<48> key", () => {
+    const key = "sk-" + "a".repeat(48);
+    expect(extractApiKeyFromText(key)).toBe(key);
+  });
+});
+
+describe("isTruncatedCapture — F10 truncation detection", () => {
+  it("flags a key directly followed by '...'", () => {
+    const text = "Your key: sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8...";
+    // Simulate what the labeled regex would have captured here.
+    const captured = "sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8";
+    expect(isTruncatedCapture(text, captured)).toBe(true);
+  });
+
+  it("flags a key followed by the Unicode ellipsis", () => {
+    const text = "sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8…";
+    expect(isTruncatedCapture(text, "sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8")).toBe(
+      true,
+    );
+  });
+
+  it("flags a key with whitespace before the ellipsis", () => {
+    // Some modals render "sk-…  …" with a gap. The detector tolerates
+    // leading whitespace between the captured value and the marker.
+    const text = "sk-or-v1-abc123 ...";
+    expect(isTruncatedCapture(text, "sk-or-v1-abc123")).toBe(true);
+  });
+
+  it("does NOT flag a key followed by two dots (ordinary punctuation)", () => {
+    // "sk-or-v1-abc123.. and ..." — two trailing dots can appear in
+    // prose. Three or more dots is the marker.
+    const text = "Your key sk-or-v1-abc123.. configured.";
+    expect(isTruncatedCapture(text, "sk-or-v1-abc123")).toBe(false);
+  });
+
+  it("does NOT flag a key at end-of-string with no marker", () => {
+    const text = "sk-or-v1-abc123";
+    expect(isTruncatedCapture(text, "sk-or-v1-abc123")).toBe(false);
+  });
+
+  it("returns false when the captured key isn't in the source text", () => {
+    expect(isTruncatedCapture("unrelated text", "sk-or-v1-abc")).toBe(false);
   });
 });

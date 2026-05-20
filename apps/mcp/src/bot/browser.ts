@@ -316,9 +316,20 @@ export class BrowserController {
       // timezone + geolocation track the real egress (T3.1); a fixed
       // default when the probe failed.
       timezoneId: geo?.timezoneId ?? "America/New_York",
-      ...(geo?.geolocation !== undefined
-        ? { geolocation: geo.geolocation, permissions: ["geolocation"] }
-        : {}),
+      // F10: `clipboard-read` is what makes `navigator.clipboard.readText()`
+      // return the user's just-clicked Copy-button value, which is how
+      // every modern API-key modal (OpenRouter, Anthropic, OpenAI,
+      // Stripe) reveals the full secret — the visible display is
+      // masked / truncated and only the clipboard has the whole key.
+      // `clipboard-write` is a freebie; some Copy buttons no-op without
+      // it. Granting both at context-creation time so we don't have to
+      // re-grant on every nav.
+      permissions: [
+        ...(geo?.geolocation !== undefined ? ["geolocation"] : []),
+        "clipboard-read",
+        "clipboard-write",
+      ],
+      ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
     });
     this.context = context;
     // Patch the navigator.webdriver flag — most anti-bot heuristics look here.
@@ -1013,6 +1024,43 @@ export class BrowserController {
   //      immediate children, excluding descendants. A key in a
   //      <code>/<span>/<div> yields its clean value here even when a
   //      sibling button shares the same parent.
+  // F10: read the clipboard contents (typically populated by the
+  // user-modal's Copy button — every modern API-key reveal modal puts
+  // the full secret here while displaying a masked stub). Requires
+  // `clipboard-read` permission, granted at context creation. Returns
+  // an empty string if the clipboard is empty; throws on permission
+  // failure (caller catches and falls through to other paths).
+  async readClipboard(): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(async () => {
+      try {
+        return await navigator.clipboard.readText();
+      } catch {
+        return "";
+      }
+    });
+  }
+
+  // F10 fallback: ALL <input> / <textarea> values, ignoring
+  // visibility and type filters. extractCredentialCandidates
+  // deliberately skips `type=hidden` / `type=password` / invisible
+  // elements (correct for general candidate scanning), but some
+  // API-key modals stash the full key in a hidden input the masked
+  // display reads from — and that needs to be reachable when the
+  // visible extraction comes back truncated.
+  async extractAllInputValues(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const out: string[] = [];
+      document.querySelectorAll("input, textarea").forEach((el) => {
+        if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
+        const value = el.value;
+        if (value.trim().length > 0) out.push(value.trim());
+      });
+      return out;
+    });
+  }
+
   async extractCredentialCandidates(): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(() => {

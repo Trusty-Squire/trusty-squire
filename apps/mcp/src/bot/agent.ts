@@ -694,6 +694,28 @@ const EMBEDDED_KEY_PREFIXES: readonly string[] = [
 //
 // Exported for unit testing — the regex tuning here is the load-
 // bearing logic and deserves direct coverage.
+// True when `capturedKey` is followed by a truncation marker (`...`
+// or the Unicode ellipsis `…`) in `sourceText`. That marker is the
+// signal that the visible display masked the full secret — the
+// regex captured everything up to but not including the marker, so
+// the value LOOKS valid but is short. Used by F10's
+// extract-via-Copy-button recovery path; without this check, the
+// bot accepts the truncated value, stores it, and the user discovers
+// the failure only when their next API call returns 401.
+export function isTruncatedCapture(sourceText: string, capturedKey: string): boolean {
+  const idx = sourceText.indexOf(capturedKey);
+  if (idx < 0) return false;
+  const after = sourceText.slice(
+    idx + capturedKey.length,
+    idx + capturedKey.length + 10,
+  );
+  // Whitespace OK between key and ellipsis (some modals render as
+  // "sk-or-v1-xxxx ..."). Three OR MORE dots; two dots are ordinary
+  // punctuation and would false-positive on e.g. "key value.." in
+  // help text.
+  return /^\s*(?:\.{3,}|…)/.test(after);
+}
+
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
@@ -709,6 +731,15 @@ export function extractApiKeyFromText(text: string): string | null {
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
     /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
     /\bsntry[su]_[A-Za-z0-9_=\-]{20,}/, // Sentry org/user auth token
+    // OpenRouter, Anthropic, OpenAI — these are the dominant
+    // OAuth-completed-then-copy-needed services. Specific-prefix
+    // patterns first so a labeled-pattern fallback isn't load-
+    // bearing for them. Putting `sk-or-v1-` before `sk-` so it wins
+    // when both could match (cosmetic; both capture the same value).
+    /\bsk-or-v1-[a-zA-Z0-9_-]{20,}/, // OpenRouter (sk-or-v1-…)
+    /\bsk-ant-[a-zA-Z0-9_-]{20,}/, // Anthropic (sk-ant-…)
+    /\bsk-proj-[a-zA-Z0-9_-]{20,}/, // OpenAI project key
+    /\bsk-[a-zA-Z0-9]{40,}/, // OpenAI legacy (`sk-` + ~48 chars, no dashes)
   ];
   for (const pattern of prefixed) {
     const match = text.match(pattern);
@@ -2364,24 +2395,129 @@ ${formatInventory(input.inventory)}${
     // Turnstile, hCaptcha) whose challenge tokens look like API keys to
     // a naive regex.
     //
-    // Two visible surfaces, in priority order:
-    //   1. Discrete credential candidates — copy-input values and each
-    //      element's own direct text. A key is read whole here, un-glued
-    //      from adjacent buttons; captcha tokens (hidden inputs) are
-    //      excluded by the browser.
-    //   2. The whole visible body text — fallback for a key shown as
-    //      plain prose, accepting that body concatenation can glue
-    //      neighbours (the extractApiKeyFromText guards catch the worst).
+    // Three-pass extraction, in priority order:
+    //   1. Visible candidates — input values + each element's direct
+    //      text. A key read whole, un-glued from adjacent buttons.
+    //   2. F10: when pass 1 hits a TRUNCATED display (modal shows
+    //      "sk-or-v1-1687…" with the full secret only on the
+    //      clipboard via the Copy button), click the Copy button and
+    //      re-extract from `navigator.clipboard.readText()`. This is
+    //      the OpenRouter / Anthropic / OpenAI / Stripe modal
+    //      pattern — pass 1 would otherwise persist a truncated stub.
+    //   3. F10 fallback: walk hidden inputs. Some modals stash the
+    //      full secret in a `display:none` <input> the masked display
+    //      reads from.
     const credentials: Record<string, string> = {};
     let apiKey: string | null = null;
+    let truncatedHit: string | null = null;
+
     for (const candidate of await this.browser.extractCredentialCandidates()) {
-      apiKey = extractApiKeyFromText(candidate);
-      if (apiKey !== null) break;
+      const hit = extractApiKeyFromText(candidate);
+      if (hit === null) continue;
+      if (isTruncatedCapture(candidate, hit)) {
+        // Remember the truncated value but keep scanning — a later
+        // candidate may produce a full one (e.g. a hidden input on
+        // the same page).
+        truncatedHit = truncatedHit ?? hit;
+        continue;
+      }
+      apiKey = hit;
+      break;
     }
     if (apiKey === null) {
-      apiKey = extractApiKeyFromText(await this.browser.extractText());
+      const bodyText = await this.browser.extractText();
+      const hit = extractApiKeyFromText(bodyText);
+      if (hit !== null) {
+        if (isTruncatedCapture(bodyText, hit)) {
+          truncatedHit = truncatedHit ?? hit;
+        } else {
+          apiKey = hit;
+        }
+      }
     }
+
+    // Pass 2 — Copy-button + clipboard recovery.
+    if (apiKey === null && truncatedHit !== null) {
+      apiKey = await this.tryCopyButtonExtraction();
+    }
+
+    // Pass 3 — hidden-input scan. Cheap to always try as a last
+    // resort, whether or not we saw a truncated hit; a service that
+    // stashes the key in a hidden input may not display it at all.
+    if (apiKey === null) {
+      try {
+        for (const value of await this.browser.extractAllInputValues()) {
+          const hit = extractApiKeyFromText(value);
+          if (hit !== null && !isTruncatedCapture(value, hit)) {
+            apiKey = hit;
+            break;
+          }
+        }
+      } catch {
+        // Hidden-input scan failures are non-fatal; we just stay
+        // with whatever we had (or null).
+      }
+    }
+
+    // Last resort: if every path returned a truncated value, persist
+    // it with a `_truncated` suffix so the host agent can surface the
+    // partial result to the user (better than reporting "no key
+    // found" when the bot demonstrably reached the modal).
+    if (apiKey === null && truncatedHit !== null) {
+      credentials.api_key_truncated = truncatedHit;
+      return credentials;
+    }
+
     if (apiKey !== null) credentials.api_key = apiKey;
     return credentials;
+  }
+
+  // F10: click the page's Copy button (whose label typically reads
+  // "Copy", "Copy key", "Copy secret") and extract the secret from
+  // `navigator.clipboard.readText()`. Returns null on any failure —
+  // the caller has its own fallback paths.
+  private async tryCopyButtonExtraction(): Promise<string | null> {
+    let copyBtnSelector: string | null = null;
+    try {
+      const inventory = await this.browser.extractInteractiveElements();
+      const copyBtn = inventory.find((e) => {
+        const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+        // "Copy" alone, "Copy key", "Copy API key", "Copy secret",
+        // "Copy token". Anchored so a "Don't copy this" tooltip
+        // doesn't match. Case-insensitive.
+        return /^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|key)\b/i.test(text);
+      });
+      if (copyBtn === undefined) return null;
+      copyBtnSelector = copyBtn.selector;
+    } catch {
+      return null;
+    }
+
+    try {
+      await this.browser.click(copyBtnSelector);
+      // Brief wait — the Copy button's onclick is usually a sync
+      // navigator.clipboard.writeText, but some modals run an async
+      // serialize step (e.g. format-the-key into "Bearer <key>"
+      // first). 1s covers both with no real cost.
+      await this.browser.wait(1);
+    } catch {
+      return null;
+    }
+
+    let clipboardText: string;
+    try {
+      clipboardText = await this.browser.readClipboard();
+    } catch {
+      return null;
+    }
+    if (clipboardText.trim().length === 0) return null;
+
+    const fromClipboard = extractApiKeyFromText(clipboardText);
+    if (fromClipboard === null) return null;
+    // Sanity: don't accept a clipboard hit that is ITSELF truncated
+    // (some Copy buttons copy the masked display rather than the
+    // real value — defensive against that surprising case).
+    if (isTruncatedCapture(clipboardText, fromClipboard)) return null;
+    return fromClipboard;
   }
 }
