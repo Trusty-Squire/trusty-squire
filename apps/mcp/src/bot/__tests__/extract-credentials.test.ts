@@ -15,8 +15,9 @@ describe("extractApiKeyFromText — prefixed keys", () => {
 
   it("extracts a Resend key whose body contains underscores", () => {
     // Real Resend keys carry an underscore mid-body — the prefix
-    // charset must include it (a live capture key had one).
-    const key = "re_eDGaLe7W_J9biUJyA9z43NenTJH36ZrsV";
+    // charset must include it. Synthetic fixture (32 random chars
+    // with one underscore mid-body) — no live keys in source.
+    const key = "re_" + "FAKEonlyAA_AAaaBBbbCCccDDdd1234567890";
     expect(extractApiKeyFromText(`shown once: ${key}`)).toBe(key);
   });
 
