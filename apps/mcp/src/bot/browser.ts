@@ -1353,6 +1353,13 @@ export class BrowserController {
     // redirect to the real page. Without this, the bot snapshots a
     // 2-element interstitial inventory and bails.
     await this.waitForAntiBotInterstitialToClear(timeoutMs);
+    // Cookie-consent banners (GDPR/CCPA) routinely overlay the page
+    // and intercept clicks until dismissed. F3 detects them and tells
+    // the planner to avoid them — but if EVERYTHING is behind one
+    // (Railway-class), the bot has nothing to interact with. Dismiss
+    // by clicking the primary "Accept" CTA. Idempotent: no-op when no
+    // banner is visible.
+    await this.dismissConsentBanner();
     try {
       await this.page.waitForSelector("input, button", {
         state: "visible",
@@ -1361,6 +1368,69 @@ export class BrowserController {
     } catch {
       // No interactive element appeared in time — let the planner run
       // anyway; it fails cleanly rather than hanging.
+    }
+  }
+
+  // Find and click an "Accept"-class button inside any visible cookie
+  // consent banner. Returns true when something was clicked, false
+  // when no banner / no clickable affordance was found. Best-effort:
+  // never throws.
+  //
+  // Strategy: scope to elements matched by the same consent selector
+  // F3's inventory builder uses, then prefer a primary "Accept all"
+  // CTA, then a bare "Accept" / "OK", then "Reject all" as a last
+  // resort. We don't try to honor "manage preferences" — that lands
+  // us in a multi-step modal we then can't drive.
+  async dismissConsentBanner(): Promise<boolean> {
+    if (!this.page) return false;
+    const CONSENT_ROOT =
+      '[class*="osano"],[id*="onetrust"],[id*="cookie"],[class*="cookie-consent"],[class*="cookie-banner"],[class*="cookieConsent"]';
+    // Prefer-order regex — first match wins.
+    const PREFER_ORDER: RegExp[] = [
+      /^\s*(?:accept all|allow all|accept cookies|i accept|got it|i agree)\s*$/i,
+      /^\s*(?:accept|agree|ok|continue)\s*$/i,
+      /^\s*(?:reject all|decline all|decline|reject)\s*$/i,
+    ];
+    let target: { x: number; y: number } | null = null;
+    try {
+      target = await this.page.evaluate(
+        ({ rootSel, patterns }) => {
+          const root = document.querySelector(rootSel);
+          if (root === null) return null;
+          const rect = (root as HTMLElement).getBoundingClientRect();
+          // Skip if the banner isn't actually visible (some sites
+          // leave the DOM but display:none after dismissal).
+          if (rect.width < 2 || rect.height < 2) return null;
+          const candidates = Array.from(
+            root.querySelectorAll('button, a, [role="button"], [role="link"]'),
+          ) as HTMLElement[];
+          for (const re of patterns.map((p: string) => new RegExp(p, "i"))) {
+            const hit = candidates.find((c) => re.test((c.textContent || "").trim()));
+            if (hit !== undefined) {
+              const r = hit.getBoundingClientRect();
+              if (r.width < 2 || r.height < 2) continue;
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            }
+          }
+          return null;
+        },
+        {
+          rootSel: CONSENT_ROOT,
+          patterns: PREFER_ORDER.map((p) => p.source),
+        },
+      );
+    } catch {
+      return false;
+    }
+    if (target === null) return false;
+    try {
+      await this.page.mouse.click(target.x, target.y);
+      // Give the banner a tick to fade out so the next inventory scan
+      // doesn't snapshot it still half-present.
+      await this.page.waitForTimeout(600);
+      return true;
+    } catch {
+      return false;
     }
   }
 
