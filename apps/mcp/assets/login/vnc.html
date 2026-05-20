@@ -10,10 +10,8 @@
     google-login.ts runHeadlessChrome). Deliberately uses ONLY noVNC's
     stable RFB API — the `RFB` default export, its constructor, the
     `scaleViewport`/`resizeSession` properties, the
-    connect/disconnect/securityfailure events, and `rfb.focus()` (used
-    to pop the mobile soft keyboard) — all stable across every noVNC
-    1.x release, so this page survives whatever version the host
-    distro's `novnc` package pinned.
+    connect/disconnect/securityfailure events, and `rfb.sendKey()` —
+    all stable across every noVNC 1.x release.
   -->
   <style>
     html, body { margin: 0; height: 100%; background: #0f1115; color: #e6e8ec;
@@ -32,38 +30,30 @@
     #dot.ok { background: #3fb950; }
     #dot.err { background: #f85149; }
     #screen { flex: 1; position: relative; background: #0f1115; min-height: 0; }
-    #msg { position: absolute; top: 50%; left: 0; right: 0; text-align: center;
-      transform: translateY(-50%); color: #9aa0ab; font-size: 14px; padding: 0 24px; }
-    /* Show-keyboard button. The remote VNC view is just pixels — the OS
-       can't tell there's a typeable field, so a normal tap inside the
-       remote Chrome doesn't pop the soft keyboard. This button focuses
-       the hidden #kbInput element below; the OS sees an actual editable
-       input gain focus and pops the keyboard. Each character typed
-       into #kbInput is forwarded to the VNC stream via rfb.sendKey()
-       and the input is cleared, so the local input never accumulates
-       the user's password.
-
-       Button is positioned 88px above the bottom edge to clear Android
-       gesture-navigation zones and iOS home indicators (bottom: 16px
-       used to fail on some phones because the tap landed on the OS
-       nav instead of the button). 64px target is comfortably above the
-       44pt minimum tap-target size both platforms recommend. */
-    #kb { position: absolute; right: 16px; bottom: max(88px, env(safe-area-inset-bottom, 16px));
+    /* Overlay siblings of #screen — `position: fixed` against the
+       viewport, NOT positioned inside #screen. RFB appends a <canvas>
+       child to #screen at connect time, and that canvas can cover any
+       absolutely-positioned children even with z-index. Sibling +
+       fixed keeps them above the canvas unconditionally. */
+    #msg { position: fixed; top: 50%; left: 0; right: 0; text-align: center;
+      transform: translateY(-50%); color: #9aa0ab; font-size: 14px; padding: 0 24px;
+      pointer-events: none; z-index: 9; }
+    /* The keyboard button. Always visible (no media-query gating —
+       desktop users see a tiny ⌨ they ignore; better than a phone user
+       finding nothing). Position fixed against the viewport so the OS
+       gesture nav area at the bottom can't swallow taps meant for it. */
+    #kb {
+      position: fixed; right: 16px;
+      bottom: max(96px, env(safe-area-inset-bottom, 16px));
       width: 64px; height: 64px;
+      display: flex; align-items: center; justify-content: center;
       border-radius: 50%; border: none; background: #4f46e5; color: #fff;
       font-size: 28px; line-height: 1; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-      cursor: pointer; z-index: 10; display: none;
+      cursor: pointer; z-index: 20;
       -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+      transition: background 120ms, transform 80ms;
     }
-    #kb:active { transform: scale(0.94); }
-    /* Only show the button on touch-capable devices — desktops already
-       have a hardware keyboard and the button just clutters the view.
-       Always-on once the page loads; previously gated on RFB's connect
-       event, but if connect fired before the listener attached (or if
-       the user was reconnecting), the button stayed hidden forever. */
-    @media (hover: none) and (pointer: coarse) {
-      #kb { display: flex; align-items: center; justify-content: center; }
-    }
+    #kb:active, #kb.tapped { transform: scale(0.92); background: #3fb950; }
     /* Hidden input the button focuses. The noVNC-canonical pattern:
        1×1 px, positioned off-screen, matching foreground+background so
        any flicker is invisible, z-index: -1 so it can't intercept any
@@ -71,7 +61,7 @@
        it considers "invisible" — opacity:0 is one of those triggers —
        but a 1px element positioned off-screen counts as visible enough. */
     #kbInput {
-      position: absolute; left: -40px; top: 0;
+      position: fixed; left: -40px; top: 0;
       width: 1px; height: 1px;
       background: #fff; color: #fff; caret-color: transparent;
       border: 0; padding: 0; margin: 0;
@@ -85,16 +75,17 @@
     <b>Trusty Squire</b>
     <span class="sub">— sign in to your account, then return to your terminal.</span>
   </div>
-  <div id="screen">
-    <div id="msg">Connecting to the secure login window&hellip;</div>
-    <!-- inputmode=text + autocorrect/autocapitalize/spellcheck off so the
-         soft keyboard never offers autocomplete suggestions for a typed
-         password, and never enriches characters before we forward them. -->
-    <input id="kbInput" type="text" inputmode="text" autocomplete="off"
-           autocorrect="off" autocapitalize="off" spellcheck="false"
-           aria-hidden="true" tabindex="-1" />
-    <button id="kb" type="button" aria-label="Show keyboard">⌨</button>
-  </div>
+  <div id="screen"></div>
+  <!-- Overlays as body-level siblings, not children of #screen — see
+       the #msg / #kb CSS comments above. -->
+  <div id="msg">Connecting to the secure login window&hellip;</div>
+  <!-- inputmode=text + autocorrect/autocapitalize/spellcheck off so the
+       soft keyboard never offers autocomplete suggestions for a typed
+       password, and never enriches characters before we forward them. -->
+  <input id="kbInput" type="text" inputmode="text" autocomplete="off"
+         autocorrect="off" autocapitalize="off" spellcheck="false"
+         aria-hidden="true" tabindex="-1" />
+  <button id="kb" type="button" aria-label="Show keyboard">⌨</button>
   <script type="module">
     import RFB from "./core/rfb.js";
 
@@ -142,16 +133,23 @@
         msg.textContent = "Could not authenticate to the login window.";
       });
 
-      // Tap → soft keyboard pop. The blur+focus dance is the load-
-      // bearing trick: focus() on an already-focused element is a
-      // no-op and the OS won't re-trigger the keyboard, but blur first
-      // forces a fresh focus event. The whole sequence stays inside
-      // the click handler so iOS Safari and Android Chrome both
-      // accept the focus() as gesture-bound. Focusing a real <input>
-      // is what triggers the OS keyboard — focusing the RFB div
-      // (rfb.focus() in noVNC 1.x) wouldn't.
+      // Tap → soft keyboard pop. The blur+focus dance is load-bearing:
+      // focus() on an already-focused element is a no-op so the OS
+      // won't re-trigger the keyboard; blur first forces a fresh focus
+      // event. The whole sequence stays inside the click handler so
+      // iOS Safari and Android Chrome both accept the focus() as
+      // gesture-bound. Focusing a real <input> is what pops the OS
+      // keyboard — focusing the RFB div (rfb.focus() in noVNC 1.x)
+      // wouldn't.
+      //
+      // The .tapped class flashes the button green for 200ms so the
+      // user can see the tap registered even if the OS doesn't (yet)
+      // pop the keyboard — separates "did my tap reach the button?"
+      // from "does focus() pop the keyboard on this device?"
       kbBtn.addEventListener("click", (e) => {
         e.preventDefault();
+        kbBtn.classList.add("tapped");
+        setTimeout(() => kbBtn.classList.remove("tapped"), 200);
         kbInput.blur();
         kbInput.value = "";
         kbInput.focus();
@@ -175,10 +173,9 @@
 
       // Forward typed characters. The `input` event fires once per
       // commit (each char on most soft keyboards; sometimes batched
-      // when an IME finalizes). We diff against the previous value
-      // to handle paste / autocorrect insertions, send a press+release
-      // for each new character, then clear the input so it never
-      // accumulates the user's password.
+      // when an IME finalizes). We send a press+release for each
+      // character, then clear the input so it never accumulates the
+      // user's password.
       let lastKbValue = "";
       kbInput.addEventListener("input", () => {
         const newValue = kbInput.value;
