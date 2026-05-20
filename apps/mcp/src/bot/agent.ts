@@ -1115,6 +1115,22 @@ export class SignupAgent {
           "OAuth-first: no usable provider affordance on the page — " +
             "falling back to form-fill",
         );
+        // Dump visible buttons/links so we can see what the OAuth-
+        // first scan rejected. The previous diagnostic only fires for
+        // tiny inventories; this one fires whenever the OAuth scan
+        // exhausts its retries regardless of inventory size. Lets us
+        // tell whether the GitHub/Google button was on the page but
+        // mis-matched, or genuinely absent.
+        const oauthDiag = inventory
+          .slice(0, 20)
+          .map((e) => {
+            const t = (e.visibleText ?? e.ariaLabel ?? "").slice(0, 50);
+            return `  ${e.tag}${e.type ? `[${e.type}]` : ""} ${JSON.stringify(t)}`;
+          })
+          .join("\n");
+        steps.push(
+          `OAuth-first scan rejected — visible candidates (${inventory.length}):\n${oauthDiag}`,
+        );
       }
 
       // Anti-bot interstitial that didn't clear (Cloudflare/Sucuri/
