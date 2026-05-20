@@ -752,56 +752,96 @@ export class BrowserController {
     await this.selectFromCombobox(selector, optionMatcher);
   }
 
-  // F11: click a combobox trigger, wait for the listbox to open,
-  // click an option. Generic across Radix / Headless UI / React Aria
-  // / cmdk because they all emit role=option on item elements.
+  // F11 (+rc.7 hardening): click a combobox trigger, wait for the
+  // listbox to open, click an option.
+  //
+  // Tries option-selector patterns in priority order — each tier
+  // targets one combobox-library convention. The text-based final
+  // tier catches libraries that ship NO ARIA roles at all (Sentry's
+  // permissions picker is the canonical case: it uses `<div>`s with
+  // plain text for options and pure JS click handlers).
+  //
+  //   1. [role=option]            — Radix, Headless UI, React Aria, cmdk
+  //   2. [role=menuitem]          — ARIA menu pattern (libs that model
+  //                                 a dropdown as a menu)
+  //   3. [role=listbox] li        — listbox container without role
+  //                                 attribute on its children
+  //   4. text-based (matcher only) — after the trigger click, any newly-
+  //                                 visible element whose text matches
+  //                                 the planner-supplied label is
+  //                                 almost certainly the option. Only
+  //                                 enabled when a matcher exists,
+  //                                 since "first text on the page"
+  //                                 with no matcher would catch
+  //                                 unrelated UI text.
   private async selectFromCombobox(
     triggerSelector: string,
     optionMatcher?: string,
   ): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    // Open the dropdown. humanClick scrolls into view + bezier-paths
-    // the click so it lands inside the trigger.
     await this.humanClick(triggerSelector);
-    // Wait for option elements to appear. Some libraries (Radix) mount
-    // the listbox in a portal at body root, so we scan the whole
-    // document, not the trigger's subtree.
-    try {
-      await this.page.waitForSelector('[role="option"]', {
-        state: "visible",
-        timeout: 5000,
-      });
-    } catch {
-      throw new Error(
-        `combobox ${triggerSelector}: no [role=option] appeared within 5s — ` +
-          `the trigger may not be a combobox, or the listbox uses a non-ARIA pattern`,
-      );
+
+    const patternSelectors: readonly string[] = [
+      '[role="option"]:visible',
+      '[role="menuitem"]:visible',
+      '[role="listbox"]:visible li:visible',
+    ];
+    const triedDescriptors: string[] = [];
+    for (const sel of patternSelectors) {
+      triedDescriptors.push(sel);
+      const locator = this.page.locator(sel);
+      try {
+        await locator.first().waitFor({ state: "visible", timeout: 1500 });
+      } catch {
+        continue;
+      }
+      const count = await locator.count();
+      if (count === 0) continue;
+      await this.pickComboboxOption(locator, optionMatcher);
+      return;
     }
 
-    const options = await this.page.locator('[role="option"]:visible').all();
-    if (options.length === 0) {
-      throw new Error(
-        `combobox ${triggerSelector}: opened but found 0 visible options`,
-      );
-    }
-
-    // Pick: matcher-by-text if provided, first otherwise.
-    let chosen = options[0]!;
+    // ARIA tiers all empty. Text-based fallback, only if the planner
+    // told us WHICH option to pick — without a matcher, "first text
+    // on the page" would click unrelated UI.
     if (optionMatcher !== undefined) {
-      const matcherLower = optionMatcher.toLowerCase();
-      for (const o of options) {
-        const text = ((await o.textContent()) ?? "").toLowerCase();
-        if (text.includes(matcherLower)) {
-          chosen = o;
-          break;
-        }
+      const byText = this.page.getByText(optionMatcher, { exact: false }).first();
+      triedDescriptors.push(`text="${optionMatcher}"`);
+      try {
+        await byText.waitFor({ state: "visible", timeout: 2000 });
+        await this.humanClickLocator(byText);
+        await this.wait(0.5);
+        return;
+      } catch {
+        // not found — fall through to error
       }
     }
 
-    await this.humanClickLocator(chosen);
-    // Small settle — most comboboxes animate the close and update the
-    // form state on the same tick, but a few (Headless UI Transition)
-    // run a 150-200ms exit before the form sees the new value.
+    throw new Error(
+      `combobox ${triggerSelector}: no options found after click. ` +
+        `Tried: ${triedDescriptors.join(", ")}. ` +
+        `The trigger may not have opened a popover, or the popover uses ` +
+        `an option pattern this executor doesn't recognize.`,
+    );
+  }
+
+  // F11: pick an option from a Playwright Locator already-narrowed to
+  // candidates. Matcher → filter by hasText (case-insensitive by
+  // default in Playwright). No matcher → first.
+  private async pickComboboxOption(
+    options: Locator,
+    matcher?: string,
+  ): Promise<void> {
+    if (matcher !== undefined) {
+      const filtered = options.filter({ hasText: matcher });
+      const filteredCount = await filtered.count();
+      if (filteredCount > 0) {
+        await this.humanClickLocator(filtered.first());
+        await this.wait(0.5);
+        return;
+      }
+    }
+    await this.humanClickLocator(options.first());
     await this.wait(0.5);
   }
 
