@@ -396,10 +396,11 @@ async function runSignupTask(
       service: input.service,
       ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
       email: ctx.alias,
-      // No `inbox`: the SES inbound pipeline is mothballed (TODOS M1).
-      // Without an inbox, signup() fast-fails an email-verifying form
-      // to `verification_not_sent` instead of a blind poll (M2/S3).
-      // The OAuth path needs no inbox at all.
+      // SES inbound pipeline revived on trustysquire.com 2026-05-20
+      // (TODOS M1). Pass the inbox client so signup() can poll for the
+      // verification email after form submit. OAuth runs don't need
+      // it; the agent ignores it on those paths.
+      inbox: ctx.inboxClient,
       llm: llmPair,
       // T6/T13: route through the provider's OAuth path when the
       // caller asked for it (Google or GitHub).

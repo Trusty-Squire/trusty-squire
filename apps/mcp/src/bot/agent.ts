@@ -22,7 +22,7 @@ import {
   type OAuthProviderId,
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
-import { loggedInProviders } from "./login-state.js";
+import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
@@ -1103,7 +1103,7 @@ export class SignupAgent {
       // intentionally has 0 interactive elements. Surface as its own
       // status, not as oauth_required: the latter implies "service is
       // OAuth-only", which is wrong for Cloudflare et al.
-      if (inventory.length < 5) {
+      if (inventory.length < 10) {
         const block = detectAntiBotBlock(state.html);
         if (block !== null) {
           steps.push(
@@ -1290,7 +1290,10 @@ export class SignupAgent {
     // Turnstile, "Just a moment...", reCAPTCHA wall) is up. Surface the
     // page state into the step trail so the failure is debuggable from
     // outside the bot host.
-    if (inventory.length < 5 && raw.length < 5) {
+    // Threshold tuned 0.6.1: a Railway signup at /signup landed with
+    // 6 elements (no OAuth chooser yet — likely a CTA-only landing
+    // page before the real signup form renders). 5 was too narrow.
+    if (inventory.length < 10 && raw.length < 10) {
       try {
         const state = await this.browser.getState();
         const text = state.html
@@ -1929,6 +1932,15 @@ export class SignupAgent {
         );
       }
       if (authState === "needs_login") {
+        // Drop the provider from the logged-in marker so the NEXT
+        // signup doesn't optimistically re-take the OAuth path and
+        // fail the same way — it'll fall back to form-fill until the
+        // user runs `mcp login` to re-establish a usable session.
+        clearProviderLoggedIn(provider.id);
+        steps.push(
+          `OAuth: cleared ${provider.label} from logged-in providers — ` +
+            `future signups will form-fill until \`${loginCmd}\` runs`,
+        );
         return this.oauthAbort(
           "needs_login",
           `the bot's ${provider.label} session is missing or expired — no consent screen was reached. ` +
@@ -1943,6 +1955,7 @@ export class SignupAgent {
       // login page that says "to continue to <app>"). Hand back —
       // never type into it.
       if (await this.oauthLoginFormPresent()) {
+        clearProviderLoggedIn(provider.id);
         return this.oauthAbort(
           "needs_login",
           `landed on a ${provider.label} sign-in form — the session is missing or expired. ` +

@@ -47,3 +47,20 @@ export function markProviderLoggedIn(
     /* best-effort — auto-prefer just won't kick in for this provider */
   }
 }
+
+// Drop `provider` from the confirmed-session marker. Called when an
+// OAuth flow aborted with needs_login — the previously-recorded
+// session is no longer usable. Next signup then falls back to
+// form-fill instead of optimistically retrying OAuth and failing the
+// same way. Idempotent + best-effort.
+export function clearProviderLoggedIn(
+  provider: OAuthProviderId,
+  profileDir: string = CHROME_PROFILE_DIR,
+): void {
+  try {
+    const providers = loggedInProviders(profileDir).filter((p) => p !== provider);
+    writeFileSync(markerPath(profileDir), JSON.stringify(providers), "utf8");
+  } catch {
+    /* best-effort */
+  }
+}
