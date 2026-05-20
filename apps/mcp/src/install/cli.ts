@@ -31,6 +31,9 @@
 // entrypoint guard, no top-level execution.
 
 import process from "node:process";
+import { cpSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
@@ -118,17 +121,60 @@ function isAgentTarget(s: string): s is AgentTarget {
   return s in AGENTS;
 }
 
-// The MCP-config command that launches the server. An absolute
-// `node <bin.js> server` is deterministic and offline — no npx package
-// resolution every time the host agent spawns the server. But when this
-// CLI is itself running from npx's throwaway cache, that path won't
-// survive a cache sweep, so fall back to a version-pinned npx call.
+// The MCP-config command that launches the server. Three cases:
+//
+// 1. Non-ephemeral — running from a checkout or a `node` invocation
+//    that points at a permanent path. Use the absolute bin.js path
+//    directly. Deterministic, offline, fast.
+//
+// 2. Ephemeral + stable version — the CLI was invoked via
+//    `npx @trusty-squire/mcp@X.Y.Z`, which copies the package into
+//    npx's throwaway cache. The cache CAN get swept, so we don't
+//    pin the cache path; instead we write `npx @trusty-squire/mcp@<version>`
+//    so the launch re-resolves against npm every time. Works as
+//    long as the version is on the public npm registry.
+//
+// 3. Ephemeral + prerelease version — the CLI was invoked via
+//    `npx <tarball-url>` (the GitHub-Release test pattern). The
+//    version isn't on npm, so case 2 would fail with `ETARGET`.
+//    We instead copy the package out of the ephemeral cache into
+//    `~/.trusty-squire/lib/mcp` and write a `node <stable>/dist/bin.js`
+//    launch. The stable copy survives npx-cache cleanup; if the user
+//    re-installs they overwrite it.
+//
+// Prerelease detection: semver prerelease versions carry a `-` (e.g.
+// `0.6.0-rc.1`). Stable versions don't. Cheap, reliable.
 function resolveServerLaunch(): { command: string; args: string[] } {
   const binPath = fileURLToPath(new URL("../bin.js", import.meta.url));
   const ephemeral = /[/\\]_npx[/\\]/.test(binPath);
-  return ephemeral
-    ? { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] }
-    : { command: process.execPath, args: [binPath, "server"] };
+  if (!ephemeral) {
+    return { command: process.execPath, args: [binPath, "server"] };
+  }
+  const isPrerelease = VERSION.includes("-");
+  if (!isPrerelease) {
+    return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
+  }
+  // Prerelease from GitHub Releases — copy the package out so the
+  // launch survives npx cache eviction.
+  const stableRoot = join(homedir(), ".trusty-squire", "lib", "mcp");
+  const pkgRoot = dirname(dirname(binPath)); // dist/bin.js → package root
+  try {
+    cpSync(pkgRoot, stableRoot, { recursive: true, force: true });
+  } catch (err) {
+    // If the copy fails (unlikely — write access to $HOME is the
+    // bar), fall back to the in-cache absolute path. Works until
+    // npx clears it, which is acceptable for a test build.
+    console.warn(
+      `[trusty-squire] couldn't copy package to ~/.trusty-squire/lib/mcp ` +
+        `(${err instanceof Error ? err.message : String(err)}); using cache path. ` +
+        `Re-run install if the MCP server stops working.`,
+    );
+    return { command: process.execPath, args: [binPath, "server"] };
+  }
+  return {
+    command: process.execPath,
+    args: [join(stableRoot, "dist", "bin.js"), "server"],
+  };
 }
 
 export async function runCli(argv: string[]): Promise<void> {
