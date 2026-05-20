@@ -319,7 +319,47 @@ mechanics. Ranked by leverage.
   button-link parsing.
 - [ ] **F9 — Search fallback. [P2]** Validic: no URL given → the bot
   landed on Google's results page and tried to solve Google's captcha.
-  Fix or remove the search-for-signup-URL path.
+  Fix or remove the search-for-signup-URL path. **Partially addressed
+  2026-05-20 in `@trusty-squire/mcp@0.5.9`:** `guessSignupUrl(service)`
+  now navigates to `https://<slug>.com/signup` first; the Google-search
+  + `findSignupLink` path is the fallback only when the guess doesn't
+  look like a signup page. Validic-class long-tail services still hit
+  the fallback and the brittle regex; full fix is to either codify a
+  known-services map or teach `findSignupLink` to click CTAs.
+
+- [ ] **F10 — Capture API keys hidden behind a Copy button. [P1]**
+  Surfaced 2026-05-20 by an OpenRouter signup: the OAuth flow
+  completed, the bot navigated to the keys page and created a key,
+  but the displayed value was truncated (`sk-or-v1-1687b94c0e589f34
+  ea46ae2c3f4e124a8...`) and the full secret only existed on the
+  clipboard via the Copy button. `extractCredentials` reads visible
+  text only, captured the truncated value, the verify-and-replan
+  loop spun 6 times re-reading the same truncation, then gave up.
+  Nothing in the vault.
+
+  This is the dominant failure mode for OAuth-completed signups
+  going forward — OpenRouter, Anthropic, OpenAI, Stripe, and most
+  modern services use the same one-time-reveal-modal-with-Copy
+  pattern. Worse than other F-items because the bot DID the work
+  successfully; it falls at the last step and the user can't
+  re-extract (the modal is one-time; recovery means creating a new
+  key).
+
+  Fix path: when an extracted candidate ends with `…`/`...` or the
+  surrounding text contains the truncation marker, look for the
+  nearest button matching `/^copy|copy.*key|copy.*secret/i`, click
+  it, read the clipboard via `navigator.clipboard.readText()`
+  (Playwright grants `clipboard-read` permission to the context),
+  validate against a known key-prefix pattern (sk-or-*, sk-ant-*,
+  sk-*, re_*, phc_*, etc.) before accepting it. Fallback path: walk
+  all `<input>` elements including `visible:false` and check `.value`
+  — some modals stash the full value in a hidden input the visible
+  display reads from.
+
+  Realistic scope: half-day. Two parts — `readClipboard()` helper on
+  `BrowserController` with permission grant + an
+  extract-credentials-via-copy-button code path in `agent.ts` that
+  triggers when the visible extraction returns a truncated value.
 
 Also observed: 3/16 (Appwrite, MongoDB Atlas, Koyeb) submitted cleanly
 and got no verification email — genuine S3 anti-abuse withholding,
