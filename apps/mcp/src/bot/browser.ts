@@ -1136,6 +1136,22 @@ export class BrowserController {
 
   async getState(): Promise<BrowserState> {
     if (!this.page) throw new Error("Browser not started");
+    // page.content() / page.title() / screenshot() all throw
+    // "Execution context was destroyed" when the page is mid-
+    // navigation — common after an OAuth-button click that kicks off
+    // a 3-5 hop redirect chain (sentry.io → accounts.google.com →
+    // consent → callback → onboarding). Retry once after a short
+    // settle: most navigations finish in <500ms even on slow links.
+    try {
+      return await this.snapshotState();
+    } catch {
+      await this.wait(0.8);
+      return await this.snapshotState();
+    }
+  }
+
+  private async snapshotState(): Promise<BrowserState> {
+    if (!this.page) throw new Error("Browser not started");
     return {
       url: this.page.url(),
       title: await this.page.title(),
