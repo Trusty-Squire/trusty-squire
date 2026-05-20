@@ -1320,6 +1320,20 @@ export class SignupAgent {
             `url=${state.url.slice(0, 120)} text=${JSON.stringify(text)}` +
             (antiBot ? " ⚠ anti-bot interstitial detected" : ""),
         );
+        // Also surface what the (few) elements actually ARE — selector
+        // + visible text + tag — so we can see whether the remaining
+        // visible affordance is an OAuth chooser, a "Continue" CTA, a
+        // language picker, etc.
+        if (inventory.length > 0 && inventory.length < 10) {
+          const lines = inventory
+            .slice(0, 8)
+            .map((e) => {
+              const text = (e.visibleText ?? e.ariaLabel ?? "").slice(0, 60);
+              return `  ${e.tag}${e.type ? `[${e.type}]` : ""} text=${JSON.stringify(text)} sel=${e.selector.slice(0, 80)}`;
+            })
+            .join("\n");
+          steps.push(`Element details (${inventory.length}):\n${lines}`);
+        }
       } catch {
         // best-effort diagnostic; never abort on its failure
       }
