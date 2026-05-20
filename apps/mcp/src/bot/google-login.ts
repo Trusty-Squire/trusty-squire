@@ -28,6 +28,7 @@ import { createServer } from "node:net";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { CHROME_PROFILE_DIR } from "./profile.js";
+import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -465,15 +466,22 @@ export async function ensureOAuthSession(opts?: {
   profileDir?: string;
   timeoutMinutes?: number;
 }): Promise<LoginResult> {
-  const target = LOGIN_TARGETS[opts?.provider ?? "google"];
+  const provider: OAuthProviderId = opts?.provider ?? "google";
+  const target = LOGIN_TARGETS[provider];
   const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
   try {
-    return hasDisplay()
+    const result = hasDisplay()
       ? await loginWithDisplay(profileDir, deadline, target)
       : await loginHeadless(profileDir, deadline, target);
+    // A confirmed session — record it so the signup bot can auto-prefer
+    // this provider's OAuth path without a probe round-trip.
+    if (result.status === "logged_in" || result.status === "already_valid") {
+      markProviderLoggedIn(provider, profileDir);
+    }
+    return result;
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   }

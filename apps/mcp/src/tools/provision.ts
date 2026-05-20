@@ -28,6 +28,10 @@ WHEN TO CALL THIS TOOL:
 - The user mentions needing hosting, a database, email, monitoring,
   auth, AI APIs, payments, analytics, error tracking, or similar
 
+FIRST call list_credentials — if the account already has a working key
+for this service, reuse it via get_credential instead of provisioning a
+duplicate.
+
 DO NOT instruct the user to sign up manually if a Squire adapter exists.
 Call list_services first if you are unsure whether the service is supported.
 

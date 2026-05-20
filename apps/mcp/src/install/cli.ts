@@ -57,7 +57,16 @@ function parseArgs(argv: string[]): Argv {
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
-      if (isAgentTarget(t)) target = t;
+      if (!isAgentTarget(t)) {
+        // Silent-drop is the footgun behind the pre-0.4.2 Goose mishap
+        // (--target=goose-typo → auto-detect → wrong agent configured).
+        // Fail loud with the valid list so the user sees the mismatch.
+        console.error(
+          `unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`,
+        );
+        process.exit(64);
+      }
+      target = t;
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
     } else if (arg.startsWith("--proxy-url=")) {
@@ -77,7 +86,10 @@ function parseArgs(argv: string[]): Argv {
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
-  return s === "claude-code" || s === "cursor" || s === "goose" || s === "cline" || s === "continue";
+  // Source of truth is AGENTS — adding/removing a target there auto-
+  // propagates here, so a new agent (or a removed one) can't drift the
+  // accept-list out of sync.
+  return s in AGENTS;
 }
 
 // The MCP-config command that launches the server. An absolute

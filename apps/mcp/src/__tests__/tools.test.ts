@@ -7,6 +7,7 @@ import {
   checkProvisionStatusTool,
   getCredentialTool,
   getUsageTool,
+  listCredentialsTool,
   listServicesTool,
   listSubscriptionsTool,
   provisionTool,
@@ -23,6 +24,7 @@ function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
     createRun: vi.fn(),
     getRun: vi.fn(),
     getCredential: vi.fn(),
+    listCredentials: vi.fn(),
     listSubscriptions: vi.fn(),
     cancelSubscription: vi.fn(),
     getUsage: vi.fn(),
@@ -126,6 +128,39 @@ describe("get_credential", () => {
       status: 401,
       code: "unauth",
     });
+  });
+});
+
+describe("list_credentials", () => {
+  it("returns the vault credential metadata list", async () => {
+    const listCredentials = vi.fn().mockResolvedValue({
+      credentials: [
+        {
+          id: "c1",
+          reference: "vault://acct/c1",
+          service: "Resend",
+          key_name: "RESEND_API_KEY",
+          type: "api_key",
+          created_at: "now",
+          last_retrieved_at: null,
+          retrieval_count: 0,
+        },
+      ],
+    });
+    const api = makeMockApi({ listCredentials } as unknown as ApiClient);
+    const parsed = listCredentialsTool.inputSchema.parse({});
+    const res = (await listCredentialsTool.handler(parsed, api)) as {
+      credentials: { reference: string }[];
+    };
+    expect(res.credentials).toHaveLength(1);
+    expect(res.credentials[0].reference).toBe("vault://acct/c1");
+    expect(listCredentials).toHaveBeenCalledOnce();
+  });
+
+  it("requires a paired session", async () => {
+    await expect(listCredentialsTool.handler({}, null)).rejects.toThrow(
+      /paired/,
+    );
   });
 });
 
@@ -299,8 +334,14 @@ describe("wait_for_approval", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes 10 tools", () => {
-    expect(TOOLS).toHaveLength(10);
+  it("exposes 4 tools — the native-provision cluster is unregistered", () => {
+    expect(TOOLS).toHaveLength(4);
+    expect(TOOLS.map((t) => t.name).sort()).toEqual([
+      "check_provision_status",
+      "get_credential",
+      "list_credentials",
+      "provision_any_service",
+    ]);
   });
 
   it("includes the async provision pair (start + status poll)", () => {

@@ -11,7 +11,7 @@ Returns the secret value so you can plug it into your code's env vars
 or pass it to a request.
 
 WHEN TO CALL THIS TOOL:
-- After provision() succeeded and you need the resulting API key
+- After provision_any_service succeeded and you need the resulting API key
 - When the user has authorized a credential and you need its value
 - Every time you need to make an outbound call to a SaaS API on behalf
   of the user

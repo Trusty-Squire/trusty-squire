@@ -43,7 +43,7 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   pairBaseUrl?: string;
 }> = async (fastify, opts) => {
-  const pairBaseUrl = opts.pairBaseUrl ?? "https://app.trustysquire.ai/pair";
+  const pairBaseUrl = opts.pairBaseUrl ?? "https://trustysquire.ai/pair";
 
   fastify.post("/v1/mcp/pair/initiate", async (req, reply) => {
     // Body is optional; if invalid we surface 400 rather than silently
@@ -101,6 +101,33 @@ export const registerMcpPairRoute: FastifyPluginAsync<{
       }
       // delivered / expired
       reply.code(410).send({ status: "expired" });
+    },
+  );
+
+  // Browser-side status check — used by the /pair web page. Unlike
+  // /status, this NEVER delivers the one-time agent token: that delivery
+  // is reserved exclusively for the CLI's /status poll, so a page load
+  // can't consume the token out from under the CLI.
+  fastify.get<{ Params: { token: string } }>(
+    "/v1/mcp/pair/:token/state",
+    async (req, reply) => {
+      const now = opts.deps.now?.() ?? new Date();
+      const record = await opts.deps.pairingTokenStore.find(req.params.token);
+      if (record === null) {
+        reply.code(404).send({ error: "not_found" });
+        return;
+      }
+      if (now > record.expires_at && record.status !== "delivered") {
+        return reply.code(200).send({ status: "expired" });
+      }
+      if (record.status === "pending") {
+        return reply.code(200).send({
+          status: "pending",
+          agent_identity: record.agent_identity,
+        });
+      }
+      // claimed or delivered — pairing is done from the browser's POV.
+      return reply.code(200).send({ status: record.status });
     },
   );
 

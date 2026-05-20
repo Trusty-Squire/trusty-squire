@@ -31,6 +31,7 @@ import {
   InMemoryCredentialStore,
   InMemoryVaultAuditStore,
   LocalKMS,
+  type CredentialStore,
 } from "@trusty-squire/vault";
 import {
   MandateValidator,
@@ -50,6 +51,15 @@ import {
   type PairingTokenStore,
 } from "../auth/pairing-token.js";
 import { PrismaPairingTokenStore } from "../auth/prisma-pairing-token.js";
+import { PrismaSessionStore } from "../auth/prisma-session-store.js";
+import { PrismaAgentSessionStore } from "../auth/prisma-agent-session-store.js";
+import { PrismaAccountStore } from "./prisma-account-store.js";
+import { PrismaCredentialStore } from "./prisma-credential-store.js";
+import {
+  InMemoryOAuthIdentityStore,
+  PrismaOAuthIdentityStore,
+  type OAuthIdentityStore,
+} from "./oauth-identity-store.js";
 import { getApiPrismaClient, type ApiPrismaClient } from "./api-prisma-client.js";
 import { PrismaMachineTokenStore } from "./prisma-machine-tokens.js";
 import { PrismaLLMUsageTracker } from "./prisma-llm-usage-tracker.js";
@@ -83,11 +93,13 @@ export interface ApiDeps {
   agentSessionStore: AgentSessionStore;
   approvalTokenStore: ApprovalTokenStore;
   pairingTokenStore: PairingTokenStore;
+  oauthIdentityStore: OAuthIdentityStore;
 
   // Runtime
   runStore: RunStore;
   adapterRegistry: AdapterRegistry;
   vault: VaultClient;
+  credentialStore: CredentialStore;
   inbox: InboxService;
   sesHandler: SesHandler;
   mailgunHandler: MailgunHandler;
@@ -125,24 +137,43 @@ export interface BuildInMemoryDepsOpts {
 }
 
 export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
-  const accountStore = new InMemoryAccountStore();
-  const sessionStore = new InMemorySessionStore();
-  const agentSessionStore = new InMemoryAgentSessionStore();
   const approvalTokenStore = new InMemoryApprovalTokenStore();
 
-  // Auth Prisma client — loaded once and shared across pairing tokens,
-  // machine tokens, and LLM usage. Conditional on AUTH_DATABASE_URL so
-  // tests/local use in-memory stores.
+  // Auth Prisma client — loaded once and shared across the account,
+  // session, agent-session, pairing-token, machine-token, and LLM
+  // stores. Conditional on AUTH_DATABASE_URL so tests/local dev use
+  // the in-memory stores.
   const authDatabaseUrl = process.env.AUTH_DATABASE_URL;
   const authPrisma =
     authDatabaseUrl !== undefined && authDatabaseUrl.length > 0
       ? getApiPrismaClient(authDatabaseUrl)
       : null;
 
+  // Identity / auth stores. Postgres-backed when a DB is wired so
+  // accounts, web sessions, and paired CLI sessions survive restarts
+  // and redeploys; in-memory for tests + DB-less local dev.
+  const accountStore: AccountStore =
+    authPrisma !== null
+      ? new PrismaAccountStore(authPrisma)
+      : new InMemoryAccountStore();
+  const sessionStore: SessionStore =
+    authPrisma !== null
+      ? new PrismaSessionStore(authPrisma)
+      : new InMemorySessionStore();
+  const agentSessionStore: AgentSessionStore =
+    authPrisma !== null
+      ? new PrismaAgentSessionStore(authPrisma)
+      : new InMemoryAgentSessionStore();
+
   const pairingTokenStore: PairingTokenStore =
     authPrisma !== null
       ? new PrismaPairingTokenStore(authPrisma)
       : new InMemoryPairingTokenStore();
+
+  const oauthIdentityStore: OAuthIdentityStore =
+    authPrisma !== null
+      ? new PrismaOAuthIdentityStore(authPrisma)
+      : new InMemoryOAuthIdentityStore();
 
   const runStore = new InMemoryRunStore();
   const adapterRegistry = new InMemoryAdapterRegistry();
@@ -155,7 +186,14 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     adapterRegistry.register(resendDemoManifest);
   }
 
-  const credentialStore = new InMemoryCredentialStore();
+  // Credential store: Postgres-backed when a DB is wired so the vault's
+  // contents survive restarts; in-memory for tests + DB-less dev. The
+  // audit store stays in-memory for now (rate-limit window is
+  // per-process; durable audit is a follow-up).
+  const credentialStore: CredentialStore =
+    authPrisma !== null
+      ? new PrismaCredentialStore(authPrisma)
+      : new InMemoryCredentialStore();
   const vaultAuditStore = new InMemoryVaultAuditStore();
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
   const vault = new CredentialVault({ store: credentialStore, audit: vaultAuditStore, kms });
@@ -308,9 +346,11 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     agentSessionStore,
     approvalTokenStore,
     pairingTokenStore,
+    oauthIdentityStore,
     runStore,
     adapterRegistry,
     vault,
+    credentialStore,
     inbox,
     sesHandler,
     mailgunHandler,

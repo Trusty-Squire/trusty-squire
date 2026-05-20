@@ -70,6 +70,20 @@ export interface CredentialResponse {
   retrieved_at: string;
 }
 
+// Metadata for one vault credential — no secret value. The agent lists
+// these to discover what keys exist, then passes `reference` to
+// getCredential() to retrieve the actual secret.
+export interface VaultCredentialSummary {
+  id: string;
+  reference: string;
+  service: string | null;
+  key_name: string | null;
+  type: string;
+  created_at: string;
+  last_retrieved_at: string | null;
+  retrieval_count: number;
+}
+
 export interface DirectoryEntry {
   service: string;
   latest_version: string;
@@ -107,6 +121,14 @@ export class ApiClient {
   async getCredential(reference: string, purpose: string): Promise<CredentialResponse> {
     return this.get<CredentialResponse>(
       `/v1/credentials/${encodeURIComponent(reference)}?purpose=${encodeURIComponent(purpose)}`,
+    );
+  }
+
+  // Metadata list of every credential in the account's vault — no
+  // secret values. The discovery half of the credential loop.
+  async listCredentials(): Promise<{ credentials: VaultCredentialSummary[] }> {
+    return this.get<{ credentials: VaultCredentialSummary[] }>(
+      "/v1/vault/credentials",
     );
   }
 

@@ -17,10 +17,13 @@ import { registerInboxRoute } from "./routes/inbox.js";
 import { registerLLMRoute } from "./routes/llm.js";
 import { registerSesWebhookRoute } from "./routes/ses-webhook.js";
 import { registerAuthRoute } from "./routes/auth.js";
+import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerApprovalsRoute } from "./routes/approvals.js";
 import { registerCredentialsRoute } from "./routes/credentials.js";
+import { registerVaultRoute } from "./routes/vault.js";
 import { registerMandatesRoute } from "./routes/mandates.js";
 import { registerMcpPairRoute } from "./routes/mcp-pair.js";
+import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerReadViewsRoute } from "./routes/read-views.js";
 import { registerRunsRoute } from "./routes/runs.js";
 import {
@@ -36,12 +39,12 @@ export interface BuildServerOpts {
   pairBaseUrl?: string;
 }
 
-// Pick the PWA base URL that pair/approval emails point at. In dev the
-// PWA runs on :3002; in prod it's the canonical app.trustysquire.ai.
-// PWA_BASE_URL overrides for self-hosters or staging deployments.
+// Base URL of the web app that pair/approval links point at. The app
+// surface is folded into the trustysquire.ai apex (login, /pair, the
+// vault). PWA_BASE_URL overrides for local dev or staging.
 function defaultPwaBaseUrl(): string {
   if (process.env.PWA_BASE_URL !== undefined) return process.env.PWA_BASE_URL;
-  if (process.env.NODE_ENV === "production") return "https://app.trustysquire.ai";
+  if (process.env.NODE_ENV === "production") return "https://trustysquire.ai";
   return "http://localhost:3002";
 }
 
@@ -122,6 +125,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
   await fastify.register(registerAccountsRoute, { deps });
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
+  await fastify.register(registerOAuthRoute, { deps });
   await fastify.register(registerMandatesRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerSesWebhookRoute, { deps });
   await fastify.register(registerInstallRoute, {
@@ -158,11 +162,21 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerApprovalsRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerCredentialsRoute, { deps, requireAgent: auth.requireAgent });
+  await fastify.register(registerVaultRoute, {
+    deps,
+    requireWeb: auth.requireWeb,
+    requireAgent: auth.requireAgent,
+    requireAny: auth.requireAny,
+  });
   const pairBaseUrl = opts.pairBaseUrl ?? `${defaultPwaBaseUrl()}/pair`;
   await fastify.register(registerMcpPairRoute, {
     deps,
     requireWeb: auth.requireWeb,
     pairBaseUrl,
+  });
+  await fastify.register(registerMcpSessionsRoute, {
+    deps,
+    requireWeb: auth.requireWeb,
   });
   await fastify.register(registerReadViewsRoute, {
     deps,

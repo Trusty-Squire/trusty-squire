@@ -36,36 +36,45 @@
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-html,
-body {
-  background-color: var(--color-bg);
-  color: var(--color-text);
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+/*
+ * Base element styles MUST live in @layer base. Tailwind v4 puts its
+ * utilities in @layer utilities; unlayered rules beat ALL layered ones,
+ * so a bare `a { color }` would override every `text-*` utility on
+ * links. Inside @layer base, utilities correctly win.
+ */
+@layer base {
+  html,
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  a {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--color-accent-hover);
+  }
+
+  button {
+    font: inherit;
+  }
 }
 
-h1,
-h2,
-h3,
-h4 {
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
-a {
-  color: var(--color-accent);
-  text-decoration: none;
-}
-
-a:hover {
-  color: var(--color-accent-hover);
-}
-
-button {
-  font: inherit;
-}
-
+/* Unlayered on purpose — these should win over utilities. */
 ::selection {
   background: var(--color-accent-fill);
   color: #fff;

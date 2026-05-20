@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   SignupAgent,
   findOAuthButton,
+  findFirstOAuthButton,
   parsePostVerifyStep,
   type AgentInbox,
 } from "../agent.js";
@@ -277,18 +278,62 @@ describe("findOAuthButton", () => {
   });
 });
 
+// ───────────────────── findFirstOAuthButton ─────────────────────
+
+describe("findFirstOAuthButton", () => {
+  it("returns the first match in CANDIDATE order, not inventory order", () => {
+    const google = mk({
+      tag: "button",
+      visibleText: "Continue with Google",
+      selector: "#g",
+    });
+    const github = mk({
+      tag: "button",
+      visibleText: "Continue with GitHub",
+      selector: "#gh",
+    });
+    const hit = findFirstOAuthButton([google, github], ["github", "google"]);
+    expect(hit?.provider).toBe("github");
+    expect(hit?.button.selector).toBe("#gh");
+  });
+
+  it("falls through to the next candidate when the first is absent", () => {
+    const github = mk({
+      tag: "button",
+      visibleText: "Continue with GitHub",
+      selector: "#gh",
+    });
+    const hit = findFirstOAuthButton([github], ["google", "github"]);
+    expect(hit?.provider).toBe("github");
+  });
+
+  it("returns null when no candidate's affordance is on the page", () => {
+    const email = mk({ tag: "input", type: "email", selector: "#email" });
+    expect(findFirstOAuthButton([email], ["google", "github"])).toBeNull();
+  });
+});
+
 // ───────────────────── scoreSignupButton oauthProvider ─────────────────────
 
 describe("scoreSignupButton — OAuth-first flip", () => {
-  it("scores a Google button negative by default, positive when google is requested", () => {
+  it("scores a Google button negative by default, positive when google is a candidate", () => {
     expect(scoreSignupButton("Continue with Google")).toBeLessThan(0);
-    expect(scoreSignupButton("Continue with Google", "google")).toBeGreaterThan(0);
+    expect(scoreSignupButton("Continue with Google", ["google"])).toBeGreaterThan(0);
   });
 
-  it("flips only the REQUESTED provider — the other stays negative", () => {
-    expect(scoreSignupButton("Continue with GitHub", "google")).toBeLessThan(0);
-    expect(scoreSignupButton("Continue with GitHub", "github")).toBeGreaterThan(0);
-    expect(scoreSignupButton("Continue with Google", "github")).toBeLessThan(0);
+  it("flips only candidate providers — non-candidates stay negative", () => {
+    expect(scoreSignupButton("Continue with GitHub", ["google"])).toBeLessThan(0);
+    expect(scoreSignupButton("Continue with GitHub", ["github"])).toBeGreaterThan(0);
+    expect(scoreSignupButton("Continue with Google", ["github"])).toBeLessThan(0);
+  });
+
+  it("flips every provider in a multi-candidate list (auto-prefer)", () => {
+    expect(
+      scoreSignupButton("Continue with Google", ["google", "github"]),
+    ).toBeGreaterThan(0);
+    expect(
+      scoreSignupButton("Continue with GitHub", ["google", "github"]),
+    ).toBeGreaterThan(0);
   });
 });
 

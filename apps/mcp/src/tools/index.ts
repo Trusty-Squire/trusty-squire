@@ -13,6 +13,7 @@ import type { ApiClient } from "../api-client.js";
 import { provisionTool } from "./provision.js";
 import { waitForApprovalTool } from "./wait-for-approval.js";
 import { getCredentialTool } from "./get-credential.js";
+import { listCredentialsTool } from "./list-credentials.js";
 import { listServicesTool } from "./list-services.js";
 import { listSubscriptionsTool } from "./list-subscriptions.js";
 import { cancelTool } from "./cancel.js";
@@ -38,17 +39,20 @@ export function assertPaired(api: ApiClient | null): asserts api is ApiClient {
   }
 }
 
+// The agent-facing tool registry. Only tools with a live backend are
+// exposed: the Tier-0 universal signup bot + its status poll, and the
+// vault read path (P3). The native-`provision` cluster — provisionTool,
+// waitForApprovalTool, listServicesTool, listSubscriptionsTool,
+// cancelTool, getUsageTool, rotateCredentialTool — is still defined and
+// re-exported below but deliberately NOT registered: that subsystem
+// (adapter registry + mandate engine + native adapters) is deferred, so
+// handing those tools to a coding agent only yields 403s / dead-registry
+// errors. Re-register them when the native-provision work lands.
 export const TOOLS: Tool[] = [
   provisionAnyTool,
   checkProvisionStatusTool,
-  provisionTool,
-  waitForApprovalTool,
   getCredentialTool,
-  listServicesTool,
-  listSubscriptionsTool,
-  cancelTool,
-  getUsageTool,
-  rotateCredentialTool,
+  listCredentialsTool,
 ] as Tool[];
 
 export function findTool(name: string): Tool | null {
@@ -66,6 +70,7 @@ export {
   provisionTool,
   waitForApprovalTool,
   getCredentialTool,
+  listCredentialsTool,
   listServicesTool,
   listSubscriptionsTool,
   cancelTool,

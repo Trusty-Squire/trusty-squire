@@ -6,7 +6,7 @@ repository. Concise and precise. Keep it current.
 ## Project Overview
 
 **Trusty Squire** is a credential broker that lets AI agents (Claude
-Code, Cursor, Goose, Cline, Continue) provision SaaS services on behalf
+Code, Cursor, Codex, Goose, Cline, Continue) provision SaaS services on behalf
 of a user, within a user-signed spending mandate. The MCP server runs
 on the user's machine; an API on Fly.io handles persistence and
 orchestration.
@@ -184,7 +184,7 @@ stale (they reference a `prisma:generate` script that no longer exists)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.2.1`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.4.2`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was
@@ -258,9 +258,16 @@ migrate deploy` against the inbox database on the next deploy.
 
 ### Goose / local-dev MCP install
 
-The official install path (`npx @trusty-squire/mcp install --target=...`)
-doesn't support Goose yet. For local dev/testing on a Goose CLI or
-Desktop install, hand-write the extension into `~/.config/goose/config.yaml`:
+`npx @trusty-squire/mcp install --target=goose` writes the extension to
+`~/.config/goose/config.yaml` (modern goose's config file) — works for
+npx-installed users as of 0.4.2. (Before 0.4.2 it wrote `profiles.yaml`,
+the old pre-1.0 path, so goose never saw it.)
+
+For **local dev** against this monorepo checkout, the installer's
+`node dist/bin.js server` command fails under Goose Desktop (it spawns
+extensions with `cwd=/`, and the monorepo's deps aren't hoisted — see
+below). Hand-write a cwd-anchored wrapper into
+`~/.config/goose/config.yaml` instead:
 
 ```yaml
 extensions:

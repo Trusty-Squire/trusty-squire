@@ -37,7 +37,7 @@ export const provisionAnyInputSchema = z.object({
     .enum(["google", "github"])
     .optional()
     .describe(
-      "Prefer OAuth signup with this provider: if the page has a 'Sign in with Google/GitHub' button, sign up through it using the bot's saved session instead of filling a form. Requires a one-time `npx @trusty-squire/mcp login [--provider=github]` first.",
+      "Force OAuth signup through a specific provider. Usually unnecessary — the bot already auto-prefers OAuth when the service offers Google/GitHub sign-in and a login session exists. Set this only to pin one provider. OAuth needs a one-time `npx @trusty-squire/mcp login [--provider=github]`.",
     ),
 });
 
@@ -68,7 +68,7 @@ const PROVISION_ANY_JSON_SCHEMA = {
       type: "string",
       enum: ["google", "github"],
       description:
-        "Prefer OAuth signup with this provider. When set and the page has a matching 'Sign in with Google/GitHub' affordance, the bot signs up through it (using the session established by `npx @trusty-squire/mcp login [--provider=github]`) instead of filling a form.",
+        "Force OAuth signup through a specific provider. Usually unnecessary — the bot auto-prefers OAuth whenever the service offers Google/GitHub sign-in and a session exists (`npx @trusty-squire/mcp login`). Set this only to pin one provider.",
     },
   },
 } as const;
@@ -108,8 +108,13 @@ You MUST then poll check_provision_status with that run_id (about once a
 minute) until its status is no longer "running".
 
 WHEN TO CALL THIS TOOL:
-- The user wants an account for a service Trusty Squire has no native adapter for.
-- Best for free-tier developer services with email/password signup.
+- The user needs an account or API key for any SaaS service.
+- Free-tier developer services. The bot auto-signs-up via Google/GitHub
+  OAuth when the service offers it and the user has run
+  \`npx @trusty-squire/mcp login\` once; otherwise it fills the email form.
+
+If the user has a paired Trusty Squire account, call list_credentials
+first — reuse an existing key rather than signing up again.
 
 IMMEDIATE RESPONSES (no run started):
 - status="started" + run_id → poll check_provision_status next.
@@ -219,6 +224,7 @@ export const provisionAnyTool = {
       machineToken: session.machine_token,
       alias,
       inboxClient,
+      agentSessionToken: session.agent_session_token ?? null,
     });
 
     return {
@@ -267,6 +273,9 @@ interface RunContext {
   machineToken: string;
   alias: string;
   inboxClient: InboxClient;
+  // Tier 1 agent-session bearer token, when this machine is paired.
+  // Null for Tier 0 (anonymous) installs — no account, no vault.
+  agentSessionToken: string | null;
 }
 
 // Runs the signup to completion and stores the final tool response in
@@ -328,6 +337,22 @@ async function runSignupTask(
     }
 
     response = buildSignupResponse(input, result);
+
+    // Tier 1 (paired) accounts: persist the collected keys into the
+    // account's vault. Fire-and-forget — the credentials are already in
+    // `response`, so a vault write failure is non-fatal.
+    if (
+      result.success &&
+      result.credentials !== undefined &&
+      ctx.agentSessionToken !== null
+    ) {
+      void postCredentialsToVault(
+        ctx.apiBase,
+        ctx.agentSessionToken,
+        input.service,
+        result.credentials,
+      );
+    }
   } catch (err) {
     response = {
       status: "error",
@@ -513,5 +538,46 @@ async function postCaptchaEvent(
         err instanceof Error ? err.message : String(err)
       }`,
     );
+  }
+}
+
+// Stores the keys a signup yielded into the paired account's vault via
+// POST /v1/vault/credentials (agent-authenticated). Best-effort, one
+// request per credential — a failure logs and is dropped, since the
+// keys are still returned to the caller in the tool response.
+async function postCredentialsToVault(
+  apiBase: string,
+  agentSessionToken: string,
+  service: string,
+  credentials: Record<string, string | undefined>,
+): Promise<void> {
+  // "Resend" → "RESEND"; used to build an env-var-style key name.
+  const prefix = service
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  for (const [name, value] of Object.entries(credentials)) {
+    if (value === undefined || value.length === 0) continue;
+    try {
+      await fetch(`${apiBase}/v1/vault/credentials`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${agentSessionToken}`,
+        },
+        body: JSON.stringify({
+          service,
+          value,
+          env_var_suggestion: `${prefix}_${name.toUpperCase()}`,
+          type: "api_key",
+        }),
+      });
+    } catch (err) {
+      console.error(
+        `[provision-any] vault store failed for ${service}/${name} (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 }

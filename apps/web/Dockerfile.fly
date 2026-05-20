@@ -1,0 +1,34 @@
+# Web app (trustysquire.ai) — marketing site + the folded-in app
+# surface (login, /pair, /vault, /agents).
+#
+# Built from the monorepo root: the build context must be the repo
+# root so pnpm can resolve the workspace. apps/web has no workspace
+# dependencies, so only its own packages are pulled.
+#
+#   flyctl deploy --config apps/web/fly.toml --dockerfile apps/web/Dockerfile.fly
+#   (run from the repo root)
+
+FROM node:22-alpine AS base
+RUN apk add --no-cache libc6-compat
+RUN corepack enable
+WORKDIR /app
+
+FROM base AS build
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @trusty-squire/web build
+
+# Next standalone output. With outputFileTracingRoot at the repo root,
+# the bundle keeps the workspace layout — the server lands at
+# apps/web/server.js.
+FROM base AS runner
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /app/apps/web/.next/standalone ./
+COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build /app/apps/web/public ./apps/web/public
+
+EXPOSE 3000
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
+CMD ["node", "apps/web/server.js"]

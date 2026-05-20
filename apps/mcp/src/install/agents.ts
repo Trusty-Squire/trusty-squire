@@ -6,6 +6,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
+import { stringify as tomlStringify, parse as tomlParse } from "smol-toml";
 
 // Tests override $HOME to isolate the file system. Node's os.homedir()
 // reads from getpwuid_r and ignores $HOME, so we honor HOME first
@@ -14,9 +15,36 @@ function home(): string {
   return process.env.HOME ?? os.homedir();
 }
 
+// VS Code's globalStorage root, OS-specific. Cline (the
+// saoudrizwan.claude-dev extension) stores its MCP settings under
+// <here>/saoudrizwan.claude-dev/settings/cline_mcp_settings.json. Covers
+// vanilla "Code" only — Code-Insiders / VSCodium use sibling dirs and
+// would need their own targets if we ever cared about them.
+function vscodeGlobalStorage(): string {
+  const h = home();
+  if (process.platform === "darwin") {
+    return path.join(h, "Library", "Application Support", "Code", "User", "globalStorage");
+  }
+  if (process.platform === "win32") {
+    return path.join(
+      process.env.APPDATA ?? path.join(h, "AppData", "Roaming"),
+      "Code",
+      "User",
+      "globalStorage",
+    );
+  }
+  return path.join(
+    process.env.XDG_CONFIG_HOME ?? path.join(h, ".config"),
+    "Code",
+    "User",
+    "globalStorage",
+  );
+}
+
 export type AgentTarget =
   | "claude-code"
   | "cursor"
+  | "codex"
   | "goose"
   | "cline"
   | "continue";
@@ -106,10 +134,13 @@ const cursor: AgentDefinition = {
 
 // ── goose ───────────────────────────────────────────────────
 //
-// goose uses YAML with an `extensions` key. Spec listed `profiles.yaml`
-// but recent goose versions use `~/.config/goose/profiles.yaml`. We
-// merge into the same key shape (`extensions.squire`) so existing
-// custom extensions are preserved.
+// Modern goose (the Rust CLI + Desktop) reads ~/.config/goose/
+// config.yaml with an `extensions` map. (`profiles.yaml` was the old
+// pre-1.0 Python goose — writing there leaves the extension invisible
+// and makes detect() miss an installed goose.) We merge into
+// `extensions.squire`, preserving the user's other extensions, and
+// write the full entry shape goose expects — `enabled` and `name`
+// included, or goose treats the extension as absent.
 
 const goose: AgentDefinition = {
   target: "goose",
@@ -118,7 +149,7 @@ const goose: AgentDefinition = {
     path.join(
       process.env.XDG_CONFIG_HOME ?? path.join(home(), ".config"),
       "goose",
-      "profiles.yaml",
+      "config.yaml",
     ),
   detect: async () => exists(goose.config_path()),
   writeConfig: async (input) => {
@@ -139,9 +170,16 @@ const goose: AgentDefinition = {
         : {};
     extensions[SERVER_KEY] = {
       type: "stdio",
+      name: SERVER_KEY,
       cmd: input.command,
       args: input.args,
       envs: input.env,
+      // goose treats a missing `enabled` as not-loaded and surfaces the
+      // extension by `name` — both are required for it to appear.
+      enabled: true,
+      bundled: false,
+      description: "Trusty Squire — credential broker + universal signup bot",
+      timeout: 300,
     };
     data.extensions = extensions;
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -154,8 +192,19 @@ const goose: AgentDefinition = {
 const cline: AgentDefinition = {
   target: "cline",
   display_name: "Cline",
-  config_path: () => path.join(home(), ".cline", "mcp_config.json"),
-  detect: async () => exists(path.join(home(), ".cline")),
+  // Cline is a VS Code extension (saoudrizwan.claude-dev) — its MCP
+  // settings live in the extension's globalStorage, not the
+  // ~/.cline/mcp_config.json the installer once wrote (which Cline
+  // never reads). Same bug class as the pre-0.4.2 goose path.
+  config_path: () =>
+    path.join(
+      vscodeGlobalStorage(),
+      "saoudrizwan.claude-dev",
+      "settings",
+      "cline_mcp_settings.json",
+    ),
+  detect: async () =>
+    exists(path.join(vscodeGlobalStorage(), "saoudrizwan.claude-dev")),
   writeConfig: async (input) => mergeMcpServersJson(cline.config_path(), input),
 };
 
@@ -195,9 +244,49 @@ const continueAgent: AgentDefinition = {
   },
 };
 
+// ── codex ───────────────────────────────────────────────────
+//
+// Codex CLI reads ~/.codex/config.toml — TOML, not JSON. MCP servers
+// live under `[mcp_servers.<name>]` tables. We parse + merge + write
+// back via smol-toml so the user's other config.toml entries (model,
+// approval policy, sandbox mode, etc.) survive untouched.
+
+const codex: AgentDefinition = {
+  target: "codex",
+  display_name: "Codex CLI",
+  config_path: () => path.join(home(), ".codex", "config.toml"),
+  detect: async () => exists(path.join(home(), ".codex")),
+  writeConfig: async (input) => {
+    const filePath = codex.config_path();
+    let data: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      const parsed = tomlParse(raw);
+      if (parsed !== null && typeof parsed === "object") {
+        data = parsed as Record<string, unknown>;
+      }
+    } catch (err) {
+      if ((err as { code?: string }).code !== "ENOENT") throw err;
+    }
+    const servers =
+      data.mcp_servers !== undefined && typeof data.mcp_servers === "object"
+        ? (data.mcp_servers as Record<string, unknown>)
+        : {};
+    servers[SERVER_KEY] = {
+      command: input.command,
+      args: input.args,
+      env: input.env,
+    };
+    data.mcp_servers = servers;
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, tomlStringify(data), { mode: 0o600 });
+  },
+};
+
 export const AGENTS: Record<AgentTarget, AgentDefinition> = {
   "claude-code": claudeCode,
   cursor,
+  codex,
   goose,
   cline,
   continue: continueAgent,

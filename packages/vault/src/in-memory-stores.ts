@@ -49,6 +49,13 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.ciphertext = Buffer.from(ciphertext);
     r.rotated_at = rotatedAt;
   }
+
+  async listByAccount(accountId: string): Promise<CredentialRecord[]> {
+    return [...this.byReference.values()]
+      .filter((r) => r.account_id === accountId && r.deleted_at === null)
+      .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
+      .map((r) => clone(r));
+  }
 }
 
 export interface InMemoryAuditEvent extends VaultAuditEventInput {

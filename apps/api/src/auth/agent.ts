@@ -31,6 +31,8 @@ export interface AgentSessionStore {
   findActiveByHash(tokenHash: string, now: Date): Promise<AgentSessionRecord | null>;
   bumpUse(id: string, lastUsedAt: Date): Promise<void>;
   revoke(id: string, reason: string): Promise<void>;
+  // Connected-agents view (GET /v1/mcp/sessions) — newest first.
+  listByAccount(accountId: string): Promise<AgentSessionRecord[]>;
 }
 
 export function issueAgentSession(input: {
@@ -103,5 +105,12 @@ export class InMemoryAgentSessionStore implements AgentSessionStore {
         return;
       }
     }
+  }
+
+  async listByAccount(accountId: string): Promise<AgentSessionRecord[]> {
+    return [...this.byHash.values()]
+      .filter((r) => r.account_id === accountId)
+      .sort((a, b) => b.issued_at.getTime() - a.issued_at.getTime())
+      .map((r) => ({ ...r }));
   }
 }
