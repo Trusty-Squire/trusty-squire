@@ -21,15 +21,13 @@ describe("parseArgs --proxy-url", () => {
     expect(parseArgs(["install", "--proxy-url="]).proxyUrl).toBeUndefined();
   });
 
-  it("parses --proxy-url alongside --target and --pair", () => {
+  it("parses --proxy-url alongside --target", () => {
     const a = parseArgs([
       "install",
       "--target=claude-code",
-      "--pair",
       "--proxy-url=http://user:pass@host:8080",
     ]);
     expect(a.target).toBe("claude-code");
-    expect(a.withPair).toBe(true);
     expect(a.proxyUrl).toBe("http://user:pass@host:8080");
   });
 });
@@ -53,7 +51,7 @@ describe("parseArgs --provider / --skip-login", () => {
 
 describe("runLoginStage — non-fatal contract", () => {
   it("skips the login entirely under --skip-login", async () => {
-    const login = vi.fn<[{ provider: string }], Promise<LoginResult>>();
+    const login = vi.fn<(opts: { provider: string }) => Promise<LoginResult>>();
     await runLoginStage(parseArgs(["install", "--skip-login"]), login);
     expect(login).not.toHaveBeenCalled();
   });
@@ -95,9 +93,11 @@ describe("runLoginStage — non-fatal contract", () => {
   it("defaults to Google with no --provider and no TTY", async () => {
     // vitest runs with no TTY on stdin → resolveLoginProviders must
     // default to Google rather than block on a prompt.
-    const login = vi.fn(async () => ({ status: "already_valid" }) as LoginResult);
+    const login = vi.fn<(opts: { provider: string }) => Promise<LoginResult>>(
+      async () => ({ status: "already_valid" }) as LoginResult,
+    );
     await runLoginStage(parseArgs(["install"]), login);
     expect(login).toHaveBeenCalledTimes(1);
-    expect(login.mock.calls[0]?.[0].provider).toBe("google");
+    expect(login.mock.calls[0]?.[0]?.provider).toBe("google");
   });
 });

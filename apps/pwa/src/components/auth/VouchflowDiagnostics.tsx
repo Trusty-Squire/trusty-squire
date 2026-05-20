@@ -61,15 +61,15 @@ export function VouchflowDiagnostics({ err, onRetry }: Props) {
         <ResetButton resetting={resetting} resetMsg={resetMsg} onClick={doReset} />
       ) : null}
       <details
-        className="text-xs border border-[color:var(--color-rule)] rounded-md bg-[color:var(--color-cream)] p-2"
+        className="text-xs border border-[color:var(--color-border)] rounded-md bg-[color:var(--color-surface)] p-2"
         open
       >
-        <summary className="cursor-pointer font-medium text-[color:var(--color-amber-black)]">
+        <summary className="cursor-pointer font-medium text-[color:var(--color-text)]">
           Vouchflow request log ({log.length} call{log.length === 1 ? "" : "s"})
         </summary>
         <ol className="mt-2 space-y-2 font-mono">
           {log.map((entry, i) => (
-            <li key={i} className="border-t border-[color:var(--color-rule)] pt-2">
+            <li key={i} className="border-t border-[color:var(--color-border)] pt-2">
               <button
                 type="button"
                 className="text-left w-full"
@@ -77,22 +77,22 @@ export function VouchflowDiagnostics({ err, onRetry }: Props) {
               >
                 <span
                   className={
-                    entry.status >= 400 || entry.status === 0 ? "text-[color:var(--color-wine)]" : ""
+                    entry.status >= 400 || entry.status === 0 ? "text-[color:var(--color-accent)]" : ""
                   }
                 >
                   [{entry.status || "ERR"}] {entry.method} {shortPath(entry.url)}{" "}
-                  <span className="text-[color:var(--color-ink-muted)]">({entry.duration_ms}ms)</span>
+                  <span className="text-[color:var(--color-text-muted)]">({entry.duration_ms}ms)</span>
                 </span>
               </button>
               {expanded === i ? (
                 <div className="mt-1 space-y-1">
-                  <div className="text-[color:var(--color-ink-soft)]">URL: {entry.url}</div>
+                  <div className="text-[color:var(--color-text-soft)]">URL: {entry.url}</div>
                   {entry.request_body !== null ? (
-                    <pre className="whitespace-pre-wrap break-all bg-white p-1 rounded border border-[color:var(--color-rule)]">
+                    <pre className="whitespace-pre-wrap break-all bg-[color:var(--color-surface-raised)] p-1 rounded border border-[color:var(--color-border)]">
                       → {truncatePretty(entry.request_body)}
                     </pre>
                   ) : null}
-                  <pre className="whitespace-pre-wrap break-all bg-white p-1 rounded border border-[color:var(--color-rule)]">
+                  <pre className="whitespace-pre-wrap break-all bg-[color:var(--color-surface-raised)] p-1 rounded border border-[color:var(--color-border)]">
                     ← {truncatePretty(entry.response_body)}
                   </pre>
                 </div>
@@ -115,8 +115,8 @@ function ResetButton({
   onClick: () => void;
 }) {
   return (
-    <div className="space-y-1 border border-[color:var(--color-rule)] rounded-md bg-[color:var(--color-cream)] p-2">
-      <p className="text-xs text-[color:var(--color-ink-soft)]">
+    <div className="space-y-1 border border-[color:var(--color-border)] rounded-md bg-[color:var(--color-surface)] p-2">
+      <p className="text-xs text-[color:var(--color-text-soft)]">
         Looks like the SDK and your device authenticator disagree about whether you're enrolled.
         Clearing the SDK's local state will trigger a fresh passkey setup on the next try.
       </p>
@@ -124,12 +124,12 @@ function ResetButton({
         type="button"
         onClick={onClick}
         disabled={resetting}
-        className="text-xs px-3 py-1.5 rounded border border-[color:var(--color-wine)] text-[color:var(--color-wine)] bg-white disabled:opacity-50"
+        className="text-xs px-3 py-1.5 rounded border border-[color:var(--color-accent)] text-[color:var(--color-accent)] bg-[color:var(--color-surface)] hover:bg-[color:var(--color-surface-raised)] disabled:opacity-50"
       >
         {resetting ? "Clearing…" : "Reset device state"}
       </button>
       {resetMsg !== null ? (
-        <p className="text-xs text-[color:var(--color-ink-soft)]">{resetMsg}</p>
+        <p className="text-xs text-[color:var(--color-text-soft)]">{resetMsg}</p>
       ) : null}
     </div>
   );

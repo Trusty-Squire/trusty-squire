@@ -8,7 +8,7 @@ interface MandateReviewProps {
 export function MandateReview({ policy, expiresAt }: MandateReviewProps) {
   const ceiling = formatCents(policy.silent_signup.max_monthly_cost_cents);
   return (
-    <div className="space-y-4 font-mono text-sm text-[color:var(--color-amber-black)]">
+    <div className="space-y-4 font-mono text-sm text-[color:var(--color-text)]">
       <p>You are giving your squire authority to:</p>
 
       <div className="pl-4 space-y-2">

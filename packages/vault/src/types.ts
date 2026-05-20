@@ -32,6 +32,9 @@ export interface CredentialStore {
   markRetrieved(reference: string, retrievedAt: Date): Promise<void>;
   softDelete(reference: string, deletedAt: Date): Promise<void>;
   rotate(reference: string, ciphertext: Buffer, rotatedAt: Date): Promise<void>;
+  // All of an account's active (non-deleted) credentials, newest
+  // first. Powers the vault UI's credential list.
+  listByAccount(accountId: string): Promise<CredentialRecord[]>;
 }
 
 export type VaultRequester = "agent" | "user" | "system";

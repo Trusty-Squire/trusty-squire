@@ -1,22 +1,27 @@
-// Setup CLI — the install / pair / logout subcommands.
+// Setup CLI — install / logout / login subcommands.
 //
-// Tier 0 install (default) — friction-free:
 //   npx @trusty-squire/mcp install --target=claude-code
-//   → issues an anonymous machine token, writes MCP config, done.
+//     Issues a machine token, opens the browser to connect this machine
+//     to your account, writes the MCP config, then runs the one-time
+//     OAuth login (Google/GitHub) the signup bot rides. One command.
 //
-// Tier 1+ pair (opt-in, on quota hit or user request):
-//   npx @trusty-squire/mcp pair
-//   → opens browser, pairs machine, upgrades session to a real account.
+//   npx @trusty-squire/mcp login [--provider=google|github]
+//     Re-runs the OAuth sign-in for the bot's persistent Chrome
+//     profile. Different from the login stage inside `install` —
+//     this one fails loud on timeout/error, so it's the right
+//     command to use when you're explicitly retrying login.
 //
-// Logout:
 //   npx @trusty-squire/mcp logout
 //
 // Flags:
-//   --target=<agent>     skip auto-detection
-//   --api-base=<url>     override the API base URL
-//   --pair               run pairing as part of install (Tier 1 from minute 1)
-//   --proxy-url=<url>    bake a residential proxy into the MCP config's env
-//                        (UNIVERSAL_BOT_PROXY_URL) — set once, never hand-edit
+//   --target=<agent>             skip auto-detection
+//   --api-base=<url>             override the API base URL
+//   --provider=google|github|both  pick the OAuth identity to connect
+//                                during the install login stage
+//   --skip-login                 skip the install login stage entirely
+//                                (CI / scripted installs)
+//   --proxy-url=<url>            bake a residential proxy into the MCP
+//                                config's env (UNIVERSAL_BOT_PROXY_URL)
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -24,7 +29,7 @@
 import process from "node:process";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { pairInitiate, pairPoll, issueMachineToken } from "../api-client.js";
+import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
@@ -40,7 +45,6 @@ type Argv = {
   command: string;
   target?: AgentTarget;
   apiBase: string;
-  withPair: boolean;
   // Residential proxy URL to bake into the written MCP config's env as
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
@@ -59,14 +63,22 @@ function parseArgs(argv: string[]): Argv {
   const command = positional[0] ?? "install";
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
-  let withPair = false;
   let proxyUrl: string | undefined;
   let providerArg: ProviderArg | undefined;
   let skipLogin = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
-      if (isAgentTarget(t)) target = t;
+      if (!isAgentTarget(t)) {
+        // Silent-drop is the footgun behind the pre-0.4.2 Goose mishap
+        // (--target=goose-typo → auto-detect → wrong agent configured).
+        // Fail loud with the valid list so the user sees the mismatch.
+        console.error(
+          `unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`,
+        );
+        process.exit(64);
+      }
+      target = t;
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
     } else if (arg.startsWith("--proxy-url=")) {
@@ -74,13 +86,11 @@ function parseArgs(argv: string[]): Argv {
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
       if (p === "google" || p === "github" || p === "both") providerArg = p;
-    } else if (arg === "--pair") {
-      withPair = true;
     } else if (arg === "--skip-login") {
       skipLogin = true;
     }
   }
-  const args: Argv = { command, apiBase, withPair, skipLogin };
+  const args: Argv = { command, apiBase, skipLogin };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
@@ -88,7 +98,10 @@ function parseArgs(argv: string[]): Argv {
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
-  return s === "claude-code" || s === "cursor" || s === "goose" || s === "cline" || s === "continue";
+  // Source of truth is AGENTS — adding/removing a target there auto-
+  // propagates here, so a new agent (or a removed one) can't drift the
+  // accept-list out of sync.
+  return s in AGENTS;
 }
 
 // The MCP-config command that launches the server. An absolute
@@ -109,9 +122,6 @@ export async function runCli(argv: string[]): Promise<void> {
   switch (args.command) {
     case "install":
       await install(args);
-      return;
-    case "pair":
-      await pair(args);
       return;
     case "logout":
       await logout();
@@ -134,64 +144,63 @@ async function install(args: Argv): Promise<void> {
   const agent = AGENTS[target];
 
   // ── Detect egress class ───────────────────────────────────
-  // We do this before issuing the machine token so the asn class can
-  // be sent in the install payload (lets the API pre-correlate captcha
-  // failures with network class for analytics). Best-effort — a network
-  // failure here just means "unknown" gets sent.
+  // Done before the install handshake so the asn class can ride along
+  // in the initiate payload — lets the API correlate captcha failures
+  // with network class for analytics. Best-effort.
   const asn = await detectAsn();
 
-  // ── Tier 0: get a machine token (zero clicks) ─────────────
+  // ── Issue a machine token for the bot's inbox + LLM-proxy ─
+  // The machine token is the bot-internal credential the universal
+  // signup bot uses for the LLM proxy and the inbox alias service. It
+  // is NOT the user's auth — the agent_session_token (issued via the
+  // browser confirm flow below) is. The MCP server reads both from the
+  // session file.
   console.warn(`Setting up Trusty Squire on this machine…`);
   const machine = await issueMachineToken(args.apiBase, fetch, asn ?? undefined);
-  console.warn(
-    `✓ Got ${machine.quota_limit} free signups. No account needed yet.`,
-  );
 
   // ── Warn datacenter users explicitly ──────────────────────
   // The whole captcha-bypass story depends on a residential egress IP.
   // Datacenter ASNs (Hetzner, AWS, Codespaces) get auto-rejected by
-  // reCAPTCHA v2 regardless of fingerprint quality. We don't try to
-  // hide this — better to set expectations now than have the user
-  // file a "Postmark signup doesn't work" bug later.
+  // reCAPTCHA v2 regardless of fingerprint quality. Better to set
+  // expectations now than have the user file a "Postmark doesn't work"
+  // bug later.
   if (asn !== null) {
     printAsnWarning(asn);
   }
 
-  const storage = await openSessionStorage();
+  // ── Browser confirm: bind this machine to the user's account ─
+  // Opens a URL where the user signs in (Google/GitHub) and confirms
+  // the machine. We poll for the agent_session_token and write it to
+  // the local session alongside the machine_token.
   const baseSession: SessionData = {
     api_base_url: args.apiBase,
     saved_at: new Date().toISOString(),
     machine_token: machine.machine_token,
   };
-
-  // ── Optional Tier 1: pair if --pair was passed ────────────
-  let finalSession = baseSession;
-  if (args.withPair) {
-    const upgraded = await runPair(args.apiBase, target, baseSession);
-    if (upgraded === null) {
-      console.warn(
-        "Pairing didn't complete — keeping Tier 0 session. Run `npx @trusty-squire/mcp pair` later to upgrade.",
-      );
-    } else {
-      finalSession = upgraded;
-    }
+  const session = await runInstallClaim(args.apiBase, target, baseSession);
+  if (session === null) {
+    console.error(
+      "Install didn't complete — the browser confirm step never finished. " +
+        "Try again with `npx @trusty-squire/mcp install`.",
+    );
+    process.exit(1);
   }
 
-  await storage.write(finalSession);
+  const storage = await openSessionStorage();
+  await storage.write(session);
   console.warn(`✓ Session saved (${storage.backendName()}).`);
 
   // ── Write the MCP config into the host agent ──────────────
   //
   // Env vars passed to the MCP child:
   //   - TRUSTY_SQUIRE_AGENT_IDENTITY: which host agent we're running under
-  //   - UNIVERSAL_BOT_PREFER_CHEAP=true: cheap-mode is the right default
-  //     for free Tier-0 signups; the proxy enforces this server-side
-  //     anyway, but setting it here means users who run the bot CLI
+  //   - UNIVERSAL_BOT_PREFER_CHEAP=true: the proxy enforces this server
+  //     side too, but setting it here means users who run the bot CLI
   //     directly (outside MCP) also get the cheap path by default.
   //
-  // The machine token itself is NOT in the env — the MCP server reads it
-  // from session storage (keychain / file), which keeps it out of any
-  // child-process listing or shell history.
+  // The tokens themselves are NOT in the env — the MCP server reads
+  // them from session storage (keychain / file), which keeps them out
+  // of any child-process listing or shell history.
   const launch = resolveServerLaunch();
   const env: Record<string, string> = {
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
@@ -224,6 +233,41 @@ async function install(args: Argv): Promise<void> {
   console.warn(``);
   console.warn(`Try it now — ask your agent:`);
   console.warn(`  "sign me up for Resend"`);
+}
+
+// Runs the browser-based install confirm flow. Returns a session with
+// agent_session_token + account_id set on success, null on timeout/expiry.
+async function runInstallClaim(
+  apiBase: string,
+  target: AgentTarget,
+  baseSession: SessionData,
+): Promise<SessionData | null> {
+  console.warn(`Connecting this machine to your account…`);
+  const initiate = await installInitiate(
+    apiBase,
+    target,
+    baseSession.machine_token ?? null,
+  );
+  console.warn(`Open this URL in your browser to sign in and confirm:`);
+  console.warn(`  ${initiate.confirm_url}`);
+
+  try {
+    const openMod = await import("open");
+    await openMod.default(initiate.confirm_url);
+  } catch {
+    // ignore — user copies the URL
+  }
+
+  const claim = await pollForClaim(apiBase, initiate.setup_code);
+  if (claim === null) return null;
+
+  return {
+    ...baseSession,
+    api_base_url: apiBase,
+    saved_at: new Date().toISOString(),
+    agent_session_token: claim.token,
+    account_id: claim.account_id,
+  };
 }
 
 // The OAuth login stage of `install`. Non-fatal by contract: it never
@@ -323,58 +367,6 @@ function promptLine(question: string): Promise<string> {
   });
 }
 
-async function pair(args: Argv): Promise<void> {
-  const storage = await openSessionStorage();
-  const existing = (await storage.read()) ?? {
-    api_base_url: args.apiBase,
-    saved_at: new Date().toISOString(),
-  };
-  const target = await resolveTarget(args.target);
-  const upgraded = await runPair(args.apiBase, target, existing);
-  if (upgraded === null) {
-    console.error("Pairing failed or expired. Try again with `npx @trusty-squire/mcp pair`.");
-    process.exit(1);
-  }
-  await storage.write(upgraded);
-  console.warn(`✓ Paired. You can now use vault + paid-service provisioning.`);
-}
-
-// Runs the browser-based pair flow. Returns an upgraded SessionData on
-// success, null on timeout/expiry. Preserves any existing machine_token
-// so quota tracking continues to work post-pair.
-async function runPair(
-  apiBase: string,
-  target: AgentTarget,
-  existing: SessionData,
-): Promise<SessionData | null> {
-  console.warn(`Pairing this machine with Trusty Squire…`);
-  const initiate = await pairInitiate(
-    apiBase,
-    target,
-    existing.machine_token ?? null,
-  );
-  console.warn(`Open this URL in your browser to confirm:`);
-  console.warn(`  ${initiate.pair_url}`);
-
-  try {
-    const openMod = await import("open");
-    await openMod.default(initiate.pair_url);
-  } catch {
-    // ignore — user copies the URL
-  }
-
-  const claim = await pollForClaim(apiBase, initiate.pair_token);
-  if (claim === null) return null;
-
-  return {
-    ...existing,
-    api_base_url: apiBase,
-    saved_at: new Date().toISOString(),
-    agent_session_token: claim.token,
-    account_id: claim.account_id,
-  };
-}
-
 async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {
   if (explicit !== undefined) return explicit;
   const detected = await detectInstalledAgents();
@@ -403,9 +395,10 @@ async function logout(): Promise<void> {
 // Establish (or confirm) a provider session in the bot's persistent
 // Chrome profile — the one-time interactive login the OAuth-first
 // signup path needs. With a display this opens a Chrome window;
-// headless, it prints a URL to log in from any browser. T13: the
-// provider defaults to Google; `login --provider=github` logs the
-// same profile into GitHub. See bot/google-login.ts.
+// headless, it prints a URL to log in from any browser. Defaults to
+// Google; `login --provider=github` logs the same profile into GitHub.
+// Unlike the login stage inside `install`, this command fails loud on
+// timeout/error — it's the explicit retry path.
 async function login(args: Argv): Promise<void> {
   const provider: OAuthProviderId =
     args.providerArg === "github" ? "github" : "google";
@@ -442,8 +435,9 @@ function printHelp(): void {
   console.warn(``);
   console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);
   console.warn(``);
-  console.warn(`\`install\` writes the MCP config and connects your Google/GitHub`);
-  console.warn(`account, so the bot can sign you up for services on your behalf.`);
+  console.warn(`\`install\` writes the MCP config, opens a browser so you can sign in`);
+  console.warn(`(Google or GitHub) to confirm this machine, and then connects the`);
+  console.warn(`OAuth identity the bot rides when it signs you up for services.`);
   console.warn(`Best run on a laptop or desktop — a headless box does a one-time`);
   console.warn(`remote-browser login instead. Use --skip-login for CI / scripted`);
   console.warn(`installs and run \`login\` later.`);
@@ -456,7 +450,7 @@ interface ClaimResult {
 
 async function pollForClaim(
   apiBase: string,
-  pairToken: string,
+  setupCode: string,
   intervalMsOrOpts: number | { intervalMs?: number; timeoutMs?: number } = {},
   timeoutMsArg?: number,
 ): Promise<ClaimResult | null> {
@@ -468,7 +462,7 @@ async function pollForClaim(
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const status = await pairPoll(apiBase, pairToken);
+    const status = await installPoll(apiBase, setupCode);
     if (status.status === "claimed" && status.agent_session_token !== undefined) {
       return {
         token: status.agent_session_token,
@@ -511,4 +505,4 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-export { install, pair, logout, login, parseArgs, pollForClaim, printAsnWarning, resolveServerLaunch };
+export { install, logout, login, parseArgs, pollForClaim, printAsnWarning, resolveServerLaunch };

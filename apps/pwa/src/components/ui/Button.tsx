@@ -6,12 +6,15 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export function Button({ variant = "primary", className = "", children, ...rest }: ButtonProps) {
-  const base = "px-5 py-2.5 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
+  const base =
+    "px-5 py-2.5 rounded-md font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
   const variants = {
-    primary: "bg-[color:var(--color-wine)] text-[color:var(--color-cream-soft)] hover:bg-[color:var(--color-wine-deep)]",
+    primary:
+      "bg-[color:var(--color-accent-fill)] text-[color:var(--color-accent-contrast)] hover:bg-[color:var(--color-accent-fill-hover)]",
     secondary:
-      "bg-[color:var(--color-cream)] text-[color:var(--color-amber-black)] border border-[color:var(--color-rule)] hover:bg-[color:var(--color-cream-soft)]",
-    ghost: "text-[color:var(--color-amber-black)] hover:bg-[color:var(--color-cream)]",
+      "bg-[color:var(--color-surface)] text-[color:var(--color-text)] border border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-raised)] hover:border-[color:var(--color-border-strong)]",
+    ghost:
+      "text-[color:var(--color-text-soft)] hover:bg-[color:var(--color-surface)] hover:text-[color:var(--color-text)]",
   };
   return (
     <button className={`${base} ${variants[variant]} ${className}`} {...rest}>

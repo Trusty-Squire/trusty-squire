@@ -21,6 +21,7 @@ import {
   extractOAuthScopes,
   type OAuthProviderId,
 } from "./oauth-providers.js";
+import { loggedInProviders } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
@@ -225,7 +226,7 @@ type PlanExecOutcome =
   // T6: an OAuth-first signup found its provider affordance — the
   // selector of the "Sign in with Google" button to click. signup()
   // hands off to the OAuth consent flow instead of credential extraction.
-  | { kind: "oauth"; selector: string };
+  | { kind: "oauth"; selector: string; provider: OAuthProviderId };
 
 // What to do next after the verification link is clicked. Most services
 // land you on a dashboard with the API key visible; some require one or
@@ -523,6 +524,20 @@ export function findOAuthButton(
     if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text)) {
       return e;
     }
+  }
+  return null;
+}
+
+// Scan the inventory for the first OAuth affordance among `providers`,
+// in order — the auto-prefer decision passes every provider the
+// profile has a session for. Returns the matched provider + element.
+export function findFirstOAuthButton(
+  inventory: readonly InteractiveElement[],
+  providers: readonly OAuthProviderId[],
+): { provider: OAuthProviderId; button: InteractiveElement } | null {
+  for (const provider of providers) {
+    const button = findOAuthButton(inventory, provider);
+    if (button !== null) return { provider, button };
   }
   return null;
 }
@@ -878,28 +893,34 @@ export class SignupAgent {
     let oauthScanRetries = 0;
     let hint: string | undefined;
 
-    const oauthProvider = task.oauthProvider;
+    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
     for (;;) {
       await this.browser.waitForFormReady();
       await saveDebugSnapshot(this.browser, "before-fill");
       const state = await this.browser.getState();
-      const inventory = await this.buildInventory(steps, oauthProvider);
+      const inventory = await this.buildInventory(steps, oauthCandidates);
 
-      // T6/T13 — OAuth-first: when an OAuth signup is requested and the
-      // page carries a "Sign in with <provider>" affordance, the OAuth
-      // button unconditionally outranks any form field (a rule, not
-      // score arithmetic — spec refinement). Hand off to the OAuth
-      // consent flow. Absent the affordance, fall through to form-fill.
-      if (oauthProvider !== undefined) {
-        const oauthButton = findOAuthButton(inventory, oauthProvider);
-        const label = OAUTH_PROVIDERS[oauthProvider].label;
-        if (oauthButton !== null) {
+      // OAuth-first (T6/T13 + auto-prefer): when the page carries a
+      // "Sign in with <provider>" affordance for a provider the bot can
+      // use, that button unconditionally outranks any form field — hand
+      // off to the OAuth consent flow. `oauthCandidates` is the explicit
+      // provider when one was requested, else every provider the profile
+      // has a session for. Absent any affordance, fall through to
+      // form-fill.
+      if (oauthCandidates.length > 0) {
+        const hit = findFirstOAuthButton(inventory, oauthCandidates);
+        if (hit !== null) {
+          const label = OAUTH_PROVIDERS[hit.provider].label;
           steps.push(
             `OAuth-first: found a ${label} sign-in affordance ` +
-              `(${JSON.stringify(oauthButton.visibleText ?? oauthButton.ariaLabel ?? label)}) ` +
+              `(${JSON.stringify(hit.button.visibleText ?? hit.button.ariaLabel ?? label)}) ` +
               `— taking the OAuth path`,
           );
-          return { kind: "oauth", selector: oauthButton.selector };
+          return {
+            kind: "oauth",
+            selector: hit.button.selector,
+            provider: hit.provider,
+          };
         }
         // SSO buttons frequently load async — Mistral renders its
         // icon-only provider buttons after the email form. Re-extract
@@ -907,15 +928,15 @@ export class SignupAgent {
         if (oauthScanRetries < 2) {
           oauthScanRetries += 1;
           steps.push(
-            `OAuth-first: no ${label} affordance yet — waiting for an async ` +
-              `render (retry ${oauthScanRetries}/2)`,
+            `OAuth-first: no provider affordance yet — waiting for an ` +
+              `async render (retry ${oauthScanRetries}/2)`,
           );
           await this.browser.wait(3);
           continue;
         }
         steps.push(
-          `OAuth-first requested but no ${label} affordance on the page — ` +
-            `falling back to form-fill`,
+          "OAuth-first: no usable provider affordance on the page — " +
+            "falling back to form-fill",
         );
       }
 
@@ -1069,25 +1090,58 @@ export class SignupAgent {
   }
 
   // Extract + rank the page's interactive elements (F3 T1/T2).
-  // `oauthProvider` keeps that provider's OAuth affordance from being
-  // ranked out of the capped inventory when an OAuth-first signup is
-  // requested (T6/T13). `buttonCap` widens for the post-OAuth
-  // onboarding loop: a dashboard carries far more nav links than a
-  // signup form, and they do not score as signup buttons, so the
-  // default cap would drop the "API Keys"/"Settings" links the
-  // onboarding planner must reach.
+  // `oauthProviders` keeps those providers' OAuth affordances from
+  // being ranked out of the capped inventory (T6/T13 + auto-prefer).
+  // `buttonCap` widens for the post-OAuth onboarding loop: a dashboard
+  // carries far more nav links than a signup form, and they do not
+  // score as signup buttons, so the default cap would drop the "API
+  // Keys"/"Settings" links the onboarding planner must reach.
   private async buildInventory(
     steps: string[],
-    oauthProvider?: OAuthProviderId,
+    oauthProviders?: readonly OAuthProviderId[],
     buttonCap = 25,
   ): Promise<InteractiveElement[]> {
     const raw = await this.browser.extractInteractiveElements();
-    const { inventory, buttonsDropped } = rankAndCapInventory(raw, buttonCap, oauthProvider);
+    const { inventory, buttonsDropped } = rankAndCapInventory(
+      raw,
+      buttonCap,
+      oauthProviders,
+    );
     steps.push(
       `Inventory: ${inventory.length} element(s)` +
         (buttonsDropped > 0 ? ` (${buttonsDropped} low-ranked button(s) dropped)` : ""),
     );
     return inventory;
+  }
+
+  // Which OAuth providers may this signup take? An explicit
+  // task.oauthProvider forces that one. Otherwise the bot auto-prefers
+  // OAuth — it returns every provider the persistent profile has a
+  // login session for, so a "Continue with Google/GitHub" affordance is
+  // used instead of a form-fill (which OAuth-gated dev services
+  // routinely anti-abuse-flag).
+  //
+  // No datacenter gate (reversed from the 0.4.0 design): yes, Google /
+  // GitHub may challenge OAuth from a datacenter IP (G7), but form-fill
+  // on datacenter fails just as often — silent verification withholding,
+  // the Resend-on-Hetzner case. An OAuth challenge at least surfaces a
+  // clear `needs_login` the host agent can act on, vs. a silent 45-second
+  // form-fill timeout. Better failure mode wins; the original gate was
+  // protecting the bot from the wrong loss.
+  private async resolveOAuthCandidates(
+    task: SignupTask,
+    steps: string[],
+  ): Promise<OAuthProviderId[]> {
+    if (task.oauthProvider !== undefined) {
+      return [task.oauthProvider];
+    }
+    const loggedIn = loggedInProviders();
+    if (loggedIn.length === 0) return [];
+    steps.push(
+      `Auto-OAuth: profile has a session for ${loggedIn.join(", ")} — ` +
+        "preferring OAuth if the page offers it",
+    );
+    return loggedIn;
   }
 
   // Verify every selector the plan references still resolves on the
@@ -1400,7 +1454,12 @@ export class SignupAgent {
           // T6/T7 — OAuth-first path. runOAuthFlow drives the consent
           // handshake and post-OAuth onboarding to its own terminal
           // SignupResult; there is no form submit / email verification.
-          return await this.runOAuthFlow(task, outcome.selector, steps);
+          return await this.runOAuthFlow(
+            task,
+            outcome.selector,
+            outcome.provider,
+            steps,
+          );
         case "submitted":
           break;
       }
@@ -1543,9 +1602,10 @@ export class SignupAgent {
   private async runOAuthFlow(
     task: SignupTask,
     oauthSelector: string,
+    providerId: OAuthProviderId,
     steps: string[],
   ): Promise<SignupResult> {
-    const provider = OAUTH_PROVIDERS[task.oauthProvider ?? "google"];
+    const provider = OAUTH_PROVIDERS[providerId];
     const loginCmd =
       provider.id === "github"
         ? "npx @trusty-squire/mcp login --provider=github"

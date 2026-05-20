@@ -533,3 +533,184 @@ withholds verification mail from <30-day-old domains.
   withheld. This supersedes SES inbound entirely and costs no new
   infrastructure. Future work, not MVP — but it is the reason M1's
   mothballed pipeline should eventually be deleted, not revived.
+
+## P — Product roadmap: vault → credential broker → agent commerce
+
+Six large buckets raised by the founder 2026-05-19, after the OAuth +
+pairing + web-vault work shipped. These are multi-day product buckets,
+not single-PR tasks. Founder's first-pass labels in brackets;
+recommended slot + rationale below.
+
+### The strategic read
+
+The core loop is: **agent needs a key → Squire provisions it → key
+lands in the vault → agent uses the key.** Today the *populate* half
+works (the bot writes credentials into the vault); the *read* half
+does not — nothing pulls keys back out programmatically. So the vault
+is currently a write-only sink, and an agent re-provisions a service
+it already has a key for.
+
+**P3 closes that loop and is the keystone.** Everything else either
+hardens it (P4), widens its entry points (P1, P2), or monetizes on top
+of it (P5, P6).
+
+The **spine** of the long-term vision — *secure credential broker for
+agents, including paid SaaS* — is **P3 → P4 → P6**. P1, P2, P5 hang off
+the side and are independently shippable (parallel-track / filler
+work; "LOW" = low coupling, not "blocked").
+
+### Recommended sequencing
+
+| Slot | Bucket | Founder label | Why here |
+|------|--------|---------------|----------|
+| 1 | **P3** — agent reads the vault | HIGH | Keystone. Makes the vault a real broker. Read API already half-built. |
+| 2 | **P4** — Vouchflow secures the vault | MEDIUM | Harden P3's *new* read surface before it sees traffic — retrofitting later reworks the reveal path twice. Unblocks P6. |
+| 3 | **P2** — provision from the vault UI | MEDIUM | Widens provisioning to the web. Gated on one architecture call (where the bot runs). |
+| 4 | **P1** — skillify signups → adapters | MEDIUM | Compounding cost/quality win; no urgency — can skillify retroactively from logs. = the open half of A1.2. |
+| 5 | **P5** — Stripe billing for Squire | LOW | Monetizes the product. Fully independent — parallelizable anytime. |
+| 6 | **P6** — paid-SaaS via Stripe Issuing + mandate tab | LOW | Heaviest; most dependencies; Stripe Issuing has external approval lead time. |
+
+**Deviation from the founder's labels:** P4 is pulled ahead of P1/P2
+(all three MEDIUM) because it is coupled to P3's new surface — ship P3
+unsecured and the reveal path gets built twice. If P6 is committed,
+**start the Stripe Issuing application now** regardless of code slot —
+its approval lead time is the long pole.
+
+---
+
+### P1 — Closed feedback loop: skillify signups into adapters [MEDIUM]
+
+**This is the open half of A1.2** (see the A1 section) — restated here
+for the roadmap view; tracked as A1.2.
+
+- **What.** When `provision_any_service` (the universal browser bot)
+  completes a signup for a service with no native adapter, capture the
+  run — the DOM-grounded step trail, field map, verification flow —
+  and codify it into a native `defineAdapter` adapter registered in
+  `registry-api`. Future signups take the deterministic `provision`
+  fast path.
+- **Why.** The bot is slow, LLM-metered, captcha-fragile; native
+  adapters are free, fast, deterministic. Every skillified service is
+  a permanent win — the product compounds, getting better the more it
+  is used. `adapters/resend/manifest.ts` already anticipates this.
+- **Depends on.** Nothing hard — the bot already emits a structured
+  step trail (F3's DOM-grounded inventory makes it clean enough to
+  codegen from).
+- **Scope.** Persist successful runs' trails → adapter-codegen step
+  (LLM-assisted scaffold, offline) → human review → register. Start
+  human-in-the-loop; do not auto-ship generated adapter code to prod.
+- **Open Q.** Fully-automated codegen vs. assisted-scaffold-then-review
+  (start assisted). Routing: detect "this service now has an adapter"
+  and prefer it over the bot.
+
+### P2 — Provision SaaS directly from the vault UI [MEDIUM]
+
+- **What.** A web flow in the vault to trigger a signup directly — pick
+  / enter a service, watch it run (Linear-style tabs + the landing
+  page's signup animation), the key lands in the vault.
+- **Why.** Today provisioning is only agent-triggered via MCP. A web
+  entry point lets a user provision without a coding agent in the
+  loop, and turns the web app into a place you *do* things.
+- **Depends on.** A web-triggerable provision path. **Architecture
+  decision required** — the bot runs Playwright in the user's *local*
+  MCP process; a web-triggered signup has no local process:
+  - **(a)** Run the bot server-side on Fly (Playwright-in-container).
+    Heavier, and **loses the residential-IP advantage** — S1/T3
+    findings show datacenter egress is scored as bot-likely.
+  - **(b)** Dispatch the job to the user's *paired CLI/MCP* if one is
+    connected (reuse the agent-session channel). Preserves the
+    residential-IP model; web is just the trigger + live view.
+  Recommend **(b)** when a paired agent exists, (a) as fallback.
+- **Decided 2026-05-19: (b)** — dispatch the signup job to the paired
+  CLI/MCP; the web is the trigger + live view. Server-side (a) is a
+  fallback only, for when no agent is paired.
+
+### P3 — Agent sessions fetch existing keys from the vault [HIGH] ★ keystone
+
+> **Status — 2026-05-19: discovery path shipped.** The fetch half
+> already existed (`GET /v1/credentials/:reference` + `get_credential`,
+> agent-auth); the missing piece was *discovery*. Now: `GET
+> /v1/vault/credentials` accepts agent-session auth (`requireAny`) and
+> returns the vault `reference`; new MCP `list_credentials` tool closes
+> the loop with `get_credential`; `provision` / `provision_any`
+> descriptions nudge check-vault-first. Tests green (MCP 237, API 69).
+> API deployed. **MCP republished — `@trusty-squire/mcp@0.3.0`**
+> (2026-05-19). Remaining: per-service / per-agent access scoping —
+> deferred, shipped per-account.
+
+- **What.** A coding agent (via MCP, authed by its `mcp_session_*`
+  agent-session token) can list and retrieve credentials already in
+  the vault. Provision flows check the vault *first* and reuse what is
+  there before signing up for a new key.
+- **Why.** THE keystone. The vault is write-only from the agent side
+  today — the bot pushes keys in, nothing reads them back — so an agent
+  re-provisions a service it already has. P3 makes the vault a real
+  broker: provision once, reuse everywhere, across machines and
+  sessions. The core value proposition, currently a dead end.
+- **Depends on.** The vault read API exists from the Phase-1 work
+  (`GET /v1/vault/credentials`, `POST /v1/vault/credentials/:id/
+  reveal`) but is **web-session-auth only** — it must also accept
+  agent-session bearer auth.
+- **Scope.** Extend the vault API auth to agent sessions; add MCP tools
+  (`list_credentials` / `get_credential`); wire provision flows to
+  check-vault-first; audit every agent-side reveal (`VaultAuditEvent`
+  already exists).
+- **Open Q.** Access scope — can any paired agent read *all* the
+  account's keys, or per-service / per-agent scoping? Ship per-account
+  now, design the schema for scoping (also the reason to do P4 next).
+
+### P4 — Vouchflow secures the vault credentials [MEDIUM]
+
+- **What.** Wire the Vouchflow web SDK so credential access requires a
+  Vouchflow-signed proof (`signPayload()`), not just a session/bearer
+  token.
+- **Why.** The vault already has AES-256-GCM envelope encryption + KMS.
+  Vouchflow adds an *authorization/attestation* layer: every reveal
+  becomes a signed, attestable action. It is the security story behind
+  the landing pitch — and dogfoods the founder's own product. It
+  should land right after P3: P3 opens a new "secrets-flow-to-agents"
+  surface, and that surface is exactly what you want gated by signed
+  proof before it sees real traffic.
+- **Depends on.** P3 defines the surface. Vouchflow SDK capabilities
+  (review needed). `config/vouchflow.ts` + `VOUCHFLOW_READ_KEY` (see
+  the deploy-follow-ups section) are the existing hooks.
+- **Open Q.** What exactly does Vouchflow attest — the user approving a
+  reveal? the agent identity? the spend? Map `signPayload()` to a
+  concrete gate. Also unblocks P6's `signPayload()` requirement.
+
+### P5 — Stripe billing for Trusty Squire subscriptions [LOW]
+
+- **What.** Users pay for Trusty Squire itself — Stripe Checkout,
+  plans, webhooks, billing state on the `Account`.
+- **Why.** Monetizes the product. Fully independent of the vault work
+  — a well-trodden Stripe Checkout integration. "LOW" here means low
+  coupling: it can run on a parallel track whenever capacity exists.
+- **Depends on.** Nothing technical. Needs a pricing/tier decision (the
+  Tier 0 free → paid model in CLAUDE.md's quota design is the start).
+
+### P6 — Paid-SaaS signup via Stripe Issuing + mandate tab [LOW]
+
+- **What.** The agent signs up for *paid* SaaS using a Stripe Issuing
+  virtual card, bounded by a user-set spending mandate. The web app
+  gains a three-tab structure — **Vault / Provision / Mandate**. The
+  Mandate tab is policy guardrails (spend caps, per-service limits,
+  approval thresholds). Every spend is gated by Vouchflow
+  `signPayload()`.
+- **Why.** Unlocks the full vision — an agent that provisions
+  *anything*, including paid services, within provable limits. Also
+  the heaviest bucket with the most dependencies.
+- **Depends on.** P3 (vault read), P4 (Vouchflow signing), a Stripe
+  relationship (P5-adjacent), AND the existing mandate concept in
+  `packages/runtime` (`mandate-validator`) — **stubbed** during the
+  OAuth work, needs un-stubbing/rebuilding. There must be **one**
+  mandate model, not a new "Mandate tab" model alongside the
+  runtime's.
+- **External lead time.** Stripe **Issuing** requires separate Stripe
+  approval/onboarding (compliance, KYC) — the long pole. Founder is
+  filing that application (decided 2026-05-19); code start is
+  independent of approval.
+- **MVP scope (decided 2026-05-19).** Paid API services with *no free
+  tier* are **out of the MVP** — the MVP covers services that have a
+  free tier. ~A few weeks of runway.
+- **Open Q.** Reconcile the Mandate tab with the runtime
+  `mandate-validator` into one model.

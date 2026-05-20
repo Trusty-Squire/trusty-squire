@@ -12,7 +12,7 @@ export function Field({ label, hint, error, id, className = "", ...rest }: Field
   const errorId = `${inputId}-error`;
   return (
     <div className="block">
-      <label htmlFor={inputId} className="block text-sm font-medium mb-1 text-[color:var(--color-amber-black)]">
+      <label htmlFor={inputId} className="block text-sm font-medium mb-1 text-[color:var(--color-text)]">
         {label}
       </label>
       <input
@@ -22,15 +22,15 @@ export function Field({ label, hint, error, id, className = "", ...rest }: Field
         aria-describedby={
           error !== undefined ? errorId : hint !== undefined ? hintId : undefined
         }
-        className={`w-full px-3 py-2 rounded-lg border bg-white border-[color:var(--color-rule)] focus:border-[color:var(--color-wine)] focus:outline-none ${className}`}
+        className={`w-full px-3 py-2 rounded-md border bg-[color:var(--color-surface)] text-[color:var(--color-text)] border-[color:var(--color-border)] placeholder:text-[color:var(--color-text-muted)] focus:border-[color:var(--color-accent)] focus:outline-none ${className}`}
       />
       {hint !== undefined && error === undefined ? (
-        <span id={hintId} className="block text-xs mt-1 text-[color:var(--color-ink-soft)]">
+        <span id={hintId} className="block text-xs mt-1 text-[color:var(--color-text-soft)]">
           {hint}
         </span>
       ) : null}
       {error !== undefined ? (
-        <span id={errorId} role="alert" className="block text-xs mt-1 text-[color:var(--color-wine)]">
+        <span id={errorId} role="alert" className="block text-xs mt-1 text-[color:var(--color-accent)]">
           {error}
         </span>
       ) : null}

@@ -41,3 +41,4 @@ debug-*.png
 
 # Raw onboarding-round captures (curate into the eval corpus)
 .onboarding-corpus-raw/
+.gstack/

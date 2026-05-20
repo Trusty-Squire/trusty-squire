@@ -71,24 +71,24 @@ export function PolicyClient() {
     }
   }
 
-  if (policy === null) return <p className="text-[color:var(--color-ink-soft)]">Loading…</p>;
+  if (policy === null) return <p className="text-[color:var(--color-text-soft)]">Loading…</p>;
 
   return (
     <div className="space-y-6 max-w-2xl">
       <PolicyEditor value={policy} onChange={setPolicy} />
-      <div className="border-t border-[color:var(--color-rule)] pt-4 space-y-3">
+      <div className="border-t border-[color:var(--color-border)] pt-4 space-y-3">
         <label className="block text-sm">
           <span className="block mb-1">Confirm email</span>
           <input
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full px-3 py-2 rounded-lg border border-[color:var(--color-rule)] bg-white"
+            className="w-full px-3 py-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] text-[color:var(--color-text)] placeholder:text-[color:var(--color-text-muted)] focus:border-[color:var(--color-accent)] focus:outline-none"
             placeholder="you@example.com"
           />
         </label>
         {msg !== null ? (
-          <p role="status" className="text-sm text-[color:var(--color-ink-soft)]">{msg}</p>
+          <p role="status" className="text-sm text-[color:var(--color-text-soft)]">{msg}</p>
         ) : null}
         <VouchflowDiagnostics err={errorObj} />
         <Button onClick={onSave} disabled={pending}>

@@ -1,20 +1,14 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
-import { Fraunces, Inter } from "next/font/google";
+import { Inter } from "next/font/google";
 import { ServiceWorkerMount } from "@/components/shell/ServiceWorkerMount";
 import "./globals.css";
 
-// Self-hosted via next/font — Next downloads the fonts at build time
-// and serves them as static assets, so the runtime never hits Google's
-// CDN. `display: 'swap'` keeps FCP fast at the cost of one font-swap
-// flash. Subsets trimmed to latin — full subsets balloon the bundle.
-
-const fraunces = Fraunces({
-  subsets: ["latin"],
-  display: "swap",
-  weight: ["400", "600", "700"],
-  variable: "--font-fraunces",
-});
+// Self-hosted via next/font — Next downloads the font at build time and
+// serves it as a static asset, so the runtime never hits Google's CDN.
+// `display: 'swap'` keeps FCP fast at the cost of one font-swap flash.
+// One family, end to end: Inter does body AND headings (headings just
+// tighten weight + tracking — see globals.css).
 
 const inter = Inter({
   subsets: ["latin"],
@@ -40,7 +34,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#8a1a30",
+  themeColor: "#0d0d10",
   width: "device-width",
   initialScale: 1,
   maximumScale: 5,
@@ -48,7 +42,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${fraunces.variable} ${inter.variable}`}>
+    <html lang="en" className={inter.variable}>
       <body>
         {children}
         <ServiceWorkerMount />

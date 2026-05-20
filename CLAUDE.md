@@ -6,7 +6,7 @@ repository. Concise and precise. Keep it current.
 ## Project Overview
 
 **Trusty Squire** is a credential broker that lets AI agents (Claude
-Code, Cursor, Goose, Cline, Continue) provision SaaS services on behalf
+Code, Cursor, Codex, Goose, Cline, Continue) provision SaaS services on behalf
 of a user, within a user-signed spending mandate. The MCP server runs
 on the user's machine; an API on Fly.io handles persistence and
 orchestration.
@@ -17,8 +17,8 @@ orchestration.
    (Resend, Stripe, etc.). Mandate-bounded, vault-backed, full
    approval flow.
 2. **`provision_any_service`** — universal browser-automation bot
-   (Playwright + Claude vision) for any other service. Currently
-   Tier 0 (anonymous, free, quota-limited).
+   (Playwright + Claude vision) for any other service. Account-bound,
+   free up to `ACCOUNT_FREE_QUOTA` signups before billing kicks in.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
@@ -68,14 +68,22 @@ OpenRouter for LLM, AWS SES for inbound mail.
   - Long-poll inbox client, verification-link click, post-verify
     navigation loop
   - Hard cap of 15 LLM calls per signup (circuit breaker)
-- **Tier 0 install flow.** `npx @trusty-squire/mcp install` issues a
-  machine token, writes the host-agent MCP config, then runs the
-  one-time OAuth login (folds in `mcp login` — Google/GitHub browser
-  session into the bot profile; non-fatal, `--skip-login` opts out).
-  No account, no mandate — MVP provisions free-tier services only.
-  Headed (laptop/desktop) is the recommended environment; a headless
-  box does a one-time remote-browser login (noVNC). See the
-  2026-05-18 streamlined-oauth-onboarding CEO plan.
+- **Single-tier install flow.** `npx @trusty-squire/mcp install` does
+  three things in one command:
+  1. Issues a machine token (bot-internal credential for LLM proxy +
+     inbox alias service).
+  2. Opens a browser so the user signs in (Google/GitHub) and confirms
+     the machine — binds the install to the account, writes the
+     account-bound `agent_session_token` to the local session file.
+  3. Runs the one-time OAuth login (the `mcp login` flow folded in —
+     Google/GitHub session into the bot's Chrome profile; non-fatal,
+     `--skip-login` opts out for CI). Headed (laptop/desktop) is the
+     recommended environment; a headless box does a one-time remote-
+     browser login (noVNC).
+  Every install is account-bound — there is no anonymous tier. Free up
+  to `ACCOUNT_FREE_QUOTA` signups (default 10), then `payment_required`
+  + `cta_billing_url`. See the 2026-05-18 streamlined-oauth-onboarding
+  CEO plan (now combined with the 2026-05-19 single-tier collapse).
 - **LLM proxy** (`/v1/llm/chat`). User's machine talks to our API,
   which forwards to OpenRouter using the operator's key. Per-machine
   rolling rate limit (150/hour, default). Cost per IPInfo signup:
@@ -91,10 +99,12 @@ OpenRouter for LLM, AWS SES for inbound mail.
 | PostHog     | ⚠ slow SPA | Form load races our planner; not captcha    |
 
 ### In-memory (not persisted, restart-vulnerable)
-- `accountStore`, `sessionStore`, `agentSessionStore`,
-  `approvalTokenStore`, `runStore`, `adapterRegistry`,
-  `credentialStore`, `vaultAuditStore`. These belong to Tier 1+ paired
-  accounts and are not yet exercised in production.
+- `approvalTokenStore`, `runStore`, `adapterRegistry`,
+  `vaultAuditStore`. These belong to the deferred native-`provision`
+  cluster (adapter registry + mandate engine + native adapters) and
+  are not yet exercised in production. `accountStore`, `sessionStore`,
+  `agentSessionStore`, and `credentialStore` are Prisma-backed when a
+  DB is wired.
 
 ## Active Sprint/Task
 
@@ -112,7 +122,7 @@ landscape we can address in-house. Focus shifts to:
 
 1. **Surface bot run telemetry** — bot results currently return
    structured status (`success` / `captcha_blocked` /
-   `quota_exceeded` / `not_installed`) but the MCP tool doesn't
+   `payment_required` / `not_installed`) but the MCP tool doesn't
    yet surface the full step trail or the `captcha_blocked` kind
    to the user. Worth wiring.
 2. **Fix 3 pre-existing test failures** in `routes.test.ts` and
@@ -121,10 +131,14 @@ landscape we can address in-house. Focus shifts to:
    exists; agent doesn't call it. Adds first-party cookies before
    navigating to strict signup URLs.
 
-**Not in scope right now:** Tier 3 (audio captcha + Whisper for v2
-image grids — rare in dev SaaS), 2Captcha integration (explicitly
-not needed given Tier 1+2 results), PWA mark-paired UI, multi-
-instance API scaling.
+**Not in scope right now:** Tier 3 captcha (audio + Whisper for v2
+image grids — rare in dev SaaS), 2Captcha integration (explicitly not
+needed given the behavior + click-and-wait results), multi-instance
+API scaling.
+
+(Captcha tiers numbered 1/2/3 above are separate from auth — the
+auth model is single-tier and the term "tier" is no longer used in
+that context.)
 
 ## Next Steps (prioritized)
 
@@ -140,9 +154,19 @@ instance API scaling.
    plus a per-service config.
 4. **PostHog SPA wait.** Add `waitForSelector` on a known form field
    before invoking the Claude planner.
-5. **Tier 1+ work (PWA mark-paired UI, vault delivery, mandate
-   signing).** Bigger product surface; pick up when Tier 0 → Tier 1
-   conversion becomes a real user funnel.
+5. **Billing surface.** The `payment_required` path returns a
+   `cta_billing_url` pointing at `/billing` in the web app, but the
+   page itself is a stub. Wiring real billing (Stripe Checkout +
+   webhook → mark account paid) is the unlock for users hitting the
+   free quota.
+6. **Per-account quota aggregation.** Today the alias-create route
+   counts signups against the calling machine_token. A user with two
+   bound machines effectively gets 2× free quota. Aggregate across
+   all machine_tokens for an account once that edge case bites.
+7. **Native-`provision` reactivation.** The native adapter cluster
+   (vault delivery, mandate signing, approval flow) is defined but
+   not registered — pick up when an account uses Trusty Squire for
+   anything beyond universal signups.
 
 ## Environment Details
 
@@ -194,7 +218,7 @@ stale (they reference a `prisma:generate` script that no longer exists)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.2.1`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.4.2`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was
@@ -268,9 +292,16 @@ migrate deploy` against the inbox database on the next deploy.
 
 ### Goose / local-dev MCP install
 
-The official install path (`npx @trusty-squire/mcp install --target=...`)
-doesn't support Goose yet. For local dev/testing on a Goose CLI or
-Desktop install, hand-write the extension into `~/.config/goose/config.yaml`:
+`npx @trusty-squire/mcp install --target=goose` writes the extension to
+`~/.config/goose/config.yaml` (modern goose's config file) — works for
+npx-installed users as of 0.4.2. (Before 0.4.2 it wrote `profiles.yaml`,
+the old pre-1.0 path, so goose never saw it.)
+
+For **local dev** against this monorepo checkout, the installer's
+`node dist/bin.js server` command fails under Goose Desktop (it spawns
+extensions with `cwd=/`, and the monorepo's deps aren't hoisted — see
+below). Hand-write a cwd-anchored wrapper into
+`~/.config/goose/config.yaml` instead:
 
 ```yaml
 extensions:
@@ -304,7 +335,7 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15`   | Per-signup circuit breaker |
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Tier 0 token for `/v1/llm/chat` proxy |
+| `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
@@ -312,7 +343,7 @@ extension state on launch and won't reload mid-session.
 | Env var | Default | Effect |
 |---|---|---|
 | `LLM_HOURLY_LIMIT` | `150` | Per-machine-token rolling rate cap for `/v1/llm/chat` |
-| `MACHINE_TOKEN_QUOTA` | `10` | Free signups per anonymous machine before pair-CTA |
+| `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required` (alias: `MACHINE_TOKEN_QUOTA`, the prior name) |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
 | `INBOX_BODY_RETENTION_DAYS` | `7` | Body_text/html nulled after this many days |

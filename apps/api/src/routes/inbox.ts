@@ -1,12 +1,14 @@
 // Inbox API for the universal signup bot.
 //
 // Two auth modes, chosen by header:
-//   1. Tier 0 — `X-Machine-Token: tsm_...` (anonymous, quota-limited)
+//   1. Machine token — `X-Machine-Token: tsm_...` (bound to an account
+//      at install-claim time; quota tracked per-account)
 //   2. Admin/test — `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`
 //
-// Tier 0 callers are checked against their quota on alias creation. Once
-// quota is hit, the response carries an explicit cta_pair_url so the MCP
-// tool can tell Claude to surface the pairing flow to the user.
+// Machine-token callers are checked against the free-signup quota on
+// alias creation. Once the limit is hit, the response is
+// payment_required + cta_billing_url so the MCP tool can tell the LLM
+// to point the user at billing.
 //
 // Alias ownership: an alias is stamped with the principal that created
 // it. The /wait and DELETE routes assert the caller owns the alias, so
@@ -29,8 +31,9 @@ export interface InboxRouteDeps {
 }
 
 const createAliasSchema = z.object({
-  // Tier 0 callers don't have an account; pass "anonymous" or omit.
-  account_id: z.string().optional().default("anonymous"),
+  // In single-tier every machine_token is bound to an account; the
+  // CLI sends the bound account_id here.
+  account_id: z.string().min(1),
   service: z.string().min(1),
   run_id: z.string().min(1),
   ttl_seconds: z.number().int().positive().optional(),
@@ -82,18 +85,20 @@ export async function registerInboxRoute(
       return;
     }
 
-    // Quota check for Tier 0 callers.
+    // Free-tier signup quota. Counts against this machine_token for
+    // now; per-account aggregation (sum across all machine_tokens
+    // bound to an account) is a follow-up.
     if (principal.kind === "machine") {
       const quota = defaultQuota();
-      if (principal.paired_account_id === null && principal.signup_count >= quota) {
-        reply.code(429).send({
-          error: "quota_exceeded",
+      if (principal.signup_count >= quota) {
+        reply.code(402).send({
+          error: "payment_required",
           quota_limit: quota,
           quota_used: principal.signup_count,
-          cta_pair_url: `${pairingBaseUrl()}/pair?machine_token=${encodeURIComponent(principal.token)}`,
+          cta_billing_url: `${webAppBaseUrl()}/billing`,
           message:
-            `You've used all ${quota} free signups on this machine. ` +
-            `Pair this machine (free, ~30s) to keep going.`,
+            `You've hit the free signup limit (${quota}). ` +
+            `Visit cta_billing_url to upgrade.`,
         });
         return;
       }
@@ -221,6 +226,6 @@ export async function registerInboxRoute(
   });
 }
 
-function pairingBaseUrl(): string {
-  return process.env.PWA_BASE_URL ?? "https://app.trustysquire.ai";
+function webAppBaseUrl(): string {
+  return process.env.PWA_BASE_URL ?? "https://trustysquire.ai";
 }

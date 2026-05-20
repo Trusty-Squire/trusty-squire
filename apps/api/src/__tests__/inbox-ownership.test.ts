@@ -2,7 +2,7 @@
 //
 // An alias is stamped with the machine token that created it. A
 // different machine token must not be able to long-poll or delete it —
-// otherwise one Tier 0 user could read another's verification codes.
+// otherwise one account-bound user could read another's verification codes.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
@@ -43,7 +43,7 @@ describe("/v1/inbox alias ownership", () => {
       method: "POST",
       url: "/v1/inbox/aliases",
       headers: { "content-type": "application/json", "x-machine-token": token },
-      payload: { service: "resend", run_id: "run-1" },
+      payload: { account_id: "acct-test", service: "resend", run_id: "run-1" },
     });
     expect(res.statusCode).toBe(201);
     return (res.json() as { alias: string }).alias;

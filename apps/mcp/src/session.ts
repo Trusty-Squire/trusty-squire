@@ -18,16 +18,23 @@ const FALLBACK_DIR = path.join(
 );
 const FALLBACK_FILE = path.join(FALLBACK_DIR, "session.json");
 
-// Session storage holds whatever auth the machine has earned.
-// Tier 0 machines have just a machine_token; Tier 1+ also have a paired
-// agent_session_token + account_id. Both fields are optional so the install
-// flow can save a Tier 0 session today and upgrade later without rewriting.
+// Session storage holds the account-bound credentials the squire needs
+// to act on a user's behalf:
+//   - machine_token: bot-internal credential for the LLM proxy + inbox
+//     alias service, bound to the account at claim time.
+//   - agent_session_token: bearer token the MCP server presents on
+//     vault writes, mandate-aware tool calls, and any other authed API
+//     surface.
+//   - account_id: the account the install is bound to.
+//
+// Fields stay optional in the type so the install CLI can write a
+// transient session with just machine_token while the browser claim is
+// in flight. At tool-call time, every field is required — missing
+// fields surface a "re-install" message.
 export interface SessionData {
   api_base_url: string;
   saved_at: string;
-  // Tier 0 — issued at install, no account needed.
   machine_token?: string;
-  // Tier 1+ — written when the user pairs.
   agent_session_token?: string;
   account_id?: string;
 }

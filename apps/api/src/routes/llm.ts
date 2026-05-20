@@ -5,7 +5,7 @@
 // (or Anthropic — whichever's configured) and return the reply.
 //
 // Why proxy instead of letting the bot use its own key?
-//   1. Tier 0 users haven't signed up for anything. We don't want to ask
+//   1. the machine-token caller users haven't signed up for anything. We don't want to ask
 //      them to BYOK an OpenRouter key just to use the free tier.
 //   2. Server-side rate limiting protects us from a runaway bot loop
 //      drilling our wallet. The per-signup cap inside the bot is best-

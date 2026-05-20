@@ -1,7 +1,7 @@
 // Shared "machine token OR admin bearer" authorization.
 //
 // Both /v1/inbox/* and /v1/llm/chat accept the same two auth modes:
-//   1. Tier 0  — `X-Machine-Token: tsm_…` (or `Authorization: Bearer tsm_…`)
+//   1. the machine-token caller  — `X-Machine-Token: tsm_…` (or `Authorization: Bearer tsm_…`)
 //   2. Admin   — `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`
 //
 // This logic used to be hand-copied into inbox.ts and llm.ts, including a
@@ -57,7 +57,7 @@ export function checkAdminBearer(req: FastifyRequest): AdminBearerResult {
   return constantTimeEquals(presented, expected) ? "ok" : "unauthorized";
 }
 
-// Authorize a request as either a Tier 0 machine token or the admin
+// Authorize a request as either a the machine-token caller machine token or the admin
 // bearer. Writes the failure response and returns null on auth failure;
 // returns the principal on success.
 export async function authorizeMachineOrAdmin(
@@ -65,7 +65,7 @@ export async function authorizeMachineOrAdmin(
   reply: FastifyReply,
   store: MachineTokenStore,
 ): Promise<AuthPrincipal | null> {
-  // Try machine token first — the common Tier 0 case.
+  // Try machine token first — the common the machine-token caller case.
   const machineToken = extractMachineToken(req);
   if (machineToken !== null) {
     const record = await authorizeMachineToken(req, reply, store);

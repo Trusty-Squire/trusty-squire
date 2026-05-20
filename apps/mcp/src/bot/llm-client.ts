@@ -206,7 +206,7 @@ export class OpenRouterClient implements LLMClient {
 //
 // For users who haven't BYOK'd an LLM provider, the bot talks to a proxy
 // endpoint we host that forwards to OpenRouter (or any provider we wire
-// up server-side). The user pays nothing for LLM calls in Tier 0 because
+// up server-side). The user pays nothing for LLM calls in active-mode because
 // the proxy uses the operator's OpenRouter key — but the server enforces
 // a rolling rate limit per machine token so a single user can't drain
 // our wallet.

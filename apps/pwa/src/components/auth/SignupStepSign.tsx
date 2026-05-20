@@ -21,7 +21,7 @@ export function SignupStepSign() {
 
   if (state === null) {
     return (
-      <p className="text-[color:var(--color-ink-soft)]">
+      <p className="text-[color:var(--color-text-soft)]">
         Your signup session has expired.{" "}
         <a href="/signup">Start again</a>.
       </p>
@@ -75,13 +75,13 @@ export function SignupStepSign() {
   return (
     <div className="space-y-6">
       <MandateReview policy={state.policy} expiresAt={expiresAt} />
-      <p className="text-sm text-[color:var(--color-ink-soft)]">
+      <p className="text-sm text-[color:var(--color-text-soft)]">
         Your device will create a passkey for Trusty Squire on the first sign — no separate setup
         step.
       </p>
       {error !== null ? (
         <div className="space-y-2">
-          <p role="alert" className="text-[color:var(--color-wine)] text-sm">
+          <p role="alert" className="text-[color:var(--color-accent)] text-sm">
             {error}
           </p>
           <VouchflowDiagnostics err={errorObj} />

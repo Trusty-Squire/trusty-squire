@@ -16,8 +16,8 @@
 // `update` event in clients. sw-register.ts handles the "new version
 // available, reload to update" prompt.
 
-const SHELL_VERSION = "v1.0.0";
-const RUNTIME_VERSION = "v1.0.0";
+const SHELL_VERSION = "v1.1.0";
+const RUNTIME_VERSION = "v1.1.0";
 
 const SHELL_CACHE = `squire-shell-${SHELL_VERSION}`;
 const RUNTIME_CACHE = `squire-runtime-${RUNTIME_VERSION}`;

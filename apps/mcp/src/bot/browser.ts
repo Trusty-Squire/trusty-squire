@@ -1571,16 +1571,16 @@ export interface InteractiveElement {
 // drift (F3 Issue 8). OAuth provider names go firmly negative so the
 // bot never wanders into a Google/GitHub login dead end.
 //
-// `oauthProvider` (T6/T13) inverts that for the requested provider:
-// when an OAuth-first signup is requested, the "Sign in with
-// <provider>" affordance is the PRIMARY target, not a dead end — so it
-// must score positive enough to survive inventory ranking/capping.
-// Stated as a rule, not arithmetic (spec refinement): under OAuth-first
-// the provider's button outranks any form field. Only the REQUESTED
-// provider flips positive; the others stay negative.
+// `oauthProviders` (T6/T13 + auto-prefer) inverts that for OAuth-
+// candidate providers: the "Sign in with <provider>" affordance is a
+// PRIMARY target, not a dead end — so it must score positive enough to
+// survive inventory ranking/capping. Stated as a rule, not arithmetic:
+// a candidate provider's button outranks any form field. Only the
+// candidate providers flip positive; every other OAuth/SSO button
+// stays negative.
 export function scoreSignupButton(
   text: string,
-  oauthProvider?: OAuthProviderId,
+  oauthProviders?: readonly OAuthProviderId[],
 ): number {
   const t = text.toLowerCase();
   let score = 0;
@@ -1598,9 +1598,12 @@ export function scoreSignupButton(
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
   if (t.includes("continue")) score += 2;
-  if (oauthProvider !== undefined && new RegExp(`\\b${oauthProvider}\\b`).test(t)) {
-    // OAuth-first: the requested provider's button is the goal. Score
-    // it above every form-field-class button so ranking never caps it out.
+  if (
+    oauthProviders !== undefined &&
+    oauthProviders.some((p) => new RegExp(`\\b${p}\\b`).test(t))
+  ) {
+    // OAuth-first: a candidate provider's button is the goal. Score it
+    // above every form-field-class button so ranking never caps it out.
     score += 50;
   } else if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso|saml)\b/.test(t)) {
     // OAuth / SSO buttons are submit-typed too — the provider name is
@@ -1621,7 +1624,7 @@ export function scoreSignupButton(
 export function rankAndCapInventory(
   elements: readonly InteractiveElement[],
   buttonCap = 25,
-  oauthProvider?: OAuthProviderId,
+  oauthProviders?: readonly OAuthProviderId[],
 ): { inventory: InteractiveElement[]; buttonsDropped: number } {
   const isButtonish = (e: InteractiveElement): boolean =>
     e.tag === "button" ||
@@ -1636,7 +1639,7 @@ export function rankAndCapInventory(
       e,
       score: scoreSignupButton(
         `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
-        oauthProvider,
+        oauthProviders,
       ),
     }))
     .sort((a, b) => b.score - a.score);

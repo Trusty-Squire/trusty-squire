@@ -1,53 +1,87 @@
 @import "tailwindcss";
 
+/*
+ * Trusty Squire design tokens — dark-first (Linear/Obsidian direction).
+ * See DESIGN.md for the full system. Single source of truth: every
+ * component references these via var(--color-*) / var(--font-*).
+ */
 @theme {
-  --color-wine: #8a1a30;
-  --color-wine-deep: #6b1326;
-  --color-mustard: #d4a82c;
-  --color-mustard-light: #e0bb44;
-  --color-cream: #f3ead7;
-  --color-cream-soft: #fbf6e8;
-  --color-amber-black: #2c2008;
-  --color-ink-soft: rgba(44, 32, 8, 0.65);
-  --color-ink-muted: rgba(44, 32, 8, 0.4);
-  --color-rule: rgba(44, 32, 8, 0.12);
+  /* Canvas — near-black, layered */
+  --color-bg: #0d0d10;
+  --color-surface: #161619;
+  --color-surface-raised: #1e1e23;
 
-  --font-display: var(--font-fraunces), Georgia, serif;
-  --font-body: var(--font-inter), -apple-system, BlinkMacSystemFont, sans-serif;
+  /* Hairline borders */
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-strong: rgba(255, 255, 255, 0.14);
+
+  /* Text */
+  --color-text: #ededef;
+  --color-text-soft: rgba(237, 237, 239, 0.64);
+  --color-text-muted: rgba(237, 237, 239, 0.52);
+
+  /* Accent — wine, lifted for legibility on near-black. The one accent;
+     the medieval hint lives here and in the shield mark, nowhere else.
+     `accent`/`accent-hover` are text-safe (WCAG AA 4.5:1 on surface);
+     `accent-fill`/`accent-fill-hover` are the darker wines that carry
+     white button text (white stays >=4.5:1 on them). */
+  --color-accent: #dd5266;
+  --color-accent-hover: #e8697b;
+  --color-accent-fill: #8a1a30;
+  --color-accent-fill-hover: #cf3a52;
+  --color-accent-contrast: #ffffff;
+
+  --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-html,
-body {
-  background-color: var(--color-cream-soft);
-  color: var(--color-amber-black);
-  font-family: var(--font-body);
+/*
+ * Base element styles MUST live in @layer base. Tailwind v4 puts its
+ * utilities in @layer utilities; unlayered rules beat ALL layered ones,
+ * so a bare `a { color }` would override every `text-*` utility on
+ * links. Inside @layer base, utilities correctly win.
+ */
+@layer base {
+  html,
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+
+  a {
+    color: var(--color-accent);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--color-accent-hover);
+  }
+
+  button {
+    font: inherit;
+  }
 }
 
-h1,
-h2,
-h3,
-h4 {
-  font-family: var(--font-display);
-  letter-spacing: -0.01em;
-}
-
-a {
-  color: var(--color-wine);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-a:hover {
-  color: var(--color-wine-deep);
-}
-
-button {
-  font: inherit;
+/* Unlayered on purpose — these should win over utilities. */
+::selection {
+  background: var(--color-accent-fill);
+  color: #fff;
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-wine);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 4px;
 }

@@ -28,6 +28,92 @@ interface MachineTokenRow {
   asn_country?: string | null;
 }
 
+// ── account account-layer row shapes ──────────────────────────
+// Hand-typed structural rows for the account/session/agent stores,
+// matching the new Prisma models. Same narrow-surface discipline as
+// MachineTokenRow above.
+
+interface AccountRow {
+  id: string;
+  email: string;
+  display_name: string;
+  default_vault: string | null;
+  created_at: Date;
+}
+
+interface OAuthIdentityRow {
+  id: string;
+  account_id: string;
+  provider: string;
+  provider_user_id: string;
+  email: string;
+  created_at: Date;
+}
+
+interface DeviceRow {
+  id: string;
+  account_id: string;
+  first_seen_at: Date;
+  last_seen_at: Date;
+  platform: string;
+  revoked_at: Date | null;
+}
+
+interface ActiveMandateRow {
+  account_id: string;
+  mandate: unknown;
+  signed_by_device: string;
+  vouchflow_device_token: string;
+  session_id: string;
+  installed_at: Date;
+}
+
+interface WebSessionRow {
+  id: string;
+  account_id: string;
+  jwt_id: string;
+  issued_at: Date;
+  last_active_at: Date;
+  absolute_expires_at: Date;
+  revoked_at: Date | null;
+  revocation_reason: string | null;
+  ip: string | null;
+  user_agent: string | null;
+}
+
+interface AgentSessionRow {
+  id: string;
+  account_id: string;
+  token_hash: string;
+  agent_identity: string | null;
+  agent_version: string | null;
+  issued_at: Date;
+  expires_at: Date;
+  last_used_at: Date | null;
+  use_count: number;
+  revoked_at: Date | null;
+  revocation_reason: string | null;
+}
+
+interface CredentialRow {
+  id: string;
+  reference: string;
+  account_id: string;
+  subscription_id: string;
+  type: string;
+  env_var_suggestion: string | null;
+  ciphertext: Buffer;
+  encrypted_dek: Buffer;
+  account_kek_blob: Buffer;
+  algorithm: string;
+  metadata: unknown;
+  rotated_at: Date | null;
+  retrieval_count: number;
+  last_retrieved_at: Date | null;
+  deleted_at: Date | null;
+  created_at: Date;
+}
+
 export interface ApiPrismaClient {
   machineToken: {
     create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
@@ -77,6 +163,78 @@ export interface ApiPrismaClient {
   };
   receivedEmail?: {
     updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+
+  // ── account account layer ─────────────────────────────────────
+  account: {
+    create(args: { data: Record<string, unknown> }): Promise<AccountRow>;
+    findUnique(args: {
+      where: { id: string } | { email: string };
+    }): Promise<AccountRow | null>;
+  };
+  oAuthIdentity: {
+    create(args: { data: Record<string, unknown> }): Promise<OAuthIdentityRow>;
+    findUnique(args: {
+      where: Record<string, unknown>;
+    }): Promise<OAuthIdentityRow | null>;
+  };
+  device: {
+    upsert(args: {
+      where: { id: string };
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    }): Promise<DeviceRow>;
+    findMany(args: { where: Record<string, unknown> }): Promise<DeviceRow[]>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+  };
+  activeMandate: {
+    upsert(args: {
+      where: { account_id: string };
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    }): Promise<ActiveMandateRow>;
+    findUnique(args: {
+      where: { account_id: string };
+    }): Promise<ActiveMandateRow | null>;
+  };
+  webSession: {
+    create(args: { data: Record<string, unknown> }): Promise<WebSessionRow>;
+    findUnique(args: { where: { jwt_id: string } }): Promise<WebSessionRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+  };
+  agentSession: {
+    create(args: { data: Record<string, unknown> }): Promise<AgentSessionRow>;
+    findUnique(args: {
+      where: { token_hash: string };
+    }): Promise<AgentSessionRow | null>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<AgentSessionRow[]>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+  };
+  credential: {
+    create(args: { data: Record<string, unknown> }): Promise<CredentialRow>;
+    findFirst(args: {
+      where: Record<string, unknown>;
+    }): Promise<CredentialRow | null>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<CredentialRow[]>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
   };
 }
 
