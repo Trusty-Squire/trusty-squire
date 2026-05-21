@@ -428,6 +428,27 @@ multi-step / withholding, out of F3's scope).
   picks, fail with `planning_failed: stuck on <selector>` instead
   of looping.
 
+- [ ] **F16 — Blind-consent iter-2 ordering bug. [P1]** Surfaced
+  2026-05-20 by Railway OAuth. When `allow_blind_oauth_consent=true`
+  fires on iter 1, `consentAlreadyApproved` is set correctly — but
+  iter 2's blind-consent branch runs BEFORE the
+  `consentAlreadyApproved` check, so when the post-auth intermediate
+  page (still classified as "consent" by the GitHub classifier)
+  re-enters the gate, the bot tries to click Authorize again, fails,
+  and aborts. Fix: swap the order — check `consentAlreadyApproved`
+  first, then `allowBlindOAuthConsent`. ~5 line patch in
+  `runOAuthFlow`. Proven by the GitHub authorization-success email
+  arriving despite the "aborted" status the bot reported.
+
+- [ ] **F17 — Detect already-signed-in dashboard state. [P2]**
+  After a successful OAuth bind, returning to `<service>/login` may
+  redirect to the dashboard with no sign-in affordance. Today the
+  bot's OAuth-first scan fails the retries and bails with
+  `oauth_required`. Should instead detect "no sign-in widget AND
+  we appear logged in" → jump straight to post-verify navigation
+  to find the API token (the existing post-OAuth flow that Sentry,
+  OpenRouter, etc. use).
+
 - [ ] **F15 — Inventory selector disambiguation for repeated
   link text. [P2]** Same Railway run: the "Email" text appeared
   twice on the page — once as the body's "Log in using email"
