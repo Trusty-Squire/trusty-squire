@@ -275,6 +275,16 @@ export interface SignupResult {
   // different signal from one on a bare datacenter IP.
   proxied?: boolean;
 
+  // Skill promoter (0.7.0): when a SignupResult was produced by
+  // replaying a Tier-2 learned skill (vs the universal bot), these
+  // fields identify the skill so the caller can include them in the
+  // tool response. `via: "bot"` is the default (universal bot path);
+  // `via: "skill"` means the registry served a skill and replaySkill
+  // executed it successfully end-to-end.
+  via?: "bot" | "skill";
+  skill_id?: string;
+  skill_version?: string;
+
   // Captcha encountered during the run. Populated only when the agent
   // hit at least one captcha widget — null/undefined otherwise. The
   // MCP tool layer reads this to emit a CaptchaEvent.

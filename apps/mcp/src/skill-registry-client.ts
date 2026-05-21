@@ -1,0 +1,363 @@
+// skill-registry-client.ts — HTTP client for the Tier-2 skill
+// registry. Sits between the MCP-side router (provision-any.ts) and
+// the registry-api endpoints added in Phase 4. Three responsibilities:
+//
+//   1. Fetch the active skill for a service (`GET /skills/:service`),
+//      validate the signed payload via the SkillSchema, and return a
+//      parsed `Skill` or null. Failures fail-open — registry
+//      unreachable or returning bad data must never block a signup,
+//      it just means the router falls through to the universal bot.
+//
+//   2. Post replay outcomes back (`POST /skills/:skill_id/replay-
+//      outcome`) so the registry can age skills, demote bad ones,
+//      and surface counters on subsequent fetches. Fire-and-forget:
+//      the router doesn't await success.
+//
+//   3. Carry the `provision_id` correlation ID through both calls so
+//      a debug session can trace a single signup attempt all the way
+//      from MCP tool entry to registry write (D8).
+//
+// **Sensitive to test environments.** Production sets the registry
+// URL via env; tests inject a base URL pointing at a Fastify inject
+// adapter. The exported client class accepts both.
+//
+// LRU cache lives here so the MCP process amortises registry calls
+// across multiple signups (C6, ~5min TTL). Cache-bust on a failed
+// replay so the next attempt re-fetches in case a remediation was
+// just published.
+
+import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
+
+// ── Public API ───────────────────────────────────────────────────────
+
+export interface SkillRegistryClientOpts {
+  /** Base URL for the registry-api. e.g. https://registry.trustysquire.com */
+  baseUrl: string;
+  /**
+   * Request timeout in ms. Default 3s — short enough that a
+   * registry outage doesn't add measurable latency to a signup. We
+   * fail open well before this bites in practice.
+   */
+  timeoutMs?: number;
+  /**
+   * Account ID for replay-outcome attribution + rate-limit
+   * accounting. In production this is the MCP user's account; tests
+   * usually inject a fixed value.
+   */
+  accountId: string;
+  /**
+   * Cache TTL in ms. Default 5 minutes. Cache entries past their TTL
+   * are dropped on the next get(). Set to 0 to disable caching
+   * (tests use this for predictable behaviour).
+   */
+  cacheTtlMs?: number;
+  /**
+   * Override the global `fetch`. Tests inject a function that
+   * dispatches through Fastify's inject() helper without going
+   * through the network.
+   */
+  fetchFn?: typeof globalThis.fetch;
+}
+
+export interface FetchSkillResult {
+  /** Parsed skill, ready for the replay engine. */
+  skill: Skill;
+  /** Signed_by from the response — for audit log. */
+  signed_by: string;
+  /** Server's view of the counters at fetch time. */
+  counters: {
+    replays_succeeded: number;
+    replays_failed: number;
+    consecutive_failures: number;
+  };
+}
+
+export type SkillFetchOutcome =
+  | { kind: "found"; result: FetchSkillResult }
+  | { kind: "not_found" }
+  | { kind: "unavailable"; reason: string };
+
+export interface PostReplayOutcomeInput {
+  skill_id: string;
+  outcome:
+    | "ok"
+    | "step_failed"
+    | "validator_failed"
+    | "extraction_failed"
+    | "needs_login"
+    | "skill_demoted"
+    | "dry_pass";
+  reason: string;
+  step_index?: number;
+  /** Carry the correlation ID through to the registry (D8). */
+  provision_id: string;
+}
+
+export interface PostReplayOutcomeResult {
+  kind: "ok" | "rate_limited" | "skill_not_found" | "unavailable";
+  reason?: string;
+  demoted?: boolean;
+}
+
+// ── Client ───────────────────────────────────────────────────────────
+
+interface CacheEntry {
+  result: FetchSkillResult;
+  expiresAt: number;
+}
+
+export class SkillRegistryClient {
+  private readonly baseUrl: string;
+  private readonly timeoutMs: number;
+  private readonly accountId: string;
+  private readonly cacheTtlMs: number;
+  private readonly fetchFn: typeof globalThis.fetch;
+  private readonly cache: Map<string, CacheEntry>;
+
+  constructor(opts: SkillRegistryClientOpts) {
+    this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
+    this.timeoutMs = opts.timeoutMs ?? 3000;
+    this.accountId = opts.accountId;
+    this.cacheTtlMs = opts.cacheTtlMs ?? 5 * 60 * 1000;
+    this.fetchFn = opts.fetchFn ?? globalThis.fetch;
+    this.cache = new Map();
+  }
+
+  /**
+   * Look up the active skill for a service. Returns:
+   *
+   *   - `{kind:"found",result}`   — registry returned a valid signed skill
+   *   - `{kind:"not_found"}`      — no active skill for this service
+   *   - `{kind:"unavailable",..}` — network error, timeout, malformed
+   *                                  response, schema-invalid payload,
+   *                                  or any other reason the client
+   *                                  couldn't produce a parseable skill
+   *
+   * Callers MUST treat `unavailable` as "fall through to the universal
+   * bot." This client never throws on transport-level failures.
+   */
+  async fetchActiveSkill(
+    service: string,
+    provisionId: string,
+  ): Promise<SkillFetchOutcome> {
+    // Cache check first. A registry-unavailable outcome is NOT cached
+    // — we want the next call to try again.
+    const cached = this.readCache(service);
+    if (cached !== null) {
+      return { kind: "found", result: cached };
+    }
+
+    const url = `${this.baseUrl}/skills/${encodeURIComponent(service)}`;
+    let response: Response;
+    try {
+      response = await this.withTimeout(
+        this.fetchFn(url, {
+          method: "GET",
+          headers: {
+            "x-account-id": this.accountId,
+            "x-provision-id": provisionId,
+          },
+        }),
+      );
+    } catch (err) {
+      return {
+        kind: "unavailable",
+        reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    if (response.status === 404) {
+      return { kind: "not_found" };
+    }
+
+    if (!response.ok) {
+      return {
+        kind: "unavailable",
+        reason: `registry returned HTTP ${response.status}`,
+      };
+    }
+
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (err) {
+      return {
+        kind: "unavailable",
+        reason: `malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    // Defensive parsing. The registry-api should always return this
+    // shape, but a version mismatch or bad deploy could send something
+    // we don't recognise — fail open rather than crash.
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("skill" in body) ||
+      !("signed_by" in body)
+    ) {
+      return {
+        kind: "unavailable",
+        reason: "response missing skill or signed_by fields",
+      };
+    }
+
+    const envelope = body as {
+      ok?: boolean;
+      skill: unknown;
+      signed_by: string;
+      counters?: {
+        replays_succeeded?: number;
+        replays_failed?: number;
+        consecutive_failures?: number;
+      };
+    };
+
+    let skill: Skill;
+    try {
+      skill = parseSkill(envelope.skill);
+    } catch (err) {
+      return {
+        kind: "unavailable",
+        reason: `skill failed schema validation: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    const result: FetchSkillResult = {
+      skill,
+      signed_by: envelope.signed_by,
+      counters: {
+        replays_succeeded: envelope.counters?.replays_succeeded ?? 0,
+        replays_failed: envelope.counters?.replays_failed ?? 0,
+        consecutive_failures: envelope.counters?.consecutive_failures ?? 0,
+      },
+    };
+
+    this.writeCache(service, result);
+    return { kind: "found", result };
+  }
+
+  /**
+   * Post a replay outcome back to the registry. Fire-and-forget at
+   * the caller level — failures here don't affect the signup result,
+   * they just mean the registry's view of this skill's health doesn't
+   * get the latest data point.
+   */
+  async postReplayOutcome(input: PostReplayOutcomeInput): Promise<PostReplayOutcomeResult> {
+    const url = `${this.baseUrl}/skills/${encodeURIComponent(input.skill_id)}/replay-outcome`;
+    let response: Response;
+    try {
+      response = await this.withTimeout(
+        this.fetchFn(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-account-id": this.accountId,
+            "x-provision-id": input.provision_id,
+          },
+          body: JSON.stringify({
+            outcome: input.outcome,
+            reason: input.reason,
+            ...(input.step_index !== undefined ? { step_index: input.step_index } : {}),
+          }),
+        }),
+      );
+    } catch (err) {
+      return {
+        kind: "unavailable",
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    if (response.status === 429) {
+      return { kind: "rate_limited" };
+    }
+    if (response.status === 404) {
+      return { kind: "skill_not_found" };
+    }
+    if (!response.ok) {
+      return {
+        kind: "unavailable",
+        reason: `registry returned HTTP ${response.status}`,
+      };
+    }
+
+    // On success we may also learn the skill was just auto-demoted.
+    // Surface that so the router can cache-bust and log appropriately.
+    try {
+      const body = (await response.json()) as { demoted?: boolean };
+      return { kind: "ok", demoted: body.demoted === true };
+    } catch {
+      return { kind: "ok" };
+    }
+  }
+
+  /**
+   * Drop a cached skill entry so the next fetch re-queries the
+   * registry. Used after a replay failure to make sure a freshly-
+   * published correction (skill v2, say) is picked up immediately.
+   */
+  invalidateCache(service: string): void {
+    this.cache.delete(service);
+  }
+
+  // ── Internals ──────────────────────────────────────────────────────
+
+  private readCache(service: string): FetchSkillResult | null {
+    if (this.cacheTtlMs === 0) return null;
+    const entry = this.cache.get(service);
+    if (entry === undefined) return null;
+    if (entry.expiresAt < Date.now()) {
+      this.cache.delete(service);
+      return null;
+    }
+    return entry.result;
+  }
+
+  private writeCache(service: string, result: FetchSkillResult): void {
+    if (this.cacheTtlMs === 0) return;
+    this.cache.set(service, {
+      result,
+      expiresAt: Date.now() + this.cacheTtlMs,
+    });
+  }
+
+  private async withTimeout<T>(promise: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`registry call timed out after ${this.timeoutMs}ms`)),
+        this.timeoutMs,
+      );
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+}
+
+// ── Factory + provision_id helper ───────────────────────────────────
+
+/**
+ * Build a SkillRegistryClient from env. Returns null when no registry
+ * URL is configured — callers must treat this as "skip the router
+ * tier entirely."
+ */
+export function clientFromEnv(accountId: string): SkillRegistryClient | null {
+  const baseUrl = process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+  if (baseUrl === undefined || baseUrl.trim().length === 0) return null;
+  return new SkillRegistryClient({ baseUrl, accountId });
+}
+
+/**
+ * Generate a fresh correlation ID for a single provision_any_service
+ * invocation. Encoded so log entries are easy to grep — short prefix
+ * + monotonic timestamp + random tail.
+ */
+export function generateProvisionId(): string {
+  const ts = Date.now().toString(36);
+  const tail = Math.random().toString(36).slice(2, 8);
+  return `prov_${ts}_${tail}`;
+}

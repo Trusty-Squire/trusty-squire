@@ -23,11 +23,19 @@ import {
   InboxClient,
   ProxyLLMClient,
   detectAsn,
+  BrowserController,
+  replaySkill,
   type LLMPair,
   type CaptchaVariant,
 } from "../bot/index.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
+import {
+  clientFromEnv,
+  generateProvisionId,
+  type SkillRegistryClient,
+} from "../skill-registry-client.js";
+
 
 type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
 
@@ -249,6 +257,11 @@ export const provisionAnyTool = {
     // the same millisecond would otherwise share a run_id — and, for the
     // same service, the same inbox alias.
     const runId = `mcp-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+    // Skill promoter correlation ID (D8). Distinct from runId — runId
+    // identifies the universal-bot run, provisionId spans the whole
+    // tool invocation including the registry-router phase that runs
+    // before the bot might even start.
+    const provisionId = generateProvisionId();
     let alias: string;
     try {
       alias = await inboxClient.createAlias({
@@ -315,6 +328,8 @@ export const provisionAnyTool = {
       inboxClient,
       agentSessionToken: session.agent_session_token,
       stepsSink,
+      provisionId,
+      accountId: session.account_id,
     });
 
     return {
@@ -384,6 +399,187 @@ interface RunContext {
   // Shared step trail the bot pushes into in place; check_provision_status
   // reads it for live mid-run progress (Google number-match etc.).
   stepsSink: string[];
+  // Correlation ID for the skill promoter (D8). Generated at
+  // provision_any_service entry, propagated through every registry
+  // call + bot run + vault write. Useful for forensics: one log
+  // grep finds every event tied to this signup attempt.
+  provisionId: string;
+  // The account_id the session is bound to; passed to the registry
+  // client so replay-outcome writes are attributable.
+  accountId: string;
+}
+
+// Skill promoter — Tier 2 router (0.7.0).
+//
+// Before falling through to the universal bot (Tier 1), try the
+// registry: if there's an active learned skill for this service,
+// fetch it, run replaySkill in dry mode first (cheap pre-flight),
+// then full mode if dry passes. Post replay-outcome both ways so the
+// registry can track health + auto-demote.
+//
+// Returns:
+//   - SignupResult with `via: "skill"` on full success — caller
+//     short-circuits the universal bot.
+//   - `null` for ANY other reason: no registry configured, registry
+//     unavailable, skill not found, dry pass failed, full replay
+//     failed, captcha hit during replay, needs_login. Caller falls
+//     through to the universal bot path.
+//
+// This function is FAIL-OPEN by design (D4). A registry that returns
+// garbage, times out, or 500s never blocks a signup — the worst case
+// is one extra second of latency before the bot kicks in.
+async function tryReplayLearnedSkill(
+  client: SkillRegistryClient,
+  input: ProvisionAnyInput,
+  ctx: RunContext,
+): Promise<SignupResult | null> {
+  const serviceSlug = input.service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const fetched = await client.fetchActiveSkill(serviceSlug, ctx.provisionId);
+
+  if (fetched.kind !== "found") {
+    return null;
+  }
+
+  const { skill } = fetched.result;
+  // Surface that the router engaged so check_provision_status's
+  // recent_steps log shows the skill attempt before any bot output.
+  ctx.stepsSink.push(`[skill-promoter] fetched skill ${skill.skill_id} v${skill.version} for ${serviceSlug}`);
+
+  const browser = new BrowserController({ humanize: true });
+  let dryOutcome: Awaited<ReturnType<typeof replaySkill>>;
+  try {
+    await browser.start();
+    // Dry first — D3 default. Walks every step except the
+    // credential-creating click, so if the page diverged we abort
+    // cheaply before touching the user's account.
+    dryOutcome = await replaySkill({
+      skill,
+      browser,
+      mode: "dry",
+      templateValues: {
+        EMAIL_ALIAS: ctx.alias,
+        TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
+      },
+    });
+  } catch (err) {
+    ctx.stepsSink.push(`[skill-promoter] replay crashed: ${err instanceof Error ? err.message : String(err)}`);
+    void client.postReplayOutcome({
+      skill_id: skill.skill_id,
+      outcome: "step_failed",
+      reason: `replay engine crashed: ${err instanceof Error ? err.message : String(err)}`,
+      provision_id: ctx.provisionId,
+    });
+    client.invalidateCache(serviceSlug);
+    try { await browser.close(); } catch { /* noop */ }
+    return null;
+  }
+
+  if (dryOutcome.kind !== "dry_pass") {
+    // Dry-mode found a problem. Record + fall through.
+    ctx.stepsSink.push(`[skill-promoter] dry replay failed: ${dryOutcome.kind}`);
+    const outcomeKind = dryOutcome.kind === "needs_login"
+      ? "needs_login"
+      : dryOutcome.kind === "validator_failed"
+        ? "validator_failed"
+        : dryOutcome.kind === "extraction_failed"
+          ? "extraction_failed"
+          : "step_failed";
+    void client.postReplayOutcome({
+      skill_id: skill.skill_id,
+      outcome: outcomeKind,
+      reason: `dry-mode pre-flight failed: ${JSON.stringify(dryOutcome)}`,
+      ...("stepIndex" in dryOutcome && typeof dryOutcome.stepIndex === "number"
+        ? { step_index: dryOutcome.stepIndex }
+        : {}),
+      provision_id: ctx.provisionId,
+    });
+    client.invalidateCache(serviceSlug);
+    try { await browser.close(); } catch { /* noop */ }
+    return null;
+  }
+
+  // Dry passed → restart the browser fresh and do full replay. We
+  // restart rather than reusing because the dry-mode walk left the
+  // browser at some intermediate page; full replay starts at step 0
+  // again.
+  try { await browser.close(); } catch { /* noop */ }
+  const fullBrowser = new BrowserController({ humanize: true });
+  let fullOutcome: Awaited<ReturnType<typeof replaySkill>>;
+  try {
+    await fullBrowser.start();
+    fullOutcome = await replaySkill({
+      skill,
+      browser: fullBrowser,
+      mode: "full",
+      templateValues: {
+        EMAIL_ALIAS: ctx.alias,
+        TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
+      },
+    });
+  } catch (err) {
+    ctx.stepsSink.push(`[skill-promoter] full replay crashed: ${err instanceof Error ? err.message : String(err)}`);
+    void client.postReplayOutcome({
+      skill_id: skill.skill_id,
+      outcome: "step_failed",
+      reason: `full replay engine crashed: ${err instanceof Error ? err.message : String(err)}`,
+      provision_id: ctx.provisionId,
+    });
+    client.invalidateCache(serviceSlug);
+    try { await fullBrowser.close(); } catch { /* noop */ }
+    return null;
+  }
+
+  try { await fullBrowser.close(); } catch { /* noop */ }
+
+  if (fullOutcome.kind !== "ok") {
+    ctx.stepsSink.push(`[skill-promoter] full replay failed: ${fullOutcome.kind}`);
+    const outcomeKind = fullOutcome.kind === "needs_login"
+      ? "needs_login"
+      : fullOutcome.kind === "validator_failed"
+        ? "validator_failed"
+        : fullOutcome.kind === "extraction_failed"
+          ? "extraction_failed"
+          : "step_failed";
+    void client.postReplayOutcome({
+      skill_id: skill.skill_id,
+      outcome: outcomeKind,
+      reason: `full replay failed: ${JSON.stringify(fullOutcome)}`,
+      ...("stepIndex" in fullOutcome && typeof fullOutcome.stepIndex === "number"
+        ? { step_index: fullOutcome.stepIndex }
+        : {}),
+      provision_id: ctx.provisionId,
+    });
+    client.invalidateCache(serviceSlug);
+    return null;
+  }
+
+  // Full replay succeeded — credential in hand. Post the success
+  // outcome, build a SignupResult-shaped object the rest of the
+  // pipeline can consume.
+  ctx.stepsSink.push(`[skill-promoter] replay OK — credential extracted via ${fullOutcome.via}`);
+  void client.postReplayOutcome({
+    skill_id: skill.skill_id,
+    outcome: "ok",
+    reason: `extracted via ${fullOutcome.via}`,
+    provision_id: ctx.provisionId,
+  });
+
+  // The skill's first credential spec carries the env_var_suggestion.
+  // That's the key under which the value lands in the response —
+  // mirrors what the bot itself does for api_key extractions.
+  const credSpec = skill.credentials[0];
+  const credentialKey = credSpec?.env_var_suggestion?.toLowerCase() ?? "api_key";
+
+  return {
+    success: true,
+    credentials: {
+      [credentialKey]: fullOutcome.credential,
+    },
+    steps: [...ctx.stepsSink],
+    via: "skill",
+    skill_id: skill.skill_id,
+    skill_version: skill.version,
+  };
 }
 
 // Runs the signup to completion and stores the final tool response in
@@ -395,6 +591,30 @@ async function runSignupTask(
 ): Promise<void> {
   let response: Record<string, unknown>;
   try {
+    // ── Skill promoter Tier-2 router ────────────────────────────────
+    // Before launching the universal bot, check the registry for an
+    // active learned skill. If one exists and replays successfully,
+    // skip the bot entirely. Fail-open: any registry trouble or
+    // replay failure falls through transparently.
+    const registry = clientFromEnv(ctx.accountId);
+    if (registry !== null) {
+      const replayed = await tryReplayLearnedSkill(registry, input, ctx);
+      if (replayed !== null) {
+        response = buildSignupResponse(input, replayed);
+        // Persist to vault same as the bot path — credentials are real.
+        if (replayed.success && replayed.credentials !== undefined) {
+          void postCredentialsToVault(
+            ctx.apiBase,
+            ctx.agentSessionToken,
+            input.service,
+            replayed.credentials,
+          );
+        }
+        const record = runStore.get(runId);
+        if (record !== undefined) record.result = response;
+        return;
+      }
+    }
     // The user pays nothing for LLM calls — the operator's OpenRouter
     // key handles them server-side, gated by the machine token's rolling
     // rate limit. Cheap tier is primary; premium is the fallback.
@@ -506,6 +726,14 @@ export function buildSignupResponse(
       service: input.service,
       credentials: result.credentials,
       steps: result.steps,
+      // Skill promoter (0.7.0): expose via + skill_id + skill_version
+      // so the caller can tell whether the universal bot ran or a
+      // Tier-2 learned skill served the result. Useful for the
+      // operator console and for the "did we save an LLM call?"
+      // telemetry pass in Phase 6.
+      via: result.via ?? "bot",
+      ...(result.skill_id !== undefined ? { skill_id: result.skill_id } : {}),
+      ...(result.skill_version !== undefined ? { skill_version: result.skill_version } : {}),
       message: `Successfully signed up for ${input.service}. Credentials are in this response — show them to the user (or save to their .env).`,
     };
   }
