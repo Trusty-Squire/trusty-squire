@@ -5,9 +5,11 @@
 
 import { randomUUID } from "node:crypto";
 import type {
+  InsertCaptureInput,
   InsertSkillInput,
   RecordReplayInput,
   RecordReplayResult,
+  SkillCaptureRecord,
   SkillReplayRecord,
   SkillStore,
   SkillStoreRecord,
@@ -41,20 +43,37 @@ export class InMemorySkillStore implements SkillStore {
     if (this.skills.has(skill.skill_id)) {
       throw new SkillConflictError(skill.skill_id);
     }
+
+    // T26 — Human-review gate (C11). If the same service already has
+    // an active skill and the new submission changes signup_url OR
+    // oauth_provider (the two phishing-vector fields), force status
+    // to pending-review. Other field edits (steps, credentials,
+    // validators) go straight to active. Approval is via a separate
+    // operator action (POST /skills/:skill_id/approve-review).
+    let effectiveStatus = skill.status;
+    if (skill.status === "active") {
+      const existingActive = await this.findActiveByService(skill.service);
+      if (existingActive !== null && triggersHumanReview(existingActive.payload, skill)) {
+        effectiveStatus = "pending-review";
+      }
+    }
+
     // Deep-clone the payload so subsequent mutations to the stored
     // record's counters don't bleed back into the caller's Skill
     // object — Zod-parsed objects share references for nested
     // structures, which would otherwise let a test's fixture see
     // mutations from this store's bookkeeping.
+    const payload = JSON.parse(JSON.stringify(skill)) as typeof skill;
+    payload.status = effectiveStatus;
     const record: SkillStoreRecord = {
       skill_id: skill.skill_id,
       service: skill.service,
       version: skill.version,
-      payload: JSON.parse(JSON.stringify(skill)) as typeof skill,
+      payload,
       signature,
       signed_at,
       signed_by,
-      status: skill.status,
+      status: effectiveStatus,
       replays_succeeded: skill.replays_succeeded,
       replays_failed: skill.replays_failed,
       consecutive_failures: skill.consecutive_failures,
@@ -64,6 +83,33 @@ export class InMemorySkillStore implements SkillStore {
       deleted_at: skill.deleted_at ? new Date(skill.deleted_at) : null,
     };
     this.skills.set(skill.skill_id, record);
+    return record;
+  }
+
+  async approveReview(skill_id: string): Promise<SkillStoreRecord | null> {
+    const record = this.skills.get(skill_id);
+    if (record === undefined) return null;
+    if (record.status !== "pending-review") {
+      // Idempotent — already approved or in another state, no change.
+      return record;
+    }
+    // Promote to active AND supersede any older active row for the
+    // same service (mirrors the natural supersession path).
+    const now = new Date();
+    for (const other of this.skills.values()) {
+      if (
+        other.skill_id !== skill_id &&
+        other.service === record.service &&
+        other.status === "active"
+      ) {
+        other.status = "superseded";
+        other.superseded_at = now;
+        other.payload.status = "superseded";
+        other.payload.superseded_at = now.toISOString();
+      }
+    }
+    record.status = "active";
+    record.payload.status = "active";
     return record;
   }
 
@@ -165,4 +211,67 @@ export class InMemorySkillStore implements SkillStore {
       (r) => r.account_id === account_id && r.replayed_at >= since,
     ).length;
   }
+
+  // ── T19: capture sidecars ────────────────────────────────────────
+
+  private captures: Map<string, SkillCaptureRecord> = new Map();
+
+  async insertCapture(input: InsertCaptureInput): Promise<SkillCaptureRecord> {
+    const existing = this.captures.get(input.content_hash);
+    if (existing !== undefined) {
+      // Idempotent — same content already uploaded. Return as-is.
+      return existing;
+    }
+    const payload = JSON.parse(JSON.stringify(input.payload)) as unknown;
+    const byteSize = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    const record: SkillCaptureRecord = {
+      content_hash: input.content_hash,
+      skill_id: input.skill_id,
+      run_id: input.run_id,
+      round_index: input.round_index,
+      payload,
+      byte_size: byteSize,
+      uploaded_at: new Date(),
+      uploaded_by: input.uploaded_by,
+    };
+    this.captures.set(input.content_hash, record);
+    return record;
+  }
+
+  async listCapturesForSkill(skill_id: string): Promise<SkillCaptureRecord[]> {
+    const matching: SkillCaptureRecord[] = [];
+    for (const record of this.captures.values()) {
+      if (record.skill_id === skill_id) matching.push(record);
+    }
+    matching.sort((a, b) => {
+      const runCmp = a.run_id.localeCompare(b.run_id);
+      if (runCmp !== 0) return runCmp;
+      return a.round_index - b.round_index;
+    });
+    return matching;
+  }
+
+  async findCaptureByHash(content_hash: string): Promise<SkillCaptureRecord | null> {
+    return this.captures.get(content_hash) ?? null;
+  }
+}
+
+// ── T26 helper ───────────────────────────────────────────────────────
+
+/**
+ * Returns true when a proposed skill update should hit the
+ * pending-review gate instead of going active immediately. Triggers
+ * on the two phishing-vector fields: signup_url and oauth_provider.
+ * Everything else (steps, credential validators, etc.) goes straight
+ * to active.
+ *
+ * Exported for unit testing.
+ */
+export function triggersHumanReview(
+  existing: { signup_url: string; oauth_provider: "google" | "github" | null },
+  incoming: { signup_url: string; oauth_provider: "google" | "github" | null },
+): boolean {
+  if (existing.signup_url !== incoming.signup_url) return true;
+  if (existing.oauth_provider !== incoming.oauth_provider) return true;
+  return false;
 }

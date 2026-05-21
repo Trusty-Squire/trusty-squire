@@ -91,6 +91,13 @@ export interface ReplayInput {
    * is probably wrong.
    */
   templateValues?: Record<string, string>;
+  /**
+   * Override the global `fetch` used for the sentinel HTTP check
+   * (C5). Production leaves this undefined (uses globalThis.fetch).
+   * Tests inject a mock to avoid real network. Skills without a
+   * sentinel_http_check configured never invoke this.
+   */
+  fetchFn?: typeof globalThis.fetch;
 }
 
 export interface LLMFallbackInput {
@@ -223,7 +230,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // best-guess, and the credential validator catches the
         // Railway-class "wrong UUID on the page" failure (C5).
         const credSpec = skill.credentials[0]!;
-        const validatorResult = validateCredential(execOutcome.value, credSpec);
+        const validatorResult = await validateCredential(execOutcome.value, credSpec, input.fetchFn);
         if (!validatorResult.ok) {
           return {
             kind: "validator_failed",
@@ -584,10 +591,11 @@ interface ValidatorFail {
   reason: string;
 }
 
-function validateCredential(
+async function validateCredential(
   value: string,
   spec: SkillCredentialSpec,
-): ValidatorOk | ValidatorFail {
+  fetchFn?: typeof globalThis.fetch,
+): Promise<ValidatorOk | ValidatorFail> {
   const validator = spec.post_extract_validator;
   if (value.length < validator.min_length) {
     return {
@@ -615,11 +623,89 @@ function validateCredential(
       // not a credential rejection. Pass through.
     }
   }
-  // sentinel_http_check intentionally NOT invoked here. It's the C5
-  // forward-compat field reserved for Phase 6 (security gates) when
-  // we wire actual HTTP probes. Skipping it now means a skill with a
-  // sentinel configured still validates by length+regex only; Phase 6
-  // adds the live HTTP check on top.
+  // T27 (C5) — sentinel HTTP check. Fire a live probe at the
+  // service's /whoami-equivalent endpoint to confirm the extracted
+  // value is the RIGHT credential, not just shape-correct. This is
+  // the wall against the Railway 0.6.13 class bug (mechanical steps
+  // succeed, wrong UUID extracted). When the sentinel isn't
+  // configured, skip — length+regex is the only gate.
+  if (validator.sentinel_http_check !== undefined) {
+    const sentinelResult = await runSentinelHttpCheck(
+      value,
+      validator.sentinel_http_check,
+      fetchFn ?? globalThis.fetch,
+    );
+    if (!sentinelResult.ok) return sentinelResult;
+  }
+  return { ok: true };
+}
+
+/**
+ * Fire the sentinel HTTP check. Presents the extracted credential as
+ * configured (bearer / basic / x-api-key / query_param), expects a
+ * 2xx response. Any other outcome (4xx, 5xx, timeout, network error)
+ * means the credential is wrong — abort the replay with
+ * validator_failed.
+ *
+ * Bounded by sentinel.timeout_ms (default 3000, range 500-10000).
+ */
+async function runSentinelHttpCheck(
+  credential: string,
+  sentinel: NonNullable<SkillCredentialSpec["post_extract_validator"]["sentinel_http_check"]>,
+  fetchFn: typeof globalThis.fetch,
+): Promise<ValidatorOk | ValidatorFail> {
+  const url = new URL(sentinel.url);
+  const headers: Record<string, string> = {};
+
+  switch (sentinel.auth_scheme) {
+    case "bearer":
+      headers["authorization"] = `Bearer ${credential}`;
+      break;
+    case "basic":
+      // Spec assumes the credential IS the full token. Standard basic
+      // would need user:pass — for skills, the bot's only credential
+      // is the API key, so we send it as user with empty password
+      // per the convention many APIs use (e.g. Stripe).
+      headers["authorization"] = `Basic ${Buffer.from(`${credential}:`).toString("base64")}`;
+      break;
+    case "header_x_api_key":
+      headers["x-api-key"] = credential;
+      break;
+    case "query_param":
+      url.searchParams.set("api_key", credential);
+      break;
+  }
+
+  const timeoutMs = sentinel.timeout_ms;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`sentinel HTTP check timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+
+  let response: Response;
+  try {
+    response = await Promise.race([
+      fetchFn(url.toString(), { method: "GET", headers }),
+      timeoutPromise,
+    ]);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `sentinel HTTP check failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+
+  if (response.status < 200 || response.status >= 300) {
+    return {
+      ok: false,
+      reason: `sentinel HTTP check rejected the credential (HTTP ${response.status}).`,
+    };
+  }
   return { ok: true };
 }
 

@@ -124,3 +124,51 @@ model SkillReplayRecord {
   @@index([skill_id, replayed_at])
   @@index([account_id, replayed_at])
 }
+
+// SkillCaptureRecord — content-hashed corpus sidecars (T19, D1). When
+// a skill is promoted from a universal-bot run, the raw onboarding-
+// capture JSONL files that produced it get uploaded here as evidence.
+// Content-hashed so re-uploads are idempotent and the same capture
+// referenced by multiple skills only takes one row of storage.
+//
+// The replay engine + operator console resolve `Skill.source_run_ids`
+// to the actual capture files via this table — without it, source_run_ids
+// would point to local-laptop dirs that won't exist months later.
+model SkillCaptureRecord {
+  // SHA-256 of the capture content, hex-lowercased. Primary key —
+  // identical content always produces the same row.
+  content_hash String   @id
+
+  // Which skill this capture contributed to. NOT a foreign key (a
+  // capture can outlive its skill, especially after deletion), but
+  // indexed for the "show me all captures for skill X" query.
+  skill_id     String
+
+  // The run_id from the universal-bot run. Matches one of the
+  // entries in Skill.source_run_ids. Indexed so a single skill's
+  // captures can be assembled.
+  run_id       String
+
+  // Which round in the capture chain. 0-indexed.
+  round_index  Int
+
+  // The raw capture JSON. Stored verbatim — the chain's prev_hash
+  // links resolve against this row's content_hash.
+  payload_json Json
+
+  // Bytes. Useful for storage budgeting and rate limiting uploads
+  // by total volume per account.
+  byte_size    Int
+
+  // When the upload happened.
+  uploaded_at  DateTime @default(now())
+
+  // Who uploaded — the account_id from x-account-id header on the
+  // POST /skills/:skill_id/captures call. Used for audit + rate
+  // limiting future uploads from the same account.
+  uploaded_by  String
+
+  @@index([skill_id])
+  @@index([skill_id, round_index])
+  @@index([run_id])
+}

@@ -566,3 +566,219 @@ describe("replaySkill — text-match disambiguation", () => {
     expect(clicks.every((c) => c.args[0] !== "a.docs")).toBe(true);
   });
 });
+
+// ── T27: sentinel HTTP check ────────────────────────────────────────
+
+describe("replaySkill — sentinel HTTP check (C5)", () => {
+  // Helper to build a fixture extraction skill with a sentinel
+  // configured. The sentinel hits a fake /whoami URL; the test's
+  // injected fetchFn decides what status comes back.
+  function skillWithSentinel(
+    sentinel: NonNullable<
+      Skill["credentials"][0]["post_extract_validator"]["sentinel_http_check"]
+    >,
+  ): Skill {
+    const skill = skillWith([
+      { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+    ]);
+    skill.credentials[0]!.post_extract_validator.sentinel_http_check = sentinel;
+    return skill;
+  }
+
+  function setupExtraction(): ReturnType<typeof stubBrowser> {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+    return b;
+  }
+
+  it("passes through when the sentinel returns 200 (bearer)", async () => {
+    const b = setupExtraction();
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers as HeadersInit);
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "bearer",
+        timeout_ms: 3000,
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(capturedHeaders?.get("authorization")).toBe(
+      "Bearer db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+    );
+  });
+
+  it("rejects the credential when the sentinel returns 401", async () => {
+    const b = setupExtraction();
+    const fetchFn = (async () =>
+      new Response("unauthorized", { status: 401 })) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "bearer",
+        timeout_ms: 3000,
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("validator_failed");
+    if (result.kind !== "validator_failed") return;
+    expect(result.reason).toMatch(/HTTP 401/);
+  });
+
+  it("rejects on sentinel timeout", async () => {
+    const b = setupExtraction();
+    const fetchFn = (() =>
+      new Promise<Response>(() => {})) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "bearer",
+        timeout_ms: 20, // very short
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("validator_failed");
+    if (result.kind !== "validator_failed") return;
+    expect(result.reason).toMatch(/timed out/);
+  });
+
+  it("rejects on sentinel network error", async () => {
+    const b = setupExtraction();
+    const fetchFn = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "bearer",
+        timeout_ms: 3000,
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("validator_failed");
+    if (result.kind !== "validator_failed") return;
+    expect(result.reason).toMatch(/ECONNREFUSED/);
+  });
+
+  it("uses x-api-key header when auth_scheme is header_x_api_key", async () => {
+    const b = setupExtraction();
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers as HeadersInit);
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "header_x_api_key",
+        timeout_ms: 3000,
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(capturedHeaders?.get("x-api-key")).toBe(
+      "db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+    );
+  });
+
+  it("uses query_param when auth_scheme is query_param", async () => {
+    const b = setupExtraction();
+    let capturedUrl: string | undefined;
+    const fetchFn = (async (url: string) => {
+      capturedUrl = url;
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "query_param",
+        timeout_ms: 3000,
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(capturedUrl).toContain("api_key=db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+  });
+
+  it("uses basic auth when auth_scheme is basic", async () => {
+    const b = setupExtraction();
+    let capturedHeaders: Headers | undefined;
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      capturedHeaders = new Headers(init?.headers as HeadersInit);
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const result = await replaySkill({
+      skill: skillWithSentinel({
+        url: "https://api.example.com/whoami",
+        auth_scheme: "basic",
+        timeout_ms: 3000,
+      }),
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("ok");
+    const auth = capturedHeaders?.get("authorization");
+    expect(auth).toMatch(/^Basic /);
+    // Decode and verify the credential is presented as user with empty password.
+    const decoded = Buffer.from(auth!.slice(6), "base64").toString();
+    expect(decoded).toBe("db3a32ea-dd1b-4e28-9680-db2991c81e3e:");
+  });
+
+  it("does NOT invoke fetchFn when sentinel is absent", async () => {
+    const b = setupExtraction();
+    let fetchCalled = false;
+    const fetchFn = (async () => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const skill = skillWith([
+      { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+    ]);
+    // No sentinel configured.
+
+    const result = await replaySkill({
+      skill,
+      browser: b.controller,
+      mode: "full",
+      fetchFn,
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(fetchCalled).toBe(false);
+  });
+});

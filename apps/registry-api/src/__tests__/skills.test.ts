@@ -570,3 +570,576 @@ describe("GET /skills/:service/replays", () => {
     await server.close();
   });
 });
+
+// ── T26: human-review gate ──────────────────────────────────────────
+
+describe("T26 human-review gate", () => {
+  const ID_V1 = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+  const ID_V2 = "01HZY9ABCDEFGHJKMNPQRSTVWX";
+
+  it("publishes the first skill for a service as active", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: ID_V1 }), signature: "x".repeat(64) },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().status).toBe("active");
+    await server.close();
+  });
+
+  it("forces pending-review when signup_url changes", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: ID_V1 }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          skill_id: ID_V2,
+          version: "v2",
+          signup_url: "https://railway-phishing.com/account/tokens",
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().status).toBe("pending-review");
+
+    // GET /skills/:service should STILL return v1 (active), not v2.
+    const get = await server.inject({ method: "GET", url: "/skills/railway" });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().skill.skill_id).toBe(ID_V1);
+
+    await server.close();
+  });
+
+  it("forces pending-review when oauth_provider changes", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: ID_V1 }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          skill_id: ID_V2,
+          version: "v2",
+          oauth_provider: "google", // was "github"
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().status).toBe("pending-review");
+    await server.close();
+  });
+
+  it("allows step + credential edits to go straight to active", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: ID_V1 }), signature: "x".repeat(64) },
+    });
+
+    // Different steps array, same signup_url + oauth_provider — fine.
+    const v2 = validSkill({
+      skill_id: ID_V2,
+      version: "v2",
+      steps: [
+        {
+          kind: "navigate",
+          url: "https://railway.com/account/tokens",
+          provenance: { run_id: "test-run-2", round_index: 0 },
+        },
+        {
+          kind: "click",
+          text_match: "Create Token",
+          role_hint: "button",
+          provenance: { run_id: "test-run-2", round_index: 1 },
+        },
+        {
+          kind: "extract_via_copy_button",
+          near_text_hint: "Token created",
+          provenance: { run_id: "test-run-2", round_index: 2 },
+        },
+      ],
+      source_run_ids: ["test-run-2"],
+    });
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: v2, signature: "x".repeat(64) },
+    });
+
+    expect(response.statusCode).toBe(201);
+    // Note: still active even though there's already an active v1.
+    // The store doesn't auto-supersede on edits that pass the gate.
+    // That comes via approve-review or an explicit operator action.
+    expect(response.json().status).toBe("active");
+    await server.close();
+  });
+
+  it("approve-review flips pending-review to active and supersedes v1", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: ID_V1 }), signature: "x".repeat(64) },
+    });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          skill_id: ID_V2,
+          version: "v2",
+          signup_url: "https://railway.com/different-tokens",
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    // Approve v2.
+    const approve = await server.inject({
+      method: "POST",
+      url: `/skills/${ID_V2}/approve-review`,
+      headers: { "x-account-id": "operator-1" },
+    });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json().status).toBe("active");
+
+    // GET /skills/:service now returns v2.
+    const get = await server.inject({ method: "GET", url: "/skills/railway" });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().skill.skill_id).toBe(ID_V2);
+
+    await server.close();
+  });
+
+  it("approve-review returns 404 for unknown skill_id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX/approve-review",
+      headers: { "x-account-id": "operator-1" },
+    });
+
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+
+  it("approve-review is idempotent on already-active skills", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: ID_V1 }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${ID_V1}/approve-review`,
+      headers: { "x-account-id": "operator-1" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("active");
+    await server.close();
+  });
+});
+
+// ── T19: capture sidecar upload ────────────────────────────────────
+
+describe("T19 capture sidecars", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+  // Valid 64-char hex SHA-256-shaped digest.
+  const HASH_A = "a".repeat(64);
+  const HASH_B = "b".repeat(64);
+
+  async function publishSkill(server: ReturnType<typeof buildServer> extends Promise<infer S> ? S : never): Promise<void> {
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+  }
+
+  it("uploads a capture and persists it under the content hash", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload: {
+        content_hash: HASH_A,
+        run_id: "run-1",
+        round_index: 0,
+        payload: { inventory: ["item-1"] },
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = response.json();
+    expect(body.content_hash).toBe(HASH_A);
+    expect(body.byte_size).toBeGreaterThan(0);
+    await server.close();
+  });
+
+  it("returns the existing row on duplicate hash (idempotent)", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    const payload = { content_hash: HASH_A, run_id: "run-1", round_index: 0, payload: { x: 1 } };
+    await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload,
+    });
+    const second = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload,
+    });
+
+    expect(second.statusCode).toBe(201);
+    expect(second.json().content_hash).toBe(HASH_A);
+    // Only one row in the store.
+    const list = await server.inject({
+      method: "GET",
+      url: `/skills/${SKILL_ID}/captures`,
+    });
+    expect(list.json().captures).toHaveLength(1);
+    await server.close();
+  });
+
+  it("rejects malformed hash with 400", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload: {
+        content_hash: "not-hex!",
+        run_id: "run-1",
+        round_index: 0,
+        payload: { x: 1 },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    await server.close();
+  });
+
+  it("rejects oversize payload with 413", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    // Build a >1MB payload.
+    const bigString = "a".repeat(1_100_000);
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload: {
+        content_hash: HASH_A,
+        run_id: "run-1",
+        round_index: 0,
+        payload: { big: bigString },
+      },
+    });
+
+    expect(response.statusCode).toBe(413);
+    await server.close();
+  });
+
+  it("returns 404 when the skill_id is unknown", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload: {
+        content_hash: HASH_A,
+        run_id: "run-1",
+        round_index: 0,
+        payload: { x: 1 },
+      },
+    });
+
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+
+  it("lists captures in (run_id, round_index) order", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    // Upload out of order to exercise the sort.
+    const uploads = [
+      { content_hash: "c".repeat(64), run_id: "run-2", round_index: 0, payload: { p: 3 } },
+      { content_hash: HASH_A, run_id: "run-1", round_index: 1, payload: { p: 2 } },
+      { content_hash: HASH_B, run_id: "run-1", round_index: 0, payload: { p: 1 } },
+    ];
+    for (const u of uploads) {
+      await server.inject({
+        method: "POST",
+        url: `/skills/${SKILL_ID}/captures`,
+        headers: { "x-account-id": "uploader-1" },
+        payload: u,
+      });
+    }
+
+    const response = await server.inject({
+      method: "GET",
+      url: `/skills/${SKILL_ID}/captures`,
+    });
+    expect(response.statusCode).toBe(200);
+    const captures = response.json().captures;
+    expect(captures).toHaveLength(3);
+    // Order: run-1/0, run-1/1, run-2/0
+    expect(captures[0].content_hash).toBe(HASH_B);
+    expect(captures[1].content_hash).toBe(HASH_A);
+    expect(captures[2].content_hash).toBe("c".repeat(64));
+    await server.close();
+  });
+
+  it("fetches a capture by hash", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload: {
+        content_hash: HASH_A,
+        run_id: "run-1",
+        round_index: 0,
+        payload: { the_payload: "yes" },
+      },
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: `/skills/${SKILL_ID}/captures/${HASH_A}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().payload).toEqual({ the_payload: "yes" });
+    await server.close();
+  });
+
+  it("returns 404 when fetching a capture under the wrong skill_id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await publishSkill(server);
+
+    await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/captures`,
+      headers: { "x-account-id": "uploader-1" },
+      payload: {
+        content_hash: HASH_A,
+        run_id: "run-1",
+        round_index: 0,
+        payload: { x: 1 },
+      },
+    });
+
+    // Different skill_id in the URL — should 404 even though the hash exists.
+    const response = await server.inject({
+      method: "GET",
+      url: `/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX/captures/${HASH_A}`,
+    });
+
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+});
+
+// ── T20: demotion webhook ──────────────────────────────────────────
+
+describe("T20 demotion webhook", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+
+  it("fires the webhook when a skill auto-demotes", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const calls: { url: string; body: string }[] = [];
+    const fetchFn = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: init?.body as string });
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const server = await buildServer({
+      skillStore,
+      signer,
+      demotionWebhookUrl: "https://hooks.test/demotion",
+      fetchFn,
+    });
+
+    // Publish a skill.
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    // Three HTTP failures — the third triggers auto-demote and
+    // therefore the webhook.
+    await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/replay-outcome`,
+      headers: { "x-account-id": "acct-1" },
+      payload: { outcome: "step_failed", reason: "first failure" },
+    });
+    await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/replay-outcome`,
+      headers: { "x-account-id": "acct-1" },
+      payload: { outcome: "step_failed", reason: "second failure" },
+    });
+    const third = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/replay-outcome`,
+      headers: { "x-account-id": "acct-1" },
+      payload: { outcome: "step_failed", reason: "third strike, demote me" },
+    });
+
+    expect(third.json().demoted).toBe(true);
+
+    // Wait a tick for the fire-and-forget to land.
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://hooks.test/demotion");
+    const body = JSON.parse(calls[0]!.body);
+    expect(body.skill_id).toBe(SKILL_ID);
+    expect(body.reason).toBe("third strike, demote me");
+    expect(body.consecutive_failures).toBe(3);
+
+    await server.close();
+  });
+
+  it("does not fire when no webhook URL is configured", async () => {
+    const { skillStore, signer } = buildTestServer();
+    let fetchCalled = false;
+    const fetchFn = (async () => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const server = await buildServer({
+      skillStore,
+      signer,
+      // No demotionWebhookUrl
+      fetchFn,
+    });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    // Push past the demotion threshold.
+    for (let i = 0; i < 3; i++) {
+      await server.inject({
+        method: "POST",
+        url: `/skills/${SKILL_ID}/replay-outcome`,
+        headers: { "x-account-id": "acct-1" },
+        payload: { outcome: "step_failed", reason: `fail ${i}` },
+      });
+    }
+
+    await new Promise((r) => setImmediate(r));
+    expect(fetchCalled).toBe(false);
+
+    await server.close();
+  });
+
+  it("swallows webhook errors so demote response still succeeds", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const fetchFn = (async () => {
+      throw new Error("connection refused");
+    }) as typeof globalThis.fetch;
+
+    const server = await buildServer({
+      skillStore,
+      signer,
+      demotionWebhookUrl: "https://hooks.test/demotion",
+      fetchFn,
+    });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    for (let i = 0; i < 2; i++) {
+      await server.inject({
+        method: "POST",
+        url: `/skills/${SKILL_ID}/replay-outcome`,
+        headers: { "x-account-id": "acct-1" },
+        payload: { outcome: "step_failed", reason: `fail ${i}` },
+      });
+    }
+
+    // The third failure should still succeed at the HTTP layer
+    // even though the webhook fetch will throw.
+    const third = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/replay-outcome`,
+      headers: { "x-account-id": "acct-1" },
+      payload: { outcome: "step_failed", reason: "fail 2" },
+    });
+
+    expect(third.statusCode).toBe(200);
+    expect(third.json().demoted).toBe(true);
+
+    await server.close();
+  });
+});

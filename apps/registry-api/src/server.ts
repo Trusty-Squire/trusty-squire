@@ -21,6 +21,11 @@ export interface BuildServerOpts {
   // (or whatever auth scheme registry-api ends up adopting). Tests
   // inject a header reader.
   resolveAccountId?: (req: { headers: Record<string, unknown> }) => string;
+  // T20 — Demotion webhook URL. Defaults to the env var
+  // TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL when undefined; tests inject
+  // an explicit URL + fetchFn.
+  demotionWebhookUrl?: string;
+  fetchFn?: typeof globalThis.fetch;
 }
 
 export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnType<typeof Fastify>> {
@@ -62,6 +67,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     store: skillStore,
     signer,
     resolveAccountId,
+    demotionWebhookUrl:
+      opts.demotionWebhookUrl ?? process.env.TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL,
+    ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
   });
 
   fastify.get("/health", async () => ({ ok: true }));

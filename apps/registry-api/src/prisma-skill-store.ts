@@ -5,14 +5,17 @@
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
 import {
+  type InsertCaptureInput,
   type InsertSkillInput,
   type RecordReplayInput,
   type RecordReplayResult,
+  type SkillCaptureRecord,
   type SkillReplayRecord,
   type SkillStore,
   type SkillStoreRecord,
   SkillConflictError,
 } from "./skill-store.js";
+import { triggersHumanReview } from "./skill-store-memory.js";
 
 const DEMOTION_THRESHOLD = 3;
 
@@ -38,17 +41,31 @@ export class PrismaSkillStore implements SkillStore {
 
   async insert(input: InsertSkillInput): Promise<SkillStoreRecord> {
     const { skill, signature, signed_at, signed_by } = input;
+
+    // T26 — Human-review gate (C11). If an active skill already
+    // exists for this service, decide whether the new submission
+    // changes a phishing-vector field (signup_url / oauth_provider)
+    // and force pending-review if so.
+    let effectiveStatus = skill.status;
+    if (skill.status === "active") {
+      const existingActive = await this.findActiveByService(skill.service);
+      if (existingActive !== null && triggersHumanReview(existingActive.payload, skill)) {
+        effectiveStatus = "pending-review";
+      }
+    }
+    const payloadForStorage: Skill = { ...skill, status: effectiveStatus };
+
     try {
       const row = await this.client.skillRecord.create({
         data: {
           skill_id: skill.skill_id,
           service: skill.service,
           version: skill.version,
-          payload_json: skill as unknown as Prisma.InputJsonValue,
+          payload_json: payloadForStorage as unknown as Prisma.InputJsonValue,
           signature,
           signed_at,
           signed_by,
-          status: skill.status,
+          status: effectiveStatus,
           replays_succeeded: skill.replays_succeeded,
           replays_failed: skill.replays_failed,
           consecutive_failures: skill.consecutive_failures,
@@ -185,11 +202,99 @@ export class PrismaSkillStore implements SkillStore {
     }
   }
 
+  async approveReview(skill_id: string): Promise<SkillStoreRecord | null> {
+    // Atomic: flip pending-review → active AND supersede any older
+    // active row for the same service. Wrapped in $transaction so a
+    // crash mid-update doesn't leave two active rows for one service.
+    return this.client.$transaction(async (tx) => {
+      const current = await tx.skillRecord.findUnique({ where: { skill_id } });
+      if (current === null) return null;
+      if (current.status !== "pending-review") {
+        return toSkillStoreRecord(current);
+      }
+      const now = new Date();
+      await tx.skillRecord.updateMany({
+        where: {
+          service: current.service,
+          status: "active",
+          NOT: { skill_id },
+        },
+        data: { status: "superseded", superseded_at: now },
+      });
+      const updated = await tx.skillRecord.update({
+        where: { skill_id },
+        data: { status: "active" },
+      });
+      return toSkillStoreRecord(updated);
+    });
+  }
+
   async countRecentReplaysByAccount(account_id: string, since: Date): Promise<number> {
     return this.client.skillReplayRecord.count({
       where: { account_id, replayed_at: { gte: since } },
     });
   }
+
+  // ── T19: capture sidecars ────────────────────────────────────────
+
+  async insertCapture(input: InsertCaptureInput): Promise<SkillCaptureRecord> {
+    const existing = await this.client.skillCaptureRecord.findUnique({
+      where: { content_hash: input.content_hash },
+    });
+    if (existing !== null) return toCaptureRecord(existing);
+
+    const payloadJson = input.payload as Prisma.InputJsonValue;
+    const byteSize = Buffer.byteLength(JSON.stringify(input.payload), "utf8");
+    const row = await this.client.skillCaptureRecord.create({
+      data: {
+        content_hash: input.content_hash,
+        skill_id: input.skill_id,
+        run_id: input.run_id,
+        round_index: input.round_index,
+        payload_json: payloadJson,
+        byte_size: byteSize,
+        uploaded_by: input.uploaded_by,
+      },
+    });
+    return toCaptureRecord(row);
+  }
+
+  async listCapturesForSkill(skill_id: string): Promise<SkillCaptureRecord[]> {
+    const rows = await this.client.skillCaptureRecord.findMany({
+      where: { skill_id },
+      orderBy: [{ run_id: "asc" }, { round_index: "asc" }],
+    });
+    return rows.map(toCaptureRecord);
+  }
+
+  async findCaptureByHash(content_hash: string): Promise<SkillCaptureRecord | null> {
+    const row = await this.client.skillCaptureRecord.findUnique({ where: { content_hash } });
+    return row ? toCaptureRecord(row) : null;
+  }
+}
+
+type PrismaCaptureRow = {
+  content_hash: string;
+  skill_id: string;
+  run_id: string;
+  round_index: number;
+  payload_json: Prisma.JsonValue;
+  byte_size: number;
+  uploaded_at: Date;
+  uploaded_by: string;
+};
+
+function toCaptureRecord(row: PrismaCaptureRow): SkillCaptureRecord {
+  return {
+    content_hash: row.content_hash,
+    skill_id: row.skill_id,
+    run_id: row.run_id,
+    round_index: row.round_index,
+    payload: row.payload_json,
+    byte_size: row.byte_size,
+    uploaded_at: row.uploaded_at,
+    uploaded_by: row.uploaded_by,
+  };
 }
 
 // ── Row → domain conversion ─────────────────────────────────────────

@@ -48,6 +48,13 @@ export interface SkillsRouteDeps {
   // wires this to whatever auth middleware extracts; tests inject a
   // direct extractor.
   resolveAccountId: (req: { headers: Record<string, unknown> }) => string;
+  // T20 — Webhook URL to POST when a skill is auto-demoted.
+  // Undefined disables the webhook. Production reads from env
+  // (TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL); tests inject directly.
+  demotionWebhookUrl?: string;
+  // T20 — fetch override for the webhook call. Tests inject a mock
+  // to assert on the request body. Production uses globalThis.fetch.
+  fetchFn?: typeof globalThis.fetch;
 }
 
 export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
@@ -173,9 +180,26 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
           step_index: req.body.step_index ?? null,
         });
 
-        // T20 follow-up: when result.demoted is true, emit a webhook
-        // for the ops dashboard. For now we just include the flag in
-        // the response so the caller (router) can log locally.
+        // T20 — Fire the demotion webhook fire-and-forget. We don't
+        // await it: the response to the router/replay-outcome caller
+        // must not block on a slow webhook listener. Errors get
+        // swallowed (the audit trail lives on the SkillReplayRecord
+        // anyway).
+        if (result.demoted && opts.demotionWebhookUrl !== undefined) {
+          void fireDemotionWebhook(
+            opts.demotionWebhookUrl,
+            opts.fetchFn ?? globalThis.fetch,
+            {
+              skill_id: req.params.skill_id,
+              reason: truncate(req.body.reason, REPLAY_REASON_MAX_LENGTH),
+              consecutive_failures: result.consecutive_failures,
+              replays_succeeded: result.replays_succeeded,
+              replays_failed: result.replays_failed,
+              demoted_at: result.replay.replayed_at.toISOString(),
+            },
+          );
+        }
+
         return reply.code(200).send({
           ok: true,
           replay_id: result.replay.id,
@@ -195,6 +219,145 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
         }
         throw err;
       }
+    },
+  );
+
+  // ── POST /skills/:skill_id/approve-review ──────────────────────
+  // T26 (C11) — operator approval gate. A skill submitted with a
+  // changed signup_url or oauth_provider lands in pending-review;
+  // this endpoint flips it to active. Mirrors the skill:approve-review
+  // CLI surface. Requires operator-grade auth in production; tests
+  // exercise it with the same resolveAccountId helper used elsewhere.
+  fastify.post<{ Params: { skill_id: string } }>(
+    "/skills/:skill_id/approve-review",
+    async (req, reply) => {
+      // Resolve account so the audit trail (Phase 7 follow-up) knows
+      // who approved. Ignored value today — we still call to enforce
+      // x-account-id presence.
+      void opts.resolveAccountId(req as { headers: Record<string, unknown> });
+
+      const updated = await opts.store.approveReview(req.params.skill_id);
+      if (updated === null) {
+        return reply.code(404).send({
+          ok: false,
+          error: "skill_not_found",
+        });
+      }
+      return reply.code(200).send({
+        ok: true,
+        skill_id: updated.skill_id,
+        service: updated.service,
+        version: updated.version,
+        status: updated.status,
+      });
+    },
+  );
+
+  // ── POST /skills/:skill_id/captures ─────────────────────────────
+  // T19 (D1) — upload one capture-chain round as a content-hashed
+  // sidecar. Idempotent on content_hash. Body shape:
+  //   { content_hash: string, run_id: string, round_index: number,
+  //     payload: object }
+  // The promoter computes the SHA-256 of the canonical payload
+  // serialisation and sends both — the server doesn't recompute
+  // because the synthesizer's chain verification already trusted
+  // this exact hash.
+  fastify.post<{
+    Params: { skill_id: string };
+    Body: UploadCaptureBody;
+  }>("/skills/:skill_id/captures", async (req, reply) => {
+    const account_id = opts.resolveAccountId(req as { headers: Record<string, unknown> });
+
+    if (!isUploadCaptureBody(req.body)) {
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_request",
+        detail: "Expected { content_hash, run_id, round_index, payload }.",
+      });
+    }
+    // Bound the payload size — captures are small JSON, not blobs.
+    // Anything over 1MB is almost certainly a misuse of this
+    // endpoint and should be rejected before hitting the DB.
+    const payloadBytes = Buffer.byteLength(JSON.stringify(req.body.payload), "utf8");
+    if (payloadBytes > 1_000_000) {
+      return reply.code(413).send({
+        ok: false,
+        error: "payload_too_large",
+        detail: `Capture payload is ${payloadBytes} bytes; max 1000000.`,
+      });
+    }
+
+    // Skill must exist before we accept captures for it (catches
+    // typos and stops orphan rows from accumulating).
+    const skill = await opts.store.findById(req.params.skill_id);
+    if (skill === null) {
+      return reply.code(404).send({
+        ok: false,
+        error: "skill_not_found",
+      });
+    }
+
+    const inserted = await opts.store.insertCapture({
+      content_hash: req.body.content_hash,
+      skill_id: req.params.skill_id,
+      run_id: req.body.run_id,
+      round_index: req.body.round_index,
+      payload: req.body.payload,
+      uploaded_by: account_id,
+    });
+
+    return reply.code(201).send({
+      ok: true,
+      content_hash: inserted.content_hash,
+      skill_id: inserted.skill_id,
+      run_id: inserted.run_id,
+      round_index: inserted.round_index,
+      byte_size: inserted.byte_size,
+      uploaded_at: inserted.uploaded_at.toISOString(),
+    });
+  });
+
+  // ── GET /skills/:skill_id/captures ──────────────────────────────
+  fastify.get<{ Params: { skill_id: string } }>(
+    "/skills/:skill_id/captures",
+    async (req, reply) => {
+      const captures = await opts.store.listCapturesForSkill(req.params.skill_id);
+      return reply.code(200).send({
+        ok: true,
+        skill_id: req.params.skill_id,
+        captures: captures.map((c) => ({
+          content_hash: c.content_hash,
+          run_id: c.run_id,
+          round_index: c.round_index,
+          byte_size: c.byte_size,
+          uploaded_at: c.uploaded_at.toISOString(),
+        })),
+      });
+    },
+  );
+
+  // ── GET /skills/:skill_id/captures/:hash ────────────────────────
+  fastify.get<{ Params: { skill_id: string; hash: string } }>(
+    "/skills/:skill_id/captures/:hash",
+    async (req, reply) => {
+      const capture = await opts.store.findCaptureByHash(req.params.hash);
+      if (capture === null || capture.skill_id !== req.params.skill_id) {
+        return reply.code(404).send({
+          ok: false,
+          error: "capture_not_found",
+        });
+      }
+      return reply.code(200).send({
+        ok: true,
+        content_hash: capture.content_hash,
+        skill_id: capture.skill_id,
+        run_id: capture.run_id,
+        round_index: capture.round_index,
+        payload: capture.payload,
+        byte_size: capture.byte_size,
+        uploaded_at: capture.uploaded_at.toISOString(),
+        uploaded_by: capture.uploaded_by,
+      });
     },
   );
 
@@ -289,8 +452,76 @@ function isReplayOutcomeBody(value: unknown): value is ReplayOutcomeBody {
   );
 }
 
+// T19: capture upload body shape.
+interface UploadCaptureBody {
+  content_hash: string;
+  run_id: string;
+  round_index: number;
+  payload: unknown;
+}
+
+function isUploadCaptureBody(value: unknown): value is UploadCaptureBody {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.content_hash === "string" &&
+    // SHA-256 hex is 64 chars; accept any hex string 32-128 chars
+    // (lets the synthesizer pick its own digest while keeping the
+    // door closed on garbage).
+    /^[0-9a-f]{32,128}$/i.test(v.content_hash) &&
+    typeof v.run_id === "string" &&
+    typeof v.round_index === "number" &&
+    Number.isInteger(v.round_index) &&
+    v.round_index >= 0 &&
+    typeof v.payload === "object" &&
+    v.payload !== null
+  );
+}
+
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+// T20 — Demotion webhook payload + dispatcher. Best-effort POST with
+// a 3s timeout. Failures are swallowed so a flaky webhook listener
+// doesn't break the replay-outcome path.
+interface DemotionWebhookPayload {
+  skill_id: string;
+  reason: string;
+  consecutive_failures: number;
+  replays_succeeded: number;
+  replays_failed: number;
+  demoted_at: string;
+}
+
+async function fireDemotionWebhook(
+  url: string,
+  fetchFn: typeof globalThis.fetch,
+  payload: DemotionWebhookPayload,
+): Promise<void> {
+  const timeoutMs = 3000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("webhook timeout")), timeoutMs);
+    });
+    await Promise.race([
+      fetchFn(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-trusty-squire-event": "skill.demoted",
+        },
+        body: JSON.stringify(payload),
+      }),
+      timeoutPromise,
+    ]);
+  } catch {
+    // Swallow — webhook is fire-and-forget, the audit trail is
+    // already on the SkillReplayRecord.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 // SkillStatusSchema is imported for type narrowing in places that

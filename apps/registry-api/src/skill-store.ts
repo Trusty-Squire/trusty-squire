@@ -128,9 +128,59 @@ export interface SkillStore {
   manuallyDemote(skill_id: string, reason: string): Promise<SkillStoreRecord | null>;
 
   /**
+   * Approve a pending-review skill (T26). Flips status from
+   * pending-review to active and supersedes any older active row
+   * for the same service. Returns null when the skill_id doesn't
+   * exist; idempotent (returns the record unchanged) when the
+   * skill is already in another state. Backs
+   * POST /skills/:skill_id/approve-review (C11).
+   */
+  approveReview(skill_id: string): Promise<SkillStoreRecord | null>;
+
+  /**
    * Count replay-outcome writes for an account in a recent window.
    * Backs the 60/min rate limit on POST /skills/:id/replay-outcome
    * (C9). Returns the count; the route layer decides whether to 429.
    */
   countRecentReplaysByAccount(account_id: string, since: Date): Promise<number>;
+
+  /**
+   * Persist a capture sidecar (T19, D1). The content_hash is the
+   * idempotency key — uploading the same content twice is a no-op
+   * (returns the existing row). Backs
+   * POST /skills/:skill_id/captures.
+   */
+  insertCapture(input: InsertCaptureInput): Promise<SkillCaptureRecord>;
+
+  /**
+   * List captures for a skill, ordered by (run_id, round_index)
+   * ascending so replay-trace can walk them in chain order.
+   */
+  listCapturesForSkill(skill_id: string): Promise<SkillCaptureRecord[]>;
+
+  /**
+   * Fetch a single capture by its content hash. Returns null when
+   * the capture isn't in the registry.
+   */
+  findCaptureByHash(content_hash: string): Promise<SkillCaptureRecord | null>;
+}
+
+export interface InsertCaptureInput {
+  content_hash: string;
+  skill_id: string;
+  run_id: string;
+  round_index: number;
+  payload: unknown;
+  uploaded_by: string;
+}
+
+export interface SkillCaptureRecord {
+  content_hash: string;
+  skill_id: string;
+  run_id: string;
+  round_index: number;
+  payload: unknown;
+  byte_size: number;
+  uploaded_at: Date;
+  uploaded_by: string;
 }
