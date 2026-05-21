@@ -44,9 +44,20 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   // used both for skill provenance (`signed_by` field on stored
   // skills) and — once Phase 6 lands — for full Ed25519 verification
   // of incoming POST /skills payloads.
+  // Resolution order:
+  //   1. Explicit opts.signer (tests inject one)
+  //   2. ADAPTER_SIGNING_PRIVATE_KEY env (production — base64url PKCS8)
+  //   3. Ephemeral key (dev only — restart invalidates every previous
+  //      signature, surfaces as `signed_by: "registry-api-dev"`).
+  //
+  // The env path is the production deploy contract. fly.toml ships a
+  // placeholder; the real key gets injected via `fly secrets set` and
+  // *never* lives in any committed file.
   let signer: ManifestSigner;
   if (opts.signer !== undefined) {
     signer = opts.signer;
+  } else if (process.env.ADAPTER_SIGNING_PRIVATE_KEY !== undefined && process.env.ADAPTER_SIGNING_PRIVATE_KEY.length > 0) {
+    signer = ManifestSigner.fromEnv(process.env, "registry-api");
   } else {
     const { privateKey } = generateKeyPairSync("ed25519");
     signer = ManifestSigner.fromKeyObject(privateKey, "registry-api-dev");

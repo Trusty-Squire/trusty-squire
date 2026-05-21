@@ -1,0 +1,51 @@
+# Fly.io deploy image for registry-api (Tier-2 Learned Skill registry).
+#
+# Single-stage build, mirrors apps/api/Dockerfile.fly. Builds the whole
+# workspace and runs `node dist/server.js` as the entrypoint. Prisma
+# migrations execute as the fly.toml release_command, NOT here — the
+# build can run without DB access.
+
+FROM node:22-alpine
+
+# openssl provides libssl.so.3, which the Prisma linux-musl-openssl-3.0.x
+# query engine links against at runtime.
+RUN apk add --no-cache openssl
+
+# Pinned pnpm version. Matches packageManager in root package.json so
+# the lockfile resolves identically across build environments.
+RUN corepack enable && corepack prepare pnpm@8.15.0 --activate
+
+WORKDIR /app
+
+# Copy the whole workspace. .dockerignore excludes node_modules and
+# build artifacts so the COPY is fast.
+COPY . .
+
+# Install ALL deps (devDependencies too — tsc lives there). The build
+# stage needs them; we don't prune at the end because Prisma generate's
+# output lives under node_modules/@prisma/client and pruning can strip
+# it.
+RUN pnpm install --frozen-lockfile
+
+# Generate the Prisma client for registry-api's schema. This writes
+# into node_modules/.prisma/client at the workspace root, which
+# @prisma/client picks up at runtime. Done before tsc because
+# prisma-skill-store.ts imports the generated types.
+RUN pnpm -F @trusty-squire/registry-api exec prisma generate --schema=/app/apps/registry-api/prisma/schema.prisma
+
+# Build the adapter-sdk first (registry-api depends on its compiled
+# output for schema validation), then registry-api itself. The
+# `...` filter syntax includes dependencies.
+RUN pnpm --filter @trusty-squire/registry-api... build
+
+ENV NODE_ENV=production
+
+# Fly's default internal port. fly.toml binds the public 80/443
+# endpoints to this.
+ENV REGISTRY_API_PORT=8080
+EXPOSE 8080
+
+# Migrations run via the fly.toml release_command, which fly executes
+# in a one-off machine *before* swapping in the new app. By the time
+# this CMD runs, the DB schema is already current.
+CMD ["node", "apps/registry-api/dist/server.js"]

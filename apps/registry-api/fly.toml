@@ -1,0 +1,69 @@
+# fly.toml — registry-api (Tier-2 Learned Skill registry).
+#
+# Distinct from apps/api/fly.toml (which runs the universal-bot
+# orchestrator API at trusty-squire-api). This is `trusty-squire-registry`,
+# a smaller, operator-driven service: signups don't depend on it being
+# warm — the router fails open to the universal bot when the registry
+# is slow or unreachable. Therefore:
+#
+#   - auto_stop_machines = true (let it nap)
+#   - min_machines_running = 0 (cold starts are fine)
+#
+# That's the inverse of apps/api which MUST stay warm for inbound SES
+# webhooks. The skill-registry router calls happen during a signup
+# which already runs for tens of seconds — a 1-2s cold start is
+# invisible.
+
+app = "trusty-squire-registry"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+# release_command runs in a one-off machine before fly swaps in the
+# new app instances. We point it at the migrate runner so schema
+# changes land before any request hits the new code. If migrate
+# fails, fly aborts the deploy and keeps serving the old version.
+[deploy]
+  release_command = "pnpm -F @trusty-squire/registry-api exec prisma migrate deploy --schema=/app/apps/registry-api/prisma/schema.prisma"
+
+[env]
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+  REGISTRY_API_PORT = "8080"
+
+# Secrets injected via `fly secrets set` — never committed:
+#   REGISTRY_DATABASE_URL          Postgres connection string
+#   ADAPTER_SIGNING_PRIVATE_KEY    base64url PKCS8 Ed25519 private key
+#   TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL  (optional) ops webhook target
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Unlike apps/api, the registry has no inbound webhook traffic. It's
+  # called by the MCP router during signups (already a long-running
+  # tool call — cold starts are absorbed) and by `npx skill ...` CLI
+  # commands (human-driven — a few seconds is fine). Letting fly stop
+  # machines on idle saves $.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 100
+    hard_limit = 150
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "30s"
+  method = "GET"
+  timeout = "5s"
+  path = "/health"
+
+[[vm]]
+  # The registry is tiny — Fastify + Prisma client + a Postgres
+  # connection pool. 256MB is plenty for the dev/early-prod load.
+  # Bump to 512 if we see OOMs on the rolling p95 dashboard.
+  size = "shared-cpu-1x"
+  memory = "256mb"
