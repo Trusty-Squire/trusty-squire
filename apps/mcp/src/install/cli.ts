@@ -635,4 +635,15 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-export { install, logout, login, parseArgs, pollForClaim, printAsnWarning, resolveServerLaunch };
+// Back-compat alias: external imports of `install` keep working at the module
+// level. The CLI command got renamed; the function is the same.
+export {
+  connect,
+  connect as install,
+  logout,
+  login,
+  parseArgs,
+  pollForClaim,
+  printAsnWarning,
+  resolveServerLaunch,
+};
