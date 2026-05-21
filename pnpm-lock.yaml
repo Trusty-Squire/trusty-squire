@@ -51,7 +51,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/adapters/resend
       '@trusty-squire/adapter-sdk':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../packages/adapter-sdk
       '@trusty-squire/inbox':
         specifier: workspace:*
@@ -131,7 +131,7 @@ importers:
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
       '@trusty-squire/adapter-sdk':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../packages/adapter-sdk
       boxen:
         specifier: ^8.0.1
@@ -257,7 +257,7 @@ importers:
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
       '@trusty-squire/adapter-sdk':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../packages/adapter-sdk
       canonicalize:
         specifier: ^2.0.0
@@ -344,7 +344,7 @@ importers:
   packages/adapters/resend:
     dependencies:
       '@trusty-squire/adapter-sdk':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../adapter-sdk
     devDependencies:
       typescript:
@@ -407,7 +407,7 @@ importers:
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
       '@trusty-squire/adapter-sdk':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../adapter-sdk
       '@trusty-squire/inbox':
         specifier: workspace:*

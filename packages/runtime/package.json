@@ -22,7 +22,7 @@
     "prisma:migrate:dev": "prisma migrate dev"
   },
   "dependencies": {
-    "@trusty-squire/adapter-sdk": "workspace:^",
+    "@trusty-squire/adapter-sdk": "workspace:*",
     "@trusty-squire/inbox": "workspace:*",
     "@prisma/client": "^5.22.0",
     "otplib": "^12.0.1",
