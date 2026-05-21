@@ -155,6 +155,24 @@ jobs:
         # Builds everything so workspace deps resolve when packaging apps/mcp
         run: pnpm build
 
+      # Force a clean rebuild of the MCP package right before publish.
+      # Without this, TypeScript's incremental build can reuse stale dist
+      # from the workspace build above, and the prepublishOnly hook's
+      # `npm run build` will be a no-op. The 0.6.14 release shipped with
+      # an outdated dist/install/cli.js for exactly this reason.
+      - name: Clean + rebuild MCP package (publish prerequisite)
+        working-directory: apps/mcp
+        run: |
+          rm -rf dist tsconfig.build.tsbuildinfo
+          npm run build
+          # Spot-check that the build actually ran by looking for a sentinel
+          # string the source has now and the previous published tarball
+          # didn't. Fails loud if dist is somehow still stale.
+          if ! grep -q 'case "connect"' dist/install/cli.js; then
+            echo "::error::Built dist/install/cli.js is missing rename — refusing to publish stale tarball"
+            exit 1
+          fi
+
       # ---- npm publish -----------------------------------------------------
       - name: Publish to npm
         working-directory: apps/mcp
@@ -165,10 +183,14 @@ jobs:
           echo "Publishing @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
           # --provenance: GitHub Actions signs the tarball (sigstore). Shows
           # a verified badge on npmjs.com. Requires id-token: write (set above).
+          # --ignore-scripts: prepublishOnly already ran (we built it above).
+          # Skipping prevents a redundant second build that could re-introduce
+          # the staleness we just defended against.
           npm publish \
             --access=public \
             --tag="${{ needs.verify.outputs.npm_dist_tag }}" \
-            --provenance
+            --provenance \
+            --ignore-scripts
 
       # ---- Ground-truth verification: NEVER trust npm's success output -----
       # The previous agent burned three version numbers because they trusted
