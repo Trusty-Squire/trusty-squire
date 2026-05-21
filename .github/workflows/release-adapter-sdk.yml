@@ -111,6 +111,8 @@ jobs:
     needs: verify
     if: needs.verify.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    # NPM_TOKEN lives in the `npm-publish` GitHub Environment. Required-
+    # reviewers protection rule removed. See release.yml for context.
     environment: npm-publish
     steps:
       - uses: actions/checkout@v4

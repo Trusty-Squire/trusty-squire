@@ -32,6 +32,7 @@ import {
   type LLMClient,
   type LLMPair,
 } from "./llm-client.js";
+import { getDomain } from "tldts";
 
 // Structural type the agent needs from an inbox source. Satisfied by both
 // the in-process @trusty-squire/inbox InboxService and the HTTP InboxClient
@@ -172,6 +173,18 @@ export function guessSignupUrl(service: string): string {
   if (entry !== undefined && /^https?:\/\//i.test(entry)) return entry;
   const host = entry ?? `${slug}.com`;
   return `https://${host}/signup`;
+}
+
+// BUG-2 GUARD — did `url` come from KNOWN_DOMAINS as a hardcoded full
+// URL (vs the default /signup convention)? These were explicitly
+// chosen because the default 404s and the real entry is non-obvious
+// — e.g. Railway's /login, Cloudflare's dash.cloudflare.com/sign-up.
+// Trust the mapping rather than falling back to a Google search.
+// Exported for unit testing.
+export function isKnownDomainFullUrlMatch(service: string, url: string): boolean {
+  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const entry = KNOWN_DOMAINS[slug];
+  return entry !== undefined && /^https?:\/\//i.test(entry) && entry === url;
 }
 
 // True when the URL is a Google search results page — used to gate
@@ -593,6 +606,59 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
       return bits.join("  ");
     })
     .join("\n");
+}
+
+// BUG-1 GUARD — does `hostname` belong to the same registered domain as
+// `serviceSlug` (the alphanumeric squashed service name like "railway",
+// "postmark")?
+//
+// Uses PSL-aware eTLD+1 (via tldts) so platform subdomains like
+// `*.up.railway.app` and `*.vercel.app` are correctly classified as
+// distinct registered domains (each customer site is its own entity).
+//
+//   railway.com           ↔ slug "railway" → MATCH   (registered = railway.com,
+//                                                     first-label of root = "railway")
+//   docs.railway.com      ↔ slug "railway" → MATCH   (same registered)
+//   storysite-production.up.railway.app ↔ slug "railway" → REJECT
+//                                                     (registered = storysite-production.up.railway.app
+//                                                      under the .up.railway.app public suffix)
+//   railway.io (typosquat) ↔ slug "railway" → MATCH  (intentional — we can't
+//                                                     distinguish typo-squats from
+//                                                     legitimate TLD variants like
+//                                                     sentry.com → sentry.io)
+//
+// Empty slug → permissive (return true), preserving prior behavior when
+// no service name was provided to findSignupLink.
+//
+// Exported for unit testing.
+export function hostMatchesServiceDomain(
+  hostname: string,
+  serviceSlug: string,
+): boolean {
+  if (serviceSlug.length === 0) return true;
+  const registered = getDomain(hostname);
+  if (registered === null) return false;
+  // The first label of the eTLD+1 is the "site name". For
+  // railway.com that's "railway"; for storysite-production.up.railway.app
+  // the eTLD+1 IS the whole thing (because .up.railway.app is a PSL
+  // public suffix) and its first label is "storysite-production".
+  const firstLabel = registered.split(".")[0]?.toLowerCase() ?? "";
+  // Normalize: strip hyphens so "trusty-squire" matches slug "trustysquire".
+  const normalized = firstLabel.replace(/[^a-z0-9]/g, "");
+  return normalized === serviceSlug;
+}
+
+// BUG-3 GUARD — diagnostic flag for the Inventory snapshot. Stricter
+// than detectAntiBotBlock (no "cf-turnstile" / "recaptcha" raw-HTML
+// matches) because the previous regex false-positive matched legitimate
+// signup pages that just embed a Turnstile/reCAPTCHA widget script.
+// Match on visible-text patterns only.
+//
+// Exported for unit testing.
+export function isAntiBotInterstitialText(visibleText: string): boolean {
+  return /just a moment|verify you are human|attention required|are you a robot|checking your browser/i.test(
+    visibleText,
+  );
 }
 
 // Recognize a full-page anti-bot interstitial that's still up. Returns
@@ -1443,10 +1509,11 @@ export class SignupAgent {
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 240);
-        const antiBot =
-          /just a moment|verify you are human|attention required|cloudflare|cf-challenge|cf-turnstile|recaptcha|are you a robot/i.test(
-            state.html,
-          );
+        // BUG-3 FIX: match on user-visible text only. Previous regex
+        // hit `cf-turnstile` / `recaptcha` / `cloudflare` in raw HTML,
+        // false-positive-firing on legitimate signup pages that embed
+        // a Turnstile widget script.
+        const antiBot = isAntiBotInterstitialText(text);
         steps.push(
           `Inventory diagnostic: title=${JSON.stringify(state.title.slice(0, 80))} ` +
             `url=${state.url.slice(0, 120)} text=${JSON.stringify(text)}` +
@@ -1777,7 +1844,20 @@ export class SignupAgent {
       // search-and-find-link path. This is the safety net that lets
       // the bot recover from a wrong canonical guess (e.g. a service
       // that uses /register or a non-`.com` TLD).
-      if (task.signupUrl === undefined && !(await this.looksLikeSignupPage())) {
+      //
+      // BUG-2 GUARD: when the guessed URL came from KNOWN_DOMAINS as a
+      // full hardcoded URL (e.g. Railway → https://railway.com/login,
+      // Cloudflare → https://dash.cloudflare.com/sign-up), trust the
+      // mapping. These were explicitly chosen because the default
+      // /signup path 404s and the real entry is non-obvious — falling
+      // back to a Google search has produced cross-domain bugs (the
+      // Railway run that ended up on storysite-production.up.railway.app).
+      const usedKnownFullUrl = isKnownDomainFullUrlMatch(task.service, guessed);
+      if (
+        task.signupUrl === undefined &&
+        !usedKnownFullUrl &&
+        !(await this.looksLikeSignupPage())
+      ) {
         steps.push(
           `${guessed} didn't look like a signup page — searching for the real one`,
         );
@@ -1797,6 +1877,25 @@ export class SignupAgent {
           steps.push(`Found signup link: ${found}`);
           await this.browser.goto(found);
           await this.browser.wait(2);
+        } else {
+          // BUG-1 GUARD: findSignupLink filters off-domain candidates
+          // (registered-domain match against the service slug). If
+          // nothing remained AND we'd been sent here from a Google
+          // fallback, the bot is sitting on a SERP with no usable
+          // destination — abort rather than let the form-fill planner
+          // happily fill the Google search box.
+          if (isGoogleSearchUrl(signupUrl)) {
+            return {
+              success: false,
+              error:
+                `no_signup_link: searched for ${task.service}'s signup page and ` +
+                `found no on-domain candidates. The service likely doesn't have ` +
+                `a public self-serve signup, or the bot's domain guard rejected ` +
+                `every match. Sign up manually.`,
+              steps,
+              ...this.resultTail(),
+            };
+          }
         }
       }
 
@@ -3069,6 +3168,16 @@ ${formatInventory(input.inventory)}${
       }
       // Negative: signin/login/logout in host+path.
       if (/(?:^|\/)(?:signin|login|logout|sign-in|log-in)\b/.test(hostPath)) continue;
+
+      // BUG-1 GUARD: registered-domain match against the target service.
+      // Without this, a Google search for "Railway signup" returned a
+      // link to storysite-production.up.railway.app/signup/ — somebody's
+      // hobby Django app hosted on Railway — and the bot filled out the
+      // form, creating a junk account on the wrong website. PSL-aware
+      // eTLD+1 comparison handles platform suffixes like .up.railway.app
+      // and .vercel.app (where each customer subdomain is its own
+      // "registered" entity) correctly.
+      if (!hostMatchesServiceDomain(url.hostname, serviceSlug)) continue;
 
       // Score: a host containing the service slug is a strong match.
       // Without a slug to compare against, every match scores 1.

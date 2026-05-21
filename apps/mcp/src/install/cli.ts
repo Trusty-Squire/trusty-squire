@@ -167,6 +167,27 @@ function isAgentTarget(s: string): s is AgentTarget {
 //
 // Prerelease detection: semver prerelease versions carry a `-` (e.g.
 // `0.6.0-rc.1`). Stable versions don't. Cheap, reliable.
+/**
+ * Copy an npx-style node_modules tree to a stable location.
+ *
+ * Exported for testing. npx caches frequently contain dangling .bin/*
+ * symlinks (e.g. `node_modules/.bin/yaml` → `../yaml/bin/yaml.js` where
+ * the target is created lazily by a postinstall script that didn't run
+ * in the cache). Default cpSync follows symlinks, stats the target,
+ * sees ENOENT, throws.
+ *
+ * `verbatimSymlinks: true` copies symlinks as symlinks (no target stat)
+ * — node's runtime resolver dereferences .bin lazily anyway, so the
+ * resulting tree still works for MCP-server launches.
+ */
+export function copyNpxNodeModules(src: string, dest: string): void {
+  cpSync(src, dest, {
+    recursive: true,
+    force: true,
+    verbatimSymlinks: true,
+  });
+}
+
 function resolveServerLaunch(): { command: string; args: string[] } {
   const binPath = fileURLToPath(new URL("../bin.js", import.meta.url));
   const ephemeral = /[/\\]_npx[/\\]/.test(binPath);
@@ -209,11 +230,12 @@ function resolveServerLaunch(): { command: string; args: string[] } {
     "bin.js",
   );
   try {
-    cpSync(cacheNodeModules, stableNodeModules, { recursive: true, force: true });
+    copyNpxNodeModules(cacheNodeModules, stableNodeModules);
   } catch (err) {
-    // If the copy fails (unlikely — write access to $HOME is the
-    // bar), fall back to the in-cache absolute path. Works until
-    // npx clears it, which is acceptable for a test build.
+    // Defence in depth: if the copy still fails (e.g. EACCES on $HOME),
+    // fall back to the in-cache absolute path. Works until npx clears
+    // the cache (days-to-weeks later), at which point the MCP server
+    // breaks silently mid-session. Surface the warning so users know.
     console.warn(
       `[trusty-squire] couldn't copy node_modules to ~/.trusty-squire/lib ` +
         `(${err instanceof Error ? err.message : String(err)}); using cache path. ` +

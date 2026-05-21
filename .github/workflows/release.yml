@@ -220,7 +220,13 @@ jobs:
     needs: verify
     if: needs.verify.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
-    environment: npm-publish   # optional: add required reviewers in repo settings
+    # NPM_TOKEN lives in the `npm-publish` GitHub Environment (not repo
+    # secrets), so we need this `environment:` block to access it. The
+    # environment's required-reviewers protection rule has been removed
+    # (it was silently blocking rc.4/rc.5). If you re-add reviewers, make
+    # sure they're actually monitored — a stuck-pending publish job is
+    # not visibly different from a successful one until you look.
+    environment: npm-publish
     steps:
       - uses: actions/checkout@v4
         with:
