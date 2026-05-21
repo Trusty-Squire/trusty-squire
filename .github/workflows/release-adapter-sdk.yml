@@ -158,33 +158,47 @@ jobs:
             --provenance \
             --no-git-checks
 
-      # Ground truth: never trust pnpm/npm stdout. Tarball must return 200.
-      - name: Verify tarball is live on registry
+      # Ground truth: never trust pnpm/npm stdout. Use `npm view` (metadata
+      # index) — that's what real users hit. Tarball CDN can lag 5-10min.
+      - name: Verify version is live on registry
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
-          URL="https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-$V.tgz"
-          echo "Polling $URL ..."
-          for i in $(seq 1 24); do
-            CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I "$URL")
-            echo "  attempt $i → HTTP $CODE"
-            if [[ "$CODE" == "200" ]]; then
-              echo "✓ Tarball is live."
-              exit 0
+          echo "Polling: npm view @trusty-squire/adapter-sdk@$V version (up to 5min) ..."
+          for i in $(seq 1 30); do
+            FOUND=$(npm view "@trusty-squire/adapter-sdk@$V" version 2>/dev/null || echo "")
+            echo "  attempt $i → '$FOUND'"
+            if [[ "$FOUND" == "$V" ]]; then
+              echo "✓ Version $V is live on registry."
+              break
             fi
-            sleep 5
+            if [[ "$i" == "30" ]]; then
+              echo "::error::Version $V not on registry after 5min. npm publish lied."
+              exit 1
+            fi
+            sleep 10
           done
-          echo "::error::Tarball did not become available within 2min. Publish may have failed silently."
-          exit 1
 
-      # Extra-paranoid: download what was just published and confirm the
-      # built JS actually contains parseSkill. The 0.6.14 mcp release shipped
-      # a stale dist that proves "we built it locally" ≠ "registry served it".
+      # Extra-paranoid: download tarball + grep parseSkill. Tarball CDN lags
+      # the metadata index — skip if CDN not ready, downgrade to warning.
       - name: Verify tarball contents
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
           URL="https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-$V.tgz"
+          echo "Waiting for tarball CDN (up to 5min) ..."
+          for i in $(seq 1 30); do
+            CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I "$URL")
+            if [[ "$CODE" == "200" ]]; then
+              echo "✓ Tarball CDN ready (attempt $i)"
+              break
+            fi
+            if [[ "$i" == "30" ]]; then
+              echo "::warning::Tarball CDN still 404 — skipping content check (metadata is live)."
+              exit 0
+            fi
+            sleep 10
+          done
           curl -sSL "$URL" | tar -xzO package/dist/index.js | grep -q 'parseSkill' \
             || { echo "::error::Published tarball missing parseSkill"; exit 1; }
           echo "✓ Tarball contains parseSkill"
@@ -201,7 +215,7 @@ jobs:
           V="${{ needs.verify.outputs.version }}"
           TAG="${{ needs.verify.outputs.npm_dist_tag }}"
           echo "Asserting dist-tag '$TAG' → $V"
-          for i in $(seq 1 6); do
+          for i in $(seq 1 18); do
             CURRENT=$(npm view "@trusty-squire/adapter-sdk" dist-tags --json 2>/dev/null \
               | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
             echo "  attempt $i — npm view says $TAG = '$CURRENT'"
@@ -219,7 +233,7 @@ jobs:
               echo "✓ Cross-check: package doc also confirms $TAG=$V"
               exit 0
             fi
-            sleep 5
+            sleep 10
           done
           echo "::warning::dist-tag $TAG = '$CURRENT', expected '$V'. Forcing it via npm dist-tag add."
           npm dist-tag add "@trusty-squire/adapter-sdk@$V" "$TAG"

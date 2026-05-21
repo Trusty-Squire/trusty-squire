@@ -11,8 +11,21 @@ PKG="${1:-}"
 EXPECTED_VERSION="${2:-}"
 SENTINEL="${3:-}"
 
+# Auto-detect expected dist-tag from version string:
+#   stable (e.g. 0.6.13)        → latest
+#   prerelease (e.g. 0.6.13-rc) → next
+# Override with EXPECTED_TAG env var.
+if [[ -n "${EXPECTED_TAG:-}" ]]; then
+  TAG="$EXPECTED_TAG"
+elif [[ "$EXPECTED_VERSION" == *-* ]]; then
+  TAG="next"
+else
+  TAG="latest"
+fi
+
 if [[ -z "$PKG" || -z "$EXPECTED_VERSION" ]]; then
   echo "Usage: $0 <package-name> <expected-version> [<sentinel-string-in-dist>]"
+  echo "  EXPECTED_TAG env var overrides auto-detected dist-tag (latest/next)."
   echo "Example: $0 @trusty-squire/mcp 0.6.15 'case \"connect\"'"
   exit 1
 fi
@@ -36,22 +49,22 @@ if [[ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]]; then
 fi
 echo "OK"
 
-# STEP 2: Verify dist-tags latest via npm view (authoritative)
-echo -n "STEP 2: npm view $PKG dist-tags --json (latest=$EXPECTED_VERSION) ... "
+# STEP 2: Verify dist-tags[$TAG] via npm view (authoritative)
+echo -n "STEP 2: npm view $PKG dist-tags --json ($TAG=$EXPECTED_VERSION) ... "
 DIST_TAGS_JSON=$(npm view "$PKG" dist-tags --json 2>&1 || echo "{}")
-LATEST_TAG=$(echo "$DIST_TAGS_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('latest', ''))" 2>/dev/null || echo "")
-if [[ "$LATEST_TAG" != "$EXPECTED_VERSION" ]]; then
-  echo "FAIL: dist-tags.latest=$LATEST_TAG, expected $EXPECTED_VERSION"
+CURRENT_TAG=$(echo "$DIST_TAGS_JSON" | python3 -c "import sys, json; print(json.load(sys.stdin).get('$TAG', ''))" 2>/dev/null || echo "")
+if [[ "$CURRENT_TAG" != "$EXPECTED_VERSION" ]]; then
+  echo "FAIL: dist-tags.$TAG=$CURRENT_TAG, expected $EXPECTED_VERSION"
   exit 1
 fi
 echo "OK"
 
 # STEP 3: Cross-check with full package document
-echo -n "STEP 3: curl https://registry.npmjs.org/$PKG (dist-tags.latest cross-check) ... "
+echo -n "STEP 3: curl https://registry.npmjs.org/$PKG (dist-tags.$TAG cross-check) ... "
 FULL_DOC=$(curl -sS "https://registry.npmjs.org/$PKG" 2>&1 || echo "{}")
-LATEST_FROM_DOC=$(echo "$FULL_DOC" | python3 -c "import sys, json; print(json.load(sys.stdin).get('dist-tags', {}).get('latest', ''))" 2>/dev/null || echo "")
-if [[ "$LATEST_FROM_DOC" != "$EXPECTED_VERSION" ]]; then
-  echo "FAIL: Full doc has dist-tags.latest=$LATEST_FROM_DOC, npm view said $LATEST_TAG. CDN inconsistency detected!"
+TAG_FROM_DOC=$(echo "$FULL_DOC" | python3 -c "import sys, json; print(json.load(sys.stdin).get('dist-tags', {}).get('$TAG', ''))" 2>/dev/null || echo "")
+if [[ "$TAG_FROM_DOC" != "$EXPECTED_VERSION" ]]; then
+  echo "FAIL: Full doc has dist-tags.$TAG=$TAG_FROM_DOC, npm view said $CURRENT_TAG. CDN inconsistency detected!"
   exit 1
 fi
 echo "OK"
@@ -104,14 +117,14 @@ else
 fi
 
 # STEP 6: End-to-end clean install
-echo -n "STEP 6: Clean tmpdir install (npm install $PKG@latest) ... "
+echo -n "STEP 6: Clean tmpdir install (npm install $PKG@$TAG) ... "
 INSTALL_DIR=$(mktemp -d)
 trap "rm -rf $INSTALL_DIR" EXIT
 
 (
   cd "$INSTALL_DIR"
   npm init -y >/dev/null 2>&1
-  npm install --no-audit --no-fund "$PKG@latest" >/dev/null 2>&1
+  npm install --no-audit --no-fund "$PKG@$TAG" >/dev/null 2>&1
   
   # Read installed version (handle scoped packages correctly)
   PKG_DIR="./node_modules/$PKG"
