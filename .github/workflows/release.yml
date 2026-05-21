@@ -167,16 +167,18 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Generate Prisma clients
-        # `packages/inbox` and `apps/registry-api` ship Prisma schemas; tsc fails
-        # ("Property X does not exist on PrismaClient") without generated clients.
-        run: |
-          pnpm --filter '@trusty-squire/inbox' prisma:generate
-          pnpm --filter '@trusty-squire/registry-api' --if-present prisma:generate || true
+      - name: Generate Prisma client for inbox
+        # `packages/inbox` (an mcp workspace dep) ships a Prisma schema; tsc
+        # fails ("Property 'emailAlias' does not exist on PrismaClient")
+        # without a generated client.
+        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
 
-      - name: Build (workspace)
-        # Builds everything so workspace deps resolve when packaging apps/mcp
-        run: pnpm build
+      - name: Build mcp's workspace deps
+        # Build ONLY what mcp depends on. A full `pnpm -r build` pulls in
+        # apps/web + apps/pwa (Next.js) which rebuild @prisma/client in
+        # parallel and race with inbox's tsc, breaking the inbox build.
+        # Keep in sync with apps/mcp/package.json workspace deps.
+        run: pnpm --filter '@trusty-squire/adapter-sdk' --filter '@trusty-squire/inbox' build
 
       # Force a clean rebuild of the MCP package right before publish.
       # Without this, TypeScript's incremental build can reuse stale dist
