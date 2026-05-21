@@ -52,7 +52,13 @@ export async function runSkillCli(
   }
 
   try {
-    const client = (opts.buildClient ?? (() => clientFromEnvOrThrow({ accountId: process.env.TRUSTY_SQUIRE_ACCOUNT_ID })))();
+    const client = (opts.buildClient ?? (() => {
+      // Only forward accountId when it's actually set — passing
+      // `undefined` violates exactOptionalPropertyTypes on the
+      // Partial<RegistryHttpOpts> the http helper expects.
+      const acctId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+      return clientFromEnvOrThrow(acctId !== undefined ? { accountId: acctId } : {});
+    }))();
     switch (subcommand) {
       case "list":
         return await cmdList(argv.slice(1), client, stdout);
