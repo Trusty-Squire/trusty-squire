@@ -763,6 +763,187 @@ export class BrowserController {
     }
   }
 
+  // Scroll a Terms-of-Service style modal to the bottom so the gated
+  // "Accept" button enables. Railway's signup is the canonical case:
+  // a modal with a virtualized ToS list watches real `scroll` /
+  // `wheel` events on its container and only flips the button to
+  // enabled once `scrollTop + clientHeight ~= scrollHeight`.
+  //
+  // The post-verify planner has no way to name a non-interactive div
+  // (the inventory only carries interactive elements), so when
+  // `selector` is omitted this method auto-detects the most plausible
+  // scrollable container: the largest visible element with
+  // `overflow:auto|scroll` and real scroll headroom. Returns a
+  // structured result so the executor can log what it found and the
+  // calling planner round can re-plan if nothing was scrollable.
+  //
+  // Strategy:
+  //   1. Resolve a target element (selector or auto-detected).
+  //   2. Position the mouse over it and emit a series of `mouse.wheel`
+  //      events. Real wheel events fire `scroll` + `wheel` handlers
+  //      and walk virtualized lists row by row; a single JS
+  //      `scrollTop = scrollHeight` skips them.
+  //   3. Fallback: once wheel loop exits, set `scrollTop = scrollHeight`
+  //      and dispatch a synthetic `scroll` event. Covers static lists
+  //      whose handlers only debounce on the final scroll position.
+  async scrollToEndOfTOS(
+    selector?: string,
+  ): Promise<{
+    scrolled: boolean;
+    container: string | null;
+    reason: "ok" | "no_container" | "already_at_bottom";
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+
+    // 1. Find the container.
+    const target = await this.page.evaluate((sel: string | null) => {
+      const scrollableOf = (el: Element): boolean => {
+        const s = window.getComputedStyle(el);
+        const overflowY = s.overflowY;
+        if (overflowY !== "auto" && overflowY !== "scroll") return false;
+        return el.scrollHeight > el.clientHeight + 20;
+      };
+      const visibleArea = (el: Element): number => {
+        const r = el.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        return w * h;
+      };
+      const describe = (el: Element): { rect: DOMRect; scrollTop: number; scrollHeight: number; clientHeight: number } => ({
+        rect: el.getBoundingClientRect(),
+        scrollTop: el.scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+      });
+      if (sel !== null) {
+        const explicit = document.querySelector(sel);
+        if (explicit === null) return null;
+        return describe(explicit);
+      }
+      // Auto-detect: largest visible scrollable element.
+      const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
+      const candidates = all.filter(scrollableOf).map((el) => ({
+        el,
+        area: visibleArea(el),
+      }));
+      candidates.sort((a, b) => b.area - a.area);
+      const winner = candidates[0];
+      if (winner === undefined || winner.area < 100) return null;
+      return describe(winner.el);
+    }, selector ?? null);
+
+    if (target === null) {
+      return { scrolled: false, container: null, reason: "no_container" };
+    }
+
+    // Already at the bottom on entry — a no-op scroll. Surface this
+    // so the executor can hint the planner that whatever is gating
+    // the disabled button is NOT scroll position (Railway iter ≥2 on
+    // the second ToS modal: planner kept asking for scroll when the
+    // form was actually waiting on something else).
+    if (
+      target.scrollTop + target.clientHeight >=
+      target.scrollHeight - 4
+    ) {
+      return {
+        scrolled: false,
+        container: selector ?? "auto-detected",
+        reason: "already_at_bottom",
+      };
+    }
+
+    const { rect } = target;
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+
+    // 2. Move the mouse over the container, then wheel down repeatedly.
+    if (this.humanize) {
+      await this.bezierMouseTo(cx, cy);
+      await this.sleep(rand(80, 200));
+    } else {
+      await this.page.mouse.move(cx, cy);
+    }
+
+    const deltaPerStep = Math.max(200, Math.floor(rect.height * 0.7));
+    const maxSteps = 30;
+    for (let i = 0; i < maxSteps; i++) {
+      await this.page.mouse.wheel(0, deltaPerStep);
+      await this.sleep(this.humanize ? rand(60, 180) : 30);
+      const atBottom = await this.page.evaluate(
+        ({ sel, autoDetected }: { sel: string | null; autoDetected: boolean }) => {
+          let el: Element | null;
+          if (sel !== null) {
+            el = document.querySelector(sel);
+          } else {
+            // Re-resolve the same way we picked it the first time —
+            // the modal we wheeled may have re-rendered (virtualized
+            // list mounting new rows), so cache-by-reference would go
+            // stale.
+            const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
+            const overflowing = all.filter((node) => {
+              const s = window.getComputedStyle(node);
+              if (s.overflowY !== "auto" && s.overflowY !== "scroll") return false;
+              return node.scrollHeight > node.clientHeight + 20;
+            });
+            const visibleArea = (n: Element): number => {
+              const r = n.getBoundingClientRect();
+              const vw = window.innerWidth;
+              const vh = window.innerHeight;
+              const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+              const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+              return w * h;
+            };
+            overflowing.sort((a, b) => visibleArea(b) - visibleArea(a));
+            el = overflowing[0] ?? null;
+          }
+          if (el === null) return true;
+          void autoDetected;
+          return el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+        },
+        { sel: selector ?? null, autoDetected: selector === undefined },
+      );
+      if (atBottom) break;
+    }
+
+    // 3. JS fallback: pin scrollTop to the end and fire a synthetic
+    //    scroll event for handlers that only react on the final
+    //    position. No-op if the wheel loop already reached the bottom.
+    await this.page.evaluate((sel: string | null) => {
+      let el: Element | null;
+      if (sel !== null) {
+        el = document.querySelector(sel);
+      } else {
+        const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
+        const overflowing = all.filter((node) => {
+          const s = window.getComputedStyle(node);
+          if (s.overflowY !== "auto" && s.overflowY !== "scroll") return false;
+          return node.scrollHeight > node.clientHeight + 20;
+        });
+        const visibleArea = (n: Element): number => {
+          const r = n.getBoundingClientRect();
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+          const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+          return w * h;
+        };
+        overflowing.sort((a, b) => visibleArea(b) - visibleArea(a));
+        el = overflowing[0] ?? null;
+      }
+      if (el === null) return;
+      el.scrollTop = el.scrollHeight;
+      el.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }, selector ?? null);
+
+    return {
+      scrolled: true,
+      container: selector ?? "auto-detected",
+      reason: "ok",
+    };
+  }
+
   // Pick a valid option for either a native <select> OR a custom
   // ARIA combobox (Radix, Headless UI, React Aria, cmdk — F11). The
   // bot must not call type() on a select-shaped element (Sentry,
@@ -1658,6 +1839,7 @@ export class BrowserController {
         inConsentWidget: boolean;
         href: string | null;
         iconLabel: string | null;
+        value: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -1684,6 +1866,10 @@ export class BrowserController {
           inConsentWidget: inConsent(el),
           href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
           iconLabel: iconLabelFor(el),
+          value:
+            el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+              ? el.value
+              : null,
         });
       }
       return out;
@@ -2061,6 +2247,15 @@ export interface InteractiveElement {
   // live extractInteractiveElements sets them; test fixtures omit them.
   href?: string | null;
   iconLabel?: string | null;
+  // Current value of a text-shaped input/textarea. Surfaces "is this
+  // field actually empty?" to the planner — a Railway-class token-
+  // creation form has a name input with a placeholder ("Token name")
+  // and an empty value; without `value` the planner can't tell whether
+  // the placeholder is a hint or the current contents, and on Railway
+  // it kept clicking Create instead of filling the name. Empty string
+  // means "the field exists and is empty"; null means "not applicable
+  // (button/link) or not captured (test fixture)".
+  value?: string | null;
 }
 
 // Score a button/link by how much its text reads like a signup

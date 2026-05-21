@@ -64,9 +64,9 @@ export const provisionAnyInputSchema = z.object({
     .optional()
     .describe(
       "Blind-approve a GitHub-App-class OAuth consent screen whose scopes cannot be parsed from the URL (e.g. client_id prefix `Iv1.`). " +
-        "Use ONLY after the user has explicitly told you they trust this service for OAuth — the bot can't show them what's being granted because GitHub Apps declare permissions in the app manifest, not the consent URL. " +
-        "A safety scraper still aborts if the consent page visibly lists scope-grant verb phrases (Drive/Gmail/contacts/etc.). " +
-        "Pass this when a previous run returned status=oauth_consent_needs_review with `requested_scopes=[]` and the user confirmed they trust the service.",
+        "DEFAULT: true. The user signed up to delegate this provisioning; halting on every opaque-scope GitHub App for an extra confirmation defeats that. " +
+        "A DOM safety scraper still aborts the run if the consent page visibly lists scope-grant verb phrases (Drive/Gmail/contacts/etc.), so dangerous scopes still surface as oauth_consent_needs_review. " +
+        "Pass false ONLY when the user explicitly asked for a per-service confirmation prompt.",
     ),
 });
 
@@ -113,8 +113,9 @@ const PROVISION_ANY_JSON_SCHEMA = {
     },
     allow_blind_oauth_consent: {
       type: "boolean",
+      default: true,
       description:
-        "Blind-approve a GitHub-App-class OAuth consent screen whose scopes can't be parsed from the URL. Use ONLY after the user explicitly confirmed they trust the service — the bot can't show them what's being granted because GitHub Apps declare permissions in their app manifest, not the consent URL. A DOM safety scraper still aborts if the consent page visibly lists scope-grant verb phrases. Pass this when a previous run returned status=oauth_consent_needs_review with requested_scopes=[] AND the user confirmed trust.",
+        "Blind-approve a GitHub-App-class OAuth consent screen whose scopes can't be parsed from the URL. DEFAULT: true — the user signed up to delegate this provisioning, so opaque-scope GitHub Apps auto-approve. A DOM safety scraper still aborts if the consent page visibly lists scope-grant verb phrases (Drive/Gmail/contacts), so dangerous scopes still surface as oauth_consent_needs_review. Pass false ONLY when the user explicitly asked for a per-service confirmation prompt.",
     },
   },
 } as const;
@@ -203,10 +204,12 @@ RESPONSES:
       user, ask "approve these scopes?", and if yes call provision_any_service AGAIN with
       allow_extra_oauth_scopes set to that list.
   (b) requested_scopes is EMPTY (GitHub Apps and similar — permissions in the app manifest,
-      not the URL): tell the user "Service X uses an OAuth flow where I can't read the
-      requested permissions in advance — do you trust them?". If yes, call
-      provision_any_service AGAIN with allow_blind_oauth_consent=true. A DOM safety scraper
-      still aborts the run if the consent page visibly lists scope-grant verb phrases.
+      not the URL): the bot's DOM safety scraper saw a scope-grant verb phrase (Drive/Gmail/
+      contacts/etc.) and refused even though allow_blind_oauth_consent defaults to true. Show
+      the unauthorized_scopes / verb_phrases list to the user, ask whether they want to
+      proceed anyway; if yes, currently there is no override path — tell them to sign up
+      manually. If no verb phrases appear, the bot auto-approves and you never see this
+      status for GitHub Apps.
 - status="onboarding_blocked" → signed in via Google, but the API key is behind a
   billing/payment wall; the user must add a payment method.
 - status="failed" → the form filled but yielded no credentials; show steps[].
@@ -432,10 +435,11 @@ async function runSignupTask(
       ...(input.allow_extra_oauth_scopes !== undefined
         ? { allowExtraOAuthScopes: input.allow_extra_oauth_scopes }
         : {}),
-      // GitHub-App / opaque-OAuth blind approval — user opted in.
-      ...(input.allow_blind_oauth_consent !== undefined
-        ? { allowBlindOAuthConsent: input.allow_blind_oauth_consent }
-        : {}),
+      // GitHub-App / opaque-OAuth blind approval — defaults to true
+      // (host agent flips it off explicitly when the user asked for a
+      // per-service confirmation prompt). The DOM verb-phrase scraper
+      // in the agent is still the safety net for dangerous scopes.
+      allowBlindOAuthConsent: input.allow_blind_oauth_consent !== false,
       // Share the in-flight step trail so check_provision_status can
       // surface live progress (the bot pushes into ctx.stepsSink).
       stepsSink: ctx.stepsSink,

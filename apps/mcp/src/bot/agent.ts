@@ -360,6 +360,13 @@ export type PostVerifyStep =
   // styled label or its TOS *link* and does not flip the input;
   // browser.check() force-ticks the underlying checkbox.
   | { kind: "check"; selector: string; reason: string }
+  // `scroll` — scroll a ToS / agreement modal to the bottom so a
+  // gated "Accept" button enables (Railway is the canonical case).
+  // `selector` is OPTIONAL: the inventory only carries interactive
+  // elements, so the planner usually can't name the scrollable div.
+  // When absent the bot auto-detects the largest visible scrollable
+  // container; when present it is used verbatim.
+  | { kind: "scroll"; selector?: string; reason: string }
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
@@ -541,6 +548,23 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
       if (e.name !== null) bits.push(`name=${e.name}`);
       if (e.placeholder !== null) {
         bits.push(`placeholder=${JSON.stringify(e.placeholder)}`);
+      }
+      // Surface the *current* value of an input/textarea so the
+      // planner can distinguish empty (needs `fill`) from already-
+      // populated (already filled — usually no action). Placeholder
+      // text is shown separately above and is NOT the value; without
+      // this signal Railway's planner saw `placeholder="Token name"`
+      // and assumed the field was filled, then kept clicking Create.
+      if (
+        (e.tag === "input" || e.tag === "textarea") &&
+        e.value !== null &&
+        e.value !== undefined
+      ) {
+        bits.push(
+          e.value.length === 0
+            ? `value="" (EMPTY — fill before submitting)`
+            : `value=${JSON.stringify(e.value.slice(0, 60))}`,
+        );
       }
       const label = e.labelText ?? e.ariaLabel;
       if (label !== null && label !== undefined) {
@@ -767,6 +791,19 @@ export function parsePostVerifyStep(
       const selector = requireString(obj, "selector", "post-verify check step");
       checkSelector(selector, "post-verify check step");
       return { kind: "check", selector, reason };
+    }
+    case "scroll": {
+      // `selector` is optional. When the planner does name one (rare
+      // — div containers aren't in the inventory) it does NOT need
+      // to be in `allowedSelectors`; the bot's auto-detect handles
+      // missing/wrong selectors gracefully and the inventory check
+      // would otherwise force the planner to omit a valid hint.
+      const sel = obj["selector"];
+      return {
+        kind: "scroll",
+        reason,
+        ...(typeof sel === "string" && sel.length > 0 ? { selector: sel } : {}),
+      };
     }
     case "navigate":
       return {
@@ -2148,13 +2185,15 @@ export class SignupAgent {
           await this.browser.wait(3);
           continue;
         }
-        // GitHub App / opaque-OAuth blind-approve: user explicitly opted
-        // in for this run with allow_blind_oauth_consent=true. The DOM
-        // scraper above is the safety net — if no dangerous-verb phrase
-        // appears, we honor the user's opt-in and approve.
+        // GitHub App / opaque-OAuth blind-approve: defaults to true at
+        // the tool schema (provision-any.ts), since the user signed up
+        // to delegate this provisioning. The DOM scraper above is the
+        // safety net — Drive/Gmail/contacts-class scope-grant verb
+        // phrases still abort here. Set to false explicitly to force a
+        // per-service confirmation prompt.
         if (task.allowBlindOAuthConsent === true) {
           steps.push(
-            `OAuth: blind consent approved (user opted in via allow_blind_oauth_consent; ` +
+            `OAuth: blind consent approved (allow_blind_oauth_consent=true; ` +
               `no scope-grant verb phrases detected in page DOM)`,
           );
           const advanced = await this.browser.advanceOAuthConsent(provider.id);
@@ -2468,6 +2507,15 @@ ${formatInventory(input.inventory)}`,
     // string and keeps asking to extract it forever), or when the
     // planner's last step was rejected.
     let hint: string | undefined;
+    // Stuck-loop detector: when the planner returns the SAME action
+    // (kind+selector) two rounds in a row AND the inventory size hasn't
+    // changed, the page is unaffected by the action and the planner
+    // is in a tight loop (Railway: 3x click "Create Token" with no
+    // form-name fill; 5x scroll the same modal whose Accept button
+    // is gated on something else). Track the prior round's signature
+    // and inject a forced "no-progress" hint on the second repeat.
+    let prevSignature: string | null = null;
+    let prevInventorySize = -1;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
@@ -2547,6 +2595,80 @@ ${formatInventory(input.inventory)}`,
         observed: nextStep,
       });
 
+      // Stuck-loop detector. Re-planning steps (done/extract/login/
+      // wait/navigate) are exempt: extract is its own progress signal,
+      // navigate intentionally changes the URL not the current DOM,
+      // wait is a deliberate pause, and login/done are terminal-ish.
+      // The detector fires when a planner returns the same action with
+      // the same selector AND the inventory size matches the prior
+      // round's — strong evidence the previous step did nothing.
+      const repeatableKinds = new Set(["click", "fill", "select", "check", "scroll"]);
+      if (repeatableKinds.has(nextStep.kind)) {
+        const sel = "selector" in nextStep ? (nextStep.selector ?? "<none>") : "<none>";
+        const signature = `${nextStep.kind}|${sel}`;
+        // The selector-level guard fires on exact selector repeats. The
+        // kind-level guard fires when the planner just keeps clicking
+        // SOMETHING — the Railway pattern was 6 click steps on 2-3
+        // different selectors with no inventory change in between
+        // (planner cycles through Create, Focus-input, Create again,
+        // …). When that happens, force a non-click action.
+        const sameSelector =
+          signature === prevSignature && inventory.length === prevInventorySize;
+        const stuckOnKind =
+          nextStep.kind === "click" &&
+          prevSignature !== null &&
+          prevSignature.startsWith("click|") &&
+          inventory.length === prevInventorySize;
+        if (sameSelector || stuckOnKind) {
+          const emptyInputs = inventory
+            .filter(
+              (e) =>
+                (e.tag === "input" || e.tag === "textarea") &&
+                e.value !== null &&
+                e.value !== undefined &&
+                e.value.length === 0 &&
+                e.type !== "hidden" &&
+                e.type !== "submit" &&
+                e.type !== "button",
+            )
+            .slice(0, 5)
+            .map((e) => {
+              const hint =
+                e.placeholder ?? e.labelText ?? e.ariaLabel ?? e.name ?? "(no label)";
+              return `  - ${JSON.stringify(hint)} → selector=${e.selector}`;
+            });
+          const emptyInputHint =
+            emptyInputs.length > 0
+              ? `\n\nVisible empty inputs on this page (any of these is a likely required field):\n${emptyInputs.join("\n")}\n\nIssue {"kind":"fill"} on one of them with a sensible value.`
+              : "";
+          args.steps.push(
+            sameSelector
+              ? `Post-verify: no-progress detected — same ${nextStep.kind} on same selector, inventory unchanged. Re-planning instead of re-running.`
+              : `Post-verify: no-progress detected — successive click steps with no inventory change. Forcing a non-click action.`,
+          );
+          hint =
+            `Your previous ${sameSelector ? `'${nextStep.kind}' on ${JSON.stringify(sel)}` : "click steps"} had NO observable effect — the inventory ` +
+            `count is unchanged. The element you targeted is either disabled or gated on ` +
+            `a precondition (an empty required input, an unticked agreement checkbox, an ` +
+            `unselected dropdown option). Do NOT issue another '${nextStep.kind}' this round — pick a ` +
+            `DIFFERENT KIND: {"kind":"fill"} on any empty text input, {"kind":"check"} on ` +
+            `any unticked checkbox, {"kind":"select"} on any unselected dropdown, or ` +
+            `{"kind":"done"} if there is genuinely nothing to do.` +
+            emptyInputHint;
+          prevSignature = signature;
+          prevInventorySize = inventory.length;
+          continue;
+        }
+        prevSignature = signature;
+        prevInventorySize = inventory.length;
+      } else {
+        // Reset the signature on non-repeatable kinds so a `navigate`
+        // followed by a `click` doesn't pattern-match the click against
+        // a click before the navigate.
+        prevSignature = null;
+        prevInventorySize = inventory.length;
+      }
+
       if (nextStep.kind === "done") break;
       hint = undefined;
       try {
@@ -2574,6 +2696,33 @@ ${formatInventory(input.inventory)}`,
           // browser.check force-ticks + scrolls into view + verifies —
           // a styled TOS checkbox a plain click can't flip.
           await this.browser.check(nextStep.selector);
+          await this.browser.wait(1);
+        } else if (nextStep.kind === "scroll") {
+          // Drive a ToS modal to the bottom so its gated Accept button
+          // enables. Railway-class flow: planner sees a disabled
+          // "Accept" + a long modal body, asks us to scroll it.
+          const result = await this.browser.scrollToEndOfTOS(nextStep.selector);
+          if (result.reason === "no_container") {
+            args.steps.push(
+              `Post-verify: scroll requested but no scrollable container found — re-planning.`,
+            );
+            hint =
+              "Your last 'scroll' found NO scrollable container on the page. " +
+              "Do NOT return scroll again — try clicking a different element, " +
+              "or return done if the gated button still won't enable.";
+          } else if (result.reason === "already_at_bottom") {
+            args.steps.push(
+              `Post-verify: scroll requested but ${result.container} is already at the bottom — re-planning.`,
+            );
+            hint =
+              "Your last 'scroll' was a no-op — the scrollable container is ALREADY at the " +
+              "bottom. Whatever is keeping the Accept button disabled is NOT scroll position. " +
+              "Re-read the page: look for an unticked agreement checkbox, an unfilled required " +
+              "input (name/email), a sub-tab on the modal that hasn't been visited, or a 'I agree' " +
+              "radio button. Do NOT return scroll again.";
+          } else {
+            args.steps.push(`Post-verify: scrolled ToS container (${result.container}) to bottom.`);
+          }
           await this.browser.wait(1);
         } else if (nextStep.kind === "navigate") {
           await this.browser.goto(nextStep.url);
@@ -2716,6 +2865,7 @@ Schema:
   {"kind":"fill","selector":"<a selector= from the inventory>","value":"value","reason":"unusual — only for a required project-name etc."}
   {"kind":"select","selector":"<a selector= from the inventory>","option_text":"<visible label of the option to pick — optional>","reason":"pick an option for a dropdown — region, role, country, or a permission/scope on a token form"}
   {"kind":"check","selector":"<a selector= from the inventory, type=checkbox>","reason":"tick a terms-of-service / agreement checkbox"}
+  {"kind":"scroll","reason":"scroll a ToS / agreement modal to the bottom so its gated Accept button enables"}
   {"kind":"navigate","url":"https://...","reason":"e.g. go directly to /settings/api-keys"}
   {"kind":"wait","seconds":N,"reason":"page is still loading"}
 
@@ -2745,6 +2895,7 @@ ${loginGuidance}
 - When you need a SPECIFIC option from the dropdown — e.g. "Project: Read" on Sentry's permissions picker, or a specific region — include "option_text" with the visible label. The executor matches it case-insensitively as a substring. Omit "option_text" when any option is fine (a placeholder country picker).
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
 - If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
+- If an Accept / Agree / Continue button is DISABLED and the page shows a ToS / agreement modal (a long scrollable block of legal text, often inside a dialog), AND there is no agreement checkbox in the inventory to tick, return {"kind":"scroll"}. Some services (Railway is the canonical case) only enable the Accept button after the user scrolls the modal body to the bottom. The bot auto-detects the scrollable container — you do NOT need a selector. Do NOT use "click" to try to scroll; "click" does not scroll, it lands a click and returns. After scrolling, the next round should re-read the page and click the now-enabled Accept button (which will appear in the inventory).
 - Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
 - On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST set permissions BEFORE clicking the create button.
 - **PERMISSION SCOPE — default is MAXIMUM.** ${input.scopeHint !== undefined

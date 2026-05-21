@@ -190,6 +190,41 @@ describe("parsePostVerifyStep — valid input", () => {
     });
   });
 
+  it("parses a scroll step WITHOUT selector — auto-detect path", () => {
+    // The canonical Railway-style ToS-modal case: the scrollable
+    // container is a div not in the inventory, so the planner omits
+    // selector and the bot auto-detects.
+    const raw = JSON.stringify({
+      kind: "scroll",
+      reason: "scroll ToS to enable Accept",
+    });
+    expect(parsePostVerifyStep(raw)).toEqual({
+      kind: "scroll",
+      reason: "scroll ToS to enable Accept",
+    });
+  });
+
+  it("parses a scroll step WITH selector and does NOT inventory-check it", () => {
+    // The scrollable container is rarely interactive, so a scroll
+    // selector should not be rejected when missing from the inventory.
+    const raw = JSON.stringify({
+      kind: "scroll",
+      selector: ".tos-modal-body",
+      reason: "scroll ToS",
+    });
+    const allowed = new Set<string>(); // intentionally empty
+    expect(parsePostVerifyStep(raw, allowed)).toEqual({
+      kind: "scroll",
+      selector: ".tos-modal-body",
+      reason: "scroll ToS",
+    });
+  });
+
+  it("treats an empty-string scroll selector as absent", () => {
+    const raw = JSON.stringify({ kind: "scroll", selector: "", reason: "" });
+    expect(parsePostVerifyStep(raw)).toEqual({ kind: "scroll", reason: "" });
+  });
+
   it("treats an empty-string option_text as absent", () => {
     // A model emitting `"option_text": ""` would otherwise be saying
     // "match an option whose text contains the empty string" — every
