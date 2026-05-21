@@ -167,6 +167,13 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Generate Prisma clients
+        # `packages/inbox` and `apps/registry-api` ship Prisma schemas; tsc fails
+        # ("Property X does not exist on PrismaClient") without generated clients.
+        run: |
+          pnpm --filter '@trusty-squire/inbox' prisma:generate
+          pnpm --filter '@trusty-squire/registry-api' --if-present prisma:generate || true
+
       - name: Build (workspace)
         # Builds everything so workspace deps resolve when packaging apps/mcp
         run: pnpm build
