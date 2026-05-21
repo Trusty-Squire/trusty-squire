@@ -130,6 +130,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
+      '@trusty-squire/adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/adapter-sdk
       boxen:
         specifier: ^8.0.1
         version: 8.0.1
@@ -326,6 +329,10 @@ importers:
         version: 5.9.3
 
   packages/adapter-sdk:
+    dependencies:
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.3.3
