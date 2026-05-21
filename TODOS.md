@@ -428,7 +428,8 @@ multi-step / withholding, out of F3's scope).
   picks, fail with `planning_failed: stuck on <selector>` instead
   of looping.
 
-- [ ] **F16 — Blind-consent iter-2 ordering bug. [P1]** Surfaced
+- [x] **F16 — Blind-consent iter-2 ordering bug. [P1] — shipped 0.6.9.**
+  Surfaced
   2026-05-20 by Railway OAuth. When `allow_blind_oauth_consent=true`
   fires on iter 1, `consentAlreadyApproved` is set correctly — but
   iter 2's blind-consent branch runs BEFORE the
@@ -440,7 +441,7 @@ multi-step / withholding, out of F3's scope).
   `runOAuthFlow`. Proven by the GitHub authorization-success email
   arriving despite the "aborted" status the bot reported.
 
-- [ ] **F17 — Detect already-signed-in dashboard state. [P2]**
+- [x] **F17 — Detect already-signed-in dashboard state. [P2] — shipped 0.6.9.**
   After a successful OAuth bind, returning to `<service>/login` may
   redirect to the dashboard with no sign-in affordance. Today the
   bot's OAuth-first scan fails the retries and bails with

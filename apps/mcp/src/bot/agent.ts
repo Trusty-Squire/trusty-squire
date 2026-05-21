@@ -323,7 +323,14 @@ type PlanExecOutcome =
   // T6: an OAuth-first signup found its provider affordance — the
   // selector of the "Sign in with Google" button to click. signup()
   // hands off to the OAuth consent flow instead of credential extraction.
-  | { kind: "oauth"; selector: string; provider: OAuthProviderId };
+  | { kind: "oauth"; selector: string; provider: OAuthProviderId }
+  // F17 — the bot landed on a signup URL but the page renders a
+  // dashboard / authenticated state instead. Happens when a prior
+  // OAuth bind from a previous run completed but didn't extract
+  // credentials, and on retry the service auto-redirects past the
+  // sign-in widget. Skip OAuth + form-fill, go straight to the
+  // post-OAuth navigation loop to find the API key.
+  | { kind: "already_oauth" };
 
 // What to do next after the verification link is clicked. Most services
 // land you on a dashboard with the API key visible; some require one or
@@ -574,6 +581,33 @@ export function detectAntiBotBlock(html: string): string | null {
   if (/datadome|dd-captcha/i.test(text)) return "DataDome";
   if (/incapsula|imperva/i.test(text)) return "Imperva";
   return null;
+}
+
+// F17 — True when the inventory looks like an authenticated
+// dashboard rather than a sign-up page. Triggers when a prior OAuth
+// bind already linked the account and the service auto-redirects
+// past the sign-in widget on the next visit. Detection signals:
+//   - At least one element whose visible text matches an
+//     authenticated-state keyword (Sign out / Log out / Dashboard /
+//     Projects / Settings / Profile / Account)
+//   - No email/password input fields visible (a true sign-up page
+//     virtually always has at least one)
+// Conservative — both conditions must hold.
+export function detectAlreadySignedIn(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const AUTH_KEYWORDS =
+    /^\s*(?:sign out|log out|dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
+  const hasAuthMarker = inventory.some((e) =>
+    AUTH_KEYWORDS.test((e.visibleText ?? e.ariaLabel ?? "").trim()),
+  );
+  if (!hasAuthMarker) return false;
+  const hasCredentialInput = inventory.some(
+    (e) =>
+      e.tag === "input" &&
+      (e.type === "email" || e.type === "password" || e.type === "tel"),
+  );
+  return !hasCredentialInput;
 }
 
 // True when the page has no fillable text input AND no button that
@@ -1110,6 +1144,20 @@ export class SignupAgent {
           );
           await this.browser.wait(3);
           continue;
+        }
+        // F17 — already-signed-in detection. If the inventory shows
+        // dashboard markers (Sign out / Dashboard / Projects / etc.)
+        // AND no email/password form is visible, this is a previously-
+        // authenticated state, not a sign-up flow. Skip the form-fill
+        // path entirely and route to the post-OAuth navigation loop
+        // to find the API key — same path Sentry/OpenRouter use post-
+        // handshake.
+        if (detectAlreadySignedIn(inventory)) {
+          steps.push(
+            "Auto-OAuth: page shows dashboard markers (Sign out / Dashboard / etc.) — " +
+              "treating as already authenticated, jumping to post-verify navigation",
+          );
+          return { kind: "already_oauth" };
         }
         steps.push(
           "OAuth-first: no usable provider affordance on the page — " +
@@ -1761,6 +1809,38 @@ export class SignupAgent {
             outcome.provider,
             steps,
           );
+        case "already_oauth": {
+          // F17 — page rendered an authenticated dashboard (a
+          // previous OAuth bind already linked the account). Skip
+          // consent + form-fill, navigate straight to the API key.
+          // Uses the same post-OAuth loop runOAuthFlow uses after a
+          // successful handshake.
+          let credentials = await this.extractCredentials();
+          if (credentials.api_key === undefined) {
+            credentials = await this.postVerifyLoop({
+              service: task.service,
+              maxRounds: task.postVerifyMaxRounds ?? 12,
+              steps,
+              ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+            });
+          }
+          if (credentials.api_key !== undefined) {
+            return {
+              success: true,
+              credentials,
+              steps,
+              ...this.resultTail(),
+            };
+          }
+          return {
+            success: false,
+            error:
+              "no_credentials_after_already_signed_in: bot detected an authenticated dashboard " +
+              "but post-OAuth navigation did not surface an API key. Sign in manually and generate the token.",
+            steps,
+            ...this.resultTail(),
+          };
+        }
         case "submitted":
           break;
       }
@@ -2039,6 +2119,35 @@ export class SignupAgent {
             steps,
           );
         }
+        // F16 — order matters here. The post-grant intermediate page
+        // (after blind-consent approved on iter 1) is also classified
+        // as "consent" with unreadable scopes. If we check the blind-
+        // consent branch FIRST, iter 2 fires advanceOAuthConsent
+        // again, finds no Authorize button (already clicked), aborts —
+        // a false negative even though the real authorization
+        // succeeded. So: check consentAlreadyApproved FIRST and
+        // soft-advance; only fall to blind-consent on iter 1 when
+        // the flag isn't yet set.
+        if (consentAlreadyApproved) {
+          // We already approved a consent screen earlier in this flow
+          // (either basic-scopes match or blind-consent). The second
+          // consent-classed page is a post-grant confirmation /
+          // safety review / account chooser routed through /consent.
+          // Soft advance: try the approve control; if it isn't there
+          // the loop will re-classify on the next iteration as the
+          // page naturally redirects.
+          steps.push(
+            "OAuth: post-grant consent page (no parseable scopes, no scope phrases) — advancing",
+          );
+          const advanced = await this.browser.advanceOAuthConsent(provider.id);
+          if (!advanced) {
+            steps.push(
+              "OAuth: no approve control on the post-grant page — waiting for natural navigation",
+            );
+          }
+          await this.browser.wait(3);
+          continue;
+        }
         // GitHub App / opaque-OAuth blind-approve: user explicitly opted
         // in for this run with allow_blind_oauth_consent=true. The DOM
         // scraper above is the safety net — if no dangerous-verb phrase
@@ -2058,26 +2167,6 @@ export class SignupAgent {
             );
           }
           consentAlreadyApproved = true;
-          await this.browser.wait(3);
-          continue;
-        }
-        if (consentAlreadyApproved) {
-          // We already validated and auto-approved a scope-grant
-          // consent earlier in this flow. This second consent-classed
-          // page has no parseable scopes AND no visible scope-grant
-          // verb phrases — it's a post-grant confirmation / safety
-          // review / account chooser routed through /consent. Soft
-          // advance: try the approve control, and if it isn't there
-          // the loop will re-classify on the next iteration.
-          steps.push(
-            "OAuth: post-grant consent page (no parseable scopes, no scope phrases) — advancing",
-          );
-          const advanced = await this.browser.advanceOAuthConsent(provider.id);
-          if (!advanced) {
-            steps.push(
-              "OAuth: no approve control on the post-grant page — waiting for natural navigation",
-            );
-          }
           await this.browser.wait(3);
           continue;
         }

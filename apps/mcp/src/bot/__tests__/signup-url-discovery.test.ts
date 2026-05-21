@@ -5,7 +5,33 @@
 // live; these are the deterministic pieces unit tests can pin.
 
 import { describe, expect, it } from "vitest";
-import { detectAntiBotBlock, guessSignupUrl, isGoogleSearchUrl } from "../agent.js";
+import {
+  detectAlreadySignedIn,
+  detectAntiBotBlock,
+  guessSignupUrl,
+  isGoogleSearchUrl,
+} from "../agent.js";
+import type { InteractiveElement } from "../browser.js";
+
+function mkEl(over: Partial<InteractiveElement>): InteractiveElement {
+  return {
+    index: 0,
+    tag: "button",
+    type: null,
+    id: null,
+    name: null,
+    placeholder: null,
+    ariaLabel: null,
+    role: null,
+    labelText: null,
+    visibleText: null,
+    selector: "#x",
+    visible: true,
+    inViewport: true,
+    inConsentWidget: false,
+    ...over,
+  };
+}
 
 describe("guessSignupUrl", () => {
   it("returns https://<name>.com/signup for the common dev-SaaS pattern", () => {
@@ -88,5 +114,51 @@ describe("isGoogleSearchUrl", () => {
     expect(isGoogleSearchUrl("https://accounts.google.com/signin")).toBe(false);
     expect(isGoogleSearchUrl("https://resend.com/signup")).toBe(false);
     expect(isGoogleSearchUrl("not-a-url")).toBe(false);
+  });
+});
+
+describe("detectAlreadySignedIn (F17)", () => {
+  it("fires when dashboard markers present and no credential inputs", () => {
+    expect(
+      detectAlreadySignedIn([
+        mkEl({ tag: "a", visibleText: "Dashboard" }),
+        mkEl({ tag: "a", visibleText: "Projects" }),
+        mkEl({ tag: "button", visibleText: "Sign out" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("does NOT fire when an email or password input is present", () => {
+    expect(
+      detectAlreadySignedIn([
+        mkEl({ tag: "a", visibleText: "Dashboard" }),
+        mkEl({ tag: "input", type: "email", visibleText: null }),
+      ]),
+    ).toBe(false);
+    expect(
+      detectAlreadySignedIn([
+        mkEl({ tag: "button", visibleText: "Sign out" }),
+        mkEl({ tag: "input", type: "password" }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("does NOT fire on a true sign-up page (no auth markers)", () => {
+    expect(
+      detectAlreadySignedIn([
+        mkEl({ tag: "button", visibleText: "Continue with Google" }),
+        mkEl({ tag: "button", visibleText: "Sign up" }),
+        mkEl({ tag: "a", visibleText: "Home" }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("matches Sign out / Log out / Workspaces / Settings", () => {
+    for (const text of ["Sign out", "Log out", "Workspaces", "Settings", "My Account"]) {
+      expect(
+        detectAlreadySignedIn([mkEl({ tag: "a", visibleText: text })]),
+        `should fire on "${text}"`,
+      ).toBe(true);
+    }
   });
 });
