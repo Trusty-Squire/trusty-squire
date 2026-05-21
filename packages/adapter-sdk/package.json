@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/adapter-sdk",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "type": "module",
   "description": "Type-checked adapter manifest + learned-skill schema SDK for Trusty Squire. Defines the wire contract every adapter and registry-stored skill is validated against.",
   "license": "MIT",

@@ -35,6 +35,13 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Workspace deps (adapter-sdk, inbox, runtime, etc.) ship as TS sources
+      # whose package.json points at dist/. tsc can't resolve them otherwise.
+      # Inbox needs prisma generate first or its build fails.
+      - name: Prisma generate (inbox)
+        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
+      - name: Build workspace dep dists
+        run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package typecheck on the green set. Workspace-wide pnpm -r
       # typecheck includes apps/api + apps/registry-api which have
       # pre-existing type errors tracked separately.
@@ -72,7 +79,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # apps/api + apps/inbox-api tests import @trusty-squire/runtime and
       # @trusty-squire/adapter-resend, whose package.json points at dist/.
-      # Build them first or vitest fails to resolve the entry.
+      # Inbox needs prisma generate first or its build fails.
+      - name: Prisma generate (inbox)
+        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package test on the green set. Workspace-wide `pnpm -r test`
