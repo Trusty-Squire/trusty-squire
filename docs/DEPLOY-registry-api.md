@@ -168,6 +168,40 @@ fly deploy
 That's it. The `release_command` handles migrations; the rolling
 deploy handles zero-downtime swap.
 
+## Known gotchas
+
+### `Failed to load /node_modules/zod/lib/index.mjs` on boot
+
+If you see this in `fly logs` right after a deploy:
+
+```
+Failed to load /node_modules/zod/lib/index.mjs (imported by
+/node_modules/@trusty-squire/adapter-sdk/dist/skill.js): ENOENT
+```
+
+…the Dockerfile is missing `--shamefully-hoist` on the
+`pnpm install` and/or `--preserve-symlinks --preserve-symlinks-main`
+on the runtime CMD. Both are present in
+`apps/registry-api/Dockerfile.fly` as of phase 8 fix
+(commit acd4671). If the file is hand-edited and you strip them
+out, the runtime can't resolve transitive deps imported from
+workspace-package `dist/` files. Vitest masks this in dev because
+it does its own resolution.
+
+### `auto_stop_machines` interactions
+
+The registry is set to `auto_stop_machines = "stop"` and
+`min_machines_running = 0`. That's deliberate (saves $ — the router
+fails open on any registry call failure). After idle, the first
+request to the registry pays a ~1-2s cold-start. `fly machines list`
+will show the machine in `stopped` while `fly status` may briefly
+say `started` — Fly's proxy resumes the machine on the first
+incoming request.
+
+If you need it permanently warm for some reason (e.g. you're
+running an ops dashboard that polls it), bump
+`min_machines_running = 1` in fly.toml and redeploy.
+
 ## Disaster recovery
 
 ### Restore from backup
