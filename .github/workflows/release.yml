@@ -54,6 +54,22 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # Workspace deps (e.g. @trusty-squire/adapter-sdk) ship as TypeScript
+      # sources with `main: ./dist/index.js`. Vitest's vite resolver follows
+      # that pointer, so without a prior workspace build the MCP tests fail
+      # with "Failed to resolve entry for package @trusty-squire/adapter-sdk".
+      # We exclude the MCP package itself — its own dist gets built fresh
+      # in the publish job right before npm publish.
+      - name: Build mcp's workspace deps (for test resolution)
+        # Vitest follows the `main` of @trusty-squire/{adapter-sdk,inbox} to
+        # their dist/ — those must exist before mcp tests can import them.
+        # `inbox` requires `prisma generate` first; without the generated client
+        # tsc fails with "Property 'emailAlias' does not exist on type 'PrismaClient'".
+        # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
+        run: |
+          pnpm --filter '@trusty-squire/inbox' prisma:generate
+          pnpm --filter '@trusty-squire/adapter-sdk' --filter '@trusty-squire/inbox' build
+
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
       # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
       # Tests are the real safety net — once cleanup lands, re-enable the
