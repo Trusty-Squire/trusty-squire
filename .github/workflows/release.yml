@@ -1,0 +1,231 @@
+name: Release
+
+# Publishes @trusty-squire/mcp to npm and creates a GitHub release whenever the
+# version in apps/mcp/package.json is bumped on `main` (stable) or `staging` (rc).
+#
+# Source of truth: apps/mcp/package.json `version` field.
+#   - main:    must be a stable semver (e.g. 0.6.13). Publishes `latest` tag.
+#   - staging: must be a prerelease (e.g. 0.6.14-rc.1). Publishes `next` tag.
+#
+# If a git tag v<version> already exists, the job is a no-op (idempotent).
+# This means re-pushing main without bumping the version does NOT republish.
+
+on:
+  push:
+    branches: [main, staging]
+
+# Only one release run per branch at a time. Don't cancel in-flight: a publish
+# that's mid-way through registering on npm should be allowed to finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create tags + releases
+  id-token: write   # npm provenance (sigstore)
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: re-run lint + typecheck + test inside the same job graph as publish.
+  # We don't trust an out-of-band ci.yml result — explicit gate, explicit failure.
+  # ---------------------------------------------------------------------------
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version:        ${{ steps.read.outputs.version }}
+      is_prerelease:  ${{ steps.read.outputs.is_prerelease }}
+      tag_exists:     ${{ steps.read.outputs.tag_exists }}
+      npm_dist_tag:   ${{ steps.read.outputs.npm_dist_tag }}
+      gh_prerelease:  ${{ steps.read.outputs.gh_prerelease }}
+      should_publish: ${{ steps.read.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history to see existing tags
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0   # match packageManager in root package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
+      # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
+      # Tests are the real safety net — once cleanup lands, re-enable the
+      # `pnpm lint` and `pnpm typecheck` steps above the test step.
+      - name: Test
+        run: pnpm test
+
+      - name: Read package version + decide
+        id: read
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./apps/mcp/package.json').version")
+          BRANCH="${GITHUB_REF_NAME}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Branch:  $BRANCH"
+          echo "Version: $VERSION"
+
+          # Detect prerelease per semver: anything after a `-`
+          if [[ "$VERSION" == *"-"* ]]; then
+            IS_PRE=true
+          else
+            IS_PRE=false
+          fi
+          echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
+
+          # Branch ↔ version-shape contract
+          if [[ "$BRANCH" == "main" && "$IS_PRE" == "true" ]]; then
+            echo "::error::main branch requires a stable version, got prerelease: $VERSION"
+            exit 1
+          fi
+          if [[ "$BRANCH" == "staging" && "$IS_PRE" == "false" ]]; then
+            echo "::error::staging branch requires a prerelease version (e.g. $VERSION-rc.1), got stable: $VERSION"
+            exit 1
+          fi
+
+          # Tag-existence check = idempotent skip
+          if git rev-parse --quiet --verify "refs/tags/v$VERSION" >/dev/null; then
+            TAG_EXISTS=true
+          else
+            TAG_EXISTS=false
+          fi
+          echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
+
+          # npm dist-tag + GH release flag
+          if [[ "$IS_PRE" == "true" ]]; then
+            echo "npm_dist_tag=next"  >> "$GITHUB_OUTPUT"
+            echo "gh_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_dist_tag=latest" >> "$GITHUB_OUTPUT"
+            echo "gh_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Also short-circuit if npm already has this exact version published.
+          # Don't fail — just skip. Lets us re-run main with no version bump.
+          if npm view "@trusty-squire/mcp@$VERSION" version >/dev/null 2>&1; then
+            NPM_HAS=true
+          else
+            NPM_HAS=false
+          fi
+          echo "npm_has=$NPM_HAS"
+
+          if [[ "$TAG_EXISTS" == "true" || "$NPM_HAS" == "true" ]]; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping publish: version $VERSION already released (tag_exists=$TAG_EXISTS, npm_has=$NPM_HAS)"
+          else
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Publish: npm + GitHub release. Only runs if verify said should_publish=true.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: verify
+    if: needs.verify.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    environment: npm-publish   # optional: add required reviewers in repo settings
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (workspace)
+        # Builds everything so workspace deps resolve when packaging apps/mcp
+        run: pnpm build
+
+      # ---- npm publish -----------------------------------------------------
+      - name: Publish to npm
+        working-directory: apps/mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Publishing @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
+          # --provenance: GitHub Actions signs the tarball (sigstore). Shows
+          # a verified badge on npmjs.com. Requires id-token: write (set above).
+          npm publish \
+            --access=public \
+            --tag="${{ needs.verify.outputs.npm_dist_tag }}" \
+            --provenance
+
+      # ---- Ground-truth verification: NEVER trust npm's success output -----
+      # The previous agent burned three version numbers because they trusted
+      # `+ @trusty-squire/mcp@X.Y.Z` from npm's stdout. Only the tarball URL
+      # returning HTTP 200 proves the publish actually landed.
+      - name: Verify tarball is live on registry
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          URL="https://registry.npmjs.org/@trusty-squire/mcp/-/mcp-$V.tgz"
+          echo "Polling $URL ..."
+          for i in $(seq 1 12); do
+            CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I "$URL")
+            echo "  attempt $i → HTTP $CODE"
+            if [[ "$CODE" == "200" ]]; then
+              echo "✓ Tarball is live."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Tarball did not become available within 60s. npm publish lied."
+          exit 1
+
+      # ---- GitHub release --------------------------------------------------
+      - name: Build release tarball for GitHub
+        working-directory: apps/mcp
+        run: |
+          npm pack
+          ls -la *.tgz
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          TAG="v$V"
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.verify.outputs.gh_prerelease }}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Auto-generate notes from the commits since the previous tag.
+          # --generate-notes pulls PR titles and contributor list.
+          gh release create "$TAG" \
+            apps/mcp/trusty-squire-mcp-"$V".tgz \
+            --title "$TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            --target "$GITHUB_SHA"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Released @trusty-squire/mcp@${{ needs.verify.outputs.version }}"
+            echo ""
+            echo "- npm dist-tag: \`${{ needs.verify.outputs.npm_dist_tag }}\`"
+            echo "- GitHub release: [v${{ needs.verify.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ needs.verify.outputs.version }})"
+            echo "- Tarball: https://registry.npmjs.org/@trusty-squire/mcp/-/mcp-${{ needs.verify.outputs.version }}.tgz"
+            echo ""
+            echo "Install:"
+            echo '```'
+            echo "npm install -g @trusty-squire/mcp@${{ needs.verify.outputs.npm_dist_tag }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   pull_request:
-    branches: [main]
+    branches: [main, staging]
 
 jobs:
   lint:
@@ -12,6 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.11.0
@@ -24,6 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.11.0
@@ -36,6 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.11.0
