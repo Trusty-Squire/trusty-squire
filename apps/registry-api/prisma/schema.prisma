@@ -35,3 +35,92 @@ model AdapterManifestRecord {
   @@index([service])
   @@index([disabled_at])
 }
+
+// SkillRecord — Tier-2 Learned Skills (0.7.0).
+//
+// Lives in the same database as AdapterManifestRecord but in a
+// separate table. The user-visible "unified" routing experience
+// (Decision 2 → option A) is delivered at the route layer, which
+// resolves "what runs this service?" against both tables and returns
+// whichever tier has an active record. Two storage tables + one router
+// lookup gives us the unified UX without forcing Prisma migrations on
+// the existing immutable AdapterManifestRecord every time the skill
+// schema iterates.
+//
+// `payload_json` carries the full SkillSchema-validated JSON. Health
+// counters live as columns rather than inside the JSON so atomic SQL
+// UPDATE works (E3 race-condition fix).
+model SkillRecord {
+  // ULID-shaped skill identifier. Primary key because (service,
+  // version) isn't unique — skill:edit can republish the same
+  // version with new content under a fresh skill_id.
+  skill_id             String   @id
+
+  // Identity + routing
+  service              String
+  version              String
+
+  // Signed payload + signature. Same signer infrastructure as
+  // AdapterManifestRecord; signature attests to the payload bytes.
+  payload_json         Json
+  signature            String
+  signed_at            DateTime
+  signed_by            String
+
+  // Lifecycle status. Mirrors SkillStatus in @trusty-squire/adapter-sdk.
+  // Stored as TEXT (not Prisma enum) so adding new variants doesn't
+  // require a migration — the schema-package Zod enum is the source
+  // of truth.
+  status               String
+
+  // Health counters. Updated via atomic SQL on each replay outcome.
+  replays_succeeded    Int      @default(0)
+  replays_failed       Int      @default(0)
+  consecutive_failures Int      @default(0)
+
+  // Timestamps
+  created_at           DateTime @default(now())
+  last_replayed_at     DateTime?
+  superseded_at        DateTime?
+  deleted_at           DateTime?
+
+  // Reverse relation to replay outcomes for trail debugging.
+  replays              SkillReplayRecord[]
+
+  // Hot-path index: router asks "what's the active skill for this
+  // service?". Indexed for that exact query shape.
+  @@index([service, status])
+  @@index([service])
+  @@index([status])
+  @@index([deleted_at])
+}
+
+// SkillReplayRecord — one row per replay outcome reported by the
+// router. Powers GET /skills/:service/replays (D7) and feeds the
+// auto-demotion logic in POST /skills/:id/replay-outcome.
+model SkillReplayRecord {
+  id          String      @id @default(cuid())
+  skill_id    String
+  skill       SkillRecord @relation(fields: [skill_id], references: [skill_id], onDelete: Cascade)
+
+  // The ReplayOutcome.kind serialised as TEXT.
+  outcome     String
+
+  // Free-text reason from the router. Bounded to 2000 chars at the
+  // API layer to keep the table small under load.
+  reason      String
+
+  // Which account ran the replay. Powers per-account rate limiting
+  // and account-scoped debugging.
+  account_id  String
+
+  // Which step (if any) failed. NULL for outcome="ok" or "dry_pass".
+  step_index  Int?
+
+  // When the replay happened.
+  replayed_at DateTime @default(now())
+
+  @@index([skill_id])
+  @@index([skill_id, replayed_at])
+  @@index([account_id, replayed_at])
+}
