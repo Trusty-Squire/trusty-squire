@@ -941,6 +941,14 @@ export function extractApiKeyFromText(text: string): string | null {
   const labeled: readonly RegExp[] = [
     /(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key)(?:[ \t]*[:=][ \t]*|[ \t]+)([a-zA-Z0-9_\-]{20,})/i,
     /\b[Bb]earer[ \t]+([a-zA-Z0-9_\-.]{30,})/,
+    // UUID-style tokens (Railway uses bare UUIDs for API tokens; some
+    // smaller services do too). MUST be labeled — bare UUIDs appear all
+    // over dashboards as trace IDs, project IDs, and request IDs, so an
+    // unlabeled UUID regex would false-positive on the first error page
+    // the bot lands on. The label set is broader than the prefix-style
+    // labeled regex above because Railway specifically renders "Token"
+    // (not "API key") next to the value.
+    /(?:api[_\s-]?token|api[_\s-]?key|access[_\s-]?token|new[_\s-]?token|\btoken|\bsecret)(?:[ \t\n]*[:=][ \t\n]*|[ \t\n]+)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i,
   ];
   for (const pattern of labeled) {
     const match = text.match(pattern);
@@ -2507,6 +2515,17 @@ ${formatInventory(input.inventory)}`,
     // string and keeps asking to extract it forever), or when the
     // planner's last step was rejected.
     let hint: string | undefined;
+    // Failed-extract counter. The stuck-loop detector below exempts
+    // `extract` on the theory that "extract is its own progress signal"
+    // — true when extract succeeds, FALSE when it returns no key. A
+    // planner that keeps quoting the on-screen token in its reasoning
+    // but extract keeps returning null means the regex library in
+    // extractApiKeyFromText doesn't recognize the shape (Railway: bare
+    // UUID token). Without this counter the loop burns all 12 rounds
+    // re-extracting the same unrecognized value. Two consecutive
+    // failures triggers a re-plan with a hint that steers the planner
+    // toward Copy buttons or `done`.
+    let consecutiveFailedExtracts = 0;
     // Stuck-loop detector: when the planner returns the SAME action
     // (kind+selector) two rounds in a row AND the inventory size hasn't
     // changed, the page is unaffected by the action and the planner
@@ -2675,14 +2694,45 @@ ${formatInventory(input.inventory)}`,
         if (nextStep.kind === "extract") {
           credentials = await this.extractCredentials();
           if (credentials.api_key === undefined) {
-            // The planner saw a key-shaped string but extraction got
-            // nothing — the on-page key is masked/truncated. Steer the
-            // next round off `extract` and toward creating a fresh key.
-            hint =
-              "Your last 'extract' found NO key — the key text on the page is " +
-              "masked or truncated (e.g. shows '...' or dots). A masked existing " +
-              "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
-              "generate a fresh one — its full value is shown once, on creation.";
+            consecutiveFailedExtracts += 1;
+            // Two consecutive failed extracts on a DOM the planner
+            // keeps quoting a token from means the value's shape is
+            // not in our regex library (Railway: bare UUID; some
+            // smaller services use opaque alphanumeric tokens with no
+            // recognisable prefix or nearby label). Steer HARD toward
+            // a Copy-button click — the page renders a Copy affordance
+            // far more often than it changes the token's text shape,
+            // and the Copy path is regex-free. Falling back to `done`
+            // is acceptable when the user can copy the token visually.
+            if (consecutiveFailedExtracts >= 2) {
+              args.steps.push(
+                `Post-verify: ${consecutiveFailedExtracts} consecutive failed extracts ` +
+                  `on a page the planner says shows a token — the value's shape is not ` +
+                  `in this build's regex library. Re-planning off extract.`,
+              );
+              hint =
+                "Your last TWO 'extract' attempts returned NO key, even though you " +
+                "said the token is visible. The token's SHAPE is not one this " +
+                "extractor recognises (e.g. a bare UUID with no 'API key:' label " +
+                "nearby). Do NOT issue another 'extract'. Instead: " +
+                "(1) {\"kind\":\"click\"} a 'Copy' / 'Copy token' / 'Copy to clipboard' " +
+                "button near the token — the clipboard path bypasses the regex. " +
+                "(2) If no Copy button exists, issue {\"kind\":\"done\"} — the user " +
+                "will copy the token manually from the screenshot.";
+              consecutiveFailedExtracts = 0;
+            } else {
+              // First failure: keep the existing masked/truncated hint
+              // — most services that fail extract once do so because
+              // the displayed value is dots/ellipsis, and the existing
+              // hint correctly steers to "create a fresh key".
+              hint =
+                "Your last 'extract' found NO key — the key text on the page is " +
+                "masked or truncated (e.g. shows '...' or dots). A masked existing " +
+                "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
+                "generate a fresh one — its full value is shown once, on creation.";
+            }
+          } else {
+            consecutiveFailedExtracts = 0;
           }
         } else if (nextStep.kind === "click") {
           await this.browser.click(nextStep.selector);

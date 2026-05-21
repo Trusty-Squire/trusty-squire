@@ -216,3 +216,72 @@ describe("isTruncatedCapture — F10 truncation detection", () => {
     expect(isTruncatedCapture("unrelated text", "sk-or-v1-abc")).toBe(false);
   });
 });
+
+// UUID-style API tokens (Railway uses bare UUIDs; some smaller services
+// do too). MUST be labeled — bare UUIDs are everywhere on dashboards as
+// trace IDs, project IDs, and request IDs, so an unlabeled UUID regex
+// would false-positive on the first error page the bot lands on.
+//
+// Regression fixture: Railway's signup ran 12 post-verify rounds with
+// the message "The full API token is visible on the page:
+// db3a32ea-dd1b-4e28-9680-db2991c81e3e" — the planner could see the
+// token but the extractor's regex library had no UUID pattern, so each
+// extract returned null and the loop never broke.
+describe("extractApiKeyFromText — UUID-style tokens (Railway)", () => {
+  // Synthetic fixture UUID — random hex, not a real Railway token.
+  const UUID = "12345678-1111-2222-3333-444455556666";
+
+  it("extracts a UUID labeled with 'API token:'", () => {
+    const text = `Your new API token: ${UUID} — copy it now.`;
+    expect(extractApiKeyFromText(text)).toBe(UUID);
+  });
+
+  it("extracts a UUID labeled with 'API key:'", () => {
+    const text = `API key: ${UUID}`;
+    expect(extractApiKeyFromText(text)).toBe(UUID);
+  });
+
+  it("extracts a UUID labeled with bare 'Token' (Railway dashboard pattern)", () => {
+    // Railway specifically renders "Token" (not "API key") next to the
+    // value in the "New Token" section.
+    const text = `New Token\nmy-api-token\nToken ${UUID}`;
+    expect(extractApiKeyFromText(text)).toBe(UUID);
+  });
+
+  it("extracts a UUID with '=' separator", () => {
+    const text = `secret=${UUID}`;
+    expect(extractApiKeyFromText(text)).toBe(UUID);
+  });
+
+  it("does NOT extract a bare UUID with no credential label", () => {
+    // Trace IDs and request IDs would false-positive otherwise.
+    const text = `Request failed. Trace ID: ${UUID}`;
+    expect(extractApiKeyFromText(text)).toBeNull();
+  });
+
+  it("does NOT extract a UUID labeled as a project/trace ID", () => {
+    const text = `Project ID: ${UUID}`;
+    expect(extractApiKeyFromText(text)).toBeNull();
+  });
+
+  it("extracts the UUID even when surrounded by dashboard chrome", () => {
+    // Realistic-ish layout — Railway's modal renders the token below a
+    // 'New Token' header with the name field above it.
+    const text = [
+      "Account / Tokens",
+      "Create New Token",
+      "Name: my-api-token",
+      "New Token",
+      `Token ${UUID}`,
+      "Copy",
+      "Make sure to copy your token now. You won't see it again.",
+    ].join("\n");
+    expect(extractApiKeyFromText(text)).toBe(UUID);
+  });
+
+  it("is case-insensitive on the label", () => {
+    expect(extractApiKeyFromText(`api token: ${UUID}`)).toBe(UUID);
+    expect(extractApiKeyFromText(`API TOKEN: ${UUID}`)).toBe(UUID);
+    expect(extractApiKeyFromText(`Api_Token = ${UUID}`)).toBe(UUID);
+  });
+});
