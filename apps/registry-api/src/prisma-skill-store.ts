@@ -7,6 +7,7 @@ import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
 import {
   type InsertCaptureInput,
   type InsertSkillInput,
+  type ListSkillsFilter,
   type RecordReplayInput,
   type RecordReplayResult,
   type SkillCaptureRecord,
@@ -101,6 +102,19 @@ export class PrismaSkillStore implements SkillStore {
       orderBy: { created_at: "desc" },
     });
     return row ? toSkillStoreRecord(row) : null;
+  }
+
+  async listSkills(filter: ListSkillsFilter): Promise<SkillStoreRecord[]> {
+    const limit = Math.min(500, Math.max(1, filter.limit ?? 100));
+    const where: Prisma.SkillRecordWhereInput = { deleted_at: null };
+    if (filter.service !== undefined) where.service = filter.service;
+    if (filter.status !== undefined) where.status = filter.status;
+    const rows = await this.client.skillRecord.findMany({
+      where,
+      orderBy: { created_at: "desc" },
+      take: limit,
+    });
+    return rows.map(toSkillStoreRecord);
   }
 
   async recordReplayOutcome(input: RecordReplayInput): Promise<RecordReplayResult> {

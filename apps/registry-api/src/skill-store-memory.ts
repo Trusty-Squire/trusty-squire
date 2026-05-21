@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import type {
   InsertCaptureInput,
   InsertSkillInput,
+  ListSkillsFilter,
   RecordReplayInput,
   RecordReplayResult,
   SkillCaptureRecord,
@@ -130,6 +131,19 @@ export class InMemorySkillStore implements SkillStore {
       if (best === null || record.created_at > best.created_at) best = record;
     }
     return best;
+  }
+
+  async listSkills(filter: ListSkillsFilter): Promise<SkillStoreRecord[]> {
+    const limit = Math.min(500, Math.max(1, filter.limit ?? 100));
+    const matches: SkillStoreRecord[] = [];
+    for (const record of this.skills.values()) {
+      if (record.deleted_at !== null) continue;
+      if (filter.service !== undefined && record.service !== filter.service) continue;
+      if (filter.status !== undefined && record.status !== filter.status) continue;
+      matches.push(record);
+    }
+    matches.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    return matches.slice(0, limit);
   }
 
   async recordReplayOutcome(input: RecordReplayInput): Promise<RecordReplayResult> {

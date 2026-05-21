@@ -146,6 +146,91 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
     },
   );
 
+  // ── GET /skills ─────────────────────────────────────────────────
+  // T28 — list endpoint backing the `skill list` CLI subcommand.
+  // Filter by service and/or status; default limit 100, max 500.
+  // NOTE: route ordering matters in Fastify — this MUST be
+  // registered AFTER /skills/:service (above) to avoid colliding
+  // with single-record fetches. Fastify's radix router treats them
+  // distinctly, but the order is deliberate.
+  fastify.get<{
+    Querystring: {
+      service?: string;
+      status?: string;
+      limit?: string;
+    };
+  }>("/skills", async (req, reply) => {
+    const limit = parseInt(req.query.limit ?? "100", 10);
+    const filter: { service?: string; status?: string; limit?: number } = {};
+    if (req.query.service !== undefined) filter.service = req.query.service;
+    if (req.query.status !== undefined) filter.status = req.query.status;
+    if (!Number.isNaN(limit) && limit > 0) filter.limit = limit;
+    const records = await opts.store.listSkills(filter);
+    return reply.code(200).send({
+      ok: true,
+      skills: records.map((r) => ({
+        skill_id: r.skill_id,
+        service: r.service,
+        version: r.version,
+        status: r.status,
+        signed_by: r.signed_by,
+        signed_at: r.signed_at.toISOString(),
+        replays_succeeded: r.replays_succeeded,
+        replays_failed: r.replays_failed,
+        consecutive_failures: r.consecutive_failures,
+        created_at: r.created_at.toISOString(),
+        last_replayed_at: r.last_replayed_at?.toISOString() ?? null,
+      })),
+    });
+  });
+
+  // ── GET /skills/by-id/:skill_id ─────────────────────────────────
+  // T28 — fetch one skill record by ULID. The /skills/:service shape
+  // returns the *active* record; this returns the exact one whatever
+  // its status. Used by `skill show`, `skill replays`, etc.
+  // Namespaced under /by-id/ so it can't collide with service slugs.
+  fastify.get<{ Params: { skill_id: string } }>(
+    "/skills/by-id/:skill_id",
+    async (req, reply) => {
+      const record = await opts.store.findById(req.params.skill_id);
+      if (record === null) {
+        return reply.code(404).send({ ok: false, error: "skill_not_found" });
+      }
+      return sendSkillResponse(reply, record);
+    },
+  );
+
+  // ── POST /skills/:skill_id/demote ───────────────────────────────
+  // T28 — operator manual demotion. Sets status=demoted regardless
+  // of consecutive_failures. Body: { reason: string }.
+  fastify.post<{
+    Params: { skill_id: string };
+    Body: { reason?: unknown };
+  }>("/skills/:skill_id/demote", async (req, reply) => {
+    void opts.resolveAccountId(req as { headers: Record<string, unknown> });
+
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+    if (reason.length < 1) {
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_request",
+        detail: "reason is required (operator must explain manual demote)",
+      });
+    }
+    const updated = await opts.store.manuallyDemote(
+      req.params.skill_id,
+      truncate(reason, REPLAY_REASON_MAX_LENGTH),
+    );
+    if (updated === null) {
+      return reply.code(404).send({ ok: false, error: "skill_not_found" });
+    }
+    return reply.code(200).send({
+      ok: true,
+      skill_id: updated.skill_id,
+      status: updated.status,
+    });
+  });
+
   // ── POST /skills/:skill_id/replay-outcome ───────────────────────
   fastify.post<{ Params: { skill_id: string }; Body: ReplayOutcomeBody }>(
     "/skills/:skill_id/replay-outcome",
@@ -360,6 +445,39 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
       });
     },
   );
+
+  // ── GET /skills/by-id/:skill_id/replays ─────────────────────────
+  // T28 — replays for a specific skill record (any status). The
+  // /skills/:service/replays variant below resolves the active row
+  // and is fine for "what's happening with the current Railway
+  // skill?"; this variant is needed when the operator wants to
+  // inspect a demoted or superseded skill's failure trail.
+  fastify.get<{
+    Params: { skill_id: string };
+    Querystring: { limit?: string };
+  }>("/skills/by-id/:skill_id/replays", async (req, reply) => {
+    const record = await opts.store.findById(req.params.skill_id);
+    if (record === null) {
+      return reply.code(404).send({ ok: false, error: "skill_not_found" });
+    }
+    const limit = Math.min(
+      REPLAY_LIST_MAX_LIMIT,
+      Math.max(1, parseInt(req.query.limit ?? `${REPLAY_LIST_DEFAULT_LIMIT}`, 10) || REPLAY_LIST_DEFAULT_LIMIT),
+    );
+    const replays = await opts.store.listReplays(record.skill_id, limit);
+    return reply.code(200).send({
+      ok: true,
+      service: record.service,
+      skill_id: record.skill_id,
+      replays: replays.map((r) => ({
+        id: r.id,
+        outcome: r.outcome,
+        reason: r.reason,
+        step_index: r.step_index,
+        replayed_at: r.replayed_at.toISOString(),
+      })),
+    });
+  });
 
   // ── GET /skills/:service/replays ────────────────────────────────
   fastify.get<{

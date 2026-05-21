@@ -104,6 +104,20 @@ export interface SkillStore {
   findActiveByService(service: string): Promise<SkillStoreRecord | null>;
 
   /**
+   * List skills with optional filters. Powers the `skill list` CLI
+   * subcommand and operator-console pagination (Phase 7).
+   *
+   * Filters:
+   *   - service: exact-match service slug
+   *   - status:  exact-match status string (active, demoted, etc.)
+   *
+   * Pass empty filter object to list every skill in the registry.
+   * Results are ordered by created_at descending (newest first).
+   * Limit defaults to 100; max 500.
+   */
+  listSkills(filter: ListSkillsFilter): Promise<SkillStoreRecord[]>;
+
+  /**
    * Record a replay outcome and atomically update the counters on
    * the parent skill (E3). When this outcome pushes consecutive
    * failures to ≥3, the skill is auto-demoted to status=demoted in
@@ -163,6 +177,12 @@ export interface SkillStore {
    * the capture isn't in the registry.
    */
   findCaptureByHash(content_hash: string): Promise<SkillCaptureRecord | null>;
+}
+
+export interface ListSkillsFilter {
+  service?: string;
+  status?: string;
+  limit?: number;
 }
 
 export interface InsertCaptureInput {

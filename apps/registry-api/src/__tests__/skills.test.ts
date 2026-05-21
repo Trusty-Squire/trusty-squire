@@ -1143,3 +1143,297 @@ describe("T20 demotion webhook", () => {
     await server.close();
   });
 });
+
+// ── Phase 7 backend: list + by-id + demote ─────────────────────────
+
+describe("GET /skills (list)", () => {
+  it("returns all skills when no filters set", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    for (let i = 0; i < 3; i++) {
+      await server.inject({
+        method: "POST",
+        url: "/skills",
+        payload: {
+          skill: validSkill({
+            skill_id: `01HZX${String.fromCharCode(65 + i)}9ABCDEFGHJKMNPQRSTVWX`,
+            service: `svc-${i}`,
+            source_run_ids: [`run-${i}`],
+            steps: [
+              {
+                kind: "navigate" as const,
+                url: `https://svc-${i}.example.com/signup`,
+                provenance: { run_id: `run-${i}`, round_index: 0 },
+              },
+              {
+                kind: "extract_via_copy_button" as const,
+                near_text_hint: "API Key",
+                provenance: { run_id: `run-${i}`, round_index: 1 },
+              },
+            ],
+          }),
+          signature: "x".repeat(64),
+        },
+      });
+    }
+
+    const response = await server.inject({ method: "GET", url: "/skills" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().skills).toHaveLength(3);
+    await server.close();
+  });
+
+  it("filters by service", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: "01HZXA9ABCDEFGHJKMNPQRSTVWX" }), signature: "x".repeat(64) },
+    });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          skill_id: "01HZXB9ABCDEFGHJKMNPQRSTVWX",
+          service: "other-service",
+          source_run_ids: ["run-other"],
+          steps: [
+            {
+              kind: "navigate" as const,
+              url: "https://other.example.com/signup",
+              provenance: { run_id: "run-other", round_index: 0 },
+            },
+            {
+              kind: "extract_via_copy_button" as const,
+              near_text_hint: "API Key",
+              provenance: { run_id: "run-other", round_index: 1 },
+            },
+          ],
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/skills?service=railway",
+    });
+    expect(response.statusCode).toBe(200);
+    const skills = response.json().skills;
+    expect(skills).toHaveLength(1);
+    expect(skills[0].service).toBe("railway");
+    await server.close();
+  });
+
+  it("filters by status", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: "01HZXC9ABCDEFGHJKMNPQRSTVWX" }), signature: "x".repeat(64) },
+    });
+
+    // Demote it.
+    await skillStore.manuallyDemote("01HZXC9ABCDEFGHJKMNPQRSTVWX", "ops decision");
+
+    const activeResp = await server.inject({
+      method: "GET",
+      url: "/skills?status=active",
+    });
+    expect(activeResp.json().skills).toHaveLength(0);
+
+    const demotedResp = await server.inject({
+      method: "GET",
+      url: "/skills?status=demoted",
+    });
+    expect(demotedResp.json().skills).toHaveLength(1);
+    expect(demotedResp.json().skills[0].status).toBe("demoted");
+    await server.close();
+  });
+
+  it("respects limit", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    for (let i = 0; i < 5; i++) {
+      await server.inject({
+        method: "POST",
+        url: "/skills",
+        payload: {
+          skill: validSkill({
+            skill_id: `01HZX${String.fromCharCode(70 + i)}9ABCDEFGHJKMNPQRSTVWX`,
+            service: `svc-l-${i}`,
+            source_run_ids: [`run-l-${i}`],
+            steps: [
+              {
+                kind: "navigate" as const,
+                url: `https://svc.example.com/${i}`,
+                provenance: { run_id: `run-l-${i}`, round_index: 0 },
+              },
+              {
+                kind: "extract_via_copy_button" as const,
+                near_text_hint: "API Key",
+                provenance: { run_id: `run-l-${i}`, round_index: 1 },
+              },
+            ],
+          }),
+          signature: "x".repeat(64),
+        },
+      });
+    }
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/skills?limit=2",
+    });
+    expect(response.json().skills).toHaveLength(2);
+    await server.close();
+  });
+});
+
+describe("GET /skills/by-id/:skill_id", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+
+  it("returns the full skill record", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: `/skills/by-id/${SKILL_ID}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().skill.skill_id).toBe(SKILL_ID);
+    await server.close();
+  });
+
+  it("returns 404 for unknown id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/skills/by-id/01HZZ9ABCDEFGHJKMNPQRSTVWX",
+    });
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+});
+
+describe("POST /skills/:skill_id/demote", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+
+  it("flips status to demoted", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/demote`,
+      headers: { "x-account-id": "operator-1" },
+      payload: { reason: "Bad credentials reported in field" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("demoted");
+
+    // GET /skills/:service no longer returns it.
+    const get = await server.inject({ method: "GET", url: "/skills/railway" });
+    expect(get.statusCode).toBe(404);
+    await server.close();
+  });
+
+  it("rejects missing reason with 400", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/demote`,
+      headers: { "x-account-id": "operator-1" },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(400);
+    await server.close();
+  });
+
+  it("returns 404 for unknown skill_id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX/demote",
+      headers: { "x-account-id": "operator-1" },
+      payload: { reason: "test" },
+    });
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+});
+
+describe("GET /skills/by-id/:skill_id/replays", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+
+  it("returns replays for any skill (including demoted)", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    for (let i = 0; i < 3; i++) {
+      await server.inject({
+        method: "POST",
+        url: `/skills/${SKILL_ID}/replay-outcome`,
+        headers: { "x-account-id": "acct-1" },
+        payload: { outcome: "ok", reason: `r${i}` },
+      });
+    }
+
+    // Manually demote — the skill is still findable via by-id.
+    await skillStore.manuallyDemote(SKILL_ID, "ops decision");
+
+    const response = await server.inject({
+      method: "GET",
+      url: `/skills/by-id/${SKILL_ID}/replays`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().replays).toHaveLength(3);
+    await server.close();
+  });
+
+  it("returns 404 for unknown skill_id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/skills/by-id/01HZZ9ABCDEFGHJKMNPQRSTVWX/replays",
+    });
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+});
