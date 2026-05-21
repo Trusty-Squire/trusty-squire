@@ -38,7 +38,7 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
 export function assertApi(api: ApiClient | null): asserts api is ApiClient {
   if (api === null) {
     throw new Error(
-      "This tool requires an active Trusty Squire session. Run `npx @trusty-squire/mcp install`.",
+      "This tool requires an active Trusty Squire session. Run `npx @trusty-squire/mcp connect`.",
     );
   }
 }

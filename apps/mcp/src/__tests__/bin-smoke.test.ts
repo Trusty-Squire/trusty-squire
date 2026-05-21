@@ -85,16 +85,30 @@ describe("launched through a bin symlink", () => {
     expect(stderr).toMatch(/\[trusty-squire\] server v\d/);
   }, 30_000);
 
-  it("`mcp install` reaches the setup flow", async () => {
-    const link = await linkTo("mcp-install-link.js");
+  it("`mcp connect` reaches the setup flow", async () => {
+    const link = await linkTo("mcp-connect-link.js");
     // Bogus api-base + sandbox HOME: it fails at the API call, but only
-    // after the entrypoint fired and dispatched into install.
+    // after the entrypoint fired and dispatched into connect.
+    const out = runSubcommand(link, [
+      "connect",
+      "--target=claude-code",
+      "--api-base=http://127.0.0.1:1",
+    ]);
+    expect(out).toContain("Setting up Trusty Squire");
+  }, 30_000);
+
+  it("`mcp install` still works as a deprecated alias for `connect`", async () => {
+    // 0.6.14 renamed `install` → `connect`. The old spelling stays as a
+    // hidden alias so docs/scripts published against ≤0.6.13 keep working.
+    // It should reach the same setup flow AND emit a deprecation warning.
+    const link = await linkTo("mcp-install-alias-link.js");
     const out = runSubcommand(link, [
       "install",
       "--target=claude-code",
       "--api-base=http://127.0.0.1:1",
     ]);
     expect(out).toContain("Setting up Trusty Squire");
+    expect(out).toMatch(/install.*is now.*connect/);
   }, 30_000);
 });
 

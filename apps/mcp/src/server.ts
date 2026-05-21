@@ -51,7 +51,7 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     if (api === null) {
       return errorContent(
         `This install is from before single-tier auth and isn't bound to an account. ` +
-          `Run \`npx @trusty-squire/mcp install\` to reconnect.`,
+          `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
       );
     }
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});

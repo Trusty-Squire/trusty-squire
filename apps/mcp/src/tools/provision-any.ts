@@ -178,7 +178,7 @@ IMMEDIATE RESPONSES (no run started):
 - status="started" + run_id → poll check_provision_status next.
 - status="payment_required" + cta_billing_url → the account hit the free
   signup limit; the user can upgrade at cta_billing_url.
-- status="not_installed" → Trusty Squire isn't installed; tell the user to run \`npx @trusty-squire/mcp install\`.
+- status="not_installed" → Trusty Squire isn't connected; tell the user to run \`npx @trusty-squire/mcp connect\`.
 - status="error" → could not reach the API to set up the signup.`;
 
 const CHECK_DESCRIPTION = `Check the status of a signup started by provision_any_service.
@@ -245,8 +245,8 @@ export const provisionAnyTool = {
       return {
         status: "not_installed",
         message:
-          "Trusty Squire isn't fully installed on this machine. " +
-          "Run `npx @trusty-squire/mcp install` to set up the squire (or reconnect " +
+          "Trusty Squire isn't fully connected on this machine. " +
+          "Run `npx @trusty-squire/mcp connect` to set up the squire (or reconnect " +
           "an install from before single-tier auth).",
       };
     }

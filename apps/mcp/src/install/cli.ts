@@ -81,7 +81,21 @@ type Argv = {
 
 function parseArgs(argv: string[]): Argv {
   const positional = argv.filter((a) => !a.startsWith("--"));
-  const command = positional[0] ?? "install";
+  // `connect` is the canonical command as of 0.6.14. `install` is kept
+  // as a hidden alias so any docs/scripts/blog-posts published against
+  // ≤0.6.13 still work — it emits a one-line deprecation notice but
+  // otherwise behaves identically. Default (no positional) → `connect`
+  // because the most common invocation is `npx @trusty-squire/mcp` with
+  // no args, and that should still kick off the setup flow.
+  let command = positional[0] ?? "connect";
+  if (command === "install") {
+    console.warn(
+      "[trusty-squire] `install` is now `connect`. " +
+        "This alias still works but will be removed in a future major. " +
+        "Update your docs/scripts to: `npx @trusty-squire/mcp connect`.",
+    );
+    command = "connect";
+  }
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
@@ -213,8 +227,8 @@ function resolveServerLaunch(): { command: string; args: string[] } {
 export async function runCli(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
   switch (args.command) {
-    case "install":
-      await install(args);
+    case "connect":
+      await connect(args);
       return;
     case "logout":
       await logout();
@@ -232,7 +246,7 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 }
 
-async function install(args: Argv): Promise<void> {
+async function connect(args: Argv): Promise<void> {
   ui.heading("Setting up Trusty Squire on this machine");
 
   const target = await resolveTarget(args.target);
@@ -300,7 +314,7 @@ async function install(args: Argv): Promise<void> {
   if (session === null) {
     ui.fail(
       "Install didn't complete — the browser confirm step never finished. " +
-        `Try again with ${ui.code("npx @trusty-squire/mcp install")}.`,
+        `Try again with ${ui.code("npx @trusty-squire/mcp connect")}.`,
     );
     process.exit(1);
   }
@@ -537,18 +551,18 @@ async function login(args: Argv): Promise<void> {
 }
 
 function printHelp(): void {
-  console.warn(`mcp — install Trusty Squire into a coding agent`);
+  console.warn(`mcp — connect Trusty Squire to a coding agent`);
   console.warn(``);
   console.warn(`Commands:`);
   console.warn(
-    `  install [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>] [--force-relogin]`,
+    `  connect [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>] [--force-relogin]`,
   );
   console.warn(`  login [--provider=google|github]   re-run the one-time OAuth sign-in`);
   console.warn(`  logout`);
   console.warn(``);
   console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);
   console.warn(``);
-  console.warn(`\`install\` writes the MCP config, opens a browser so you can sign in`);
+  console.warn(`\`connect\` writes the MCP config, opens a browser so you can sign in`);
   console.warn(`(Google or GitHub) to confirm this machine, and then connects the`);
   console.warn(`OAuth identity the bot rides when it signs you up for services.`);
   console.warn(`Best run on a laptop or desktop — a headless box does a one-time`);

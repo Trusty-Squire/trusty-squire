@@ -7,7 +7,7 @@
 export class MissingSessionError extends Error {
   constructor() {
     super(
-      "No active Trusty Squire session. Run `npx @trusty-squire/mcp install --target=<agent>` to set up this machine.",
+      "No active Trusty Squire session. Run `npx @trusty-squire/mcp connect --target=<agent>` to set up this machine.",
     );
     this.name = "MissingSessionError";
   }
