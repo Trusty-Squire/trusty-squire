@@ -18,7 +18,7 @@
     "prisma:migrate:dev": "prisma migrate dev --schema=prisma/schema.prisma"
   },
   "dependencies": {
-    "@trusty-squire/adapter-sdk": "workspace:*",
+    "@trusty-squire/adapter-sdk": "workspace:^",
     "@prisma/client": "^5.22.0",
     "canonicalize": "^2.0.0",
     "fastify": "^4.28.0",

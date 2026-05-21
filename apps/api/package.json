@@ -19,7 +19,7 @@
     "@fastify/rate-limit": "^9.1.0",
     "@prisma/client": "^5.22.0",
     "@trusty-squire/adapter-resend": "workspace:*",
-    "@trusty-squire/adapter-sdk": "workspace:*",
+    "@trusty-squire/adapter-sdk": "workspace:^",
     "@trusty-squire/inbox": "workspace:*",
     "@trusty-squire/mandate-validator": "workspace:*",
     "@trusty-squire/runtime": "workspace:*",

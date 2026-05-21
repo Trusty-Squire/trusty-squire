@@ -1,0 +1,273 @@
+name: Release adapter-sdk
+
+# Publishes @trusty-squire/adapter-sdk to npm whenever the version in
+# packages/adapter-sdk/package.json is bumped on `main` (stable) or `staging` (rc).
+#
+# Source of truth: packages/adapter-sdk/package.json `version` field.
+#   - main:    must be a stable semver. Publishes `latest` tag.
+#   - staging: must be a prerelease. Publishes `next` tag.
+#
+# Tag scheme: `adapter-sdk@<version>` (avoids collision with mcp's `v<version>` tags).
+# If the tag already exists OR npm already has that version, the job is a no-op.
+#
+# This workflow ONLY triggers when packages/adapter-sdk/** or this file changes
+# — pushes that only touch unrelated parts of the monorepo skip it entirely.
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - "packages/adapter-sdk/**"
+      - ".github/workflows/release-adapter-sdk.yml"
+
+concurrency:
+  group: release-adapter-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write   # npm provenance
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version:        ${{ steps.read.outputs.version }}
+      tag_exists:     ${{ steps.read.outputs.tag_exists }}
+      npm_dist_tag:   ${{ steps.read.outputs.npm_dist_tag }}
+      gh_prerelease:  ${{ steps.read.outputs.gh_prerelease }}
+      should_publish: ${{ steps.read.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/adapter-sdk'
+
+      - name: Test adapter-sdk
+        run: pnpm --filter '@trusty-squire/adapter-sdk' test
+
+      - name: Read package version + decide
+        id: read
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packages/adapter-sdk/package.json').version")
+          BRANCH="${GITHUB_REF_NAME}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Branch:  $BRANCH"
+          echo "Version: $VERSION"
+
+          if [[ "$VERSION" == *"-"* ]]; then IS_PRE=true; else IS_PRE=false; fi
+
+          if [[ "$BRANCH" == "main" && "$IS_PRE" == "true" ]]; then
+            echo "::error::main branch requires a stable version, got prerelease: $VERSION"
+            exit 1
+          fi
+          if [[ "$BRANCH" == "staging" && "$IS_PRE" == "false" ]]; then
+            echo "::error::staging branch requires a prerelease version, got stable: $VERSION"
+            exit 1
+          fi
+
+          TAG="adapter-sdk@$VERSION"
+          if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then
+            TAG_EXISTS=true
+          else
+            TAG_EXISTS=false
+          fi
+          echo "tag_exists=$TAG_EXISTS" >> "$GITHUB_OUTPUT"
+
+          if [[ "$IS_PRE" == "true" ]]; then
+            echo "npm_dist_tag=next"  >> "$GITHUB_OUTPUT"
+            echo "gh_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_dist_tag=latest" >> "$GITHUB_OUTPUT"
+            echo "gh_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if npm view "@trusty-squire/adapter-sdk@$VERSION" version >/dev/null 2>&1; then
+            NPM_HAS=true
+          else
+            NPM_HAS=false
+          fi
+          echo "npm_has=$NPM_HAS"
+
+          if [[ "$TAG_EXISTS" == "true" || "$NPM_HAS" == "true" ]]; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping publish: version $VERSION already released (tag_exists=$TAG_EXISTS, npm_has=$NPM_HAS)"
+          else
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: verify
+    if: needs.verify.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/adapter-sdk'
+
+      - name: Clean + build adapter-sdk
+        working-directory: packages/adapter-sdk
+        run: |
+          rm -rf dist
+          pnpm build
+          # Sentinel: refuse to publish if the build didn't produce parseSkill.
+          if ! grep -q 'parseSkill' dist/index.js; then
+            echo "::error::Built dist/index.js is missing parseSkill — refusing to publish broken tarball"
+            exit 1
+          fi
+
+      # pnpm publish (not npm publish) — pnpm rewrites `workspace:` specifiers
+      # to real semver before tarball assembly. Critical for monorepo packages
+      # whose own deps use `workspace:` (none today for adapter-sdk, but cheap
+      # insurance against future drift).
+      - name: Publish to npm
+        working-directory: packages/adapter-sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          TAG="${{ needs.verify.outputs.npm_dist_tag }}"
+          echo "Publishing @trusty-squire/adapter-sdk@$V with dist-tag $TAG"
+          pnpm publish \
+            --access=public \
+            --tag="$TAG" \
+            --provenance \
+            --no-git-checks
+
+      # Ground truth: never trust pnpm/npm stdout. Tarball must return 200.
+      - name: Verify tarball is live on registry
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          URL="https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-$V.tgz"
+          echo "Polling $URL ..."
+          for i in $(seq 1 24); do
+            CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I "$URL")
+            echo "  attempt $i → HTTP $CODE"
+            if [[ "$CODE" == "200" ]]; then
+              echo "✓ Tarball is live."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Tarball did not become available within 2min. Publish may have failed silently."
+          exit 1
+
+      # Extra-paranoid: download what was just published and confirm the
+      # built JS actually contains parseSkill. The 0.6.14 mcp release shipped
+      # a stale dist that proves "we built it locally" ≠ "registry served it".
+      - name: Verify tarball contents
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          URL="https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-$V.tgz"
+          curl -sSL "$URL" | tar -xzO package/dist/index.js | grep -q 'parseSkill' \
+            || { echo "::error::Published tarball missing parseSkill"; exit 1; }
+          echo "✓ Tarball contains parseSkill"
+
+      # pnpm publish in workspace mode has been observed to silently ignore
+      # --tag, tagging the new version as `next` instead of `latest`. The
+      # tarball-and-content check above passes, but end users running
+      # `npm install @latest` get the old version. Assert + auto-fix.
+      - name: Verify dist-tag points at this version (and fix if pnpm lied)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          TAG="${{ needs.verify.outputs.npm_dist_tag }}"
+          echo "Asserting dist-tag '$TAG' → $V"
+          for i in $(seq 1 6); do
+            CURRENT=$(npm view "@trusty-squire/adapter-sdk" dist-tags --json 2>/dev/null \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
+            echo "  attempt $i — npm view says $TAG = '$CURRENT'"
+            if [[ "$CURRENT" == "$V" ]]; then
+              echo "✓ dist-tag $TAG correctly points at $V."
+              # Cross-check: the full package doc must agree. If it disagrees with
+              # npm view, something is wrong at the registry level (do not declare
+              # success — fail loud, surface the inconsistency).
+              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/adapter-sdk" \
+                | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
+              if [[ "$DOC_TAG" != "$V" ]]; then
+                echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
+                exit 1
+              fi
+              echo "✓ Cross-check: package doc also confirms $TAG=$V"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::warning::dist-tag $TAG = '$CURRENT', expected '$V'. Forcing it via npm dist-tag add."
+          npm dist-tag add "@trusty-squire/adapter-sdk@$V" "$TAG"
+          for i in $(seq 1 12); do
+            CURRENT=$(npm view "@trusty-squire/adapter-sdk" dist-tags --json 2>/dev/null \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
+            echo "  post-fix attempt $i — $TAG = '$CURRENT'"
+            if [[ "$CURRENT" == "$V" ]]; then
+              echo "✓ dist-tag $TAG now points at $V (after explicit fix)."
+              # Cross-check: the full package doc must agree. If it disagrees with
+              # npm view, something is wrong at the registry level (do not declare
+              # success — fail loud, surface the inconsistency).
+              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/adapter-sdk" \
+                | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
+              if [[ "$DOC_TAG" != "$V" ]]; then
+                echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
+                exit 1
+              fi
+              echo "✓ Cross-check: package doc also confirms $TAG=$V"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::dist-tag $TAG still wrong after fix attempt."
+          exit 1
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          TAG="adapter-sdk@$V"
+          PRERELEASE_FLAG=""
+          if [[ "${{ needs.verify.outputs.gh_prerelease }}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            --target "$GITHUB_SHA"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Released @trusty-squire/adapter-sdk@${{ needs.verify.outputs.version }}"
+            echo ""
+            echo "- npm dist-tag: \`${{ needs.verify.outputs.npm_dist_tag }}\`"
+            echo "- Tarball: https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-${{ needs.verify.outputs.version }}.tgz"
+          } >> "$GITHUB_STEP_SUMMARY"

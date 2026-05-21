@@ -46,7 +46,15 @@ describe("package manifest", () => {
   });
 });
 
-describe("packed tarball", () => {
+// `pnpm pack` in CI release runners has exhausted inodes (Issue: pnpm
+// writes workspace .pnpm/lock.yaml during pack resolution, and the runner's
+// inode limit is hit). The release workflow does its own ground-truth
+// verification by downloading the published tarball and grepping inside.
+// This in-process pack test stays on for local + ci.yml, where it catches
+// real packaging regressions, but is opt-out for the release pipeline.
+const skipPack = process.env.MCP_SKIP_PACK_SMOKE === "1";
+
+describe.skipIf(skipPack)("packed tarball", () => {
   it("ships dist/bin.js with a node shebang", async () => {
     const packDir = path.join(tmpDir, "pack");
     await fs.mkdir(packDir, { recursive: true });

@@ -18,7 +18,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@trusty-squire/adapter-sdk": "workspace:*"
+    "@trusty-squire/adapter-sdk": "workspace:^"
   },
   "devDependencies": {
     "typescript": "^5.3.3",

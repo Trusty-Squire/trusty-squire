@@ -1,9 +1,25 @@
 {
   "name": "@trusty-squire/adapter-sdk",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Type-checked adapter manifest SDK for Trusty Squire.",
+  "description": "Type-checked adapter manifest + learned-skill schema SDK for Trusty Squire. Defines the wire contract every adapter and registry-stored skill is validated against.",
+  "license": "MIT",
+  "author": "Trusty Squire",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Trusty-Squire/trusty-squire.git",
+    "directory": "packages/adapter-sdk"
+  },
+  "homepage": "https://github.com/Trusty-Squire/trusty-squire/tree/main/packages/adapter-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Trusty-Squire/trusty-squire/issues"
+  },
+  "keywords": [
+    "trusty-squire",
+    "adapter",
+    "schema",
+    "zod"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -12,10 +28,21 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "prepublishOnly": "rm -rf dist && npm run build"
   },
   "dependencies": {
     "zod": "^3.23.8"

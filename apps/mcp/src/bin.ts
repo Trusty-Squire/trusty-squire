@@ -17,8 +17,24 @@ import { MissingSessionError } from "./api-client.js";
 import { runCli } from "./install/cli.js";
 import { runServer } from "./server.js";
 import { runSkillCli } from "./skill-cli/cli.js";
+import { VERSION } from "./version.js";
 
 const argv = process.argv.slice(2);
+
+// Check for version flags early, before dispatching to subcommands.
+// Supports: --version, -v, -V, and "version" as a positional.
+// Must NOT interfere with `server` or `skill` subcommands.
+const isVersionFlag =
+  argv[0] === "version" ||
+  argv[0] === "--version" ||
+  argv[0] === "-v" ||
+  argv[0] === "-V";
+
+if (isVersionFlag) {
+  console.log(VERSION);
+  process.exit(0);
+}
+
 const isServer = argv[0] === "server";
 const isSkill = argv[0] === "skill";
 

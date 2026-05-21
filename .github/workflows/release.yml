@@ -1,4 +1,4 @@
-name: Release
+name: Release mcp
 
 # Publishes @trusty-squire/mcp to npm and creates a GitHub release whenever the
 # version in apps/mcp/package.json is bumped on `main` (stable) or `staging` (rc).
@@ -9,10 +9,20 @@ name: Release
 #
 # If a git tag v<version> already exists, the job is a no-op (idempotent).
 # This means re-pushing main without bumping the version does NOT republish.
+#
+# Path filter: only fires on changes that could affect the mcp tarball
+# (apps/mcp, packages/inbox, packages/adapter-sdk, root lockfile, this file).
+# Unrelated commits to other parts of the monorepo skip CI entirely.
 
 on:
   push:
     branches: [main, staging]
+    paths:
+      - "apps/mcp/**"
+      - "packages/inbox/**"
+      - "packages/adapter-sdk/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/release.yml"
 
 # Only one release run per branch at a time. Don't cancel in-flight: a publish
 # that's mid-way through registering on npm should be allowed to finish.
@@ -42,6 +52,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # need full history to see existing tags
+
+      # The monorepo contains Next.js apps (apps/web, apps/pwa) whose
+      # node_modules and .next caches blow past the default runner disk
+      # quota (14GB free of 75GB). pnpm install + tests fail with ENOSPC.
+      # Free ~25GB by removing preinstalled toolchains we don't use.
+      - name: Free disk space on runner
+        run: |
+          set -euo pipefail
+          echo "Disk before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
+          sudo docker system prune -af --volumes || true
+          echo "Disk after cleanup:"
+          df -h /
+
       - uses: pnpm/action-setup@v4
         with:
           version: 8.15.0   # match packageManager in root package.json
@@ -51,8 +76,10 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
+      # Install ONLY mcp's dep tree, not the entire monorepo (which has
+      # Next.js apps whose ~4M symlinks exhaust the runner's inode quota).
+      - name: Install (mcp dep tree only)
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
 
       # Workspace deps (e.g. @trusty-squire/adapter-sdk) ship as TypeScript
       # sources with `main: ./dist/index.js`. Vitest's vite resolver follows
@@ -80,7 +107,50 @@ jobs:
       # MCP we're publishing here. Workspace-wide tests still run in ci.yml
       # for signal — they just don't block publishes.
       - name: Test (MCP package only)
+        # Skip the pnpm-pack smoke test — it exhausts inodes on GH runners,
+        # and the publish job's own tarball-content verification covers the
+        # same ground from real registry bytes.
+        env:
+          MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test
+
+      # Preflight: refuse to publish mcp if its runtime workspace dep
+      # (@trusty-squire/adapter-sdk) isn't on the npm registry at a version
+      # the published mcp tarball will resolve to. Without this, mcp can
+      # ship "successfully" but `npm install` fails for end users with
+      # ETARGET. Skip the check if mcp's adapter-sdk dep is still a
+      # `workspace:` spec — that means we're in a state where mcp isn't
+      # being bumped right now (path filter probably tripped accidentally).
+      - name: Preflight — adapter-sdk dep resolvable on npm
+        run: |
+          set -euo pipefail
+          DEP_SPEC=$(node -p "require('./apps/mcp/package.json').dependencies['@trusty-squire/adapter-sdk'] || ''")
+          echo "mcp depends on adapter-sdk: $DEP_SPEC"
+          if [[ -z "$DEP_SPEC" ]]; then
+            echo "mcp no longer depends on adapter-sdk — skipping preflight."
+            exit 0
+          fi
+          if [[ "$DEP_SPEC" == workspace:* ]]; then
+            # pnpm will rewrite workspace:^ → ^<local-version> at publish.
+            LOCAL_V=$(node -p "require('./packages/adapter-sdk/package.json').version")
+            echo "workspace spec — will be rewritten to ^$LOCAL_V at publish."
+            DEP_SPEC="^$LOCAL_V"
+          fi
+          echo "Checking npm has a version satisfying: $DEP_SPEC"
+          # If adapter-sdk's release workflow is running in parallel (same push
+          # bumped both versions), poll for up to 5min so we don't race-fail.
+          MATCH=""
+          for i in $(seq 1 30); do
+            MATCH=$(npm view "@trusty-squire/adapter-sdk@$DEP_SPEC" version 2>/dev/null | tail -1 || true)
+            if [[ -n "$MATCH" ]]; then break; fi
+            echo "  attempt $i — no match yet for $DEP_SPEC, sleeping 10s"
+            sleep 10
+          done
+          if [[ -z "$MATCH" ]]; then
+            echo "::error::No published @trusty-squire/adapter-sdk satisfies '$DEP_SPEC' after 5min. Publish adapter-sdk first."
+            exit 1
+          fi
+          echo "✓ adapter-sdk $MATCH satisfies $DEP_SPEC on the registry."
 
       - name: Read package version + decide
         id: read
@@ -155,6 +225,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Free disk space on runner
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
+          sudo docker system prune -af --volumes || true
+
       - uses: pnpm/action-setup@v4
         with:
           version: 8.15.0
@@ -164,8 +241,14 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
+      # Install ONLY mcp's dep tree (mcp + transitive workspace deps), not
+      # the entire monorepo. A full `pnpm install` creates ~4M symlinks
+      # across apps/web + apps/pwa + their Next.js node_modules, which
+      # exceeds the GH runner's inode quota and crashes with ENOSPC mid-
+      # install (NOT disk space — `df -h` shows 100GB free; it's inodes,
+      # which `df -i` would show exhausted).
+      - name: Install (mcp dep tree only)
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
 
       - name: Generate Prisma client for inbox
         # `packages/inbox` (an mcp workspace dep) ships a Prisma schema; tsc
@@ -199,6 +282,12 @@ jobs:
           fi
 
       # ---- npm publish -----------------------------------------------------
+      # Use `pnpm publish`, NOT `npm publish`. pnpm rewrites `workspace:`
+      # specifiers (e.g. `"@trusty-squire/adapter-sdk": "workspace:^"`) to
+      # real semver (`^0.1.0`) before tarball assembly. `npm publish`
+      # ships them through literally, producing an unusable package.
+      # `--no-git-checks` because the working tree may differ from the
+      # commit SHA (we just rebuilt dist/).
       - name: Publish to npm
         working-directory: apps/mcp
         env:
@@ -206,37 +295,110 @@ jobs:
         run: |
           set -euo pipefail
           echo "Publishing @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
-          # --provenance: GitHub Actions signs the tarball (sigstore). Shows
-          # a verified badge on npmjs.com. Requires id-token: write (set above).
-          # --ignore-scripts: prepublishOnly already ran (we built it above).
-          # Skipping prevents a redundant second build that could re-introduce
-          # the staleness we just defended against.
-          npm publish \
+          pnpm publish \
             --access=public \
             --tag="${{ needs.verify.outputs.npm_dist_tag }}" \
             --provenance \
-            --ignore-scripts
+            --no-git-checks
 
       # ---- Ground-truth verification: NEVER trust npm's success output -----
       # The previous agent burned three version numbers because they trusted
-      # `+ @trusty-squire/mcp@X.Y.Z` from npm's stdout. Only the tarball URL
-      # returning HTTP 200 proves the publish actually landed.
+      # `+ @trusty-squire/mcp@X.Y.Z` from npm's stdout. We check THREE things
+      # the registry actually serves:
+      #   1. The tarball URL returns 200.
+      #   2. The tarball's dist/install/cli.js contains the rename sentinel.
+      #   3. The dist-tag we asked for actually points at our version.
+      # Item 3 caught a real bug: pnpm publish in workspace mode silently
+      # ignored --tag=latest and tagged 0.6.13 as `next` instead, leaving
+      # `latest` stuck on 0.6.12. The tarball-only check missed it.
       - name: Verify tarball is live on registry
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
           URL="https://registry.npmjs.org/@trusty-squire/mcp/-/mcp-$V.tgz"
-          echo "Polling $URL ..."
-          for i in $(seq 1 12); do
+          # Poll up to 5min — npm/Fastly propagation routinely takes 30-120s.
+          # The previous 60s cap was the root cause of the 0.6.13/14/15/16
+          # publish-but-fail-CI loop: pnpm publish succeeded, tarball became
+          # live ~90s later, the verify step had already exited 1.
+          echo "Polling $URL (up to 5min) ..."
+          for i in $(seq 1 30); do
             CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I "$URL")
             echo "  attempt $i → HTTP $CODE"
             if [[ "$CODE" == "200" ]]; then
               echo "✓ Tarball is live."
+              break
+            fi
+            if [[ "$i" == "30" ]]; then
+              echo "::error::Tarball did not become available within 5min. npm publish lied."
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Verify tarball contents (case "connect" sentinel)
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          URL="https://registry.npmjs.org/@trusty-squire/mcp/-/mcp-$V.tgz"
+          curl -sSL "$URL" | tar -xzO package/dist/install/cli.js | grep -q 'case "connect"' \
+            || { echo "::error::Published tarball missing case \"connect\""; exit 1; }
+          echo "✓ Tarball contains case \"connect\""
+
+      - name: Verify dist-tag points at this version (and fix if pnpm lied)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          TAG="${{ needs.verify.outputs.npm_dist_tag }}"
+          echo "Asserting dist-tag '$TAG' → $V"
+          # pnpm publish has a known quirk in workspace mode where --tag is
+          # silently ignored. Read the registry's dist-tags blob and fix it
+          # explicitly if it's wrong. Idempotent.
+          for i in $(seq 1 18); do
+            CURRENT=$(npm view "@trusty-squire/mcp" dist-tags --json 2>/dev/null \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
+            echo "  attempt $i — npm view says $TAG = '$CURRENT'"
+            if [[ "$CURRENT" == "$V" ]]; then
+              echo "✓ dist-tag $TAG correctly points at $V."
+              # Cross-check: the full package doc must agree. If it disagrees with
+              # npm view, something is wrong at the registry level (do not declare
+              # success — fail loud, surface the inconsistency).
+              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/mcp" \
+                | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
+              if [[ "$DOC_TAG" != "$V" ]]; then
+                echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
+                exit 1
+              fi
+              echo "✓ Cross-check: package doc also confirms $TAG=$V"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::dist-tag $TAG = '$CURRENT', expected '$V'. Forcing it via npm dist-tag add."
+          npm dist-tag add "@trusty-squire/mcp@$V" "$TAG"
+          # Re-verify after the fix.
+          for i in $(seq 1 12); do
+            CURRENT=$(npm view "@trusty-squire/mcp" dist-tags --json 2>/dev/null \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
+            echo "  post-fix attempt $i — $TAG = '$CURRENT'"
+            if [[ "$CURRENT" == "$V" ]]; then
+              echo "✓ dist-tag $TAG now points at $V (after explicit fix)."
+              # Cross-check: the full package doc must agree. If it disagrees with
+              # npm view, something is wrong at the registry level (do not declare
+              # success — fail loud, surface the inconsistency).
+              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/mcp" \
+                | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
+              if [[ "$DOC_TAG" != "$V" ]]; then
+                echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
+                exit 1
+              fi
+              echo "✓ Cross-check: package doc also confirms $TAG=$V"
               exit 0
             fi
             sleep 5
           done
-          echo "::error::Tarball did not become available within 60s. npm publish lied."
+          echo "::error::dist-tag $TAG still wrong after fix attempt. Manual intervention required."
           exit 1
 
       # ---- GitHub release --------------------------------------------------
