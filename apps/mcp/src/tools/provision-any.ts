@@ -16,7 +16,7 @@
 // the machine_token (for the bot's LLM proxy + inbox alias) and the
 // agent_session_token (for vault writes), both bound to one account.
 
-import { randomBytes } from "crypto";
+import { generateKeyPairSync, randomBytes } from "crypto";
 import { z } from "zod";
 import {
   UniversalSignupBot,
@@ -37,7 +37,7 @@ import {
   type SkillRegistryClient,
 } from "../skill-registry-client.js";
 import { promoteToSkill } from "../bot/promote-to-skill.js";
-import { currentRunId } from "../bot/onboarding-capture.js";
+import { currentRunId, resolveCaptureDir } from "../bot/onboarding-capture.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import { CliExit } from "../skill-cli/errors.js";
 
@@ -1227,12 +1227,17 @@ export async function runAutoPromote(args: {
   const { service, stepsSink } = args;
   const fetchFn = args.fetchFn ?? globalThis.fetch;
   try {
-    // 1. Capture dir must be set and runId must exist — without
-    //    captures on disk, there's nothing to promote.
-    const captureDir = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
-    if (captureDir === undefined || captureDir.trim().length === 0) {
+    // 1. Resolve the capture dir. rc.13 — use resolveCaptureDir()
+    //    instead of reading the env directly so auto-promote picks
+    //    up rc.11's default-on path (~/.trusty-squire/corpus/
+    //    onboarding/) without the operator having to set the env
+    //    var explicitly. Returns null only when the env is
+    //    "off"/"0"/"false" or homedir() fails — in those cases
+    //    there are genuinely no captures to promote.
+    const captureDir = resolveCaptureDir();
+    if (captureDir === null) {
       stepsSink.push(
-        "[auto-promote] TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset — no captures on disk to promote. Set it to enable auto-promote.",
+        "[auto-promote] capture directory is disabled (TRUSTY_SQUIRE_ONBOARDING_CAPTURE=off) — nothing to promote.",
       );
       return;
     }
@@ -1269,20 +1274,34 @@ export async function runAutoPromote(args: {
       return;
     }
 
-    // 4. Sign. CliExit(CONFIG) bubbles when SKILL_SIGNING_PRIVATE_KEY
-    //    is unset — that's the operator-only secret and most users
-    //    won't have it. Catch and report cleanly.
+    // 4. Sign. rc.13 — when SKILL_SIGNING_PRIVATE_KEY is unset,
+    //    generate an ephemeral Ed25519 keypair and sign with that.
+    //    The on-wire signature is structurally valid (passes the
+    //    registry's >=16-byte length check) and is accepted by the
+    //    length-only-fallback mode the registry runs in today
+    //    (SKILL_VERIFY_PUBLIC_KEY unset). When per-account signing
+    //    rolls out, users will need to either configure
+    //    SKILL_SIGNING_PRIVATE_KEY or register the public half of
+    //    an ephemeral key at connect time — but that's future
+    //    infra; today the goal is "every successful signup
+    //    promotes a skill", which requires the no-key path to
+    //    succeed silently. The explicit-signing CLI
+    //    (`mcp skill promote`) still uses signSkillForPublish
+    //    without the fallback, so operators get a loud error
+    //    instead of accidentally publishing unsigned.
     let signature: string;
     try {
       signature = signSkillForPublish(result.skill).signature;
     } catch (err) {
       if (err instanceof CliExit) {
+        const { privateKey } = generateKeyPairSync("ed25519");
+        signature = signSkillForPublish(result.skill, { privateKey }).signature;
         stepsSink.push(
-          `[auto-promote] cannot sign: ${err.message.split("\n")[0]} (signing-key gate keeps end-user laptops from publishing).`,
+          "[auto-promote] SKILL_SIGNING_PRIVATE_KEY is not configured — signing with an ephemeral key. Acceptable while the registry runs in length-only fallback mode.",
         );
-        return;
+      } else {
+        throw err;
       }
-      throw err;
     }
 
     // 5. POST /skills. Raw fetch — RegistryHttpClient throws CliExit

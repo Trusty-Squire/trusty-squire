@@ -178,15 +178,20 @@ function uniqueService(): string {
 // ── Tests ───────────────────────────────────────────────────────────
 
 describe("runAutoPromote — env preconditions", () => {
-  it("skips when TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset", async () => {
-    delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+  it("skips when TRUSTY_SQUIRE_ONBOARDING_CAPTURE is explicitly off", async () => {
+    // rc.13: capture dir resolution moved to resolveCaptureDir(),
+    // which under vitest returns null when the env is unset (test
+    // suppression) OR when it's the literal "off"/"0"/"false". Both
+    // hit the same early-exit branch. Setting "off" pins the test
+    // to the production-relevant path.
+    process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = "off";
     const sink: string[] = [];
     await runAutoPromote({
       service: "railway",
       stepsSink: sink,
       accountId: "acct-1",
     });
-    expect(sink.join("\n")).toMatch(/TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset/);
+    expect(sink.join("\n")).toMatch(/capture directory is disabled/);
   });
 
   it("skips when no runId exists (bot didn't write captures)", async () => {
@@ -225,18 +230,44 @@ describe("runAutoPromote — env preconditions", () => {
     expect(sink.join("\n")).toMatch(/TRUSTY_SQUIRE_REGISTRY_URL is unset/);
   });
 
-  it("skips when SKILL_SIGNING_PRIVATE_KEY is unset", async () => {
+  it("falls back to an ephemeral key when SKILL_SIGNING_PRIVATE_KEY is unset", async () => {
+    // rc.13: instead of bailing when no key is configured, auto-
+    // promote generates an ephemeral Ed25519 keypair and signs with
+    // that. The registry runs in length-only fallback mode today,
+    // so an ephemeral signature is accepted. This unblocks the
+    // "every successful signup uploads a skill" goal without
+    // requiring operator-only signing infra.
     const service = uniqueService();
     writeRailwayCapture(service);
     process.env.TRUSTY_SQUIRE_REGISTRY_URL = "https://registry.test";
     delete process.env.SKILL_SIGNING_PRIVATE_KEY;
+
+    let postedBody: unknown;
+    const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      postedBody = JSON.parse(init?.body as string);
+      return new Response(
+        JSON.stringify({ ok: true, skill_id: "01ABCDEF" }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof globalThis.fetch;
+
     const sink: string[] = [];
     await runAutoPromote({
       service,
       stepsSink: sink,
       accountId: "acct-1",
+      fetchFn,
     });
-    expect(sink.join("\n")).toMatch(/cannot sign/);
+
+    // The ephemeral signature shape matches Ed25519 base64url — same
+    // length as a configured-key signature (~86 chars).
+    const body = postedBody as { signature: string };
+    expect(body.signature.length).toBeGreaterThan(80);
+    expect(sink.join("\n")).toMatch(/ephemeral key/);
+    // No "cannot sign" — the fallback continued past signing into
+    // the registry POST and saw the 201.
+    expect(sink.join("\n")).not.toMatch(/cannot sign/);
+    expect(sink.join("\n")).toMatch(/published .* v1/);
   });
 });
 
