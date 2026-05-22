@@ -3405,6 +3405,38 @@ ${formatInventory(input.inventory)}${
       }
     }
 
+    // Pass 4 — Copy-button colocation scan. Railway's "New Token"
+    // modal shows the UUID inside a <code> built character-by-span,
+    // which Pass 1's direct-text walk can't reassemble. Walk every
+    // visible "Copy" affordance's ancestor subtree, tokenize its
+    // innerText, and accept the first token that looks like a
+    // credential. Strict on shape (length 16-256, isolated token)
+    // to avoid false positives on copy-blog-post-link buttons.
+    if (apiKey === null) {
+      try {
+        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        for (const candidate of await this.browser.extractCredentialsNearCopyButtons()) {
+          // The candidate is a bare whitespace-isolated token. If it's
+          // a UUID, accept it directly — the Copy-button colocation
+          // is the credential signal we'd otherwise demand a textual
+          // "api key" label for.
+          if (UUID_RE.test(candidate)) {
+            apiKey = candidate;
+            break;
+          }
+          // Otherwise route through the normal extractor — accepts
+          // gh*_*, sk_*, pk_*, Stripe/AWS-style prefixes, JWTs, etc.
+          const hit = extractApiKeyFromText(candidate);
+          if (hit !== null && !isTruncatedCapture(candidate, hit)) {
+            apiKey = hit;
+            break;
+          }
+        }
+      } catch {
+        // Non-fatal — leave apiKey as null and fall through.
+      }
+    }
+
     // Last resort: if every path returned a truncated value, persist
     // it with a `_truncated` suffix so the host agent can surface the
     // partial result to the user (better than reporting "no key

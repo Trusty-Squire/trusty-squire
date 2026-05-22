@@ -1476,6 +1476,56 @@ export class BrowserController {
     });
   }
 
+  // Last-resort scan: walk innerText looking for credential-shaped
+  // tokens (UUIDs and other long alnum+hyphen blobs) inside any DOM
+  // subtree that ALSO contains a "Copy" / "Copy token" / "Copy to
+  // clipboard" affordance. The Copy-button colocation is what tells
+  // us "the UI is presenting this string AS a credential" — without
+  // it, we'd false-positive on session IDs in URLs, cache-buster
+  // query params, etc. Returns every match it finds; the caller picks
+  // the first that survives extractApiKeyFromText.
+  async extractCredentialsNearCopyButtons(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const out: string[] = [];
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        return r.width > 2 && r.height > 2;
+      };
+      // Find every Copy-class affordance.
+      const copyButtons = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'button, [role="button"], a, [aria-label]',
+        ),
+      ).filter((el) => {
+        if (!isVisible(el)) return false;
+        const hay =
+          `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`.toLowerCase();
+        return /\bcopy\b/.test(hay);
+      });
+      // For each, walk up a few ancestors and dump the subtree's
+      // innerText. The token is somewhere in there.
+      const seen = new Set<string>();
+      for (const btn of copyButtons) {
+        let anc: HTMLElement | null = btn;
+        for (let i = 0; i < 6 && anc !== null; i++) {
+          anc = anc.parentElement;
+        }
+        if (anc === null) continue;
+        const text = (anc.innerText ?? "").trim();
+        if (text.length === 0 || text.length > 4096) continue;
+        // Tokenize by whitespace — each token is a separate candidate.
+        text.split(/\s+/).forEach((tok) => {
+          if (tok.length < 16 || tok.length > 256) return;
+          if (seen.has(tok)) return;
+          seen.add(tok);
+          out.push(tok);
+        });
+      }
+      return out;
+    });
+  }
+
   async extractCredentialCandidates(): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(() => {
@@ -1508,6 +1558,18 @@ export class BrowserController {
         // A real key is short; a long blob is a paragraph, not a key.
         if (direct.length > 0 && direct.length <= 256) out.push(direct);
       });
+      // Structural containers (<code>, <pre>, kbd, samp, [role=textbox])
+      // often render a credential by interpolating it through nested
+      // <span>s — the loop above sees an empty direct-text and skips
+      // them. Push the full textContent so a UUID built as
+      // <code><span>7</span><span>5</span>…</code> is still scannable.
+      document
+        .querySelectorAll('code, pre, kbd, samp, [role="textbox"]')
+        .forEach((el) => {
+          if (!isVisible(el)) return;
+          const full = (el.textContent ?? "").trim();
+          if (full.length > 0 && full.length <= 256) out.push(full);
+        });
       return out;
     });
   }
