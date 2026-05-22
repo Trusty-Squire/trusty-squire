@@ -26,6 +26,14 @@
 //                        their own browser (CI / scripted installs)
 //   --proxy-url=<url>    bake a residential proxy into the MCP config's
 //                        env (UNIVERSAL_BOT_PROXY_URL)
+//   --registry-url=<url> override the default skill registry URL
+//                        (default: https://registry.trustysquire.ai).
+//                        Baked into the MCP config's env as
+//                        TRUSTY_SQUIRE_REGISTRY_URL so the Tier-2
+//                        router is on out of the box.
+//   --no-registry        omit TRUSTY_SQUIRE_REGISTRY_URL from the
+//                        config → mcp skips the router entirely and
+//                        every signup goes through the universal bot
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -50,6 +58,13 @@ import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
+// Default skill-registry URL. Wired into the MCP config's env block
+// so users don't have to set it manually — without it, mcp skips the
+// Tier-2 router and every signup goes through the universal bot
+// (fail-open by design, but a worse experience than just using the
+// closed loop).
+const DEFAULT_REGISTRY_URL =
+  process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? "https://registry.trustysquire.ai";
 
 type ProviderArg = "google" | "github";
 
@@ -61,6 +76,13 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
+  // Skill registry URL — baked into the MCP config's env as
+  // TRUSTY_SQUIRE_REGISTRY_URL. Defaults to the production registry;
+  // override with --registry-url=<url> (staging / self-hosted),
+  // disable with --no-registry (skip Tier-2 router entirely, every
+  // signup goes through the universal bot).
+  registryUrl?: string;
+  noRegistry: boolean;
   // OAuth provider — for `login`, picks which provider to sign in to.
   // For `install`, the provider is chosen by the user inside the
   // trustysquire confirm page (Google or GitHub button), so this flag
@@ -99,6 +121,8 @@ function parseArgs(argv: string[]): Argv {
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
+  let registryUrl: string | undefined;
+  let noRegistry = false;
   let providerArg: ProviderArg | undefined;
   let skipBrowser = false;
   let forceRelogin = false;
@@ -119,6 +143,10 @@ function parseArgs(argv: string[]): Argv {
       apiBase = arg.slice("--api-base=".length);
     } else if (arg.startsWith("--proxy-url=")) {
       proxyUrl = arg.slice("--proxy-url=".length);
+    } else if (arg.startsWith("--registry-url=")) {
+      registryUrl = arg.slice("--registry-url=".length);
+    } else if (arg === "--no-registry") {
+      noRegistry = true;
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
       if (p === "google" || p === "github") providerArg = p;
@@ -130,9 +158,10 @@ function parseArgs(argv: string[]): Argv {
       forceRelogin = true;
     }
   }
-  const args: Argv = { command, apiBase, skipBrowser, forceRelogin };
+  const args: Argv = { command, apiBase, skipBrowser, forceRelogin, noRegistry };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
+  if (registryUrl !== undefined && registryUrl.length > 0) args.registryUrl = registryUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
   return args;
 }
@@ -419,6 +448,12 @@ async function writeAgentConfig(
   if (args.proxyUrl !== undefined) {
     env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
   }
+  // Skill registry URL — wired by default so the Tier-2 router is on
+  // out of the box. Override with --registry-url=<url>; opt out
+  // entirely with --no-registry (which omits the var → router skips).
+  if (!args.noRegistry) {
+    env.TRUSTY_SQUIRE_REGISTRY_URL = args.registryUrl ?? DEFAULT_REGISTRY_URL;
+  }
   await agent.writeConfig({
     command: launch.command,
     args: launch.args,
@@ -427,6 +462,11 @@ async function writeAgentConfig(
   ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
   if (args.proxyUrl !== undefined) {
     ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
+  }
+  if (args.noRegistry) {
+    ui.hint("  Skill registry disabled (--no-registry) — every signup goes through the universal bot");
+  } else if (args.registryUrl !== undefined) {
+    ui.hint(`  Skill registry: ${args.registryUrl}`);
   }
 }
 
@@ -577,7 +617,7 @@ function printHelp(): void {
   console.warn(``);
   console.warn(`Commands:`);
   console.warn(
-    `  connect [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>] [--force-relogin]`,
+    `  connect [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>] [--registry-url=<url>] [--no-registry] [--force-relogin]`,
   );
   console.warn(`  login [--provider=google|github]   re-run the one-time OAuth sign-in`);
   console.warn(`  logout`);

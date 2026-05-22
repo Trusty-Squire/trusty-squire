@@ -365,10 +365,23 @@ package would defeat the whole 0.7.0 thesis).
   fire-and-forget on auto-demotion (3 consecutive failures).
 
 **Client env on user machines:**
-- `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. Unset = mcp skips the
-  router entirely (fail-open to universal bot).
+- `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. **Auto-wired by `connect`
+  as of rc.10**; defaults to `https://registry.trustysquire.ai`.
+  Override with `connect --registry-url=<url>`, disable with
+  `connect --no-registry` (skips the router entirely → universal bot
+  only).
 - `SKILL_SIGNING_PRIVATE_KEY` — required for `mcp skill promote`
-  to sign before publishing. Unset = `promote` exits with CONFIG (3).
+  AND auto-promote. Unset = `promote` exits with CONFIG (3),
+  auto-promote logs `cannot sign` and skips.
+- `TRUSTY_SQUIRE_AUTO_PROMOTE` — set to `"true"` to enable auto-
+  promotion on successful bot signups (rc.10). After a bot run
+  succeeds, the bot package fires fire-and-forget against the local
+  capture: synthesizes a skill, signs it, posts to the registry.
+  Failures land in the signup's step trail with the `[auto-promote]`
+  prefix and never fail the parent signup. Opt-in until trusted.
+- `TRUSTY_SQUIRE_ONBOARDING_CAPTURE` — capture directory. Auto-promote
+  needs this set to find the run's JSON files. Recommended:
+  `~/.trusty-squire/corpus/onboarding/`.
 
 ### Goose / local-dev MCP install
 

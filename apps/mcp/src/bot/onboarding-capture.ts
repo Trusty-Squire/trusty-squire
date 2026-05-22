@@ -46,6 +46,14 @@ export const CAPTURE_FORMAT_VERSION = 1 as const;
 // keeps each service's rounds grouped without collisions.
 let runId: string | undefined;
 
+// Read the in-process runId. Auto-promote needs to know which run's
+// captures to promote after a successful signup. Returns undefined
+// when no rounds have been captured yet — auto-promote then skips
+// with a useful message rather than promoting nothing.
+export function currentRunId(): string | undefined {
+  return runId;
+}
+
 // Per-(service, runId) chain head. Each new round's `prev_hash` is the
 // previous round's `content_hash`; round 0's `prev_hash` is null. The
 // promoter walks the chain forward and rejects on any break.

@@ -113,6 +113,7 @@ describe("install --target=<agent> writes a valid config", () => {
         // for this target," and keeps the test fast (no Chrome boot).
         skipBrowser: true,
         forceRelogin: false,
+        noRegistry: false,
       });
 
       const configPath = AGENTS[target].config_path();
@@ -128,6 +129,40 @@ describe("install --target=<agent> writes a valid config", () => {
       expect(raw, `${target}: config should reference the squire entry`).toMatch(
         /squire|trusty-squire/,
       );
+      // Skill-registry URL wired by default (rc.10). Without this, the
+      // bot's Tier-2 router has no endpoint and the closed loop can't
+      // close — so the install path must bake it in.
+      expect(
+        raw,
+        `${target}: config should set TRUSTY_SQUIRE_REGISTRY_URL by default`,
+      ).toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
     });
   }
+
+  it("--no-registry omits TRUSTY_SQUIRE_REGISTRY_URL from the config", async () => {
+    await install({
+      command: "install",
+      target: TARGETS[0]!,
+      apiBase: "https://test.invalid",
+      skipBrowser: true,
+      forceRelogin: false,
+      noRegistry: true,
+    });
+    const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
+    expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
+  });
+
+  it("--registry-url=<url> overrides the default", async () => {
+    await install({
+      command: "install",
+      target: TARGETS[0]!,
+      apiBase: "https://test.invalid",
+      skipBrowser: true,
+      forceRelogin: false,
+      noRegistry: false,
+      registryUrl: "https://staging.registry.test",
+    });
+    const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
+    expect(raw).toMatch(/staging\.registry\.test/);
+  });
 });

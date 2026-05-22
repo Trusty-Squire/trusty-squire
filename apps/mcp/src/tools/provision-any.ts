@@ -36,6 +36,10 @@ import {
   generateProvisionId,
   type SkillRegistryClient,
 } from "../skill-registry-client.js";
+import { promoteToSkill } from "../bot/promote-to-skill.js";
+import { currentRunId } from "../bot/onboarding-capture.js";
+import { signSkillForPublish } from "../skill-cli/signing.js";
+import { CliExit } from "../skill-cli/errors.js";
 
 
 type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
@@ -760,6 +764,23 @@ async function runSignupTask(
         result.credentials,
       );
     }
+
+    // Auto-promote on bot success (rc.10). Closes the loop without an
+    // operator running `mcp skill promote` between signups: the bot's
+    // capture chain becomes a published skill the next provision will
+    // replay. Opt-in via TRUSTY_SQUIRE_AUTO_PROMOTE=true; gated by
+    // SKILL_SIGNING_PRIVATE_KEY being present (otherwise we can't
+    // sign → registry rejects). Fire-and-forget — failures push to
+    // stepsSink with `[auto-promote]` prefix and never fail the
+    // signup. The server-side review gate still catches signup_url /
+    // oauth_provider changes (lands as pending-review, not active).
+    if (result.success && process.env.TRUSTY_SQUIRE_AUTO_PROMOTE === "true") {
+      void runAutoPromote({
+        service: input.service,
+        stepsSink: ctx.stepsSink,
+        accountId: ctx.accountId,
+      });
+    }
   } catch (err) {
     response = {
       status: "error",
@@ -1119,4 +1140,143 @@ function buildExtractFailureUploader(
       );
     }
   };
+}
+
+// Auto-promote on bot success (rc.10). Reads from process.env so the
+// feature stays a single-flag opt-in: TRUSTY_SQUIRE_AUTO_PROMOTE=true
+// turns it on; everything else is plumbing. Never throws — all
+// failures land in `stepsSink` with the `[auto-promote]` prefix.
+//
+// Exported for unit testing. Production callers pass {service,
+// stepsSink: ctx.stepsSink, accountId: ctx.accountId}; tests inject
+// a `fetchFn` to assert on the registry POST without a real network.
+export async function runAutoPromote(args: {
+  service: string;
+  stepsSink: string[];
+  accountId: string;
+  fetchFn?: typeof globalThis.fetch;
+}): Promise<void> {
+  const { service, stepsSink } = args;
+  const fetchFn = args.fetchFn ?? globalThis.fetch;
+  try {
+    // 1. Capture dir must be set and runId must exist — without
+    //    captures on disk, there's nothing to promote.
+    const captureDir = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    if (captureDir === undefined || captureDir.trim().length === 0) {
+      stepsSink.push(
+        "[auto-promote] TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset — no captures on disk to promote. Set it to enable auto-promote.",
+      );
+      return;
+    }
+    const runId = currentRunId();
+    if (runId === undefined) {
+      stepsSink.push(
+        "[auto-promote] no captures written this run (bot may have taken the fast path) — skipping.",
+      );
+      return;
+    }
+
+    // 2. Registry URL must be configured.
+    const registryUrl = process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+    if (registryUrl === undefined || registryUrl.trim().length === 0) {
+      stepsSink.push(
+        "[auto-promote] TRUSTY_SQUIRE_REGISTRY_URL is unset — no registry to publish to.",
+      );
+      return;
+    }
+
+    // 3. Synthesize. promoteToSkill is pure (filesystem + Zod); any
+    //    rejection here is a structural issue with the capture, not
+    //    a runtime failure.
+    const serviceSlug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const result = promoteToSkill({
+      dir: captureDir,
+      service: serviceSlug,
+      run_id: runId,
+    });
+    if (result.kind !== "ok") {
+      stepsSink.push(
+        `[auto-promote] synthesizer rejected: ${result.stage} / ${result.error_kind} — ${result.message}`,
+      );
+      return;
+    }
+
+    // 4. Sign. CliExit(CONFIG) bubbles when SKILL_SIGNING_PRIVATE_KEY
+    //    is unset — that's the operator-only secret and most users
+    //    won't have it. Catch and report cleanly.
+    let signature: string;
+    try {
+      signature = signSkillForPublish(result.skill).signature;
+    } catch (err) {
+      if (err instanceof CliExit) {
+        stepsSink.push(
+          `[auto-promote] cannot sign: ${err.message.split("\n")[0]} (signing-key gate keeps end-user laptops from publishing).`,
+        );
+        return;
+      }
+      throw err;
+    }
+
+    // 5. POST /skills. Raw fetch — RegistryHttpClient throws CliExit
+    //    which is the wrong shape here. We want a quiet log on
+    //    failure, never a throw.
+    const url = `${registryUrl.replace(/\/+$/, "")}/skills`;
+    let resp: Response;
+    try {
+      resp = await fetchFn(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-account-id": args.accountId,
+        },
+        body: JSON.stringify({ skill: result.skill, signature }),
+      });
+    } catch (err) {
+      stepsSink.push(
+        `[auto-promote] POST /skills failed (${err instanceof Error ? err.message : String(err)}).`,
+      );
+      return;
+    }
+
+    if (resp.status === 201) {
+      stepsSink.push(
+        `[auto-promote] published ${serviceSlug} ${result.skill.version} ` +
+          `(skill_id=${result.skill.skill_id}). Next ${serviceSlug} signup will hit the skill.`,
+      );
+      return;
+    }
+    if (resp.status === 200) {
+      // Idempotent re-publish (same skill_id). Already in the registry
+      // — same captures produced the same skill_id deterministically.
+      stepsSink.push(
+        `[auto-promote] ${serviceSlug} ${result.skill.version} already published (idempotent).`,
+      );
+      return;
+    }
+    if (resp.status === 401) {
+      // Bad signature — either SKILL_VERIFY_PUBLIC_KEY mismatch on
+      // the server, or our private key isn't the matching one.
+      stepsSink.push(
+        `[auto-promote] registry rejected signature (HTTP 401). Check that SKILL_SIGNING_PRIVATE_KEY here matches SKILL_VERIFY_PUBLIC_KEY on the registry.`,
+      );
+      return;
+    }
+    // Anything else: log status + try to surface the registry's detail.
+    let detail = "";
+    try {
+      const body = (await resp.json()) as { detail?: string; error?: string };
+      detail = body.detail ?? body.error ?? "";
+    } catch {
+      /* malformed JSON — skip */
+    }
+    stepsSink.push(
+      `[auto-promote] HTTP ${resp.status} from registry${detail.length > 0 ? ": " + detail : ""}.`,
+    );
+  } catch (err) {
+    // Defense-in-depth: any unexpected throw lands here. Never let
+    // auto-promote take down the parent signup task.
+    stepsSink.push(
+      `[auto-promote] unexpected failure (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
