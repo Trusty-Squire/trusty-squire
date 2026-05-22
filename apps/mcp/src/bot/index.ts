@@ -3,13 +3,18 @@
 
 import { randomBytes } from "crypto";
 import { BrowserController } from "./browser.js";
-import { SignupAgent, type SignupResult, LLMCallBudgetExceeded } from "./agent.js";
+import {
+  SignupAgent,
+  type SignupResult,
+  type ExtractFailureUploader,
+  LLMCallBudgetExceeded,
+} from "./agent.js";
 import type { AgentInbox } from "./agent.js";
 import { withOAuthLock } from "./oauth-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 
-export { type SignupResult, LLMCallBudgetExceeded };
+export { type SignupResult, type ExtractFailureUploader, LLMCallBudgetExceeded };
 export { withOAuthLock } from "./oauth-lock.js";
 export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export { BrowserController } from "./browser.js";
@@ -70,6 +75,13 @@ export interface UniversalSignupRequest {
   // Blind-approve opaque consent (GitHub Apps; scopes not in URL).
   // DOM danger-phrase scraper still gates.
   allowBlindOAuthConsent?: boolean | undefined;
+  // Diagnostic uploader — best-effort. The MCP layer wires this to
+  // the registry-api's POST /v1/extract-failures endpoint so the
+  // agent can capture DOM + screenshots when extractCredentials()
+  // fails despite the LLM asserting a credential was visible.
+  // Undefined in unit tests and in installs that haven't yet paired
+  // with an account (no apiClient available).
+  extractFailureUploader?: ExtractFailureUploader | undefined;
 }
 
 export class UniversalSignupBot {
@@ -109,7 +121,13 @@ export class UniversalSignupBot {
     });
     // request.llm is `LLMClient | LLMPair | undefined`; SignupAgent's
     // constructor handles all three shapes.
-    const agent = new SignupAgent(browser, request.llm);
+    const agent = new SignupAgent(
+      browser,
+      request.llm,
+      request.extractFailureUploader !== undefined
+        ? { extractFailureUploader: request.extractFailureUploader }
+        : {},
+    );
 
     try {
       await browser.start();

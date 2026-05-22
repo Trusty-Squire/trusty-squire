@@ -28,7 +28,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 export interface LLMVisionBlock {
   kind: "image";
-  media_type: "image/png";
+  media_type: "image/png" | "image/jpeg";
   data_base64: string;
 }
 

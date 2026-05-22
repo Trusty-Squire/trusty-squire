@@ -70,6 +70,18 @@ function validSkill(overrides: Partial<Skill> = {}): Skill {
   return { ...base, ...overrides } as Skill;
 }
 
+function testSkillId(suffix: string): string {
+  return `01HZX9ABCDEFGHJKMNPQRSTVW${suffix}`;
+}
+
+const TEST_SKILL_ID_SUFFIXES = "ABCDEFGHJKMNPQRSTVWXYZ0123456789";
+
+function testSkillIdAt(index: number): string {
+  const suffix = TEST_SKILL_ID_SUFFIXES[index];
+  if (suffix === undefined) throw new Error(`No test skill id suffix at index ${index}`);
+  return testSkillId(suffix);
+}
+
 function buildTestServer() {
   const { privateKey } = generateKeyPairSync("ed25519");
   const signer = ManifestSigner.fromKeyObject(privateKey, "test-signer");
@@ -1152,12 +1164,12 @@ describe("GET /skills (list)", () => {
     const server = await buildServer({ skillStore, signer });
 
     for (let i = 0; i < 3; i++) {
-      await server.inject({
+      const post = await server.inject({
         method: "POST",
         url: "/skills",
         payload: {
           skill: validSkill({
-            skill_id: `01HZX${String.fromCharCode(65 + i)}9ABCDEFGHJKMNPQRSTVWX`,
+            skill_id: testSkillIdAt(i),
             service: `svc-${i}`,
             source_run_ids: [`run-${i}`],
             steps: [
@@ -1176,6 +1188,7 @@ describe("GET /skills (list)", () => {
           signature: "x".repeat(64),
         },
       });
+      expect(post.statusCode).toBe(201);
     }
 
     const response = await server.inject({ method: "GET", url: "/skills" });
@@ -1188,17 +1201,18 @@ describe("GET /skills (list)", () => {
     const { skillStore, signer } = buildTestServer();
     const server = await buildServer({ skillStore, signer });
 
-    await server.inject({
+    const firstPost = await server.inject({
       method: "POST",
       url: "/skills",
-      payload: { skill: validSkill({ skill_id: "01HZXA9ABCDEFGHJKMNPQRSTVWX" }), signature: "x".repeat(64) },
+      payload: { skill: validSkill({ skill_id: testSkillId("A") }), signature: "x".repeat(64) },
     });
-    await server.inject({
+    expect(firstPost.statusCode).toBe(201);
+    const secondPost = await server.inject({
       method: "POST",
       url: "/skills",
       payload: {
         skill: validSkill({
-          skill_id: "01HZXB9ABCDEFGHJKMNPQRSTVWX",
+          skill_id: testSkillId("B"),
           service: "other-service",
           source_run_ids: ["run-other"],
           steps: [
@@ -1217,6 +1231,7 @@ describe("GET /skills (list)", () => {
         signature: "x".repeat(64),
       },
     });
+    expect(secondPost.statusCode).toBe(201);
 
     const response = await server.inject({
       method: "GET",
@@ -1233,14 +1248,16 @@ describe("GET /skills (list)", () => {
     const { skillStore, signer } = buildTestServer();
     const server = await buildServer({ skillStore, signer });
 
-    await server.inject({
+    const skillId = testSkillId("C");
+    const post = await server.inject({
       method: "POST",
       url: "/skills",
-      payload: { skill: validSkill({ skill_id: "01HZXC9ABCDEFGHJKMNPQRSTVWX" }), signature: "x".repeat(64) },
+      payload: { skill: validSkill({ skill_id: skillId }), signature: "x".repeat(64) },
     });
+    expect(post.statusCode).toBe(201);
 
     // Demote it.
-    await skillStore.manuallyDemote("01HZXC9ABCDEFGHJKMNPQRSTVWX", "ops decision");
+    await skillStore.manuallyDemote(skillId, "ops decision");
 
     const activeResp = await server.inject({
       method: "GET",
@@ -1262,12 +1279,12 @@ describe("GET /skills (list)", () => {
     const server = await buildServer({ skillStore, signer });
 
     for (let i = 0; i < 5; i++) {
-      await server.inject({
+      const post = await server.inject({
         method: "POST",
         url: "/skills",
         payload: {
           skill: validSkill({
-            skill_id: `01HZX${String.fromCharCode(70 + i)}9ABCDEFGHJKMNPQRSTVWX`,
+            skill_id: testSkillIdAt(5 + i),
             service: `svc-l-${i}`,
             source_run_ids: [`run-l-${i}`],
             steps: [
@@ -1286,6 +1303,7 @@ describe("GET /skills (list)", () => {
           signature: "x".repeat(64),
         },
       });
+      expect(post.statusCode).toBe(201);
     }
 
     const response = await server.inject({

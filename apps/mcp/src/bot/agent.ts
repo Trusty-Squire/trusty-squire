@@ -254,6 +254,23 @@ export interface SignupTask {
   allowBlindOAuthConsent?: boolean | undefined;
 }
 
+// Best-effort callback the MCP layer wires into SignupAgent so the
+// agent can upload a DOM + screenshot diagnostic snapshot whenever
+// `extractCredentials()` returned null despite the planner asserting
+// a credential was visible. The implementation MUST NOT throw — the
+// agent calls it from try/catch but a throw would surface as a
+// "snapshot upload failed" step trail entry, which is just noise.
+export type ExtractFailureUploader = (input: {
+  service: string;
+  url: string;
+  title: string;
+  step_label: string;
+  extract_reason: string;
+  candidates: ReadonlyArray<string>;
+  html: string;
+  screenshot_jpeg_base64?: string;
+}) => Promise<void>;
+
 export interface SignupResult {
   success: boolean;
   credentials?: {
@@ -1301,8 +1318,13 @@ export class SignupAgent {
         steps.push(`Dismissed cookie consent: "${dismissed}"`);
       }
       await saveDebugSnapshot(this.browser, "before-fill");
-      const state = await this.browser.getState();
-      const inventory = await this.buildInventory(steps, oauthCandidates);
+      // PERF: getState() (page.content + title + screenshot) and
+      // extractInteractiveElements (DOM walk) are independent
+      // Playwright calls — fire them in parallel.
+      const [state, inventory] = await Promise.all([
+        this.browser.getState(),
+        this.buildInventory(steps, oauthCandidates),
+      ]);
 
       // OAuth-first (T6/T13 + auto-prefer): when the page carries a
       // "Sign in with <provider>" affordance for a provider the bot can
@@ -1508,7 +1530,10 @@ export class SignupAgent {
         steps.push(`⚠ submit click failed: ${reason}`);
         return { kind: "submit_failed", reason };
       }
-      await this.browser.wait(5);
+      // PERF: 5s was overcautious — runCaptchaGate has its own wait
+      // for the captcha widget to render, and waitForFormReady at
+      // the next planner iteration handles SPA settle.
+      await this.browser.wait(2);
 
       const postGate = await this.runCaptchaGate("Post-submit", steps);
       if (postGate.blocked) return { kind: "captcha_blocked", captchaKind: postGate.kind };
@@ -1686,9 +1711,20 @@ export class SignupAgent {
     return misses.length > 0 ? misses.join(", ") : null;
   }
 
+  // Diagnostic uploader — best-effort. When set, the post-verify
+  // loop uploads the current DOM + screenshot to the registry-api
+  // after a failed extract pass, so UI-shape regressions can be
+  // diagnosed without users needing to configure debug env vars.
+  // Wired from the MCP layer; undefined in unit-test contexts.
+  private readonly extractFailureUploader?: ExtractFailureUploader;
+  // Set per-task in signup(). Lets the uploader know which service
+  // was being provisioned without threading it through every call.
+  private currentService = "";
+
   constructor(
     private browser: BrowserController,
     llm?: LLMClient | LLMPair,
+    opts: { extractFailureUploader?: ExtractFailureUploader } = {},
   ) {
     if (llm === undefined) {
       this.llmPair = pickLLMPair({ preferCheap: PREFER_CHEAP_LLM });
@@ -1700,6 +1736,9 @@ export class SignupAgent {
       // Caller passed a single LLMClient — no premium fallback in that
       // case. Tests and the MCP-Sampling future path use this.
       this.llmPair = { primary: llm, premium: null };
+    }
+    if (opts.extractFailureUploader !== undefined) {
+      this.extractFailureUploader = opts.extractFailureUploader;
     }
   }
 
@@ -1827,6 +1866,10 @@ export class SignupAgent {
     // (Google number-match etc.). Without it, the run still works —
     // steps are just only visible in the final result.
     const steps: string[] = task.stepsSink ?? [];
+    // Stash the service name so the diagnostic uploader (called from
+    // deep inside postVerifyLoop after a failed extract) can label
+    // the snapshot without us threading task through every method.
+    this.currentService = task.service;
     const rawTimeout = Number(process.env.UNIVERSAL_BOT_RUN_TIMEOUT_MS);
     const timeoutMs =
       Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 600_000;
@@ -1908,7 +1951,9 @@ export class SignupAgent {
 
       steps.push(`Navigating to ${signupUrl}`);
       await this.browser.goto(signupUrl);
-      await this.browser.wait(2);
+      // PERF: goto() awaits domcontentloaded; the subsequent
+      // waitForFormReady in planExecuteWithRetry handles SPA settle.
+      // No need for a blind 2s dwell here.
 
       // When we *guessed* (no signup_url provided) and the page after
       // load doesn't look like a signup page — no inputs, no OAuth
@@ -1935,7 +1980,8 @@ export class SignupAgent {
         );
         const fallbackSearch = `https://www.google.com/search?q=${encodeURIComponent(`${task.service} signup`)}`;
         await this.browser.goto(fallbackSearch);
-        await this.browser.wait(2);
+        // PERF: domcontentloaded from goto() + findSignupLink reads
+        // the DOM itself — no blind dwell needed.
         signupUrl = fallbackSearch;
       }
 
@@ -1948,7 +1994,7 @@ export class SignupAgent {
           await this.runPrewarm(found, steps);
           steps.push(`Found signup link: ${found}`);
           await this.browser.goto(found);
-          await this.browser.wait(2);
+          // PERF: planner loop's waitForFormReady is next; no dwell.
         } else {
           // BUG-1 GUARD: findSignupLink filters off-domain candidates
           // (registered-domain match against the service slug). If
@@ -2127,7 +2173,10 @@ export class SignupAgent {
               if (verifyLink !== null) {
                 steps.push(`Following verification link: ${verifyLink}`);
                 await this.browser.goto(verifyLink);
-                await this.browser.wait(3);
+                // PERF: a 1s settle is enough for the verify landing
+                // page to commit cookies + render the post-verify
+                // dashboard. Previous 3s was over-cautious.
+                await this.browser.wait(1);
                 await saveDebugSnapshot(this.browser, "after-verify");
 
                 // Try extracting first — many services drop the API key
@@ -2594,7 +2643,7 @@ Output rules:
 
     const hintLine = input.hint !== undefined ? `\nHint: ${input.hint}` : "";
     const userBlocks: LLMBlock[] = [
-      { kind: "image", media_type: "image/png", data_base64: input.screenshot },
+      { kind: "image", media_type: "image/jpeg", data_base64: input.screenshot },
       {
         kind: "text",
         text: `Service: ${input.service}
@@ -2735,8 +2784,11 @@ ${formatInventory(input.inventory)}`,
       let state: BrowserState;
       let inventory: InteractiveElement[];
       try {
-        state = await this.browser.getState();
-        inventory = await this.buildInventory(args.steps, undefined, 80);
+        // PERF: parallel getState + inventory (independent calls).
+        [state, inventory] = await Promise.all([
+          this.browser.getState(),
+          this.buildInventory(args.steps, undefined, 80),
+        ]);
       } catch (err) {
         args.steps.push(
           `Post-verify round ${round}: page was mid-navigation ` +
@@ -2876,6 +2928,34 @@ ${formatInventory(input.inventory)}`,
           credentials = await this.extractCredentials();
           if (credentials.api_key === undefined) {
             consecutiveFailedExtracts += 1;
+            // Best-effort diagnostic upload: when extract returns
+            // null despite the planner asserting a credential is
+            // visible, capture the DOM + screenshot so the UI shape
+            // can be inspected later. Wrapped tight — any failure
+            // here MUST NOT abort the post-verify loop.
+            if (this.extractFailureUploader !== undefined) {
+              void (async () => {
+                try {
+                  const snapshot = await this.browser.getState();
+                  const candidates = await this.browser.extractCredentialCandidates();
+                  await this.extractFailureUploader!({
+                    service: this.currentService,
+                    url: snapshot.url,
+                    title: snapshot.title,
+                    step_label: `post-verify round ${round + 1}/${args.maxRounds}: extract`,
+                    extract_reason: nextStep.reason,
+                    candidates,
+                    html: snapshot.html,
+                    screenshot_jpeg_base64: snapshot.screenshot,
+                  });
+                  args.steps.push(
+                    `Diagnostic: uploaded extract-failure snapshot (post-verify round ${round + 1}).`,
+                  );
+                } catch {
+                  // Silent — diagnostic uploads are best-effort.
+                }
+              })();
+            }
             // Two consecutive failed extracts on a DOM the planner
             // keeps quoting a token from means the value's shape is
             // not in our regex library (Railway: bare UUID; some
@@ -2957,7 +3037,7 @@ ${formatInventory(input.inventory)}`,
           await this.browser.wait(1);
         } else if (nextStep.kind === "navigate") {
           await this.browser.goto(nextStep.url);
-          await this.browser.wait(3);
+          // PERF: next round opens with waitForFormReady; no blind dwell.
         } else if (nextStep.kind === "wait") {
           await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {
@@ -3136,7 +3216,7 @@ ${loginGuidance}
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [
-      { kind: "image", media_type: "image/png", data_base64: input.state.screenshot },
+      { kind: "image", media_type: "image/jpeg", data_base64: input.state.screenshot },
       {
         kind: "text",
         text: `Service: ${input.service}

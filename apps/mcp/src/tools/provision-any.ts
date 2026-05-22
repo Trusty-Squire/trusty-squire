@@ -30,6 +30,7 @@ import {
 } from "../bot/index.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
+import { VERSION } from "../version.js";
 import {
   clientFromEnv,
   generateProvisionId,
@@ -663,6 +664,14 @@ async function runSignupTask(
       // Share the in-flight step trail so check_provision_status can
       // surface live progress (the bot pushes into ctx.stepsSink).
       stepsSink: ctx.stepsSink,
+      // Diagnostic uploader — auto-uploads DOM + screenshot snapshots
+      // to the registry-api whenever extractCredentials() returns
+      // null. Lets us diagnose UI-shape regressions without users
+      // needing to enable debug env vars. Best-effort; failures here
+      // never abort the signup. Scoped by account_id so the matching
+      // MCP fetch tools (list_extract_failures / get_extract_failure)
+      // see the same snapshots.
+      extractFailureUploader: buildExtractFailureUploader(ctx.accountId),
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -999,4 +1008,63 @@ async function postCredentialsToVault(
       );
     }
   }
+}
+
+// Build the extract-failure diagnostic uploader. The bot calls this
+// asynchronously (fire-and-forget) when extractCredentials() returns
+// null despite the LLM planner asserting a credential was visible.
+//
+// Scoped by account_id so the matching MCP fetch tools (which use
+// ApiClient, also configured with account_id) see the same data.
+//
+// All errors are swallowed: a snapshot upload failure must never
+// abort a signup.
+function buildExtractFailureUploader(
+  accountId: string,
+): (input: {
+  service: string;
+  url: string;
+  title: string;
+  step_label: string;
+  extract_reason: string;
+  candidates: ReadonlyArray<string>;
+  html: string;
+  screenshot_jpeg_base64?: string;
+}) => Promise<void> {
+  // The registry-api lives at a separate origin. Resolution order
+  // matches the rest of the MCP: explicit env override, then prod
+  // default. Defined here (not as a module const) so tests can flip
+  // the env var and re-build the uploader.
+  const registryBase = process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
+  return async (input) => {
+    try {
+      const body = {
+        service: input.service,
+        mcp_version: VERSION,
+        url: input.url,
+        title: input.title,
+        step_label: input.step_label,
+        extract_reason: input.extract_reason,
+        candidates: input.candidates,
+        html: input.html,
+        ...(input.screenshot_jpeg_base64 !== undefined
+          ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
+          : {}),
+      };
+      await fetch(`${registryBase}/v1/extract-failures`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-account-id": accountId,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      console.error(
+        `[provision-any] extract-failure upload failed (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
 }

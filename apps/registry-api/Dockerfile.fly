@@ -35,10 +35,9 @@ COPY . .
 # around this in dev; `node dist/server.js` in production does not.
 RUN pnpm install --frozen-lockfile --shamefully-hoist
 
-# Generate the Prisma client for registry-api's schema. This writes
-# into node_modules/.prisma/client at the workspace root, which
-# @prisma/client picks up at runtime. Done before tsc because
-# prisma-skill-store.ts imports the generated types.
+# Generate the Prisma client for registry-api's schema. This writes to
+# apps/registry-api/node_modules/.prisma/registry-client so it does
+# not collide with other workspace Prisma schemas.
 RUN pnpm -F @trusty-squire/registry-api exec prisma generate --schema=/app/apps/registry-api/prisma/schema.prisma
 
 # Build the adapter-sdk first (registry-api depends on its compiled

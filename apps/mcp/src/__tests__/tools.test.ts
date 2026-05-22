@@ -334,12 +334,14 @@ describe("wait_for_approval", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes 4 tools — the native-provision cluster is unregistered", () => {
-    expect(TOOLS).toHaveLength(4);
+  it("exposes the public MCP tools — the native-provision cluster is unregistered", () => {
+    expect(TOOLS).toHaveLength(6);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "check_provision_status",
       "get_credential",
+      "get_extract_failure",
       "list_credentials",
+      "list_extract_failures",
       "provision_any_service",
     ]);
   });

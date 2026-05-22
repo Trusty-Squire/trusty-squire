@@ -2,8 +2,11 @@
 // production server. Imported lazily so tests + the in-memory dev
 // loop don't pay the @prisma/client startup cost.
 
-import { PrismaClient, type Prisma } from "@prisma/client";
 import type { AdapterManifest } from "@trusty-squire/adapter-sdk";
+import {
+  createRegistryPrismaClient,
+  type RegistryPrismaClient,
+} from "./registry-prisma-client.js";
 import {
   type InsertManifestInput,
   type ManifestStore,
@@ -12,10 +15,10 @@ import {
 import type { ManifestRecord } from "./types.js";
 
 export class PrismaManifestStore implements ManifestStore {
-  private constructor(private readonly client: PrismaClient) {}
+  private constructor(private readonly client: RegistryPrismaClient) {}
 
   static async fromEnv(): Promise<PrismaManifestStore> {
-    const client = new PrismaClient();
+    const client = createRegistryPrismaClient();
     await client.$connect();
     return new PrismaManifestStore(client);
   }
@@ -30,7 +33,7 @@ export class PrismaManifestStore implements ManifestStore {
         data: {
           service: input.service,
           version: input.version,
-          manifest_json: input.manifest as unknown as Prisma.InputJsonValue,
+          manifest_json: input.manifest,
           signature: input.signature,
           signed_at: input.signed_at,
           signed_by: input.signed_by,
@@ -55,7 +58,7 @@ export class PrismaManifestStore implements ManifestStore {
     const row = await this.client.adapterManifestRecord.findUnique({
       where: { service_version: { service, version } },
     });
-    return row === null ? null : toRecord(row);
+    return row === null ? null : toRecord(row as ManifestRow);
   }
 
   async listVersions(service: string): Promise<ManifestRecord[]> {
@@ -63,7 +66,7 @@ export class PrismaManifestStore implements ManifestStore {
       where: { service },
       orderBy: { created_at: "desc" },
     });
-    return rows.map(toRecord);
+    return rows.map((row) => toRecord(row as ManifestRow));
   }
 
   async listLatestByService(): Promise<ManifestRecord[]> {
@@ -77,7 +80,8 @@ export class PrismaManifestStore implements ManifestStore {
     });
     const seen = new Set<string>();
     const out: ManifestRecord[] = [];
-    for (const row of rows) {
+    for (const raw of rows) {
+      const row = raw as ManifestRow;
       if (seen.has(row.service)) continue;
       seen.add(row.service);
       out.push(toRecord(row));
@@ -93,17 +97,19 @@ export class PrismaManifestStore implements ManifestStore {
   }
 }
 
-function toRecord(row: {
+type ManifestRow = {
   service: string;
   version: string;
-  manifest_json: Prisma.JsonValue;
+  manifest_json: unknown;
   signature: string;
   signed_at: Date;
   signed_by: string;
   disabled_at: Date | null;
   disabled_reason: string | null;
   created_at: Date;
-}): ManifestRecord {
+};
+
+function toRecord(row: ManifestRow): ManifestRecord {
   return {
     service: row.service,
     version: row.version,

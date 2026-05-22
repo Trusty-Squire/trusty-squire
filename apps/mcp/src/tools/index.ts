@@ -20,6 +20,7 @@ import { cancelTool } from "./cancel.js";
 import { getUsageTool } from "./get-usage.js";
 import { rotateCredentialTool } from "./rotate-credential.js";
 import { provisionAnyTool, checkProvisionStatusTool } from "./provision-any.js";
+import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -57,6 +58,10 @@ export const TOOLS: Tool[] = [
   checkProvisionStatusTool,
   getCredentialTool,
   listCredentialsTool,
+  // Diagnostic tools: agent reads them after a failed extract so it
+  // can write a targeted fix without the user fetching by curl.
+  listExtractFailuresTool,
+  getExtractFailureTool,
 ] as Tool[];
 
 export function findTool(name: string): Tool | null {
@@ -80,4 +85,6 @@ export {
   cancelTool,
   getUsageTool,
   rotateCredentialTool,
+  listExtractFailuresTool,
+  getExtractFailureTool,
 };

@@ -100,6 +100,7 @@ export async function runServer(): Promise<void> {
           registryBaseUrl: DEFAULT_REGISTRY_BASE,
           agentSessionToken: session.agent_session_token,
           agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
+          ...(session.account_id !== undefined ? { accountId: session.account_id } : {}),
         })
       : null;
 

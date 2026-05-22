@@ -1390,7 +1390,16 @@ export class BrowserController {
 
   async screenshot(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
-    const buffer = await this.page.screenshot({ fullPage: false });
+    // PERF: JPEG quality=70 yields ~250-400KB vs PNG's 1-3MB, with
+    // no loss of legibility for the planner (Claude reads button
+    // labels, not pixel detail). Smaller upload + faster Claude
+    // tokenization saves ~300-500ms per planner round, and there
+    // are 8-15 rounds per signup.
+    const buffer = await this.page.screenshot({
+      fullPage: false,
+      type: "jpeg",
+      quality: 70,
+    });
     return buffer.toString("base64");
   }
 
@@ -1582,11 +1591,22 @@ export class BrowserController {
   // swallow their own timeout so the planner always still runs.
   async waitForFormReady(timeoutMs = 15000): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    // PERF: networkidle almost never settles on real signup pages
+    // (analytics sockets / long-poll / Intercom widgets keep traffic
+    // flowing indefinitely), so the previous 15s ceiling was 15s of
+    // pure deadtime per call. Cap at 1500ms so the bot gets the
+    // signal-when-it's-real and moves on otherwise. domcontentloaded
+    // is the real "DOM is parsed" signal; networkidle here is just
+    // a best-effort polish wait for the SPA to settle.
     try {
-      await this.page.waitForLoadState("networkidle", { timeout: timeoutMs });
+      await this.page.waitForLoadState("domcontentloaded", { timeout: 5_000 });
     } catch {
-      // networkidle never settles on pages with analytics sockets or
-      // long-poll — not fatal, fall through to the element wait.
+      // already past domcontentloaded → fine
+    }
+    try {
+      await this.page.waitForLoadState("networkidle", { timeout: 1_500 });
+    } catch {
+      // expected on most modern pages — fall through to the element wait.
     }
     // F13 follow-up — if we landed on a full-page anti-bot interstitial
     // (Cloudflare "Just a moment..." / Turnstile pre-clear / similar),

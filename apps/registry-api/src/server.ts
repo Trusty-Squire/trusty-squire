@@ -6,15 +6,23 @@ import Fastify from "fastify";
 import { ManifestCache } from "./cache.js";
 import { registerAdaptersRoute } from "./routes/adapters.js";
 import { registerSkillsRoute } from "./routes/skills.js";
+import { registerExtractFailuresRoute } from "./routes/extract-failures.js";
 import { generateKeyPairSync } from "node:crypto";
 import { ManifestSigner } from "./signer.js";
 import { InMemoryManifestStore, type ManifestStore } from "./store.js";
 import { InMemorySkillStore } from "./skill-store-memory.js";
 import type { SkillStore } from "./skill-store.js";
+import {
+  InMemoryExtractFailureStore,
+  MAX_HTML_BYTES,
+  MAX_SCREENSHOT_BYTES,
+  type ExtractFailureStore,
+} from "./extract-failure-store.js";
 
 export interface BuildServerOpts {
   store?: ManifestStore;
   skillStore?: SkillStore;
+  extractFailureStore?: ExtractFailureStore;
   cache?: ManifestCache;
   signer?: ManifestSigner;
   // Account ID resolver — production wires this to JWT middleware
@@ -35,9 +43,14 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     process.env.VITEST === "true" || process.env.NODE_ENV === "test"
       ? false
       : { level: process.env.LOG_LEVEL ?? "info" };
-  const fastify = Fastify({ logger });
+  const fastify = Fastify({
+    logger,
+    bodyLimit: MAX_HTML_BYTES + MAX_SCREENSHOT_BYTES + 512 * 1024,
+  });
   const store = opts.store ?? new InMemoryManifestStore();
   const skillStore = opts.skillStore ?? new InMemorySkillStore();
+  const extractFailureStore =
+    opts.extractFailureStore ?? new InMemoryExtractFailureStore();
   const cache = opts.cache ?? new ManifestCache();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
@@ -74,14 +87,34 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     });
 
   await fastify.register(registerAdaptersRoute, { store, cache });
+  const demotionWebhookUrl =
+    opts.demotionWebhookUrl ?? process.env.TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL;
   await fastify.register(registerSkillsRoute, {
     store: skillStore,
     signer,
     resolveAccountId,
-    demotionWebhookUrl:
-      opts.demotionWebhookUrl ?? process.env.TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL,
+    ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
   });
+
+  await fastify.register(registerExtractFailuresRoute, {
+    store: extractFailureStore,
+    resolveAccountId,
+  });
+
+  // Hourly background pruner. Best-effort — server doesn't crash if
+  // it fails; the lazy delete in list()/get() catches stragglers.
+  const pruneInterval = setInterval(
+    () => {
+      void extractFailureStore.pruneExpired().catch((err) => {
+        fastify.log.warn({ err }, "extract-failure pruner failed");
+      });
+    },
+    60 * 60 * 1000,
+  );
+  // setInterval keeps the process alive; unref so it doesn't block
+  // graceful shutdown.
+  pruneInterval.unref();
 
   fastify.get("/health", async () => ({ ok: true }));
 
@@ -90,6 +123,17 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.REGISTRY_API_PORT ?? 3001);
-  const server = await buildServer();
+  let serverOpts: BuildServerOpts = {};
+  if (process.env.REGISTRY_DATABASE_URL !== undefined && process.env.REGISTRY_DATABASE_URL.length > 0) {
+    const { PrismaManifestStore } = await import("./prisma-store.js");
+    const { PrismaSkillStore } = await import("./prisma-skill-store.js");
+    const { PrismaExtractFailureStore } = await import("./prisma-extract-failure-store.js");
+    serverOpts = {
+      store: await PrismaManifestStore.fromEnv(),
+      skillStore: await PrismaSkillStore.fromEnv(),
+      extractFailureStore: await PrismaExtractFailureStore.fromEnv(),
+    };
+  }
+  const server = await buildServer(serverOpts);
   await server.listen({ port, host: "0.0.0.0" });
 }

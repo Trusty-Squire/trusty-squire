@@ -2,8 +2,11 @@
 // use InMemorySkillStore. Mirrors prisma-store.ts (the manifest
 // equivalent).
 
-import { PrismaClient, type Prisma } from "@prisma/client";
 import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
+import {
+  createRegistryPrismaClient,
+  type RegistryPrismaClient,
+} from "./registry-prisma-client.js";
 import {
   type InsertCaptureInput,
   type InsertSkillInput,
@@ -21,15 +24,15 @@ import { triggersHumanReview } from "./skill-store-memory.js";
 const DEMOTION_THRESHOLD = 3;
 
 export class PrismaSkillStore implements SkillStore {
-  private constructor(private readonly client: PrismaClient) {}
+  private constructor(private readonly client: RegistryPrismaClient) {}
 
   static async fromEnv(): Promise<PrismaSkillStore> {
-    const client = new PrismaClient();
+    const client = createRegistryPrismaClient();
     await client.$connect();
     return new PrismaSkillStore(client);
   }
 
-  static fromClient(client: PrismaClient): PrismaSkillStore {
+  static fromClient(client: RegistryPrismaClient): PrismaSkillStore {
     // For tests + the registry-api server which already maintains a
     // single PrismaClient. Skipping $connect — the caller owns the
     // lifecycle.
@@ -62,7 +65,7 @@ export class PrismaSkillStore implements SkillStore {
           skill_id: skill.skill_id,
           service: skill.service,
           version: skill.version,
-          payload_json: payloadForStorage as unknown as Prisma.InputJsonValue,
+          payload_json: payloadForStorage,
           signature,
           signed_at,
           signed_by,
@@ -75,7 +78,7 @@ export class PrismaSkillStore implements SkillStore {
           deleted_at: skill.deleted_at ? new Date(skill.deleted_at) : null,
         },
       });
-      return toSkillStoreRecord(row);
+      return toSkillStoreRecord(row as PrismaSkillRow);
     } catch (err) {
       if (
         err !== null &&
@@ -91,7 +94,7 @@ export class PrismaSkillStore implements SkillStore {
 
   async findById(skill_id: string): Promise<SkillStoreRecord | null> {
     const row = await this.client.skillRecord.findUnique({ where: { skill_id } });
-    return row ? toSkillStoreRecord(row) : null;
+    return row ? toSkillStoreRecord(row as PrismaSkillRow) : null;
   }
 
   async findActiveByService(service: string): Promise<SkillStoreRecord | null> {
@@ -101,12 +104,12 @@ export class PrismaSkillStore implements SkillStore {
       where: { service, status: "active", deleted_at: null },
       orderBy: { created_at: "desc" },
     });
-    return row ? toSkillStoreRecord(row) : null;
+    return row ? toSkillStoreRecord(row as PrismaSkillRow) : null;
   }
 
   async listSkills(filter: ListSkillsFilter): Promise<SkillStoreRecord[]> {
     const limit = Math.min(500, Math.max(1, filter.limit ?? 100));
-    const where: Prisma.SkillRecordWhereInput = { deleted_at: null };
+    const where: Record<string, unknown> = { deleted_at: null };
     if (filter.service !== undefined) where.service = filter.service;
     if (filter.status !== undefined) where.status = filter.status;
     const rows = await this.client.skillRecord.findMany({
@@ -114,7 +117,7 @@ export class PrismaSkillStore implements SkillStore {
       orderBy: { created_at: "desc" },
       take: limit,
     });
-    return rows.map(toSkillStoreRecord);
+    return rows.map((row) => toSkillStoreRecord(row as PrismaSkillRow));
   }
 
   async recordReplayOutcome(input: RecordReplayInput): Promise<RecordReplayResult> {
@@ -176,7 +179,7 @@ export class PrismaSkillStore implements SkillStore {
       });
 
       return {
-        replay: toReplayRecord(replay),
+        replay: toReplayRecord(replay as PrismaReplayRow),
         demoted,
         consecutive_failures: skill.consecutive_failures,
         replays_succeeded: skill.replays_succeeded,
@@ -191,7 +194,7 @@ export class PrismaSkillStore implements SkillStore {
       orderBy: { replayed_at: "desc" },
       take: limit,
     });
-    return rows.map(toReplayRecord);
+    return rows.map((row) => toReplayRecord(row as PrismaReplayRow));
   }
 
   async manuallyDemote(skill_id: string, reason: string): Promise<SkillStoreRecord | null> {
@@ -201,7 +204,7 @@ export class PrismaSkillStore implements SkillStore {
         where: { skill_id },
         data: { status: "demoted" },
       });
-      return toSkillStoreRecord(row);
+      return toSkillStoreRecord(row as PrismaSkillRow);
     } catch (err) {
       // P2025 = "record to update not found"
       if (
@@ -221,7 +224,9 @@ export class PrismaSkillStore implements SkillStore {
     // active row for the same service. Wrapped in $transaction so a
     // crash mid-update doesn't leave two active rows for one service.
     return this.client.$transaction(async (tx) => {
-      const current = await tx.skillRecord.findUnique({ where: { skill_id } });
+      const current = (await tx.skillRecord.findUnique({ where: { skill_id } })) as
+        | PrismaSkillRow
+        | null;
       if (current === null) return null;
       if (current.status !== "pending-review") {
         return toSkillStoreRecord(current);
@@ -239,7 +244,7 @@ export class PrismaSkillStore implements SkillStore {
         where: { skill_id },
         data: { status: "active" },
       });
-      return toSkillStoreRecord(updated);
+      return toSkillStoreRecord(updated as PrismaSkillRow);
     });
   }
 
@@ -255,9 +260,9 @@ export class PrismaSkillStore implements SkillStore {
     const existing = await this.client.skillCaptureRecord.findUnique({
       where: { content_hash: input.content_hash },
     });
-    if (existing !== null) return toCaptureRecord(existing);
+    if (existing !== null) return toCaptureRecord(existing as PrismaCaptureRow);
 
-    const payloadJson = input.payload as Prisma.InputJsonValue;
+    const payloadJson = input.payload;
     const byteSize = Buffer.byteLength(JSON.stringify(input.payload), "utf8");
     const row = await this.client.skillCaptureRecord.create({
       data: {
@@ -270,7 +275,7 @@ export class PrismaSkillStore implements SkillStore {
         uploaded_by: input.uploaded_by,
       },
     });
-    return toCaptureRecord(row);
+    return toCaptureRecord(row as PrismaCaptureRow);
   }
 
   async listCapturesForSkill(skill_id: string): Promise<SkillCaptureRecord[]> {
@@ -278,12 +283,12 @@ export class PrismaSkillStore implements SkillStore {
       where: { skill_id },
       orderBy: [{ run_id: "asc" }, { round_index: "asc" }],
     });
-    return rows.map(toCaptureRecord);
+    return rows.map((row) => toCaptureRecord(row as PrismaCaptureRow));
   }
 
   async findCaptureByHash(content_hash: string): Promise<SkillCaptureRecord | null> {
     const row = await this.client.skillCaptureRecord.findUnique({ where: { content_hash } });
-    return row ? toCaptureRecord(row) : null;
+    return row ? toCaptureRecord(row as PrismaCaptureRow) : null;
   }
 }
 
@@ -292,7 +297,7 @@ type PrismaCaptureRow = {
   skill_id: string;
   run_id: string;
   round_index: number;
-  payload_json: Prisma.JsonValue;
+  payload_json: unknown;
   byte_size: number;
   uploaded_at: Date;
   uploaded_by: string;
@@ -317,7 +322,7 @@ type PrismaSkillRow = {
   skill_id: string;
   service: string;
   version: string;
-  payload_json: Prisma.JsonValue;
+  payload_json: unknown;
   signature: string;
   signed_at: Date;
   signed_by: string;

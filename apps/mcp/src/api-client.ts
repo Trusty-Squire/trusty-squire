@@ -32,6 +32,12 @@ export interface ApiClientConfig {
   fetch?: typeof fetch;
   // Self-reported in headers so the API ledger can attribute actions.
   agentIdentity?: string;
+  // Account identifier — sent as `x-account-id` to the registry-api,
+  // which uses it for scoping (extract-failure snapshots, skill
+  // uploads, etc.). Optional because dev/test MCPs may not yet have
+  // a paired account; the registry-api falls back to "anonymous"
+  // when this header is missing.
+  accountId?: string;
 }
 
 export interface ProvisionInput {
@@ -152,6 +158,116 @@ export class ApiClient {
     return this.get<UsageResponse>("/v1/usage");
   }
 
+  // ── Extract-failure diagnostics ───────────────────────────
+
+  // Upload a DOM + screenshot snapshot from a universal-bot run
+  // where extractCredentials() returned null. Lives on the
+  // registry-api (not apps/api) because the diagnostic data is
+  // operator-facing, not a hot-path workflow. Best-effort: failures
+  // here MUST NOT abort the signup. Caller wraps in try/catch.
+  async uploadExtractFailure(input: {
+    service: string;
+    mcp_version: string;
+    url: string;
+    title: string;
+    step_label: string;
+    extract_reason: string;
+    candidates: ReadonlyArray<string>;
+    html: string;
+    screenshot_jpeg_base64?: string;
+  }): Promise<{ id: string }> {
+    const url = `${this.config.registryBaseUrl}/v1/extract-failures`;
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(input),
+    });
+    return (await this.handleResponse(res, "POST", "/v1/extract-failures")) as { id: string };
+  }
+
+  // List this account's recent extract-failure snapshots. Returns
+  // metadata only — no HTML, no screenshot bytes. Call
+  // getExtractFailure(id) to fetch the body of a specific snapshot.
+  async listExtractFailures(limit = 20): Promise<{
+    snapshots: Array<{
+      id: string;
+      service: string;
+      mcp_version: string;
+      uploaded_at: string;
+      expires_at: string;
+      url: string;
+      title: string;
+      step_label: string;
+      extract_reason: string;
+      html_bytes: number;
+      screenshot_bytes: number;
+    }>;
+  }> {
+    const url = `${this.config.registryBaseUrl}/v1/extract-failures?limit=${encodeURIComponent(String(limit))}`;
+    const res = await this.fetchImpl(url, {
+      method: "GET",
+      headers: this.headers(),
+    });
+    return (await this.handleResponse(res, "GET", "/v1/extract-failures")) as {
+      snapshots: Array<{
+        id: string;
+        service: string;
+        mcp_version: string;
+        uploaded_at: string;
+        expires_at: string;
+        url: string;
+        title: string;
+        step_label: string;
+        extract_reason: string;
+        html_bytes: number;
+        screenshot_bytes: number;
+      }>;
+    };
+  }
+
+  // Fetch the full body of one snapshot: decompressed HTML + base64
+  // JPEG screenshot, plus all metadata. Used by the diagnostic MCP
+  // tool so a coding agent can pull the DOM into its context window
+  // and write a targeted fix in the same conversation.
+  async getExtractFailure(id: string): Promise<{
+    id: string;
+    service: string;
+    mcp_version: string;
+    uploaded_at: string;
+    expires_at: string;
+    url: string;
+    title: string;
+    step_label: string;
+    extract_reason: string;
+    candidates: ReadonlyArray<string>;
+    html: string;
+    html_bytes: number;
+    screenshot_jpeg_base64: string | null;
+    screenshot_bytes: number;
+  }> {
+    const url = `${this.config.registryBaseUrl}/v1/extract-failures/${encodeURIComponent(id)}`;
+    const res = await this.fetchImpl(url, {
+      method: "GET",
+      headers: this.headers(),
+    });
+    return (await this.handleResponse(res, "GET", `/v1/extract-failures/${id}`)) as {
+      id: string;
+      service: string;
+      mcp_version: string;
+      uploaded_at: string;
+      expires_at: string;
+      url: string;
+      title: string;
+      step_label: string;
+      extract_reason: string;
+      candidates: ReadonlyArray<string>;
+      html: string;
+      html_bytes: number;
+      screenshot_jpeg_base64: string | null;
+      screenshot_bytes: number;
+    };
+  }
+
   // ── Service directory ─────────────────────────────────────
 
   async listServices(category?: string): Promise<{ adapters: DirectoryEntry[] }> {
@@ -173,6 +289,11 @@ export class ApiClient {
     };
     if (this.config.agentIdentity !== undefined) {
       h["X-Squire-Agent-Identity"] = this.config.agentIdentity;
+    }
+    // The registry-api scopes its reads to `x-account-id`. Main API
+    // ignores unknown headers, so it's safe to always send.
+    if (this.config.accountId !== undefined) {
+      h["x-account-id"] = this.config.accountId;
     }
     return h;
   }
