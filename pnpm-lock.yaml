@@ -157,6 +157,9 @@ importers:
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
+      tldts:
+        specifier: ^7.0.30
+        version: 7.0.30
       yaml:
         specifier: ^2.6.1
         version: 2.8.4
@@ -8673,6 +8676,17 @@ packages:
   /tlds@1.261.0:
     resolution: {integrity: sha512-QXqwfEl9ddlGBaRFXIvNKK6OhipSiLXuRuLJX5DErz0o0Q0rYxulWLdFryTkV5PkdZct5iMInwYEGe/eR++1AA==}
     hasBin: true
+    dev: false
+
+  /tldts-core@7.0.30:
+    resolution: {integrity: sha512-uiHN8PIB1VmWyS98eZYja4xzlYqeFZVjb4OuYlJQnZAuJhMw4PbKQOKgHKhBdJR3FE/t5mUQ1Kd80++B+qhD1Q==}
+    dev: false
+
+  /tldts@7.0.30:
+    resolution: {integrity: sha512-ELrFxuqsDdHUwoh0XxDbxuLD3Wnz49Z57IFvTtvWy1hJdcMZjXLIuonjilCiWHlT2GbE4Wlv1wKVTzDFnXH1aw==}
+    hasBin: true
+    dependencies:
+      tldts-core: 7.0.30
     dev: false
 
   /to-regex-range@5.0.1:

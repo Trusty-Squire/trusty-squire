@@ -608,24 +608,76 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
     .join("\n");
 }
 
+// Platform-as-a-service customer-tenant suffixes that the bundled PSL
+// in `tldts` does NOT (yet) classify as public suffixes, but functionally
+// behave like one: every label to the left is a distinct customer site,
+// not an extension of the platform's own brand.
+//
+// Without this override, `getDomain("storysite-production.up.railway.app")`
+// returns `"railway.app"` (first label "railway") and the guard wrongly
+// matches it to slug "railway" — which is exactly the Railway bug this
+// guard is meant to prevent.
+//
+// Keep this list short: only platforms where serving arbitrary 3rd-party
+// content on `*.<suffix>` is the platform's primary purpose. Custom-domain-
+// only platforms (e.g. heroku custom domains) don't belong here.
+//
+// Order matters — most-specific first. We pick the longest suffix the
+// hostname ends with.
+const PLATFORM_TENANT_SUFFIXES: readonly string[] = [
+  "up.railway.app",
+  "railway.app",
+  "vercel.app",
+  "netlify.app",
+  "pages.dev",
+  "fly.dev",
+  "onrender.com",
+  "herokuapp.com",
+  "github.io",
+  "gitlab.io",
+  "workers.dev",
+];
+
+// Treat `hostname` as if `suffix` were a public suffix: return the label
+// immediately to the left of the suffix, lowercased. Returns null if the
+// hostname doesn't end with the suffix.
+function tenantLabelUnderPlatformSuffix(
+  hostname: string,
+  suffix: string,
+): string | null {
+  const lc = hostname.toLowerCase();
+  const dotSuffix = `.${suffix}`;
+  if (!lc.endsWith(dotSuffix)) return null;
+  const head = lc.slice(0, -dotSuffix.length);
+  if (head.length === 0) return null;
+  // The tenant label is the LAST label of head (rightmost-before-suffix).
+  const parts = head.split(".");
+  return parts[parts.length - 1] ?? null;
+}
+
 // BUG-1 GUARD — does `hostname` belong to the same registered domain as
 // `serviceSlug` (the alphanumeric squashed service name like "railway",
 // "postmark")?
 //
-// Uses PSL-aware eTLD+1 (via tldts) so platform subdomains like
-// `*.up.railway.app` and `*.vercel.app` are correctly classified as
-// distinct registered domains (each customer site is its own entity).
+// Uses PSL-aware eTLD+1 (via tldts) AND a hardcoded override for
+// platform-tenant suffixes the bundled PSL doesn't cover yet, so platform
+// subdomains like `*.up.railway.app` and `*.vercel.app` are correctly
+// classified as distinct customer sites.
 //
-//   railway.com           ↔ slug "railway" → MATCH   (registered = railway.com,
-//                                                     first-label of root = "railway")
-//   docs.railway.com      ↔ slug "railway" → MATCH   (same registered)
-//   storysite-production.up.railway.app ↔ slug "railway" → REJECT
-//                                                     (registered = storysite-production.up.railway.app
-//                                                      under the .up.railway.app public suffix)
-//   railway.io (typosquat) ↔ slug "railway" → MATCH  (intentional — we can't
-//                                                     distinguish typo-squats from
-//                                                     legitimate TLD variants like
-//                                                     sentry.com → sentry.io)
+//   railway.com                          ↔ slug "railway" → MATCH
+//   docs.railway.com                     ↔ slug "railway" → MATCH
+//   storysite-production.up.railway.app  ↔ slug "railway" → REJECT
+//                                          (matched by platform override —
+//                                          tenant label is "storysite-production",
+//                                          not "railway")
+//   railway.app                          ↔ slug "railway" → MATCH
+//                                          (the apex itself is the platform's
+//                                          own brand; only labels to the left
+//                                          are tenant sites)
+//   railway.io (typosquat)               ↔ slug "railway" → MATCH
+//                                          (intentional — we can't disambiguate
+//                                          typosquats from TLD variants like
+//                                          sentry.com vs sentry.io)
 //
 // Empty slug → permissive (return true), preserving prior behavior when
 // no service name was provided to findSignupLink.
@@ -636,12 +688,32 @@ export function hostMatchesServiceDomain(
   serviceSlug: string,
 ): boolean {
   if (serviceSlug.length === 0) return true;
-  const registered = getDomain(hostname);
+  const lcHost = hostname.toLowerCase();
+
+  // Platform-tenant override: if hostname is `*.<platform-suffix>`, the
+  // tenant label (left of the suffix) is the "site name", not the
+  // platform's brand. Pick the LONGEST matching suffix so e.g.
+  // "x.up.railway.app" picks "up.railway.app" before "railway.app".
+  let bestSuffix: string | null = null;
+  for (const sfx of PLATFORM_TENANT_SUFFIXES) {
+    if (
+      lcHost.endsWith(`.${sfx}`) &&
+      (bestSuffix === null || sfx.length > bestSuffix.length)
+    ) {
+      bestSuffix = sfx;
+    }
+  }
+  if (bestSuffix !== null) {
+    const tenant = tenantLabelUnderPlatformSuffix(lcHost, bestSuffix);
+    if (tenant === null) return false;
+    const normalizedTenant = tenant.replace(/[^a-z0-9]/g, "");
+    return normalizedTenant === serviceSlug;
+  }
+
+  const registered = getDomain(lcHost);
   if (registered === null) return false;
-  // The first label of the eTLD+1 is the "site name". For
-  // railway.com that's "railway"; for storysite-production.up.railway.app
-  // the eTLD+1 IS the whole thing (because .up.railway.app is a PSL
-  // public suffix) and its first label is "storysite-production".
+  // The first label of the eTLD+1 is the "site name". For railway.com
+  // that's "railway".
   const firstLabel = registered.split(".")[0]?.toLowerCase() ?? "";
   // Normalize: strip hyphens so "trusty-squire" matches slug "trustysquire".
   const normalized = firstLabel.replace(/[^a-z0-9]/g, "");
