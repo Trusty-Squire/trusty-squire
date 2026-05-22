@@ -26,7 +26,12 @@ import type { LLMUsageTracker } from "../services/llm-usage-tracker.js";
 const blockSchema = z.union([
   z.object({
     kind: z.literal("image"),
-    media_type: z.literal("image/png"),
+    // Both PNG and JPEG are valid for the multi-modal user blocks.
+    // The bot's browser.screenshot() switched to JPEG (quality=70)
+    // in rc.8 for ~10x smaller payloads + faster Claude tokenization;
+    // some upstream call sites still emit PNG. Both pass through the
+    // OpenRouter / Anthropic SDK unchanged.
+    media_type: z.enum(["image/png", "image/jpeg"]),
     data_base64: z.string().min(1),
   }),
   z.object({
