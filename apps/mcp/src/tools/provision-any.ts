@@ -771,16 +771,18 @@ async function runSignupTask(
       );
     }
 
-    // Auto-promote on bot success (rc.10). Closes the loop without an
+    // Auto-promote on bot success. Closes the loop without an
     // operator running `mcp skill promote` between signups: the bot's
     // capture chain becomes a published skill the next provision will
-    // replay. Opt-in via TRUSTY_SQUIRE_AUTO_PROMOTE=true; gated by
-    // SKILL_SIGNING_PRIVATE_KEY being present (otherwise we can't
-    // sign → registry rejects). Fire-and-forget — failures push to
-    // stepsSink with `[auto-promote]` prefix and never fail the
-    // signup. The server-side review gate still catches signup_url /
-    // oauth_provider changes (lands as pending-review, not active).
-    if (result.success && process.env.TRUSTY_SQUIRE_AUTO_PROMOTE === "true") {
+    // replay. rc.13: with the ephemeral-key fallback in place, auto-
+    // promote no longer requires operator-level signing infra to
+    // succeed — so rc.14 flips the default from opt-in to ON. Opt
+    // OUT with TRUSTY_SQUIRE_AUTO_PROMOTE=false (or 0 / off). The
+    // server-side review gate still catches signup_url / oauth_
+    // provider changes (lands as pending-review, not active).
+    // Fire-and-forget — failures push to stepsSink with `[auto-
+    // promote]` prefix and never fail the signup.
+    if (result.success && isAutoPromoteEnabled(process.env)) {
       void runAutoPromote({
         service: input.service,
         stepsSink: ctx.stepsSink,
@@ -1210,10 +1212,23 @@ function buildRoundUploader(
   };
 }
 
-// Auto-promote on bot success (rc.10). Reads from process.env so the
-// feature stays a single-flag opt-in: TRUSTY_SQUIRE_AUTO_PROMOTE=true
-// turns it on; everything else is plumbing. Never throws — all
-// failures land in `stepsSink` with the `[auto-promote]` prefix.
+// Decide whether auto-promote should fire after a successful signup.
+// rc.14 — default is ON. Set TRUSTY_SQUIRE_AUTO_PROMOTE to one of
+// "false" / "0" / "off" to disable. Any other value (including
+// "true", unset, or empty) leaves it enabled. Exported for unit
+// testing; the caller path uses it as an `if` condition.
+export function isAutoPromoteEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.TRUSTY_SQUIRE_AUTO_PROMOTE;
+  if (raw === undefined) return true;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "false" || trimmed === "0" || trimmed === "off") return false;
+  return true;
+}
+
+// Auto-promote on bot success (rc.10). Reads from process.env. As of
+// rc.14 the feature is on by default — opt out with
+// TRUSTY_SQUIRE_AUTO_PROMOTE=false. Never throws — all failures
+// land in `stepsSink` with the `[auto-promote]` prefix.
 //
 // Exported for unit testing. Production callers pass {service,
 // stepsSink: ctx.stepsSink, accountId: ctx.accountId}; tests inject

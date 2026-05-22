@@ -12,7 +12,7 @@ import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAutoPromote } from "../provision-any.js";
+import { isAutoPromoteEnabled, runAutoPromote } from "../provision-any.js";
 import { captureOnboardingRound } from "../../bot/onboarding-capture.js";
 import type { OnboardingRoundCapture } from "../../bot/onboarding-capture.js";
 import type { InteractiveElement } from "../../bot/browser.js";
@@ -176,6 +176,29 @@ function uniqueService(): string {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
+
+describe("isAutoPromoteEnabled — rc.14 default-on", () => {
+  it("is enabled when env var is unset", () => {
+    expect(isAutoPromoteEnabled({})).toBe(true);
+  });
+
+  it("is enabled when env var is 'true'", () => {
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "true" })).toBe(true);
+  });
+
+  it("is enabled for any non-disable-token value", () => {
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "yes" })).toBe(true);
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "1" })).toBe(true);
+  });
+
+  it("is disabled by 'false', '0', or 'off' (case-insensitive)", () => {
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "false" })).toBe(false);
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "0" })).toBe(false);
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "off" })).toBe(false);
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: "OFF" })).toBe(false);
+    expect(isAutoPromoteEnabled({ TRUSTY_SQUIRE_AUTO_PROMOTE: " False " })).toBe(false);
+  });
+});
 
 describe("runAutoPromote — env preconditions", () => {
   it("skips when TRUSTY_SQUIRE_ONBOARDING_CAPTURE is explicitly off", async () => {

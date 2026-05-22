@@ -371,17 +371,23 @@ package would defeat the whole 0.7.0 thesis).
   `connect --no-registry` (skips the router entirely → universal bot
   only).
 - `SKILL_SIGNING_PRIVATE_KEY` — required for `mcp skill promote`
-  AND auto-promote. Unset = `promote` exits with CONFIG (3),
-  auto-promote logs `cannot sign` and skips.
-- `TRUSTY_SQUIRE_AUTO_PROMOTE` — set to `"true"` to enable auto-
-  promotion on successful bot signups (rc.10). After a bot run
-  succeeds, the bot package fires fire-and-forget against the local
-  capture: synthesizes a skill, signs it, posts to the registry.
-  Failures land in the signup's step trail with the `[auto-promote]`
-  prefix and never fail the parent signup. Opt-in until trusted.
-- `TRUSTY_SQUIRE_ONBOARDING_CAPTURE` — capture directory. Auto-promote
-  needs this set to find the run's JSON files. Recommended:
-  `~/.trusty-squire/corpus/onboarding/`.
+  (operator-explicit signing). Auto-promote (rc.13+) falls back to
+  an ephemeral Ed25519 keypair when this is unset, so the closed
+  loop runs without operator-level signing infra. The explicit CLI
+  still exits CONFIG (3) without a key — that's the intended loud
+  failure mode for the operator-publish path.
+- `TRUSTY_SQUIRE_AUTO_PROMOTE` — auto-promotion on successful bot
+  signups. **Default-on as of rc.14.** Opt out with `"false"` /
+  `"0"` / `"off"`. After a bot run succeeds, the bot package fires
+  fire-and-forget against the local capture: synthesizes a skill,
+  signs it (real key if configured, otherwise an ephemeral one),
+  posts to the registry. Failures land in the signup's step trail
+  with the `[auto-promote]` prefix and never fail the parent signup.
+- `TRUSTY_SQUIRE_ONBOARDING_CAPTURE` — capture directory. Default-on
+  as of rc.11 — `~/.trusty-squire/corpus/onboarding/` when unset.
+  Auto-promote reads this via `resolveCaptureDir()` so the default
+  path is honored without any env work. Set to `off` / `0` / `false`
+  to suppress capture entirely.
 
 ### Goose / local-dev MCP install
 
