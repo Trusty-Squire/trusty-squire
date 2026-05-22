@@ -775,3 +775,184 @@ describe("promoteToSkill — output passes SkillSchema", () => {
     }).not.toThrow();
   });
 });
+
+// ── Multi-credential synthesis (Phase C per docs/DESIGN-multi-credential.md) ──
+
+// Twitter-class fixture: 3 distinct credentials extracted from copy
+// buttons with different surrounding labels.
+function twitterMultiCredRounds(service: string): OnboardingRoundCapture[] {
+  return [
+    {
+      service,
+      round: 0,
+      oauth: true,
+      state: {
+        url: "https://developer.twitter.com/portal/keys",
+        title: "Keys and tokens",
+        html:
+          "<html><body>API Key Copy " +
+          "API Key Secret Copy " +
+          "Bearer Token Copy</body></html>",
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Copy",
+          selector: "button.copy-api-key",
+          role: "button",
+          ariaLabel: "Copy API Key",
+        }),
+      ],
+      observed: {
+        kind: "extract",
+        reason:
+          "API Key value visible in 'API Key' section: copy button beside it.",
+      },
+    },
+    {
+      service,
+      round: 1,
+      oauth: true,
+      state: {
+        url: "https://developer.twitter.com/portal/keys",
+        title: "Keys and tokens",
+        html: "<html><body>API Key Secret Copy</body></html>",
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Copy",
+          selector: "button.copy-api-key-secret",
+          role: "button",
+          ariaLabel: "Copy API Key Secret",
+        }),
+      ],
+      observed: {
+        kind: "extract",
+        reason: "API Key Secret value visible: 'API Key Secret' section.",
+      },
+    },
+    {
+      service,
+      round: 2,
+      oauth: true,
+      state: {
+        url: "https://developer.twitter.com/portal/keys",
+        title: "Keys and tokens",
+        html: "<html><body>Bearer Token Copy</body></html>",
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Copy",
+          selector: "button.copy-bearer-token",
+          role: "button",
+          ariaLabel: "Copy Bearer Token",
+        }),
+      ],
+      observed: {
+        kind: "extract",
+        reason: "Bearer Token visible in 'Bearer Token' section.",
+      },
+    },
+  ];
+}
+
+describe("promoteToSkill — multi-credential (Twitter-class)", () => {
+  it("produces a skill with N distinct credentials and N named extract steps", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(twitterMultiCredRounds(service));
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    // Three distinct credentials.
+    expect(result.skill.credentials).toHaveLength(3);
+    const names = result.skill.credentials.map((c) => c.name).sort();
+    expect(names).toEqual(["api_key", "api_key_secret", "bearer_token"]);
+
+    // Each extract step is the *_named variant referencing its credential.
+    const extractSteps = result.skill.steps.filter(
+      (s) =>
+        s.kind === "extract_via_copy_button_named" ||
+        s.kind === "extract_via_regex_named",
+    );
+    expect(extractSteps).toHaveLength(3);
+    for (const s of extractSteps) {
+      const produces = (s as { produces: string }).produces;
+      expect(names).toContain(produces);
+    }
+    // No legacy extract kinds slipped through.
+    const legacyExtracts = result.skill.steps.filter(
+      (s) => s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
+    );
+    expect(legacyExtracts).toHaveLength(0);
+  });
+
+  it("derives <SERVICE>_<PRODUCES> env vars per credential", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(twitterMultiCredRounds(service));
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    const upperService = service.toUpperCase().replace(/-/g, "_");
+    const envVars = new Set(result.skill.credentials.map((c) => c.env_var_suggestion));
+    expect(envVars.has(`${upperService}_API_KEY`)).toBe(true);
+    expect(envVars.has(`${upperService}_API_KEY_SECRET`)).toBe(true);
+    expect(envVars.has(`${upperService}_BEARER_TOKEN`)).toBe(true);
+  });
+
+  it("rejects when two extract rounds derive the same produces", () => {
+    // Two rounds with the same label → same produces → duplicate.
+    const service = uniqueService();
+    const rounds = twitterMultiCredRounds(service);
+    // Force a duplicate by re-using "API Key" reason for round 1.
+    rounds[1]!.observed = {
+      kind: "extract",
+      reason: "Second API Key value in 'API Key' section.",
+    };
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") return;
+    expect(result.error_kind).toBe("duplicate_credential_produces");
+  });
+
+  it("single-credential captures still produce a credentials[0].name = undefined skill", () => {
+    // Regression net: the multi-cred dispatch must NOT fire for
+    // single-cred captures. The Railway fixture is single-cred; its
+    // output should keep the legacy shape (one credentials entry,
+    // no `name` field, legacy extract step kinds).
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(railwayRounds(service));
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    expect(result.skill.credentials).toHaveLength(1);
+    // Backward-compat invariant: single-cred skills omit `name`.
+    expect(result.skill.credentials[0]!.name).toBeUndefined();
+    // Legacy step kinds preserved.
+    const legacy = result.skill.steps.filter(
+      (s) => s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
+    );
+    expect(legacy.length).toBeGreaterThan(0);
+    const named = result.skill.steps.filter(
+      (s) =>
+        s.kind === "extract_via_copy_button_named" ||
+        s.kind === "extract_via_regex_named",
+    );
+    expect(named).toHaveLength(0);
+  });
+});

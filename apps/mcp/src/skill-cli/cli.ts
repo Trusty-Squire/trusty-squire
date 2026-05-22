@@ -18,8 +18,17 @@
 // class so shell scripts can branch reliably.
 
 import process from "node:process";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import { spawnSync } from "node:child_process";
 import { CliExit, ExitCode } from "./errors.js";
 import { clientFromEnvOrThrow, RegistryHttpClient } from "./registry-http.js";
+import { signSkillForPublish } from "./signing.js";
+import { promoteToSkill, deriveSkillId } from "../bot/promote-to-skill.js";
+import { replaySkill } from "../bot/replay-skill.js";
+import { BrowserController } from "../bot/browser.js";
+import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
 
 // ── Public entry point ──────────────────────────────────────────────
 
@@ -30,6 +39,30 @@ export interface SkillCliOpts {
   stdout?: (line: string) => void;
   /** Override stderr for tests. Default: console.error. */
   stderr?: (line: string) => void;
+  /**
+   * Corpus root for `promote`. Default: env CORPUS_DIR, else
+   * `./corpus/onboarding`. Tests override directly so they don't
+   * depend on cwd.
+   */
+  corpusDir?: string;
+  /**
+   * Signing-key override for `promote`. When omitted, the signer
+   * reads SKILL_SIGNING_PRIVATE_KEY from env. Tests inject a
+   * KeyObject so they don't have to round-trip a real env var.
+   */
+  signingPrivateKey?: import("node:crypto").KeyObject;
+  /**
+   * Browser factory for `replay-test`. Default: `new BrowserController()`.
+   * Tests inject a stub.
+   */
+  browserFactory?: () => BrowserController;
+  /**
+   * Editor invocation for `edit`. Default: spawnSync($EDITOR, [filePath]).
+   * Tests inject a function that mutates the tempfile in place — that's
+   * how we exercise the "save → re-validate → re-publish" path without
+   * an interactive editor.
+   */
+  editorCommand?: (filePath: string) => void | Promise<void>;
 }
 
 /**
@@ -72,6 +105,18 @@ export async function runSkillCli(
         return await cmdDemote(argv.slice(1), client, stdout);
       case "approve":
         return await cmdApprove(argv.slice(1), client, stdout);
+      case "promote":
+        return await cmdPromote(argv.slice(1), client, stdout, opts);
+      case "reactivate":
+        return await cmdReactivate(argv.slice(1), client, stdout);
+      case "delete":
+        return await cmdDelete(argv.slice(1), client, stdout);
+      case "replay-test":
+        return await cmdReplayTest(argv.slice(1), client, stdout, opts);
+      case "diff":
+        return await cmdDiff(argv.slice(1), client, stdout);
+      case "edit":
+        return await cmdEdit(argv.slice(1), client, stdout, opts);
       default:
         stderr(`unknown skill subcommand: ${subcommand}`);
         printHelp(stderr);
@@ -439,32 +484,717 @@ async function cmdApprove(
   return ExitCode.OK;
 }
 
+// ── promote ─────────────────────────────────────────────────────────
+
+interface PromoteResponseOk {
+  ok: true;
+  skill_id: string;
+  service: string;
+  version: string;
+  status: string;
+  idempotent?: boolean;
+}
+
+async function cmdPromote(
+  argv: string[],
+  client: RegistryHttpClient,
+  out: (line: string) => void,
+  opts: SkillCliOpts,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(
+    parsed,
+    new Set(["run-id", "corpus-dir", "dry-run", "json"]),
+  );
+  requirePositional(parsed, 1, "service");
+  const service = parsed.positional[0]!;
+  const runId = parsed.flags["run-id"];
+  if (runId === undefined || runId.length === 0) {
+    // `--run-id` is required for 0.7.0: there's no manifest of "which
+    // capture is canonical", and silently picking one would let a
+    // half-finished capture leak into the registry. Operator picks.
+    throw new CliExit(
+      ExitCode.ARGS,
+      "promote requires --run-id=<id> (pick which capture run to promote)",
+    );
+  }
+  const corpusRoot =
+    parsed.flags["corpus-dir"] ?? opts.corpusDir ?? process.env.CORPUS_DIR ?? "./corpus/onboarding";
+  const dir = path.join(corpusRoot, service);
+  const dryRun = parsed.booleans.has("dry-run");
+  const json = parsed.booleans.has("json");
+
+  // Stage 1 — synthesize. Capture-chain verification, step translation,
+  // credential-spec inference, schema validation all happen here.
+  const result = promoteToSkill({ dir, service, run_id: runId });
+  if (result.kind !== "ok") {
+    const payload = {
+      ok: false,
+      stage: result.stage,
+      error_kind: result.error_kind,
+      message: result.message,
+      ...(result.offending_round !== undefined
+        ? { offending_round: result.offending_round }
+        : {}),
+      ...(result.offending_step !== undefined
+        ? { offending_step: result.offending_step }
+        : {}),
+      ...(result.detail !== undefined ? { detail: result.detail } : {}),
+      synthesizer_version: result.synthesizer_version,
+    };
+    if (json) {
+      out(JSON.stringify(payload, null, 2));
+    } else {
+      out(`rejected: ${result.stage} / ${result.error_kind}`);
+      out(`  ${result.message}`);
+      if (result.offending_round !== undefined) out(`  at round ${result.offending_round}`);
+      if (result.offending_step !== undefined) out(`  at step ${result.offending_step}`);
+      if (result.detail !== undefined) out(`  detail: ${result.detail}`);
+    }
+    return ExitCode.VALIDATION;
+  }
+
+  if (dryRun) {
+    // Dry-run stops here — no signing, no publish. The synthesis
+    // result is itself the validation we'd otherwise hit the server
+    // with. Print enough that the operator can decide whether to
+    // re-run without --dry-run.
+    const payload = {
+      ok: true,
+      dry_run: true,
+      skill_id: result.skill.skill_id,
+      service: result.skill.service,
+      version: result.skill.version,
+      steps: result.skill.steps.length,
+    };
+    if (json) {
+      out(JSON.stringify(payload, null, 2));
+    } else {
+      out(`dry-run OK — synthesized ${result.skill.skill_id} v${result.skill.version} (${result.skill.steps.length} steps)`);
+      out("  re-run without --dry-run to sign and publish.");
+    }
+    return ExitCode.OK;
+  }
+
+  // Stage 2 — sign. CliExit(CONFIG) bubbles when the key isn't set.
+  const signed = signSkillForPublish(result.skill, opts.signingPrivateKey !== undefined ? { privateKey: opts.signingPrivateKey } : {});
+
+  // Stage 3 — publish. POST /skills returns 201 on first publish, 200
+  // on idempotent re-publish. The HTTP client throws on 401/400/etc.
+  // (caught by the top-level dispatcher and surfaced as the right
+  // exit code).
+  const response = await client.post<PromoteResponseOk>("/skills", {
+    skill: result.skill,
+    signature: signed.signature,
+  });
+
+  if (json) {
+    out(JSON.stringify(response, null, 2));
+  } else {
+    const tag = response.idempotent ? "already published" : "published";
+    out(`${tag}: ${response.service} ${response.version} (skill_id=${response.skill_id}, status=${response.status})`);
+  }
+  return ExitCode.OK;
+}
+
+// ── reactivate ──────────────────────────────────────────────────────
+
+async function cmdReactivate(
+  argv: string[],
+  client: RegistryHttpClient,
+  out: (line: string) => void,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(parsed, new Set(["json"]));
+  requirePositional(parsed, 1, "skill_id");
+  const skillId = parsed.positional[0]!;
+
+  const data = await client.post<{
+    ok: boolean;
+    skill_id: string;
+    status: string;
+    previously: string;
+  }>(`/skills/${encodeURIComponent(skillId)}/reactivate`, {});
+
+  if (parsed.booleans.has("json")) {
+    out(JSON.stringify(data, null, 2));
+    return ExitCode.OK;
+  }
+  if (data.previously === data.status) {
+    out(`${data.skill_id} is already ${data.status} (no-op)`);
+  } else {
+    out(`reactivated ${data.skill_id} (${data.previously} → ${data.status})`);
+  }
+  return ExitCode.OK;
+}
+
+// ── delete ──────────────────────────────────────────────────────────
+
+async function cmdDelete(
+  argv: string[],
+  client: RegistryHttpClient,
+  out: (line: string) => void,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(parsed, new Set(["confirm", "json"]));
+  requirePositional(parsed, 1, "skill_id");
+  const skillId = parsed.positional[0]!;
+
+  if (!parsed.booleans.has("confirm")) {
+    throw new CliExit(
+      ExitCode.ARGS,
+      "delete is irreversible — pass --confirm to acknowledge. " +
+        "Captures linked to this skill_id are deleted with it.",
+    );
+  }
+
+  // Hard delete via DELETE /skills/:skill_id. The HTTP client always
+  // tries to parse JSON, so the server responds with a small body.
+  const data = await client.delete<{ ok: boolean; skill_id: string; deleted: boolean }>(
+    `/skills/${encodeURIComponent(skillId)}`,
+  );
+
+  if (parsed.booleans.has("json")) {
+    out(JSON.stringify(data, null, 2));
+    return ExitCode.OK;
+  }
+  out(`deleted ${data.skill_id}`);
+  return ExitCode.OK;
+}
+
+// ── replay-test ─────────────────────────────────────────────────────
+
+async function cmdReplayTest(
+  argv: string[],
+  client: RegistryHttpClient,
+  out: (line: string) => void,
+  opts: SkillCliOpts,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(parsed, new Set(["full", "json"]));
+  requirePositional(parsed, 1, "service");
+  const service = parsed.positional[0]!;
+  const full = parsed.booleans.has("full");
+  const json = parsed.booleans.has("json");
+
+  // Fetch the active skill — same endpoint the router uses. 404 here
+  // becomes CliExit(NOT_FOUND, …) via the http client.
+  const envelope = await client.get<{ ok: boolean; skill: unknown; signed_by: string }>(
+    `/skills/${encodeURIComponent(service)}`,
+  );
+  let skill: Skill;
+  try {
+    skill = parseSkill(envelope.skill);
+  } catch (err) {
+    throw new CliExit(
+      ExitCode.GENERIC,
+      `registry returned a skill that fails schema validation: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Boot the browser. Tests inject a stub so they don't need
+  // Playwright/Chromium.
+  const browser = (opts.browserFactory ?? (() => new BrowserController({ humanize: true })))();
+  let outcome: Awaited<ReturnType<typeof replaySkill>>;
+  try {
+    await browser.start();
+    outcome = await replaySkill({
+      skill,
+      browser,
+      mode: full ? "full" : "dry",
+      templateValues: {
+        EMAIL_ALIAS: `replay-test-${Date.now()}@example.invalid`,
+        TOKEN_NAME: `replay-test-${Date.now()}`,
+      },
+    });
+  } finally {
+    try { await browser.close(); } catch { /* noop */ }
+  }
+
+  const payload = { ok: outcome.kind === "ok" || outcome.kind === "dry_pass", outcome };
+  if (json) {
+    out(JSON.stringify(payload, null, 2));
+  } else if (outcome.kind === "dry_pass") {
+    out(`dry-pass: walked ${outcome.stepsWalked} steps without executing the credential-creating click.`);
+  } else if (outcome.kind === "ok") {
+    out(`ok: full-mode replay extracted a credential via ${outcome.via}.`);
+  } else {
+    out(`failed: ${outcome.kind}`);
+    if ("reason" in outcome) out(`  reason: ${outcome.reason}`);
+    if ("stepIndex" in outcome) out(`  at step ${outcome.stepIndex}`);
+  }
+  return outcome.kind === "ok" || outcome.kind === "dry_pass"
+    ? ExitCode.OK
+    : 6; // T30 exit code for replay-test rejection (design doc §CLI)
+}
+
+// ── diff ────────────────────────────────────────────────────────────
+
+type StepDiffEntry =
+  | { kind: "unchanged"; index: number; step_kind: string }
+  | {
+      kind: "modified";
+      index: number;
+      step_kind: string;
+      fields: string[];
+      before: Record<string, unknown>;
+      after: Record<string, unknown>;
+    }
+  | { kind: "added"; index: number; step_kind: string; step: Record<string, unknown> }
+  | { kind: "removed"; index: number; step_kind: string; step: Record<string, unknown> };
+
+// Fields that participate in semantic identity per step kind. Anything
+// outside this list (e.g. `provenance`) is bookkeeping the diff
+// ignores — operators care about what the replay engine actually
+// targets, not which capture round originated each step.
+const STEP_IDENTITY_FIELDS: Record<string, readonly string[]> = {
+  navigate: ["url"],
+  click_oauth_button: ["provider"],
+  click: ["text_match", "role"],
+  fill: ["text_match", "role", "value_template"],
+  select: ["text_match", "role", "option_match"],
+  extract_via_copy_button: ["near_text_hint"],
+  extract_via_regex: ["pattern_name"],
+};
+
+function semanticStepDiff(
+  before: ReadonlyArray<Record<string, unknown>>,
+  after: ReadonlyArray<Record<string, unknown>>,
+): StepDiffEntry[] {
+  const out: StepDiffEntry[] = [];
+  const max = Math.max(before.length, after.length);
+  for (let i = 0; i < max; i++) {
+    const b = before[i];
+    const a = after[i];
+    if (b === undefined && a !== undefined) {
+      out.push({
+        kind: "added",
+        index: i,
+        step_kind: typeof a.kind === "string" ? a.kind : "<unknown>",
+        step: a,
+      });
+      continue;
+    }
+    if (a === undefined && b !== undefined) {
+      out.push({
+        kind: "removed",
+        index: i,
+        step_kind: typeof b.kind === "string" ? b.kind : "<unknown>",
+        step: b,
+      });
+      continue;
+    }
+    if (a === undefined || b === undefined) continue;
+    const bKind = typeof b.kind === "string" ? b.kind : "<unknown>";
+    const aKind = typeof a.kind === "string" ? a.kind : "<unknown>";
+    if (bKind !== aKind) {
+      out.push({
+        kind: "modified",
+        index: i,
+        step_kind: `${bKind} → ${aKind}`,
+        fields: ["kind"],
+        before: b,
+        after: a,
+      });
+      continue;
+    }
+    const identityFields = STEP_IDENTITY_FIELDS[bKind] ?? [];
+    const changed: string[] = [];
+    for (const field of identityFields) {
+      if (JSON.stringify(b[field]) !== JSON.stringify(a[field])) changed.push(field);
+    }
+    if (changed.length === 0) {
+      out.push({ kind: "unchanged", index: i, step_kind: bKind });
+    } else {
+      out.push({
+        kind: "modified",
+        index: i,
+        step_kind: bKind,
+        fields: changed,
+        before: b,
+        after: a,
+      });
+    }
+  }
+  return out;
+}
+
+interface SkillListItem {
+  skill_id: string;
+  service: string;
+  version: string;
+  status: string;
+}
+
+interface ByIdResponse {
+  ok: boolean;
+  skill: Record<string, unknown>;
+  signature: string;
+  signed_at: string;
+  signed_by: string;
+}
+
+async function cmdDiff(
+  argv: string[],
+  client: RegistryHttpClient,
+  out: (line: string) => void,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(parsed, new Set(["json"]));
+  if (parsed.positional.length !== 3) {
+    throw new CliExit(
+      ExitCode.ARGS,
+      `expected 3 positional arguments (service v1 v2), got ${parsed.positional.length}`,
+    );
+  }
+  const [service, v1, v2] = parsed.positional as [string, string, string];
+  const json = parsed.booleans.has("json");
+
+  if (v1 === v2) {
+    if (json) {
+      out(JSON.stringify({ ok: true, identical: true, service, from: v1, to: v2 }, null, 2));
+    } else {
+      out(`identical: both arguments are ${JSON.stringify(v1)}`);
+    }
+    return 1; // T30 exit code: versions identical (design doc §CLI)
+  }
+
+  // 1. Find both versions in the service's list.
+  const list = await client.get<{ ok: boolean; skills: SkillListItem[] }>(
+    `/skills?service=${encodeURIComponent(service)}&limit=500`,
+  );
+  const items = list.skills ?? [];
+  const fromItem = items.find((s) => s.version === v1);
+  const toItem = items.find((s) => s.version === v2);
+  if (fromItem === undefined || toItem === undefined) {
+    const missing: string[] = [];
+    if (fromItem === undefined) missing.push(v1);
+    if (toItem === undefined) missing.push(v2);
+    throw new CliExit(
+      // Design doc maps "version not found" to exit code 2 (ARGS class
+      // — operator named a version that doesn't exist).
+      ExitCode.ARGS,
+      `version${missing.length > 1 ? "s" : ""} not found for service ${JSON.stringify(service)}: ${missing.join(", ")}`,
+    );
+  }
+
+  // 2. Fetch full payloads — list returns metadata only.
+  const before = await client.get<ByIdResponse>(`/skills/by-id/${encodeURIComponent(fromItem.skill_id)}`);
+  const after = await client.get<ByIdResponse>(`/skills/by-id/${encodeURIComponent(toItem.skill_id)}`);
+
+  const beforeSteps = Array.isArray((before.skill as { steps?: unknown }).steps)
+    ? ((before.skill as { steps: Record<string, unknown>[] }).steps)
+    : [];
+  const afterSteps = Array.isArray((after.skill as { steps?: unknown }).steps)
+    ? ((after.skill as { steps: Record<string, unknown>[] }).steps)
+    : [];
+
+  const entries = semanticStepDiff(beforeSteps, afterSteps);
+  const identical = entries.every((e) => e.kind === "unchanged");
+
+  if (json) {
+    out(
+      JSON.stringify(
+        {
+          ok: true,
+          service,
+          from: { version: v1, skill_id: fromItem.skill_id },
+          to: { version: v2, skill_id: toItem.skill_id },
+          identical,
+          step_diff: entries,
+        },
+        null,
+        2,
+      ),
+    );
+    return identical ? 1 : ExitCode.OK;
+  }
+
+  // Human-readable output. Unified-diff-ish: prefix each line with a
+  // sigil (=, ~, +, -) so a `grep '^[+-]'` finds only real changes.
+  out(`diff: ${service} ${v1} → ${v2}`);
+  out(`  skill_id: ${fromItem.skill_id} → ${toItem.skill_id}`);
+  out(`  steps: ${beforeSteps.length} → ${afterSteps.length}` +
+    (beforeSteps.length !== afterSteps.length
+      ? ` (${afterSteps.length > beforeSteps.length ? "+" : ""}${afterSteps.length - beforeSteps.length})`
+      : ""));
+  out("");
+  for (const entry of entries) {
+    const sigil =
+      entry.kind === "unchanged"
+        ? "="
+        : entry.kind === "modified"
+          ? "~"
+          : entry.kind === "added"
+            ? "+"
+            : "-";
+    const label = `${sigil} [${entry.index}] ${entry.step_kind}`;
+    if (entry.kind === "unchanged") {
+      out(`${label}  unchanged`);
+    } else if (entry.kind === "modified") {
+      out(`${label}  modified: ${entry.fields.join(", ")}`);
+      for (const field of entry.fields) {
+        out(`    - ${field}: ${JSON.stringify(entry.before[field])}`);
+        out(`    + ${field}: ${JSON.stringify(entry.after[field])}`);
+      }
+    } else if (entry.kind === "added") {
+      out(`${label}  added`);
+    } else {
+      out(`${label}  removed`);
+    }
+  }
+
+  // Exit code: 0 if differences shown, 1 if identical (per design doc).
+  return identical ? 1 : ExitCode.OK;
+}
+
+// ── edit ────────────────────────────────────────────────────────────
+
+async function cmdEdit(
+  argv: string[],
+  client: RegistryHttpClient,
+  out: (line: string) => void,
+  opts: SkillCliOpts,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(parsed, new Set(["dry-run", "json"]));
+  requirePositional(parsed, 1, "service");
+  const service = parsed.positional[0]!;
+  const dryRun = parsed.booleans.has("dry-run");
+  const json = parsed.booleans.has("json");
+
+  // 1. Fetch the active skill. The endpoint returns 404 when there's
+  //    nothing to edit; the HTTP client maps that to NOT_FOUND.
+  const envelope = await client.get<{
+    ok: boolean;
+    skill: Record<string, unknown>;
+    signed_by: string;
+  }>(`/skills/${encodeURIComponent(service)}`);
+  let before: Skill;
+  try {
+    before = parseSkill(envelope.skill);
+  } catch (err) {
+    throw new CliExit(
+      ExitCode.GENERIC,
+      `registry returned a skill that fails schema validation: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // 2. Write the skill to a tempfile and let $EDITOR (or the injected
+  //    editorCommand) modify it. Save the original bytes to detect
+  //    "no changes" cleanly — comparing JSON would also work but the
+  //    string compare catches whitespace/order edits the operator
+  //    might intentionally make.
+  const tempPath = path.join(
+    os.tmpdir(),
+    `skill-edit-${before.skill_id}-${Date.now()}.json`,
+  );
+  const originalText = JSON.stringify(before, null, 2);
+  fs.writeFileSync(tempPath, originalText, "utf8");
+
+  try {
+    if (opts.editorCommand !== undefined) {
+      await opts.editorCommand(tempPath);
+    } else {
+      const editor = process.env.EDITOR ?? process.env.VISUAL ?? "vi";
+      const result = spawnSync(editor, [tempPath], { stdio: "inherit" });
+      if (result.error !== undefined) {
+        throw new CliExit(
+          ExitCode.GENERIC,
+          `failed to launch editor (${editor}): ${result.error.message}`,
+        );
+      }
+      if (typeof result.status === "number" && result.status !== 0) {
+        throw new CliExit(
+          ExitCode.GENERIC,
+          `editor (${editor}) exited with status ${result.status}`,
+        );
+      }
+    }
+
+    const editedText = fs.readFileSync(tempPath, "utf8");
+    if (editedText === originalText) {
+      if (json) {
+        out(JSON.stringify({ ok: false, no_edits: true }, null, 2));
+      } else {
+        out("no edits made — skill unchanged.");
+      }
+      // Design doc maps "no edits made" to exit code 2 (ARGS class).
+      return ExitCode.ARGS;
+    }
+
+    // 3. Parse the edited JSON.
+    let edited: unknown;
+    try {
+      edited = JSON.parse(editedText);
+    } catch (err) {
+      throw new CliExit(
+        ExitCode.VALIDATION,
+        `edited file is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // 4. Recompute skill_id from the edited content so the operator
+    //    doesn't need to manage it manually. The edit field is
+    //    ignored in favor of the deterministic derivation — but a
+    //    schema-invalid Omit<Skill,"skill_id"> still throws here.
+    if (typeof edited !== "object" || edited === null || Array.isArray(edited)) {
+      throw new CliExit(
+        ExitCode.VALIDATION,
+        "edited file must be a JSON object",
+      );
+    }
+    const editedObj = edited as Record<string, unknown>;
+    delete editedObj.skill_id;
+    // parseSkill requires skill_id; insert a deterministically-derived
+    // placeholder so validation passes, then we'll recompute from the
+    // validated shape.
+    editedObj.skill_id = before.skill_id;
+    let candidate: Skill;
+    try {
+      candidate = parseSkill(editedObj);
+    } catch (err) {
+      throw new CliExit(
+        ExitCode.VALIDATION,
+        `edited skill failed schema validation: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const candidateWithoutId: Omit<Skill, "skill_id"> = { ...candidate };
+    delete (candidateWithoutId as { skill_id?: string }).skill_id;
+    const newSkillId = deriveSkillId(candidateWithoutId);
+    const finalSkill: Skill = { ...candidate, skill_id: newSkillId };
+
+    // 5. Detect security-relevant edits. The server's review gate
+    //    (T26) does the actual hold; we surface a clear warning so
+    //    the operator knows the new skill won't go live until
+    //    `skill approve <skill_id>` runs.
+    const securityChanges: string[] = [];
+    if (finalSkill.signup_url !== before.signup_url) {
+      securityChanges.push(
+        `signup_url: ${before.signup_url} → ${finalSkill.signup_url}`,
+      );
+    }
+    if (finalSkill.oauth_provider !== before.oauth_provider) {
+      securityChanges.push(
+        `oauth_provider: ${before.oauth_provider ?? "null"} → ${finalSkill.oauth_provider ?? "null"}`,
+      );
+    }
+
+    if (dryRun) {
+      if (json) {
+        out(
+          JSON.stringify(
+            {
+              ok: true,
+              dry_run: true,
+              skill_id: finalSkill.skill_id,
+              previous_skill_id: before.skill_id,
+              version: finalSkill.version,
+              security_changes: securityChanges,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        out(`dry-run OK — edited skill validates (${finalSkill.skill_id} v${finalSkill.version}).`);
+        if (securityChanges.length > 0) {
+          out("");
+          out("⚠ security-gated edits — would land in pending-review:");
+          for (const change of securityChanges) out(`  ${change}`);
+        }
+      }
+      return ExitCode.OK;
+    }
+
+    // 6. Sign + publish.
+    const signed = signSkillForPublish(
+      finalSkill,
+      opts.signingPrivateKey !== undefined ? { privateKey: opts.signingPrivateKey } : {},
+    );
+    const response = await client.post<{
+      ok: boolean;
+      skill_id: string;
+      service: string;
+      version: string;
+      status: string;
+    }>("/skills", { skill: finalSkill, signature: signed.signature });
+
+    if (json) {
+      out(
+        JSON.stringify(
+          {
+            ...response,
+            ok: true,
+            previous_skill_id: before.skill_id,
+            security_changes: securityChanges,
+          },
+          null,
+          2,
+        ),
+      );
+    } else {
+      out(`published: ${response.service} ${response.version} (skill_id=${response.skill_id}, status=${response.status})`);
+      if (securityChanges.length > 0) {
+        out("");
+        out("⚠ this edit touched security-relevant fields — the registry holds");
+        out("  it as pending-review until an operator runs:");
+        out(`    skill approve ${response.skill_id}`);
+        for (const change of securityChanges) out(`  ${change}`);
+      }
+    }
+    return ExitCode.OK;
+  } finally {
+    // Always clean the tempfile — it contains the full skill payload,
+    // which isn't secret per se but lingering tempfiles are noise.
+    try { fs.unlinkSync(tempPath); } catch { /* noop */ }
+  }
+}
+
 // ── Help ────────────────────────────────────────────────────────────
 
 function printHelp(out: (line: string) => void): void {
   out(`Usage: npx @trusty-squire/mcp skill <subcommand> [args]
 
 Subcommands:
-  list     [--service=X] [--status=S] [--limit=N] [--json]
-           List skills with optional filters.
+  promote     <service> --run-id=<id> [--corpus-dir=<path>] [--dry-run] [--json]
+              Synthesize a skill from corpus/onboarding/<service>/<run_id>/* and publish.
 
-  show     <skill_id> [--json]
-           Show a skill's full record (steps, credentials, counters).
+  list        [--service=X] [--status=S] [--limit=N] [--json]
+              List skills with optional filters.
 
-  replays  <skill_id> [--limit=N] [--json]
-           Show recent replay outcomes for a skill (any status).
+  show        <skill_id> [--json]
+              Show a skill's full record (steps, credentials, counters).
 
-  captures <skill_id> [--json]
-           List capture sidecars (source-map for the skill's promotion).
+  replays     <skill_id> [--limit=N] [--json]
+              Show recent replay outcomes for a skill (any status).
 
-  demote   <skill_id> --reason=<text>
-           Manually demote a skill so the router stops serving it.
+  captures    <skill_id> [--json]
+              List capture sidecars (source-map for the skill's promotion).
 
-  approve  <skill_id>
-           Flip a pending-review skill to active (C11 human gate).
+  demote      <skill_id> --reason=<text>
+              Manually demote a skill so the router stops serving it.
+
+  reactivate  <skill_id> [--json]
+              Undo a demotion; reset consecutive_failures to 0.
+
+  approve     <skill_id>
+              Flip a pending-review skill to active (C11 human gate).
+
+  delete      <skill_id> --confirm [--json]
+              Hard-delete a skill and its captures. Irreversible.
+
+  replay-test <service> [--full] [--json]
+              Re-run the active skill's replay against the live page. Default: dry mode.
+
+  diff        <service> <v1> <v2> [--json]
+              Semantic step-graph diff between two skill versions for a service.
+
+  edit        <service> [--dry-run] [--json]
+              Open the active skill in $EDITOR; re-validate, re-sign, re-publish.
 
   help
-           Print this message.
+              Print this message.
 
 Environment:
   TRUSTY_SQUIRE_REGISTRY_URL    Required. Base URL of registry-api.

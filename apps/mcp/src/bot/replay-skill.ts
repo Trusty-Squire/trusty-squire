@@ -115,6 +115,16 @@ export interface LLMFallbackInput {
 
 export type ReplayOutcome =
   | { kind: "ok"; credential: string; via: "copy_button" | "regex" | "dry_skipped" }
+  // Multi-credential success — Phase D per docs/DESIGN-multi-credential.md.
+  // A separate variant rather than expanding `ok`'s shape so the
+  // compiler forces every caller to decide what to do with both
+  // (vault write paths differ, router messaging differs). `credentials`
+  // is keyed by extract step's `produces` value.
+  | {
+      kind: "ok_multi";
+      credentials: Record<string, string>;
+      via: Record<string, "copy_button" | "regex">;
+    }
   | { kind: "step_failed"; stepIndex: number; reason: string; capturedStep: SkillStep }
   | { kind: "validator_failed"; stepIndex: number; got: string; reason: string }
   | { kind: "extraction_failed"; stepIndex: number; reason: string }
@@ -147,6 +157,29 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // immediately before the first extract_* step. Compute the cutoff
   // up front so the loop's stopping condition stays local.
   const dryStopAt = mode === "dry" ? computeDryStopIndex(skill.steps) : skill.steps.length;
+
+  // Multi-credential bundle (Phase D per docs/DESIGN-multi-credential.md).
+  // When the skill has named extract steps, we accumulate values into
+  // this map keyed by `produces`. The outer loop returns `ok_multi`
+  // once every named extract has run successfully — not on the first
+  // extract like the single-cred path. Detected by skill content:
+  // any *_named step → multi mode, else → single.
+  const isMultiCred = skill.steps.some(
+    (s) =>
+      s.kind === "extract_via_copy_button_named" ||
+      s.kind === "extract_via_regex_named",
+  );
+  const expectedProduces = new Set<string>(
+    skill.steps
+      .filter(
+        (s): s is Extract<SkillStep, { produces: string }> =>
+          s.kind === "extract_via_copy_button_named" ||
+          s.kind === "extract_via_regex_named",
+      )
+      .map((s) => s.produces),
+  );
+  const credentialBundle: Record<string, string> = {};
+  const viaBundle: Record<string, "copy_button" | "regex"> = {};
 
   let stepsWalked = 0;
   for (let i = 0; i < skill.steps.length; i++) {
@@ -184,6 +217,23 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         }
       }
       stepsWalked += 1;
+      // Multi-credential safety: validate any LATER extract steps
+      // (Stripe-class 0.8.0) so a broken Copy-button hint on
+      // credential 2+ surfaces in dry mode rather than full.
+      const laterFailure = await preValidateAllExtractsInDryMode(
+        skill.steps,
+        i,
+        browser,
+        templateValues,
+      );
+      if (laterFailure !== null) {
+        return {
+          kind: "step_failed",
+          stepIndex: laterFailure.stepIndex,
+          reason: `multi-credential dry-mode: ${laterFailure.reason}`,
+          capturedStep: skill.steps[laterFailure.stepIndex]!,
+        };
+      }
       return { kind: "dry_pass", stepsWalked };
     }
 
@@ -241,6 +291,44 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         }
         return { kind: "ok", credential: execOutcome.value, via: execOutcome.via };
       }
+      if (execOutcome.kind === "extract_named_ok") {
+        // Multi-cred: accumulate into the bundle. We do per-cred shape
+        // validation here (cheap) but defer bundle_sentinel validation
+        // to after the loop, when every credential is in hand.
+        const credSpec = skill.credentials.find(
+          (c) => c.name === execOutcome.produces,
+        );
+        if (credSpec === undefined) {
+          // The synthesizer's job is to guarantee step.produces lines
+          // up with credentials[].name; reaching this branch means
+          // either a hand-edited skill or a synthesizer bug. Fail loud.
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `Extract step's produces=${JSON.stringify(execOutcome.produces)} ` +
+              `does not reference any credential in this skill's credentials[].`,
+            capturedStep: step,
+          };
+        }
+        const validatorResult = await validateCredential(
+          execOutcome.value,
+          credSpec,
+          input.fetchFn,
+        );
+        if (!validatorResult.ok) {
+          return {
+            kind: "validator_failed",
+            stepIndex: i,
+            got: execOutcome.value,
+            reason: `${execOutcome.produces}: ${validatorResult.reason}`,
+          };
+        }
+        credentialBundle[execOutcome.produces] = execOutcome.value;
+        viaBundle[execOutcome.produces] = execOutcome.via;
+        // Don't return early — keep walking. The bundle may still need
+        // more credentials (Twitter wants 5).
+      }
     } catch (err) {
       return {
         kind: "step_failed",
@@ -251,6 +339,48 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
     }
 
     stepsWalked += 1;
+  }
+
+  // Loop done. Branch on multi vs single:
+  //   - Multi-cred: every expected produces must be in the bundle, OR
+  //     the skill has a bundle_sentinel that catches missing values.
+  //     We don't run bundle_sentinel here yet (Phase F per the design
+  //     doc — per-auth-scheme work). Today: assert completeness, return
+  //     ok_multi. Phase F will plumb the sentinel here.
+  //   - Single-cred (fall-through): we exited the loop without
+  //     extracting → the skill was missing its extract step.
+  if (isMultiCred) {
+    const missing: string[] = [];
+    for (const name of expectedProduces) {
+      if (credentialBundle[name] === undefined) missing.push(name);
+    }
+    if (missing.length > 0) {
+      // Phase G safety net (replay-side): when a multi-cred bundle is
+      // incomplete, do a best-effort sweep of the page for any
+      // credential-shaped strings that the named extracts didn't claim.
+      // Surface them in the failure reason so operators triaging
+      // "what did the replay miss?" can see the candidates the planner
+      // might have skipped — without changing the outcome (still
+      // extraction_failed; the data is diagnostic).
+      const sweepReport = await sweepUnclaimedCandidates(
+        browser,
+        credentialBundle,
+      ).catch(() => "");
+      return {
+        kind: "extraction_failed",
+        stepIndex: skill.steps.length - 1,
+        reason:
+          `Multi-credential skill walked end-to-end but missed: ` +
+          `[${missing.join(", ")}]. Expected ${expectedProduces.size} credentials, ` +
+          `got ${Object.keys(credentialBundle).length}.` +
+          (sweepReport.length > 0 ? `\n${sweepReport}` : ""),
+      };
+    }
+    return {
+      kind: "ok_multi",
+      credentials: credentialBundle,
+      via: viaBundle,
+    };
   }
 
   // We walked every step but produced no credential. Either the skill
@@ -429,6 +559,52 @@ async function preValidateStep(
       }
       return { ok: true };
     }
+
+    // Multi-credential extract steps (Phase D per docs/DESIGN-multi-credential.md).
+    // Same pre-validation as the single-cred variants — the only
+    // difference is what the step yields at execute time (a keyed
+    // entry in a multi-credential bundle).
+    case "extract_via_copy_button_named": {
+      const inventory = await browser.extractInteractiveElements();
+      const copyButtons = inventory.filter(isCopyButton);
+      if (copyButtons.length === 0) {
+        return {
+          ok: false,
+          reason: `No Copy button visible on page (looking for ${JSON.stringify(step.produces)}).`,
+        };
+      }
+      // On multi-cred pages there are by definition multiple Copy
+      // buttons. Use near_text_hint to pick the right one.
+      const disambiguated = copyButtons.filter((btn) =>
+        nearTextHintMatches(btn, step.near_text_hint, inventory),
+      );
+      if (disambiguated.length === 1) return { ok: true, match: disambiguated[0]! };
+      if (disambiguated.length === 0) {
+        return {
+          ok: false,
+          reason:
+            `${copyButtons.length} Copy buttons visible; none near text ${JSON.stringify(step.near_text_hint)} ` +
+            `(producing ${step.produces}).`,
+        };
+      }
+      return {
+        ok: false,
+        reason:
+          `${copyButtons.length} Copy buttons visible; ${disambiguated.length} match near_text_hint ` +
+          `${JSON.stringify(step.near_text_hint)} — cannot uniquely identify the source for ${step.produces}.`,
+      };
+    }
+
+    case "extract_via_regex_named": {
+      const text = await browser.extractText();
+      if (text.trim().length === 0) {
+        return {
+          ok: false,
+          reason: `Page extractText returned no content (extracting ${step.produces}).`,
+        };
+      }
+      return { ok: true };
+    }
   }
 }
 
@@ -440,6 +616,14 @@ type ExecutionOutcome =
   | { kind: "filled" }
   | { kind: "selected" }
   | { kind: "extract_ok"; value: string; via: "copy_button" | "regex" }
+  // Multi-cred extract — value carries the credential, `produces` names
+  // it for the bundle accumulator in replaySkill's outer loop.
+  | {
+      kind: "extract_named_ok";
+      produces: string;
+      value: string;
+      via: "copy_button" | "regex";
+    }
   | { kind: "needs_login"; provider: "google" | "github" };
 
 async function executeStep(
@@ -575,6 +759,66 @@ async function executeStep(
         throw new Error(`No credential matching pattern ${step.pattern_name} found on page.`);
       }
       return { kind: "extract_ok", value: extracted, via: "regex" };
+    }
+
+    // Multi-cred extract: mirrors the single-cred copy_button executor
+    // but returns extract_named_ok so the outer loop can route values
+    // into the bundle accumulator under `produces`.
+    case "extract_via_copy_button_named": {
+      const inventory = await browser.extractInteractiveElements();
+      const copyButtons = inventory.filter(isCopyButton);
+      const target = copyButtons.find((btn) =>
+        nearTextHintMatches(btn, step.near_text_hint, inventory),
+      );
+      if (target === undefined) {
+        throw new Error(
+          `Copy button for ${step.produces} disappeared between pre-validation and execution.`,
+        );
+      }
+      await browser.click(target.selector);
+      await browser.wait(1);
+      const candidates = await browser.extractCredentialCandidates();
+      for (const candidate of candidates) {
+        const hit = extractApiKeyFromText(candidate);
+        if (hit !== null && !isTruncatedCapture(candidate, hit)) {
+          void skill;
+          return {
+            kind: "extract_named_ok",
+            produces: step.produces,
+            value: hit,
+            via: "copy_button",
+          };
+        }
+      }
+      const text = await browser.extractText();
+      const fromBody = extractApiKeyFromText(text);
+      if (fromBody !== null && !isTruncatedCapture(text, fromBody)) {
+        return {
+          kind: "extract_named_ok",
+          produces: step.produces,
+          value: fromBody,
+          via: "copy_button",
+        };
+      }
+      throw new Error(
+        `Copy button for ${step.produces} clicked but no credential matched the regex library.`,
+      );
+    }
+
+    case "extract_via_regex_named": {
+      const text = await browser.extractText();
+      const extracted = extractApiKeyFromText(text);
+      if (extracted === null) {
+        throw new Error(
+          `No credential matching pattern ${step.pattern_name} (for ${step.produces}) found on page.`,
+        );
+      }
+      return {
+        kind: "extract_named_ok",
+        produces: step.produces,
+        value: extracted,
+        via: "regex",
+      };
     }
   }
   const _exhaustive: never = step;
@@ -866,6 +1110,43 @@ function pickClickPriority(matches: InteractiveElement[]): InteractiveElement {
   return matches[0]!;
 }
 
+// Phase G safety net: scan the visible page for credential-shaped
+// strings that aren't in the multi-cred bundle. Diagnostic only —
+// caller decides what to do with the report. Best-effort: any failure
+// returns an empty string so the caller's primary failure message
+// still surfaces.
+async function sweepUnclaimedCandidates(
+  browser: BrowserController,
+  claimed: Record<string, string>,
+): Promise<string> {
+  const claimedValues = new Set(Object.values(claimed));
+  const candidates = await browser.extractCredentialCandidates();
+  const unclaimed: string[] = [];
+  for (const candidate of candidates) {
+    const hit = extractApiKeyFromText(candidate);
+    if (hit === null) continue;
+    if (claimedValues.has(hit)) continue;
+    if (isTruncatedCapture(candidate, hit)) continue;
+    // Mask the middle: an operator triaging a failure reason doesn't
+    // need the full credential — just enough to recognize what shape
+    // was visible. Prefix + suffix preserves the prefix-based pattern
+    // signal (sk-or-v1-, sk-ant-, etc.) without leaking the secret.
+    unclaimed.push(maskCredential(hit));
+  }
+  if (unclaimed.length === 0) {
+    return "Phase G sweep: no unclaimed credential-shaped strings found on page.";
+  }
+  return (
+    `Phase G sweep: ${unclaimed.length} credential-shaped string(s) visible on the page ` +
+    `that the named extracts did NOT claim — possible planner miss: [${unclaimed.join(", ")}]`
+  );
+}
+
+function maskCredential(value: string): string {
+  if (value.length <= 12) return `${value.slice(0, 4)}***`;
+  return `${value.slice(0, 8)}…${value.slice(-4)}`;
+}
+
 function substituteTemplate(template: string, values: Record<string, string>): string {
   // ${TOKEN_NAME} → values["TOKEN_NAME"], left literal if missing.
   // No nested substitution, no escaping — templates in skills are
@@ -883,9 +1164,24 @@ function computeDryStopIndex(steps: SkillStep[]): number {
   // it (confirms the button is on the page), but does not execute it.
   // If the skill has no extract step (shouldn't happen — synthesizer
   // rejects), we just walk everything.
+  //
+  // Single-credential assumption (0.7.0): only the FIRST extract step
+  // determines the dry-mode cutoff. Multi-credential skills (0.8.0,
+  // Stripe-class) will introduce later extract steps after additional
+  // credential-creating clicks; preValidateAllExtractsInDryMode()
+  // catches breakage on those even though dry mode itself stops at
+  // the first cutoff. When multi-credential support lands, this
+  // function should return the cutoff for the LAST extract (so dry
+  // mode walks far enough to validate every credential path) — but
+  // that's an explicit redesign, not a drop-in change.
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]!;
-    if (step.kind === "extract_via_copy_button" || step.kind === "extract_via_regex") {
+    if (
+      step.kind === "extract_via_copy_button" ||
+      step.kind === "extract_via_regex" ||
+      step.kind === "extract_via_copy_button_named" ||
+      step.kind === "extract_via_regex_named"
+    ) {
       // Find the last click before this extract.
       for (let j = i - 1; j >= 0; j--) {
         const prev = steps[j]!;
@@ -898,4 +1194,36 @@ function computeDryStopIndex(steps: SkillStep[]): number {
     }
   }
   return steps.length;
+}
+
+// Dry-mode safety net for multi-credential skills (0.8.0). The main
+// loop only pre-validates the extract step at dryStopAt; any later
+// extract step (additional credential on a Stripe-class page) goes
+// unchecked. This sweep runs preValidateStep against every extract
+// step's selectors so a broken Copy-button hint on credential 2 of 3
+// still surfaces as a dry-mode failure rather than slipping through
+// to full mode. Returns the index of the first extract that failed,
+// or null if all pass / there are no later extracts.
+async function preValidateAllExtractsInDryMode(
+  steps: SkillStep[],
+  dryStopAt: number,
+  browser: BrowserController,
+  templateValues: Record<string, string>,
+): Promise<{ stepIndex: number; reason: string } | null> {
+  for (let i = dryStopAt + 1; i < steps.length; i++) {
+    const step = steps[i]!;
+    if (
+      step.kind !== "extract_via_copy_button" &&
+      step.kind !== "extract_via_regex" &&
+      step.kind !== "extract_via_copy_button_named" &&
+      step.kind !== "extract_via_regex_named"
+    ) {
+      continue;
+    }
+    const validation = await preValidateStep(step, browser, templateValues);
+    if (!validation.ok) {
+      return { stepIndex: i, reason: validation.reason };
+    }
+  }
+  return null;
 }

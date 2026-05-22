@@ -248,6 +248,65 @@ export class PrismaSkillStore implements SkillStore {
     });
   }
 
+  async reactivate(skill_id: string): Promise<{
+    record: SkillStoreRecord;
+    previously: string;
+  } | null> {
+    return this.client.$transaction(async (tx) => {
+      const current = (await tx.skillRecord.findUnique({ where: { skill_id } })) as
+        | PrismaSkillRow
+        | null;
+      if (current === null) return null;
+      const previously = current.status;
+      if (previously === "active") {
+        // Idempotent — caller sees previously === status.
+        return { record: toSkillStoreRecord(current), previously };
+      }
+      // Mirror approveReview: supersede any active row for the same
+      // service before flipping this one to active.
+      const now = new Date();
+      await tx.skillRecord.updateMany({
+        where: {
+          service: current.service,
+          status: "active",
+          NOT: { skill_id },
+        },
+        data: { status: "superseded", superseded_at: now },
+      });
+      const updated = await tx.skillRecord.update({
+        where: { skill_id },
+        data: { status: "active", consecutive_failures: 0 },
+      });
+      return {
+        record: toSkillStoreRecord(updated as PrismaSkillRow),
+        previously,
+      };
+    });
+  }
+
+  async deleteSkill(skill_id: string): Promise<boolean> {
+    try {
+      // Captures are NOT on a Prisma cascade — only the replay table is
+      // (schema.prisma:106). Delete captures explicitly first; the
+      // skill row's removal triggers the replay cascade.
+      await this.client.$transaction(async (tx) => {
+        await tx.skillCaptureRecord.deleteMany({ where: { skill_id } });
+        await tx.skillRecord.delete({ where: { skill_id } });
+      });
+      return true;
+    } catch (err) {
+      if (
+        err !== null &&
+        typeof err === "object" &&
+        "code" in err &&
+        (err as { code: unknown }).code === "P2025"
+      ) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
   async countRecentReplaysByAccount(account_id: string, since: Date): Promise<number> {
     return this.client.skillReplayRecord.count({
       where: { account_id, replayed_at: { gte: since } },

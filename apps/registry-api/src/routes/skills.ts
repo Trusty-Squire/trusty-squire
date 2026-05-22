@@ -26,6 +26,7 @@ import {
   type SkillStatus,
 } from "@trusty-squire/adapter-sdk";
 import type { ManifestSigner } from "../signer.js";
+import { verifySkillSignature } from "../signer.js";
 import type { SkillStore, SkillStoreRecord } from "../skill-store.js";
 import { SkillConflictError } from "../skill-store.js";
 
@@ -55,6 +56,14 @@ export interface SkillsRouteDeps {
   // T20 — fetch override for the webhook call. Tests inject a mock
   // to assert on the request body. Production uses globalThis.fetch.
   fetchFn?: typeof globalThis.fetch;
+  // Public key (base64url SPKI DER) used to verify the signature on
+  // POST /skills bodies. When undefined the route falls back to the
+  // length-only stub and logs a warning per publish — that mode is
+  // intended for dev/staging where the promoter hasn't been wired
+  // with a signing key yet. Production should always set this; once
+  // the Phase 7 publish CLI lands, leaving it unset becomes a
+  // misconfiguration.
+  skillVerifyPublicKey?: string;
 }
 
 export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
@@ -86,19 +95,45 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
       });
     }
 
-    // 2. Verify the signature. The full signed-envelope verification
-    //    (matching the ManifestSigner contract) lands in Phase 6
-    //    alongside the human-review gate for signup_url + oauth_provider
-    //    edits (C11). For now, we record the signature bytes as
-    //    provenance so the eventual verification has the value to
-    //    check against, and we reject obviously-empty signatures so
-    //    the route surface is honest about requiring one.
+    // 2. Verify the signature. Two modes:
+    //
+    //    (a) `skillVerifyPublicKey` is configured (production) —
+    //        Ed25519 verify against the canonical bytes of the parsed
+    //        skill. A failure here is a 401, full stop; the route is
+    //        the trust boundary, no fallback.
+    //    (b) `skillVerifyPublicKey` is unset (dev/staging) — fall back
+    //        to the length-only stub and log a warn per publish so the
+    //        operator knows verification is off. This mode exists
+    //        because the promoter doesn't yet have a publish path
+    //        (Phase 7); when it lands and the verify key is rolled
+    //        out, leaving it unset becomes a misconfiguration.
     if (body.signature.length < 16) {
       return reply.code(401).send({
         ok: false,
         error: "invalid_signature",
         detail: "Signature too short — promoter must sign skills before publishing.",
       });
+    }
+    if (opts.skillVerifyPublicKey !== undefined) {
+      const ok = verifySkillSignature(
+        skill,
+        body.signature,
+        opts.skillVerifyPublicKey,
+      );
+      if (!ok) {
+        return reply.code(401).send({
+          ok: false,
+          error: "invalid_signature",
+          detail:
+            "Ed25519 signature did not verify against the registry's configured public key.",
+        });
+      }
+    } else {
+      req.log.warn(
+        { skill_id: skill.skill_id, service: skill.service },
+        "skill published without signature verification — SKILL_VERIFY_PUBLIC_KEY is not set. " +
+          "This is acceptable in dev/staging but MUST be set in production.",
+      );
     }
 
     // 3. Persist. SkillConflictError on (skill_id) collision means the
@@ -230,6 +265,46 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
       status: updated.status,
     });
   });
+
+  // ── POST /skills/:skill_id/reactivate (Phase 7) ─────────────────
+  // Operator action: undo a demotion. Body is empty. Idempotent —
+  // reactivating an already-active skill returns 200 with
+  // `previously === status` so the CLI can render "no-op".
+  fastify.post<{ Params: { skill_id: string } }>(
+    "/skills/:skill_id/reactivate",
+    async (req, reply) => {
+      void opts.resolveAccountId(req as { headers: Record<string, unknown> });
+      const result = await opts.store.reactivate(req.params.skill_id);
+      if (result === null) {
+        return reply.code(404).send({ ok: false, error: "skill_not_found" });
+      }
+      return reply.code(200).send({
+        ok: true,
+        skill_id: result.record.skill_id,
+        status: result.record.status,
+        previously: result.previously,
+      });
+    },
+  );
+
+  // ── DELETE /skills/:skill_id (Phase 7) ──────────────────────────
+  // Hard-delete. The CLI gates this behind --confirm; here we just
+  // do what's asked. Captures + replays cascade away with the row.
+  fastify.delete<{ Params: { skill_id: string } }>(
+    "/skills/:skill_id",
+    async (req, reply) => {
+      void opts.resolveAccountId(req as { headers: Record<string, unknown> });
+      const ok = await opts.store.deleteSkill(req.params.skill_id);
+      if (!ok) {
+        return reply.code(404).send({ ok: false, error: "skill_not_found" });
+      }
+      return reply.code(200).send({
+        ok: true,
+        skill_id: req.params.skill_id,
+        deleted: true,
+      });
+    },
+  );
 
   // ── POST /skills/:skill_id/replay-outcome ───────────────────────
   fastify.post<{ Params: { skill_id: string }; Body: ReplayOutcomeBody }>(

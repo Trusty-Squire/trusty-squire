@@ -18,6 +18,9 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
+import { Buffer } from "node:buffer";
+import canonicalize from "canonicalize";
+import { sign as nodeSign } from "node:crypto";
 import { ManifestSigner } from "../signer.js";
 import type { Skill } from "@trusty-squire/adapter-sdk";
 import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
@@ -135,6 +138,75 @@ describe("POST /skills", () => {
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toBe("schema_validation_failed");
 
+    await server.close();
+  });
+
+  it("accepts a valid Ed25519 signature when skillVerifyPublicKey is configured", async () => {
+    const { skillStore, signer } = buildTestServer();
+    // Build a matching key-pair so we can produce a real signature
+    // the server's verifier will accept.
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyB64 = publicKey
+      .export({ format: "der", type: "spki" })
+      .toString("base64url");
+    const skill = validSkill();
+    const canonicalJson = canonicalize(skill);
+    if (typeof canonicalJson !== "string") {
+      throw new Error("canonicalize returned non-string");
+    }
+    const signature = Buffer.from(
+      nodeSign(null, Buffer.from(canonicalJson, "utf8"), privateKey),
+    ).toString("base64url");
+
+    const server = await buildServer({
+      skillStore,
+      signer,
+      skillVerifyPublicKey: publicKeyB64,
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill, signature },
+    });
+
+    expect(response.statusCode).toBe(201);
+    await server.close();
+  });
+
+  it("rejects a mismatched signature with 401 when skillVerifyPublicKey is configured", async () => {
+    const { skillStore, signer } = buildTestServer();
+    // Configure with one public key, sign with a DIFFERENT private
+    // key — verification must fail even though the signature itself
+    // is well-formed.
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const wrongPair = generateKeyPairSync("ed25519");
+    const publicKeyB64 = publicKey
+      .export({ format: "der", type: "spki" })
+      .toString("base64url");
+    const skill = validSkill();
+    const canonicalJson = canonicalize(skill);
+    if (typeof canonicalJson !== "string") {
+      throw new Error("canonicalize returned non-string");
+    }
+    const signature = Buffer.from(
+      nodeSign(null, Buffer.from(canonicalJson, "utf8"), wrongPair.privateKey),
+    ).toString("base64url");
+
+    const server = await buildServer({
+      skillStore,
+      signer,
+      skillVerifyPublicKey: publicKeyB64,
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill, signature },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error).toBe("invalid_signature");
     await server.close();
   });
 
@@ -1404,6 +1476,141 @@ describe("POST /skills/:skill_id/demote", () => {
       url: "/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX/demote",
       headers: { "x-account-id": "operator-1" },
       payload: { reason: "test" },
+    });
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+});
+
+describe("POST /skills/:skill_id/reactivate (Phase 7)", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+
+  it("flips demoted → active and resets consecutive_failures", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+    // Drive 3 failures → auto-demote.
+    for (let i = 0; i < 3; i++) {
+      await server.inject({
+        method: "POST",
+        url: `/skills/${SKILL_ID}/replay-outcome`,
+        headers: { "x-account-id": "acct-1" },
+        payload: { outcome: "step_failed", reason: `fail ${i}` },
+      });
+    }
+    const demotedSkill = await skillStore.findById(SKILL_ID);
+    expect(demotedSkill?.status).toBe("demoted");
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/reactivate`,
+      headers: { "x-account-id": "operator-1" },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.status).toBe("active");
+    expect(body.previously).toBe("demoted");
+
+    const after = await skillStore.findById(SKILL_ID);
+    expect(after?.status).toBe("active");
+    expect(after?.consecutive_failures).toBe(0);
+    await server.close();
+  });
+
+  it("is idempotent on already-active skills (previously === status)", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/reactivate`,
+      headers: { "x-account-id": "operator-1" },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.status).toBe("active");
+    expect(body.previously).toBe("active");
+    await server.close();
+  });
+
+  it("returns 404 for unknown skill_id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX/reactivate",
+      headers: { "x-account-id": "operator-1" },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(404);
+    await server.close();
+  });
+});
+
+describe("DELETE /skills/:skill_id (Phase 7)", () => {
+  const SKILL_ID = "01HZX9ABCDEFGHJKMNPQRSTVWX";
+
+  it("hard-deletes the skill and cascades to captures/replays", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: SKILL_ID }), signature: "x".repeat(64) },
+    });
+    // Add a replay row + a capture so we can assert cascade.
+    await server.inject({
+      method: "POST",
+      url: `/skills/${SKILL_ID}/replay-outcome`,
+      headers: { "x-account-id": "acct-1" },
+      payload: { outcome: "ok", reason: "seed" },
+    });
+    await skillStore.insertCapture({
+      content_hash: "deadbeef",
+      skill_id: SKILL_ID,
+      run_id: "run-1",
+      round_index: 0,
+      payload: { hi: 1 },
+      uploaded_by: "test",
+    });
+
+    const response = await server.inject({
+      method: "DELETE",
+      url: `/skills/${SKILL_ID}`,
+      headers: { "x-account-id": "operator-1" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().deleted).toBe(true);
+
+    const after = await skillStore.findById(SKILL_ID);
+    expect(after).toBeNull();
+    const replays = await skillStore.listReplays(SKILL_ID, 10);
+    expect(replays).toEqual([]);
+    const captures = await skillStore.listCapturesForSkill(SKILL_ID);
+    expect(captures).toEqual([]);
+    await server.close();
+  });
+
+  it("returns 404 for unknown skill_id", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "DELETE",
+      url: "/skills/01HZZ9ABCDEFGHJKMNPQRSTVWX",
+      headers: { "x-account-id": "operator-1" },
     });
     expect(response.statusCode).toBe(404);
     await server.close();

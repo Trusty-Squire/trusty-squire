@@ -323,13 +323,17 @@ describe("SkillRegistryClient cache", () => {
   });
 
   it("does not cache unavailable / not_found outcomes", async () => {
+    // The GET path retries on 5xx, so to exercise "first attempt
+    // returns unavailable, second call works" we have to:
+    //   1. Persistently return 500 for the entire first fetchActiveSkill
+    //      (so all retries fail → unavailable).
+    //   2. Flip to 200 only after the first fetchActiveSkill returns,
+    //      so the second call sees success.
+    let firstFetchDone = false;
     let calls = 0;
-    let nextStatus = 500;
     const fetchFn = mockFetch(async () => {
       calls += 1;
-      const s = nextStatus;
-      nextStatus = 200; // second call returns success
-      if (s === 500) return jsonResponse(500, { ok: false });
+      if (!firstFetchDone) return jsonResponse(500, { ok: false });
       return jsonResponse(200, {
         signed_by: "x",
         skill: makeSkill(),
@@ -344,9 +348,33 @@ describe("SkillRegistryClient cache", () => {
 
     const first = await client.fetchActiveSkill("railway", "p1");
     expect(first.kind).toBe("unavailable");
+    firstFetchDone = true;
 
     const second = await client.fetchActiveSkill("railway", "p2");
     expect(second.kind).toBe("found");
+    // First fetch retried 3x on 500 (no cache); second fetch hit once
+    // on the now-200 response. Total: 3 + 1 = 4.
+    expect(calls).toBe(4);
+  });
+
+  it("retries GET on a transient 500 then succeeds on the retry", async () => {
+    let calls = 0;
+    const fetchFn = mockFetch(async () => {
+      calls += 1;
+      if (calls === 1) return jsonResponse(500, { ok: false });
+      return jsonResponse(200, {
+        signed_by: "x",
+        skill: makeSkill(),
+      });
+    });
+    const client = new SkillRegistryClient({
+      baseUrl: "https://registry.test",
+      accountId: "a",
+      fetchFn,
+      cacheTtlMs: 60_000,
+    });
+    const result = await client.fetchActiveSkill("railway", "p1");
+    expect(result.kind).toBe("found");
     expect(calls).toBe(2);
   });
 

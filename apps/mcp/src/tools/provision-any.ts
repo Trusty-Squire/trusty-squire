@@ -410,6 +410,42 @@ interface RunContext {
   accountId: string;
 }
 
+// Translate a ReplayOutcome (camelCase, from the replay engine) into
+// the snake_case shape the registry's POST /skills/:id/replay-outcome
+// endpoint expects. Centralized so a future field rename on either
+// side can't drift silently — the two consumers (dry-mode and full-
+// mode failure paths) shared an ad-hoc spread that quietly omitted any
+// new field. Output omits `step_index` when the outcome carries none
+// so the optional field stays unset rather than null.
+function toReplayOutcomeBody(
+  skillId: string,
+  outcome: Awaited<ReturnType<typeof replaySkill>>,
+  reason: string,
+  provisionId: string,
+): import("../skill-registry-client.js").PostReplayOutcomeInput {
+  const outcomeKind: import("../skill-registry-client.js").PostReplayOutcomeInput["outcome"] =
+    outcome.kind === "ok"
+      ? "ok"
+      : outcome.kind === "dry_pass"
+        ? "dry_pass"
+        : outcome.kind === "needs_login"
+          ? "needs_login"
+          : outcome.kind === "validator_failed"
+            ? "validator_failed"
+            : outcome.kind === "extraction_failed"
+              ? "extraction_failed"
+              : "step_failed";
+  return {
+    skill_id: skillId,
+    outcome: outcomeKind,
+    reason,
+    provision_id: provisionId,
+    ...("stepIndex" in outcome && typeof outcome.stepIndex === "number"
+      ? { step_index: outcome.stepIndex }
+      : {}),
+  };
+}
+
 // Skill promoter — Tier 2 router (0.7.0).
 //
 // Before falling through to the universal bot (Tier 1), try the
@@ -478,22 +514,14 @@ async function tryReplayLearnedSkill(
   if (dryOutcome.kind !== "dry_pass") {
     // Dry-mode found a problem. Record + fall through.
     ctx.stepsSink.push(`[skill-promoter] dry replay failed: ${dryOutcome.kind}`);
-    const outcomeKind = dryOutcome.kind === "needs_login"
-      ? "needs_login"
-      : dryOutcome.kind === "validator_failed"
-        ? "validator_failed"
-        : dryOutcome.kind === "extraction_failed"
-          ? "extraction_failed"
-          : "step_failed";
-    void client.postReplayOutcome({
-      skill_id: skill.skill_id,
-      outcome: outcomeKind,
-      reason: `dry-mode pre-flight failed: ${JSON.stringify(dryOutcome)}`,
-      ...("stepIndex" in dryOutcome && typeof dryOutcome.stepIndex === "number"
-        ? { step_index: dryOutcome.stepIndex }
-        : {}),
-      provision_id: ctx.provisionId,
-    });
+    void client.postReplayOutcome(
+      toReplayOutcomeBody(
+        skill.skill_id,
+        dryOutcome,
+        `dry-mode pre-flight failed: ${JSON.stringify(dryOutcome)}`,
+        ctx.provisionId,
+      ),
+    );
     client.invalidateCache(serviceSlug);
     try { await browser.close(); } catch { /* noop */ }
     return null;
@@ -532,50 +560,74 @@ async function tryReplayLearnedSkill(
 
   try { await fullBrowser.close(); } catch { /* noop */ }
 
-  if (fullOutcome.kind !== "ok") {
+  // Branch on outcome. Single-cred and multi-cred success live in
+  // separate code paths — the compiler enforces this via the
+  // discriminated union; no silent coercion.
+  if (fullOutcome.kind !== "ok" && fullOutcome.kind !== "ok_multi") {
     ctx.stepsSink.push(`[skill-promoter] full replay failed: ${fullOutcome.kind}`);
-    const outcomeKind = fullOutcome.kind === "needs_login"
-      ? "needs_login"
-      : fullOutcome.kind === "validator_failed"
-        ? "validator_failed"
-        : fullOutcome.kind === "extraction_failed"
-          ? "extraction_failed"
-          : "step_failed";
-    void client.postReplayOutcome({
-      skill_id: skill.skill_id,
-      outcome: outcomeKind,
-      reason: `full replay failed: ${JSON.stringify(fullOutcome)}`,
-      ...("stepIndex" in fullOutcome && typeof fullOutcome.stepIndex === "number"
-        ? { step_index: fullOutcome.stepIndex }
-        : {}),
-      provision_id: ctx.provisionId,
-    });
+    void client.postReplayOutcome(
+      toReplayOutcomeBody(
+        skill.skill_id,
+        fullOutcome,
+        `full replay failed: ${JSON.stringify(fullOutcome)}`,
+        ctx.provisionId,
+      ),
+    );
     client.invalidateCache(serviceSlug);
     return null;
   }
 
-  // Full replay succeeded — credential in hand. Post the success
-  // outcome, build a SignupResult-shaped object the rest of the
-  // pipeline can consume.
-  ctx.stepsSink.push(`[skill-promoter] replay OK — credential extracted via ${fullOutcome.via}`);
+  if (fullOutcome.kind === "ok") {
+    // Single-credential success path — unchanged from pre-multi-cred.
+    ctx.stepsSink.push(`[skill-promoter] replay OK — credential extracted via ${fullOutcome.via}`);
+    void client.postReplayOutcome({
+      skill_id: skill.skill_id,
+      outcome: "ok",
+      reason: `extracted via ${fullOutcome.via}`,
+      provision_id: ctx.provisionId,
+    });
+    const credSpec = skill.credentials[0];
+    const credentialKey = credSpec?.env_var_suggestion?.toLowerCase() ?? "api_key";
+    return {
+      success: true,
+      credentials: {
+        [credentialKey]: fullOutcome.credential,
+      },
+      steps: [...ctx.stepsSink],
+      via: "skill",
+      skill_id: skill.skill_id,
+      skill_version: skill.version,
+    };
+  }
+
+  // Multi-credential success path (Phase D per docs/DESIGN-multi-credential.md).
+  // The bundle has been validated per-credential by the replay engine;
+  // a future Phase F adds the bundle_sentinel call here. We turn the
+  // bundle into a credentials map keyed by each credential's env_var_
+  // suggestion (lowercased), matching what the agent SDK reads from
+  // process.env.
+  ctx.stepsSink.push(
+    `[skill-promoter] replay OK (multi) — extracted ${Object.keys(fullOutcome.credentials).length} ` +
+      `credentials: [${Object.keys(fullOutcome.credentials).join(", ")}]`,
+  );
   void client.postReplayOutcome({
     skill_id: skill.skill_id,
     outcome: "ok",
-    reason: `extracted via ${fullOutcome.via}`,
+    reason: `multi-cred extracted: [${Object.keys(fullOutcome.credentials).join(", ")}]`,
     provision_id: ctx.provisionId,
   });
-
-  // The skill's first credential spec carries the env_var_suggestion.
-  // That's the key under which the value lands in the response —
-  // mirrors what the bot itself does for api_key extractions.
-  const credSpec = skill.credentials[0];
-  const credentialKey = credSpec?.env_var_suggestion?.toLowerCase() ?? "api_key";
-
+  const credentials: Record<string, string> = {};
+  for (const [produces, value] of Object.entries(fullOutcome.credentials)) {
+    const spec = skill.credentials.find((c) => c.name === produces);
+    // Synthesizer guarantees every produces references a credentials
+    // entry; fall back to the produces name if a hand-edited skill
+    // slips through with a mismatch (defensive).
+    const key = (spec?.env_var_suggestion ?? produces).toLowerCase();
+    credentials[key] = value;
+  }
   return {
     success: true,
-    credentials: {
-      [credentialKey]: fullOutcome.credential,
-    },
+    credentials,
     steps: [...ctx.stepsSink],
     via: "skill",
     skill_id: skill.skill_id,

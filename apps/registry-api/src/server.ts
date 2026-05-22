@@ -25,6 +25,13 @@ export interface BuildServerOpts {
   extractFailureStore?: ExtractFailureStore;
   cache?: ManifestCache;
   signer?: ManifestSigner;
+  // Public key (base64url SPKI DER) used to verify POST /skills
+  // signatures. When undefined the route logs a warn per publish and
+  // falls back to the length-only stub — acceptable for dev/staging
+  // before the Phase 7 publish CLI ships, a misconfiguration in prod.
+  // Resolution order: opts.skillVerifyPublicKey → SKILL_VERIFY_PUBLIC_KEY
+  // env → undefined.
+  skillVerifyPublicKey?: string;
   // Account ID resolver — production wires this to JWT middleware
   // (or whatever auth scheme registry-api ends up adopting). Tests
   // inject a header reader.
@@ -89,12 +96,17 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   await fastify.register(registerAdaptersRoute, { store, cache });
   const demotionWebhookUrl =
     opts.demotionWebhookUrl ?? process.env.TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL;
+  const skillVerifyPublicKey =
+    opts.skillVerifyPublicKey ?? process.env.SKILL_VERIFY_PUBLIC_KEY;
   await fastify.register(registerSkillsRoute, {
     store: skillStore,
     signer,
     resolveAccountId,
     ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
+    ...(skillVerifyPublicKey !== undefined && skillVerifyPublicKey.length > 0
+      ? { skillVerifyPublicKey }
+      : {}),
   });
 
   await fastify.register(registerExtractFailuresRoute, {

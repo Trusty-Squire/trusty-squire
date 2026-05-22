@@ -152,6 +152,30 @@ export interface SkillStore {
   approveReview(skill_id: string): Promise<SkillStoreRecord | null>;
 
   /**
+   * Reactivate a demoted skill (Phase 7). Flips status from `demoted`
+   * back to `active` and resets `consecutive_failures` to 0. Returns
+   * the updated record, or `null` when no such skill_id exists.
+   * Idempotent: a no-op when the skill is already active (returns
+   * record unchanged with `previously === status`). When reactivating
+   * would create a second active row for the same service, the
+   * existing active row is superseded so the (service, status=active)
+   * uniqueness invariant holds.
+   */
+  reactivate(skill_id: string): Promise<{
+    record: SkillStoreRecord;
+    previously: string;
+  } | null>;
+
+  /**
+   * Hard-delete a skill (Phase 7). Removes the skill row AND every
+   * linked capture sidecar; replay rows are removed by FK cascade in
+   * the DB. Returns true when a row was deleted, false when nothing
+   * matched. Backs DELETE /skills/:skill_id; the CLI requires
+   * --confirm because this is irreversible.
+   */
+  deleteSkill(skill_id: string): Promise<boolean>;
+
+  /**
    * Count replay-outcome writes for an account in a recent window.
    * Backs the 60/min rate limit on POST /skills/:id/replay-outcome
    * (C9). Returns the count; the route layer decides whether to 429.

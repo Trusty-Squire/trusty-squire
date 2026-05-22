@@ -148,23 +148,14 @@ export class SkillRegistryClient {
     }
 
     const url = `${this.baseUrl}/skills/${encodeURIComponent(service)}`;
-    let response: Response;
-    try {
-      response = await this.withTimeout(
-        this.fetchFn(url, {
-          method: "GET",
-          headers: {
-            "x-account-id": this.accountId,
-            "x-provision-id": provisionId,
-          },
-        }),
-      );
-    } catch (err) {
-      return {
-        kind: "unavailable",
-        reason: `network error: ${err instanceof Error ? err.message : String(err)}`,
-      };
+    const attempt = await this.fetchGetWithRetry(url, {
+      "x-account-id": this.accountId,
+      "x-provision-id": provisionId,
+    });
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
     }
+    const response = attempt.response;
 
     if (response.status === 404) {
       return { kind: "not_found" };
@@ -245,29 +236,23 @@ export class SkillRegistryClient {
    */
   async postReplayOutcome(input: PostReplayOutcomeInput): Promise<PostReplayOutcomeResult> {
     const url = `${this.baseUrl}/skills/${encodeURIComponent(input.skill_id)}/replay-outcome`;
-    let response: Response;
-    try {
-      response = await this.withTimeout(
-        this.fetchFn(url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-account-id": this.accountId,
-            "x-provision-id": input.provision_id,
-          },
-          body: JSON.stringify({
-            outcome: input.outcome,
-            reason: input.reason,
-            ...(input.step_index !== undefined ? { step_index: input.step_index } : {}),
-          }),
-        }),
-      );
-    } catch (err) {
-      return {
-        kind: "unavailable",
-        reason: err instanceof Error ? err.message : String(err),
-      };
+    const attempt = await this.fetchPostWithRetry(
+      url,
+      {
+        "content-type": "application/json",
+        "x-account-id": this.accountId,
+        "x-provision-id": input.provision_id,
+      },
+      JSON.stringify({
+        outcome: input.outcome,
+        reason: input.reason,
+        ...(input.step_index !== undefined ? { step_index: input.step_index } : {}),
+      }),
+    );
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
     }
+    const response = attempt.response;
 
     if (response.status === 429) {
       return { kind: "rate_limited" };
@@ -335,6 +320,80 @@ export class SkillRegistryClient {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  // GET retry: idempotent, so retry on any transient class — network
+  // error, timeout, or 5xx — with jittered exponential backoff. 3
+  // attempts total (0ms, ~250ms, ~1000ms) keeps total worst-case under
+  // ~2.3s with the default 3s timeout. The caller still treats final
+  // failure as "fall through to the universal bot."
+  private async fetchGetWithRetry(
+    url: string,
+    headers: Record<string, string>,
+  ): Promise<{ kind: "ok"; response: Response } | { kind: "err"; reason: string }> {
+    const delays = [0, 250, 1000];
+    let lastReason = "";
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      const delay = delays[attempt]!;
+      if (delay > 0) {
+        const jitter = Math.floor(Math.random() * 100);
+        await new Promise<void>((r) => setTimeout(r, delay + jitter));
+      }
+      let response: Response;
+      try {
+        response = await this.withTimeout(
+          this.fetchFn(url, { method: "GET", headers }),
+        );
+      } catch (err) {
+        lastReason = `network error: ${err instanceof Error ? err.message : String(err)}`;
+        continue;
+      }
+      if (response.status >= 500 && response.status < 600) {
+        lastReason = `registry returned HTTP ${response.status}`;
+        continue;
+      }
+      // Any non-5xx response (200, 404, 401, etc.) is deterministic —
+      // hand back to the caller, retry buys nothing.
+      return { kind: "ok", response };
+    }
+    return { kind: "err", reason: lastReason };
+  }
+
+  // POST retry: NOT fully idempotent (replay-outcome increments a
+  // counter that drives auto-demotion at 3 consecutive failures). To
+  // avoid double-counting, retry ONLY on outright fetch-throws — the
+  // request couldn't leave the client, so it didn't reach the server.
+  // Skip retry on timeouts and 5xx (the request may have been processed
+  // server-side; a retry would double-record the outcome). Two attempts
+  // total with a small backoff.
+  private async fetchPostWithRetry(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+  ): Promise<{ kind: "ok"; response: Response } | { kind: "err"; reason: string }> {
+    const delays = [0, 250];
+    let lastReason = "";
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      const delay = delays[attempt]!;
+      if (delay > 0) {
+        const jitter = Math.floor(Math.random() * 100);
+        await new Promise<void>((r) => setTimeout(r, delay + jitter));
+      }
+      let response: Response;
+      try {
+        response = await this.withTimeout(
+          this.fetchFn(url, { method: "POST", headers, body }),
+        );
+        return { kind: "ok", response };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastReason = msg;
+        // A timeout means the request MAY have reached the server;
+        // a retry could double-count. Bail rather than risk it.
+        if (msg.includes("timed out")) break;
+      }
+    }
+    return { kind: "err", reason: lastReason };
   }
 }
 

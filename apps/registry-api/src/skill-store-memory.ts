@@ -220,6 +220,52 @@ export class InMemorySkillStore implements SkillStore {
     return skill;
   }
 
+  async reactivate(skill_id: string): Promise<{
+    record: SkillStoreRecord;
+    previously: string;
+  } | null> {
+    const skill = this.skills.get(skill_id);
+    if (skill === undefined) return null;
+    const previously = skill.status;
+    if (previously === "active") {
+      // Idempotent no-op — caller sees previously === status.
+      return { record: skill, previously };
+    }
+    // Supersede any other active row for the same service before
+    // flipping this one to active, so the (service, status=active)
+    // invariant doesn't get violated by reactivating a stale version.
+    const now = new Date();
+    for (const other of this.skills.values()) {
+      if (
+        other.skill_id !== skill_id &&
+        other.service === skill.service &&
+        other.status === "active"
+      ) {
+        other.status = "superseded";
+        other.superseded_at = now;
+        other.payload.status = "superseded";
+        other.payload.superseded_at = now.toISOString();
+      }
+    }
+    skill.status = "active";
+    skill.consecutive_failures = 0;
+    skill.payload.status = "active";
+    return { record: skill, previously };
+  }
+
+  async deleteSkill(skill_id: string): Promise<boolean> {
+    const existed = this.skills.delete(skill_id);
+    if (!existed) return false;
+    // Cascade — remove replays + captures bound to this skill_id.
+    // The Prisma store will do this via FK ON DELETE CASCADE; in-memory
+    // we have to walk and prune.
+    this.replays = this.replays.filter((r) => r.skill_id !== skill_id);
+    for (const [hash, capture] of this.captures.entries()) {
+      if (capture.skill_id === skill_id) this.captures.delete(hash);
+    }
+    return true;
+  }
+
   async countRecentReplaysByAccount(account_id: string, since: Date): Promise<number> {
     return this.replays.filter(
       (r) => r.account_id === account_id && r.replayed_at >= since,

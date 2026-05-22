@@ -10,7 +10,7 @@
 import { Buffer } from "node:buffer";
 import { createPrivateKey, createPublicKey, sign as nodeSign, verify as nodeVerify, type KeyObject } from "node:crypto";
 import canonicalize from "canonicalize";
-import type { AdapterManifest } from "@trusty-squire/adapter-sdk";
+import type { AdapterManifest, Skill } from "@trusty-squire/adapter-sdk";
 
 export class SignerConfigError extends Error {
   constructor(message: string) {
@@ -64,12 +64,47 @@ export class ManifestSigner {
       signed_by: this.signedBy,
     };
   }
+
+  // Sign a Skill (Tier-2 learned skill). Same Ed25519 + canonical
+  // bytes scheme as adapter manifests — kept separate from sign() so
+  // the type signature stays narrow and a manifest signer can't be
+  // accidentally passed a skill object (or vice versa).
+  signSkill(skill: Skill): SignedManifestEnvelope {
+    const bytes = canonicalBytes(skill);
+    const sig = nodeSign(null, bytes, this.privateKey);
+    return {
+      signature: Buffer.from(sig).toString("base64url"),
+      signed_at: new Date().toISOString(),
+      signed_by: this.signedBy,
+    };
+  }
 }
 
 // Standalone verifier for tests + future RegistryClient hardening.
 // Public key is base64url-encoded SPKI DER.
 export function verifyManifestSignature(
   manifest: AdapterManifest,
+  signatureB64: string,
+  publicKeyB64: string,
+): boolean {
+  return verifyEd25519(manifest, signatureB64, publicKeyB64);
+}
+
+// Verify the signature on a published Skill. Used by the registry's
+// POST /skills route when SKILL_VERIFY_PUBLIC_KEY is configured.
+// Returns false for any failure path (malformed key, malformed
+// signature, mismatch) — never throws, so the route can fall through
+// cleanly to a 401 response.
+export function verifySkillSignature(
+  skill: Skill,
+  signatureB64: string,
+  publicKeyB64: string,
+): boolean {
+  return verifyEd25519(skill, signatureB64, publicKeyB64);
+}
+
+function verifyEd25519(
+  payload: AdapterManifest | Skill,
   signatureB64: string,
   publicKeyB64: string,
 ): boolean {
@@ -80,14 +115,23 @@ export function verifyManifestSignature(
   } catch {
     return false;
   }
-  const sig = Buffer.from(signatureB64, "base64url");
-  return nodeVerify(null, canonicalBytes(manifest), pub, sig);
+  let sig: Buffer;
+  try {
+    sig = Buffer.from(signatureB64, "base64url");
+  } catch {
+    return false;
+  }
+  try {
+    return nodeVerify(null, canonicalBytes(payload), pub, sig);
+  } catch {
+    return false;
+  }
 }
 
-function canonicalBytes(manifest: AdapterManifest): Buffer {
-  const json = canonicalize(manifest);
+function canonicalBytes(payload: AdapterManifest | Skill): Buffer {
+  const json = canonicalize(payload);
   if (typeof json !== "string") {
-    throw new SignerConfigError("manifest could not be canonicalized");
+    throw new SignerConfigError("payload could not be canonicalized");
   }
   return Buffer.from(json, "utf8");
 }

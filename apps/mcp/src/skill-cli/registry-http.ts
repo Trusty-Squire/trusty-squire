@@ -42,6 +42,10 @@ export class RegistryHttpClient {
     return this.request<T>("POST", path, body);
   }
 
+  async delete<T = unknown>(path: string): Promise<T> {
+    return this.request<T>("DELETE", path);
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {};

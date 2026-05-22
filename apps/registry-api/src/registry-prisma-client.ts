@@ -43,6 +43,7 @@ interface SkillRecordDelegate {
     where: Record<string, unknown>;
     data: Record<string, unknown>;
   }): Promise<{ count: number }>;
+  delete(args: { where: Record<string, unknown> }): Promise<unknown>;
 }
 
 interface SkillReplayDelegate {
@@ -62,6 +63,9 @@ interface SkillCaptureDelegate {
     where: Record<string, unknown>;
     orderBy?: Array<Record<string, unknown>>;
   }): Promise<unknown[]>;
+  deleteMany(args: {
+    where: Record<string, unknown>;
+  }): Promise<{ count: number }>;
 }
 
 interface ExtractFailureSnapshotDelegate {

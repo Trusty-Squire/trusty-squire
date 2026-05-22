@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "0.6.14-rc.8",
+  "version": "0.6.14-rc.9",
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API, with the bundled universal signup bot.",
   "main": "./dist/server.js",
@@ -40,6 +40,7 @@
     "@trusty-squire/adapter-sdk": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "boxen": "^8.0.1",
+    "canonicalize": "^2.0.0",
     "chalk": "^5.3.0",
     "open": "^10.1.0",
     "ora": "^8.1.1",

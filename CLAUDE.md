@@ -148,65 +148,63 @@ OpenRouter for LLM, AWS SES for inbound mail.
 
 ## Active Sprint/Task
 
-**Tier 2 captcha shipped (`b39d0ee5d`).** Visible Turnstile +
-reCAPTCHA v2 checkboxes now handled with click-and-wait. Smoke-tested
-against Cloudflare's demo site (token populated correctly). On real
-SaaS signups, client-side solve works but **server-side CF scoring
-can still reject the session** when the fingerprint+IP combo is
-suspicious — this is unavoidable without a residential IP, and
-the user-machine deployment model already provides that.
+**0.7.0 closed loop shipped (rc.9).** Skill Promoter end-to-end:
+universal-bot success → captured signup → synthesizer-produced
+skill → registry → replay on subsequent provisions. Phases 1-8 +
+the polish audit complete. The Tier 2 closed loop is now in
+production; Tier 1 (universal bot) stays the fallback when no
+skill exists or replay fails.
 
-**Up next: stabilize and observe.** No new feature work pending;
-the universal bot is now feature-complete for the captcha
-landscape we can address in-house. Focus shifts to:
+**Multi-credential scaffolding landed (Phases B/C/D/G of
+`docs/DESIGN-multi-credential.md`).** Schema + synthesizer +
+replay engine + shadow-test harness all in place. Single-cred
+byte-equivalence preserved (no existing skill's canonical bytes
+change). Phase E (planner prompt expansion) and Phase F (bundle
+sentinel HTTP auth) explicitly deferred — both gated behind
+LLM-mode shadow validation and a real multi-cred service on the
+roadmap.
 
-1. **Surface bot run telemetry** — bot results currently return
-   structured status (`success` / `captcha_blocked` /
-   `payment_required` / `not_installed`) but the MCP tool doesn't
-   yet surface the full step trail or the `captcha_blocked` kind
-   to the user. Worth wiring.
-2. **Fix 3 pre-existing test failures** in `routes.test.ts` and
-   `mandate.test.ts`. Blocks a clean CI badge.
-3. **Domain prewarm at agent level.** `BrowserController.prewarm()`
-   exists; agent doesn't call it. Adds first-party cookies before
-   navigating to strict signup URLs.
-
-**Not in scope right now:** Tier 3 captcha (audio + Whisper for v2
-image grids — rare in dev SaaS), 2Captcha integration (explicitly not
-needed given the behavior + click-and-wait results), multi-instance
-API scaling.
-
-(Captcha tiers numbered 1/2/3 above are separate from auth — the
-auth model is single-tier and the term "tier" is no longer used in
-that context.)
+**Up next: stabilize-and-observe the closed loop in production.**
+Promote a captured Railway skill, exercise the replay path,
+verify the ~6min → ~30s improvement. Then surface telemetry
+around skill replay success rates so the auto-demotion threshold
+can be tuned against real data.
 
 ## Next Steps (prioritized)
 
-1. **Surface bot run telemetry to the MCP tool response.** Pass
-   `captcha_blocked` status through so Claude can tell the user
-   "Postmark requires a captcha we can't auto-solve; sign up
-   manually here: <url>".
-2. **Surface retention-cron + LLM-usage stats on
-   `/v1/install/status`.** The cron logs per run but there's no API
-   to inspect current state.
-3. **Domain prewarm for strict sites.** `BrowserController.prewarm()`
-   exists; agent doesn't yet call it. Probably 30 mins of plumbing
-   plus a per-service config.
-4. **PostHog SPA wait.** Add `waitForSelector` on a known form field
-   before invoking the Claude planner.
-5. **Billing surface.** The `payment_required` path returns a
-   `cta_billing_url` pointing at `/billing` in the web app, but the
-   page itself is a stub. Wiring real billing (Stripe Checkout +
-   webhook → mark account paid) is the unlock for users hitting the
-   free quota.
-6. **Per-account quota aggregation.** Today the alias-create route
-   counts signups against the calling machine_token. A user with two
-   bound machines effectively gets 2× free quota. Aggregate across
-   all machine_tokens for an account once that edge case bites.
-7. **Native-`provision` reactivation.** The native adapter cluster
-   (vault delivery, mandate signing, approval flow) is defined but
-   not registered — pick up when an account uses Trusty Squire for
-   anything beyond universal signups.
+1. **Field-test the closed loop on Railway.** Run a Railway signup
+   against rc.9; promote the capture; run a second Railway signup
+   and verify it goes through the skill in ~30s. Iterate on
+   rejection codes that surface from real captures.
+2. **Set `SKILL_VERIFY_PUBLIC_KEY` on `trusty-squire-registry`.**
+   Generate a matching `SKILL_SIGNING_PRIVATE_KEY` for whoever runs
+   `skill promote` (dev machine + future CI). Until this lands,
+   skill publishes are length-only-validated (route logs a warn
+   per publish).
+3. **LLM-mode shadow test baseline.** Run
+   `RUN_LLM_SHADOW=true pnpm test src/bot/__tests__/planner-shadow.test.ts`
+   against the current prompt + curated corpus. Establish the
+   "all 14 single-cred fixtures stay in single-cred vocabulary"
+   baseline. Costs ~$2. Explicit prerequisite for multi-cred Phase E.
+4. **Multi-cred Phase E + F when a real multi-cred service shows
+   up.** Twitter / Stripe / OpenAI. The schema + synthesizer +
+   replay engine are ready; only the planner prompt + per-service
+   auth code remain.
+5. **Surface skill-replay telemetry.** Today the registry tracks
+   replays_succeeded / replays_failed but nothing exposes them as
+   an operator dashboard. A simple `mcp skill list --health`
+   summary (sortable by failure rate) would surface skills that
+   need re-promotion before auto-demotion kicks in.
+6. **Demotion webhook listener.** The registry POSTs to
+   `TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL` on auto-demote but no
+   listener exists yet. Slack / GitHub-issue / pager wiring is
+   straightforward once the URL is configured.
+7. **Older deferred items.** Bot-run telemetry surfacing
+   (`captcha_blocked` kind in MCP response), retention-cron stats
+   on `/v1/install/status`, domain prewarm at agent level,
+   PostHog SPA wait, billing surface, per-account quota
+   aggregation, native-`provision` reactivation — all still
+   queued but not blocking the closed-loop work.
 
 ## Environment Details
 
@@ -340,6 +338,37 @@ The Mailgun, Resend, postfix, and fly-email webhook routes were removed;
 SES is the sole inbound path. The inbox schema gained an `issued_to`
 column for alias ownership; run `pnpm -F @trusty-squire/inbox prisma
 migrate deploy` against the inbox database on the next deploy.
+
+### Skill registry (0.7.0)
+
+Lives at `apps/registry-api/`. Separate Fly app:
+`trusty-squire-registry`. Holds skills, capture sidecars, replay
+outcomes, extract failures. The mcp package is its only public
+client (universal bot reports outcomes; skill CLI publishes +
+manages skills).
+
+**Why separate from the rest of the API:** different deployment
+lifecycle (mcp ships via npm, registry via Fly), different trust
+boundary (Ed25519 signing keys + DB creds belong on the server,
+never on user laptops), different state ownership (skills are
+institutional memory shared across users; storing them in the mcp
+package would defeat the whole 0.7.0 thesis).
+
+**Production env vars on `trusty-squire-registry`:**
+- `ADAPTER_SIGNING_PRIVATE_KEY` (PKCS8 DER, base64url) — for
+  manifest signing.
+- `SKILL_VERIFY_PUBLIC_KEY` (SPKI DER, base64url) — verifies
+  POST /skills bodies. Generate as a keypair with the mcp
+  client's `SKILL_SIGNING_PRIVATE_KEY`. **Unset = length-only
+  fallback + warn log — acceptable for staging, sloppy for prod.**
+- `TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL` (optional) — fired
+  fire-and-forget on auto-demotion (3 consecutive failures).
+
+**Client env on user machines:**
+- `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. Unset = mcp skips the
+  router entirely (fail-open to universal bot).
+- `SKILL_SIGNING_PRIVATE_KEY` — required for `mcp skill promote`
+  to sign before publishing. Unset = `promote` exits with CONFIG (3).
 
 ### Goose / local-dev MCP install
 

@@ -92,7 +92,16 @@ export interface PromoteRejection {
     | "unsupported_step_kind"
     | "inventory_entry_not_found"
     | "credential_spec_inference_failed"
-    | "schema_invalid";
+    | "schema_invalid"
+    // Multi-credential paths (Phase C per docs/DESIGN-multi-credential.md).
+    // `duplicate_credential_produces`: two extract rounds derived the
+    // same `produces` name (e.g. both labeled "API Key"). Operator
+    // fixes by hand-editing the capture labels or re-running the
+    // signup with a clearer planner prompt.
+    // `unparseable_credential_label`: an extract round's hint reduced
+    // to an empty `produces` after normalization (just "Copy", say).
+    | "duplicate_credential_produces"
+    | "unparseable_credential_label";
   message: string;
   offending_round?: number;
   offending_step?: number;
@@ -128,8 +137,10 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     };
   }
 
-  // Stage 1.b — synthesize the SkillStep array.
-  const stepsResult = synthesizeSteps(verification.rounds);
+  // Stage 1.b — synthesize the SkillStep array. Always emits single-
+  // cred extract kinds; the multi-cred upgrade happens in Stage 1.c.5
+  // below as a post-pass. This keeps step synthesis single-purpose.
+  const stepsResult = synthesizeSteps(verification.rounds, input.run_id);
   if (stepsResult.kind !== "ok") return stepsResult;
 
   // Stage 1.c — infer signup_url + oauth_provider from round 0 + steps.
@@ -137,14 +148,44 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   const signupUrl = firstRound.state.url;
   const oauthProvider = inferOAuthProvider(stepsResult.steps);
 
-  // Stage 1.d — infer the credential spec from the extract step + page.
-  const credentialResult = inferCredentialSpec(
-    verification.rounds,
-    stepsResult.steps,
-    input.service,
-    input.env_var_suggestion,
-  );
-  if (credentialResult.kind !== "ok") return credentialResult;
+  // Stage 1.c.5 — multi-cred dispatch (Phase B/C per docs/DESIGN-
+  // multi-credential.md). Count extract-class steps; if >1 AND each
+  // has a distinct derivable `produces` name, upgrade to the multi-
+  // cred shape (named extract kinds + multiple credentials). On any
+  // failure (collision, unparseable label) we REJECT rather than
+  // silently fall back to single-cred — a multi-cred capture with
+  // ambiguous labels is operator-fix territory.
+  const extractStepIndices = stepsResult.steps
+    .map((s, i) => ({ s, i }))
+    .filter(
+      ({ s }) =>
+        s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
+    );
+  const multiCred = extractStepIndices.length > 1;
+  let steps: SkillStep[] = stepsResult.steps;
+  let credentials: SkillCredentialSpec[];
+
+  if (multiCred) {
+    const multiResult = upgradeToMultiCred(
+      stepsResult.steps,
+      verification.rounds,
+      input.service,
+    );
+    if (multiResult.kind !== "ok") return multiResult;
+    steps = multiResult.steps;
+    credentials = multiResult.credentials;
+  } else {
+    // Stage 1.d (single-cred) — infer one credential spec from the
+    // sole extract step + page. UNCHANGED from pre-multi-cred.
+    const credentialResult = inferCredentialSpec(
+      verification.rounds,
+      stepsResult.steps,
+      input.service,
+      input.env_var_suggestion,
+    );
+    if (credentialResult.kind !== "ok") return credentialResult;
+    credentials = [credentialResult.spec];
+  }
 
   // Stage 1.e — assemble the candidate skill and validate via Zod.
   // skill_id is derived deterministically from the assembled content
@@ -159,8 +200,8 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     version: "v1",
     signup_url: signupUrl,
     oauth_provider: oauthProvider,
-    steps: stepsResult.steps,
-    credentials: [credentialResult.spec],
+    steps,
+    credentials,
     source_run_ids: [input.run_id],
     status: "active",
     replays_succeeded: 0,
@@ -202,15 +243,19 @@ interface StepsOk {
 
 function synthesizeSteps(
   rounds: OnboardingCaseFile[],
+  runId: string,
 ): StepsOk | PromoteRejection {
   const steps: SkillStep[] = [];
 
   for (let i = 0; i < rounds.length; i++) {
     const round = rounds[i]!;
     // Build the provenance once — every step in this round shares the
-    // same (run_id, round_index) pair.
+    // same (run_id, round_index) pair. The run_id comes from the
+    // promoter's input rather than being derived from the round, so
+    // forensics on a published skill point back at the actual run dir
+    // (`<service>-<run_id>-r*.json`) rather than a placeholder hash.
     const provenance: SkillStepProvenance = {
-      run_id: extractRunIdFromRound(round),
+      run_id: runId,
       round_index: i,
     };
 
@@ -782,6 +827,206 @@ function inferOAuthProvider(steps: SkillStep[]): "google" | "github" | null {
   return null;
 }
 
+// ── Multi-credential upgrade (Phase C) ──────────────────────────────
+//
+// Post-pass that takes the single-cred output of synthesizeSteps and
+// promotes it into multi-cred shape when the capture has >1 extract
+// rounds. The single-cred path skips this entirely — `upgradeToMultiCred`
+// is only called when extract-step count > 1.
+//
+// For each extract step:
+//   1. Derive a `produces` name from its near_text_hint (or pattern_name
+//      for regex extracts) — lowercase_snake_case.
+//   2. Replace the step kind with its `_named` counterpart.
+//   3. Build a SkillCredentialSpec per `produces`, with name +
+//      service-aware env var (TWITTER_API_KEY_SECRET etc.).
+//
+// Rejects on:
+//   - duplicate_credential_produces: two steps derived the same name
+//   - unparseable_credential_label: a hint reduced to empty after norm
+
+interface MultiCredOk {
+  kind: "ok";
+  steps: SkillStep[];
+  credentials: SkillCredentialSpec[];
+}
+
+function upgradeToMultiCred(
+  inputSteps: SkillStep[],
+  rounds: OnboardingCaseFile[],
+  service: string,
+): MultiCredOk | PromoteRejection {
+  const seen = new Set<string>();
+  const outSteps: SkillStep[] = [];
+  const credentialsByName = new Map<string, SkillCredentialSpec>();
+
+  for (let i = 0; i < inputSteps.length; i++) {
+    const step = inputSteps[i]!;
+
+    if (step.kind === "extract_via_copy_button") {
+      const produces = deriveProducesFromHint(step.near_text_hint);
+      if (produces === null) {
+        return {
+          kind: "rejected",
+          stage: "synthesis",
+          error_kind: "unparseable_credential_label",
+          message:
+            `Extract step at index ${i} has a hint (${JSON.stringify(step.near_text_hint)}) ` +
+            `that doesn't normalize to a usable credential name. ` +
+            `Multi-credential skills require each extract to name what it produces.`,
+          offending_step: i,
+          synthesizer_version: SYNTHESIZER_VERSION,
+        };
+      }
+      if (seen.has(produces)) {
+        return {
+          kind: "rejected",
+          stage: "synthesis",
+          error_kind: "duplicate_credential_produces",
+          message:
+            `Two extract steps derived the same credential name ` +
+            `(${JSON.stringify(produces)}). A multi-credential skill ` +
+            `must produce N distinctly-named values; relabel the capture or ` +
+            `re-run the signup so each credential gets a unique near-text hint.`,
+          offending_step: i,
+          synthesizer_version: SYNTHESIZER_VERSION,
+        };
+      }
+      seen.add(produces);
+      outSteps.push({
+        kind: "extract_via_copy_button_named",
+        near_text_hint: step.near_text_hint,
+        produces,
+        provenance: step.provenance,
+      });
+      credentialsByName.set(
+        produces,
+        buildCredentialSpecForMulti(produces, "opaque", service),
+      );
+      continue;
+    }
+
+    if (step.kind === "extract_via_regex") {
+      // Regex extracts on a multi-cred page derive `produces` from the
+      // pattern_name (e.g. "stripe_secret" → "stripe_secret"). The
+      // pattern_name is already snake_case and unique per credential
+      // type, so it's a natural identifier.
+      const produces = step.pattern_name.toLowerCase();
+      if (seen.has(produces)) {
+        return {
+          kind: "rejected",
+          stage: "synthesis",
+          error_kind: "duplicate_credential_produces",
+          message:
+            `Two extract steps target the same regex pattern (` +
+            `${produces}). Multi-credential extracts must use distinct ` +
+            `patterns; if two credentials share a shape, switch one to ` +
+            `a copy_button extraction with a distinguishing near-text hint.`,
+          offending_step: i,
+          synthesizer_version: SYNTHESIZER_VERSION,
+        };
+      }
+      seen.add(produces);
+      outSteps.push({
+        kind: "extract_via_regex_named",
+        pattern_name: step.pattern_name,
+        produces,
+        provenance: step.provenance,
+      });
+      // Shape hint follows the pattern's known prefix.
+      const shape = patternToShapeHint(step.pattern_name);
+      credentialsByName.set(
+        produces,
+        buildCredentialSpecForMulti(produces, shape, service),
+      );
+      continue;
+    }
+
+    // Non-extract steps pass through unchanged.
+    outSteps.push(step);
+  }
+
+  // Capture rounds + ordering preserved so a future caller can correlate
+  // step index → round (used by the in-flight schema validator later).
+  void rounds;
+
+  return {
+    kind: "ok",
+    steps: outSteps,
+    credentials: Array.from(credentialsByName.values()),
+  };
+}
+
+// Normalize a free-text credential label into a snake_case `produces`
+// identifier. "API Key Secret" → "api_key_secret". Returns null when
+// the result is empty or doesn't start with a letter (the schema
+// requires `^[a-z][a-z0-9_]*$`).
+function deriveProducesFromHint(hint: string): string | null {
+  const normalized = hint
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (normalized.length === 0) return null;
+  if (!/^[a-z]/.test(normalized)) return null;
+  // The schema regex allows only [a-z][a-z0-9_]*. Filter again for safety;
+  // any character that slipped through means a unicode edge case.
+  if (!/^[a-z][a-z0-9_]*$/.test(normalized)) return null;
+  // Truncate to a reasonable length — avoid pathological inputs producing
+  // 200-char `produces` names.
+  return normalized.slice(0, 64);
+}
+
+function patternToShapeHint(patternName: string): SkillCredentialSpec["shape_hint"] {
+  switch (patternName) {
+    case "stripe_secret":
+      return "prefix:sk_live";
+    case "stripe_publishable":
+      return "prefix:sk_live";
+    case "resend":
+      return "prefix:re_";
+    case "sendgrid":
+      return "prefix:SG.";
+    case "mailgun":
+      return "prefix:key-";
+    case "render":
+      return "prefix:rnd_";
+    case "sentry_token":
+      return "prefix:sntry";
+    case "openrouter":
+      return "prefix:sk-or-v1-";
+    case "anthropic":
+      return "prefix:sk-ant-";
+    case "openai_legacy":
+      return "prefix:sk-";
+    default:
+      return "opaque";
+  }
+}
+
+function buildCredentialSpecForMulti(
+  name: string,
+  shape: SkillCredentialSpec["shape_hint"],
+  service: string,
+): SkillCredentialSpec {
+  // Env var: <SERVICE>_<PRODUCES>. Twitter + api_key_secret →
+  // TWITTER_API_KEY_SECRET. Maintains the "<SERVICE>_<CRED>" convention
+  // and disambiguates the multiple credentials in a multi-cred bundle.
+  const upperService = service.toUpperCase().replace(/-/g, "_");
+  const upperName = name.toUpperCase();
+  const envVar = `${upperService}_${upperName}`;
+  return {
+    name,
+    type: "api_key",
+    shape_hint: shape,
+    env_var_suggestion: envVar,
+    post_extract_validator: {
+      min_length: shape === "uuid" ? 36 : 16,
+      max_length: shape === "uuid" ? 36 : 512,
+    },
+  };
+}
+
 // ── Deterministic helpers ────────────────────────────────────────────
 
 function deriveEnvVar(service: string): string {
@@ -803,7 +1048,7 @@ function deriveTimestampFromRounds(rounds: OnboardingCaseFile[]): string {
   return new Date(Date.UTC(2026, 0, 1) + offsetMs).toISOString();
 }
 
-function deriveSkillId(candidate: Omit<Skill, "skill_id">): string {
+export function deriveSkillId(candidate: Omit<Skill, "skill_id">): string {
   // Skill IDs are ULID-shaped. We derive a deterministic 26-char
   // string from the candidate's hash so that the same captures
   // produce the same skill_id across runs (test determinism +
@@ -818,21 +1063,6 @@ function deriveSkillId(candidate: Omit<Skill, "skill_id">): string {
     out += alphabet[hash[i % hash.length]! % alphabet.length];
   }
   return out;
-}
-
-function extractRunIdFromRound(round: OnboardingCaseFile): string {
-  // The capture format doesn't store run_id explicitly — it's encoded
-  // in the filename. The promoter passes it down via PromoteInput,
-  // but synthesizeSteps doesn't have access to that closure. Workaround:
-  // since every round in a chain shares a run_id, and the chain is
-  // verified before we get here, we can reconstruct it from the
-  // content_hash chain by hashing the round's own identifier. For now,
-  // we use a placeholder that the test-deterministic hash will pin
-  // identically across runs.
-  //
-  // TODO: refactor to thread run_id through translateStep — this works
-  // for tests but obscures provenance. Tracked: not blocking 0.7.0.
-  return `derived-${round.content_hash.slice(0, 8)}`;
 }
 
 function chainRejectionMessage(

@@ -231,6 +231,73 @@ const ExtractViaRegexStepSchema = z
   })
   .strict();
 
+// Multi-credential step kinds (Phase B per docs/DESIGN-multi-credential.md).
+// These are NEW kinds, not new fields on the existing extract steps — the
+// side-by-side dispatch principle keeps single-credential skills byte-
+// identical (canonical bytes unchanged → signatures still verify).
+//
+// `produces` names the credential this step yields and MUST reference an
+// entry in the parent Skill's `credentials[].name`. The schema can't
+// cross-validate that link statically (Zod can't look up a sibling array
+// from a step), so the synthesizer + replay engine enforce it at higher
+// layers (synthesizer at build time, replay engine on dispatch).
+const ExtractViaCopyButtonNamedStepSchema = z
+  .object({
+    kind: z.literal("extract_via_copy_button_named"),
+    near_text_hint: z
+      .string()
+      .min(1)
+      .describe(
+        "Same semantics as extract_via_copy_button: visible text near " +
+          "the Copy button that disambiguates it on a multi-credential " +
+          "page. For Twitter, distinguishes 'Copy API Key' from 'Copy " +
+          "API Key Secret'.",
+      ),
+    produces: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/, "must be lowercase_snake_case")
+      .describe(
+        "References an entry in the parent Skill's credentials[].name. " +
+          "Lowercase snake_case (e.g. 'api_key_secret', 'bearer_token').",
+      ),
+    provenance: ProvenanceSchema,
+  })
+  .strict();
+
+const ExtractViaRegexNamedStepSchema = z
+  .object({
+    kind: z.literal("extract_via_regex_named"),
+    pattern_name: z
+      .enum([
+        "stripe_secret",
+        "stripe_publishable",
+        "resend",
+        "sendgrid",
+        "mailgun",
+        "render",
+        "sentry_token",
+        "openrouter",
+        "anthropic",
+        "openai_legacy",
+        "openai_project",
+        "uuid_token",
+      ])
+      .describe(
+        "Same pattern library as extract_via_regex. The synthesizer " +
+          "writes this kind when one credential on a multi-cred page " +
+          "matches a known prefix pattern (e.g. Stripe publishable + " +
+          "secret keys: both regex-recognizable, both on one page).",
+      ),
+    produces: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/, "must be lowercase_snake_case")
+      .describe(
+        "References an entry in the parent Skill's credentials[].name.",
+      ),
+    provenance: ProvenanceSchema,
+  })
+  .strict();
+
 export const SkillStepSchema = z
   .discriminatedUnion("kind", [
     NavigateStepSchema,
@@ -240,6 +307,10 @@ export const SkillStepSchema = z
     SelectStepSchema,
     ExtractViaCopyButtonStepSchema,
     ExtractViaRegexStepSchema,
+    // Multi-credential extract steps. Single-credential skills never
+    // contain these; they're additive at the union level.
+    ExtractViaCopyButtonNamedStepSchema,
+    ExtractViaRegexNamedStepSchema,
   ])
   .describe(
     "One step in a Skill's replay graph. Steps execute in order. A " +
@@ -278,6 +349,22 @@ const CredentialShapeSchema = z
 
 export const SkillCredentialSpecSchema = z
   .object({
+    // Multi-credential identifier (Phase B per docs/DESIGN-multi-credential.md).
+    // Optional for backward-compat: existing single-credential skills
+    // omit it (their canonical bytes don't change → signatures remain
+    // valid). Multi-credential skills MUST set it; the synthesizer
+    // rejects when two credentials share a name.
+    name: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/, "must be lowercase_snake_case")
+      .optional()
+      .describe(
+        "Stable identifier for this credential within the skill. " +
+          "References by extract_via_*_named steps' `produces` field. " +
+          "Lowercase snake_case (e.g. 'api_key', 'api_key_secret'). " +
+          "Single-credential skills omit this — defaults to the " +
+          "implicit name 'api_key' for backward compatibility.",
+      ),
     type: z
       .enum([
         "api_key",
@@ -477,6 +564,61 @@ export const SkillSchema = z
           "multiple for Stripe-class multi-credential services in " +
           "0.8.0. The replay engine fills these in order from the " +
           "extract_* steps.",
+      ),
+
+    // Multi-credential bundle validator (Phase B per docs/DESIGN-multi-credential.md).
+    // Optional. Single-credential skills omit it. When set, the replay
+    // engine signs ONE HTTP request with the named credentials and
+    // calls the configured URL — catches "right shape, wrong values"
+    // bugs that per-credential validators miss (the Twitter case:
+    // five tokens that are only useful as a set, none independently
+    // validatable). The first auth_scheme is documented; more land per
+    // service (oauth1_signed → Twitter; sigv4 → AWS; oauth2_bearer →
+    // most modern APIs).
+    bundle_sentinel: z
+      .object({
+        url: z
+          .string()
+          .url()
+          .describe(
+            "Service endpoint that returns 200 when the bundle is " +
+              "valid (e.g. https://api.twitter.com/2/users/me).",
+          ),
+        auth_scheme: z
+          .enum(["oauth1_signed", "oauth2_bearer", "bearer_plus_secret"])
+          .describe(
+            "How to present the credential bundle. oauth1_signed: HMAC-" +
+              "SHA1 signature over (consumer_key, consumer_secret, " +
+              "access_token, access_token_secret) — Twitter. " +
+              "oauth2_bearer: Authorization: Bearer <bearer_token>. " +
+              "bearer_plus_secret: Bearer + a secondary header (Stripe-" +
+              "class publishable+secret).",
+          ),
+        required_credentials: z
+          .array(z.string().regex(/^[a-z][a-z0-9_]*$/))
+          .min(1)
+          .describe(
+            "Names (credentials[].name values) that the bundle " +
+              "request must include. All listed names must be " +
+              "extracted before the sentinel fires.",
+          ),
+        timeout_ms: z
+          .number()
+          .int()
+          .min(500)
+          .max(10_000)
+          .default(3000)
+          .describe(
+            "Network timeout — bounded so a slow service can't gate " +
+              "replay indefinitely.",
+          ),
+      })
+      .optional()
+      .describe(
+        "Per-Skill bundle validator. Replaces per-credential sentinel " +
+          "HTTP checks for multi-credential services where credentials " +
+          "are only useful together. Per-credential post_extract_" +
+          "validator shape/regex checks still run.",
       ),
 
     // Lineage
