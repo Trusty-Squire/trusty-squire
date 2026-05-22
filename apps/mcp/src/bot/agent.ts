@@ -626,6 +626,34 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
             : `value=${JSON.stringify(e.value.slice(0, 60))}`,
         );
       }
+      // <select> state. `value=""` is the React-defaulted-placeholder
+      // pattern (the first option's value is empty, common for
+      // "No workspace" / "Select…" / "Choose…" prompts). React Hook
+      // Form treats those fields as untouched and silently rejects
+      // submits — Railway's token-creation form was the canonical
+      // case. The planner needs the selected text and the option
+      // list to issue an explicit `select` step before clicking
+      // submit. Selectors run to end-of-line, so this annotation goes
+      // BEFORE the trailing `selector=`.
+      if (e.tag === "select") {
+        const selectedText = e.selectedOptionText ?? "";
+        const isDefaulted =
+          e.value !== null && e.value !== undefined && e.value.length === 0;
+        bits.push(
+          isDefaulted
+            ? `value="" selected=${JSON.stringify(selectedText)} (DEFAULTED — pick an explicit option before submitting)`
+            : `value=${JSON.stringify((e.value ?? "").slice(0, 60))} selected=${JSON.stringify(selectedText)}`,
+        );
+        if (e.selectOptions !== null && e.selectOptions !== undefined && e.selectOptions.length > 0) {
+          const optionTexts = e.selectOptions
+            .map((o) => o.text || `(value=${JSON.stringify(o.value)})`)
+            .filter((t) => t.length > 0)
+            .slice(0, 6)
+            .map((t) => JSON.stringify(t))
+            .join(", ");
+          if (optionTexts.length > 0) bits.push(`options=[${optionTexts}]`);
+        }
+      }
       const label = e.labelText ?? e.ariaLabel;
       if (label !== null && label !== undefined) {
         bits.push(`label=${JSON.stringify(label)}`);
@@ -2953,6 +2981,43 @@ ${formatInventory(input.inventory)}`,
             emptyInputs.length > 0
               ? `\n\nVisible empty inputs on this page (any of these is a likely required field):\n${emptyInputs.join("\n")}\n\nIssue {"kind":"fill"} on one of them with a sensible value.`
               : "";
+          // Defaulted <select>s — value="" means the first <option>
+          // (typically "Select…", "No workspace", "Choose…") is still
+          // showing. React Hook Form treats those as untouched and
+          // silently rejects submits. The Railway token-create form
+          // was the canonical case: the Workspace dropdown's "No
+          // workspace" placeholder was visually selected, but its
+          // value="" left React state undefined, so Create did
+          // nothing. Surface them explicitly so the planner emits a
+          // select step before another click.
+          const defaultedSelects = inventory
+            .filter(
+              (e) =>
+                e.tag === "select" &&
+                e.value !== null &&
+                e.value !== undefined &&
+                e.value.length === 0 &&
+                e.selectOptions !== null &&
+                e.selectOptions !== undefined &&
+                e.selectOptions.length > 1,
+            )
+            .slice(0, 5)
+            .map((e) => {
+              const label =
+                e.labelText ?? e.ariaLabel ?? e.name ?? e.placeholder ?? "(no label)";
+              // Show the first non-empty-value option as the suggested
+              // pick — the obvious target when the planner doesn't
+              // have a domain reason to prefer a specific one.
+              const realOptions = (e.selectOptions ?? []).filter(
+                (o) => o.value.length > 0 && o.text.length > 0,
+              );
+              const firstReal = realOptions[0]?.text ?? "(none)";
+              return `  - ${JSON.stringify(label)} → selector=${e.selector} (first real option: ${JSON.stringify(firstReal)})`;
+            });
+          const defaultedSelectHint =
+            defaultedSelects.length > 0
+              ? `\n\nVisible DEFAULTED dropdowns on this page (value="" — React form-state likely treats these as UNTOUCHED, which silently fails submit):\n${defaultedSelects.join("\n")}\n\nIssue {"kind":"select", "option_text":"…"} to commit a choice. Even if the default visible label ("No workspace", "None") is what you want, you MUST emit the select step to register it with the form's state.`
+              : "";
           args.steps.push(
             sameSelector
               ? `Post-verify: no-progress detected — same ${nextStep.kind} on same selector, inventory unchanged. Re-planning instead of re-running.`
@@ -2966,7 +3031,8 @@ ${formatInventory(input.inventory)}`,
             `DIFFERENT KIND: {"kind":"fill"} on any empty text input, {"kind":"check"} on ` +
             `any unticked checkbox, {"kind":"select"} on any unselected dropdown, or ` +
             `{"kind":"done"} if there is genuinely nothing to do.` +
-            emptyInputHint;
+            emptyInputHint +
+            defaultedSelectHint;
           prevSignature = signature;
           prevInventorySize = inventory.length;
           continue;
@@ -3269,6 +3335,7 @@ ${loginGuidance}
 - If an Accept / Agree / Continue button is DISABLED and the page shows a ToS / agreement modal (a long scrollable block of legal text, often inside a dialog), AND there is no agreement checkbox in the inventory to tick, return {"kind":"scroll"}. Some services (Railway is the canonical case) only enable the Accept button after the user scrolls the modal body to the bottom. The bot auto-detects the scrollable container — you do NOT need a selector. Do NOT use "click" to try to scroll; "click" does not scroll, it lands a click and returns. After scrolling, the next round should re-read the page and click the now-enabled Accept button (which will appear in the inventory).
 - Prefer the simplest credential path: a project- or organization-level API token / auth token usually needs only a name. A "personal token" with a grid of per-scope permission dropdowns is more work — choose it only if no simpler token type is offered.
 - On a token-creation form whose permission/scope dropdowns default to "No Access" / "None", you MUST set permissions BEFORE clicking the create button.
+- **Defaulted dropdowns (value="") gate submit, even when the visible label looks fine.** An inventory line marked \`(DEFAULTED — pick an explicit option before submitting)\` means a \`<select>\` is showing its first option visually but its underlying value is empty. React-form-state libraries (React Hook Form, Formik) treat those as UNTOUCHED and reject submits silently — the click on the submit button visually focuses it but no submission occurs. Issue \`{"kind":"select", "option_text":"…"}\` to commit a choice BEFORE clicking submit, even if the existing visible label ("No workspace", "None", "Select…") is the option you want. The Railway token-create form was the canonical case: typing the name and clicking Create did nothing for six rounds because the Workspace dropdown was never explicitly selected.
 - **PERMISSION SCOPE — default is MAXIMUM.** ${input.scopeHint !== undefined
   ? `The user provided a scope hint: "${input.scopeHint}". Pick option_text values aligned with this on each permission dropdown.`
   : `No scope hint was provided. Default to the HIGHEST available permission level on EVERY permission dropdown (Admin > Write > Read > anything lower). Most agent use-cases need write access; a read-only token will fail downstream when the agent tries to push data. Set "Admin" if offered; "Write" otherwise. Explicitly use option_text to specify — do NOT rely on first-option behavior, which often picks Read.`}

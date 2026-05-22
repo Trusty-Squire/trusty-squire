@@ -109,6 +109,48 @@ describe("formatInventory", () => {
     ]);
     expect(out).toContain("[cookie-consent — avoid]");
   });
+
+  // Railway regression (rc.12): a <select> whose first option has
+  // value="" is the React-form-state-untouched pattern that silently
+  // breaks submit. The planner needs to see the defaulted marker AND
+  // the option list to know what to commit before clicking submit.
+  it("flags a defaulted <select> with DEFAULTED marker + option list", () => {
+    const out = formatInventory([
+      mk({
+        tag: "select",
+        name: "workspaceId",
+        selector: "select[name=\"workspaceId\"]",
+        value: "",
+        selectedOptionText: "No workspace",
+        selectOptions: [
+          { value: "", text: "No workspace" },
+          { value: "uuid-1", text: "Acme Inc" },
+        ],
+      }),
+    ]);
+    expect(out).toContain("DEFAULTED");
+    expect(out).toContain("\"No workspace\"");
+    expect(out).toContain("options=");
+    expect(out).toContain("\"Acme Inc\"");
+  });
+
+  it("does NOT flag a <select> whose user already picked a real option", () => {
+    const out = formatInventory([
+      mk({
+        tag: "select",
+        name: "workspaceId",
+        selector: "select[name=\"workspaceId\"]",
+        value: "uuid-1",
+        selectedOptionText: "Acme Inc",
+        selectOptions: [
+          { value: "", text: "No workspace" },
+          { value: "uuid-1", text: "Acme Inc" },
+        ],
+      }),
+    ]);
+    expect(out).not.toContain("DEFAULTED");
+    expect(out).toContain("selected=\"Acme Inc\"");
+  });
 });
 
 describe("isOauthOnlyChooser", () => {

@@ -1922,6 +1922,8 @@ export class BrowserController {
         href: string | null;
         iconLabel: string | null;
         value: string | null;
+        selectOptions: Array<{ value: string; text: string }> | null;
+        selectedOptionText: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -1951,6 +1953,32 @@ export class BrowserController {
           value:
             el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
               ? el.value
+              : el instanceof HTMLSelectElement
+                ? el.value
+                : null,
+          // For <select>: the currently-selected option's visible text
+          // and a short list of available option labels. The combination
+          // is how the planner detects the "React-defaulted dropdown"
+          // pattern that broke Railway — `value=""` + a first option
+          // whose text reads as a placeholder ("No workspace", "Select
+          // …", "Choose …") means the user (or bot) has not yet
+          // committed a choice and React form state still treats the
+          // field as untouched. The planner needs that signal to issue
+          // a `select` step before clicking submit. Limit to 8 options
+          // — long pickers (countries, timezones) would otherwise blow
+          // the inventory rendering.
+          selectOptions:
+            el instanceof HTMLSelectElement
+              ? Array.from(el.options)
+                  .slice(0, 8)
+                  .map((o) => ({
+                    value: o.value,
+                    text: clean(o.textContent) ?? "",
+                  }))
+              : null,
+          selectedOptionText:
+            el instanceof HTMLSelectElement
+              ? clean(el.options[el.selectedIndex]?.textContent ?? null)
               : null,
         });
       }
@@ -2329,15 +2357,24 @@ export interface InteractiveElement {
   // live extractInteractiveElements sets them; test fixtures omit them.
   href?: string | null;
   iconLabel?: string | null;
-  // Current value of a text-shaped input/textarea. Surfaces "is this
-  // field actually empty?" to the planner — a Railway-class token-
-  // creation form has a name input with a placeholder ("Token name")
-  // and an empty value; without `value` the planner can't tell whether
-  // the placeholder is a hint or the current contents, and on Railway
-  // it kept clicking Create instead of filling the name. Empty string
-  // means "the field exists and is empty"; null means "not applicable
-  // (button/link) or not captured (test fixture)".
+  // Current value of a text-shaped input/textarea OR a <select>.
+  // Surfaces "is this field actually empty / unselected?" to the
+  // planner. For an input/textarea: empty string means the field
+  // exists and is empty. For a <select>: empty string means the
+  // first option's value is "" — typically the "Select…" placeholder
+  // option, which is the React-form-state-untouched pattern that
+  // broke Railway's token-creation form (clicking Create silently
+  // bailed because React Hook Form treated workspaceId as untouched).
+  // null means "not applicable (button/link) or not captured (test
+  // fixture)".
   value?: string | null;
+  // <select>-only: the visible text of the currently-selected option
+  // and a short list of available option labels (capped to 8 — long
+  // pickers like countries blow the inventory rendering). Lets the
+  // planner emit a `{"kind":"select", option_text: …}` step targeting
+  // an option by name. Both null for non-select elements.
+  selectOptions?: Array<{ value: string; text: string }> | null;
+  selectedOptionText?: string | null;
 }
 
 // Score a button/link by how much its text reads like a signup
