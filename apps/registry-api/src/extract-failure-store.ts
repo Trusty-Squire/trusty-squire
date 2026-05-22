@@ -25,10 +25,12 @@ export const SNAPSHOT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_HTML_BYTES = 5 * 1024 * 1024;
 export const MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024;
 
-// Per-account upload rate limit: 50 snapshots/hour. Plenty for a
-// single user iterating on a broken service; tight enough that a
-// runaway bot can't fill storage.
-export const UPLOAD_RATE_LIMIT_PER_HOUR = 50;
+// Per-account upload rate limit: 500 snapshots/hour. A normal signup
+// uploads ~20 per-round telemetry captures plus 0-1 extract-failures;
+// 500/hr leaves room for ~20 back-to-back signups before throttling.
+// Tight enough that a runaway bot can't fill storage. Was 50 before
+// 0.6.14-rc.11 made per-round uploads default-on.
+export const UPLOAD_RATE_LIMIT_PER_HOUR = 500;
 export const UPLOAD_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 
 export interface ExtractFailureUpload {

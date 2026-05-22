@@ -271,6 +271,26 @@ export type ExtractFailureUploader = (input: {
   screenshot_jpeg_base64?: string;
 }) => Promise<void>;
 
+// Per-round telemetry uploader. Fires on EVERY post-verify round, not
+// just on failure — so we can reconstruct what the planner saw at each
+// step without needing to reproduce the run locally. Same fire-and-
+// forget contract as ExtractFailureUploader: best-effort, never throws,
+// never blocks the signup. Default-on as of 0.6.14-rc.11; the MCP
+// layer wires it to /v1/extract-failures with extract_reason set to
+// "round_telemetry" so the round captures live alongside extract
+// failures in the same registry table.
+export type RoundUploader = (input: {
+  service: string;
+  round: number;
+  kind: string;
+  url: string;
+  title: string;
+  inventory_count: number;
+  observed_reason: string;
+  html: string;
+  screenshot_jpeg_base64?: string;
+}) => Promise<void>;
+
 export interface SignupResult {
   success: boolean;
   credentials?: {
@@ -1717,6 +1737,10 @@ export class SignupAgent {
   // diagnosed without users needing to configure debug env vars.
   // Wired from the MCP layer; undefined in unit-test contexts.
   private readonly extractFailureUploader?: ExtractFailureUploader;
+  // Per-round telemetry uploader (0.6.14-rc.11). Fires on every post-
+  // verify round so the registry has the full DOM + screenshot trail
+  // for any stuck signup, not just the ones that fail at extract.
+  private readonly roundUploader?: RoundUploader;
   // Set per-task in signup(). Lets the uploader know which service
   // was being provisioned without threading it through every call.
   private currentService = "";
@@ -1724,7 +1748,10 @@ export class SignupAgent {
   constructor(
     private browser: BrowserController,
     llm?: LLMClient | LLMPair,
-    opts: { extractFailureUploader?: ExtractFailureUploader } = {},
+    opts: {
+      extractFailureUploader?: ExtractFailureUploader;
+      roundUploader?: RoundUploader;
+    } = {},
   ) {
     if (llm === undefined) {
       this.llmPair = pickLLMPair({ preferCheap: PREFER_CHEAP_LLM });
@@ -1739,6 +1766,9 @@ export class SignupAgent {
     }
     if (opts.extractFailureUploader !== undefined) {
       this.extractFailureUploader = opts.extractFailureUploader;
+    }
+    if (opts.roundUploader !== undefined) {
+      this.roundUploader = opts.roundUploader;
     }
   }
 
@@ -2834,10 +2864,12 @@ ${formatInventory(input.inventory)}`,
       }
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${nextStep.reason}`);
 
-      // Dev-only (env-gated): dump this round's real page state +
-      // inventory into the E1 eval-corpus format, so onboarding
-      // adapters can be iterated offline without re-running the
-      // rate-limited OAuth handshake.
+      // Dump this round's real page state + inventory in the E1
+      // eval-corpus format so onboarding adapters can be iterated
+      // offline without re-running the rate-limited OAuth handshake.
+      // Default-on as of 0.6.14-rc.11 — writes to
+      // ~/.trusty-squire/corpus/onboarding/ unless an env override
+      // points elsewhere or disables it.
       captureOnboardingRound({
         service: args.service,
         round,
@@ -2846,6 +2878,34 @@ ${formatInventory(input.inventory)}`,
         inventory,
         observed: nextStep,
       });
+
+      // Per-round telemetry upload (rc.11). Mirrors the disk capture
+      // but ships to the registry so debugging works from any host —
+      // the bot may be running in Goose or a sibling agent that
+      // doesn't share a filesystem with whoever's diagnosing the run.
+      // Fire-and-forget; failures must never abort the loop.
+      if (this.roundUploader !== undefined) {
+        const observedReason = "reason" in nextStep ? nextStep.reason : "";
+        void (async () => {
+          try {
+            await this.roundUploader!({
+              service: args.service,
+              round,
+              kind: nextStep.kind,
+              url: state.url,
+              title: state.title,
+              inventory_count: inventory.length,
+              observed_reason: observedReason,
+              html: state.html,
+              ...(state.screenshot !== undefined && state.screenshot.length > 0
+                ? { screenshot_jpeg_base64: state.screenshot }
+                : {}),
+            });
+          } catch {
+            // best-effort — telemetry upload is diagnostic, never load-bearing
+          }
+        })();
+      }
 
       // Stuck-loop detector. Re-planning steps (done/extract/login/
       // wait/navigate) are exempt: extract is its own progress signal,

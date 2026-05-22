@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CAPTURE_FORMAT_VERSION,
   captureOnboardingRound,
+  resolveCaptureDir,
   verifyCaptureChain,
   type OnboardingCaseFile,
 } from "../onboarding-capture.js";
@@ -157,18 +158,90 @@ describe("captureOnboardingRound — format", () => {
     });
   });
 
-  it("is inert when TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset", () => {
-    // Just confirm no throw and no writes; we can't easily observe
-    // the no-write side since there's no temp dir to inspect.
+  it("is inert under vitest when TRUSTY_SQUIRE_ONBOARDING_CAPTURE is unset", () => {
+    // Default-on (rc.11) intentionally skips when running under
+    // vitest — otherwise every agent-loop test would silently dump
+    // captures into the runner's home dir. Confirm the suppression
+    // holds and no throw escapes.
     const prev = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
     delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
     try {
+      expect(resolveCaptureDir()).toBeNull();
       expect(() => captureOnboardingRound(mockRound(0))).not.toThrow();
     } finally {
       if (prev !== undefined) {
         process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = prev;
       }
     }
+  });
+});
+
+// ── resolveCaptureDir: env precedence ──────────────────────────────
+
+describe("resolveCaptureDir", () => {
+  function withEnv(value: string | undefined, fn: () => void): void {
+    const prev = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    if (value === undefined) delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    else process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+      else process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = prev;
+    }
+  }
+
+  // Production-mode tests need VITEST/NODE_ENV unset on the inner call
+  // since the default-on path is intentionally test-suppressed.
+  function asProduction(fn: () => void): void {
+    const prevNode = process.env.NODE_ENV;
+    const prevVitest = process.env.VITEST;
+    delete process.env.NODE_ENV;
+    delete process.env.VITEST;
+    try {
+      fn();
+    } finally {
+      if (prevNode === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNode;
+      if (prevVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = prevVitest;
+    }
+  }
+
+  it("returns explicit env value when set", () => {
+    withEnv("/tmp/custom-capture-dir", () => {
+      expect(resolveCaptureDir()).toBe("/tmp/custom-capture-dir");
+    });
+  });
+
+  it("returns null when env is the literal 'off'", () => {
+    withEnv("off", () => {
+      expect(resolveCaptureDir()).toBeNull();
+    });
+    withEnv("0", () => {
+      expect(resolveCaptureDir()).toBeNull();
+    });
+    withEnv("false", () => {
+      expect(resolveCaptureDir()).toBeNull();
+    });
+  });
+
+  it("defaults to $HOME/.trusty-squire/corpus/onboarding in production", () => {
+    asProduction(() => {
+      withEnv(undefined, () => {
+        const resolved = resolveCaptureDir();
+        expect(resolved).not.toBeNull();
+        expect(resolved).toMatch(/\.trusty-squire\/corpus\/onboarding$/);
+      });
+    });
+  });
+
+  it("returns null when env is unset under test env (suppression)", () => {
+    // Vitest sets VITEST=true; this is the expected default behavior
+    // when this test file is run.
+    withEnv(undefined, () => {
+      expect(resolveCaptureDir()).toBeNull();
+    });
   });
 });
 

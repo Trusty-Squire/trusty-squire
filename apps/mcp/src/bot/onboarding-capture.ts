@@ -28,11 +28,17 @@
 // file. The promoter rejects unknown versions explicitly (E2) rather
 // than failing midway through synthesis on a shape it can't parse.
 //
-// Inert unless TRUSTY_SQUIRE_ONBOARDING_CAPTURE names a directory —
-// production never sets it (same env-gated pattern as debug.ts).
+// **0.6.14-rc.11 — default-on.** Previously inert unless
+// TRUSTY_SQUIRE_ONBOARDING_CAPTURE named a directory; we kept finding
+// stuck-loop bugs (e.g. Railway token-create click no-op) where no
+// captures existed on disk because the env var was never set. Now
+// defaults to `$HOME/.trusty-squire/corpus/onboarding` when the env
+// var is unset or empty. Set the env to a custom path to override;
+// set it to `off` to opt out entirely.
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep } from "./agent.js";
@@ -104,11 +110,48 @@ function computeContentHash(
   return hasher.digest("hex");
 }
 
-// Dump one onboarding round to the capture directory, if configured.
+// Resolve the capture directory. Order:
+//   1. Explicit env var (TRUSTY_SQUIRE_ONBOARDING_CAPTURE) — including
+//      the literal "off" / "0" / "false" which suppress capture.
+//   2. Default fallback: `$HOME/.trusty-squire/corpus/onboarding`,
+//      EXCEPT under vitest (NODE_ENV=test or VITEST=true) where
+//      defaulting on would pollute every test runner's home dir with
+//      stray captures from agent-loop tests. Tests that exercise the
+//      capture explicitly set the env var via the withCaptureDir
+//      helper.
+// Exported so the round-uploader (provision-any.ts) can read the same
+// resolved path without re-implementing the policy.
+export function resolveCaptureDir(): string | null {
+  const envValue = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+  if (envValue !== undefined) {
+    const trimmed = envValue.trim();
+    if (trimmed.length === 0) return isTestEnv() ? null : defaultCaptureDir();
+    if (trimmed === "off" || trimmed === "0" || trimmed === "false") return null;
+    return trimmed;
+  }
+  if (isTestEnv()) return null;
+  return defaultCaptureDir();
+}
+
+function isTestEnv(): boolean {
+  return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
+}
+
+function defaultCaptureDir(): string | null {
+  try {
+    const home = homedir();
+    if (home.length === 0) return null;
+    return join(home, ".trusty-squire", "corpus", "onboarding");
+  } catch {
+    return null;
+  }
+}
+
+// Dump one onboarding round to the capture directory.
 // Best-effort: a capture failure must never break a signup run.
 export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
-  const dir = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
-  if (dir === undefined || dir.trim().length === 0) return;
+  const dir = resolveCaptureDir();
+  if (dir === null) return;
   try {
     mkdirSync(dir, { recursive: true });
     if (runId === undefined) runId = Date.now().toString(36);

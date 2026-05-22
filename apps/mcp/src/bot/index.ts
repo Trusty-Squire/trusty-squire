@@ -7,6 +7,7 @@ import {
   SignupAgent,
   type SignupResult,
   type ExtractFailureUploader,
+  type RoundUploader,
   LLMCallBudgetExceeded,
 } from "./agent.js";
 import type { AgentInbox } from "./agent.js";
@@ -14,7 +15,12 @@ import { withOAuthLock } from "./oauth-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 
-export { type SignupResult, type ExtractFailureUploader, LLMCallBudgetExceeded };
+export {
+  type SignupResult,
+  type ExtractFailureUploader,
+  type RoundUploader,
+  LLMCallBudgetExceeded,
+};
 export { withOAuthLock } from "./oauth-lock.js";
 export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export { BrowserController } from "./browser.js";
@@ -82,6 +88,12 @@ export interface UniversalSignupRequest {
   // Undefined in unit tests and in installs that haven't yet paired
   // with an account (no apiClient available).
   extractFailureUploader?: ExtractFailureUploader | undefined;
+  // Per-round telemetry uploader (0.6.14-rc.11). Fires on every post-
+  // verify round so the registry captures the full DOM + screenshot
+  // trail for any stuck run, not just extract failures. Same best-
+  // effort contract; same MCP-layer ownership of wiring + account
+  // scoping. Undefined in unit tests.
+  roundUploader?: RoundUploader | undefined;
 }
 
 export class UniversalSignupBot {
@@ -121,13 +133,14 @@ export class UniversalSignupBot {
     });
     // request.llm is `LLMClient | LLMPair | undefined`; SignupAgent's
     // constructor handles all three shapes.
-    const agent = new SignupAgent(
-      browser,
-      request.llm,
-      request.extractFailureUploader !== undefined
+    const agent = new SignupAgent(browser, request.llm, {
+      ...(request.extractFailureUploader !== undefined
         ? { extractFailureUploader: request.extractFailureUploader }
-        : {},
-    );
+        : {}),
+      ...(request.roundUploader !== undefined
+        ? { roundUploader: request.roundUploader }
+        : {}),
+    });
 
     try {
       await browser.start();

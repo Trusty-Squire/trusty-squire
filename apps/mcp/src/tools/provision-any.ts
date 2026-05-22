@@ -728,6 +728,12 @@ async function runSignupTask(
       // MCP fetch tools (list_extract_failures / get_extract_failure)
       // see the same snapshots.
       extractFailureUploader: buildExtractFailureUploader(ctx.accountId),
+      // Per-round telemetry — every post-verify round's DOM +
+      // screenshot lands in the registry, not just the ones that
+      // fail at extract. Default-on as of 0.6.14-rc.11 so stuck-loop
+      // bugs (Railway token-create no-op) are diagnosable without
+      // needing to reproduce the run locally.
+      roundUploader: buildRoundUploader(ctx.accountId),
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -1135,6 +1141,68 @@ function buildExtractFailureUploader(
     } catch (err) {
       console.error(
         `[provision-any] extract-failure upload failed (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
+}
+
+// Build the per-round telemetry uploader (rc.11). Fires on every post-
+// verify round — gives us the full DOM + screenshot trail of any signup
+// without needing to reproduce it. Reuses /v1/extract-failures because
+// the on-disk schema (HTML+JPEG+title+url+step_label) is identical;
+// `extract_reason: "round_telemetry"` differentiates the rows from
+// real extract failures when listing.
+//
+// Same fire-and-forget contract as buildExtractFailureUploader: errors
+// are logged but never propagate, and the round-uploader call site in
+// agent.ts ALSO wraps in try/catch so the loop is bulletproof either
+// way. Account-scoped identically.
+function buildRoundUploader(
+  accountId: string,
+): (input: {
+  service: string;
+  round: number;
+  kind: string;
+  url: string;
+  title: string;
+  inventory_count: number;
+  observed_reason: string;
+  html: string;
+  screenshot_jpeg_base64?: string;
+}) => Promise<void> {
+  const registryBase = process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
+  return async (input) => {
+    try {
+      const body = {
+        service: input.service,
+        mcp_version: VERSION,
+        url: input.url,
+        title: input.title,
+        // `step_label` distinguishes rounds when listing the table;
+        // keep it short + sortable. `extract_reason` carries the
+        // planner's chosen reason so the trail is intelligible
+        // without fetching the full row.
+        step_label: `round-${input.round}-${input.kind}`,
+        extract_reason: `round_telemetry: ${input.observed_reason}`.slice(0, 4000),
+        candidates: [`inventory_count=${input.inventory_count}`],
+        html: input.html,
+        ...(input.screenshot_jpeg_base64 !== undefined
+          ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
+          : {}),
+      };
+      await fetch(`${registryBase}/v1/extract-failures`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-account-id": accountId,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      console.error(
+        `[provision-any] round-telemetry upload failed (non-fatal): ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
