@@ -3194,10 +3194,72 @@ ${formatInventory(input.inventory)}`,
       }
       // Re-extract — but tolerate the page still navigating from the
       // step just taken; the next round settles and re-reads.
+      const hadCredentialsBefore =
+        credentials.api_key !== undefined || credentials.username !== undefined;
       try {
         credentials = await this.extractCredentials();
       } catch {
         // page mid-navigation — next round's waitForFormReady handles it
+      }
+      // rc.16 — synthetic extract round capture. When the implicit
+      // extractCredentials() above pulls a credential out of the page
+      // *without* the planner ever having picked an `extract` step,
+      // the for-loop's early-return at the next iteration's top fires
+      // before any further capture is written. The chain that
+      // auto-promote sees then has no `observed.kind === "extract"`
+      // round, so promoteToSkill rejects with no_extract_step. Fix:
+      // when an implicit extract just succeeded and the planner's
+      // chosen step this round wasn't already `extract`, write a
+      // synthetic extract round with fresh state+inventory captured
+      // RIGHT NOW (the action just ran, the token row is now visible).
+      // Best-effort — a capture failure must never block returning the
+      // credential we already have.
+      const haveNewCredentials =
+        !hadCredentialsBefore &&
+        (credentials.api_key !== undefined || credentials.username !== undefined);
+      if (haveNewCredentials && nextStep.kind !== "extract") {
+        try {
+          const [postState, postInventory] = await Promise.all([
+            this.browser.getState(),
+            this.buildInventory(args.steps, undefined, 80),
+          ]);
+          const syntheticExtract: PostVerifyStep = {
+            kind: "extract",
+            reason: `implicit extract after ${nextStep.kind} — credentials surfaced on the page`,
+          };
+          captureOnboardingRound({
+            service: args.service,
+            round: round + 1,
+            oauth,
+            state: postState,
+            inventory: postInventory,
+            observed: syntheticExtract,
+          });
+          if (this.roundUploader !== undefined) {
+            void (async () => {
+              try {
+                await this.roundUploader!({
+                  service: args.service,
+                  round: round + 1,
+                  kind: syntheticExtract.kind,
+                  url: postState.url,
+                  title: postState.title,
+                  inventory_count: postInventory.length,
+                  observed_reason: syntheticExtract.reason,
+                  html: postState.html,
+                  ...(postState.screenshot !== undefined && postState.screenshot.length > 0
+                    ? { screenshot_jpeg_base64: postState.screenshot }
+                    : {}),
+                });
+              } catch {
+                // best-effort
+              }
+            })();
+          }
+        } catch {
+          // best-effort — synthetic capture is auto-promote plumbing,
+          // never load-bearing for the parent signup
+        }
       }
     }
     return credentials;
