@@ -1,0 +1,10 @@
+[Unit]
+Description=Trusty Squire skill harvester — close + refresh daily summary at 23:55 UTC
+
+[Timer]
+OnCalendar=*-*-* 23:55:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

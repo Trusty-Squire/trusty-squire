@@ -1,0 +1,10 @@
+[Unit]
+Description=Trusty Squire skill harvester — close daily summary issue
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lunchbox/trusty-squire/tools/harvester
+ExecStart=/usr/bin/node /home/lunchbox/trusty-squire/tools/harvester/daily.mjs --close
+Environment=GH_REPO=Trusty-Squire/trusty-squire
+StandardOutput=journal
+StandardError=journal

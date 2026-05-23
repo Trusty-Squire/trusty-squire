@@ -500,13 +500,70 @@ async function runOnce(pick) {
     );
     writeCounter(0);
   } else {
-    // Phase C will gate halt logic here. For Phase B we just keep the
-    // counter accurate so Phase C is a wiring change, not new logic.
-    const cur = readCounter();
-    writeCounter(cur + 1);
+    // rc.C circuit breaker. After 3 consecutive non-replay-ok outcomes
+    // across the whole queue, halt: write the halt sentinel, create
+    // (or update) the HALTED issue, exit non-zero. Subsequent timer
+    // ticks short-circuit on the sentinel until the operator clears
+    // it. Counts ANY non-replay-ok outcome — including needs-manual
+    // — because the harvester needs operator attention to make
+    // progress in either case.
+    const newCount = readCounter() + 1;
+    writeCounter(newCount);
+    if (newCount >= 3) {
+      writeFileSync(HALTED_FILE, new Date().toISOString(), "utf8");
+      tripCircuitBreakerIssue(entry, classification, newCount);
+    }
   }
 
   return classification;
+}
+
+function tripCircuitBreakerIssue(latestEntry, latestClassification, count) {
+  // Surface the halt as a single dedicated GH issue. Idempotent: if a
+  // HALTED issue is already open, append a comment; otherwise create
+  // it. Labels: skill-harvester, status:halted.
+  ensureLabels("skill-harvester", "status:halted");
+  const existing = gh(
+    "issue", "list",
+    "--label", "status:halted",
+    "--label", "skill-harvester",
+    "--state", "open",
+    "--limit", "1",
+    "--json", "number,title",
+  );
+  const summary = [
+    `**Circuit breaker tripped** — ${count} consecutive non-replay-ok outcomes.`,
+    ``,
+    `Latest failure: \`${latestEntry.slug}\` (${latestEntry.name}) → \`${latestClassification}\``,
+    ``,
+    `To resume the harvester:`,
+    `  1. Investigate the per-service issues (label: \`skill-harvester\`).`,
+    `  2. Fix or mark \`status:needs-manual\` on the offending services.`,
+    `  3. Clear the halt state:`,
+    `     \`\`\``,
+    `     rm ~/.trusty-squire/harvester-halted`,
+    `     rm ~/.trusty-squire/harvester-consecutive-failures`,
+    `     \`\`\``,
+    `  4. Close this issue with a "resumed" comment.`,
+  ].join("\n");
+  if (existing.length > 0) {
+    commentOnIssue(existing[0].number, summary);
+    console.log(`  circuit breaker: appended comment to existing HALTED issue #${existing[0].number}`);
+  } else {
+    const tmp = join(mkdtempSync(join(tmpdir(), "harvester-")), "body.md");
+    writeFileSync(tmp, summary);
+    try {
+      gh(
+        "issue", "create",
+        "--title", `[skill-harvester] HALTED — ${count} consecutive failures`,
+        "--body-file", tmp,
+        "--label", "skill-harvester,status:halted",
+      );
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+    console.log(`  circuit breaker: created HALTED issue`);
+  }
 }
 
 async function main() {
@@ -558,6 +615,12 @@ async function main() {
     process.exit(64);
   }
 
+  // Halt sentinel is a clean exit, not an error: timer ticks expect
+  // exit 0 so they don't email the operator on every cooldown.
+  if (existsSync(HALTED_FILE)) {
+    console.log(`─── Halted — exiting cleanly. Sentinel at ${HALTED_FILE} ─────`);
+    process.exit(0);
+  }
   const failed = checks.find((c) => !c.ok);
   if (failed !== undefined) {
     console.log(`─── Aborting: pre-flight failed (${failed.name}) ─────`);

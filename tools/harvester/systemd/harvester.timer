@@ -1,0 +1,16 @@
+[Unit]
+Description=Trusty Squire skill harvester — fire every 10 minutes
+Documentation=https://github.com/Trusty-Squire/trusty-squire/blob/main/tools/harvester/README.md
+
+[Timer]
+# Fire 5 minutes after boot, then every 10 minutes. Persistent=false:
+# missed firings (laptop closed, machine off) are dropped, not
+# back-filled — back-filling would create a queue burst that bypasses
+# the cooldown.
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=Trusty Squire skill harvester — single attempt
+Documentation=https://github.com/Trusty-Squire/trusty-squire/blob/main/tools/harvester/README.md
+
+# Don't kick off if the prior tick is still running — the harvester is
+# single-shot, but a hung tick that's still polling check_provision_status
+# shouldn't get clobbered by the next 10-minute fire.
+ConditionPathExists=!%h/.trusty-squire/harvester-halted
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lunchbox/trusty-squire/tools/harvester
+ExecStart=/usr/bin/node /home/lunchbox/trusty-squire/tools/harvester/run.mjs --once
+
+# Per-attempt budget: 10 minutes for the bot to run + post-promote
+# round-trip. Anything longer is a hung browser; let systemd reap and
+# the next tick retry.
+TimeoutStartSec=900
+
+# Env. The harvester reads session.json from $HOME/.config/trusty-squire/
+# automatically (handled by the MCP server it spawns), but the bot
+# itself needs the proxy + the dedicated chrome profile.
+Environment=UNIVERSAL_BOT_PROXY_URL=socks5://127.0.0.1:1080
+Environment=UNIVERSAL_BOT_PROXY_ALWAYS=true
+Environment=UNIVERSAL_BOT_PREFER_CHEAP=true
+Environment=TRUSTY_SQUIRE_PROFILE_DIR=%h/.trusty-squire/chrome-profile-harvester
+Environment=HARVESTER_MCP_VERSION=0.6.14-rc.19
+Environment=GH_REPO=Trusty-Squire/trusty-squire
+
+# stdout/stderr both flow to journalctl --user -u trusty-squire-harvester.
+StandardOutput=journal
+StandardError=journal
