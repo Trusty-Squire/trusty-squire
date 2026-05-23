@@ -1341,33 +1341,94 @@ export class BrowserController {
   // Locates the captcha widget on the current page. Returns the
   // iframe's bounding box and which provider it is, or null if no
   // visible widget is present.
+  //
+  // rc.23 — two-phase detection:
+  //   (1) Iframe-shape — fast path. Polls for up to 5s in case the
+  //       widget's iframe is being injected by the host page's JS
+  //       (Clerk installs Turnstile this way; the iframe is absent
+  //       from the static HTML snapshot but materializes within a
+  //       few seconds of the form rendering).
+  //   (2) Host-element fallback — when no iframe ever appears
+  //       (rare, but Cloudflare sometimes embeds the widget in a
+  //       way the selector misses), find the hidden response input
+  //       (cf-turnstile-response / g-recaptcha-response) and use
+  //       its closest visible ancestor as the click target. The
+  //       widget's click handler is registered on the host div, so
+  //       a click inside the host box still triggers the challenge.
   private async findCaptchaWidget(): Promise<{
     kind: "turnstile" | "recaptcha";
     box: { x: number; y: number; width: number; height: number };
   } | null> {
     if (!this.page) throw new Error("Browser not started");
 
-    // Cloudflare Turnstile iframes look like:
-    //   https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/if/...
-    // reCAPTCHA v2 iframes look like:
-    //   https://www.google.com/recaptcha/api2/anchor?...
-    const candidates: Array<{ kind: "turnstile" | "recaptcha"; selector: string }> = [
+    // Phase 1: iframe shape with polling.
+    //   Cloudflare Turnstile: src contains "challenges.cloudflare.com"
+    //   reCAPTCHA v2:         src contains "recaptcha/api2"
+    const iframeCandidates: Array<{
+      kind: "turnstile" | "recaptcha";
+      selector: string;
+    }> = [
       { kind: "turnstile", selector: 'iframe[src*="challenges.cloudflare.com"]' },
       { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2"]' },
     ];
+    const iframeDeadline = Date.now() + 5000;
+    while (Date.now() < iframeDeadline) {
+      for (const { kind, selector } of iframeCandidates) {
+        const locator = this.page.locator(selector);
+        const count = await locator.count();
+        if (count === 0) continue;
+        for (let i = 0; i < count; i++) {
+          const el = locator.nth(i);
+          const box = await el.boundingBox();
+          if (box === null) continue;
+          if (box.width < 50 || box.height < 30) continue;
+          return { kind, box };
+        }
+      }
+      await this.sleep(250);
+    }
 
-    for (const { kind, selector } of candidates) {
+    // Phase 2: host-element fallback. The hidden response input is
+    // injected by the captcha JS even before the iframe; locate it,
+    // walk up to a visible ancestor, return that bounding box.
+    const hostCandidates: Array<{
+      kind: "turnstile" | "recaptcha";
+      selector: string;
+    }> = [
+      { kind: "turnstile", selector: 'input[name="cf-turnstile-response"]' },
+      { kind: "recaptcha", selector: 'textarea[name="g-recaptcha-response"]' },
+    ];
+    for (const { kind, selector } of hostCandidates) {
       const locator = this.page.locator(selector);
       const count = await locator.count();
       if (count === 0) continue;
-      // Some pages embed multiple widgets (e.g., one in the signup
-      // form, one in a hidden login modal). Take the first visible
-      // one with a non-trivial bounding box.
-      for (let i = 0; i < count; i++) {
-        const el = locator.nth(i);
-        const box = await el.boundingBox();
-        if (box === null) continue;
-        if (box.width < 50 || box.height < 30) continue; // hidden/clipped
+      const box = await locator
+        .first()
+        .evaluate((input) => {
+          // Walk up looking for an ancestor with a non-trivial layout
+          // box. The hidden input itself has 0×0 dimensions; the
+          // visible widget container (Cloudflare's `.cf-turnstile`,
+          // Clerk's `#clerk-captcha`, or any styled wrapper) sits
+          // 1–3 levels up.
+          let el = input as HTMLElement;
+          for (let depth = 0; depth < 6 && el !== null; depth++) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width >= 50 && rect.height >= 30) {
+              return {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+              };
+            }
+            const parent = el.parentElement;
+            if (parent === null) break;
+            el = parent;
+          }
+          return null;
+        })
+        .catch(() => null);
+      if (box !== null) {
         return { kind, box };
       }
     }
