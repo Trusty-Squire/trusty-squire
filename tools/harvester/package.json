@@ -5,9 +5,11 @@
   "type": "module",
   "description": "Skill harvester — drives provision_any_service across a curated queue of dev SaaS services, reports per-service progress to GitHub issues.",
   "scripts": {
-    "dry-run": "node run.mjs --dry-run"
+    "dry-run": "node run.mjs --dry-run",
+    "once": "node run.mjs --once"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
     "js-yaml": "^4.1.0"
   }
 }
