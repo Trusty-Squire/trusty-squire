@@ -972,36 +972,50 @@ export class BrowserController {
       .evaluate((node) => node.tagName.toLowerCase());
 
     if (tagName === "select") {
-      // Native path — unchanged.
-      const values = await this.page
+      // Native path. rc.15 — keep value="" options selectable. The
+      // Railway workspace dropdown's "No workspace" option is value=""
+      // and it IS the right pick for an account-scoped token. The
+      // prior implementation filtered empty strings out of the fallback
+      // list AND rejected matched value="" picks, so the planner could
+      // never reach that option. Now: fallback list keeps every option
+      // (with the first option's value, even if empty), and a matched
+      // text-based pick is honored verbatim — including empty values.
+      const allValues = await this.page
         .locator(`${selector} option`)
         .evaluateAll((opts) =>
-          opts
-            .map((o) => (o instanceof HTMLOptionElement ? o.value : ""))
-            .filter((v) => v.length > 0),
+          opts.map((o) => (o instanceof HTMLOptionElement ? o.value : "")),
         );
-      const first = values[0];
-      if (first === undefined) {
+      if (allValues.length === 0) {
         throw new Error(`<select> ${selector} has no selectable option`);
       }
-      // When the planner specified an option, prefer the one whose
-      // visible text matches it; fall back to first.
-      let chosenValue = first;
+      // Default to the first NON-empty value when the planner gave no
+      // hint — historic behavior, kept because "Select…" placeholder
+      // options are almost always the wrong default pick.
+      const firstReal = allValues.find((v) => v.length > 0);
+      let chosenValue: string | undefined =
+        firstReal !== undefined ? firstReal : allValues[0];
       if (optionMatcher !== undefined) {
         const matcherLower = optionMatcher.toLowerCase();
+        // Returns either a matched value (may be "") or null when no
+        // option's text matches. Wrap in an object so we can
+        // distinguish "matched to empty value" from "no match".
         const matched = await this.page
           .locator(`${selector} option`)
           .evaluateAll(
-            (opts, needle) =>
-              opts
+            (opts, needle) => {
+              const hit = opts
                 .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
-                .find((o) => o.textContent?.toLowerCase().includes(needle))
-                ?.value ?? null,
+                .find((o) => o.textContent?.toLowerCase().includes(needle));
+              return hit !== undefined ? { value: hit.value } : null;
+            },
             matcherLower,
           );
-        if (typeof matched === "string" && matched.length > 0) {
-          chosenValue = matched;
+        if (matched !== null) {
+          chosenValue = matched.value;
         }
+      }
+      if (chosenValue === undefined) {
+        throw new Error(`<select> ${selector} has no selectable option`);
       }
       await this.page.selectOption(selector, chosenValue);
       return;
