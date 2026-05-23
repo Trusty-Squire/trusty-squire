@@ -228,7 +228,7 @@ function preflightChecks() {
   checks.push({
     name: "harvester chrome profile",
     ok: existsSync(process.env.TRUSTY_SQUIRE_PROFILE_DIR ??
-                   join(homedir(), ".trusty-squire", "chrome-profile-harvester")),
+                   join(homedir(), ".trusty-squire", "chrome-profile")),
     detail: `must be seeded with methoxine's Google OAuth session via 'npx @trusty-squire/mcp login --provider=google' (TRUSTY_SQUIRE_PROFILE_DIR=${process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "<default>"})`,
   });
   checks.push({
@@ -275,7 +275,7 @@ async function invokeProvisionAnyService(entry) {
       process.env.UNIVERSAL_BOT_PREFER_CHEAP ?? "true",
     TRUSTY_SQUIRE_PROFILE_DIR:
       process.env.TRUSTY_SQUIRE_PROFILE_DIR ??
-      join(homedir(), ".trusty-squire", "chrome-profile-harvester"),
+      join(homedir(), ".trusty-squire", "chrome-profile"),
   };
 
   const transport = new StdioClientTransport({
