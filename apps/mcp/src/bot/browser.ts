@@ -1018,6 +1018,19 @@ export class BrowserController {
         throw new Error(`<select> ${selector} has no selectable option`);
       }
       await this.page.selectOption(selector, chosenValue);
+      // rc.17 — mark the element as touched so subsequent inventory
+      // reads can suppress the DEFAULTED-dropdown warning for it.
+      // Without this, a select whose committed value is "" (Railway's
+      // "No workspace") keeps tripping the warning every round, and
+      // the planner gets stuck in a select→select→… loop trying to
+      // satisfy a warning the form has already satisfied.
+      await this.page
+        .locator(selector)
+        .first()
+        .evaluate((el) => {
+          if (el instanceof HTMLElement) el.setAttribute("data-ts-touched", "1");
+        })
+        .catch(() => {});
       return;
     }
 
@@ -1938,6 +1951,7 @@ export class BrowserController {
         value: string | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
+        interactedThisRun: boolean;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -1994,6 +2008,7 @@ export class BrowserController {
             el instanceof HTMLSelectElement
               ? clean(el.options[el.selectedIndex]?.textContent ?? null)
               : null,
+          interactedThisRun: el.getAttribute("data-ts-touched") === "1",
         });
       }
       return out;
@@ -2389,6 +2404,14 @@ export interface InteractiveElement {
   // an option by name. Both null for non-select elements.
   selectOptions?: Array<{ value: string; text: string }> | null;
   selectedOptionText?: string | null;
+  // True when the bot has issued a selectOption / type / etc. against
+  // this element earlier in this run, leaving a `data-ts-touched`
+  // attribute. Inventory rendering uses this to suppress the
+  // DEFAULTED-dropdown warning on selects we've already committed —
+  // a Railway "No workspace" (value="") select otherwise re-trips
+  // the warning every round and the planner gets stuck in a select
+  // loop. Default false (or absent).
+  interactedThisRun?: boolean;
 }
 
 // Score a button/link by how much its text reads like a signup

@@ -214,6 +214,49 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(result.skill.steps[2]!.kind).toBe("extract_via_copy_button");
   });
 
+  // rc.17 regression — generated unique names (the shape rc.15's
+  // planner prompt told the bot to use) MUST templatize to
+  // ${TOKEN_NAME} so each replay generates a fresh name. Without
+  // this, every promoted skill bakes in a name that already exists
+  // on the upstream service and replay deterministically fails at
+  // the credential-creating click (Railway's silent duplicate-name
+  // rejection).
+  it("templatizes a generated unique fill value to ${TOKEN_NAME}", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    // Replace the fill value with the generated-name shape rc.15
+    // produces in the wild — exactly the value that broke the
+    // Run #2 → Run #3 replay path.
+    rounds[1]!.observed = {
+      kind: "fill",
+      selector: "input[name='token-name']",
+      value: "agent-zp9q",
+      reason: "Fill a unique token name",
+    };
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+
+    const fillStep = result.skill.steps[1]!;
+    if (fillStep.kind !== "fill") throw new Error("expected fill");
+    expect(fillStep.value_template).toBe("${TOKEN_NAME}");
+  });
+
+  it("keeps a non-generated fill value as a literal", () => {
+    const service = uniqueService();
+    // "my-api-token" — 3 hyphen-separated parts, doesn't match the
+    // generated-name shape regex (^[a-z]{3,15}-[a-z0-9]{4,12}$).
+    const { dir, runId } = setupCaptures(railwayRounds(service));
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+
+    const fillStep = result.skill.steps[1]!;
+    if (fillStep.kind !== "fill") throw new Error("expected fill");
+    expect(fillStep.value_template).toBe("my-api-token");
+  });
+
   it("prefers Copy button extraction over regex when a Copy button is in inventory", () => {
     const service = uniqueService();
     const { dir, runId } = setupCaptures(railwayRounds(service));

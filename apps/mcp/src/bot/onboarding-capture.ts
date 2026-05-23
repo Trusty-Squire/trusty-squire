@@ -60,6 +60,20 @@ export function currentRunId(): string | undefined {
   return runId;
 }
 
+// rc.17 — reset the per-process capture chain state at the start of a
+// new signup. runId is module-scoped and was previously set once per
+// process; back-to-back signups in one bot process then shared the
+// same runId, so the second signup's round-0 looked up the first
+// signup's last hash via chainHead and wrote a non-null prev_hash —
+// which the chain verifier then rejected as prev_hash_mismatch (Run
+// #3 of the Railway closed-loop test was the canonical case).
+// Called from UniversalSignupBot.runSession() before the bot's first
+// captureOnboardingRound call.
+export function resetCaptureChain(): void {
+  runId = undefined;
+  chainHead.clear();
+}
+
 // Per-(service, runId) chain head. Each new round's `prev_hash` is the
 // previous round's `content_hash`; round 0's `prev_hash` is null. The
 // promoter walks the chain forward and rejects on any break.

@@ -361,12 +361,24 @@ function translateStep(
     case "fill": {
       const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex);
       if (hintResult.kind !== "ok") return hintResult;
+      // rc.17 — if the captured value looks like the unique-name
+      // shape the rc.15 planner prompt told the bot to use
+      // (e.g. "agent-zp9q", "ts-x9k2", "mcp-a3b9c2f1"), templatize
+      // it to ${TOKEN_NAME} so each replay generates a fresh name.
+      // Without this, every promoted skill bakes in the literal
+      // name from its capture run — and the very next replay fails
+      // at the credential-creating click because that name now
+      // already exists on the service (Railway's silent duplicate-
+      // name rejection was the canonical case).
+      const literal = observed.value;
+      const looksGenerated = /^[a-z]{3,15}-[a-z0-9]{4,12}$/.test(literal);
+      const valueTemplate = looksGenerated ? "${TOKEN_NAME}" : literal;
       return {
         kind: "ok",
         step: {
           kind: "fill",
           label_hint: hintResult.hint,
-          value_template: observed.value,
+          value_template: valueTemplate,
           provenance,
         },
       };

@@ -14,6 +14,7 @@ import type { AgentInbox } from "./agent.js";
 import { withOAuthLock } from "./oauth-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
+import { resetCaptureChain } from "./onboarding-capture.js";
 
 export {
   type SignupResult,
@@ -125,6 +126,12 @@ export class UniversalSignupBot {
   }
 
   private async runSession(request: UniversalSignupRequest): Promise<SignupResult> {
+    // rc.17 — reset the disk-capture chain state so this signup starts
+    // a fresh runId + empty chainHead. Otherwise back-to-back signups
+    // in the same bot process share runId and the second one's chain
+    // looks up the first one's last hash as prev_hash, failing
+    // verifyCaptureChain with prev_hash_mismatch.
+    resetCaptureChain();
     // Defaults: humanize=true (production behavior — we want to pass
     // Cloudflare/reCAPTCHA scoring). Tests can pass `humanize: false`
     // to skip the behavior-simulation overhead.

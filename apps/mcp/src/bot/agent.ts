@@ -635,14 +635,21 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
       // list to issue an explicit `select` step before clicking
       // submit. Selectors run to end-of-line, so this annotation goes
       // BEFORE the trailing `selector=`.
+      //
+      // rc.17: suppress the DEFAULTED marker for selects we've already
+      // selected (data-ts-touched). A successful selectOption to a
+      // value="" option leaves value=="" but the form-state is
+      // committed — without this suppression the planner would see
+      // DEFAULTED again next round and re-select indefinitely.
       if (e.tag === "select") {
         const selectedText = e.selectedOptionText ?? "";
         const isDefaulted =
           e.value !== null && e.value !== undefined && e.value.length === 0;
+        const alreadyTouched = e.interactedThisRun === true;
         bits.push(
-          isDefaulted
+          isDefaulted && !alreadyTouched
             ? `value="" selected=${JSON.stringify(selectedText)} (DEFAULTED — pick an explicit option before submitting)`
-            : `value=${JSON.stringify((e.value ?? "").slice(0, 60))} selected=${JSON.stringify(selectedText)}`,
+            : `value=${JSON.stringify((e.value ?? "").slice(0, 60))} selected=${JSON.stringify(selectedText)}${alreadyTouched ? " (touched — already selected by bot)" : ""}`,
         );
         if (e.selectOptions !== null && e.selectOptions !== undefined && e.selectOptions.length > 0) {
           const optionTexts = e.selectOptions
@@ -2999,7 +3006,11 @@ ${formatInventory(input.inventory)}`,
                 e.value.length === 0 &&
                 e.selectOptions !== null &&
                 e.selectOptions !== undefined &&
-                e.selectOptions.length > 1,
+                e.selectOptions.length > 1 &&
+                // rc.17 — skip selects we've already touched; their
+                // form state is committed even though the visible
+                // value="" still trips the DEFAULTED heuristic.
+                e.interactedThisRun !== true,
             )
             .slice(0, 5)
             .map((e) => {
