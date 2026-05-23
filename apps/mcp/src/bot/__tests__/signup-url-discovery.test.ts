@@ -118,47 +118,121 @@ describe("isGoogleSearchUrl", () => {
 });
 
 describe("detectAlreadySignedIn (F17)", () => {
+  const SIGNUP_URL = "https://example.com/signup";
+  const LOGIN_URL = "https://example.com/login";
+  const DASHBOARD_URL = "https://example.com/dashboard";
+  const NEW_URL = "https://railway.com/new";
+
   it("fires when dashboard markers present and no credential inputs", () => {
     expect(
-      detectAlreadySignedIn([
-        mkEl({ tag: "a", visibleText: "Dashboard" }),
-        mkEl({ tag: "a", visibleText: "Projects" }),
-        mkEl({ tag: "button", visibleText: "Sign out" }),
-      ]),
+      detectAlreadySignedIn({
+        url: DASHBOARD_URL,
+        inventory: [
+          mkEl({ tag: "a", visibleText: "Dashboard" }),
+          mkEl({ tag: "a", visibleText: "Projects" }),
+          mkEl({ tag: "button", visibleText: "Sign out" }),
+        ],
+      }),
     ).toBe(true);
   });
 
   it("does NOT fire when an email or password input is present", () => {
     expect(
-      detectAlreadySignedIn([
-        mkEl({ tag: "a", visibleText: "Dashboard" }),
-        mkEl({ tag: "input", type: "email", visibleText: null }),
-      ]),
+      detectAlreadySignedIn({
+        url: SIGNUP_URL,
+        inventory: [
+          mkEl({ tag: "a", visibleText: "Dashboard" }),
+          mkEl({ tag: "input", type: "email", visibleText: null }),
+        ],
+      }),
     ).toBe(false);
     expect(
-      detectAlreadySignedIn([
-        mkEl({ tag: "button", visibleText: "Sign out" }),
-        mkEl({ tag: "input", type: "password" }),
-      ]),
+      detectAlreadySignedIn({
+        url: SIGNUP_URL,
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Sign out" }),
+          mkEl({ tag: "input", type: "password" }),
+        ],
+      }),
     ).toBe(false);
   });
 
   it("does NOT fire on a true sign-up page (no auth markers)", () => {
     expect(
-      detectAlreadySignedIn([
-        mkEl({ tag: "button", visibleText: "Continue with Google" }),
-        mkEl({ tag: "button", visibleText: "Sign up" }),
-        mkEl({ tag: "a", visibleText: "Home" }),
-      ]),
+      detectAlreadySignedIn({
+        url: SIGNUP_URL,
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Continue with Google" }),
+          mkEl({ tag: "button", visibleText: "Sign up" }),
+          mkEl({ tag: "a", visibleText: "Home" }),
+        ],
+      }),
     ).toBe(false);
   });
 
   it("matches Sign out / Log out / Workspaces / Settings", () => {
     for (const text of ["Sign out", "Log out", "Workspaces", "Settings", "My Account"]) {
       expect(
-        detectAlreadySignedIn([mkEl({ tag: "a", visibleText: text })]),
+        detectAlreadySignedIn({
+          url: LOGIN_URL,
+          inventory: [mkEl({ tag: "a", visibleText: text })],
+        }),
         `should fire on "${text}"`,
       ).toBe(true);
     }
+  });
+
+  // rc.18 — Railway's /new project-creation page has none of the
+  // strict nav keywords. The only post-login signal is the "$X.XX
+  // left / Trial" billing widget. Signal 2 (billing) covers this.
+  it("fires on a billing/trial widget even without nav keywords", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: NEW_URL,
+        inventory: [
+          mkEl({ tag: "button", visibleText: "New project" }),
+          mkEl({ tag: "button", visibleText: "28 days or $5.00 leftTrial" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("fires on dashboard URL + creation CTA without billing widget", () => {
+    // Signal 3 alone.
+    expect(
+      detectAlreadySignedIn({
+        url: NEW_URL,
+        inventory: [
+          mkEl({ tag: "button", visibleText: "New project" }),
+          mkEl({ tag: "a", visibleText: "Templates" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT fire on /signup with a 'Create account' CTA — would otherwise false-positive", () => {
+    // The URL gate excludes /signup paths so a Create button there
+    // doesn't trip the dashboard+CTA signal.
+    expect(
+      detectAlreadySignedIn({
+        url: SIGNUP_URL,
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Create account" }),
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("does NOT fire when only a billing-shaped string but no signal-1/3 — must respect input precondition", () => {
+    // Email input still beats billing.
+    expect(
+      detectAlreadySignedIn({
+        url: NEW_URL,
+        inventory: [
+          mkEl({ tag: "input", type: "email" }),
+          mkEl({ tag: "button", visibleText: "Trial $5.00 left" }),
+        ],
+      }),
+    ).toBe(false);
   });
 });

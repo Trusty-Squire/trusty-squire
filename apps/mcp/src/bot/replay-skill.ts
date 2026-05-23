@@ -753,12 +753,25 @@ async function executeStep(
     }
 
     case "extract_via_regex": {
-      const text = await browser.extractText();
-      const extracted = extractApiKeyFromText(text);
-      if (extracted === null) {
-        throw new Error(`No credential matching pattern ${step.pattern_name} found on page.`);
+      // rc.18 — poll the page text for the credential. The previous
+      // step (click Create / Generate / etc.) returns after a fixed
+      // 1s settle, but services like Railway render the new-token
+      // row 1-3s after the click. Single-shot extract was racing
+      // the DOM update and finding nothing. Poll up to 8s on a
+      // 500ms tick, return the first match. The real bot's post-
+      // verify loop achieves the same robustness implicitly by
+      // re-extracting at the top of each round; replay collapses
+      // that into one step and needs an explicit poll.
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        const text = await browser.extractText();
+        const extracted = extractApiKeyFromText(text);
+        if (extracted !== null) {
+          return { kind: "extract_ok", value: extracted, via: "regex" };
+        }
+        await browser.wait(0.5);
       }
-      return { kind: "extract_ok", value: extracted, via: "regex" };
+      throw new Error(`No credential matching pattern ${step.pattern_name} found on page.`);
     }
 
     // Multi-cred extract: mirrors the single-cred copy_button executor

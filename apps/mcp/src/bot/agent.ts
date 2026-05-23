@@ -827,31 +827,100 @@ export function detectAntiBotBlock(html: string): string | null {
   return null;
 }
 
-// F17 — True when the inventory looks like an authenticated
-// dashboard rather than a sign-up page. Triggers when a prior OAuth
-// bind already linked the account and the service auto-redirects
-// past the sign-in widget on the next visit. Detection signals:
-//   - At least one element whose visible text matches an
-//     authenticated-state keyword (Sign out / Log out / Dashboard /
-//     Projects / Settings / Profile / Account)
-//   - No email/password input fields visible (a true sign-up page
-//     virtually always has at least one)
-// Conservative — both conditions must hold.
-export function detectAlreadySignedIn(
-  inventory: readonly InteractiveElement[],
-): boolean {
-  const AUTH_KEYWORDS =
-    /^\s*(?:sign out|log out|dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
-  const hasAuthMarker = inventory.some((e) =>
-    AUTH_KEYWORDS.test((e.visibleText ?? e.ariaLabel ?? "").trim()),
-  );
-  if (!hasAuthMarker) return false;
+// F17 — True when the page looks like an authenticated dashboard
+// rather than a sign-up page. Triggers when a prior OAuth bind
+// already linked the account and the service auto-redirects past
+// the sign-in widget on the next visit.
+//
+// **Universal precondition**: no email/password/tel input visible.
+// A true sign-up page virtually always has at least one; if any
+// such input is present, we are NOT authenticated regardless of
+// what other markers the page carries.
+//
+// **Positive signals (any one fires authentication)**:
+//   1. Explicit nav keyword (Sign out / Log out / Dashboard /
+//      Projects / Settings / Profile / Account / Workspaces) —
+//      the canonical strict-match path. Works for Sentry,
+//      OpenRouter, Postmark, etc. — sites with a real nav bar.
+//   2. Billing / trial widget visible ("$X.XX left", "N days left",
+//      "Trial") — these only render to authenticated users. Caught
+//      Railway's `/new` page where the only post-login marker was
+//      the "28 days or $5.00 leftTrial" button.
+//   3. Dashboard-route URL (path contains /new, /dashboard,
+//      /projects, /account, /settings, /workspace) AND a creation
+//      CTA visible ("New project", "Create", "New <X>") — paired
+//      signal that catches sparse SPAs whose entire layout is a
+//      single create-form on a logged-in URL.
+//
+// rc.18: signals 2 and 3 added. Previously only signal 1 was
+// checked; Railway's project-creation widget tripped the form-fill
+// fallback (and a low-confidence LLM plan that filled "Empty
+// Project" then waited for a verification email that never came).
+export function detectAlreadySignedIn(args: {
+  inventory: readonly InteractiveElement[];
+  url: string;
+}): boolean {
+  const { inventory, url } = args;
+
+  // Precondition: any visible credential input → not authenticated.
   const hasCredentialInput = inventory.some(
     (e) =>
       e.tag === "input" &&
       (e.type === "email" || e.type === "password" || e.type === "tel"),
   );
-  return !hasCredentialInput;
+  if (hasCredentialInput) return false;
+
+  const visibleTextOf = (e: InteractiveElement): string =>
+    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+
+  // Signal 1 — strict nav-keyword match (the canonical Sentry-class case).
+  const AUTH_KEYWORDS =
+    /^\s*(?:sign out|log out|dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
+  if (
+    inventory.some((e) => AUTH_KEYWORDS.test((e.visibleText ?? e.ariaLabel ?? "").trim()))
+  ) {
+    return true;
+  }
+
+  // Signal 2 — billing / trial widget. Patterns observed in the wild:
+  //   "28 days or $5.00 leftTrial" (Railway, no separator)
+  //   "Trial" (most SaaS)
+  //   "$N left" / "N days left" / "remaining"
+  const BILLING =
+    /(?:\$\d+(?:\.\d+)?\s*(?:left|remaining)|\d+\s*days?\s*(?:left|remaining|trial)|\btrial\b)/i;
+  if (inventory.some((e) => BILLING.test(visibleTextOf(e)))) {
+    return true;
+  }
+
+  // Signal 3 — dashboard-route URL + creation CTA visible.
+  // The URL gate is conservative: a path that READS as dashboard,
+  // not /login or /signup or /. Combined with a creation CTA
+  // ("New project", "Create workspace", "+ New") it pins the
+  // page as a post-login surface.
+  let dashboardyPath = false;
+  try {
+    const parsed = new URL(url);
+    dashboardyPath =
+      /\/(?:new|dashboard|projects?|account|settings|workspace|home)(?:\/|$)/i.test(
+        parsed.pathname,
+      ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname);
+  } catch {
+    // Malformed URL — skip URL signal.
+  }
+  if (dashboardyPath) {
+    const CREATION_CTA =
+      /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key)|create(?:\s+(?:new|a|project|workspace))?)/i;
+    if (
+      inventory.some((e) => {
+        const t = e.visibleText ?? e.ariaLabel ?? "";
+        return CREATION_CTA.test(t.trim());
+      })
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // True when the page has no fillable text input AND no button that
@@ -1422,9 +1491,9 @@ export class SignupAgent {
         // path entirely and route to the post-OAuth navigation loop
         // to find the API key — same path Sentry/OpenRouter use post-
         // handshake.
-        if (detectAlreadySignedIn(inventory)) {
+        if (detectAlreadySignedIn({ inventory, url: state.url })) {
           steps.push(
-            "Auto-OAuth: page shows dashboard markers (Sign out / Dashboard / etc.) — " +
+            "Auto-OAuth: page shows authenticated-state markers (nav keyword, billing widget, or dashboard URL + create CTA) — " +
               "treating as already authenticated, jumping to post-verify navigation",
           );
           return { kind: "already_oauth" };
