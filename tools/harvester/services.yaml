@@ -1,0 +1,179 @@
+# Skill-harvester queue.
+#
+# Each entry describes one service the harvester will attempt to sign up
+# to + promote a replayable skill for. Fields:
+#
+#   slug              Stable lowercase ID. Used as the registry service
+#                     slug AND as a GitHub label (`service:<slug>`).
+#                     MUST be lowercase, no spaces. Editing breaks state
+#                     tracking; pick once and freeze.
+#   name              Display name. Passed to provision_any_service as
+#                     the `service` argument and shown in GitHub issue
+#                     titles. Mirrors the planner's "Service:" line.
+#   signup_url        Direct URL the bot navigates to. The bot's
+#                     URL-discovery flow is bypassed because the
+#                     harvester picks deliberate landing pages — pick
+#                     /signup, /register, or /login as appropriate. For
+#                     Railway specifically: /login (not /new, which is
+#                     authed-only).
+#   oauth_provider    The OAuth identity to use. As of harvester v1 we
+#                     only run signups via `google` (methoxine@gmail.com
+#                     session in the harvester chrome profile). GitHub-
+#                     only services are not yet in scope and should be
+#                     marked status:skip until that lands.
+#   scope_hint        Free-text guidance to the planner for permission/
+#                     scope dropdowns (Sentry's per-row picker; Postmark's
+#                     server-vs-account toggle). Empty / null lets the
+#                     rc.12 default kick in ("max permissions").
+#   status            Lifecycle state.
+#                       pending      — never attempted, eligible to run
+#                       skip         — known-incompatible, harvester
+#                                       never picks this. Document reason.
+#                       hold         — temporarily paused (e.g. waiting
+#                                       for an upstream fix). Same effect
+#                                       as skip but signals intent.
+#                     The runtime per-attempt state (running, replay-ok,
+#                     failed, needs-manual) lives on the GitHub issue's
+#                     labels, NOT here — this file is hand-edited config,
+#                     not a state DB.
+
+- slug: ipinfo
+  name: IPInfo
+  signup_url: https://ipinfo.io/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Simplest known case — API key on dashboard after signup. Already
+    promoted from a prior lunchboxfortwo run; this re-validates with
+    methoxine identity.
+
+- slug: openrouter
+  name: OpenRouter
+  signup_url: https://openrouter.ai/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Copy-button extract path (the F10 case). Validates rc.19's
+    findCopyButton-via-title against a second service.
+
+- slug: resend
+  name: Resend
+  signup_url: https://resend.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Cloudflare Turnstile during signup — Tier-1 behavior simulation
+    should pass. Previously verified post-captcha success.
+
+- slug: postmark
+  name: Postmark
+  signup_url: https://account.postmarkapp.com/sign_up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    reCAPTCHA v3 scoring — Tier-1 behavior simulation should pass.
+    Previously verified post-captcha success.
+
+- slug: sentry
+  name: Sentry
+  signup_url: https://sentry.io/signup/
+  oauth_provider: google
+  scope_hint: "max permissions on every scope dropdown — Admin > Write > Read"
+  status: pending
+  notes: |
+    Multi-row scope grid (Project / Team / Member / Issue / Event /
+    Release / Organization). scope_hint steers each row to Admin/Write.
+    rc.12 system prompt has a paragraph specifically for this shape.
+
+- slug: render
+  name: Render
+  signup_url: https://dashboard.render.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Previously bottlenecked on verification email; inbox revival
+    (2026-05-20, trustysquire.com SES) unblocked. This is the first
+    post-revival test for Render.
+
+- slug: railway
+  name: Railway
+  signup_url: https://railway.com/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Already validated end-to-end with lunchboxfortwo. Re-running under
+    methoxine identity to confirm closed-loop generalizes across
+    accounts.
+
+- slug: posthog
+  name: PostHog
+  signup_url: https://app.posthog.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Slow SPA — the planner has historically raced the form render.
+    Watch for "no Name input" style failures; bump waitForFormReady
+    if needed.
+
+- slug: anthropic
+  name: Anthropic API
+  signup_url: https://console.anthropic.com/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Untested — Anthropic's console may require workspace creation
+    before API keys are reachable. If post-verify can't find /settings/
+    keys, fall through.
+
+- slug: openai
+  name: OpenAI API
+  signup_url: https://platform.openai.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Likely phone-verification gate during signup. If the post-OAuth
+    page lands on a phone-entry form, the bot's anti-bot detection
+    won't help — mark status:needs-manual after first attempt.
+
+# Known-incompatible services. Kept here for visibility — operator should
+# never see a `service:cloudflare` issue auto-created.
+- slug: cloudflare
+  name: Cloudflare
+  signup_url: https://dash.cloudflare.com/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: skip
+  reason: |
+    Cloudflare's own dashboard ships maximum-strength Turnstile + IP
+    risk-score gating that the universal bot cannot pass. CLAUDE.md
+    notes: "manual signup is the realistic call".
+
+- slug: vercel
+  name: Vercel
+  signup_url: https://vercel.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: skip
+  reason: |
+    SMS phone-verification gate (F12). The bot completes OAuth but
+    halts at the phone-entry form. Will be revisited if a phone-
+    relay path is added.
+
+- slug: mailersend
+  name: MailerSend
+  signup_url: https://app.mailersend.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: skip
+  reason: |
+    Same shape as Vercel — phone-verification gate after the form
+    completes. Skip until phone relay exists.

@@ -1,0 +1,13 @@
+{
+  "name": "@trusty-squire/harvester",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Skill harvester — drives provision_any_service across a curated queue of dev SaaS services, reports per-service progress to GitHub issues.",
+  "scripts": {
+    "dry-run": "node run.mjs --dry-run"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}
