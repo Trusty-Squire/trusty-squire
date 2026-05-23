@@ -1948,6 +1948,7 @@ export class BrowserController {
         inConsentWidget: boolean;
         href: string | null;
         iconLabel: string | null;
+        title: string | null;
         value: string | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
@@ -1978,6 +1979,7 @@ export class BrowserController {
           inConsentWidget: inConsent(el),
           href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
           iconLabel: iconLabelFor(el),
+          title: clean(el.getAttribute("title")),
           value:
             el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
               ? el.value
@@ -2386,6 +2388,13 @@ export interface InteractiveElement {
   // live extractInteractiveElements sets them; test fixtures omit them.
   href?: string | null;
   iconLabel?: string | null;
+  // rc.19 — the element's own `title` attribute. Tooltip-style labels
+  // used by icon-only buttons like Railway's modal "Copy Code" copy
+  // button, which has no visible text and no aria-label. Without this
+  // signal, findCopyButton in the synthesizer falls back to
+  // extract_via_regex on bare UUIDs (which the regex library cannot
+  // match without a label). Optional; test fixtures may omit.
+  title?: string | null;
   // Current value of a text-shaped input/textarea OR a <select>.
   // Surfaces "is this field actually empty / unselected?" to the
   // planner. For an input/textarea: empty string means the field

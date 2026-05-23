@@ -41,6 +41,7 @@ function inventoryElement(overrides: Partial<InteractiveElement>): InteractiveEl
     inViewport: overrides.inViewport ?? true,
     inConsentWidget: overrides.inConsentWidget ?? false,
     value: overrides.value ?? null,
+    title: overrides.title ?? null,
   };
 }
 
@@ -280,6 +281,36 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
       throw new Error("expected extract_via_copy_button");
     }
     expect(extract.near_text_hint).toBe("New Token");
+  });
+
+  // rc.19 regression — Railway's icon-only modal copy button has
+  // no visible text and no aria-label; its only label signal is the
+  // `title="Copy Code"` attribute. Pre-rc.19 the synthesizer missed
+  // it and fell back to extract_via_regex (which fails on bare
+  // UUIDs). Now findCopyButton checks title + iconLabel + adds
+  // "Copy Code" to its vocabulary.
+  it("finds an icon-only copy button via the title attribute", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    // Replace the explicit-text Copy button with an icon-only one
+    // labeled only via title — exactly the shape Railway ships.
+    rounds[2]!.inventory = [
+      inventoryElement({
+        index: 0,
+        tag: "button",
+        visibleText: "",
+        ariaLabel: null,
+        title: "Copy Code",
+        selector: "button.copy-code-btn",
+        role: "button",
+      }),
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+    const extract = result.skill.steps[2]!;
+    expect(extract.kind).toBe("extract_via_copy_button");
   });
 
   it("infers shape_hint: uuid from the visible token in HTML", () => {

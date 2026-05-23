@@ -758,16 +758,43 @@ async function executeStep(
       // 1s settle, but services like Railway render the new-token
       // row 1-3s after the click. Single-shot extract was racing
       // the DOM update and finding nothing. Poll up to 8s on a
-      // 500ms tick, return the first match. The real bot's post-
-      // verify loop achieves the same robustness implicitly by
-      // re-extracting at the top of each round; replay collapses
-      // that into one step and needs an explicit poll.
+      // 500ms tick.
+      //
+      // rc.19 — mirror the bot's Pass-4 copy-button colocation scan.
+      // Railway's modal renders the UUID in a <span>5588…</span>
+      // adjacent to an icon-only "Copy Code" button. The regex
+      // library cannot match a bare UUID without a nearby label,
+      // so extractApiKeyFromText returns null even though the
+      // value is on the page. The bot's real extractCredentials
+      // accepts a bare UUID when it is colocated with a Copy
+      // affordance — that colocation IS the credential signal.
+      // Replay needs the same fallback or the skill replay-fails
+      // forever on Railway-class flows even with the polling above.
+      const UUID_RE =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const deadline = Date.now() + 8000;
       while (Date.now() < deadline) {
         const text = await browser.extractText();
         const extracted = extractApiKeyFromText(text);
         if (extracted !== null) {
           return { kind: "extract_ok", value: extracted, via: "regex" };
+        }
+        // Pass-4: scan tokens near a Copy button. extractCredentials-
+        // NearCopyButtons walks each Copy affordance's ancestor
+        // subtree and tokenizes; a bare UUID-shaped token there is
+        // accepted as the credential.
+        try {
+          for (const candidate of await browser.extractCredentialsNearCopyButtons()) {
+            if (UUID_RE.test(candidate)) {
+              return { kind: "extract_ok", value: candidate, via: "regex" };
+            }
+            const hit = extractApiKeyFromText(candidate);
+            if (hit !== null) {
+              return { kind: "extract_ok", value: hit, via: "regex" };
+            }
+          }
+        } catch {
+          // Non-fatal — fall through to next poll tick.
         }
         await browser.wait(0.5);
       }

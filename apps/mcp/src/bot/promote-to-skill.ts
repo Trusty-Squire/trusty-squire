@@ -678,9 +678,15 @@ function findCopyButton(
   inventory: readonly InteractiveElement[],
 ): InteractiveElement | null {
   for (const el of inventory) {
-    const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+    // rc.19 — also include title (icon-only buttons like Railway's
+    // "Copy Code" modal button carry the label there) and iconLabel
+    // (which folds in descendant SVG/img alt/aria-label). Without
+    // this, the synthesizer picks extract_via_regex for Railway-
+    // class flows, then the replay's regex library can't match a
+    // bare UUID and the skill replay-fails forever.
+    const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.title ?? ""} ${el.iconLabel ?? ""}`.trim();
     // Same vocabulary as agent.ts:tryCopyButtonExtraction.
-    if (/^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|key|to\s+clipboard)\b/i.test(text)) {
+    if (/^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|code|key|to\s+clipboard)\b/i.test(text)) {
       return el;
     }
   }
