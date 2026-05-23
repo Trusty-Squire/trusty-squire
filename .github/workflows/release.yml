@@ -363,8 +363,25 @@ jobs:
             fi
             sleep 10
           done
-          curl -sSL "$URL" | tar -xzO package/dist/install/cli.js | grep -q 'case "connect"' \
-            || { echo "::error::Published tarball missing case \"connect\""; exit 1; }
+          # Stage the tarball + extracted cli.js to disk before grep.
+          # Under `set -o pipefail`, the earlier
+          #   curl | tar -xzO ... | grep -q 'case "connect"'
+          # form false-negative'd whenever the sentinel was actually
+          # present: grep -q exits as soon as it matches, the
+          # downstream pipe closes, tar's next write gets SIGPIPE
+          # (exit 141), and pipefail surfaces 141 as the pipeline
+          # status — making every successful publish look red.
+          # Staging breaks the pipeline so each command's exit is
+          # checked in isolation.
+          TGZ="$(mktemp --suffix=.tgz)"
+          CLI="$(mktemp --suffix=.cli.js)"
+          trap 'rm -f "$TGZ" "$CLI"' EXIT
+          curl -sSL "$URL" -o "$TGZ"
+          tar -xzO -f "$TGZ" package/dist/install/cli.js > "$CLI"
+          if ! grep -q 'case "connect"' "$CLI"; then
+            echo "::error::Published tarball missing case \"connect\""
+            exit 1
+          fi
           echo "✓ Tarball contains case \"connect\""
 
       - name: Verify dist-tag points at this version (and fix if pnpm lied)
