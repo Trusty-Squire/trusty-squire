@@ -2401,6 +2401,30 @@ export class SignupAgent {
       provider.id === "github"
         ? "npx @trusty-squire/mcp login --provider=github"
         : "npx @trusty-squire/mcp login";
+    // rc.22 — OpenRouter (Clerk) renders a visible Cloudflare Turnstile
+    // checkbox at the bottom of the same form as the OAuth buttons.
+    // Clerk's Google button stops at a loading spinner if Turnstile
+    // hasn't been completed — the OAuth click never redirects, the bot
+    // sees URL unchanged and times out. clickSubmit handles this for
+    // form-submit paths, but OAuth-first bypasses clickSubmit. Run the
+    // tier-2 solver here too. Best-effort: a missing widget no-ops, a
+    // failed solve still proceeds (the click may still work for some
+    // services that don't gate OAuth on Turnstile).
+    try {
+      const captcha = await this.browser.solveVisibleCaptcha(20_000);
+      if (captcha.found) {
+        steps.push(
+          captcha.solved
+            ? `OAuth: ticked the visible ${captcha.kind ?? "captcha"} checkbox before clicking the ${provider.label} affordance`
+            : `OAuth: visible ${captcha.kind ?? "captcha"} present but did not solve in 20s — clicking the ${provider.label} affordance anyway`,
+        );
+      }
+    } catch (err) {
+      // Solver is best-effort; never block OAuth on its failure.
+      steps.push(
+        `OAuth: visible-captcha precheck failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     steps.push(`OAuth: clicking the ${provider.label} sign-in affordance`);
     await this.browser.startOAuth(oauthSelector);
     await this.browser.wait(3);
