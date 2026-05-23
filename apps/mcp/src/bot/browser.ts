@@ -1149,6 +1149,38 @@ export class BrowserController {
   private async humanClickLocator(locator: Locator): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await locator.waitFor({ state: "visible", timeout: 10000 });
+    // rc.20 — wait for the target to be ENABLED before issuing the
+    // click. humanClick uses page.mouse.click(x, y) which bypasses
+    // Playwright's actionability check, so a disabled button receives
+    // the mousedown/mouseup events but the browser no-ops them, and
+    // the caller sees no error. Symptom: OpenRouter's /sign-up renders
+    // Clerk's OAuth buttons with `disabled` + `cl-loading` while Clerk
+    // JS is initialising; humanClick fires against the disabled
+    // Google button, nothing happens, then auth-state detection
+    // misreads "URL unchanged, not on provider" as "OAuth completed"
+    // and the run falls apart.
+    //
+    // Poll for up to 6s for the disabled state to clear. Both the
+    // HTML `disabled` attribute AND `aria-disabled="true"` are
+    // honored — the latter covers ARIA-styled buttons (Radix, Headless
+    // UI) that visually appear interactive but reject input.
+    {
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        const isDisabled = await locator
+          .first()
+          .evaluate((el) => {
+            if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement) {
+              if (el.disabled) return true;
+            }
+            const aria = el.getAttribute("aria-disabled");
+            return aria === "true" || aria === "";
+          })
+          .catch(() => false);
+        if (!isDisabled) break;
+        await this.sleep(150);
+      }
+    }
     // Scroll the element into the viewport BEFORE measuring it. A
     // humanized click is a raw page.mouse.click(x, y) at viewport
     // coordinates — boundingBox() of a below-the-fold element returns

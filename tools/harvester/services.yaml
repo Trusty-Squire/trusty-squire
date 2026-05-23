@@ -55,8 +55,13 @@
   scope_hint: null
   status: pending
   notes: |
-    Copy-button extract path (the F10 case). Validates rc.19's
-    findCopyButton-via-title against a second service.
+    Copy-button extract path (the F10 case). /sign-up is required for
+    first-time OAuth — Clerk's /sign-in errors with "External Account
+    was not found" when the Google identity has no existing account.
+    /sign-up renders Clerk's OAuth buttons in a brief disabled
+    cl-loading state; rc.20's humanClickLocator click-guard polls for
+    them to enable before clicking. Cloudflare Turnstile is also on
+    the page but doesn't gate the OAuth buttons specifically.
 
 - slug: resend
   name: Resend
