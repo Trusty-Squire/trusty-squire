@@ -12,11 +12,19 @@ import path from "node:path";
 const KEYTAR_SERVICE = "trusty-squire";
 const KEYTAR_ACCOUNT = "session";
 
-const FALLBACK_DIR = path.join(
-  process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-  "trusty-squire",
-);
-const FALLBACK_FILE = path.join(FALLBACK_DIR, "session.json");
+// rc.21 — DO NOT cache the fallback path at module-load time. Tests
+// sandbox via beforeEach { process.env.HOME = tmpdir }; a path cached
+// at import time captures the REAL ~/.config/trusty-squire/ and the
+// test then writes the test-fixture session.json to the user's actual
+// home, destroying live credentials. Resolve per-call so the env
+// override in effect at write-time wins.
+function resolveFallbackFile(): string {
+  return path.join(
+    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+    "trusty-squire",
+    "session.json",
+  );
+}
 
 // Session storage holds the account-bound credentials the squire needs
 // to act on a user's behalf:
@@ -123,8 +131,14 @@ class KeytarStorage implements SessionStorage {
 }
 
 export class FileStorage implements SessionStorage {
-  // Allow tests to override the default file path.
-  constructor(private readonly filePath: string = FALLBACK_FILE) {}
+  private readonly filePath: string;
+  // Allow tests to override the default file path. When no override is
+  // supplied, resolve the path NOW (constructor invocation) instead of
+  // capturing a value cached at module-import time — see
+  // resolveFallbackFile's comment.
+  constructor(filePath?: string) {
+    this.filePath = filePath ?? resolveFallbackFile();
+  }
 
   async read(): Promise<SessionData | null> {
     try {
