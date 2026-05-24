@@ -1485,6 +1485,14 @@ export class SignupAgent {
     let emptyPlans = 0;
     let oauthScanRetries = 0;
     let hint: string | undefined;
+    // rc.31 — once the bot has explicitly clicked an email-flow
+    // button (e.g. Railway's "Log in using email" two-stage chooser),
+    // stay on the email path. Without this, the auto-OAuth-first
+    // detection on the *next* iteration sees the now-revealed
+    // "Continue with Google" button and reroutes — exactly the
+    // regression that produced the Security Code challenge on
+    // methoxine's account during the rc.30 Railway run.
+    let committedToEmailPath = false;
 
     const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
     for (;;) {
@@ -1513,7 +1521,13 @@ export class SignupAgent {
       // provider when one was requested, else every provider the profile
       // has a session for. Absent any affordance, fall through to
       // form-fill.
-      if (oauthCandidates.length > 0) {
+      //
+      // rc.31 — skip the OAuth-first scan when we've already committed
+      // to the email path on a previous round. Otherwise a two-stage
+      // chooser ("Log in using email" → reveals a page with both an
+      // email input AND a Google button) reroutes us back to OAuth on
+      // the second round.
+      if (oauthCandidates.length > 0 && !committedToEmailPath) {
         const hit = findFirstOAuthButton(inventory, oauthCandidates);
         if (hit !== null) {
           const label = OAUTH_PROVIDERS[hit.provider].label;
@@ -1650,6 +1664,28 @@ export class SignupAgent {
       }
 
       await this.executePlan(plan, fillValues, steps, bySelector);
+
+      // rc.31 — flag the email-path commitment once we've executed a
+      // click whose reason explicitly targets an "email" affordance
+      // (Railway's "Log in using email", Vercel's "Continue with
+      // email", etc.). Subsequent OAuth-first scans will then be
+      // suppressed so we don't reroute back to Google/GitHub on the
+      // revealed page (the rc.30 Railway regression: clicking the
+      // email button revealed a page with BOTH an email input AND a
+      // Google button; without this flag the bot picks Google and
+      // triggers the Security Code challenge that methoxine can't
+      // navigate). One-way flag — once we're on email, we stay.
+      if (!committedToEmailPath) {
+        const emailClick = plan.actions.find(
+          (a) => a.kind === "click" && /\bemail\b/i.test(a.reason),
+        );
+        if (emailClick !== undefined) {
+          committedToEmailPath = true;
+          steps.push(
+            "Committed to email-fill path — auto-OAuth-first scan suppressed for the rest of this signup",
+          );
+        }
+      }
 
       // A plan with no fill actions either revealed/advanced the page
       // (a cookie banner, a two-stage "sign up with email" chooser) —
