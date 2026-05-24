@@ -1215,6 +1215,35 @@ export function isTruncatedCapture(sourceText: string, capturedKey: string): boo
   return /^\s*(?:\.{3,}|…)/.test(after);
 }
 
+// rc.28 — when the regex library doesn't recognize the credential
+// shape (e.g. IPInfo's 14-char hex token has no service-prefix and
+// no nearby "API key" label, so extractApiKeyFromText returns null),
+// the Claude vision planner often still quotes the value in its
+// `extract` step reason — e.g. "The API token 'fd3afcbe09648c' is
+// fully visible on the dashboard under 'API Access'". This pulls
+// quoted credential-shaped substrings from the reason, then keeps
+// only those that appear verbatim in the page text — the
+// verbatim-in-DOM check is the guardrail against accepting a
+// hallucinated value. Exported for unit testing.
+export function extractQuotedTokenFromReason(
+  reason: string,
+  pageText: string,
+): string | null {
+  // Single/double/back quotes around a credential-shaped value.
+  // Min 10 chars filters out short UI words ("Yes", "Copy"); max 80
+  // is the same ceiling extractApiKeyFromText effectively uses via
+  // its MAX_CREDENTIAL_LENGTH counterpart. Character class matches
+  // what real API tokens look like: alphanumeric, underscores,
+  // hyphens; no spaces, no punctuation that would gather UI text.
+  const matches = reason.matchAll(/['"`]([A-Za-z0-9_\-]{10,80})['"`]/g);
+  for (const m of matches) {
+    const candidate = m[1];
+    if (candidate === undefined) continue;
+    if (pageText.includes(candidate)) return candidate;
+  }
+  return null;
+}
+
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
@@ -3213,6 +3242,28 @@ ${formatInventory(input.inventory)}`,
         if (nextStep.kind === "extract") {
           credentials = await this.extractCredentials();
           if (credentials.api_key === undefined) {
+            // rc.28 — planner-quoted-token fallback. The regex
+            // library missed (IPInfo's 14-char hex; some other
+            // shape) but the planner's reason often literally
+            // quotes the value. Accept it IF it's also present
+            // verbatim in the visible page text — that's the
+            // anti-hallucination guardrail.
+            const pageText = await this.browser
+              .extractText()
+              .catch(() => "");
+            const quoted = extractQuotedTokenFromReason(
+              nextStep.reason,
+              pageText,
+            );
+            if (quoted !== null) {
+              credentials = { ...credentials, api_key: quoted };
+              args.steps.push(
+                `Post-verify ${round + 1}/${args.maxRounds}: extracted token via ` +
+                  `planner-quoted fallback (${quoted.slice(0, 4)}…${quoted.slice(-4)})`,
+              );
+              consecutiveFailedExtracts = 0;
+              continue;
+            }
             consecutiveFailedExtracts += 1;
             // Best-effort diagnostic upload: when extract returns
             // null despite the planner asserting a credential is
