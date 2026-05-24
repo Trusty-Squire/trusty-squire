@@ -35,6 +35,14 @@ import {
   recordAttempt,
   isEligibleByBackoff,
 } from "./backoff.mjs";
+import {
+  loadBudgetState,
+  saveBudgetState,
+  recordCallsToday,
+  isOverBudget,
+  summarizeBudget,
+  DEFAULT_BUDGET_USD,
+} from "./budget.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QUEUE_FILE = join(__dirname, "services.yaml");
@@ -619,7 +627,10 @@ async function runOnce(pick) {
     }
   }
 
-  return classification;
+  // Surface LLM call count so the caller can update the daily budget.
+  // Some bot responses omit it; treat as 0 rather than failing.
+  const llmCalls = typeof final.llm_calls === "number" ? final.llm_calls : 0;
+  return { classification, llmCalls };
 }
 
 function tripCircuitBreakerIssue(latestEntry, latestClassification, count) {
@@ -691,6 +702,20 @@ async function main() {
     process.exit(2);
   }
 
+  // Daily LLM budget cap. Short-circuit before any setup work if
+  // we're already over today's cap. Trips the global halt sentinel
+  // so subsequent timer ticks short-circuit cheaply too. Cleared
+  // automatically at UTC midnight (the budget state's date check).
+  const budgetCap = numericEnv("HARVESTER_DAILY_BUDGET_USD", DEFAULT_BUDGET_USD);
+  const budgetState = await loadBudgetState();
+  const overBudget = isOverBudget(budgetState, budgetCap);
+  console.log(`  ${summarizeBudget(budgetState, budgetCap)}`);
+  if (overBudget.over) {
+    console.log(`─── Aborting: ${overBudget.reason} ─────`);
+    try { writeFileSync(HALTED_FILE, new Date().toISOString(), "utf8"); } catch {}
+    process.exit(4);
+  }
+
   // Per-service backoff state. Drives the picker's eligibility check
   // (skip services within 24h cooldown or extended backoff after 3
   // consecutive failures) and gets updated post-attempt.
@@ -735,7 +760,7 @@ async function main() {
     process.exit(3);
   }
 
-  const classification = await runOnce(pick);
+  const { classification, llmCalls } = await runOnce(pick);
 
   // Update per-service backoff state. Best-effort — a write failure
   // here must not change the run's exit code.
@@ -750,7 +775,26 @@ async function main() {
     );
   }
 
+  // Update today's LLM-spend total. Same best-effort policy as backoff.
+  try {
+    const nextBudget = recordCallsToday(budgetState, llmCalls);
+    await saveBudgetState(nextBudget);
+  } catch (err) {
+    console.error(
+      `  WARN: daily-budget write failed (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
   process.exit(classification === "replay-ok" ? 0 : 1);
+}
+
+function numericEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 main().catch((err) => {
