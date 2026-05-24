@@ -108,13 +108,20 @@
 - slug: railway
   name: Railway
   signup_url: https://railway.com/login
-  oauth_provider: google
+  oauth_provider: github
   scope_hint: null
   status: pending
   notes: |
-    Already validated end-to-end with lunchboxfortwo. Re-running under
-    methoxine identity to confirm closed-loop generalizes across
-    accounts.
+    Railway's /login shows "Continue with Google" prominently at the
+    top AND "Log in using GitHub" in the footer. Operator confirmed
+    (2026-05-24) the actual working signup is via GitHub — Google
+    OAuth leads to dead-ends for new accounts. Configured here as
+    github so the OAuth-first scan keeps the GitHub button (footer
+    `<button type=button>Log in using GitHub`) in the ranked inventory
+    instead of dropping it as a -32 non-candidate OAuth button.
+    Originally validated end-to-end with lunchboxfortwo's GitHub
+    session; same identity is what the harvester chrome profile
+    carries via `mcp connect --provider=github`.
 
 - slug: posthog
   name: PostHog
