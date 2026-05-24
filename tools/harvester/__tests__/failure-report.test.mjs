@@ -5,6 +5,7 @@ import os from "node:os";
 import {
   buildFailureReport,
   writeFailureReport,
+  archiveAsEvalFixture,
 } from "../failure-report.mjs";
 
 let tmpDir;
@@ -186,6 +187,102 @@ describe("buildFailureReport", () => {
 
     expect(report.bot_status).toBe("needs_manual");
     expect(report.error_message).toBeNull();
+  });
+});
+
+describe("failure_category field (Phase 2)", () => {
+  it("defaults to null when no failureCategory opt passed", () => {
+    const report = buildFailureReport({
+      service: sampleService,
+      final: sampleFinal,
+      steps: sampleSteps,
+      classification: "failed",
+      attemptNumber: 1,
+      consecutiveFailures: 1,
+      mcpVersionResolved: "0.6.14-rc.33",
+      runStartedAt: new Date(),
+      issueNumber: 16,
+      repo: "Trusty-Squire/trusty-squire",
+      debugDir,
+    });
+    expect(report.failure_category).toBeNull();
+  });
+
+  it("carries failureCategory through to the report", () => {
+    const report = buildFailureReport({
+      service: sampleService,
+      final: sampleFinal,
+      steps: sampleSteps,
+      classification: "failed",
+      failureCategory: "code_bug",
+      attemptNumber: 1,
+      consecutiveFailures: 1,
+      mcpVersionResolved: "0.6.14-rc.33",
+      runStartedAt: new Date(),
+      issueNumber: 16,
+      repo: "Trusty-Squire/trusty-squire",
+      debugDir,
+    });
+    expect(report.failure_category).toBe("code_bug");
+  });
+});
+
+describe("archiveAsEvalFixture (Phase 2)", () => {
+  it("returns null for non-code_bug categories (skipped)", async () => {
+    const report = buildFailureReport({
+      service: sampleService,
+      final: sampleFinal,
+      steps: sampleSteps,
+      classification: "failed",
+      failureCategory: "environment",
+      attemptNumber: 1,
+      consecutiveFailures: 1,
+      mcpVersionResolved: "0.6.14-rc.33",
+      runStartedAt: new Date(),
+      issueNumber: 16,
+      repo: "Trusty-Squire/trusty-squire",
+      debugDir,
+    });
+    const result = await archiveAsEvalFixture(report, tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it("writes code_bug reports to tools/harvester-subagent/eval/fixtures/", async () => {
+    const report = buildFailureReport({
+      service: sampleService,
+      final: sampleFinal,
+      steps: sampleSteps,
+      classification: "failed",
+      failureCategory: "code_bug",
+      attemptNumber: 1,
+      consecutiveFailures: 1,
+      mcpVersionResolved: "0.6.14-rc.33",
+      runStartedAt: new Date(),
+      issueNumber: 16,
+      repo: "Trusty-Squire/trusty-squire",
+      debugDir,
+    });
+    const fixturePath = await archiveAsEvalFixture(report, tmpDir);
+    expect(fixturePath).toMatch(/tools\/harvester-subagent\/eval\/fixtures\/\d+-railway\.json$/);
+    const roundTrip = JSON.parse(await fs.readFile(fixturePath, "utf8"));
+    expect(roundTrip.failure_category).toBe("code_bug");
+  });
+
+  it("handles missing failure_category (treats as not code_bug → skip)", async () => {
+    const report = buildFailureReport({
+      service: sampleService,
+      final: sampleFinal,
+      steps: sampleSteps,
+      classification: "failed",
+      attemptNumber: 1,
+      consecutiveFailures: 1,
+      mcpVersionResolved: "0.6.14-rc.33",
+      runStartedAt: new Date(),
+      issueNumber: 16,
+      repo: "Trusty-Squire/trusty-squire",
+      debugDir,
+    });
+    expect(await archiveAsEvalFixture(report, tmpDir)).toBeNull();
   });
 });
 

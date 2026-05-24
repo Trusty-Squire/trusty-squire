@@ -88,6 +88,12 @@ export function buildFailureReport(opts) {
     bot_status: final.status ?? "unknown",
     error_message: final.error ?? null,
     classification,
+    // Phase 2 — separate from `classification` (the harvester outcome).
+    // failure_category is the subagent's decision input: one of
+    // code_bug / environment / external_block / upstream_change / null.
+    // null means rules abstained — Phase 3 subagent will LLM-classify
+    // on the fallback path.
+    failure_category: opts.failureCategory ?? null,
     attempt_number: attemptNumber,
     consecutive_failures: consecutiveFailures,
     step_trail: steps,
@@ -107,6 +113,32 @@ export async function writeFailureReport(report) {
   const tsMs = Date.parse(report.ts) || Date.now();
   const filename = `${tsMs}-${report.service}.json`;
   const targetPath = join(HALTS_DIR, filename);
+  await writeJsonAtomic(targetPath, report);
+  return targetPath;
+}
+
+// Phase 2 — eval-fixture archival. When a code_bug-classified failure
+// lands, also copy the report into tools/harvester-subagent/eval/
+// fixtures/ so Phase 3 can grade the subagent's propose-fix prompt
+// against real-world fixtures from this corpus. Skipped for non-
+// code_bug categories (environment / external_block / upstream_change
+// aren't subagent-PR-eligible, so they don't seed the eval).
+//
+// Filename matches the halt-report filename for cross-referencing.
+// Caller passes the repo root so we don't have to hardcode paths
+// inside the module (helps tests).
+export async function archiveAsEvalFixture(report, repoRoot) {
+  if (report.failure_category !== "code_bug") return null;
+  const tsMs = Date.parse(report.ts) || Date.now();
+  const filename = `${tsMs}-${report.service}.json`;
+  const targetPath = join(
+    repoRoot,
+    "tools",
+    "harvester-subagent",
+    "eval",
+    "fixtures",
+    filename,
+  );
   await writeJsonAtomic(targetPath, report);
   return targetPath;
 }

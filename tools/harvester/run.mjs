@@ -27,8 +27,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   buildFailureReport,
   writeFailureReport,
+  archiveAsEvalFixture,
   resolveMcpVersion,
 } from "./failure-report.mjs";
+import { classifyFailure } from "./classify.mjs";
 import {
   loadBackoffState,
   saveBackoffState,
@@ -45,6 +47,9 @@ import {
 } from "./budget.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Repo root for the eval-fixture archive path. tools/harvester sits
+// at <repo-root>/tools/harvester, so two `..` ups lands at the root.
+const REPO_ROOT = join(__dirname, "..", "..");
 const QUEUE_FILE = join(__dirname, "services.yaml");
 const HALTED_FILE = join(homedir(), ".trusty-squire", "harvester-halted");
 const COUNTER_FILE = join(homedir(), ".trusty-squire", "harvester-consecutive-failures");
@@ -604,11 +609,17 @@ async function runOnce(pick) {
     // bubble up — a failure-report write blip should not turn a
     // recoverable signup attempt into a halted harvester.
     try {
+      // Phase 2: subagent-decision classifier. SEPARATE from `classification`
+      // (the harvester outcome that drives GH labels). failure_category
+      // is one of code_bug / environment / external_block / upstream_change
+      // or null when rules abstain.
+      const failureCategory = classifyFailure(final, steps);
       const report = buildFailureReport({
         service: entry,
         final,
         steps,
         classification,
+        failureCategory,
         attemptNumber,
         consecutiveFailures: newCount,
         mcpVersionResolved,
@@ -617,7 +628,26 @@ async function runOnce(pick) {
         repo: REPO,
       });
       const reportPath = await writeFailureReport(report);
-      console.log(`  failure-report: ${reportPath}`);
+      console.log(`  failure-report: ${reportPath} (category=${failureCategory ?? "unknown"})`);
+
+      // Phase 2: eval-fixture archival. code_bug-classified failures
+      // also land in tools/harvester-subagent/eval/fixtures/ so the
+      // Phase 3 subagent's propose-fix prompt has real-world fixtures
+      // to grade against. Other categories aren't subagent-PR-eligible.
+      if (failureCategory === "code_bug") {
+        try {
+          const fixturePath = await archiveAsEvalFixture(report, REPO_ROOT);
+          if (fixturePath) {
+            console.log(`  eval-fixture archived: ${fixturePath}`);
+          }
+        } catch (err) {
+          console.error(
+            `  WARN: eval-fixture archive failed (non-fatal): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
     } catch (err) {
       console.error(
         `  WARN: failure-report write failed (non-fatal): ${
