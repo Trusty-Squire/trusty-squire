@@ -492,29 +492,16 @@ async function preValidateStep(
         };
       }
       if (matches.length > 1) {
-        // rc.24 — cascading disambiguator. OpenRouter's "Name" hint
-        // matches both the new-key form's empty input AND a label on
-        // an existing-keys row (or a hidden duplicate React Hook Form
-        // input). The disambiguator narrows from most-likely-to-least
-        // and accepts the first filter that produces a unique winner.
-        const filters: Array<{ name: string; fn: (el: InteractiveElement) => boolean }> = [
-          { name: "in viewport", fn: (el) => el.inViewport === true },
-          { name: "visible", fn: (el) => el.visible !== false },
-          { name: "empty value", fn: (el) => el.value === "" || el.value === null || el.value === undefined },
-          { name: "not yet interacted with", fn: (el) => el.interactedThisRun !== true },
-        ];
-        let narrowed: InteractiveElement[] = matches;
-        for (const f of filters) {
-          const next = narrowed.filter(f.fn);
-          if (next.length === 1) return { ok: true, match: next[0]! };
-          if (next.length > 0) narrowed = next;
+        const picked = disambiguateFillMatches(matches);
+        if (picked === null) {
+          return {
+            ok: false,
+            reason:
+              `label_hint=${JSON.stringify(step.label_hint)} matched ${matches.length} inputs; ` +
+              `disambiguator could not uniquely identify the fill target.`,
+          };
         }
-        return {
-          ok: false,
-          reason:
-            `label_hint=${JSON.stringify(step.label_hint)} matched ${matches.length} inputs; ` +
-            `disambiguator narrowed to ${narrowed.length} — still cannot uniquely identify the fill target.`,
-        };
+        return { ok: true, match: picked };
       }
       return { ok: true, match: matches[0]! };
     }
@@ -706,9 +693,20 @@ async function executeStep(
 
     case "fill": {
       const inventory = await browser.extractInteractiveElements();
-      const match = inventory.find((el) => matchesLabelHint(el, step.label_hint));
-      if (match === undefined) {
+      const matches = inventory.filter((el) => matchesLabelHint(el, step.label_hint));
+      if (matches.length === 0) {
         throw new Error(`No input matches label_hint=${step.label_hint}`);
+      }
+      // rc.25 — share the disambiguator with preValidate so execute
+      // doesn't unilaterally pick `inventory.find`'s first hit when
+      // the page has more than one matching input.
+      const match =
+        matches.length === 1 ? matches[0]! : disambiguateFillMatches(matches);
+      if (match === null) {
+        throw new Error(
+          `label_hint=${step.label_hint} matched ${matches.length} inputs; ` +
+            `disambiguator could not uniquely identify the fill target.`,
+        );
       }
       const value = substituteTemplate(step.value_template, templateValues);
       await browser.type(match.selector, value);
@@ -1121,6 +1119,31 @@ function matchesLabelHint(el: InteractiveElement, hint: string): boolean {
     placeholder === lowerHint ||
     aria === lowerHint
   );
+}
+
+// rc.24/rc.25 — cascading fill-target disambiguator. Shared by
+// preValidate and executeStep so both arrive at the same input when
+// a label matches more than once (OpenRouter's "Name" input ships
+// alongside a hidden React Hook Form duplicate). Filters narrow from
+// most-to-least informative; the first filter that yields a unique
+// winner picks it. Returns null when the cascade exhausts without
+// narrowing to one — caller decides whether to fail.
+function disambiguateFillMatches(
+  matches: InteractiveElement[],
+): InteractiveElement | null {
+  const filters: Array<(el: InteractiveElement) => boolean> = [
+    (el) => el.inViewport === true,
+    (el) => el.visible !== false,
+    (el) => el.value === "" || el.value === null || el.value === undefined,
+    (el) => el.interactedThisRun !== true,
+  ];
+  let narrowed: InteractiveElement[] = matches;
+  for (const f of filters) {
+    const next = narrowed.filter(f);
+    if (next.length === 1) return next[0]!;
+    if (next.length > 0) narrowed = next;
+  }
+  return null;
 }
 
 function matchesRole(el: InteractiveElement, role: "button" | "link" | "tab" | "menuitem"): boolean {

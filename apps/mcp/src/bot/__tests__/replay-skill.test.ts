@@ -666,10 +666,9 @@ describe("replaySkill — fill-label disambiguation (rc.24)", () => {
     expect(types).toHaveLength(1);
     expect(types[0]!.args[0]).toBe("input.visible");
     // The skill has no extract step, so full mode bails after the
-    // fill — but the disambiguator already ran. Either step_failed or
-    // a downstream error is fine; we only care that the right input
-    // got the type.
-    expect(["ok", "step_failed", "extract_failed"]).toContain(result.kind);
+    // fill with extraction_failed — but the disambiguator already
+    // ran. The selector assertion above is the load-bearing check.
+    expect(["ok", "step_failed", "extraction_failed"]).toContain(result.kind);
   });
 
   it("fails cleanly when every matching input is filled and on-viewport", async () => {
