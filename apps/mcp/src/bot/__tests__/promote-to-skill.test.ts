@@ -313,6 +313,74 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(extract.kind).toBe("extract_via_copy_button");
   });
 
+  // rc.29 regression — IPInfo-class dashboards ship icon-only copy
+  // buttons with EVERY label signal empty (no visibleText, ariaLabel,
+  // title, or iconLabel — the affordance is purely visual via an SVG
+  // icon). The only signal that survives into inventory is the
+  // selector, which captures the button's CSS class / id. Pre-rc.29
+  // the synthesizer missed these and produced extract_via_regex with
+  // pattern_name=uuid_token (the synthesizer-default fallback), which
+  // never matches IPInfo's 14-char hex token shape and produces
+  // un-replayable skills. rc.29 adds a selector-keyword fallback in
+  // findCopyButton.
+  it("finds an icon-only copy button via its selector class (rc.29)", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    // Replace the explicit-text Copy button with an icon-only one
+    // whose ONLY signal is the class name in the selector.
+    rounds[2]!.inventory = [
+      inventoryElement({
+        index: 0,
+        tag: "button",
+        visibleText: "",
+        ariaLabel: null,
+        title: null,
+        iconLabel: null,
+        selector: "button.copy-btn-icon",
+        role: "button",
+      }),
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+    const extract = result.skill.steps[2]!;
+    expect(extract.kind).toBe("extract_via_copy_button");
+  });
+
+  // Negative: a button whose selector contains "copy" only as part of
+  // a longer word ("copyright", "policy") must NOT be misclassified.
+  it("does not mistake 'copyright' / 'policy' selectors for copy buttons (rc.29)", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    rounds[2]!.inventory = [
+      inventoryElement({
+        index: 0,
+        tag: "button",
+        visibleText: "",
+        ariaLabel: null,
+        title: null,
+        iconLabel: null,
+        selector: "button.copyright-link",
+        role: "button",
+      }),
+      inventoryElement({
+        index: 1,
+        tag: "button",
+        visibleText: "",
+        ariaLabel: null,
+        title: null,
+        iconLabel: null,
+        selector: "#policy-button",
+        role: "button",
+      }),
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // Neither button is a copy button → falls back to extract_via_regex.
+    expect(result.skill.steps[2]!.kind).toBe("extract_via_regex");
+  });
+
   it("infers shape_hint: uuid from the visible token in HTML", () => {
     const service = uniqueService();
     const { dir, runId } = setupCaptures(railwayRounds(service));

@@ -718,6 +718,27 @@ function findCopyButton(
       return el;
     }
   }
+  // rc.29 — selector-based fallback. Modern dashboards ship icon-only
+  // copy buttons with NO text/aria-label/title/iconLabel (IPInfo's
+  // dashboard is the canonical case — every text signal is empty,
+  // the copy affordance is purely visual). When the vocabulary pass
+  // above finds nothing, walk the inventory again looking at the
+  // *selector* — which captures CSS classes and IDs in the path. A
+  // class/id containing "copy" is a strong signal for a copy button
+  // even when no label survives. False positives are bounded: a
+  // signup flow doesn't ship many elements named ".copy-…" outside
+  // of clipboard affordances.
+  for (const el of inventory) {
+    if (el.tag !== "button" && el.role !== "button") continue;
+    // Walks tag/class/id/data-* in the captured selector. Pattern:
+    // a word boundary on either side of "copy" in any case, in any
+    // CSS segment. Excludes "policy", "copyright", "copywriter" by
+    // requiring "copy" be either standalone or followed by
+    // separator characters that CSS class/id naming uses.
+    if (/(?:^|[\s.#\[])copy(?:[\s.\-_\]]|$)/i.test(el.selector)) {
+      return el;
+    }
+  }
   return null;
 }
 
