@@ -42,3 +42,8 @@ debug-*.png
 # Raw onboarding-round captures (curate into the eval corpus)
 .onboarding-corpus-raw/
 .gstack/
+
+# npm lockfile — repo uses pnpm. npm lockfiles sneak in when
+# `npm install` runs ad-hoc inside a workspace; they're never
+# authoritative here and shouldn't be committed.
+package-lock.json
