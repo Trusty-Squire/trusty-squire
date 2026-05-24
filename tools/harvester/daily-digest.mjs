@@ -25,8 +25,16 @@ import {
   summarizeBudget,
   DEFAULT_BUDGET_USD,
 } from "./budget.mjs";
+import { execSync } from "node:child_process";
 import { sendMessage, buildDailyDigest } from "./telegram.mjs";
 import { listSkillsByStatus } from "./registry-client.mjs";
+import {
+  findPersistentFailures,
+  readAllHalts,
+  buildEscalationIssueBody,
+  escalationLabels,
+  escalationTitle,
+} from "./escalation.mjs";
 
 const HALTS_DIR = join(homedir(), ".trusty-squire", "halts");
 
@@ -84,7 +92,68 @@ async function main() {
   });
 
   const ok = await sendMessage(message);
+
+  // Persistent-environment escalation pass (Phase 2). Once per day,
+  // scan ALL halt reports (not just today's), find (service,
+  // environment) pairs that have persisted >7d, ensure each has an
+  // open GH issue tagged harvester:investigate. Idempotent via
+  // GitHub labels — duplicate issues never created.
+  try {
+    const allHalts = await readAllHalts();
+    const persistent = findPersistentFailures(allHalts);
+    const repo = process.env.GH_REPO ?? "Trusty-Squire/trusty-squire";
+    for (const group of persistent) {
+      ensureEscalationIssue(repo, group);
+    }
+    if (persistent.length > 0) {
+      console.error(`[escalation] ${persistent.length} persistent-failure issue(s) ensured`);
+    }
+  } catch (err) {
+    console.error(
+      `[escalation] pass failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   process.exit(ok ? 0 : 1);
+}
+
+// Idempotent issue create. Looks for an existing OPEN issue with the
+// full label set; creates one if none exists. Failures here are
+// non-fatal — we'd rather the digest go through than block on a
+// flaky gh call.
+function ensureEscalationIssue(repo, group) {
+  const labels = escalationLabels(group);
+  const title = escalationTitle(group);
+  try {
+    const existing = execSync(
+      `gh issue list --repo ${repo} --state open --label "${labels.join(",")}" --json number,title`,
+      { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const parsed = JSON.parse(existing);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return; // already escalated
+    }
+    // Ensure labels exist (gh issue create errors if any label is unknown)
+    for (const lbl of labels) {
+      try {
+        execSync(
+          `gh label create "${lbl}" --repo ${repo} --color BFD4F2 --description "harvester escalation" 2>/dev/null`,
+          { stdio: "ignore", timeout: 5_000 },
+        );
+      } catch {
+        // label probably already exists; ignore
+      }
+    }
+    const body = buildEscalationIssueBody(group);
+    execSync(
+      `gh issue create --repo ${repo} --title ${JSON.stringify(title)} --label "${labels.join(",")}" --body-file -`,
+      { input: body, encoding: "utf8", timeout: 10_000, stdio: ["pipe", "pipe", "inherit"] },
+    );
+  } catch (err) {
+    console.error(
+      `[escalation] ensureEscalationIssue(${group.service}) failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 async function readHaltsSince(sinceMs) {

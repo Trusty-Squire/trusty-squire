@@ -32,6 +32,15 @@ import {
 } from "./failure-report.mjs";
 import { classifyFailure } from "./classify.mjs";
 import {
+  loadBlocksState,
+  saveBlocksState,
+  deriveBlockReason,
+  recordBlock,
+  clearBlock,
+  isEligibleByBlock,
+  bumpPostBlockAttempts,
+} from "./blocks.mjs";
+import {
   loadBackoffState,
   saveBackoffState,
   recordAttempt,
@@ -233,7 +242,7 @@ function eligibleStatusFromIssue(issueStatus) {
   return { eligible: true, reason: `unknown status ${JSON.stringify(issueStatus)} — treating as retryable` };
 }
 
-function pickNextService(queue, backoffState) {
+function pickNextService(queue, backoffState, blocksState) {
   // HARVESTER_FORCE_SERVICE — manual override for targeted validation
   // runs (e.g. drive the disambiguator against a specific service that
   // sits deep in the queue). Filters the queue to JUST that slug and
@@ -271,11 +280,13 @@ function pickNextService(queue, backoffState) {
     if (!issueVerdict.eligible) continue;
     const backoffVerdict = isEligibleByBackoff(backoffState, entry.slug);
     if (!backoffVerdict.eligible) continue;
+    const blockVerdict = isEligibleByBlock(blocksState, entry.slug);
+    if (!blockVerdict.eligible) continue;
     return {
       entry,
       issue,
       issueStatus,
-      reason: `${issueVerdict.reason}; ${backoffVerdict.reason}`,
+      reason: `${issueVerdict.reason}; ${backoffVerdict.reason}; ${blockVerdict.reason}`,
     };
   }
   return null;
@@ -750,7 +761,11 @@ async function main() {
   // (skip services within 24h cooldown or extended backoff after 3
   // consecutive failures) and gets updated post-attempt.
   const backoffState = await loadBackoffState();
-  const pick = pickNextService(queue, backoffState);
+  // External-block state. Services flagged as needs_phone /
+  // needs_payment / needs_oauth_provider_session get a 30d cooldown
+  // and one post-cooldown retry before requiring operator action.
+  const blocksState = await loadBlocksState();
+  const pick = pickNextService(queue, backoffState, blocksState);
   if (pick === null) {
     console.log("─── Decision ───────────────────────────────────────────");
     console.log("No eligible service. Reasons can include: already validated, operator marked needs-manual, in 24h cooldown, or in extended backoff after consecutive failures. Check ~/.trusty-squire/backoff-state.json for per-service state.");
@@ -800,6 +815,37 @@ async function main() {
   } catch (err) {
     console.error(
       `  WARN: backoff-state write failed (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // Update external-block state. Three flows:
+  //   - Successful (replay-ok) signup → clear any block (signup worked,
+  //     whatever was blocking is no longer blocking).
+  //   - external_block-shaped failure → record/refresh block with
+  //     30d cooldown + reason derived from bot status.
+  //   - Other failures during a post-block-retry → bump retry counter
+  //     so we don't keep retrying the same blocked service.
+  try {
+    const blockReason = deriveBlockReason(final);
+    let nextBlocks = blocksState;
+    if (classification === "replay-ok") {
+      nextBlocks = clearBlock(nextBlocks, pick.entry.slug);
+    } else if (blockReason !== null) {
+      nextBlocks = recordBlock(nextBlocks, pick.entry.slug, blockReason);
+      console.log(`  block recorded: ${pick.entry.slug} → ${blockReason} (30d cooldown)`);
+    } else if (nextBlocks[pick.entry.slug] !== undefined) {
+      // We came in on a post-block retry and didn't succeed; bump
+      // the retry counter so a future tick doesn't retry again.
+      nextBlocks = bumpPostBlockAttempts(nextBlocks, pick.entry.slug);
+    }
+    if (nextBlocks !== blocksState) {
+      await saveBlocksState(nextBlocks);
+    }
+  } catch (err) {
+    console.error(
+      `  WARN: blocks-state write failed (non-fatal): ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
