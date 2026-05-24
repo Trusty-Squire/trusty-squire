@@ -2539,12 +2539,19 @@ export function scoreSignupButton(
   if (t.includes("sign up") || t.includes("signup")) score += 10;
   if (t.includes("register")) score += 8;
   if (t.includes("get started")) score += 6;
-  if (
+  // rc.30 — "email" is a strong signal that this button is the
+  // signup path even when the page lacks a "Sign up" button (Railway,
+  // Vercel, lots of services combine signup + login on one page and
+  // label the email path "Log in using email" / "Sign in with email").
+  // Bump weight from +5 to +12 so the combined-flow button outranks
+  // generic nav anchors that score 0. The compensating auth-verb
+  // penalty below is also suppressed when email is present.
+  const hasEmail =
     t.includes("continue with email") ||
     t.includes("sign up with email") ||
-    t.includes("email")
-  ) {
-    score += 5;
+    t.includes("email");
+  if (hasEmail) {
+    score += 12;
   }
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
@@ -2561,7 +2568,15 @@ export function scoreSignupButton(
     // the reliable discriminator, so drive those firmly negative.
     score -= 20;
   }
-  if (t.includes("sign in") || t.includes("log in") || t.includes("login")) score -= 12;
+  // rc.30 — auth-verb penalty applies only when the button is purely
+  // sign-in (no email). "Log in using email" / "Sign in with email"
+  // are combined paths where the same button serves signup AND login
+  // for first-time visitors. Penalizing them drops the actual signup
+  // route from the inventory (the Railway regression diagnosed via
+  // screenshots after rc.29).
+  const hasAuthVerb =
+    t.includes("sign in") || t.includes("log in") || t.includes("login");
+  if (hasAuthVerb && !hasEmail) score -= 12;
   return score;
 }
 

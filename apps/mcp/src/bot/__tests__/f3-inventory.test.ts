@@ -53,6 +53,25 @@ describe("scoreSignupButton", () => {
       scoreSignupButton("Log in"),
     );
   });
+
+  // rc.30 — combined login/signup-via-email path: services like
+  // Railway, Vercel, Cloudflare ship one button that handles both
+  // first-time signup AND returning login. Pre-rc.30 the "log in"
+  // penalty drove "Log in using email" to negative, dropping it from
+  // the inventory; the planner then had no email-button selector and
+  // misclicked the footer "Email" contact link instead. Now the
+  // auth-verb penalty is suppressed when "email" is present.
+  it("keeps Log-in-with-email buttons positive (rc.30)", () => {
+    // The Railway regression: "Log in using email" must outrank
+    // generic nav anchors (score 0) so it survives ranking caps.
+    expect(scoreSignupButton("Log in using email")).toBeGreaterThan(0);
+    expect(scoreSignupButton("Sign in with email")).toBeGreaterThan(0);
+    expect(scoreSignupButton("Continue with email")).toBeGreaterThan(0);
+    // Without email, the penalty still applies — a bare "Sign in"
+    // button is still the wrong target on a signup page.
+    expect(scoreSignupButton("Sign in")).toBeLessThan(0);
+    expect(scoreSignupButton("Log in")).toBeLessThan(0);
+  });
 });
 
 describe("rankAndCapInventory", () => {
