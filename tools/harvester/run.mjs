@@ -29,6 +29,12 @@ import {
   writeFailureReport,
   resolveMcpVersion,
 } from "./failure-report.mjs";
+import {
+  loadBackoffState,
+  saveBackoffState,
+  recordAttempt,
+  isEligibleByBackoff,
+} from "./backoff.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QUEUE_FILE = join(__dirname, "services.yaml");
@@ -214,11 +220,12 @@ function eligibleStatusFromIssue(issueStatus) {
   return { eligible: true, reason: `unknown status ${JSON.stringify(issueStatus)} — treating as retryable` };
 }
 
-function pickNextService(queue) {
+function pickNextService(queue, backoffState) {
   // HARVESTER_FORCE_SERVICE — manual override for targeted validation
   // runs (e.g. drive the disambiguator against a specific service that
   // sits deep in the queue). Filters the queue to JUST that slug and
-  // bypasses issue-label eligibility checks. No-op when unset.
+  // bypasses BOTH issue-label eligibility AND backoff/cooldown checks.
+  // No-op when unset.
   const forceSlug = process.env.HARVESTER_FORCE_SERVICE;
   if (forceSlug !== undefined && forceSlug.length > 0) {
     const forced = queue.find((e) => e.slug === forceSlug);
@@ -237,14 +244,26 @@ function pickNextService(queue) {
       reason: `forced via HARVESTER_FORCE_SERVICE (issue status=${issueStatus ?? "<none>"})`,
     };
   }
+  // Two-stage eligibility:
+  //   1. issue-label check — has the operator marked it needs-manual /
+  //      already validated / etc.?
+  //   2. backoff check — within the 24h cooldown or in extended backoff
+  //      after 3 consecutive failures? (per-service, isolates flaky
+  //      services from monopolizing the queue per codex critique)
   for (const entry of queue) {
     if (entry.status !== "pending") continue;
     const issue = findIssueForSlug(entry.slug);
     const issueStatus = statusLabelFromIssue(issue);
-    const verdict = eligibleStatusFromIssue(issueStatus);
-    if (verdict.eligible) {
-      return { entry, issue, issueStatus, reason: verdict.reason };
-    }
+    const issueVerdict = eligibleStatusFromIssue(issueStatus);
+    if (!issueVerdict.eligible) continue;
+    const backoffVerdict = isEligibleByBackoff(backoffState, entry.slug);
+    if (!backoffVerdict.eligible) continue;
+    return {
+      entry,
+      issue,
+      issueStatus,
+      reason: `${issueVerdict.reason}; ${backoffVerdict.reason}`,
+    };
   }
   return null;
 }
@@ -672,10 +691,14 @@ async function main() {
     process.exit(2);
   }
 
-  const pick = pickNextService(queue);
+  // Per-service backoff state. Drives the picker's eligibility check
+  // (skip services within 24h cooldown or extended backoff after 3
+  // consecutive failures) and gets updated post-attempt.
+  const backoffState = await loadBackoffState();
+  const pick = pickNextService(queue, backoffState);
   if (pick === null) {
     console.log("─── Decision ───────────────────────────────────────────");
-    console.log("No eligible service. Either every pending is already replay-ok, or every pending has an open needs-manual issue.");
+    console.log("No eligible service. Reasons can include: already validated, operator marked needs-manual, in 24h cooldown, or in extended backoff after consecutive failures. Check ~/.trusty-squire/backoff-state.json for per-service state.");
     return;
   }
 
@@ -713,6 +736,20 @@ async function main() {
   }
 
   const classification = await runOnce(pick);
+
+  // Update per-service backoff state. Best-effort — a write failure
+  // here must not change the run's exit code.
+  try {
+    const next = recordAttempt(backoffState, pick.entry.slug, classification);
+    await saveBackoffState(next);
+  } catch (err) {
+    console.error(
+      `  WARN: backoff-state write failed (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
   process.exit(classification === "replay-ok" ? 0 : 1);
 }
 
