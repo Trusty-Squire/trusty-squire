@@ -2461,32 +2461,61 @@ export class SignupAgent {
       if (authState === "not_provider") break; // flow left the provider — back on the service
 
       if (authState === "challenge") {
-        // Google's number-match challenge ("Tap N on your phone") is
-        // resolvable by the user without re-running the login flow —
-        // surface the number and wait for them to complete it.
+        // rc.26 — always capture forensic state at the moment the
+        // challenge is detected. Before this, snapshots fired only at
+        // before-fill / oauth-after-click / oauth-post-consent — none
+        // covered the challenge page itself. When
+        // extractGoogleNumberMatch's patterns don't match the current
+        // Google phrasing, this is the only artifact the user can read
+        // to find the number to tap.
+        await saveDebugSnapshot(this.browser, "google-challenge");
+
         if (provider.id === "google") {
           const matchNum = extractGoogleNumberMatch(body);
           if (matchNum !== null) {
+            // rc.26 — surface in real-time via stderr as well as the
+            // step trail. The step trail only renders after the run
+            // ends; stderr lands in the harvester output immediately,
+            // inside the 2-minute window the user has to react.
+            console.error(
+              `[universal-bot] GOOGLE NUMBER-MATCH: tap "${matchNum}" on your phone — 2 minute window`,
+            );
             steps.push(
               `Google: match the number ${matchNum} on your phone — ` +
                 `open the Google app on your phone and tap ${matchNum}`,
             );
-            const cleared = await this.waitForGoogleChallenge(provider, steps);
-            if (!cleared) {
-              return this.oauthAbort(
-                "needs_login",
-                `Google number-match challenge timed out after 2 minutes. ` +
-                  `Re-run \`${loginCmd}\`, complete the challenge in the window, then retry.`,
-                steps,
-              );
-            }
-            steps.push("Google: challenge cleared — continuing OAuth");
-            // Re-classify on the next iteration without burning the
-            // OAuth-navigation budget (which assumes continuous
-            // browser progress, not a 2-minute human pause).
-            i--;
-            continue;
+          } else {
+            // Extractor missed the number — Google phrasing has
+            // drifted again. Surface a banner so the user knows to
+            // check the just-saved snapshot before the 2-minute wait
+            // expires.
+            console.error(
+              `[universal-bot] GOOGLE CHALLENGE detected (number-match phrasing not recognized) — ` +
+                `read the most recent google-challenge.png in the debug dir to find the number — 2 minute window`,
+            );
+            steps.push(
+              "Google: challenge detected, number-match extractor missed it. " +
+                "See the latest google-challenge snapshot in the debug dir to read the number.",
+            );
           }
+          // Either way (number found or not), the user can still
+          // clear the challenge in the bot's browser window or by
+          // tapping on their phone. Wait the full 2 minutes.
+          const cleared = await this.waitForGoogleChallenge(provider, steps);
+          if (!cleared) {
+            return this.oauthAbort(
+              "needs_login",
+              `Google challenge timed out after 2 minutes. ` +
+                `Re-run \`${loginCmd}\`, complete the challenge in the window, then retry.`,
+              steps,
+            );
+          }
+          steps.push("Google: challenge cleared — continuing OAuth");
+          // Re-classify on the next iteration without burning the
+          // OAuth-navigation budget (which assumes continuous
+          // browser progress, not a 2-minute human pause).
+          i--;
+          continue;
         }
         return this.oauthAbort(
           "needs_login",
