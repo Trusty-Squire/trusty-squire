@@ -24,6 +24,11 @@ import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  buildFailureReport,
+  writeFailureReport,
+  resolveMcpVersion,
+} from "./failure-report.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QUEUE_FILE = join(__dirname, "services.yaml");
@@ -520,6 +525,13 @@ async function runOnce(pick) {
   }
 
   // 2. Invoke the MCP tool. Long-running — log substeps as they come.
+  // Track run start so the failure-report writer can scope its .debug
+  // artifact scan to files this run produced.
+  const runStartedAt = new Date();
+  // Resolve floating dist-tags (@next, @latest) to a real version so
+  // the failure-report carries reproducibility despite the dynamic
+  // pin. Cheap (~50ms npm view); skips for already-pinned semver.
+  const mcpVersionResolved = resolveMcpVersion(MCP_VERSION);
   let final;
   let steps;
   try {
@@ -556,6 +568,35 @@ async function runOnce(pick) {
     if (newCount >= 3) {
       writeFileSync(HALTED_FILE, new Date().toISOString(), "utf8");
       tripCircuitBreakerIssue(entry, classification, newCount);
+    }
+
+    // Structured failure-report — the boundary the subagent (Phase 3)
+    // will consume. Written on EVERY non-replay-ok attempt (not only
+    // halt-eligible) so we get a corpus of failure samples to grade
+    // the subagent's eval suite against. Failures here must not
+    // bubble up — a failure-report write blip should not turn a
+    // recoverable signup attempt into a halted harvester.
+    try {
+      const report = buildFailureReport({
+        service: entry,
+        final,
+        steps,
+        classification,
+        attemptNumber,
+        consecutiveFailures: newCount,
+        mcpVersionResolved,
+        runStartedAt,
+        issueNumber,
+        repo: REPO,
+      });
+      const reportPath = await writeFailureReport(report);
+      console.log(`  failure-report: ${reportPath}`);
+    } catch (err) {
+      console.error(
+        `  WARN: failure-report write failed (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   }
 
