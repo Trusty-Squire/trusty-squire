@@ -204,6 +204,28 @@ function eligibleStatusFromIssue(issueStatus) {
 }
 
 function pickNextService(queue) {
+  // HARVESTER_FORCE_SERVICE — manual override for targeted validation
+  // runs (e.g. drive the disambiguator against a specific service that
+  // sits deep in the queue). Filters the queue to JUST that slug and
+  // bypasses issue-label eligibility checks. No-op when unset.
+  const forceSlug = process.env.HARVESTER_FORCE_SERVICE;
+  if (forceSlug !== undefined && forceSlug.length > 0) {
+    const forced = queue.find((e) => e.slug === forceSlug);
+    if (forced === undefined) {
+      throw new Error(
+        `HARVESTER_FORCE_SERVICE=${JSON.stringify(forceSlug)} but no such ` +
+          `slug in services.yaml. Available: ${queue.map((e) => e.slug).join(", ")}`,
+      );
+    }
+    const issue = findIssueForSlug(forced.slug);
+    const issueStatus = statusLabelFromIssue(issue);
+    return {
+      entry: forced,
+      issue,
+      issueStatus,
+      reason: `forced via HARVESTER_FORCE_SERVICE (issue status=${issueStatus ?? "<none>"})`,
+    };
+  }
   for (const entry of queue) {
     if (entry.status !== "pending") continue;
     const issue = findIssueForSlug(entry.slug);
