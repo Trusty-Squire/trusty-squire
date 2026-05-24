@@ -472,8 +472,10 @@ describe("promoteToSkill — OAuth provider detection", () => {
     if (result.kind !== "ok") throw new Error("expected ok");
 
     // The click should NOT be classified as OAuth — provider word
-    // boundary isn't matched.
-    expect(result.skill.steps[0]!.kind).toBe("click");
+    // boundary isn't matched. (rc.24 prepends a navigate as step 0,
+    // so the click is at step 1.)
+    expect(result.skill.steps[0]!.kind).toBe("navigate");
+    expect(result.skill.steps[1]!.kind).toBe("click");
     expect(result.skill.oauth_provider).toBeNull();
   });
 });
@@ -824,9 +826,12 @@ describe("promoteToSkill — flow-control kinds dropped", () => {
     if (result.kind !== "ok") {
       throw new Error(`expected ok, got ${JSON.stringify(result)}`);
     }
-    expect(result.skill.steps).toHaveLength(2); // wait dropped; click + extract remain
-    expect(result.skill.steps[0]!.kind).toBe("click");
-    expect(result.skill.steps[1]!.kind).toBe("extract_via_copy_button");
+    // rc.24 prepends a navigate as step 0, so the chain is now
+    // navigate + click + extract; the dropped `wait` is still dropped.
+    expect(result.skill.steps).toHaveLength(3);
+    expect(result.skill.steps[0]!.kind).toBe("navigate");
+    expect(result.skill.steps[1]!.kind).toBe("click");
+    expect(result.skill.steps[2]!.kind).toBe("extract_via_copy_button");
   });
 });
 
