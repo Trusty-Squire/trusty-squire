@@ -14,6 +14,7 @@ describe("buildDailyDigest", () => {
       succeeded: ["ipinfo", "openrouter"],
       demoted: ["railway"],
       newCaptures: ["postmark"],
+      pendingReview: ["resend", "sentry"],
       inBackoff: ["railway", "vercel"],
       recentFailures: [
         { slug: "railway", status: "captcha_blocked", error: "turnstile timeout" },
@@ -26,6 +27,8 @@ describe("buildDailyDigest", () => {
     expect(msg).toContain("ipinfo, openrouter");
     expect(msg).toContain("⚠️  In backoff: 2");
     expect(msg).toContain("🆕 New captures: 1");
+    expect(msg).toContain("👀 Pending review: 2");
+    expect(msg).toContain("resend, sentry");
     expect(msg).toContain("❌ Demoted today: 1");
     expect(msg).toContain("Recent failures:");
     expect(msg).toContain("railway: captcha_blocked — turnstile timeout");

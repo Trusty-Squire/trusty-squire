@@ -159,6 +159,10 @@ export function buildDailyDigest(opts) {
   if ((opts.newCaptures?.length ?? 0) > 0) {
     lines.push(`   ${opts.newCaptures.join(", ")}`);
   }
+  lines.push(`👀 Pending review: ${opts.pendingReview?.length ?? 0}`);
+  if ((opts.pendingReview?.length ?? 0) > 0) {
+    lines.push(`   ${opts.pendingReview.join(", ")}`);
+  }
   lines.push(`❌ Demoted today: ${opts.demoted?.length ?? 0}`);
   if ((opts.demoted?.length ?? 0) > 0) {
     lines.push(`   ${opts.demoted.join(", ")}`);

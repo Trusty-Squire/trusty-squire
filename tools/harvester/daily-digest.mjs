@@ -26,6 +26,7 @@ import {
   DEFAULT_BUDGET_USD,
 } from "./budget.mjs";
 import { sendMessage, buildDailyDigest } from "./telegram.mjs";
+import { listSkillsByStatus } from "./registry-client.mjs";
 
 const HALTS_DIR = join(homedir(), ".trusty-squire", "halts");
 
@@ -33,9 +34,11 @@ async function main() {
   const today = new Date().toISOString().slice(0, 10);
   const todayMs = Date.parse(`${today}T00:00:00Z`);
 
-  const [backoff, budget] = await Promise.all([
+  const [backoff, budget, pendingReviewSkills] = await Promise.all([
     loadBackoffState(),
     loadBudgetState(today),
+    // Skill-quarantine queue. Best-effort — registry blip returns [].
+    listSkillsByStatus("pending-review"),
   ]);
   const halts = await readHaltsSince(todayMs);
 
@@ -64,6 +67,10 @@ async function main() {
     error: h.error_message,
   }));
 
+  // Pending-review skill slugs (unique). The registry returns one
+  // record per (service, version); dedup to service for the digest.
+  const pendingReview = dedupe(pendingReviewSkills.map((s) => s.service));
+
   const cap = numericEnv("HARVESTER_DAILY_BUDGET_USD", DEFAULT_BUDGET_USD);
   const message = buildDailyDigest({
     date: today,
@@ -71,6 +78,7 @@ async function main() {
     succeeded: succeededToday,
     demoted: demotedToday,
     newCaptures: [],
+    pendingReview,
     inBackoff,
     recentFailures,
   });
