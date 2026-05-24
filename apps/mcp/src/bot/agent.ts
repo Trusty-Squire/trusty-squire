@@ -99,19 +99,46 @@ const VERIFICATION_PROBE_SECONDS = 45;
 // without a key and the page reads like this, the run ends
 // `onboarding_blocked` rather than grep-looping a wall it cannot
 // satisfy (the S3-class trap named in the plan's failure modes).
-const ONBOARDING_PAYWALL_PATTERNS: readonly string[] = [
-  "add a payment method",
-  "add a credit card",
-  "add credit card",
-  "payment method required",
-  "a payment method is required",
-  "credit card required",
-  "enter your card",
-  "enter your payment",
-  "enter payment details",
-  "upgrade your plan to",
-  "start your paid plan",
+//
+// rc.27 — patterns are regexes (not substrings) so word boundaries
+// hold. `isAtPaywall` also rejects matches preceded by a negator
+// ("no", "without", "doesn't require", …) so a free-plan blurb like
+// "No credit card required, no hidden fees" — the exact phrase that
+// false-positively halted the IPInfo run on rc.26 — no longer
+// triggers a paywall verdict.
+const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
+  /\badd\s+a\s+payment\s+method\b/i,
+  /\badd\s+(?:a\s+)?credit\s+card\b/i,
+  /\bpayment\s+method\s+(?:is\s+)?required\b/i,
+  /\bcredit\s+card\s+required\b/i,
+  /\benter\s+your\s+card\b/i,
+  /\benter\s+your\s+payment\b/i,
+  /\benter\s+payment\s+details\b/i,
+  /\bupgrade\s+your\s+plan\s+to\b/i,
+  /\bstart\s+your\s+paid\s+plan\b/i,
 ];
+
+// Negators that, if they appear in the ~30 characters immediately
+// before a paywall pattern match, flip its meaning from a demand
+// to a marketing reassurance. "No", "without", "doesn't require",
+// "don't need", "isn't".
+const PAYWALL_NEGATION_PREFIX =
+  /\b(?:no|without|doesn'?t\s+(?:need|require)|don'?t\s+(?:need|require)|isn'?t)\s+$/i;
+
+// Exported for unit testing — the post-OAuth heuristic distinguishing
+// "the dashboard is asking for a card before issuing a key" from "the
+// dashboard happens to mention cards on a marketing tile".
+export function isAtPaywall(text: string): boolean {
+  for (const pattern of ONBOARDING_PAYWALL_PATTERNS) {
+    const m = pattern.exec(text);
+    if (m === null) continue;
+    const start = Math.max(0, m.index - 30);
+    const prefix = text.slice(start, m.index);
+    if (PAYWALL_NEGATION_PREFIX.test(prefix)) continue;
+    return true;
+  }
+  return false;
+}
 
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
@@ -2705,8 +2732,8 @@ export class SignupAgent {
 
     // No API key. Distinguish a billing/card wall (onboarding_blocked)
     // from a generic navigation miss — never grep-loop a paid wall.
-    const finalText = (await this.browser.extractText().catch(() => "")).toLowerCase();
-    if (ONBOARDING_PAYWALL_PATTERNS.some((p) => finalText.includes(p))) {
+    const finalText = await this.browser.extractText().catch(() => "");
+    if (isAtPaywall(finalText)) {
       return {
         success: false,
         error:
