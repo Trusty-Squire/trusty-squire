@@ -415,7 +415,76 @@ export class BrowserController {
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
+
+    // rc.33 — spoof WebGL renderer/vendor. Under Xvfb (or any non-GPU
+    // host) Chrome falls back to SwiftShader, which reports
+    //   UNMASKED_VENDOR_WEBGL   = "Google Inc. (Google)"
+    //   UNMASKED_RENDERER_WEBGL = "ANGLE (Google, ...SwiftShader...)"
+    // Both strings are on every published anti-bot fingerprint
+    // blocklist; Cloudflare Turnstile responds with error 600010
+    // ("internal client execution error") rather than even trying to
+    // grade the click. Override the two parameter codes on both
+    // WebGL1 and WebGL2 prototypes to look like a stock Intel laptop
+    // GPU. Doesn't change actual rendering — only the strings the
+    // fingerprint probe reads back.
+    await context.addInitScript(() => {
+      const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
+      const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
+      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext) => {
+        const orig = proto.getParameter;
+        proto.getParameter = function (this: typeof proto, p: number) {
+          if (p === VENDOR_WEBGL) return "Intel Inc.";
+          if (p === RENDERER_WEBGL) return "Intel(R) UHD Graphics 620";
+          return orig.call(this, p);
+        };
+      };
+      if (typeof WebGLRenderingContext !== "undefined") {
+        spoof(WebGLRenderingContext.prototype as WebGLRenderingContext);
+      }
+      if (typeof WebGL2RenderingContext !== "undefined") {
+        spoof(WebGL2RenderingContext.prototype as WebGL2RenderingContext);
+      }
+    });
     this.page = context.pages()[0] ?? (await context.newPage());
+
+    // rc.33 — captcha tracing. When UNIVERSAL_BOT_CAPTCHA_TRACE=1 is
+    // set, log every response from Cloudflare/Google's challenge
+    // endpoints plus any console message that mentions captcha-y
+    // keywords. Gives us visibility into *why* a Tier-2 click times
+    // out ("sat idle" vs "score-too-low" vs "follow-up issued") —
+    // the parent page can't read the iframe's DOM (cross-origin) but
+    // it CAN observe its network. Off by default; opt in for
+    // diagnostic runs only since the bodies can be large.
+    if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
+      this.page.on("response", async (resp) => {
+        const url = resp.url();
+        if (!/challenges\.cloudflare\.com|google\.com\/recaptcha/.test(url)) {
+          return;
+        }
+        const status = resp.status();
+        const ct = resp.headers()["content-type"] ?? "";
+        let bodyPreview = "";
+        if (/json|javascript|html|plain/.test(ct)) {
+          try {
+            const body = await resp.text();
+            bodyPreview =
+              body.length > 400 ? body.slice(0, 400) + "…" : body;
+          } catch {
+            // body may be evicted; ignore
+          }
+        }
+        console.error(
+          `[captcha-trace] ${status} ${url}${
+            bodyPreview ? "\n  body: " + bodyPreview.replace(/\n/g, "\\n") : ""
+          }`,
+        );
+      });
+      this.page.on("console", (msg) => {
+        const text = msg.text();
+        if (!/turnstile|cloudflare|challenge|recaptcha/i.test(text)) return;
+        console.error(`[captcha-trace] console.${msg.type()}: ${text}`);
+      });
+    }
   }
 
   // Probe the run's actual egress geo by loading ipinfo.io. Launches a
@@ -581,16 +650,20 @@ export class BrowserController {
       // wraps result hrefs but exposes the real destination as a child
       // attribute or via the `href` itself for organic results — we
       // grab whichever link's href starts with the target origin.
-      const resultSelector = `a[href^="${targetOrigin}"]`;
-      const hasResult = (await this.page.locator(resultSelector).count()) > 0;
+      // Google SERPs often expose several anchors to the same origin
+      // (the organic result, "People also ask" related links, sitelinks
+      // like /pricing). Scope to the first match so Playwright's strict
+      // mode doesn't throw before we get to click.
+      const resultLocator = this.page.locator(`a[href^="${targetOrigin}"]`).first();
+      const hasResult = (await resultLocator.count()) > 0;
       if (hasResult) {
         // Use humanClick if available — moves the mouse along a bezier
         // path to the link, which feeds the scoring JS pointer entropy
         // as a side effect.
         if (this.humanize) {
-          await this.humanClick(resultSelector);
+          await this.humanClickLocator(resultLocator);
         } else {
-          await this.page.click(resultSelector);
+          await resultLocator.click();
         }
         await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
       } else {
@@ -1285,6 +1358,92 @@ export class BrowserController {
     const widget = await this.findCaptchaWidget();
     if (widget === null) return { found: false };
 
+    // rc.33 — fingerprint probe. When tracing, dump the values
+    // Cloudflare Turnstile (and other anti-bot solutions) actually
+    // read: WebGL renderer/vendor strings, canvas hash, hw concurrency,
+    // device memory, screen, languages, webdriver flag. Turnstile
+    // error 600010 ("internal client execution error") usually points
+    // at one of these returning something the challenge JS can't
+    // handle (e.g. SwiftShader/llvmpipe renderer under Xvfb).
+    if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
+      try {
+        const fp = await this.page.evaluate(() => {
+          const out: Record<string, unknown> = {};
+          try {
+            const c = document.createElement("canvas");
+            const gl =
+              (c.getContext("webgl2") as WebGL2RenderingContext | null) ??
+              (c.getContext("webgl") as WebGLRenderingContext | null);
+            if (gl !== null) {
+              out.webglVendor = gl.getParameter(gl.VENDOR);
+              out.webglRenderer = gl.getParameter(gl.RENDERER);
+              out.webglVersion = gl.getParameter(gl.VERSION);
+              out.webglShadingLanguageVersion = gl.getParameter(
+                gl.SHADING_LANGUAGE_VERSION,
+              );
+              const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+              if (dbg !== null) {
+                out.webglUnmaskedVendor = gl.getParameter(
+                  dbg.UNMASKED_VENDOR_WEBGL,
+                );
+                out.webglUnmaskedRenderer = gl.getParameter(
+                  dbg.UNMASKED_RENDERER_WEBGL,
+                );
+              }
+              out.webglExtensions = (gl.getSupportedExtensions() ?? [])
+                .slice(0, 6)
+                .join(",");
+            } else {
+              out.webglVendor = null;
+            }
+          } catch (e) {
+            out.webglError = String(e);
+          }
+          try {
+            const c2 = document.createElement("canvas");
+            c2.width = 200;
+            c2.height = 50;
+            const ctx = c2.getContext("2d");
+            if (ctx !== null) {
+              ctx.textBaseline = "top";
+              ctx.font = "14px Arial";
+              ctx.fillStyle = "#f60";
+              ctx.fillRect(125, 1, 62, 20);
+              ctx.fillStyle = "#069";
+              ctx.fillText("Cwm fjordbank glyphs vext quiz", 2, 15);
+              out.canvas2dHash = c2.toDataURL().slice(-48);
+            }
+          } catch (e) {
+            out.canvas2dError = String(e);
+          }
+          out.hardwareConcurrency = navigator.hardwareConcurrency;
+          out.deviceMemory = (
+            navigator as Navigator & { deviceMemory?: number }
+          ).deviceMemory;
+          out.platform = navigator.platform;
+          out.languages = navigator.languages.join(",");
+          out.userAgent = navigator.userAgent;
+          out.webdriver = navigator.webdriver;
+          out.screen = {
+            w: screen.width,
+            h: screen.height,
+            d: screen.colorDepth,
+            availW: screen.availWidth,
+            availH: screen.availHeight,
+          };
+          out.devicePixelRatio = window.devicePixelRatio;
+          out.touchPoints = navigator.maxTouchPoints;
+          return out;
+        });
+        console.error("[fingerprint] " + JSON.stringify(fp));
+      } catch (err) {
+        console.error(
+          "[fingerprint] probe failed: " +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
     // Click at the checkbox position. Turnstile's checkbox sits at
     // roughly (28, 32) inside its iframe (the iframe is typically
     // 300x65 with the box on the left). reCAPTCHA v2 checkbox is at
@@ -1296,9 +1455,21 @@ export class BrowserController {
     // Use the humanized path so the click looks like a real user
     // tapping the box (Cloudflare's post-click challenge correlates
     // mouse-entry velocity with bot-likelihood).
+    //
+    // rc.33 — pre-click reconnaissance. Without this, the trajectory
+    // goes "last form field → straight to checkbox," which is too
+    // direct: a human eyes the captcha, glances around the form, and
+    // *then* approaches. Wander to a point above the widget first,
+    // dwell as if reading, then bezier in. The dwell also widens the
+    // scoring window so Cloudflare has more session-level entropy to
+    // grade before the click lands.
     if (this.humanize) {
+      const wanderX = widget.box.x + widget.box.width / 2 + rand(-40, 40);
+      const wanderY = widget.box.y - rand(60, 110);
+      await this.bezierMouseTo(wanderX, wanderY);
+      await this.sleep(rand(600, 1400));
       await this.bezierMouseTo(clickX, clickY);
-      await this.sleep(rand(120, 350));
+      await this.sleep(rand(180, 450));
     }
     await this.page.mouse.click(clickX, clickY);
     this.mouseX = clickX;

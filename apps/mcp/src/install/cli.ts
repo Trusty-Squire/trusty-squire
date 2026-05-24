@@ -543,6 +543,17 @@ async function runInstallClaim(
     apiBaseUrl: apiBase,
   });
 
+  // rc.33 — surface the underlying error instead of letting the outer
+  // wrapper print a generic "browser confirm step never finished."
+  // Most common case: a fresh headless box without the noVNC stack
+  // (x11vnc/novnc/websockify/cloudflared) — the runHeadlessChrome
+  // requireBinaries() throw already names the missing binaries and
+  // the apt-get install line, but the message was getting swallowed.
+  if (result.status === "error") {
+    ui.fail(`Couldn't open the confirm page: ${result.detail ?? "unknown error"}`);
+    process.exit(1);
+  }
+
   if (result.status !== "claimed" || state.value === null) {
     return null;
   }
