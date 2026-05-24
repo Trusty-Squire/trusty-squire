@@ -1403,6 +1403,17 @@ export class SignupAgent {
     steps.push(
       `${label} captcha (${result.kind}): ${result.solved ? "solved" : "NOT solved (timeout)"}`,
     );
+    // rc.32 — forensic snapshot after the captcha attempt. Without
+    // this, the only snapshot near the captcha is the pre-fill one
+    // taken BEFORE the click, so when a Turnstile fails to solve we
+    // can't tell whether (a) the bot's click didn't register (widget
+    // remains in initial state), (b) the click registered but
+    // Cloudflare immediately rejected it (red X / re-challenge), or
+    // (c) the click registered and a challenge grid rendered that
+    // we can't solve. Each path takes a different fix. Solved runs
+    // also save the snapshot — green-checkmark state is useful
+    // forensic data for tuning the success-detection regex.
+    await saveDebugSnapshot(this.browser, `captcha-after-${result.solved ? "solved" : "timeout"}`);
     // Classify the widget for spike telemetry — a pure read, after the
     // solve attempt so the challenge grid (if any) has had time to render.
     const detected = await this.browser.detectCaptchaVariant();
