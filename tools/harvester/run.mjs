@@ -30,7 +30,13 @@ const QUEUE_FILE = join(__dirname, "services.yaml");
 const HALTED_FILE = join(homedir(), ".trusty-squire", "harvester-halted");
 const COUNTER_FILE = join(homedir(), ".trusty-squire", "harvester-consecutive-failures");
 const REPO = process.env.GH_REPO ?? "Trusty-Squire/trusty-squire";
-const MCP_VERSION = process.env.HARVESTER_MCP_VERSION ?? "0.6.14-rc.19";
+// Default to the floating `@next` dist-tag (= latest staging rc per
+// release.yml). Each run resolves to whatever's freshest on npm; the
+// resolved version goes into the failure-report.json (mcp_version_
+// resolved) so we keep reproducibility despite the dynamic tag.
+// Override with HARVESTER_MCP_VERSION=<pinned-rc> for forensic re-
+// runs against a specific version.
+const MCP_VERSION = process.env.HARVESTER_MCP_VERSION ?? "next";
 
 // Tool-call polling cadence. The MCP server reports the running step
 // trail as it happens; polling more frequently means richer logs but
