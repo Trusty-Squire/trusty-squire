@@ -148,6 +148,34 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   const signupUrl = firstRound.state.url;
   const oauthProvider = inferOAuthProvider(stepsResult.steps);
 
+  // rc.24 — guarantee the first step is a navigate. When the captured
+  // bot got "lucky" — landed on a page that already showed the
+  // credential because methoxine had a prior session — the planner
+  // picks `extract` on round 0 and the synthesizer produces a skill
+  // whose first step is `extract_via_regex`. Replay can't reproduce
+  // that: the replay engine starts with a fresh browser context, runs
+  // step 0 against `about:blank`, extractText returns empty, step
+  // fails. Symptom on `ipinfo` skill F7W8…: "Page extractText returned
+  // no content." A prepended `navigate` step using the skill's own
+  // signup_url + the captured profile gets the page back to the state
+  // the synthesis was based on, and the subsequent extract works.
+  // Idempotent: if the chain already starts with a navigate, nothing
+  // changes.
+  if (
+    stepsResult.steps.length > 0 &&
+    stepsResult.steps[0]!.kind !== "navigate" &&
+    stepsResult.steps[0]!.kind !== "click_oauth_button"
+  ) {
+    stepsResult.steps.unshift({
+      kind: "navigate",
+      url: signupUrl,
+      provenance: {
+        run_id: input.run_id,
+        round_index: 0,
+      },
+    });
+  }
+
   // Stage 1.c.5 — multi-cred dispatch (Phase B/C per docs/DESIGN-
   // multi-credential.md). Count extract-class steps; if >1 AND each
   // has a distinct derivable `produces` name, upgrade to the multi-

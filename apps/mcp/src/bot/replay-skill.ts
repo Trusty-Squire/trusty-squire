@@ -492,11 +492,28 @@ async function preValidateStep(
         };
       }
       if (matches.length > 1) {
+        // rc.24 — cascading disambiguator. OpenRouter's "Name" hint
+        // matches both the new-key form's empty input AND a label on
+        // an existing-keys row (or a hidden duplicate React Hook Form
+        // input). The disambiguator narrows from most-likely-to-least
+        // and accepts the first filter that produces a unique winner.
+        const filters: Array<{ name: string; fn: (el: InteractiveElement) => boolean }> = [
+          { name: "in viewport", fn: (el) => el.inViewport === true },
+          { name: "visible", fn: (el) => el.visible !== false },
+          { name: "empty value", fn: (el) => el.value === "" || el.value === null || el.value === undefined },
+          { name: "not yet interacted with", fn: (el) => el.interactedThisRun !== true },
+        ];
+        let narrowed: InteractiveElement[] = matches;
+        for (const f of filters) {
+          const next = narrowed.filter(f.fn);
+          if (next.length === 1) return { ok: true, match: next[0]! };
+          if (next.length > 0) narrowed = next;
+        }
         return {
           ok: false,
           reason:
             `label_hint=${JSON.stringify(step.label_hint)} matched ${matches.length} inputs; ` +
-            `cannot uniquely identify the fill target.`,
+            `disambiguator narrowed to ${narrowed.length} — still cannot uniquely identify the fill target.`,
         };
       }
       return { ok: true, match: matches[0]! };
