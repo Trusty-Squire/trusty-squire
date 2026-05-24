@@ -671,7 +671,10 @@ async function runOnce(pick) {
   // Surface LLM call count so the caller can update the daily budget.
   // Some bot responses omit it; treat as 0 rather than failing.
   const llmCalls = typeof final.llm_calls === "number" ? final.llm_calls : 0;
-  return { classification, llmCalls };
+  // Surface the raw bot result too so main() can derive a block reason
+  // (deriveBlockReason needs the .status / .error fields, not the
+  // harvester's outcome classification).
+  return { classification, llmCalls, final };
 }
 
 function tripCircuitBreakerIssue(latestEntry, latestClassification, count) {
@@ -805,7 +808,7 @@ async function main() {
     process.exit(3);
   }
 
-  const { classification, llmCalls } = await runOnce(pick);
+  const { classification, llmCalls, final } = await runOnce(pick);
 
   // Update per-service backoff state. Best-effort — a write failure
   // here must not change the run's exit code.
