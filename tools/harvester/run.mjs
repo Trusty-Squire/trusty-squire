@@ -253,15 +253,16 @@ function preflightChecks() {
                    join(homedir(), ".trusty-squire", "chrome-profile")),
     detail: `must be seeded with methoxine's Google OAuth session via 'npx @trusty-squire/mcp login --provider=google' (TRUSTY_SQUIRE_PROFILE_DIR=${process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "<default>"})`,
   });
+  const proxyDisabled = process.env.UNIVERSAL_BOT_PROXY_ALWAYS === "false";
   checks.push({
     name: "SOCKS proxy listening on 127.0.0.1:1080",
-    ok: (() => {
+    ok: proxyDisabled || (() => {
       try {
         execSync("ss -tnlp 2>/dev/null | grep -q 127.0.0.1:1080", { stdio: "pipe" });
         return true;
       } catch { return false; }
     })(),
-    detail: "ssh -D to the residential proxy host. Tunnel dies on Mac sleep — re-run the ssh -D command if missing.",
+    detail: "ssh -D to the residential proxy host. Tunnel dies on Mac sleep — re-run the ssh -D command if missing. (Skipped when UNIVERSAL_BOT_PROXY_ALWAYS=false — direct-egress diagnostic runs.)",
   });
   checks.push({
     name: "harvester not halted",
