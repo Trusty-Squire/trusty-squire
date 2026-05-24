@@ -149,6 +149,65 @@
     page lands on a phone-entry form, the bot's anti-bot detection
     won't help — mark status:needs-manual after first attempt.
 
+# ── Phase 1 expansion (5 high-confidence Google-OAuth services) ──
+# Picked from the design-doc curation list. All offer Google OAuth as
+# a primary signup method. URLs verified 2026-05-24 but per-service
+# OAuth flows untested — flag as needs-manual on first attempt if the
+# bot hits an unexpected gate (phone verification, no Google button).
+
+- slug: mistral
+  name: Mistral
+  signup_url: https://console.mistral.ai/auth/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM API. Google OAuth available alongside email signup. First-
+    time attempt should validate clean OAuth-first path.
+
+- slug: neon
+  name: Neon
+  signup_url: https://console.neon.tech/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Serverless Postgres. Google + GitHub OAuth, plus email. Console
+    offers a workspace-creation step post-OAuth that may trip the
+    planner's "looking for API key" assumption — watch for that on
+    the first run.
+
+- slug: together
+  name: Together AI
+  signup_url: https://api.together.xyz/signin
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM inference. Google + GitHub OAuth. Untested with the universal
+    bot; first run validates.
+
+- slug: groq
+  name: Groq
+  signup_url: https://console.groq.com/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM inference. Google + GitHub OAuth. API-key visibility is
+    behind a "create new key" modal — F10-class copy-button path
+    likely applies.
+
+- slug: pinecone
+  name: Pinecone
+  signup_url: https://app.pinecone.io/?sessionType=signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Vector DB. Google + GitHub OAuth. Free tier exists; API key
+    surfaces in dashboard after project creation.
+
 # Known-incompatible services. Kept here for visibility — operator should
 # never see a `service:cloudflare` issue auto-created.
 - slug: cloudflare
