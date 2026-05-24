@@ -301,9 +301,24 @@ async function invokeProvisionAnyService(entry) {
       join(homedir(), ".trusty-squire", "chrome-profile"),
   };
 
+  // HARVESTER_MCP_LOCAL=1 → run the dev-tree mcp build via `node
+  // apps/mcp/dist/bin.js server` instead of npx-fetching the published
+  // rc. Lets us iterate on bot fixes without bumping a version +
+  // waiting for CI to publish. Caller must `pnpm -F @trusty-squire/mcp
+  // build` first; we check existence and refuse with a clear message
+  // rather than silently falling through to npx.
+  const useLocal = process.env.HARVESTER_MCP_LOCAL === "1";
+  const localBin = join(__dirname, "..", "..", "apps", "mcp", "dist", "bin.js");
+  if (useLocal && !existsSync(localBin)) {
+    throw new Error(
+      `HARVESTER_MCP_LOCAL=1 but ${localBin} is missing. Run: pnpm -F @trusty-squire/mcp build`,
+    );
+  }
   const transport = new StdioClientTransport({
-    command: "npx",
-    args: ["-y", `@trusty-squire/mcp@${MCP_VERSION}`, "server"],
+    command: useLocal ? "node" : "npx",
+    args: useLocal
+      ? [localBin, "server"]
+      : ["-y", `@trusty-squire/mcp@${MCP_VERSION}`, "server"],
     env: childEnv,
   });
   const client = new Client(
