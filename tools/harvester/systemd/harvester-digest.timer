@@ -1,0 +1,13 @@
+[Unit]
+Description=Trusty Squire skill harvester — daily Telegram digest at 09:00 local
+
+[Timer]
+# Fire daily at 09:00 in the operator's local time. AccuracySec=10min
+# is fine — digest doesn't need second-level precision; less
+# precision = better systemd timer coalescing.
+OnCalendar=*-*-* 09:00:00
+AccuracySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
