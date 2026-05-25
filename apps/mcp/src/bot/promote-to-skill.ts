@@ -573,9 +573,18 @@ function resolveClickHint(
 }
 
 function pickClickText(el: InteractiveElement): string | null {
-  // Prefer visibleText (what humans read); fall back to ariaLabel for
-  // icon-only buttons. Trim and drop empty strings.
-  const text = (el.visibleText ?? el.ariaLabel ?? "").trim();
+  // Prefer visibleText (what humans read); fall back through ariaLabel,
+  // title, and iconLabel for icon-only buttons. iconLabel is the most
+  // common surface for modern dashboards that ship "Sign in with X"
+  // OAuth buttons as an SVG with no text — the iconLabel folds in
+  // alt/aria-label from descendant <img>/<svg>. Trim and drop empties.
+  const text = (
+    el.visibleText ??
+    el.ariaLabel ??
+    el.title ??
+    el.iconLabel ??
+    ""
+  ).trim();
   if (text.length === 0) return null;
   // Truncate exceptionally long text — a 500-char button label is
   // almost certainly a paragraph picked up by the inventory scraper.
@@ -638,10 +647,16 @@ function resolveLabelHint(
     };
   }
 
-  // Ambiguity check — same as click resolver.
+  // Ambiguity check — same as click resolver. Mirror the replay
+  // engine's rc.8 isFillable filter: only input/textarea/select can
+  // genuinely host a fill, so don't count a labelText collision from a
+  // sibling help-button as an ambiguity (OpenRouter ships a "Name"
+  // tooltip button next to its #name input — both report labelText
+  // "Name", but the button is not a fill target).
   const duplicates = inventory.filter(
     (e) =>
       e.selector !== selector &&
+      (e.tag === "input" || e.tag === "textarea" || e.tag === "select") &&
       (e.labelText?.trim() === hint ||
         e.placeholder?.trim() === hint ||
         e.ariaLabel?.trim() === hint),
@@ -908,13 +923,22 @@ function validatorForShape(
 function inferOpaqueValidatorFromHtml(
   rounds: OnboardingCaseFile[],
 ): { min_length: number; max_length: number } | null {
-  const html = rounds[rounds.length - 1]?.state.html ?? "";
+  const rawHtml = rounds[rounds.length - 1]?.state.html ?? "";
+  // Strip HTML tags + collapse whitespace so the label and value
+  // appear adjacent — they're typically rendered as
+  // `<div>API Token</div><span>f9a062…</span>` (IPInfo case). The
+  // strip mirrors what extractText() returns at replay time, which
+  // is what the labeled regex was designed against.
+  const text = rawHtml
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ");
   // Look for "API Token" / "Token" / "API Key" label followed by an
   // alphanumeric run of 8-64 chars. The replay engine's
   // extractCredentialCandidates fallback uses validator length to
   // filter, so we want a tight ±2-char range around the observed
   // length to keep nav strings ("Dashboard", "Downloads") out.
-  const labeled = /(?:API[\s_-]?Token|API[\s_-]?Key|Token|Secret)\s*[:=]?\s*([a-zA-Z0-9_-]{8,64})/i.exec(html);
+  const labeled = /(?:API[\s_-]?Token|API[\s_-]?Key|Token|Secret)\s*[:=]?\s*([a-zA-Z0-9_-]{8,64})/i.exec(text);
   if (labeled !== null && labeled[1] !== undefined) {
     const len = labeled[1].length;
     return { min_length: Math.max(8, len - 2), max_length: len + 2 };
