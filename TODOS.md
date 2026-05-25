@@ -29,15 +29,32 @@ Doesn't touch the security boundary — user's phone is the gate.
 Unblocks ~3 services in the queue today; many more in the Phase 5
 expansion pool.
 
-### G15 — Short URL for noVNC tunnel link [P2, ~3 hours]
-The cloudflared tunnel URLs are 80-char random-words subdomains —
-unreadable on a phone. Already-spec'd: `POST /v1/short` body
-`{url}` → `{slug}` (15-min TTL matching install-token expiry),
-`GET /g/:slug` → 302. CLI calls it post-tunnel-up and prints the
-short URL in the noVNC banner.
+### G16 — Dedicated Cloudflare named tunnel for noVNC [P2, ~2 hours]
+Replaces the random `*.trycloudflare.com` cold-start. The cloudflared
+tunnel URL today is an 80-char random-words subdomain — long, slow
+(~5-10s allocation), and unreadable on a phone. A named tunnel
+(`cloudflared tunnel run <name>`) bound to `vnc.trustysquire.ai` keeps
+the routing pre-allocated on Cloudflare's edge — startup is ~1s,
+URL is short and branded, teardown is clean disconnect. Free tier,
+no usage cost.
 
-Domain decision: `trustysquire.ai/g/<slug>` works today, no new
-domain. (User just lived this on the connect flow.)
+**Supersedes G15** (the original short-URL-shortener proposal —
+G16 makes that unnecessary because the named tunnel's hostname is
+already short).
+
+Implementation:
+- Cloudflare account: provision named tunnel `noVNC`, get tunnel
+  token, store on the user's box.
+- DNS: bind `vnc.trustysquire.ai` to the tunnel via Cloudflare API.
+- google-login.ts: replace `cloudflared tunnel --url <local>` with
+  `cloudflared tunnel run <name>`; URL becomes
+  `vnc.trustysquire.ai/?password=…`.
+- Operator setup is one-time (the tunnel-token belongs in
+  `~/.config/trusty-squire/harvester.env`).
+
+Recommendation: shared hostname for all users (simpler ops; the
+password fragment keeps each session private). Per-machine tunnels
+overkill for our volume.
 
 ---
 
@@ -96,11 +113,6 @@ proxy combo handles most signups without it.
 `x11vnc -passwd <plaintext>` is readable via `ps`. Pre-existing,
 narrow attack surface (`-localhost` only). Fix: write to a 0600
 file, use `-passwdfile`.
-
-### G16 — Dedicated Cloudflare named tunnel for noVNC [P3]
-Replaces the random `*.trycloudflare.com` cold-start. ~5-10s
-faster on first install. Decision: shared `vnc.trustysquire.ai`
-hostname (option a per the original analysis).
 
 ### M3 — Read verification mail from user's own Gmail [P3]
 The bot's chrome profile is logged into the user's Google, so the

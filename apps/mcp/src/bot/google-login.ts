@@ -615,6 +615,17 @@ async function runHeadlessChrome(
       args: [
         `--window-position=0,0`,
         `--window-size=${HEADLESS_W},${HEADLESS_H}`,
+        // 0.6.15-rc.2 — render web content at 1.75× the natural pixel
+        // density on the virtual display. Without this, noVNC's
+        // scaleViewport scales 720×1280 down to the phone viewport
+        // (e.g. 393×852 on a modern iPhone = ~55% of original), so
+        // tap targets that were already small at 1× become unreadable.
+        // 1.75× means the page lays out as if on a ~411-wide phone,
+        // which most modern web apps render touch-friendly defaults
+        // for. Higher (2×) cuts horizontal space too much for sign-in
+        // forms; lower (1.5×) still leaves the GitHub login button
+        // a precise target on small phones.
+        `--force-device-scale-factor=1.75`,
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-dev-shm-usage",
