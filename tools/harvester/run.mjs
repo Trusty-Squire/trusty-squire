@@ -31,6 +31,13 @@ import {
   resolveMcpVersion,
 } from "./failure-report.mjs";
 import { classifyFailure } from "./classify.mjs";
+import { reportTick, REPORT_KINDS, maybeReportHaltedTick as maybeReportHaltedTickImpl } from "./telegram-report.mjs";
+
+async function maybeReportHaltedTick() {
+  let since = "(unknown)";
+  try { since = readFileSync(HALTED_FILE, "utf8").trim(); } catch { /* ok */ }
+  return maybeReportHaltedTickImpl(since);
+}
 import {
   loadBlocksState,
   saveBlocksState,
@@ -592,6 +599,28 @@ async function runOnce(pick) {
   commentOnIssue(issueNumber, summary);
   setIssueStatus(issueNumber, classification);
 
+  // Per-run Telegram report — fire-and-forget, never affects the
+  // harvester's exit code. Sends one message per signup attempt
+  // regardless of outcome; halt_tripped fires separately below if
+  // the circuit breaker advances on this tick.
+  const owner = process.env.GH_REPO ?? "Trusty-Squire/trusty-squire";
+  const issueUrl = `https://github.com/${owner}/issues/${issueNumber}`;
+  const errorOrSummary =
+    classification === "replay-ok"
+      ? final.api_key !== undefined
+        ? "API key extracted + stored in vault"
+        : "signup completed"
+      : (final.error ?? final.message ?? "(no detail)");
+  await reportTick({
+    kind: REPORT_KINDS.SIGNUP,
+    service: entry.name,
+    classification,
+    errorOrSummary,
+    issueUrl,
+    attempt: attemptNumber,
+    ts: Date.now(),
+  });
+
   if (classification === "replay-ok") {
     closeIssue(
       issueNumber,
@@ -611,6 +640,14 @@ async function runOnce(pick) {
     if (newCount >= 3) {
       writeFileSync(HALTED_FILE, new Date().toISOString(), "utf8");
       tripCircuitBreakerIssue(entry, classification, newCount);
+      // Separate Telegram alert: the harvester is now halted. The
+      // signup-report already fired above; this is the explicit
+      // halt-tripped notification so the operator can react.
+      await reportTick({
+        kind: REPORT_KINDS.HALT_TRIPPED,
+        failures: newCount,
+        ts: Date.now(),
+      });
     }
 
     // Structured failure-report — the boundary the subagent (Phase 3)
@@ -743,7 +780,21 @@ async function main() {
 
   if (!ghAvailable()) {
     console.log("gh CLI not authenticated — cannot proceed.");
+    await reportTick({
+      kind: REPORT_KINDS.PREFLIGHT_FAIL,
+      detail: "gh CLI not authenticated — needed to create/comment/close GH issues. Run `gh auth login`.",
+      ts: Date.now(),
+    });
     process.exit(2);
+  }
+
+  // Halt sentinel check moved EARLIER so we can throttle a telegram
+  // notification about halted ticks (1/hour) rather than rely on the
+  // systemd ConditionPathExists, which made every halted tick silent.
+  if (existsSync(HALTED_FILE)) {
+    console.log(`─── Halted — exiting cleanly. Sentinel at ${HALTED_FILE} ─────`);
+    await maybeReportHaltedTick();
+    process.exit(0);
   }
 
   // Daily LLM budget cap. Short-circuit before any setup work if
@@ -757,6 +808,11 @@ async function main() {
   if (overBudget.over) {
     console.log(`─── Aborting: ${overBudget.reason} ─────`);
     try { writeFileSync(HALTED_FILE, new Date().toISOString(), "utf8"); } catch {}
+    await reportTick({
+      kind: REPORT_KINDS.HALT_TRIPPED,
+      failures: 0,
+      ts: Date.now(),
+    });
     process.exit(4);
   }
 
@@ -772,6 +828,7 @@ async function main() {
   if (pick === null) {
     console.log("─── Decision ───────────────────────────────────────────");
     console.log("No eligible service. Reasons can include: already validated, operator marked needs-manual, in 24h cooldown, or in extended backoff after consecutive failures. Check ~/.trusty-squire/backoff-state.json for per-service state.");
+    await reportTick({ kind: REPORT_KINDS.NO_ELIGIBLE, ts: Date.now() });
     return;
   }
 
@@ -796,15 +853,16 @@ async function main() {
     process.exit(64);
   }
 
-  // Halt sentinel is a clean exit, not an error: timer ticks expect
-  // exit 0 so they don't email the operator on every cooldown.
-  if (existsSync(HALTED_FILE)) {
-    console.log(`─── Halted — exiting cleanly. Sentinel at ${HALTED_FILE} ─────`);
-    process.exit(0);
-  }
+  // (Halt-sentinel check moved earlier so it can fire a throttled
+  // telegram update. See the block above the budget cap.)
   const failed = checks.find((c) => !c.ok);
   if (failed !== undefined) {
     console.log(`─── Aborting: pre-flight failed (${failed.name}) ─────`);
+    await reportTick({
+      kind: REPORT_KINDS.PREFLIGHT_FAIL,
+      detail: `${failed.name} — ${failed.detail}`,
+      ts: Date.now(),
+    });
     process.exit(3);
   }
 

@@ -64,7 +64,7 @@ export async function sendMessage(text, opts = {}) {
     await persistChatId(chatId);
   }
 
-  return await postSendMessage(token, chatId, truncate(text));
+  return await postSendMessage(token, chatId, truncate(text), opts.parse_mode);
 }
 
 // Resolves the chat_id from the bot's recent message updates.
@@ -92,12 +92,14 @@ export async function resolveChatIdFromUpdates(token) {
   }
 }
 
-async function postSendMessage(token, chatId, text) {
+async function postSendMessage(token, chatId, text, parseMode) {
   try {
+    const body = { chat_id: chatId, text, disable_web_page_preview: true };
+    if (parseMode !== undefined) body.parse_mode = parseMode;
     const res = await fetch(`${API_BASE}/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       process.stderr.write(`[telegram] sendMessage HTTP ${res.status}\n`);

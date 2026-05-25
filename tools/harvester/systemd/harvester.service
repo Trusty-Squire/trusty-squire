@@ -2,11 +2,11 @@
 Description=Trusty Squire skill harvester — single attempt
 Documentation=https://github.com/Trusty-Squire/trusty-squire/blob/main/tools/harvester/README.md
 
-# Don't kick off if the global halt sentinel is present (budget exceeded,
-# systemic failure, etc.). Per-service backoff is handled inside run.mjs
-# and doesn't block other services — only the global sentinel short-
-# circuits the whole timer.
-ConditionPathExists=!%h/.trusty-squire/harvester-halted
+# Halt-sentinel handling moved into run.mjs (0.6.15-rc.8) so the
+# script can fire a throttled Telegram notification (1/hr) while
+# halted, rather than silently no-op'ing every tick. The script
+# still exits cleanly (code 0) when halted; the only difference is
+# the operator gets visibility.
 
 [Service]
 Type=oneshot

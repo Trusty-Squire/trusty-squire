@@ -1,0 +1,27 @@
+[Unit]
+Description=Trusty Squire harvester bot — Telegram interactive control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/trusty-squire/harvester.env
+ExecStart=/usr/bin/node /home/lunchbox/proj-ts/tools/harvester/bot-poller.mjs
+
+# Long-poll loop, intentional restart on any exit (token expired,
+# Telegram outage, code change). 10s backoff so a misconfigured
+# token doesn't burn the journal.
+Restart=always
+RestartSec=10
+
+# Don't restart endlessly if the binary is genuinely broken (every
+# restart in 60s window counts; 5 in 60s = give up).
+StartLimitInterval=60
+StartLimitBurst=5
+
+# Same security posture as the harvester service.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
