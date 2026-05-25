@@ -56,6 +56,7 @@ import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import { loggedInProviders } from "../bot/login-state.js";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
+import chalk from "chalk";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 // Default skill-registry URL. Wired into the MCP config's env block
@@ -306,7 +307,8 @@ export async function runCli(argv: string[]): Promise<void> {
 }
 
 async function connect(args: Argv): Promise<void> {
-  ui.heading("Setting up Trusty Squire on this machine");
+  ui.heading("Trusty Squire");
+  ui.hint("Setting up this machine.");
 
   const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
@@ -319,10 +321,11 @@ async function connect(args: Argv): Promise<void> {
   if (!args.forceRelogin) {
     const preflight = await checkAlreadyProvisioned();
     if (preflight !== null) {
+      ui.divider();
       await writeAgentConfig(target, agent, args);
       ui.success(
-        `Already provisioned (machine + ${preflight.providers.join("/")} session) — ` +
-          `refreshed ${agent.display_name} MCP config without re-running the browser flow`,
+        `Already provisioned (${preflight.providers.join(" + ")}). ` +
+          `${agent.display_name} config refreshed.`,
       );
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
@@ -331,18 +334,20 @@ async function connect(args: Argv): Promise<void> {
       // provider if only one is connected. This is the natural prompt
       // for users who originally chose "skip" at step 2.
       await maybeOfferSecondaryProvider(args);
-      ui.hint(`Pass ${ui.code("--force-relogin")} if you want to switch the bound account.`);
+      ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
       return;
     }
   }
+
+  ui.section(1, 2, "Your account");
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
   // Best-effort: a failure returns null and the install continues.
   const asn = await ui.withSpinner({
-    start: "Detecting your network…",
+    start: "Detecting network",
     done: "Network detected",
-    fail: () => "Network detection failed (continuing anyway)",
+    fail: () => "Network detection failed (continuing)",
     task: () => detectAsn(),
   });
 
@@ -352,7 +357,7 @@ async function connect(args: Argv): Promise<void> {
   // browser confirm flow below) is. The MCP server reads both from the
   // session file.
   const machine = await ui.withSpinner({
-    start: "Issuing a machine token…",
+    start: "Issuing machine token",
     done: "Machine token issued",
     task: () => issueMachineToken(args.apiBase, fetch, asn ?? undefined),
   });
@@ -379,8 +384,8 @@ async function connect(args: Argv): Promise<void> {
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser);
   if (session === null) {
     ui.fail(
-      "Install didn't complete — the browser confirm step never finished. " +
-        `Try again with ${ui.code("npx @trusty-squire/mcp connect")}.`,
+      `Install didn't complete — browser confirm never finished. ` +
+        `Try again: ${ui.code("npx @trusty-squire/mcp connect")}`,
     );
     process.exit(1);
   }
@@ -397,8 +402,8 @@ async function connect(args: Argv): Promise<void> {
   await writeAgentConfig(target, agent, args);
   if (args.skipBrowser) {
     ui.panel(
-      `--skip-browser was set, so the bot's Chrome didn't observe your sign-in. ` +
-        `Before your first OAuth-based signup, run:\n\n` +
+      `--skip-browser was set, so the bot's Chrome didn't observe your sign-in.\n` +
+        `Before your first OAuth signup, run:\n` +
         `  ${ui.code("npx @trusty-squire/mcp login [--provider=google|github]")}`,
       { title: "Heads up", color: "yellow" },
     );
@@ -411,11 +416,12 @@ async function connect(args: Argv): Promise<void> {
     await maybeOfferSecondaryProvider(args);
   }
 
-  console.warn("");
-  ui.success(`You're done. Restart ${agent.display_name} to pick up the new tools.`);
-  console.warn("");
-  ui.hint("Try it now — ask your agent:");
-  ui.hint(`  "sign me up for Resend"`);
+  ui.divider();
+  ui.panel(
+    `Squire on duty. Restart ${agent.display_name} to pick up the new tools.\n\n` +
+      `Try it — ask your agent: ${ui.code(`"sign me up for Resend"`)}`,
+    { color: "wine" },
+  );
 }
 
 // Runs the browser-based install confirm flow.
@@ -520,35 +526,36 @@ async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
   if (present.size === 0) return; // step 1 didn't seed anything — no basis to ask
   if (present.has("google") && present.has("github")) return; // both already connected
   const missing: OAuthProviderId = present.has("google") ? "github" : "google";
-  const primaryLabel = present.has("google") ? "Google" : "GitHub";
   const missingLabel = missing === "google" ? "Google" : "GitHub";
+  const missingExamples =
+    missing === "github"
+      ? "Railway, Vercel, parts of Cloudflare"
+      : "Resend, IPInfo, Postmark";
 
-  console.warn("");
-  ui.heading(`Step 2/2 — Add ${missingLabel} for broader service coverage?`);
-  console.warn(
-    `Some SaaS (Railway, Vercel, parts of Cloudflare) only support ${missingLabel}\n` +
-      `OAuth. Adding it now means the bot won't have to interrupt you mid-signup\n` +
-      `later when it hits a ${missingLabel}-only service. You're already signed in as ${primaryLabel}.`,
+  ui.section(2, 2, `Connect ${missingLabel}`);
+  ui.hint(
+    `Some services are ${missingLabel}-only (${missingExamples}). Adding ${missingLabel} ` +
+      `now avoids being interrupted mid-signup later.`,
   );
-  const yes = await promptYesNo(`Add ${missingLabel} now?`, true);
+  const yes = await promptYesNo(`Add ${missingLabel}?`, true);
   if (!yes) {
     ui.hint(
-      `Skipped. Add anytime with: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
+      `Skipped. Add anytime: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
     );
     return;
   }
-  console.warn(`Establishing a ${missingLabel} session for the bot…`);
+  console.warn(`Opening browser for ${missingLabel} sign-in…`);
   const result = await ensureOAuthSession({
     provider: missing,
     apiBaseUrl: args.apiBase,
   });
   if (result.status === "logged_in" || result.status === "already_valid") {
     await recordConnectedProvider(missing);
-    ui.success(`${missingLabel} session added — the bot can now use ${missingLabel} OAuth.`);
+    ui.success(`${missingLabel} session added.`);
   } else {
     ui.warn(
       `${missingLabel} sign-in didn't complete (${result.status}). ` +
-        `Try again later with: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
+        `Retry: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
     );
   }
 }
@@ -636,8 +643,10 @@ async function runInstallClaim(
     // would sign in twice (or sign in via their laptop, leaving the
     // bot's Chrome profile empty — no Google session for future OAuth
     // signups).
-    console.warn(`Open this URL in your browser to sign in and confirm:`);
-    console.warn(`  ${initiate.confirm_url}`);
+    ui.panel(
+      `Open this URL to sign in and confirm:\n\n  ${ui.link(initiate.confirm_url)}`,
+      { color: "wine", title: "sign in" },
+    );
     try {
       const openMod = await import("open");
       await openMod.default(initiate.confirm_url);
@@ -727,51 +736,47 @@ async function login(args: Argv): Promise<void> {
   const provider: OAuthProviderId =
     args.providerArg === "github" ? "github" : "google";
   const label = provider === "github" ? "GitHub" : "Google";
-  console.warn(`Establishing a ${label} session for the bot…`);
+  ui.heading(`Sign in to ${label}`);
   const result = await ensureOAuthSession({ provider, apiBaseUrl: args.apiBase });
   switch (result.status) {
     case "already_valid":
       await recordConnectedProvider(provider);
-      console.warn(`✓ Already logged in — the bot's Chrome profile has a valid ${label} session.`);
+      ui.success(`Already signed in to ${label}.`);
       return;
     case "logged_in":
       await recordConnectedProvider(provider);
-      console.warn(`✓ Logged in. The bot can now do OAuth signups with your ${label} identity.`);
+      ui.success(`Signed in to ${label}. The bot is ready.`);
       return;
     case "timeout":
-      console.error(
-        `Login timed out — no login completed. Re-run \`npx @trusty-squire/mcp login\`.`,
-      );
+      ui.fail(`Sign-in timed out. Retry: ${ui.code("npx @trusty-squire/mcp login")}`);
       process.exit(1);
     case "error":
-      console.error(`Login failed: ${result.detail ?? "unknown error"}`);
+      ui.fail(`Sign-in failed: ${result.detail ?? "unknown error"}`);
       process.exit(1);
   }
 }
 
 function printHelp(): void {
-  console.warn(`mcp — connect Trusty Squire to a coding agent`);
-  console.warn(``);
-  console.warn(`Commands:`);
-  console.warn(
-    `  connect [--target=<agent>] [--provider=google|github] [--skip-login] [--skip-secondary]`,
-  );
-  console.warn(
-    `          [--proxy-url=<url>] [--registry-url=<url>] [--no-registry] [--force-relogin]`,
-  );
-  console.warn(`  login [--provider=google|github]   re-run the one-time OAuth sign-in`);
-  console.warn(`  logout`);
-  console.warn(``);
-  console.warn(`Agents: ${Object.keys(AGENTS).join(", ")}`);
-  console.warn(``);
-  console.warn(`\`connect\` writes the MCP config, opens a browser so you can sign in`);
-  console.warn(`(Google or GitHub) to confirm this machine, and then connects the`);
-  console.warn(`OAuth identity the bot rides when it signs you up for services.`);
-  console.warn(`Best run on a laptop or desktop — a headless box does a one-time`);
-  console.warn(`remote-browser login instead. After the primary sign-in completes,`);
-  console.warn(`you'll be offered the other provider too (recommended; some SaaS`);
-  console.warn(`only support one). --skip-secondary skips that prompt for CI.`);
-  console.warn(`Use --skip-login for CI / scripted installs and run \`login\` later.`);
+  ui.heading("Trusty Squire");
+  ui.hint("Connect a coding agent to your squire.");
+  console.warn("");
+  console.warn(`${chalk.bold("Commands")}`);
+  console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
+  console.warn(`  ${ui.code("login --provider=<p>")}          add a Google or GitHub session`);
+  console.warn(`  ${ui.code("logout")}                        clear the local session`);
+  console.warn("");
+  console.warn(`${chalk.bold("Flags for connect")}`);
+  console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
+  console.warn(`  --skip-secondary             don't prompt for the second provider`);
+  console.warn(`  --skip-login                 don't launch a browser (CI mode)`);
+  console.warn(`  --force-relogin              switch the bound account`);
+  console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
+  console.warn(`  --registry-url=<url>         use a non-default skill registry`);
+  console.warn(`  --no-registry                disable the Tier-2 router entirely`);
+  console.warn("");
+  console.warn(`${chalk.bold("Example")}`);
+  console.warn(`  ${ui.code("npx @trusty-squire/mcp connect")}`);
+  console.warn("");
 }
 
 interface ClaimResult {

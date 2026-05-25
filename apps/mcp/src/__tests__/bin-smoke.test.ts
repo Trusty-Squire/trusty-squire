@@ -102,7 +102,9 @@ describe("launched through a bin symlink", () => {
       "--target=claude-code",
       "--api-base=http://127.0.0.1:1",
     ]);
-    expect(out).toContain("Setting up Trusty Squire");
+    // rc.6 voice pass — heading is "Trusty Squire" with a separate
+    // dim subline "Setting up this machine."
+    expect(out).toContain("Setting up this machine");
   }, 30_000);
 
   it("`mcp install` still works as a deprecated alias for `connect`", async () => {
@@ -115,7 +117,7 @@ describe("launched through a bin symlink", () => {
       "--target=claude-code",
       "--api-base=http://127.0.0.1:1",
     ]);
-    expect(out).toContain("Setting up Trusty Squire");
+    expect(out).toContain("Setting up this machine");
     expect(out).toMatch(/install.*is now.*connect/);
   }, 30_000);
 });

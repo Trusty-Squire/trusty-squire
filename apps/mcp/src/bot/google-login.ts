@@ -411,19 +411,27 @@ function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
 // terminals and lost on wide ones. boxen handles the reflow.
 function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: string }): void {
   const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
+  // OSC 8 hyperlink: modern terminals render the URL as cmd-clickable
+  // (label = the URL itself so it still copies cleanly). Non-TTY
+  // pipes get the raw URL — no escape garbage in logs. Wine-underlined
+  // text inside the OSC 8 wrapper preserves a visual cue on terminals
+  // that ignore the hyperlink escape.
+  const styledUrl = process.stderr.isTTY
+    ? `\x1b]8;;${opts.tunnelUrl}\x1b\\${chalk.hex("#cf3a52").underline(opts.tunnelUrl)}\x1b]8;;\x1b\\`
+    : opts.tunnelUrl;
   const body =
     `Open this on any device, any network:\n\n` +
-    `  ${chalk.cyan.underline(opts.tunnelUrl)}\n\n` +
+    `  ${styledUrl}\n\n` +
     `If asked for a VNC password:  ${chalk.bold(opts.vncPassword)}\n\n` +
     opts.label;
   console.error(
     "\n" +
       boxen(body, {
-        title: "Sign in with Trusty Squire",
+        title: "Sign in to Trusty Squire",
         titleAlignment: "left",
-        padding: { top: 0, bottom: 0, left: 2, right: 2 },
-        borderStyle: "round",
-        borderColor: "cyan",
+        padding: { top: 0, bottom: 0, left: 1, right: 1 },
+        borderStyle: "single",
+        borderColor: "#cf3a52",
         width,
       }) +
       "\n",
