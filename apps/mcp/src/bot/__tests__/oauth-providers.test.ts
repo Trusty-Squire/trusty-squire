@@ -6,6 +6,7 @@ import {
   OAUTH_PROVIDERS,
   classifyGitHubAuthState,
   githubScopesAreBasic,
+  isGitHubDismissible2faSetup,
   isOAuthProviderId,
 } from "../oauth-providers.js";
 
@@ -96,5 +97,44 @@ describe("OAUTH_PROVIDERS registry", () => {
     expect(isOAuthProviderId("github")).toBe(true);
     expect(isOAuthProviderId("microsoft")).toBe(false);
     expect(isOAuthProviderId("")).toBe(false);
+  });
+});
+
+describe("isGitHubDismissible2faSetup (rc.34)", () => {
+  it("detects the canonical 'skip 2FA verification at this moment' link", () => {
+    const body =
+      "Verify your two-factor authentication (2FA) settings\n" +
+      "This is a one-time verification of your recently configured 2FA credentials.\n" +
+      "Verify 2FA now\n" +
+      "You can choose to skip 2FA verification at this moment, we'll remind you tomorrow.";
+    expect(isGitHubDismissible2faSetup(body)).toBe(true);
+  });
+
+  it("also matches the historical 'skip 2FA verification for now' phrasing", () => {
+    const body = "skip 2FA verification for now";
+    expect(isGitHubDismissible2faSetup(body)).toBe(true);
+  });
+
+  it("is case-insensitive on the link text", () => {
+    expect(isGitHubDismissible2faSetup("SKIP 2FA VERIFICATION AT THIS MOMENT")).toBe(true);
+    expect(isGitHubDismissible2faSetup("Skip 2fa Verification At This Moment")).toBe(true);
+  });
+
+  it("does NOT match a real 2FA challenge page (no skip link)", () => {
+    const body =
+      "Two-factor authentication\n" +
+      "Use your authenticator app to get a verification code, then enter it below.\n" +
+      "Verify";
+    expect(isGitHubDismissible2faSetup(body)).toBe(false);
+  });
+
+  it("does NOT match a generic security-challenge page", () => {
+    const body = "Verify your device — we sent a code to your email.";
+    expect(isGitHubDismissible2faSetup(body)).toBe(false);
+  });
+
+  it("does NOT match a non-2FA page that happens to mention 'skip'", () => {
+    const body = "skip this tutorial";
+    expect(isGitHubDismissible2faSetup(body)).toBe(false);
   });
 });

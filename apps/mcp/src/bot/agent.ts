@@ -19,6 +19,8 @@ import { rankAndCapInventory, scoreSignupButton } from "./browser.js";
 import {
   OAUTH_PROVIDERS,
   extractOAuthScopes,
+  isGitHubDismissible2faSetup,
+  GITHUB_DISMISSIBLE_2FA_SKIP_TEXT,
   type OAuthProviderId,
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
@@ -2619,6 +2621,34 @@ export class SignupAgent {
           // browser progress, not a 2-minute human pause).
           i--;
           continue;
+        }
+        // rc.34 — GitHub 2FA sanity-check page is dismissible. When
+        // the user recently (re)configured 2FA, GitHub injects a
+        // "Verify your two-factor authentication (2FA) settings"
+        // overlay on the OAuth /authorize URL with a literal
+        // "skip 2FA verification at this moment" link. That's a
+        // non-blocking nag, not a real challenge — clicking skip
+        // returns the user to the OAuth handshake. Detect + auto-
+        // click before aborting.
+        if (provider.id === "github" && isGitHubDismissible2faSetup(body)) {
+          steps.push(
+            "GitHub: 2FA sanity-check overlay detected (post-setup nag, not a real challenge). " +
+              "Clicking 'skip 2FA verification at this moment' to defer.",
+          );
+          const clicked = await this.browser.clickLinkByText(
+            GITHUB_DISMISSIBLE_2FA_SKIP_TEXT,
+          );
+          if (clicked) {
+            // Give GitHub a moment to navigate back to the consent flow.
+            await this.browser.wait(2);
+            // Re-classify on the next iteration; the URL + body should
+            // now be the actual OAuth /authorize consent page.
+            i--;
+            continue;
+          }
+          steps.push(
+            "GitHub: skip-link click did not register — falling back to needs_login abort.",
+          );
         }
         return this.oauthAbort(
           "needs_login",

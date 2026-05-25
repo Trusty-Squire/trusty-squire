@@ -86,6 +86,35 @@ export function classifyGitHubAuthState(url: string, bodyText: string): OAuthAut
   return "needs_login";
 }
 
+// GitHub's one-time 2FA-sanity-check page is overlaid on the OAuth
+// /authorize URL when the user recently (re)configured 2FA on their
+// account. Heading: "Verify your two-factor authentication (2FA)
+// settings." It has a "skip 2FA verification at this moment" link
+// that defers the check to tomorrow — clicking it dismisses the
+// overlay and the OAuth handshake continues. This is NOT a real
+// security challenge (auth itself is complete; this is a periodic
+// nag), but classifyGitHubAuthState above flags it as `challenge`
+// because the body text matches "two-factor authentication." The
+// agent's OAuth flow uses this helper to distinguish the two and
+// auto-skip when possible.
+//
+// Detection is exact-string: the link text is stable across GitHub's
+// flow today, and false positives would cost the bot a wrong click
+// on a real 2FA challenge. If GitHub rewords the link, we'll see a
+// false negative (bot aborts as before, operator clicks manually)
+// instead of a false positive (bot clicks the wrong thing).
+export function isGitHubDismissible2faSetup(bodyText: string): boolean {
+  const text = bodyText.toLowerCase();
+  return (
+    text.includes("skip 2fa verification at this moment") ||
+    // Defensive: GitHub historically used "skip 2FA verification for
+    // now" too. Match both phrasings.
+    text.includes("skip 2fa verification for now")
+  );
+}
+
+export const GITHUB_DISMISSIBLE_2FA_SKIP_TEXT = "skip 2FA verification at this moment";
+
 // --- GitHub consent scope gate ---------------------------------------
 // GitHub's scope vocabulary is its own. Basic identity is `read:user`
 // and `user:email` (D7). Anything broader — repo, admin:*, write:*,

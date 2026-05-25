@@ -749,6 +749,37 @@ export class BrowserController {
     await this.humanClick(selector);
   }
 
+  // Click a link/button by its visible text. Used for one-off
+  // dismissibles where the bot knows the literal label text and
+  // doesn't need full inventory ranking (e.g. GitHub's "skip 2FA
+  // verification at this moment" link on the post-handshake 2FA
+  // sanity page). Case-insensitive substring match — GitHub
+  // occasionally tweaks capitalization on the same link.
+  //
+  // Returns true on successful click, false when the text isn't on
+  // the page within the timeout. Doesn't throw on miss — caller
+  // decides whether to fall back to abort.
+  async clickLinkByText(text: string, timeoutMs = 3000): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      // Escape regex metacharacters in the user-supplied label text so
+      // a literal "(2FA)" or "." doesn't get interpreted as a pattern.
+      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const locator = this.page
+        .getByText(new RegExp(escaped, "i"))
+        .first();
+      await locator.waitFor({ state: "visible", timeout: timeoutMs });
+      if (this.humanize) {
+        await this.humanClickLocator(locator);
+      } else {
+        await locator.click();
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // Click the form's submit button, disambiguating when the planned
   // selector matches several elements. Signup pages routinely render
   // OAuth buttons ("Continue with Google" / "GitHub") as
