@@ -2024,11 +2024,22 @@ export class SignupAgent {
     }
     const loggedIn = loggedInProviders();
     if (loggedIn.length === 0) return [];
+    // Stable tiebreak when both providers have a session: Google
+    // first. Google's OAuth flow is one-click in the common case
+    // (consent + redirect); GitHub's typically requires the explicit
+    // authorize-then-grant double step. Lower friction, fewer
+    // number-match challenges on warm sessions.
+    const ordered = [...loggedIn].sort((a, b) => {
+      if (a === b) return 0;
+      if (a === "google") return -1;
+      if (b === "google") return 1;
+      return 0;
+    });
     steps.push(
-      `Auto-OAuth: profile has a session for ${loggedIn.join(", ")} — ` +
+      `Auto-OAuth: profile has a session for ${ordered.join(", ")} — ` +
         "preferring OAuth if the page offers it",
     );
-    return loggedIn;
+    return ordered;
   }
 
   // Verify every selector the plan references still resolves on the

@@ -45,6 +45,19 @@ export interface SessionData {
   machine_token?: string;
   agent_session_token?: string;
   account_id?: string;
+  // OAuth providers the bot's Chrome profile has a confirmed session
+  // for. Source of truth for install-preflight to decide whether the
+  // user has both providers connected. Mirrors the bot-side
+  // `logged-in-providers.json` marker; we duplicate it into the
+  // session file because the install CLI doesn't always have the
+  // bot's profile dir on hand at preflight time. Absent / empty when
+  // written by a pre-rc.5 client; install treats absent as "unknown"
+  // and re-derives from the bot's marker.
+  //
+  // Values are OAuthProviderId strings ("google" | "github"); kept as
+  // string[] here to avoid a circular import (bot → oauth-providers
+  // → ... → session would cycle).
+  connected_providers?: string[];
 }
 
 export interface SessionStorage {

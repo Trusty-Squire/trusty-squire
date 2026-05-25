@@ -894,6 +894,35 @@ export function buildSignupResponse(
     };
   }
 
+  // F14 / rc.33-task / 0.6.15-rc.5 — the page offers OAuth buttons
+  // but the bot's chrome profile has no session for ANY of them.
+  // Distinct from needs_login (which is "had a session, it broke"):
+  // this is "never had a session for the provider this service
+  // requires". Surface a specific copy-pasteable connect command per
+  // the multi-provider onboarding design. agent.ts already builds the
+  // error string with the right `--provider=<X>` flag — extract and
+  // hand it to the host LLM verbatim.
+  if (
+    result.error !== undefined &&
+    result.error.startsWith("needs_oauth_provider_session")
+  ) {
+    const match = /--provider=(google|github)/.exec(result.error);
+    const provider = match?.[1] ?? "google";
+    const providerLabel = provider === "github" ? "GitHub" : "Google";
+    return {
+      status: "needs_login",
+      service: input.service,
+      error: result.error,
+      steps: result.steps,
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service} requires ${providerLabel} OAuth but the bot has no ${providerLabel} ` +
+        `session configured. Tell the user to run: ` +
+        `\`npx @trusty-squire/mcp login --provider=${provider}\`. ` +
+        `Once they confirm sign-in completed, retry provision_any_service.`,
+    };
+  }
+
   // T7/T10 — OAuth: the consent screen requested broader-than-basic
   // scopes (or its scopes could not be read). The bot deliberately
   // does not auto-approve — surface the parsed scope list so the LLM

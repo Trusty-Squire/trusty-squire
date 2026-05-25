@@ -112,6 +112,7 @@ describe("install --target=<agent> writes a valid config", () => {
         // browser instead. Irrelevant to "does install write a config
         // for this target," and keeps the test fast (no Chrome boot).
         skipBrowser: true,
+      skipSecondary: true,
         forceRelogin: false,
         noRegistry: false,
       });
@@ -145,6 +146,7 @@ describe("install --target=<agent> writes a valid config", () => {
       target: TARGETS[0]!,
       apiBase: "https://test.invalid",
       skipBrowser: true,
+      skipSecondary: true,
       forceRelogin: false,
       noRegistry: true,
     });
@@ -158,6 +160,7 @@ describe("install --target=<agent> writes a valid config", () => {
       target: TARGETS[0]!,
       apiBase: "https://test.invalid",
       skipBrowser: true,
+      skipSecondary: true,
       forceRelogin: false,
       noRegistry: false,
       registryUrl: "https://staging.registry.test",

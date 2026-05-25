@@ -99,6 +99,11 @@ type Argv = {
   // Use this to switch the bound Google account or recover a
   // suspect-stale session.
   forceRelogin: boolean;
+  // --skip-secondary: don't prompt for the secondary provider after
+  // the primary install (or preflight-detected) completes. For CI /
+  // scripted installs that only need one provider. Default: false
+  // (i.e., user gets the prompt, default-answer yes).
+  skipSecondary: boolean;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -126,6 +131,7 @@ function parseArgs(argv: string[]): Argv {
   let providerArg: ProviderArg | undefined;
   let skipBrowser = false;
   let forceRelogin = false;
+  let skipSecondary = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -156,9 +162,11 @@ function parseArgs(argv: string[]): Argv {
       skipBrowser = true;
     } else if (arg === "--force-relogin") {
       forceRelogin = true;
+    } else if (arg === "--skip-secondary") {
+      skipSecondary = true;
     }
   }
-  const args: Argv = { command, apiBase, skipBrowser, forceRelogin, noRegistry };
+  const args: Argv = { command, apiBase, skipBrowser, forceRelogin, noRegistry, skipSecondary };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (registryUrl !== undefined && registryUrl.length > 0) args.registryUrl = registryUrl;
@@ -316,6 +324,13 @@ async function connect(args: Argv): Promise<void> {
         `Already provisioned (machine + ${preflight.providers.join("/")} session) — ` +
           `refreshed ${agent.display_name} MCP config without re-running the browser flow`,
       );
+      // Backfill connected_providers from the bot-side marker on
+      // pre-rc.5 sessions, so the preflight cache is current.
+      for (const p of preflight.providers) await recordConnectedProvider(p);
+      // Even on a fast-path preflight pass, offer the secondary
+      // provider if only one is connected. This is the natural prompt
+      // for users who originally chose "skip" at step 2.
+      await maybeOfferSecondaryProvider(args);
       ui.hint(`Pass ${ui.code("--force-relogin")} if you want to switch the bound account.`);
       return;
     }
@@ -374,6 +389,11 @@ async function connect(args: Argv): Promise<void> {
   await storage.write(session);
   ui.success(`Session saved (${storage.backendName()})`);
 
+  // Backfill connected_providers from the bot-side marker the browser
+  // confirm seeded. The user's provider choice on the web form
+  // determines which one is present here.
+  for (const p of loggedInProviders()) await recordConnectedProvider(p);
+
   await writeAgentConfig(target, agent, args);
   if (args.skipBrowser) {
     ui.panel(
@@ -382,6 +402,13 @@ async function connect(args: Argv): Promise<void> {
         `  ${ui.code("npx @trusty-squire/mcp login [--provider=google|github]")}`,
       { title: "Heads up", color: "yellow" },
     );
+  }
+
+  // Step 2 of the install ceremony — defaults to yes, opt out with
+  // --skip-secondary. Silent no-op on --skip-browser runs (no primary
+  // session was seeded so there's no basis for the prompt).
+  if (!args.skipBrowser) {
+    await maybeOfferSecondaryProvider(args);
   }
 
   console.warn("");
@@ -426,6 +453,103 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     return { providers };
   } catch {
     return null;
+  }
+}
+
+// Persist `provider` into session.connected_providers (idempotent).
+// Called after a successful ensureOAuthSession so the install
+// preflight on the next run can read both providers off the session
+// file without having to load the bot's profile-dir marker.
+async function recordConnectedProvider(provider: OAuthProviderId): Promise<void> {
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (session === null) return;
+    const current = new Set(session.connected_providers ?? []);
+    if (current.has(provider)) return;
+    current.add(provider);
+    await storage.write({
+      ...session,
+      connected_providers: [...current],
+      saved_at: new Date().toISOString(),
+    });
+  } catch {
+    // Best-effort — the bot-side login-state.json marker is the
+    // primary source of truth; session.connected_providers is a
+    // convenience cache for the preflight path. A failed write here
+    // just means the next install runs the secondary prompt again,
+    // which is recoverable.
+  }
+}
+
+// Y/n prompt with a default answer. Returns true on yes, false on no.
+// Default is taken when the user just hits enter or when stdin isn't
+// a TTY (CI / scripted contexts). Designed to match what the user
+// expects from common CLI tooling — `[Y/n]` means default-yes.
+async function promptYesNo(message: string, defaultYes: boolean): Promise<boolean> {
+  if (!process.stdin.isTTY) return defaultYes;
+  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer: string = await new Promise((resolve) => {
+      rl.question(`${message} ${suffix} `, resolve);
+    });
+    const trimmed = answer.trim().toLowerCase();
+    if (trimmed.length === 0) return defaultYes;
+    return trimmed === "y" || trimmed === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+// Step 2 of the install ceremony: offer to add a session for the
+// OTHER provider so the bot can complete OAuth signups against
+// services that only support the one we didn't pick at step 1.
+//
+// Triggers when:
+//   - `connect` finished step 1 successfully (primary session seeded), AND
+//   - the bot's profile has a session for exactly one of {google, github}, AND
+//   - `--skip-secondary` is not set
+//
+// Defaults to yes — one extra noVNC sign-in at install time beats
+// being surprised mid-run later. The user can dismiss with "n" and
+// come back via `mcp login --provider=<other>` anytime.
+async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
+  if (args.skipSecondary) return;
+  const present = new Set(loggedInProviders());
+  if (present.size === 0) return; // step 1 didn't seed anything — no basis to ask
+  if (present.has("google") && present.has("github")) return; // both already connected
+  const missing: OAuthProviderId = present.has("google") ? "github" : "google";
+  const primaryLabel = present.has("google") ? "Google" : "GitHub";
+  const missingLabel = missing === "google" ? "Google" : "GitHub";
+
+  console.warn("");
+  ui.heading(`Step 2/2 — Add ${missingLabel} for broader service coverage?`);
+  console.warn(
+    `Some SaaS (Railway, Vercel, parts of Cloudflare) only support ${missingLabel}\n` +
+      `OAuth. Adding it now means the bot won't have to interrupt you mid-signup\n` +
+      `later when it hits a ${missingLabel}-only service. You're already signed in as ${primaryLabel}.`,
+  );
+  const yes = await promptYesNo(`Add ${missingLabel} now?`, true);
+  if (!yes) {
+    ui.hint(
+      `Skipped. Add anytime with: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
+    );
+    return;
+  }
+  console.warn(`Establishing a ${missingLabel} session for the bot…`);
+  const result = await ensureOAuthSession({
+    provider: missing,
+    apiBaseUrl: args.apiBase,
+  });
+  if (result.status === "logged_in" || result.status === "already_valid") {
+    await recordConnectedProvider(missing);
+    ui.success(`${missingLabel} session added — the bot can now use ${missingLabel} OAuth.`);
+  } else {
+    ui.warn(
+      `${missingLabel} sign-in didn't complete (${result.status}). ` +
+        `Try again later with: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
+    );
   }
 }
 
@@ -607,9 +731,11 @@ async function login(args: Argv): Promise<void> {
   const result = await ensureOAuthSession({ provider, apiBaseUrl: args.apiBase });
   switch (result.status) {
     case "already_valid":
+      await recordConnectedProvider(provider);
       console.warn(`✓ Already logged in — the bot's Chrome profile has a valid ${label} session.`);
       return;
     case "logged_in":
+      await recordConnectedProvider(provider);
       console.warn(`✓ Logged in. The bot can now do OAuth signups with your ${label} identity.`);
       return;
     case "timeout":
@@ -628,7 +754,10 @@ function printHelp(): void {
   console.warn(``);
   console.warn(`Commands:`);
   console.warn(
-    `  connect [--target=<agent>] [--provider=google|github|both] [--skip-login] [--proxy-url=<url>] [--registry-url=<url>] [--no-registry] [--force-relogin]`,
+    `  connect [--target=<agent>] [--provider=google|github] [--skip-login] [--skip-secondary]`,
+  );
+  console.warn(
+    `          [--proxy-url=<url>] [--registry-url=<url>] [--no-registry] [--force-relogin]`,
   );
   console.warn(`  login [--provider=google|github]   re-run the one-time OAuth sign-in`);
   console.warn(`  logout`);
@@ -639,8 +768,10 @@ function printHelp(): void {
   console.warn(`(Google or GitHub) to confirm this machine, and then connects the`);
   console.warn(`OAuth identity the bot rides when it signs you up for services.`);
   console.warn(`Best run on a laptop or desktop — a headless box does a one-time`);
-  console.warn(`remote-browser login instead. Use --skip-login for CI / scripted`);
-  console.warn(`installs and run \`login\` later.`);
+  console.warn(`remote-browser login instead. After the primary sign-in completes,`);
+  console.warn(`you'll be offered the other provider too (recommended; some SaaS`);
+  console.warn(`only support one). --skip-secondary skips that prompt for CI.`);
+  console.warn(`Use --skip-login for CI / scripted installs and run \`login\` later.`);
 }
 
 interface ClaimResult {
