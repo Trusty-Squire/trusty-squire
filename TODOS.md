@@ -142,6 +142,18 @@ each.
   registry** — captured runs → native adapters + central
   signup-URL map. Already partially shipped via the skill
   registry; the codegen → review → land cycle is the open half.
+- **P1.2 — Composio fallback for connect-existing-account** —
+  TS's bot is "create new account"; for users who already have a
+  service account, route through Composio's OAuth flow instead
+  (or Nango / Pipedream / Paragon / our own OAuth-app registrations).
+  Composio has 100+ services pre-registered. Vault stores both
+  API keys (TS-path) AND OAuth refresh tokens (Composio-path)
+  under the same per-service slug; agent doesn't care which. Adds
+  parity-or-better coverage immediately for existing accounts.
+  Note: requires a second credential model in the vault + per-
+  user Composio account UX + decision logic ("does user already
+  have an account on this service?"). Surfaced 2026-05-25 from
+  the OpenHuman / Composio screenshot review.
 - **P5 — Stripe billing for Trusty Squire subscriptions** —
   monetization, independent.
 - **P6 — Paid-SaaS via Stripe Issuing + mandate tab** — heaviest,

@@ -27,6 +27,7 @@ import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerReadViewsRoute } from "./routes/read-views.js";
 import { registerRunsRoute } from "./routes/runs.js";
 import { registerShortRoute } from "./routes/short.js";
+import { registerNotifyRoute } from "./routes/notify.js";
 import {
   buildInMemoryDeps,
   type ApiDeps,
@@ -38,6 +39,10 @@ export interface BuildServerOpts {
   buildDeps?: BuildInMemoryDepsOpts;
   approvalBaseUrl?: string;
   installBaseUrl?: string;
+  // Test seam — injects a stub EmailForwarder into the notify
+  // route. Production builds leave this undefined and the route
+  // builds its own forwarder from GMAIL_USER / GMAIL_APP_PASSWORD.
+  emailForwarder?: import("./services/email-forwarder.js").EmailForwarder;
 }
 
 // Base URL of the web app that install/approval links point at. The
@@ -139,6 +144,14 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps: {
       captchaEventStore: deps.captchaEventStore,
       machineTokenStore: deps.machineTokenStore,
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
+  });
+  await fastify.register(registerNotifyRoute, {
+    deps: {
+      machineTokenStore: deps.machineTokenStore,
+      accountStore: deps.accountStore,
+      ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
   });

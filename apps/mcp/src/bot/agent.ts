@@ -24,6 +24,7 @@ import {
   type OAuthProviderId,
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
+import { notifyHeightenedAuth } from "./notify-api.js";
 import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
@@ -2750,6 +2751,11 @@ export class SignupAgent {
               `Google: match the number ${matchNum} on your phone — ` +
                 `open the Google app on your phone and tap ${matchNum}`,
             );
+            void notifyHeightenedAuth({
+              service: task.service,
+              digit: String(matchNum),
+              windowSeconds: 120,
+            });
           } else {
             // Extractor missed the number — Google phrasing has
             // drifted again. Surface a banner so the user knows to
@@ -2763,6 +2769,11 @@ export class SignupAgent {
               "Google: challenge detected, number-match extractor missed it. " +
                 "See the latest google-challenge snapshot in the debug dir to read the number.",
             );
+            void notifyHeightenedAuth({
+              service: task.service,
+              digit: null,
+              windowSeconds: 120,
+            });
           }
           // Either way (number found or not), the user can still
           // clear the challenge in the bot's browser window or by

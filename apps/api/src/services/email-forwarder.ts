@@ -43,6 +43,39 @@ export class EmailForwarder {
     return this.aliases.has(recipient.toLowerCase());
   }
 
+  // Send an email to an arbitrary recipient via the same Gmail SMTP
+  // transporter — bypasses the alias map. Used by transactional
+  // surfaces (notify routes) that send to the account's OAuth-
+  // registered email, not to one of the business aliases.
+  async sendDirect(params: {
+    to: string;
+    subject: string;
+    text?: string;
+    html?: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    if (!this.transporter) {
+      console.log(
+        `[Email Forwarder] sendDirect — no SMTP configured, would send to ${params.to}: ${params.subject}`,
+      );
+      return { success: false, error: "smtp_not_configured" };
+    }
+    try {
+      const transportOptions = this.transporter.options as { auth?: { user?: string } };
+      const fromUser = transportOptions.auth?.user ?? "noreply@trustysquire.ai";
+      await this.transporter.sendMail({
+        from: `"Trusty Squire" <${fromUser}>`,
+        to: params.to,
+        subject: params.subject,
+        text: params.text,
+        html: params.html,
+      });
+      return { success: true };
+    } catch (err) {
+      console.error("[Email Forwarder] sendDirect failed:", err);
+      return { success: false, error: "smtp_error" };
+    }
+  }
+
   // Forward an email via Gmail SMTP
   async forward(params: {
     from: string;
