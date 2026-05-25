@@ -562,9 +562,33 @@ async function runHeadlessChrome(
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
   }
 
+  // G16 — named-tunnel mode. When the operator has set up a dedicated
+  // Cloudflare named tunnel pointing at a fixed local port, opt in via
+  // env. The bot then:
+  //   - binds websockify to that fixed local port (so the pre-configured
+  //     tunnel's ingress finds it)
+  //   - skips the per-session `cloudflared tunnel --url` spawn (the
+  //     named tunnel runs as a systemd service outside this process)
+  //   - prints the short branded URL instead of the long random one
+  // Both env vars must be set; absence (default) keeps the existing
+  // random `*.trycloudflare.com` flow.
+  const namedTunnelHost = process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+  const namedTunnelPortStr = process.env.TS_LOGIN_LOCAL_PORT;
+  const usingNamedTunnel =
+    namedTunnelHost !== undefined &&
+    namedTunnelHost.length > 0 &&
+    namedTunnelPortStr !== undefined &&
+    namedTunnelPortStr.length > 0;
   const display = pickFreeDisplay();
   const vncPort = await findFreePort();
-  const webPort = await findFreePort();
+  const webPort = usingNamedTunnel
+    ? Number(namedTunnelPortStr)
+    : await findFreePort();
+  if (usingNamedTunnel && (!Number.isFinite(webPort) || webPort <= 0)) {
+    throw new Error(
+      `TS_LOGIN_LOCAL_PORT=${JSON.stringify(namedTunnelPortStr)} is not a valid port number`,
+    );
+  }
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
   // The persistent Chrome context is NOT a member of `rig` — it is a
@@ -665,25 +689,40 @@ async function runHeadlessChrome(
       );
       await new Promise((r) => setTimeout(r, 1500));
 
-      // 5. Outbound tunnel — no inbound port opened, no firewall fight.
-      const cf = spawnBg("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${webPort}`]);
-      rig.procs.push(cf);
-      const tunnelUrl = await awaitTunnelUrl(cf, 30000);
-      const longVncUrl = `${tunnelUrl}/vnc.html#password=${vncPassword}`;
-
-      // G15: shorten the cloudflared URL through the API
-      // (`trustysquire.ai/g/<slug>`) when we have an API base — much
-      // less transcription-hostile on a phone than the raw
-      // cloudflared subdomain. The shortener stores the long URL
-      // verbatim (fragment included); the /g/[slug] route 302s the
-      // browser to it, preserving the password fragment.
+      // 5. Outbound tunnel.
       //
-      // shortenVncUrl returns the original long URL on any failure
-      // path (network blip, API down), so this is never a hard
-      // dependency — degrades to printing the cloudflared URL.
-      let bannerUrl = longVncUrl;
-      if (opts.apiBaseUrl !== undefined) {
-        bannerUrl = await shortenVncUrl(opts.apiBaseUrl, longVncUrl);
+      // G16 named-tunnel mode (env-gated): the operator pre-provisioned
+      // a dedicated cloudflared tunnel pointed at our fixed webPort
+      // (running as a systemd service outside this process). No per-
+      // session cloudflared spawn — saves ~5-10s of cold-start, and
+      // the URL is short + branded (vnc.trustysquire.ai instead of
+      // shouts-clean-mediawiki-cookies.trycloudflare.com).
+      //
+      // Random-tunnel fallback (default): spawn a fresh trycloudflare
+      // tunnel per session. Works everywhere, no operator setup, but
+      // the URL is ~80 chars and the cold-start hurts.
+      let bannerUrl: string;
+      if (usingNamedTunnel) {
+        bannerUrl = `https://${namedTunnelHost}/vnc.html#password=${vncPassword}`;
+      } else {
+        const cf = spawnBg("cloudflared", [
+          "tunnel",
+          "--url",
+          `http://127.0.0.1:${webPort}`,
+        ]);
+        rig.procs.push(cf);
+        const tunnelUrl = await awaitTunnelUrl(cf, 30000);
+        const longVncUrl = `${tunnelUrl}/vnc.html#password=${vncPassword}`;
+
+        // G15 (deprecated by G16): shorten the cloudflared URL through
+        // the API when we have an API base — much less transcription-
+        // hostile on a phone than the raw cloudflared subdomain. Still
+        // used on the random-tunnel fallback path; the named-tunnel
+        // path doesn't need it (URL is already short).
+        bannerUrl = longVncUrl;
+        if (opts.apiBaseUrl !== undefined) {
+          bannerUrl = await shortenVncUrl(opts.apiBaseUrl, longVncUrl);
+        }
       }
 
       // The VNC password rides in the URL *fragment* (#), not the query
