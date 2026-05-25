@@ -27,6 +27,7 @@ interface StubBrowser {
   setInventoryFor(method: "extract", inv: InteractiveElement[]): void;
   setTextFor(text: string): void;
   setCandidatesFor(candidates: string[]): void;
+  setClipboardFor(clip: string): void;
 }
 
 function inv(overrides: Partial<InteractiveElement>): InteractiveElement {
@@ -55,6 +56,7 @@ function stubBrowser(): StubBrowser {
   let inventory: InteractiveElement[] = [];
   let text = "";
   let candidates: string[] = [];
+  let clipboard = "";
 
   const controller = {
     async goto(url: string) {
@@ -90,6 +92,14 @@ function stubBrowser(): StubBrowser {
     async startOAuth(selector: string) {
       history.push({ method: "startOAuth", args: [selector] });
     },
+    async readClipboard() {
+      history.push({ method: "readClipboard", args: [] });
+      return clipboard;
+    },
+    async extractCredentialsNearCopyButtons() {
+      history.push({ method: "extractCredentialsNearCopyButtons", args: [] });
+      return [];
+    },
   } as unknown as BrowserController;
 
   return {
@@ -103,6 +113,9 @@ function stubBrowser(): StubBrowser {
     },
     setCandidatesFor(newCandidates) {
       candidates = newCandidates;
+    },
+    setClipboardFor(newClip) {
+      clipboard = newClip;
     },
   };
 }
@@ -917,5 +930,110 @@ describe("replaySkill — sentinel HTTP check (C5)", () => {
 
     expect(result.kind).toBe("ok");
     expect(fetchCalled).toBe(false);
+  });
+});
+
+// ── 0.6.15-rc.8 regression bench ────────────────────────────────────
+// Four bugs surfaced by the IPInfo/Railway/OpenRouter/Resend replay
+// triage. Each test pins one fix; if any regresses the corresponding
+// service stops replaying.
+
+describe("replaySkill — rc.8 fallback fixes", () => {
+  it("ignores non-input elements that share a labelText (OpenRouter Name button + input)", async () => {
+    // OpenRouter's New Key modal renders a help-button labeled "Name"
+    // next to the actual #name input. Both report labelText="Name".
+    // The fill step must pick the input only.
+    const b = stubBrowser();
+    const skill = skillWith([
+      { kind: "fill", label_hint: "Name", value_template: "k", provenance },
+      { kind: "click", text_match: "Add", role_hint: "button", provenance },
+      { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+    ]);
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", labelText: "Name", selector: "button.info" }),
+      inv({ tag: "input", labelText: "Name", selector: "input#name" }),
+      inv({ tag: "button", visibleText: "Add", role: "button", selector: "button.add" }),
+    ]);
+    // Label set in the labeled-UUID regex includes "token" standalone.
+    b.setTextFor("New token 12345678-1234-1234-1234-123456789012 done");
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    // The fill must target the input, not the button.
+    const typeCalls = b.history.filter((c) => c.method === "type");
+    expect(typeCalls[0]?.args[0]).toBe("input#name");
+  });
+
+  it("falls back to extractCredentialCandidates filtered by validator (IPInfo opaque token)", async () => {
+    // IPInfo dashboard glues "API Token" + the 14-char key into one
+    // textContent run, so the labeled regex can't find it. The
+    // candidates-by-element path surfaces the value cleanly.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://ipinfo.io/dashboard", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "IPINFO_API_KEY",
+            post_extract_validator: { min_length: 12, max_length: 16 },
+          },
+        ],
+      },
+    );
+    // No copy buttons, glued body text — the labeled regex misses it.
+    b.setTextFor("DashboardAPIDownloadsAPI Tokenf9a062f02fadf5cURL Example");
+    // Candidate-level extraction surfaces the value as its own string.
+    b.setCandidatesFor([
+      "Dashboard",
+      "API",
+      "Downloads",
+      "f9a062f02fadf5", // ← the actual key (14 chars, has digits)
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe("f9a062f02fadf5");
+    }
+  });
+
+  it("falls back to readClipboard when copy-button extraction finds nothing (Resend)", async () => {
+    // Resend's New Key modal stashes the full re_ key in the clipboard
+    // via the Copy button's onClick; the visible DOM shows only a
+    // masked stub. extractCredentialCandidates + body text both come
+    // back without a usable key — the clipboard is the source of truth.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "extract_via_copy_button", near_text_hint: "Copy to clipboard", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "prefix:re_",
+            env_var_suggestion: "RESEND_API_KEY",
+            post_extract_validator: { min_length: 16, max_length: 512 },
+          },
+        ],
+      },
+    );
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Copy to clipboard", selector: "button.copy" }),
+    ]);
+    b.setTextFor("re_***************** copy this you won't see it again");
+    b.setCandidatesFor(["re_*****************"]); // masked stub only
+    b.setClipboardFor("re_BE8uGo5d_Q2j25xhijRTYNcKXkcUdTSaH");
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe("re_BE8uGo5d_Q2j25xhijRTYNcKXkcUdTSaH");
+    }
   });
 });

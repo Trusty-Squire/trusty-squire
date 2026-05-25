@@ -484,7 +484,7 @@ async function preValidateStep(
 
     case "fill": {
       const inventory = await browser.extractInteractiveElements();
-      const matches = inventory.filter((el) => matchesLabelHint(el, step.label_hint));
+      const matches = inventory.filter((el) => isFillable(el) && matchesLabelHint(el, step.label_hint));
       if (matches.length === 0) {
         return {
           ok: false,
@@ -508,7 +508,7 @@ async function preValidateStep(
 
     case "select": {
       const inventory = await browser.extractInteractiveElements();
-      const matches = inventory.filter((el) => matchesLabelHint(el, step.label_hint));
+      const matches = inventory.filter((el) => isFillable(el) && matchesLabelHint(el, step.label_hint));
       if (matches.length === 0) {
         return {
           ok: false,
@@ -693,7 +693,7 @@ async function executeStep(
 
     case "fill": {
       const inventory = await browser.extractInteractiveElements();
-      const matches = inventory.filter((el) => matchesLabelHint(el, step.label_hint));
+      const matches = inventory.filter((el) => isFillable(el) && matchesLabelHint(el, step.label_hint));
       if (matches.length === 0) {
         throw new Error(`No input matches label_hint=${step.label_hint}`);
       }
@@ -762,8 +762,44 @@ async function executeStep(
       if (fromBody !== null && !isTruncatedCapture(text, fromBody)) {
         return { kind: "extract_ok", value: fromBody, via: "copy_button" };
       }
+      // 0.6.15-rc.8 — clipboard fallback. Resend (and similar) put the
+      // generated key in `navigator.clipboard` via the Copy button's
+      // handler, but ONLY render a masked stub (`re_…`) on the page.
+      // Candidate + body-text passes both come back empty in that
+      // case. readClipboard() requests the actual copied bytes via
+      // navigator.clipboard.readText() — the bot's chrome profile
+      // grants clipboard-read permission at context start so this
+      // works without an OS prompt.
+      try {
+        const clip = await browser.readClipboard();
+        if (clip && clip.length > 0) {
+          const fromClip = extractApiKeyFromText(clip);
+          if (fromClip !== null && !isTruncatedCapture(clip, fromClip)) {
+            return { kind: "extract_ok", value: fromClip, via: "copy_button" };
+          }
+          // Last resort for clipboard: the value matches the validator
+          // shape even if the regex library doesn't recognize the
+          // prefix. We trust the Copy button — the user/synthesizer
+          // explicitly targeted it — so a clipboard payload that
+          // satisfies the validator is the credential.
+          const validator = skill.credentials[0]?.post_extract_validator;
+          if (validator !== undefined) {
+            const trimmed = clip.trim();
+            if (
+              trimmed.length >= validator.min_length &&
+              trimmed.length <= validator.max_length &&
+              /^[a-zA-Z0-9_\-.]+$/.test(trimmed)
+            ) {
+              return { kind: "extract_ok", value: trimmed, via: "copy_button" };
+            }
+          }
+        }
+      } catch {
+        // Clipboard read failed (permission denied, no clipboard
+        // contents). Fall through to the canonical error.
+      }
       throw new Error(
-        "Copy button clicked but no credential matched the regex library in candidates or body text.",
+        "Copy button clicked but no credential matched the regex library in candidates, body text, or clipboard.",
       );
     }
 
@@ -812,6 +848,39 @@ async function executeStep(
           // Non-fatal — fall through to next poll tick.
         }
         await browser.wait(0.5);
+      }
+      // 0.6.15-rc.8 — final fallback: scan extractCredentialCandidates()
+      // filtered by the skill's post_extract_validator (length range +
+      // a has-digit heuristic). Catches services whose key is rendered
+      // inline as element-direct-text without a copy button (IPInfo:
+      // `<div>API Token</div><span>f9a062f02fadf5</span>`). The
+      // pre-existing regex paths above can't find these because
+      // extractText() glues DOM elements into `"API Tokenf9a062…"`
+      // with no separator, and extractCredentialsNearCopyButtons()
+      // returns nothing when there's no copy affordance. This
+      // surfaces them safely because:
+      //   - validator.{min,max}_length anchor the shape (no wandering)
+      //   - a has-digit heuristic excludes common nav-label false
+      //     positives ("Dashboard", "Downloads", "Subscription")
+      //   - the credential validator runs afterwards anyway, so a
+      //     bad candidate gets rejected at validate-time too
+      // Single-cred only (multi-cred named extractors keep their
+      // explicit near_text_hint path; mixing this in would defeat the
+      // per-credential disambiguation).
+      const validator = skill.credentials[0]?.post_extract_validator;
+      if (validator !== undefined) {
+        try {
+          const candidates = await browser.extractCredentialCandidates();
+          for (const cand of candidates) {
+            if (cand.length < validator.min_length) continue;
+            if (cand.length > validator.max_length) continue;
+            if (!/\d/.test(cand)) continue; // skip pure-letter nav strings
+            if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue; // sanity
+            return { kind: "extract_ok", value: cand, via: "regex" };
+          }
+        } catch {
+          // Fall through to the canonical error below.
+        }
       }
       throw new Error(`No credential matching pattern ${step.pattern_name} found on page.`);
     }
@@ -1119,6 +1188,16 @@ function matchesLabelHint(el: InteractiveElement, hint: string): boolean {
     placeholder === lowerHint ||
     aria === lowerHint
   );
+}
+
+// Reject elements that share a labelText with the actual form
+// control but aren't themselves a form control. OpenRouter's Name
+// modal ships a help-button labeled "Name" next to its #name input;
+// both report labelText="Name" so a label-only match returns both
+// and the disambiguator's cascade fails ("matched 2"). Includes
+// select for the SELECT case which also matches by labelText.
+function isFillable(el: InteractiveElement): boolean {
+  return el.tag === "input" || el.tag === "textarea" || el.tag === "select";
 }
 
 // rc.24/rc.25 — cascading fill-target disambiguator. Shared by

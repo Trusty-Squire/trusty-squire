@@ -1330,10 +1330,15 @@ export function extractApiKeyFromText(text: string): string | null {
     // patterns first so a labeled-pattern fallback isn't load-
     // bearing for them. Putting `sk-or-v1-` before `sk-` so it wins
     // when both could match (cosmetic; both capture the same value).
-    /\bsk-or-v1-[a-zA-Z0-9_-]{20,}/, // OpenRouter (sk-or-v1-…)
-    /\bsk-ant-[a-zA-Z0-9_-]{20,}/, // Anthropic (sk-ant-…)
-    /\bsk-proj-[a-zA-Z0-9_-]{20,}/, // OpenAI project key
-    /\bsk-[a-zA-Z0-9]{40,}/, // OpenAI legacy (`sk-` + ~48 chars, no dashes)
+    // 0.6.15-rc.8 — character-class anchored so the greedy match
+    // doesn't glue trailing modal text. extractText() returns body
+    // as one concatenated string, so a key followed by "Please copy
+    // this" with no separator looked like `sk-or-v1-<64hex>Please…`.
+    // The hex-only class terminates at the first non-hex char.
+    /\bsk-or-v1-[a-f0-9]{40,80}/i, // OpenRouter (sk-or-v1-<64hex>)
+    /\bsk-ant-[a-zA-Z0-9_-]{40,120}/, // Anthropic (sk-ant-<urlsafe-b64>)
+    /\bsk-proj-[a-zA-Z0-9_-]{40,200}/, // OpenAI project key
+    /\bsk-[a-zA-Z0-9]{40,60}/, // OpenAI legacy (`sk-` + ~48 chars, no dashes)
   ];
   for (const pattern of prefixed) {
     const match = text.match(pattern);
