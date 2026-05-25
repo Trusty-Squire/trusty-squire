@@ -256,7 +256,7 @@ stale (they reference a `prisma:generate` script that no longer exists)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.4.2`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.6.14`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was

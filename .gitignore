@@ -47,3 +47,6 @@ debug-*.png
 # `npm install` runs ad-hoc inside a workspace; they're never
 # authoritative here and shouldn't be committed.
 package-lock.json
+
+# CodeGraph local index — per-developer, regenerated from source.
+.codegraph/
