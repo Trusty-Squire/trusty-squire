@@ -110,6 +110,19 @@ describe("isGitHubDismissible2faSetup (rc.34)", () => {
     expect(isGitHubDismissible2faSetup(body)).toBe(true);
   });
 
+  it("matches across whitespace breaks from GitHub's quirky DOM (rc.34 follow-up)", () => {
+    // GitHub renders the dismiss control as `<button>skip 2FA
+    // verification</button>` with the surrounding "at this moment..."
+    // text as a sibling text node OUTSIDE the button. Real
+    // page.textContent("body") preserves the newlines/whitespace
+    // between them — earlier rc.34 used a literal substring match
+    // and missed the live page. Detector now whitespace-normalizes
+    // before checking.
+    const body =
+      "Verify 2FA now\n\n  \n            skip 2FA verification\n  \n            at this moment, we'll remind you again tomorrow.";
+    expect(isGitHubDismissible2faSetup(body)).toBe(true);
+  });
+
   it("also matches the historical 'skip 2FA verification for now' phrasing", () => {
     const body = "skip 2FA verification for now";
     expect(isGitHubDismissible2faSetup(body)).toBe(true);

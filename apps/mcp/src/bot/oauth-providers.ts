@@ -98,13 +98,20 @@ export function classifyGitHubAuthState(url: string, bodyText: string): OAuthAut
 // agent's OAuth flow uses this helper to distinguish the two and
 // auto-skip when possible.
 //
-// Detection is exact-string: the link text is stable across GitHub's
-// flow today, and false positives would cost the bot a wrong click
-// on a real 2FA challenge. If GitHub rewords the link, we'll see a
-// false negative (bot aborts as before, operator clicks manually)
-// instead of a false positive (bot clicks the wrong thing).
+// Detection: normalized substring match on the surrounding sentence.
+// GitHub renders this with a quirky structure — the dismiss link is
+// a <button> containing only "skip 2FA verification", and "at this
+// moment, we'll remind you again tomorrow" sits as a sibling text
+// node outside the button. textContent preserves the whitespace
+// between them, so the raw body has the phrases separated by line
+// breaks; we collapse whitespace before the substring check so the
+// natural English phrase matches.
+//
+// Errs toward false-negative (bot aborts as before, operator clicks
+// manually) over false-positive (bot clicks the wrong thing on a
+// real 2FA challenge).
 export function isGitHubDismissible2faSetup(bodyText: string): boolean {
-  const text = bodyText.toLowerCase();
+  const text = bodyText.toLowerCase().replace(/\s+/g, " ");
   return (
     text.includes("skip 2fa verification at this moment") ||
     // Defensive: GitHub historically used "skip 2FA verification for
@@ -113,7 +120,11 @@ export function isGitHubDismissible2faSetup(bodyText: string): boolean {
   );
 }
 
-export const GITHUB_DISMISSIBLE_2FA_SKIP_TEXT = "skip 2FA verification at this moment";
+// Literal text inside the dismiss <button> on GitHub's 2FA sanity
+// page. SHORTER than the full sentence — the surrounding "at this
+// moment..." text lives outside the button in a sibling text node,
+// so Playwright's text-locator needs the button's own label only.
+export const GITHUB_DISMISSIBLE_2FA_SKIP_TEXT = "skip 2FA verification";
 
 // --- GitHub consent scope gate ---------------------------------------
 // GitHub's scope vocabulary is its own. Basic identity is `read:user`
