@@ -243,6 +243,61 @@ describe("planExecuteWithRetry", () => {
     expect(llm.calls).toBe(0); // detected before any planner call
   });
 
+  it("F14: fails planning_failed when the planner re-picks the same click selector after no-progress", async () => {
+    const browser = new FakeBrowser();
+    // Page never advances — inventory stays the same on every call,
+    // and the only click target is a footer "Email" link that doesn't
+    // navigate (the Railway pattern that motivated F14).
+    browser.inventoryQueue = [
+      [mk({ tag: "a", visibleText: "Email", selector: "#footer-email" })],
+    ];
+    // First plan clicks the dead link (no fill → progress-replan).
+    // Second plan picks the SAME dead link — F14 should fail it.
+    const llm = new QueueLLM([
+      clickPlan("#footer-email"),
+      clickPlan("#footer-email"),
+    ]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("planning_failed");
+    expect(outcome.reason ?? "").toMatch(/stuck/i);
+    expect(outcome.reason ?? "").toContain("#footer-email");
+    // Hint should have warned the planner before the second pick.
+    expect(steps.some((s) => /only revealed the page/i.test(s))).toBe(true);
+    expect(llm.calls).toBe(2);
+  });
+
+  it("F14: allows a NEW click selector even after a prior no-progress click", async () => {
+    const browser = new FakeBrowser();
+    // Inventory advances on round 2 to reveal the actual form (the
+    // legitimate exploration case — bot picked a dead link, then a
+    // working one).
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "a", visibleText: "Email", selector: "#dead-link" }),
+        mk({ tag: "button", visibleText: "Continue with email", selector: "#real-cta" }),
+      ],
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create", selector: "#go" }),
+      ],
+    ];
+    // Round 1: dead-link click (no progress). Round 2: NEW click on
+    // the real CTA — F14 must not reject this. Round 3: fill the
+    // revealed form.
+    const llm = new QueueLLM([
+      clickPlan("#dead-link"),
+      clickPlan("#real-cta"),
+      fillPlan("#email", "#go"),
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(llm.calls).toBe(3);
+  });
+
   it("bails clean on repeated empty plans instead of spinning (Axiom 0-action loop)", async () => {
     const browser = new FakeBrowser();
     // Only a sign-up button, no fields — the page never reveals a form.

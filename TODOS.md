@@ -10,19 +10,6 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ## Tier 1 — ship next (ungated, clear payoff)
 
-### F11 — Custom React combobox / Radix dropdown support [P1, ~half day]
-The bot's `BrowserController.selectOption` only handles native
-`<select>`. Modern dashboards (Sentry, Clerk, anything Radix-UI-
-based) use `<button role="combobox">` + `[role="listbox"]` →
-`[role="option"]` instead. The Sentry signup fails on the
-permissions dropdown for this reason.
-
-Fix: in `selectOption`, branch on the target tag. Combobox path =
-click trigger → wait for `[role="option"]` → click chosen option.
-Add an optional `option_text` field on `PostVerifyStep`'s
-`select` (and main signup-plan `select`) so the planner can ask
-for a specific option instead of "first one."
-
 ### F12 — User-relayed SMS verification [P1, ~half day]
 Vercel / MailerSend / Twilio / similar all gate API tokens behind
 a phone-number entry + SMS-code wall. Bot can't be SMS
@@ -42,20 +29,6 @@ Doesn't touch the security boundary — user's phone is the gate.
 Unblocks ~3 services in the queue today; many more in the Phase 5
 expansion pool.
 
-### needs_oauth_provider_session status [P1, ~2 hours]
-The un-coded rc.33 task from the original handoff. When a service
-exposes only an OAuth provider the bot has NO session for (e.g.
-Railway showing GitHub OAuth without a GitHub session seeded),
-surface a clear `needs_oauth_provider_session` status with the
-specific provider in the error message, so the user-facing prompt
-is `run npx @trusty-squire/mcp login --provider=github` instead of
-the opaque `oauth_required`.
-
-Phase 2's `blocks.mjs` already maps `oauth_required → external_block
-(needs_oauth_provider_session)`, but the bot still emits the
-generic `oauth_required` status; the bot-side surface needs the
-specific provider in its error message.
-
 ### G15 — Short URL for noVNC tunnel link [P2, ~3 hours]
 The cloudflared tunnel URLs are 80-char random-words subdomains —
 unreadable on a phone. Already-spec'd: `POST /v1/short` body
@@ -65,33 +38,6 @@ short URL in the noVNC banner.
 
 Domain decision: `trustysquire.ai/g/<slug>` works today, no new
 domain. (User just lived this on the connect flow.)
-
-### G12 — Surface visually-hidden checkboxes in the inventory [P2, ~1 hour]
-`extractInteractiveElements` drops `visible:false` elements, but
-custom-styled TOS checkboxes are real `<input type=checkbox>`
-with `opacity:0` / `sr-only` behind a styled label. Need to
-include hidden inputs when `type=checkbox`/`radio` AND inside or
-adjacent to a visible label. Unblocks Mistral's org-creation gate.
-
-### F14 — Planner loop break: penalize repeat-selector picks [P2, ~half day]
-The planner has no memory of selectors it already tried
-unsuccessfully. The Railway run that triggered this fired
-the same selector 5 times in a row before timing out.
-
-Fix: `planExecuteWithRetry` maintains a per-run `triedSelectors`
-set, passes it into the planner's system prompt as "AVOID these
-selectors," and rejects any plan that picks one. After 2
-consecutive same-selector picks → fail with
-`planning_failed: stuck on <selector>`.
-
-### F15 — Inventory selector disambiguation for repeated link text [P2]
-Same Railway run: "Email" appeared twice on the page — body CTA
-and footer Contact > Email link. Inventory gave the planner both
-with similar selectors → wrong pick. Inventory should attach
-disambiguating context (nearby heading, parent landmark,
-position-in-section) when visible-text is non-unique. Pairs with
-F14 — memory + discriminative selectors together kill the loop
-class.
 
 ---
 

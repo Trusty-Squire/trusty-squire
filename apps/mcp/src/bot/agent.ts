@@ -403,6 +403,20 @@ type PlanExecOutcome =
   | { kind: "submit_failed"; reason: string }
   | { kind: "planning_failed"; reason: string }
   | { kind: "oauth_required" }
+  // Phase 2 follow-up to G8 / Phase 3 rc.33 task — the page exposes
+  // OAuth providers but the bot has NO session for any of them. The
+  // operator action is `npx @trusty-squire/mcp login --provider=X`,
+  // and the bot should name the provider rather than emit the
+  // opaque `oauth_required`. `missingProviders` is the providers
+  // visible on the page that the bot can't use (highest-priority
+  // OAuth affordances). `haveSessions` is what the bot's profile
+  // currently has, so the operator sees "you have Google, page
+  // needs GitHub — run `mcp login --provider=github`".
+  | {
+      kind: "needs_oauth_provider_session";
+      missingProviders: readonly OAuthProviderId[];
+      haveSessions: readonly OAuthProviderId[];
+    }
   // Cloudflare / Sucuri / DataDome / Imperva "Just a moment..." holding
   // page that the bot can't clear — usually a fingerprint/IP/ASN risk
   // score block, not a Turnstile challenge to solve. Surfaced as its
@@ -628,8 +642,26 @@ export function parseSignupPlan(
 // Render the element inventory as a compact text block for the
 // planner — one line per element, ending with the verified
 // `selector=` the planner must copy verbatim (F3 T3).
+//
+// F15 — when multiple elements share the same effective text
+// (visibleText / ariaLabel / labelText, normalized), tag each with
+// its enclosing HTML5 landmark (header / main / footer / nav / etc.)
+// so the planner has a discriminator. Without this, a Railway page
+// with "Email" both in the body CTA and the footer made the planner
+// pick the wrong one and loop. Single-occurrence text is rendered
+// without the landmark tag to keep the inventory terse.
 export function formatInventory(inventory: readonly InteractiveElement[]): string {
   if (inventory.length === 0) return "(no interactive elements found on the page)";
+  const textCounts = new Map<string, number>();
+  const textKey = (e: InteractiveElement): string =>
+    `${e.tag}|${(e.visibleText ?? e.ariaLabel ?? e.labelText ?? "").toLowerCase().trim()}`;
+  for (const e of inventory) {
+    const k = textKey(e);
+    if (k.endsWith("|")) continue; // no text → skip
+    textCounts.set(k, (textCounts.get(k) ?? 0) + 1);
+  }
+  const isDuplicated = (e: InteractiveElement): boolean =>
+    (textCounts.get(textKey(e)) ?? 0) > 1;
   return inventory
     .map((e) => {
       const bits: string[] = [`[${e.index}] ${e.tag}`];
@@ -703,6 +735,14 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
         bits.push(`text=${JSON.stringify(e.visibleText)}`);
       }
       if (e.inConsentWidget) bits.push("[cookie-consent — avoid]");
+      // F15 — disambiguating landmark tag for text-duplicates.
+      if (
+        isDuplicated(e) &&
+        e.landmark !== null &&
+        e.landmark !== undefined
+      ) {
+        bits.push(`landmark=${e.landmark}`);
+      }
       bits.push(`selector=${e.selector}`);
       return bits.join("  ");
     })
@@ -955,6 +995,29 @@ export function detectAlreadySignedIn(args: {
 // True when the page has no fillable text input AND no button that
 // reads as an email-signup option — a genuinely OAuth/SSO-only
 // service with no form to automate (F3 Issue 4).
+// rc.33-task — scan the inventory for any OAuth provider buttons,
+// regardless of whether the bot has a session for them. Used by the
+// OAuth-only-chooser branch to surface needs_oauth_provider_session
+// with the SPECIFIC providers the page offers. Detection mirrors
+// findOAuthButton's logic (visible text / aria-label / iconLabel
+// containing the provider keyword + an auth verb, or href to the
+// provider's OAuth endpoint).
+//
+// Returns providers in the order they were found in the inventory,
+// deduped.
+export function detectOAuthProvidersInInventory(
+  inventory: readonly InteractiveElement[],
+): OAuthProviderId[] {
+  const found = new Set<OAuthProviderId>();
+  const providers: OAuthProviderId[] = ["google", "github"];
+  for (const provider of providers) {
+    if (findOAuthButton(inventory, provider) !== null) {
+      found.add(provider);
+    }
+  }
+  return [...found];
+}
+
 export function isOauthOnlyChooser(
   inventory: readonly InteractiveElement[],
 ): boolean {
@@ -1498,6 +1561,13 @@ export class SignupAgent {
     let emptyPlans = 0;
     let oauthScanRetries = 0;
     let hint: string | undefined;
+    // F14 — selectors the planner clicked WITHOUT advancing the page.
+    // Each no-progress plan records its click selectors here; the next
+    // plan that picks ONLY selectors in this set is failed as stuck
+    // instead of looping. Cleared on any progress (fill action). The
+    // Railway run that motivated F14 spun the same footer "Email" link
+    // 5 times before timing out; this loop now bails after 2.
+    let lastNoProgressClickSelectors: Set<string> = new Set();
     // rc.31 — once the bot has explicitly clicked an email-flow
     // button (e.g. Railway's "Log in using email" two-stage chooser),
     // stay on the email path. Without this, the auto-OAuth-first
@@ -1624,6 +1694,35 @@ export class SignupAgent {
       // OAuth-only: no fillable input AND no button that reads as an
       // email-signup option — nothing to automate (Issue 4).
       if (isOauthOnlyChooser(inventory)) {
+        // rc.33-task — distinguish "the bot has no session for the
+        // provider the page offers" (operator action: `mcp login
+        // --provider=X`) from "service is OAuth-only in general"
+        // (operator action: manual signup). When the inventory has
+        // OAuth buttons for providers the profile does NOT have a
+        // session for AND the operator HAS sessions for other
+        // providers, the situation is recoverable — surface the
+        // specific provider to seed.
+        const visibleProviders = detectOAuthProvidersInInventory(inventory);
+        const haveSessions = loggedInProviders();
+        const missingProviders = visibleProviders.filter(
+          (p) => !haveSessions.includes(p),
+        );
+        if (
+          missingProviders.length > 0 &&
+          // Only surface needs_oauth_provider_session when the user
+          // can actually act on it — i.e. they have at least one
+          // OAuth session already (so they know how to seed
+          // others). A fresh install with zero sessions still gets
+          // the generic oauth_required (which the install/connect
+          // flow has its own help text for).
+          haveSessions.length > 0
+        ) {
+          return {
+            kind: "needs_oauth_provider_session",
+            missingProviders,
+            haveSessions,
+          };
+        }
         return { kind: "oauth_required" };
       }
 
@@ -1653,6 +1752,26 @@ export class SignupAgent {
         `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
           (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
       );
+
+      // F14 — stuck-detection: if the plan picks ONLY click selectors
+      // we already tried in the previous round without page progress,
+      // it's a planner loop. Fail planning_failed with the offending
+      // selector(s) so the operator sees what stalled. Doesn't fire
+      // when the plan adds at least one new selector (legitimate
+      // exploration). Doesn't fire on fill plans (forward progress).
+      const planClickSelectors = plan.actions
+        .filter((a) => a.kind === "click")
+        .map((a) => a.selector);
+      if (
+        planClickSelectors.length > 0 &&
+        lastNoProgressClickSelectors.size > 0 &&
+        planClickSelectors.every((s) => lastNoProgressClickSelectors.has(s))
+      ) {
+        return {
+          kind: "planning_failed",
+          reason: `stuck — planner re-picked the same click selector(s) after no-progress: ${planClickSelectors.join(", ")}`,
+        };
+      }
 
       // Verify the picks resolve on the live page — also catches a
       // stale selector resolving to a recycled wrong node (Tension 4).
@@ -1728,10 +1847,25 @@ export class SignupAgent {
             ? "Plan found nothing to act on — re-checking once for a late render"
             : "Plan only revealed the page — re-planning the now-visible form",
         );
+        // F14 — record the click selectors that didn't advance the
+        // page. The next plan's stuck-detection check (above) bails
+        // if it picks the same ones again. Hint also tells the
+        // planner which selectors NOT to re-pick.
+        lastNoProgressClickSelectors = new Set(planClickSelectors);
+        const avoidHint =
+          planClickSelectors.length > 0
+            ? ` AVOID these selectors — they were clicked but the page did NOT advance: ${planClickSelectors.map((s) => JSON.stringify(s)).join(", ")}.`
+            : "";
         hint =
-          "The previous step revealed or advanced the page. Plan the signup form that should now be visible.";
+          "The previous step revealed or advanced the page. Plan the signup form that should now be visible." +
+          avoidHint;
         continue;
       }
+
+      // F14 — fill action present = forward progress. Clear the
+      // stuck-tracker so a legitimate later click isn't false-positive
+      // rejected.
+      lastNoProgressClickSelectors = new Set();
 
       // Captcha gate + submit.
       const preGate = await this.runCaptchaGate("Pre-submit", steps);
@@ -2299,6 +2433,33 @@ export class SignupAgent {
             steps,
             ...this.resultTail(),
           };
+        case "needs_oauth_provider_session": {
+          // rc.33-task — actionable: name the missing provider so
+          // the user runs the right `mcp login` command. When more
+          // than one provider is missing, the message lists them and
+          // recommends any single one (operator picks).
+          const missing = outcome.missingProviders;
+          const have = outcome.haveSessions;
+          const firstMissing = missing[0];
+          const missingLabel = missing
+            .map((p) => OAUTH_PROVIDERS[p].label)
+            .join(" / ");
+          const haveLabel =
+            have.length > 0
+              ? have.map((p) => OAUTH_PROVIDERS[p].label).join(", ")
+              : "(none)";
+          return {
+            success: false,
+            error:
+              `needs_oauth_provider_session: ${task.service} offers ${missingLabel} OAuth ` +
+              `but the bot's chrome profile has no ${missingLabel} session ` +
+              `(currently signed in to: ${haveLabel}). ` +
+              `Run \`npx @trusty-squire/mcp login --provider=${firstMissing}\` ` +
+              `to seed the session, then retry.`,
+            steps,
+            ...this.resultTail(),
+          };
+        }
         case "anti_bot_blocked":
           return {
             success: false,

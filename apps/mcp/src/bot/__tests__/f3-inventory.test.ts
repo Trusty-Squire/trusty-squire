@@ -11,7 +11,12 @@ import {
   rankAndCapInventory,
   type InteractiveElement,
 } from "../browser.js";
-import { formatInventory, isOauthOnlyChooser, parseSignupPlan } from "../agent.js";
+import {
+  detectOAuthProvidersInInventory,
+  formatInventory,
+  isOauthOnlyChooser,
+  parseSignupPlan,
+} from "../agent.js";
 
 // Build an InteractiveElement with sane defaults — tests override
 // only the fields they care about.
@@ -153,6 +158,59 @@ describe("formatInventory", () => {
     expect(out).toContain("\"Acme Inc\"");
   });
 
+  it("F15: adds landmark=<x> to text-duplicates so the planner can pick the right one", () => {
+    // The Railway pattern that motivated F15 — "Email" appears twice
+    // on the page (body CTA + footer link). Both anchor tags share
+    // the same visibleText; without landmark disambiguation the
+    // planner picked the wrong one and looped on no-progress.
+    const out = formatInventory([
+      mk({
+        tag: "a",
+        visibleText: "Email",
+        landmark: "main",
+        selector: "#body-cta",
+      }),
+      mk({
+        tag: "a",
+        visibleText: "Email",
+        landmark: "footer",
+        selector: "#footer-link",
+      }),
+    ]);
+    expect(out).toContain("landmark=main");
+    expect(out).toContain("landmark=footer");
+  });
+
+  it("F15: does NOT add landmark on a unique-text element (terse default)", () => {
+    const out = formatInventory([
+      mk({
+        tag: "a",
+        visibleText: "Email",
+        landmark: "main",
+        selector: "#solo",
+      }),
+      mk({
+        tag: "a",
+        visibleText: "Pricing",
+        landmark: "main",
+        selector: "#pricing",
+      }),
+    ]);
+    expect(out).not.toContain("landmark=");
+  });
+
+  it("F15: tolerates missing landmark on a duplicated element (no landmark = no tag)", () => {
+    const out = formatInventory([
+      mk({ tag: "a", visibleText: "Email", selector: "#one" }),
+      mk({ tag: "a", visibleText: "Email", landmark: "footer", selector: "#two" }),
+    ]);
+    // The element with a landmark gets tagged; the one without is
+    // unchanged (it just looks like the other "Email" but with no
+    // disambiguator — graceful degrade, not a crash).
+    expect(out).toContain("landmark=footer");
+    expect(out.split("\n")[0]).not.toContain("landmark=");
+  });
+
   it("does NOT flag a <select> whose user already picked a real option", () => {
     const out = formatInventory([
       mk({
@@ -195,6 +253,55 @@ describe("isOauthOnlyChooser", () => {
         mk({ tag: "button", visibleText: "Sign up with email", selector: "#e" }),
       ]),
     ).toBe(false);
+  });
+});
+
+describe("detectOAuthProvidersInInventory (needs_oauth_provider_session)", () => {
+  it("finds both Google and GitHub when both buttons are present", () => {
+    const out = detectOAuthProvidersInInventory([
+      mk({ tag: "button", visibleText: "Continue with Google", selector: "#g" }),
+      mk({ tag: "button", visibleText: "Log in using GitHub", selector: "#h" }),
+    ]);
+    expect(out.sort()).toEqual(["github", "google"]);
+  });
+
+  it("returns just GitHub when only a GitHub link is visible (Railway pattern)", () => {
+    const out = detectOAuthProvidersInInventory([
+      mk({ tag: "button", visibleText: "Log in using GitHub", selector: "#h" }),
+      mk({ tag: "button", visibleText: "Log in using SSO", selector: "#sso" }),
+    ]);
+    expect(out).toEqual(["github"]);
+  });
+
+  it("detects OAuth via href pattern even when the visible text is generic", () => {
+    const out = detectOAuthProvidersInInventory([
+      mk({
+        tag: "a",
+        visibleText: "Sign in",
+        href: "/auth/google?return_to=/dashboard",
+        selector: "#login-link",
+      }),
+    ]);
+    expect(out).toEqual(["google"]);
+  });
+
+  it("returns empty when nothing OAuth-shaped is on the page", () => {
+    expect(
+      detectOAuthProvidersInInventory([
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", visibleText: "Sign up", selector: "#go" }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("does not match nav links that merely mention a provider name", () => {
+    // findOAuthButton requires an auth verb alongside the provider
+    // keyword — "GitHub Compliance" footer link must NOT register.
+    expect(
+      detectOAuthProvidersInInventory([
+        mk({ tag: "a", visibleText: "GitHub Compliance", href: "/policy", selector: "#policy" }),
+      ]),
+    ).toEqual([]);
   });
 });
 

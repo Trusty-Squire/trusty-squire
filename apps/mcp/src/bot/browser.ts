@@ -2132,6 +2132,42 @@ export class BrowserController {
         );
       };
 
+      // G12 — visually-hidden checkbox/radio surfacing. Custom-styled
+      // TOS checkboxes are real `<input type=checkbox>` elements with
+      // `opacity:0` / `sr-only` styling behind a styled <label>; they
+      // are user-clickable (the label's click event fires the input)
+      // and `page.check()` reaches them, but isVisible() drops them
+      // and the inventory has nothing for the planner to target.
+      // Mistral's org-creation TOS gate is the canonical case.
+      //
+      // Returns true when the hidden input is a checkbox/radio AND
+      // its label (associated by `for=` or by ancestor wrap) is
+      // itself visible. Standalone hidden checkboxes outside any
+      // label stay filtered — they're typically state-tracking inputs
+      // the bot must not toggle.
+      const isCheckableHiddenByStyledLabel = (el: Element): boolean => {
+        if (!(el instanceof HTMLInputElement)) return false;
+        const t = el.type;
+        if (t !== "checkbox" && t !== "radio") return false;
+        // Style-hidden (sr-only / opacity:0) is the case to recover;
+        // genuinely display:none is intentionally hidden state, skip.
+        const s = window.getComputedStyle(el);
+        if (s.display === "none") return false;
+        // Find an associated label and check its visibility.
+        const id = el.getAttribute("id");
+        let label: Element | null = null;
+        if (id !== null && id.length > 0) {
+          try {
+            label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          } catch {
+            /* malformed id — fall through */
+          }
+        }
+        if (label === null) label = el.closest("label");
+        if (label === null) return false;
+        return isVisible(label);
+      };
+
       const clean = (s: string | null | undefined): string | null => {
         if (s === null || s === undefined) return null;
         const t = s.replace(/\s+/g, " ").trim();
@@ -2244,6 +2280,7 @@ export class BrowserController {
         href: string | null;
         iconLabel: string | null;
         title: string | null;
+        landmark: string | null;
         value: string | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
@@ -2252,7 +2289,7 @@ export class BrowserController {
       for (const el of collected) {
         if (seen.has(el)) continue;
         seen.add(el);
-        if (!isVisible(el)) continue;
+        if (!isVisible(el) && !isCheckableHiddenByStyledLabel(el)) continue;
         const r = el.getBoundingClientRect();
         out.push({
           tag: el.tagName.toLowerCase(),
@@ -2275,6 +2312,15 @@ export class BrowserController {
           href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
           iconLabel: iconLabelFor(el),
           title: clean(el.getAttribute("title")),
+          landmark: (() => {
+            // F15 — nearest HTML5 landmark ancestor. Used by the
+            // inventory renderer to disambiguate elements with the
+            // same visibleText. Returns the lowercased tag name
+            // ("header" / "main" / "footer" / "nav" / "aside" /
+            // "article" / "section") or null when outside any.
+            const lm = el.closest("header,main,footer,nav,aside,article,section");
+            return lm !== null ? lm.tagName.toLowerCase() : null;
+          })(),
           value:
             el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
               ? el.value
@@ -2690,6 +2736,14 @@ export interface InteractiveElement {
   // extract_via_regex on bare UUIDs (which the regex library cannot
   // match without a label). Optional; test fixtures may omit.
   title?: string | null;
+  // F15 — nearest HTML5 landmark ancestor: header | main | footer |
+  // nav | aside | article | section, or null when the element is
+  // outside any landmark. The agent's inventory renderer uses this to
+  // disambiguate elements with identical visibleText (a Railway run
+  // had "Email" appear twice — body CTA and footer link — with
+  // similar selectors that confused the planner). Optional: only the
+  // live extractor sets it; fixtures may omit.
+  landmark?: string | null;
   // Current value of a text-shaped input/textarea OR a <select>.
   // Surfaces "is this field actually empty / unselected?" to the
   // planner. For an input/textarea: empty string means the field
