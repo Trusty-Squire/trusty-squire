@@ -287,7 +287,7 @@ function synthesizeSteps(
       round_index: i,
     };
 
-    const translated = translateStep(round.observed, round.inventory, provenance, i);
+    const translated = translateStep(round.observed, round.inventory, provenance, i, round.state.html);
     if (translated.kind !== "ok") return translated;
     if (translated.step !== null) steps.push(translated.step);
   }
@@ -336,6 +336,7 @@ function translateStep(
   inventory: readonly InteractiveElement[],
   provenance: SkillStepProvenance,
   roundIndex: number,
+  roundHtml: string,
 ): { kind: "ok"; step: SkillStep | null } | PromoteRejection {
   switch (observed.kind) {
     case "done":
@@ -468,7 +469,7 @@ function translateStep(
       return { kind: "ok", step: null };
 
     case "extract":
-      return synthesizeExtractStep(observed, inventory, provenance, roundIndex);
+      return synthesizeExtractStep(observed, inventory, provenance, roundIndex, roundHtml);
 
     default: {
       // Exhaustiveness check. TypeScript narrows `observed` to `never`
@@ -668,6 +669,7 @@ function synthesizeExtractStep(
   inventory: readonly InteractiveElement[],
   provenance: SkillStepProvenance,
   roundIndex: number,
+  roundHtml: string,
 ): { kind: "ok"; step: SkillStep } | PromoteRejection {
   // Strategy: prefer extract_via_copy_button when a Copy button is
   // visibly available on the same page. The clipboard path is regex-
@@ -687,19 +689,60 @@ function synthesizeExtractStep(
     };
   }
 
-  // No Copy button. Use a regex extraction with the uuid_token pattern
-  // as the default — most novel services that hit this path use
-  // UUID-shaped tokens (Railway, smaller dev SaaS). Operators can
-  // hand-edit the skill to pick a more specific pattern.
+  // No Copy button. Use a regex extraction. The pattern_name picked
+  // here decides which regex the replay engine fires at extract time;
+  // if it's wrong (e.g. uuid_token for IPInfo's 14-char opaque key),
+  // the replay can never find the value. detectKnownCredentialPattern
+  // scans the captured page text for the actual credential and picks
+  // the matching named pattern. Falls back to uuid_token only when no
+  // recognized prefix or UUID is on the page — the historical default,
+  // preserved for sites whose key has no distinguishing prefix that
+  // happens to also not be a UUID (rare; operator hand-edits).
+  const detected = detectKnownCredentialPattern(roundHtml);
   return {
     kind: "ok",
     step: {
       kind: "extract_via_regex",
-      pattern_name: "uuid_token",
+      pattern_name: detected,
       provenance,
     },
   };
   void roundIndex;
+}
+
+// Scan the captured HTML for a credential value matching any of the
+// patterns the replay engine's extractApiKeyFromText knows about.
+// Returns the matching pattern_name; falls back to "uuid_token"
+// when nothing recognizable is on the page (the historical default).
+//
+// Order matters — sk-or-v1- before sk- because both could match the
+// same string and we want the more-specific one to win, matching
+// agent.ts's extractApiKeyFromText order.
+function detectKnownCredentialPattern(
+  html: string,
+): "stripe_secret" | "stripe_publishable" | "resend" | "sendgrid" | "mailgun" | "render" | "sentry_token" | "openrouter" | "anthropic" | "openai_legacy" | "openai_project" | "uuid_token" {
+  if (/\bre_[a-zA-Z0-9_]{20,}\b/.test(html)) return "resend";
+  if (/\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/.test(html)) return "stripe_secret";
+  if (/\bsk-or-v1-[a-f0-9]{40,80}/i.test(html)) return "openrouter";
+  if (/\bsk-ant-[a-zA-Z0-9_-]{40,120}/.test(html)) return "anthropic";
+  if (/\bsk-proj-[a-zA-Z0-9_-]{40,200}/.test(html)) return "openai_project";
+  if (/\bsk-[a-zA-Z0-9]{40,60}/.test(html)) return "openai_legacy";
+  if (/\bkey-[a-f0-9]{32}\b/.test(html)) return "mailgun";
+  if (/\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/.test(html)) return "sendgrid";
+  if (/\brnd_[a-zA-Z0-9]{20,}\b/.test(html)) return "render";
+  if (/\bsntry[su]_[A-Za-z0-9_=\-]{20,}/.test(html)) return "sentry_token";
+  // UUID — Railway-class flows. Last among prefixed checks because a
+  // UUID can co-appear with prefixed keys on the same page (e.g. a
+  // dashboard showing a key plus a request-id).
+  if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(html)) {
+    return "uuid_token";
+  }
+  // No known prefix and no UUID. Default to uuid_token so the schema
+  // accepts the skill — replay engine's rc.8 fallback path will pick
+  // the value up via extractCredentialCandidates if the validator is
+  // set tightly enough (and the synthesizer DOES set it tightly when
+  // it observed a short alphanumeric below).
+  return "uuid_token";
 }
 
 function findCopyButton(
@@ -801,21 +844,82 @@ function inferCredentialSpec(
 
   const envVar = envVarOverride ?? deriveEnvVar(service);
 
-  // Validator defaults are coarse but safe. The min/max length range
-  // is wide because we don't know the exact length distribution for
-  // this service. A sentinel_http_check is NOT auto-populated — that
-  // would require knowing the service's /whoami URL, which the
-  // synthesizer can't infer. Operators set it via skill:edit (C5).
+  // Validator ranges per shape_hint. Tight ranges keep the replay
+  // engine's rc.8 candidate-fallback path from accepting wrong-shaped
+  // strings as credentials. For shapes where the value's length is
+  // service-defined, we use the typical-observed range; the operator
+  // can hand-edit if a service's keys turn out to be wider than the
+  // default. A sentinel_http_check is NOT auto-populated — that would
+  // require knowing the service's /whoami URL, which the synthesizer
+  // can't infer. Operators set it via skill:edit (C5).
+  const validator = validatorForShape(shapeHint, rounds);
   const spec: SkillCredentialSpec = {
     type: "api_key",
     shape_hint: shapeHint,
     env_var_suggestion: envVar,
-    post_extract_validator: {
-      min_length: shapeHint === "uuid" ? 36 : 16,
-      max_length: shapeHint === "uuid" ? 36 : 512,
-    },
+    post_extract_validator: validator,
   };
   return { kind: "ok", spec };
+}
+
+function validatorForShape(
+  shape: SkillCredentialSpec["shape_hint"],
+  rounds: OnboardingCaseFile[],
+): { min_length: number; max_length: number } {
+  switch (shape) {
+    case "uuid":
+      return { min_length: 36, max_length: 36 };
+    case "prefix:re_":
+      return { min_length: 24, max_length: 64 };
+    case "prefix:sk_live":
+    case "prefix:sk_test":
+      return { min_length: 28, max_length: 128 };
+    case "prefix:sk-or-v1-":
+      return { min_length: 30, max_length: 120 };
+    case "prefix:sk-ant-":
+      return { min_length: 60, max_length: 200 };
+    case "prefix:sk-":
+      return { min_length: 40, max_length: 80 };
+    case "prefix:key-":
+      return { min_length: 36, max_length: 40 };
+    case "prefix:SG.":
+      return { min_length: 50, max_length: 100 };
+    case "prefix:rnd_":
+      return { min_length: 28, max_length: 64 };
+    case "prefix:sntry":
+      return { min_length: 30, max_length: 200 };
+    case "opaque":
+      // Opaque means: no recognized prefix or UUID, but we still
+      // landed on a credential page. Use the last-round HTML to find
+      // the most-likely value's length. IPInfo's 14-char API token
+      // is the canonical case. Fall back to a wide range if no
+      // value can be inferred (rare).
+      return inferOpaqueValidatorFromHtml(rounds) ?? { min_length: 8, max_length: 64 };
+    case "username_password":
+      return { min_length: 8, max_length: 256 };
+  }
+}
+
+// Scan the last round's HTML for short alphanumeric tokens that look
+// like credentials (digits + letters, no surrounding label glue
+// detectable). Pick the longest plausible candidate's length to
+// anchor the validator's range. Returns null when nothing plausibly
+// credential-shaped is found.
+function inferOpaqueValidatorFromHtml(
+  rounds: OnboardingCaseFile[],
+): { min_length: number; max_length: number } | null {
+  const html = rounds[rounds.length - 1]?.state.html ?? "";
+  // Look for "API Token" / "Token" / "API Key" label followed by an
+  // alphanumeric run of 8-64 chars. The replay engine's
+  // extractCredentialCandidates fallback uses validator length to
+  // filter, so we want a tight ±2-char range around the observed
+  // length to keep nav strings ("Dashboard", "Downloads") out.
+  const labeled = /(?:API[\s_-]?Token|API[\s_-]?Key|Token|Secret)\s*[:=]?\s*([a-zA-Z0-9_-]{8,64})/i.exec(html);
+  if (labeled !== null && labeled[1] !== undefined) {
+    const len = labeled[1].length;
+    return { min_length: Math.max(8, len - 2), max_length: len + 2 };
+  }
+  return null;
 }
 
 function inferShapeHint(
@@ -848,8 +952,21 @@ function inferShapeHint(
         return "prefix:sk-";
       case "openai_project":
         return "prefix:sk-";
-      case "uuid_token":
-        return "uuid";
+      case "uuid_token": {
+        // uuid_token is the synthesizer's fallback when no recognized
+        // prefix was found in the HTML. Two sub-cases:
+        //   1. UUID actually present (Railway-class) → shape "uuid"
+        //   2. No UUID present (IPInfo-class opaque short token) →
+        //      shape "opaque" so the validator isn't forced to 36/36
+        //      and inferOpaqueValidatorFromHtml picks the observed
+        //      length range. The replay engine's rc.8 candidate
+        //      fallback then uses that validator to find the value.
+        const html = rounds[rounds.length - 1]?.state.html ?? "";
+        if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(html)) {
+          return "uuid";
+        }
+        return "opaque";
+      }
     }
   }
 
