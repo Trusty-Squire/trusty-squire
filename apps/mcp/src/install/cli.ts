@@ -339,7 +339,11 @@ async function connect(args: Argv): Promise<void> {
     }
   }
 
-  ui.section(1, 2, "Your account");
+  console.warn("");
+  console.warn(
+    "You need to connect your Google and/or GitHub OAuth accounts to use Trusty Squire.",
+  );
+  ui.section(1, 2, "Connect Google");
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
@@ -532,11 +536,11 @@ async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
       ? "Railway, Vercel, parts of Cloudflare"
       : "Resend, IPInfo, Postmark";
 
-  ui.section(2, 2, `Connect ${missingLabel}`);
+  console.warn("");
   ui.hint(
-    `Some services are ${missingLabel}-only (${missingExamples}). Adding ${missingLabel} ` +
-      `now avoids being interrupted mid-signup later.`,
+    `Some services are ${missingLabel}-only (${missingExamples}).`,
   );
+  ui.section(2, 2, `Connect ${missingLabel}`);
   const yes = await promptYesNo(`Add ${missingLabel}?`, true);
   if (!yes) {
     ui.hint(
