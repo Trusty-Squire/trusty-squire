@@ -215,6 +215,861 @@
     Vector DB. Google + GitHub OAuth. Free tier exists; API key
     surfaces in dashboard after project creation.
 
+# ── Phase 2 expansion (82 OAuth services, target = 100 total) ──
+# All entries below are UNTESTED with the universal bot. OAuth provider
+# availability was researched at draft time but per-service flows are
+# unverified. The harvester will surface real per-service failure modes
+# (phone gates, captcha walls, post-OAuth onboarding redirects, etc.)
+# on first attempt; flip status:skip with a reason note when one is
+# found. Default oauth_provider is google to match the harvester
+# chrome profile (methoxine@gmail.com); flip to github when a service
+# is verifiably github-first (Railway is the canonical case).
+
+# ── AI / LLM inference (7) ──
+
+- slug: replicate
+  name: Replicate
+  signup_url: https://replicate.com/signin
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Model hosting + inference. GitHub OAuth is primary (sign-in shows
+    GitHub button prominently); Google also offered. API key surfaces
+    in account settings after signup.
+
+- slug: fireworks
+  name: Fireworks AI
+  signup_url: https://fireworks.ai/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM inference. Google + GitHub OAuth on /login. API key in
+    dashboard > API keys after first project create.
+
+- slug: deepinfra
+  name: DeepInfra
+  signup_url: https://deepinfra.com/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM inference. GitHub-first OAuth (their dashboard expects GitHub
+    identity); Google also available. API key in dashboard.
+
+- slug: perplexity
+  name: Perplexity API
+  signup_url: https://www.perplexity.ai/settings/api
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Perplexity's web app uses Google OAuth; API access requires
+    payment-method-on-file before keys issue. Likely onboarding_blocked
+    on first attempt — flag for billing-wall handling.
+
+- slug: cohere
+  name: Cohere
+  signup_url: https://dashboard.cohere.com/welcome/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM inference (Command, Embed). Google + GitHub OAuth. Trial keys
+    issue immediately; production keys require billing.
+
+- slug: hyperbolic
+  name: Hyperbolic
+  signup_url: https://app.hyperbolic.xyz/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM + image inference. Google OAuth on /login; API key in settings.
+
+- slug: baseten
+  name: Baseten
+  signup_url: https://app.baseten.co/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Model serving. Google + GitHub OAuth. Workspace creation step
+    post-OAuth may trip the "looking for API key" planner — watch.
+
+# ── Cloud / PaaS (8) ──
+
+- slug: netlify
+  name: Netlify
+  signup_url: https://app.netlify.com/signup
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Static + edge hosting. GitHub OAuth is the dominant path (deploys
+    are git-driven); Google + GitLab + Bitbucket also offered. PAT in
+    user settings post-signup.
+
+- slug: fly
+  name: Fly.io
+  signup_url: https://fly.io/app/sign-up
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Edge compute. GitHub OAuth primary; payment-method-on-file gates
+    organization creation. Likely onboarding_blocked unless free
+    trial path is available — flag for billing-wall handling.
+
+- slug: koyeb
+  name: Koyeb
+  signup_url: https://app.koyeb.com/auth/signup
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Serverless container hosting. GitHub + Google OAuth. Free tier
+    exists; API token in account settings.
+
+- slug: northflank
+  name: Northflank
+  signup_url: https://app.northflank.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Container hosting + jobs. GitHub + Google + GitLab OAuth. May
+    require billing for project creation.
+
+- slug: porter
+  name: Porter
+  signup_url: https://dashboard.porter.run/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    K8s app hosting. GitHub-first OAuth (deploys from git repos).
+
+- slug: zeabur
+  name: Zeabur
+  signup_url: https://zeabur.com/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    PaaS. GitHub + Google + email OAuth. Free tier; API token in
+    account settings.
+
+- slug: digitalocean
+  name: DigitalOcean
+  signup_url: https://cloud.digitalocean.com/registrations/new
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    IaaS. Google + GitHub OAuth available; signup requires payment
+    method (charges $5 hold). Likely onboarding_blocked.
+
+# ── Databases (8) ──
+
+- slug: supabase
+  name: Supabase
+  signup_url: https://supabase.com/dashboard/sign-up
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Postgres + auth + storage. GitHub OAuth is the canonical path
+    (most users); Google also offered. Project creation post-signup
+    is required before API keys surface — multi-step post-OAuth.
+
+- slug: planetscale
+  name: PlanetScale
+  signup_url: https://auth.planetscale.com/sign-up
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Vitess-backed MySQL. GitHub + Google OAuth. Hobby tier removed;
+    likely billing-wall on database creation.
+
+- slug: turso
+  name: Turso
+  signup_url: https://app.turso.tech/auth/signin
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    libSQL (SQLite) edge. GitHub + Google OAuth. Free tier; API
+    token in account settings.
+
+- slug: xata
+  name: Xata
+  signup_url: https://app.xata.io/signin
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Serverless Postgres + search. GitHub + Google OAuth. API key in
+    user settings.
+
+- slug: convex
+  name: Convex
+  signup_url: https://dashboard.convex.dev/auth
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Reactive serverless DB. GitHub-first OAuth.
+
+- slug: upstash
+  name: Upstash
+  signup_url: https://console.upstash.com/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Serverless Redis + Kafka + QStash. GitHub + Google + Amazon
+    OAuth. API key + REST tokens in account settings.
+
+- slug: redis-cloud
+  name: Redis Cloud
+  signup_url: https://app.redislabs.com/#/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Managed Redis (Redis Labs). Google + GitHub OAuth. Free 30MB
+    tier; API key generated post-signup.
+
+- slug: cockroachdb
+  name: CockroachDB Cloud
+  signup_url: https://cockroachlabs.cloud/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Distributed Postgres-compatible DB. Google + GitHub + Azure
+    OAuth. Free serverless tier; cluster creation needed before
+    connection string surfaces.
+
+# ── Vector DBs (3) ──
+
+- slug: weaviate
+  name: Weaviate Cloud
+  signup_url: https://console.weaviate.cloud
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Vector DB. Google OAuth. Sandbox tier; API key per-cluster.
+
+- slug: qdrant
+  name: Qdrant Cloud
+  signup_url: https://cloud.qdrant.io/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Vector DB. GitHub + Google OAuth. Free tier (1GB); API key
+    in cluster settings.
+
+- slug: chroma
+  name: Chroma Cloud
+  signup_url: https://trychroma.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Vector DB (Chroma's hosted offering). Google OAuth available
+    based on landing-page CTAs.
+
+# ── Observability / logging (7) ──
+
+- slug: highlight
+  name: Highlight
+  signup_url: https://app.highlight.io/sign_up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Session replay + errors. Google + GitHub OAuth. Workspace + project
+    creation step post-OAuth before project SDK key surfaces.
+
+- slug: betterstack-logs
+  name: Better Stack Logs
+  signup_url: https://logs.betterstack.com/users/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Log management (formerly Logtail). Google + GitHub OAuth. Source
+    creation step post-OAuth surfaces an ingest token.
+
+- slug: axiom
+  name: Axiom
+  signup_url: https://app.axiom.co/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Event store + observability. Google + GitHub OAuth. Token in
+    settings > API tokens.
+
+- slug: grafana-cloud
+  name: Grafana Cloud
+  signup_url: https://grafana.com/auth/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Observability stack. Google + GitHub OAuth. Stack creation step
+    post-OAuth before API keys reachable.
+
+- slug: honeycomb
+  name: Honeycomb
+  signup_url: https://ui.honeycomb.io/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Distributed tracing. Google OAuth. Team creation step post-OAuth
+    before API key surfaces.
+
+- slug: baselime
+  name: Baselime
+  signup_url: https://console.baselime.io/signup
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Serverless observability (acquired by Cloudflare). GitHub OAuth
+    is the canonical path.
+
+- slug: last9
+  name: Last9
+  signup_url: https://app.last9.io/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    OpenTelemetry observability. Google + GitHub OAuth.
+
+# ── Analytics (4) ──
+
+- slug: mixpanel
+  name: Mixpanel
+  signup_url: https://mixpanel.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Product analytics. Google OAuth. Project token in settings >
+    project settings after creation step.
+
+- slug: amplitude
+  name: Amplitude
+  signup_url: https://amplitude.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Product analytics. Google OAuth. Org + workspace creation step
+    post-OAuth before project API key surfaces.
+
+- slug: plausible
+  name: Plausible
+  signup_url: https://plausible.io/register
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Privacy-friendly web analytics. GitHub OAuth (Sign in with
+    GitHub) on /register. Free trial.
+
+- slug: fathom
+  name: Fathom Analytics
+  signup_url: https://app.usefathom.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Privacy-friendly web analytics. Google OAuth on /register.
+    Free trial; site creation step before tracking code surfaces.
+
+# ── Email / transactional (6) ──
+
+- slug: loops
+  name: Loops
+  signup_url: https://app.loops.so/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Email for SaaS. Google + email OAuth.
+
+- slug: plunk
+  name: Plunk
+  signup_url: https://app.useplunk.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Open-source transactional email. Google OAuth + email.
+
+- slug: mailtrap
+  name: Mailtrap
+  signup_url: https://mailtrap.io/register/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Email sandbox + transactional. Google + GitHub OAuth.
+
+- slug: brevo
+  name: Brevo
+  signup_url: https://onboarding.brevo.com/account/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Email + SMS (formerly Sendinblue). Google OAuth on registration.
+    Multi-step onboarding form post-OAuth.
+
+- slug: sendgrid
+  name: SendGrid
+  signup_url: https://signup.sendgrid.com/
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Transactional + marketing email (Twilio). Likely requires phone
+    verification post-OAuth; flag needs-manual if so.
+
+- slug: mailgun
+  name: Mailgun
+  signup_url: https://signup.mailgun.com/new/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Transactional email. Google + GitHub OAuth. Payment method
+    required for sandbox-out; likely onboarding_blocked.
+
+# ── Search (3) ──
+
+- slug: algolia
+  name: Algolia
+  signup_url: https://dashboard.algolia.com/users/sign_up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Hosted search. Google + GitHub OAuth. Application + index creation
+    step post-OAuth before API keys surface.
+
+- slug: meilisearch
+  name: Meilisearch Cloud
+  signup_url: https://cloud.meilisearch.com/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Search engine. Google + GitHub OAuth. Project creation step
+    before API key surfaces.
+
+- slug: typesense
+  name: Typesense Cloud
+  signup_url: https://cloud.typesense.org/signin
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Search engine. Google + GitHub OAuth. Cluster provisioning step
+    before API key surfaces.
+
+# ── Auth providers (4) ──
+
+- slug: clerk
+  name: Clerk
+  signup_url: https://dashboard.clerk.com/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Auth-as-a-service. Google + GitHub OAuth. Application creation
+    step post-OAuth before publishable+secret keys surface.
+
+- slug: stytch
+  name: Stytch
+  signup_url: https://stytch.com/dashboard
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Auth-as-a-service. Google OAuth. Project creation step before
+    API keys surface.
+
+- slug: workos
+  name: WorkOS
+  signup_url: https://dashboard.workos.com/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Enterprise auth + SSO. Google + GitHub OAuth.
+
+- slug: kinde
+  name: Kinde
+  signup_url: https://app.kinde.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Auth-as-a-service. Google + Microsoft OAuth.
+
+# ── Payments (3) ──
+
+- slug: stripe
+  name: Stripe
+  signup_url: https://dashboard.stripe.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Payments. Google OAuth on /register. Heavy KYC; test-mode keys
+    issue immediately but bot may struggle with business-info form.
+
+- slug: paddle
+  name: Paddle
+  signup_url: https://login.paddle.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Merchant-of-record payments. Google OAuth. KYC heavy.
+
+# ── Feature flags (4) ──
+
+- slug: launchdarkly
+  name: LaunchDarkly
+  signup_url: https://app.launchdarkly.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Feature flags. Google OAuth. SDK keys per environment surface
+    post project setup.
+
+- slug: statsig
+  name: Statsig
+  signup_url: https://console.statsig.com/sign_up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Feature flags + experimentation. Google + GitHub OAuth. SDK
+    keys surface post project setup.
+
+- slug: growthbook
+  name: GrowthBook Cloud
+  signup_url: https://app.growthbook.io/auth/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Feature flags + experimentation. Google + GitHub OAuth.
+
+- slug: flagsmith
+  name: Flagsmith
+  signup_url: https://app.flagsmith.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Feature flags. Google + GitHub OAuth.
+
+# ── Code sandboxes / dev environments (5) ──
+
+- slug: e2b
+  name: E2B
+  signup_url: https://e2b.dev/auth/sign-up
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Code-interpreter sandboxes for AI agents. GitHub OAuth primary.
+
+- slug: daytona
+  name: Daytona
+  signup_url: https://app.daytona.io/signin
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Dev environment manager. GitHub OAuth.
+
+- slug: replit
+  name: Replit
+  signup_url: https://replit.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Browser dev environment. Google + GitHub + Apple OAuth. API token
+    in account settings.
+
+- slug: codesandbox
+  name: CodeSandbox
+  signup_url: https://codesandbox.io/signin
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Browser dev environment. GitHub + Google + Apple OAuth.
+
+- slug: stackblitz
+  name: StackBlitz
+  signup_url: https://stackblitz.com/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Browser dev environment (WebContainers). GitHub + Google OAuth.
+
+# ── CI / Build (1) ──
+
+- slug: circleci
+  name: CircleCI
+  signup_url: https://circleci.com/signup/
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    CI/CD. GitHub + Bitbucket OAuth (no Google — GitHub is the
+    canonical identity).
+
+# ── Workflow / orchestration (4) ──
+
+- slug: trigger
+  name: Trigger.dev
+  signup_url: https://cloud.trigger.dev/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Background jobs + workflows. GitHub + Google OAuth.
+
+- slug: inngest
+  name: Inngest
+  signup_url: https://app.inngest.com/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Durable workflows. Google + GitHub OAuth.
+
+- slug: temporal
+  name: Temporal Cloud
+  signup_url: https://cloud.temporal.io/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Durable workflows (managed Temporal). Google OAuth. Namespace
+    provisioning before mTLS credentials surface — non-API-key
+    extract shape, flag as failure mode.
+
+- slug: hatchet
+  name: Hatchet
+  signup_url: https://app.dev.hatchet-tools.com/auth/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Background task queue. GitHub + Google OAuth.
+
+# ── API tooling / webhooks (2) ──
+
+- slug: hookdeck
+  name: Hookdeck
+  signup_url: https://dashboard.hookdeck.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Event-driven infra. Google + GitHub OAuth. API key in workspace
+    settings post-creation.
+
+- slug: svix
+  name: Svix
+  signup_url: https://dashboard.svix.com/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Webhook infrastructure. Google + GitHub OAuth. API key in
+    org settings.
+
+# ── Forms (2) ──
+
+- slug: tally
+  name: Tally
+  signup_url: https://tally.so/signin
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Forms. Google + Apple + email OAuth. API token in workspace
+    settings.
+
+- slug: typeform
+  name: Typeform
+  signup_url: https://www.typeform.com/signup/
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Forms. Google + Microsoft OAuth. Personal access token in
+    account settings.
+
+# ── Scraping / browser automation (4) ──
+
+- slug: apify
+  name: Apify
+  signup_url: https://console.apify.com/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Web scraping + automation platform. Google + GitHub OAuth.
+    API token in account integrations.
+
+- slug: firecrawl
+  name: Firecrawl
+  signup_url: https://www.firecrawl.dev/signin/signup
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    LLM-friendly web scraper. GitHub + Google OAuth.
+
+- slug: scrapingbee
+  name: ScrapingBee
+  signup_url: https://app.scrapingbee.com/account/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Headless-browser scraping API. Google OAuth. API key in account
+    dashboard.
+
+- slug: browserbase
+  name: Browserbase
+  signup_url: https://www.browserbase.com/sign-in
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Headless browser-as-a-service for AI agents. Google + GitHub
+    OAuth. API key in project settings.
+
+# ── Geo / IP (3) ──
+
+- slug: ipdata
+  name: ipdata
+  signup_url: https://dashboard.ipdata.co/sign-up.html
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    IP geolocation API. Google OAuth. Free 1.5k req/day; key
+    on dashboard.
+
+# ── Status / uptime (2) ──
+
+- slug: betterstack-uptime
+  name: Better Stack Uptime
+  signup_url: https://uptime.betterstack.com/users/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Uptime monitoring. Google + GitHub OAuth. Team token in account
+    settings post-OAuth.
+
+- slug: cronitor
+  name: Cronitor
+  signup_url: https://cronitor.io/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Cron + heartbeat monitoring. Google OAuth.
+
+# ── Media / asset hosting (3) ──
+
+- slug: cloudinary
+  name: Cloudinary
+  signup_url: https://cloudinary.com/users/register_free
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Image + video CDN. Google + GitHub OAuth. API credentials on
+    dashboard post-OAuth.
+
+- slug: uploadcare
+  name: Uploadcare
+  signup_url: https://app.uploadcare.com/accounts/signup/
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    File uploads + CDN. Google + GitHub OAuth.
+
+- slug: imagekit
+  name: ImageKit
+  signup_url: https://imagekit.io/registration/
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Image + video CDN. Google + GitHub OAuth.
+
+# ── AI / specialty (3) ──
+
+- slug: elevenlabs
+  name: ElevenLabs
+  signup_url: https://elevenlabs.io/app/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    Voice synthesis API. Google OAuth. API key in profile settings.
+
+- slug: lambda-labs
+  name: Lambda Labs API
+  signup_url: https://cloud.lambdalabs.com/sign-up
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: |
+    GPU cloud (Lambda Cloud + Inference API). Google OAuth. May
+    require payment for inference keys.
+
+- slug: modal
+  name: Modal
+  signup_url: https://modal.com/signup
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: |
+    Serverless GPU compute. GitHub + Google OAuth. Token generated
+    via CLI flow — may not surface in dashboard directly. Flag if
+    the bot can't extract a key from the web dashboard alone.
+
 # Known-incompatible services. Kept here for visibility — operator should
 # never see a `service:cloudflare` issue auto-created.
 - slug: cloudflare
