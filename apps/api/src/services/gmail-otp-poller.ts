@@ -172,9 +172,17 @@ export class GmailOtpPoller {
             });
             if (!matched) continue;
           }
-          const body =
+          const raw =
             msg.source !== undefined ? msg.source.toString("utf8") : "";
-          const code = extractOtp(body, customRe);
+          // Strip the MIME envelope's header block — every digit-shaped
+          // value in there (Date, Message-ID, Received timestamps,
+          // boundary nonces) outranks the actual OTP under a naive
+          // first-match scan. Headers end at the first blank line per
+          // RFC 5322; if there's no blank line (malformed message),
+          // fall back to the full source.
+          const headerEnd = raw.search(/\r?\n\r?\n/);
+          const bodyOnly = headerEnd >= 0 ? raw.slice(headerEnd + 2) : raw;
+          const code = extractOtp(decodeMimeBody(bodyOnly), customRe);
           if (code === null) continue;
           return { code, reason: "found", scanned };
         }
@@ -200,6 +208,50 @@ export class GmailOtpPoller {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+// Best-effort MIME body decoding. Real-world OTP emails arrive as
+// quoted-printable or base64 inside multipart envelopes; the actual
+// readable text (with the code keyword + digits) is unreachable
+// without decoding. We don't pull in a full MIME parser — that's
+// overkill for the 90% case of WorkOS-style transactional emails.
+// Instead:
+//   1. Decode quoted-printable (=XX hex escapes) inline. WorkOS,
+//      Porter, Koyeb all send their text/plain part QP-encoded.
+//   2. Decode any base64-encoded blocks that LOOK isolated and
+//      decodable to plausible ASCII (skip binary attachments).
+//   3. Strip HTML tags so an HTML-only multipart yields searchable
+//      text.
+// Exported for unit testing.
+export function decodeMimeBody(body: string): string {
+  // Quoted-printable: =XX → byte, =<eol> → soft line break (drop).
+  let out = body.replace(/=([0-9A-Fa-f]{2})/g, (_m, h: string) =>
+    String.fromCharCode(parseInt(h, 16)),
+  );
+  out = out.replace(/=\r?\n/g, "");
+  // Base64 chunks: bodies of multipart parts often arrive as one or
+  // more long base64-only runs (no spaces) optionally separated by
+  // CRLFs. Decode each substantial run (>=60 chars) and append its
+  // decoded text. Best-effort: if decoding yields mostly non-
+  // printable bytes (a binary attachment), skip the result.
+  for (const m of out.matchAll(/[A-Za-z0-9+/]{40,}={0,2}(?:\r?\n[A-Za-z0-9+/]{40,}={0,2})*/g)) {
+    const chunk = m[0].replace(/\s+/g, "");
+    if (chunk.length < 60) continue;
+    try {
+      const decoded = Buffer.from(chunk, "base64").toString("utf8");
+      const nonPrintable = decoded.replace(/[\x09\x0A\x0D\x20-\x7E]/g, "");
+      if (nonPrintable.length < decoded.length * 0.1) {
+        out += "\n" + decoded;
+      }
+    } catch {
+      // Not real base64 — ignore.
+    }
+  }
+  // Strip HTML tags so HTML-only multipart parts contribute their
+  // text to the scan. Replace with spaces so digits across tag
+  // boundaries don't fuse.
+  out = out.replace(/<[^>]+>/g, " ");
+  return out;
 }
 
 // Compile a user-supplied regex, refusing patterns that look like

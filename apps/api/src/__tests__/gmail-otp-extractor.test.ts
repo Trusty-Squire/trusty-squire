@@ -5,7 +5,7 @@
 // near the digits.
 
 import { describe, it, expect } from "vitest";
-import { extractOtp } from "../services/gmail-otp-poller.js";
+import { decodeMimeBody, extractOtp } from "../services/gmail-otp-poller.js";
 
 describe("extractOtp — strict keyword-anchored pass", () => {
   it("returns the OTP after 'verification code:'", () => {
@@ -78,5 +78,38 @@ describe("extractOtp — defensive cases", () => {
 
   it("returns null when body has only non-numeric content", () => {
     expect(extractOtp("Hello there, no codes here at all.")).toBeNull();
+  });
+});
+
+describe("decodeMimeBody (rc.31)", () => {
+  it("decodes quoted-printable =XX escapes", () => {
+    // "Your verification code is: 482915" QP-encoded
+    const qp = "Your verification code is=3A 482915";
+    expect(decodeMimeBody(qp)).toContain("482915");
+    // ":" was the encoded char
+    expect(decodeMimeBody(qp)).toContain(":");
+  });
+
+  it("drops soft line breaks (= at end of line)", () => {
+    const qp = "Your verification co=\r\nde is 482915";
+    const out = decodeMimeBody(qp);
+    expect(out).toContain("code is 482915");
+  });
+
+  it("strips HTML tags so digits between tags remain searchable", () => {
+    const html = "<p>Your code is <strong>482915</strong>.</p>";
+    expect(extractOtp(decodeMimeBody(html))).toBe("482915");
+  });
+
+  it("decodes a base64-encoded multipart body inline", () => {
+    // Realistic multipart fixture: a single clean base64 run >=60
+    // chars encoding readable text with an OTP keyword.
+    const text =
+      "Your verification code is 482915. It expires in 10 minutes. " +
+      "Don't share this code with anyone.";
+    const b64 = Buffer.from(text).toString("base64");
+    // Verify the fixture is long enough to trip the >=60-char detector.
+    expect(b64.length).toBeGreaterThanOrEqual(60);
+    expect(extractOtp(decodeMimeBody(b64))).toBe("482915");
   });
 });
