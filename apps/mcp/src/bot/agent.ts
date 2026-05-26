@@ -120,6 +120,8 @@ const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
   /\benter\s+your\s+card\b/i,
   /\benter\s+your\s+payment\b/i,
   /\benter\s+payment\s+details\b/i,
+  /\bconnect\s+a(?:\s+valid)?\s+payment\s+method\b/i,
+  /\byour\s+(?:free\s+)?trial\s+(?:is\s+)?ending\b/i,
   /\bupgrade\s+your\s+plan\s+to\b/i,
   /\bstart\s+your\s+paid\s+plan\b/i,
 ];
@@ -4299,7 +4301,15 @@ ${formatInventory(input.inventory)}`,
           await this.browser.wait(1);
         } else if (nextStep.kind === "navigate") {
           await this.browser.goto(nextStep.url);
-          // PERF: next round opens with waitForFormReady; no blind dwell.
+          // rc.33 — wait for the SPA to actually render before the
+          // next round reads inventory. waitForFormReady (called at
+          // the top of the next round) handles the basic "DOM
+          // parsed" signal, but Porter / Koyeb's API-tokens pages
+          // load over 5-15 seconds — the planner-driven post-verify
+          // loop was running on the empty initial shell and burning
+          // rounds clicking nothing. Wait for at least 5 interactive
+          // elements (Porter's tokens page has 20+ once rendered).
+          await this.browser.waitForInteractiveDom(5, 20_000);
         } else if (nextStep.kind === "wait") {
           await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {

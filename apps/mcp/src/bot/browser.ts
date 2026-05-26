@@ -1977,14 +1977,58 @@ export class BrowserController {
     // redirect to the real page. Without this, the bot snapshots a
     // 2-element interstitial inventory and bails.
     await this.waitForAntiBotInterstitialToClear(timeoutMs);
+    // rc.33 — extended the element-wait selector to match the broader
+    // inventory walk added in rc.26 (menuitem/option/combobox plus
+    // anchors). Porter and Koyeb's API-tokens pages are nested SPAs
+    // that initially render with NO <input>/<button> — just <a> and
+    // role=button divs. The old selector timed out at 15s on those
+    // pages, the planner saw an empty inventory, and the post-verify
+    // loop burned rounds clicking nothing.
     try {
-      await this.page.waitForSelector("input, button", {
-        state: "visible",
-        timeout: timeoutMs,
-      });
+      await this.page.waitForSelector(
+        'input, button, textarea, select, a[href], [role="button"], [role="menuitem"]',
+        { state: "visible", timeout: timeoutMs },
+      );
     } catch {
       // No interactive element appeared in time — let the planner run
       // anyway; it fails cleanly rather than hanging.
+    }
+  }
+
+  // rc.33 — wait for the DOM to grow past a minimum interactive-
+  // element count, polling every 500ms up to timeoutMs. The
+  // single-element wait in waitForFormReady is fast-path; this is
+  // for SPAs where DOMContentLoaded fires almost immediately but the
+  // React/Vue/Svelte tree takes 5-15s more to actually render. Used
+  // after navigate() in the post-verify loop so the planner doesn't
+  // see a 0-button page that's still rendering. Best-effort —
+  // returns whenever the count is reached OR the timeout elapses.
+  async waitForInteractiveDom(
+    minElements = 5,
+    timeoutMs = 20_000,
+  ): Promise<void> {
+    if (!this.page) return;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const count = await this.page.evaluate((min: number) => {
+          const sels =
+            'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
+          const nodes = Array.from(document.querySelectorAll(sels));
+          let visible = 0;
+          for (const n of nodes) {
+            const el = n as HTMLElement;
+            const r = el.getBoundingClientRect();
+            if (r.width >= 2 && r.height >= 2) visible++;
+            if (visible >= min) return visible;
+          }
+          return visible;
+        }, minElements);
+        if (count >= minElements) return;
+      } catch {
+        // Page may be mid-navigation — try again on the next tick.
+      }
+      await this.sleep(500);
     }
   }
 
