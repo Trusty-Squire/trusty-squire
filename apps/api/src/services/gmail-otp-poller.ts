@@ -52,7 +52,52 @@ export interface OtpPollResult {
   scanned: number;
 }
 
-const DEFAULT_OTP_RE = /\b(\d{6,8})\b/;
+// rc.30 — keyword-anchored OTP search. The naive /\b(\d{6,8})\b/ in
+// rc.27 picked up the first run of 6-8 digits in the email body —
+// which on Porter's email was a date timestamp (e.g. "Sent
+// 2026-06-05") concatenated to "20260605", not the actual code.
+// Real OTP emails always introduce the code with text like "Your
+// verification code is:" or "Enter this code:". Anchor the search
+// there, falling back to the naive pattern only as a last resort.
+//
+// Two passes:
+//   1. Strict — explicit OTP keyword + colon/dash/whitespace + 6-8
+//      digit-or-space token (some services render "1 2 3 4 5 6"
+//      with single-character spacing for readability).
+//   2. Fallback — any \b\d{6,8}\b that doesn't look like a year
+//      (1900-2100) or a year-date prefix (2020xxxx, 2026xxxx).
+const STRICT_OTP_RE =
+  /\b(?:code|otp|one[\s-]?time|verification|verify|pin)\b[^A-Za-z0-9]{0,50}?(\d(?:[ \-]?\d){5,7})/i;
+const FALLBACK_OTP_RE = /\b(\d{6,8})\b/g;
+function isDateLikeNumeric(s: string): boolean {
+  // 19xx-20xx years (4 chars) or YYYYMMDD-shaped 8-digit values
+  // beginning with a plausible year prefix.
+  if (s.length === 4 && /^(19|20)\d{2}$/.test(s)) return true;
+  if (s.length === 8 && /^(19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(s)) return true;
+  return false;
+}
+// Exported for unit testing — the extractor is the load-bearing
+// regression-risk piece of the poller. Tests pin the strict +
+// fallback + date-rejection paths.
+export function extractOtp(body: string, customRe: RegExp | null = null): string | null {
+  if (customRe !== null) {
+    const m = customRe.exec(body);
+    if (m === null) return null;
+    return (m[1] ?? m[0]).replace(/[^0-9]/g, "");
+  }
+  // Strict pass.
+  const strict = STRICT_OTP_RE.exec(body);
+  if (strict !== null && strict[1] !== undefined) {
+    const cleaned = strict[1].replace(/[^0-9]/g, "");
+    if (cleaned.length >= 4 && cleaned.length <= 10) return cleaned;
+  }
+  // Fallback — first non-date-looking 6-8 digit run.
+  for (const m of body.matchAll(FALLBACK_OTP_RE)) {
+    const candidate = m[1] ?? m[0];
+    if (!isDateLikeNumeric(candidate)) return candidate;
+  }
+  return null;
+}
 const MIN_SINCE = 10;
 const MAX_SINCE = 600;
 
@@ -62,12 +107,12 @@ export class GmailOtpPoller {
   async poll(input: OtpPollInput): Promise<OtpPollResult> {
     const sinceSeconds = clamp(input.since_seconds, MIN_SINCE, MAX_SINCE);
     const sinceDate = new Date(Date.now() - sinceSeconds * 1000);
-    const otpRe =
-      input.otp_pattern !== undefined && input.otp_pattern.length > 0
-        ? compileSafeRegex(input.otp_pattern)
-        : DEFAULT_OTP_RE;
-    if (otpRe === null) {
-      return { code: null, reason: "invalid_otp_pattern", scanned: 0 };
+    let customRe: RegExp | null = null;
+    if (input.otp_pattern !== undefined && input.otp_pattern.length > 0) {
+      customRe = compileSafeRegex(input.otp_pattern);
+      if (customRe === null) {
+        return { code: null, reason: "invalid_otp_pattern", scanned: 0 };
+      }
     }
 
     const client = new ImapFlow({
@@ -129,9 +174,8 @@ export class GmailOtpPoller {
           }
           const body =
             msg.source !== undefined ? msg.source.toString("utf8") : "";
-          const m = otpRe.exec(body);
-          if (m === null) continue;
-          const code = m[1] ?? m[0];
+          const code = extractOtp(body, customRe);
+          if (code === null) continue;
           return { code, reason: "found", scanned };
         }
         return { code: null, reason: "no_match", scanned };
