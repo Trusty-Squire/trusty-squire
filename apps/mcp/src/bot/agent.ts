@@ -2323,6 +2323,45 @@ export class SignupAgent {
   // clear `needs_login` the host agent can act on, vs. a silent 45-second
   // form-fill timeout. Better failure mode wins; the original gate was
   // protecting the bot from the wrong loss.
+  // rc.28 — click the first plausible account card on a Google
+  // account-chooser page. Returns true on a successful click, false
+  // when no card was identified. Used by the rc.25 stuck-on-chooser
+  // post-OAuth gate to forward the flow off accounts.google.com
+  // instead of immediately aborting.
+  //
+  // Google's chooser markup is consistent across surfaces: each
+  // account renders as a clickable container with a data-identifier
+  // attribute equal to the account's email, plus role="link" or
+  // jsaction. The fallback is any element whose visible text
+  // contains an @ — accounts always show their email.
+  private async tryClickGoogleChooserCard(): Promise<boolean> {
+    try {
+      const page = (
+        this.browser as unknown as { page: import("playwright").Page | null }
+      ).page;
+      if (page === null || page === undefined) return false;
+      // First-choice selector: data-identifier on an interactive element.
+      const candidates = [
+        '[data-identifier]:visible',
+        '[role="link"]:has-text("@")',
+        'div[jsaction]:has-text("@")',
+      ];
+      for (const sel of candidates) {
+        const loc = page.locator(sel).first();
+        try {
+          await loc.waitFor({ state: "visible", timeout: 2_000 });
+          await loc.click({ timeout: 3_000 });
+          return true;
+        } catch {
+          continue;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   private async resolveOAuthCandidates(
     task: SignupTask,
     steps: string[],
@@ -3481,16 +3520,53 @@ export class SignupAgent {
       // signed in via Google but the OAuth flow didn't redirect off
       // accounts.google.com — usually a Clerk-mediated chooser the
       // post-verify planner can't navigate.
+      //
+      // rc.27 → rc.28 — instead of aborting immediately, try to
+      // click an account card on the chooser. Google's chooser
+      // renders each account as `<div data-identifier="email@…"
+      // role="link" jsaction="…">` (or similar accountchooser shape).
+      // Picking the first visible card forwards the flow off the
+      // chooser. If the click doesn't move us off accounts.google.com
+      // within a few seconds, abort with oauth_stuck_on_chooser.
       if (detectStuckOnGoogleOAuth(gateState.url)) {
-        return {
-          success: false,
-          error:
-            `oauth_stuck_on_chooser: ${task.service}'s Google OAuth flow did not redirect off ` +
-            `accounts.google.com (${pathOf(gateState.url)}) — likely a Clerk/Auth0 account-chooser ` +
-            `screen the bot's post-OAuth loop can't navigate. Finish the signup manually.`,
-          steps,
-          ...this.resultTail(),
-        };
+        steps.push(
+          `Post-OAuth: stuck on Google account chooser (${pathOf(gateState.url)}). ` +
+            `Trying to click an account card.`,
+        );
+        const clicked = await this.tryClickGoogleChooserCard();
+        if (clicked) {
+          await this.browser.wait(3);
+          await saveDebugSnapshot(this.browser, "oauth-chooser-click");
+          const afterUrl = this.browser.currentUrl();
+          steps.push(
+            `Post-OAuth: chooser card clicked — now at ${pathOf(afterUrl)} ` +
+              `(host=${(() => {try{return new URL(afterUrl).hostname;}catch{return "?";}})()})`,
+          );
+          // If the click moved us off accounts.google.com, fall
+          // through to the post-verify loop normally.
+          if (!detectStuckOnGoogleOAuth(afterUrl)) {
+            // continue to extract + postVerifyLoop
+          } else {
+            return {
+              success: false,
+              error:
+                `oauth_stuck_on_chooser: clicked an account card on the chooser but the URL ` +
+                `stayed on accounts.google.com (${pathOf(afterUrl)}). Finish the signup manually.`,
+              steps,
+              ...this.resultTail(),
+            };
+          }
+        } else {
+          return {
+            success: false,
+            error:
+              `oauth_stuck_on_chooser: ${task.service}'s Google OAuth flow did not redirect off ` +
+              `accounts.google.com (${pathOf(gateState.url)}) and no clickable account card was ` +
+              `found on the chooser. Finish the signup manually.`,
+            steps,
+            ...this.resultTail(),
+          };
+        }
       }
     }
 

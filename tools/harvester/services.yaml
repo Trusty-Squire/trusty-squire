@@ -266,9 +266,14 @@
   signup_url: https://app.hyperbolic.xyz/login
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: skip
   notes: |
-    LLM + image inference. Google OAuth on /login; API key in settings.
+    LLM + image inference. Google OAuth completes server-side but
+    the callback never persists a session — bot lands back on
+    /login with Sign Up / Log In buttons visible (rc.24's
+    oauth_session_not_persisted detector). Same shape as
+    DigitalOcean: anti-bot probably rejects the OAuth callback.
+    Not bot-fixable without residential-proxy egress.
 
 - slug: baseten
   name: Baseten
@@ -298,11 +303,14 @@
   signup_url: https://fly.io/app/sign-up
   oauth_provider: github
   scope_hint: null
-  status: pending
+  status: skip
   notes: |
-    Edge compute. GitHub OAuth primary; payment-method-on-file gates
-    organization creation. Likely onboarding_blocked unless free
-    trial path is available — flag for billing-wall handling.
+    Edge compute. GitHub OAuth completes but token creation is
+    blocked by SSO organization membership (rc.24's sso_restricted
+    detector). The user's GitHub identity sits in an org that
+    enforces SSO/SAML for programmatic token creation — server-side
+    rule the bot can't bypass. Not fixable without a personal Fly
+    account outside the SSO org.
 
 - slug: koyeb
   name: Koyeb
@@ -348,10 +356,14 @@
   signup_url: https://cloud.digitalocean.com/registrations/new
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: skip
   notes: |
-    IaaS. Google + GitHub OAuth available; signup requires payment
-    method (charges $5 hold). Likely onboarding_blocked.
+    IaaS. Google OAuth completes but the callback session never
+    persists — bot lands back on /login (rc.24's
+    oauth_session_not_persisted detector). DigitalOcean's anti-bot
+    layer evidently rejects the OAuth callback when egress is
+    datacenter. Not bot-fixable without residential-proxy egress
+    AND a payment method on file (signup is also $5 hold + KYC).
 
 # ── Databases (8) ──
 
