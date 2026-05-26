@@ -111,4 +111,43 @@ describe("notifyHeightenedAuth", () => {
     const [url] = fetchMock.mock.calls[0]!;
     expect(url).toBe("https://trusty-squire-api.fly.dev/v1/notify/heightened-auth");
   });
+
+  it("rc.13 — uses the param machineToken + apiBase over env (session.json path)", async () => {
+    // The MCP install writes machine_token to ~/.config/trusty-squire/
+    // session.json and does NOT export it as an env var. tools/
+    // provision-any.ts plumbs it as a param. Param must win.
+    delete process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
+    delete process.env.TRUSTY_SQUIRE_API_BASE;
+    fetchMock.mockResolvedValue({ ok: true });
+
+    const ok = await notifyHeightenedAuth({
+      service: "Resend",
+      digit: "39",
+      windowSeconds: 120,
+      machineToken: "tsm_from_session",
+      apiBase: "https://session-api.example.com",
+    });
+
+    expect(ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://session-api.example.com/v1/notify/heightened-auth");
+    expect(init.headers.authorization).toBe("Bearer tsm_from_session");
+  });
+
+  it("rc.13 — param machineToken takes precedence over env token", async () => {
+    // Both set: param wins. Guards against the dev path (env-set)
+    // overriding session.json's token when a caller plumbs it.
+    process.env.TRUSTY_SQUIRE_MACHINE_TOKEN = "tsm_from_env";
+    fetchMock.mockResolvedValue({ ok: true });
+
+    await notifyHeightenedAuth({
+      service: "Resend",
+      digit: "39",
+      windowSeconds: 120,
+      machineToken: "tsm_from_param",
+    });
+
+    const init = fetchMock.mock.calls[0]![1];
+    expect(init.headers.authorization).toBe("Bearer tsm_from_param");
+  });
 });

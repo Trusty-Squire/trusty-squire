@@ -95,6 +95,13 @@ export interface UniversalSignupRequest {
   // effort contract; same MCP-layer ownership of wiring + account
   // scoping. Undefined in unit tests.
   roundUploader?: RoundUploader | undefined;
+  // Machine token + API base for heightened-auth notifications
+  // (Google number-match email). The MCP install path keeps the
+  // token in session.json and never exports it as env, so the
+  // notify call would silently no-op without these. Plumbed by
+  // tools/provision-any.ts (rc.13).
+  machineToken?: string | undefined;
+  apiBase?: string | undefined;
 }
 
 export class UniversalSignupBot {
@@ -172,6 +179,8 @@ export class UniversalSignupBot {
         stepsSink: request.stepsSink,
         allowExtraOAuthScopes: request.allowExtraOAuthScopes,
         allowBlindOAuthConsent: request.allowBlindOAuthConsent,
+        machineToken: request.machineToken,
+        apiBase: request.apiBase,
       });
 
       console.error(`[UniversalBot] Result: ${result.success ? "SUCCESS" : "FAILED"}`);

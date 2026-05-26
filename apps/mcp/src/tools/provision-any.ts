@@ -734,6 +734,13 @@ async function runSignupTask(
       // bugs (Railway token-create no-op) are diagnosable without
       // needing to reproduce the run locally.
       roundUploader: buildRoundUploader(ctx.accountId),
+      // Heightened-auth notifier credentials — the agent's
+      // notifyHeightenedAuth call (Google number-match) reads these
+      // because session.json's machine_token is NOT exported as an
+      // env var in MCP installs. Without this plumbing the notify
+      // call silently no-ops (rc.12 and earlier).
+      machineToken: ctx.machineToken,
+      apiBase: ctx.apiBase,
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias

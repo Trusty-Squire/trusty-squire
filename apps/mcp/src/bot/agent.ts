@@ -282,6 +282,15 @@ export interface SignupTask {
   // scraper used elsewhere). User explicitly opted in for this run;
   // never set automatically.
   allowBlindOAuthConsent?: boolean | undefined;
+  // Machine token + API base for fire-and-forget heightened-auth
+  // notifications (Google number-match email). The MCP install path
+  // mints the machine token to session.json — it is not exported via
+  // env — so the agent's notify-api call must take it explicitly to
+  // avoid a silent no-op. provision-any.ts plumbs both fields from
+  // ctx; the dev harnesses that set TRUSTY_SQUIRE_MACHINE_TOKEN as an
+  // env var leave these undefined and notify-api.ts falls back to env.
+  machineToken?: string | undefined;
+  apiBase?: string | undefined;
 }
 
 // Best-effort callback the MCP layer wires into SignupAgent so the
@@ -2833,6 +2842,8 @@ export class SignupAgent {
               service: task.service,
               digit: String(matchNum),
               windowSeconds: 120,
+              machineToken: task.machineToken,
+              apiBase: task.apiBase,
             });
           } else {
             // Extractor missed the number — Google phrasing has
@@ -2851,6 +2862,8 @@ export class SignupAgent {
               service: task.service,
               digit: null,
               windowSeconds: 120,
+              machineToken: task.machineToken,
+              apiBase: task.apiBase,
             });
           }
           // Either way (number found or not), the user can still
