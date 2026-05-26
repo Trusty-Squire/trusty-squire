@@ -242,6 +242,74 @@ describe("runOneBatch — outcome routing", () => {
   });
 });
 
+describe("runOneBatch — schema drift (P1 fix)", () => {
+  it("SKIPS rather than failing when fetchSkill throws SkillSchemaDriftError", async () => {
+    const { SkillSchemaDriftError } = await import("../registry-client.js");
+    const outcomes: StubCall[] = [];
+    const client = {
+      fetchQueue: async () => [makeQueueItem("01DRIFT0000000000000000001")],
+      fetchSkill: async (skill_id: string) => {
+        throw new SkillSchemaDriftError(skill_id, "missing field foo");
+      },
+      postOutcome: async (input: StubCall) => {
+        outcomes.push(input);
+        return {
+          transition: "none" as const,
+          status: "pending-review",
+          verifier_succeeded: 0,
+          verifier_failed: 0,
+          consecutive_verifier_failures: 0,
+          next_freshness_due_at: null,
+        };
+      },
+    };
+    const logs: string[] = [];
+    const summary = await runOneBatch({
+      client: client as never,
+      replay: okReplay(),
+      log: (line) => logs.push(line),
+    });
+    // The bug we're guarding against: a schema-drift fetchSkill would
+    // get caught by the outer catch and posted as a failure outcome.
+    // Three such failures retire the skill.
+    expect(outcomes).toHaveLength(0);
+    expect(summary.failed).toBe(0);
+    expect(summary.succeeded).toBe(0);
+    expect(summary.attempted).toBe(1);
+    expect(logs.some((l) => l.includes("SKIP") && l.includes("schema drift"))).toBe(true);
+  });
+
+  it("treats a non-drift fetchSkill error as a skill failure (registry 500)", async () => {
+    const outcomes: StubCall[] = [];
+    const client = {
+      fetchQueue: async () => [makeQueueItem("01ERR000000000000000000001")],
+      fetchSkill: async () => {
+        throw new Error("HTTP 500 internal");
+      },
+      postOutcome: async (input: StubCall) => {
+        outcomes.push(input);
+        return {
+          transition: "none" as const,
+          status: "pending-review",
+          verifier_succeeded: 0,
+          verifier_failed: 0,
+          consecutive_verifier_failures: 0,
+          next_freshness_due_at: null,
+        };
+      },
+    };
+    const summary = await runOneBatch({
+      client: client as never,
+      replay: okReplay(),
+      log: () => undefined,
+    });
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]!.kind).toBe("failure");
+    expect(outcomes[0]!.reason).toMatch(/fetch_error/);
+    expect(summary.failed).toBe(1);
+  });
+});
+
 describe("runOneBatch — dry mode", () => {
   it("treats dry_pass as success", async () => {
     const { client, outcomes } = makeStubClient({

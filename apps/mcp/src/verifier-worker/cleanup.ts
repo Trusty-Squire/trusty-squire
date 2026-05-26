@@ -51,8 +51,21 @@ export async function runCleanup(input: RunCleanupInput): Promise<CleanupOutcome
   }
 
   if (cleanup.strategy === "api_delete") {
+    const url = substitute(cleanup.url_template, input.templateValues ?? {});
+    // Short-circuit on unsubstituted template vars rather than firing
+    // a DELETE at a URL containing `MISSING_TOKEN_ID`. The substitute
+    // helper marks them with the MISSING_ prefix; surfacing this as a
+    // failed outcome is more useful than silently 404ing into the
+    // best-effort log.
+    if (/\bMISSING_[A-Z_][A-Z0-9_]*\b/.test(url)) {
+      return {
+        kind: "failed",
+        strategy: "api_delete",
+        reason: `missing_template_var: url substitution left a MISSING_ marker (${url})`,
+      };
+    }
     return await runApiDelete({
-      url: substitute(cleanup.url_template, input.templateValues ?? {}),
+      url,
       method: cleanup.method,
       authScheme: cleanup.auth_scheme,
       credential: input.credential,

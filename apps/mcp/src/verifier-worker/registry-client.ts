@@ -4,6 +4,21 @@
 
 import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
 
+// Phase 3 follow-up — thrown by fetchSkill when the stored payload
+// doesn't pass the current SkillSchema (registry was written under
+// an older synthesizer or the schema package evolved). The loop
+// catches this distinctly so a worker-side schema drift can't get
+// counted as a skill failure and demote/retire perfectly fine skills.
+export class SkillSchemaDriftError extends Error {
+  readonly skill_id: string;
+  constructor(skill_id: string, cause: unknown) {
+    const msg = cause instanceof Error ? cause.message : String(cause);
+    super(`schema drift on skill ${skill_id}: ${msg}`);
+    this.skill_id = skill_id;
+    this.name = "SkillSchemaDriftError";
+  }
+}
+
 export interface VerifierQueueItem {
   skill_id: string;
   service: string;
@@ -74,9 +89,15 @@ export class VerifierRegistryClient {
       throw new Error(`fetchSkill ${skill_id}: malformed response`);
     }
     // parseSkill is the same trust gate the router uses — if the
-    // stored row drifted from the current schema, surface it now
-    // rather than crashing deeper in replaySkill.
-    return parseSkill(body.skill);
+    // stored row drifted from the current schema, surface it as a
+    // typed error so the loop can skip without counting it as a
+    // skill failure (otherwise schema drift auto-retires good
+    // skills).
+    try {
+      return parseSkill(body.skill);
+    } catch (err) {
+      throw new SkillSchemaDriftError(skill_id, err);
+    }
   }
 
   // Closed-loop Phase 6: discovery candidates.

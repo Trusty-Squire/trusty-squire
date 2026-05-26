@@ -11,11 +11,23 @@
 // tests inject a known value via the deps argument.
 
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
+import { timingSafeEqual } from "node:crypto";
+import { Buffer } from "node:buffer";
 import type {
   SkillStore,
   RecordVerifierOutcomeResult,
 } from "../skill-store.js";
 import type { BotFailureStore } from "../bot-failure-store.js";
+
+// Constant-time bearer compare. Length mismatch returns false without
+// invoking timingSafeEqual (which requires equal-length inputs).
+export function bearerEquals(presented: string, expected: string): boolean {
+  if (presented.length !== expected.length) return false;
+  return timingSafeEqual(
+    Buffer.from(presented, "utf8"),
+    Buffer.from(expected, "utf8"),
+  );
+}
 
 export interface AdminRouteDeps {
   store: SkillStore;
@@ -54,9 +66,9 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       return true;
     }
     const header = req.headers["authorization"];
-    const presented = typeof header === "string" ? header : undefined;
+    const presented = typeof header === "string" ? header : "";
     const expected = `Bearer ${opts.adminBearer}`;
-    if (presented !== expected) {
+    if (!bearerEquals(presented, expected)) {
       reply.code(401).send({ ok: false, error: "unauthorized" });
       return true;
     }
@@ -183,11 +195,40 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
         return reply.code(503).send({ ok: false, error: "telemetry_not_configured" });
       }
       const account_id = opts.resolveAccountId(req as { headers: Record<string, unknown> });
+      // Reject anonymous posts — without an authenticated account_id
+      // we can't enforce the ≥3 DISTINCT-accounts gate that protects
+      // the discovery queue from poisoning. Any caller can produce
+      // an unlimited stream of fabricated account_ids on the wire
+      // anyway, but rejecting "anonymous" lifts the floor: now the
+      // attacker has to forge MULTIPLE machine tokens, not just
+      // hit the URL with no auth.
+      if (account_id === "anonymous" || account_id.length === 0) {
+        return reply.code(401).send({
+          ok: false,
+          error: "unauthorized",
+          detail: "telemetry requires an authenticated account (x-account-id header).",
+        });
+      }
       if (!isBotFailureBody(req.body)) {
         return reply.code(400).send({
           ok: false,
           error: "invalid_request",
           detail: "Expected { service, error_kind, reason, mcp_version }.",
+        });
+      }
+      // Per-account rate limit — 60 telemetry posts per minute.
+      // Conservative; a runaway bot loop on one user's machine
+      // shouldn't be able to dominate the discovery queue.
+      const since = new Date(Date.now() - 60_000);
+      const recent = await opts.botFailureStore.countRecentByAccount(
+        account_id,
+        since,
+      );
+      if (recent >= 60) {
+        return reply.code(429).send({
+          ok: false,
+          error: "rate_limited",
+          detail: "max 60 telemetry posts per minute per account",
         });
       }
       const row = await opts.botFailureStore.insert({

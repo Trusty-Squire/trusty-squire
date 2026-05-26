@@ -268,25 +268,51 @@ export class PrismaSkillStore implements SkillStore {
         skill.status === "pending-review" &&
         skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
       ) {
-        // Promote and supersede any older active row for the same
-        // service. Mirrors approveReview's invariant maintenance.
-        await tx.skillRecord.updateMany({
+        // C11 gate — same logic as InMemorySkillStore. If an existing
+        // active skill for this service has a DIFFERENT signup_url or
+        // oauth_provider, defer to operator review rather than letting
+        // the verifier silently overwrite. The verifier validates that
+        // the SKILL works, not that it's the right skill for users.
+        const existingActive = (await tx.skillRecord.findFirst({
           where: {
-            skill_id: { not: skill.skill_id },
+            skill_id: { not: skill.skill_id } as never,
             service: skill.service,
             status: "active",
+            deleted_at: null,
           },
-          data: { status: "superseded", superseded_at: now },
-        });
-        const promoted = (await tx.skillRecord.update({
-          where: { skill_id: input.skill_id },
-          data: {
-            status: "active",
-            next_freshness_due_at: new Date(now.getTime() + oneWeek),
-          },
-        })) as unknown as PrismaSkillRow;
-        skill = promoted;
-        transition = "promoted";
+        })) as PrismaSkillRow | null;
+        let requireOperatorReview = false;
+        if (existingActive !== null) {
+          const incomingPayload = parseSkill(skill.payload_json as unknown);
+          const existingPayload = parseSkill(existingActive.payload_json as unknown);
+          requireOperatorReview = triggersHumanReview(
+            existingPayload,
+            incomingPayload,
+          );
+        }
+        if (!requireOperatorReview) {
+          // Promote and supersede any older active row for the same
+          // service. Mirrors approveReview's invariant maintenance.
+          await tx.skillRecord.updateMany({
+            where: {
+              skill_id: { not: skill.skill_id },
+              service: skill.service,
+              status: "active",
+            },
+            data: { status: "superseded", superseded_at: now },
+          });
+          const promoted = (await tx.skillRecord.update({
+            where: { skill_id: input.skill_id },
+            data: {
+              status: "active",
+              next_freshness_due_at: new Date(now.getTime() + oneWeek),
+            },
+          })) as unknown as PrismaSkillRow;
+          skill = promoted;
+          transition = "promoted";
+        }
+        // else: counter incremented, status stays pending-review,
+        // operator runs `mcp skill approve-review` to land it.
       } else if (input.kind === "success" && skill.status === "active") {
         // Freshness pass — schedule the next sweep.
         skill = (await tx.skillRecord.update({
@@ -406,7 +432,18 @@ export class PrismaSkillStore implements SkillStore {
       });
       const updated = await tx.skillRecord.update({
         where: { skill_id },
-        data: { status: "active", consecutive_failures: 0 },
+        data: {
+          status: "active",
+          consecutive_failures: 0,
+          // Phase 3 follow-up — reactivate must also reset verifier
+          // state, otherwise a reactivated skill carries forward its
+          // demotion-time cvf=3 (re-demotes on the next verifier
+          // failure) AND its next_freshness_due_at=null (verifier
+          // never picks it up). Resetting cvf to 0 and scheduling a
+          // fresh sweep is the symmetric behavior with promotion.
+          consecutive_verifier_failures: 0,
+          next_freshness_due_at: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+        },
       });
       return {
         record: toSkillStoreRecord(updated as PrismaSkillRow),

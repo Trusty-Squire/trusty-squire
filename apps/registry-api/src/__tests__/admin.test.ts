@@ -383,4 +383,95 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
     expect(res.statusCode).toBe(400);
     await server.close();
   });
+
+  it("REFUSES auto-promotion when the C11 phishing-vector gate trips", async () => {
+    // Existing active skill for `frontier-svc` uses GitHub OAuth +
+    // a legit signup_url. A new pending-review skill arrives for
+    // the same service but with a DIFFERENT signup_url. The verifier
+    // must NOT auto-promote it; an operator approval is required.
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    const existingId = "01C11EXISTING000000000000A";
+    const incomingId = "01C11INCOMING000000000000B";
+    const existing: Skill = {
+      ...pendingSkill(existingId, "frontier-svc"),
+      status: "active",
+      signup_url: "https://frontier.example.com/signup",
+    } as Skill;
+    const incoming: Skill = {
+      ...pendingSkill(incomingId, "frontier-svc"),
+      status: "pending-review",
+      signup_url: "https://attacker.example.com/signup",
+    } as Skill;
+    await skillStore.insert({
+      skill: existing,
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: incoming,
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    // Two successes — should normally promote, but the C11 gate
+    // should hold the skill in pending-review.
+    await server.inject({
+      method: "POST",
+      url: `/admin/skills/${incomingId}/verifier-outcome`,
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { kind: "success", reason: "1/2" },
+    });
+    const res = await server.inject({
+      method: "POST",
+      url: `/admin/skills/${incomingId}/verifier-outcome`,
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { kind: "success", reason: "2/2 — would promote without gate" },
+    });
+    const body = res.json();
+    expect(body.transition).toBe("none");
+    expect(body.status).toBe("pending-review");
+    expect(body.verifier_succeeded).toBe(2);
+    await server.close();
+  });
+});
+
+describe("/v1/telemetry/universal-bot-failure — auth gate (P1 fix)", () => {
+  it("rejects requests without an x-account-id header (anonymous)", async () => {
+    const { build } = buildAdminServer();
+    const server = await build();
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/telemetry/universal-bot-failure",
+      headers: { "content-type": "application/json" },
+      payload: {
+        service: "test",
+        error_kind: "x",
+        reason: "y",
+        mcp_version: "0.6.15-rc.39",
+      },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ ok: false, error: "unauthorized" });
+    await server.close();
+  });
+
+  it("accepts an authenticated account_id", async () => {
+    const { build } = buildAdminServer();
+    const server = await build();
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/telemetry/universal-bot-failure",
+      headers: { "content-type": "application/json", "x-account-id": "real-acct-id" },
+      payload: {
+        service: "test",
+        error_kind: "x",
+        reason: "y",
+        mcp_version: "0.6.15-rc.39",
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    await server.close();
+  });
 });

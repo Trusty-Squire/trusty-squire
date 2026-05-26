@@ -22,12 +22,15 @@ ALTER TABLE "SkillRecord"
 
 -- Backfill: anything currently active counts as verified through
 -- the legacy hand-promotion process. Two synthetic successes,
--- last_verified_at = created_at, joins the freshness sweep one
--- week from creation.
+-- last_verified_at = created_at, freshness sweep scheduled at
+-- GREATEST(now, created_at) + 7d to prevent a thundering-herd of
+-- legacy skills landing in the verifier queue all at once on first
+-- deploy. The stagger keeps the inaugural sweep load identical to a
+-- steady-state one — even a 100-skill registry runs cleanly.
 UPDATE "SkillRecord"
-SET "verifier_succeeded"   = 2,
-    "last_verified_at"     = "created_at",
-    "next_freshness_due_at" = "created_at" + INTERVAL '7 days'
+SET "verifier_succeeded"    = 2,
+    "last_verified_at"      = "created_at",
+    "next_freshness_due_at" = GREATEST(NOW(), "created_at") + INTERVAL '7 days'
 WHERE "status" = 'active';
 
 -- Indexed for the verifier's "what's due?" query: pull all skills

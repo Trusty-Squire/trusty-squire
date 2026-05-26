@@ -203,11 +203,11 @@ describe("runCleanup — api_delete", () => {
     expect((result as { reason: string }).reason).toMatch(/ECONNREFUSED/);
   });
 
-  it("substitutes MISSING_<KEY> when a template var is unprovided (loud)", async () => {
-    let seenUrl: string | undefined;
-    const fetchFn = vi.fn(async (url: string | URL | Request) => {
-      seenUrl = typeof url === "string" ? url : url.toString();
-      return new Response("", { status: 204 });
+  it("short-circuits to failed when a template var is unprovided (no DELETE fired)", async () => {
+    let fetchCalls = 0;
+    const fetchFn = vi.fn(async () => {
+      fetchCalls += 1;
+      return new Response(null, { status: 204 });
     }) as unknown as typeof globalThis.fetch;
     const skill = baseSkill({
       token_cleanup: {
@@ -217,13 +217,15 @@ describe("runCleanup — api_delete", () => {
         auth_scheme: "bearer_self",
       } as never,
     });
-    await runCleanup({
+    const result = await runCleanup({
       skill,
       credential: "sk-test",
       // No templateValues — TOKEN_ID is missing
       fetchFn,
     });
-    expect(seenUrl).toBe("https://api.example.com/tokens/MISSING_TOKEN_ID");
+    expect(fetchCalls).toBe(0);
+    expect(result.kind).toBe("failed");
+    expect((result as { reason: string }).reason).toMatch(/missing_template_var/);
   });
 });
 

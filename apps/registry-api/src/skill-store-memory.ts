@@ -269,25 +269,58 @@ export class InMemorySkillStore implements SkillStore {
         skill.status === "pending-review" &&
         skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
       ) {
-        // Promote pending → active. Mirror approveReview's
-        // supersession logic so the (service, status='active')
-        // invariant holds.
+        // C11 gate — when this pending-review skill would replace an
+        // existing active skill for the same service, and the
+        // incoming signup_url or oauth_provider DIFFERS from the
+        // active one, the auto-promotion path must defer to an
+        // operator review. Otherwise the verifier becomes a
+        // phishing-vector laundromat: anyone who submits a skill
+        // pointing at attacker-controlled signup_url just needs
+        // two successful verifier runs (which the attacker can
+        // engineer with a service that returns ANYTHING resembling
+        // a token) to overwrite the legit active skill. Same gate
+        // `insert()` uses for direct-active publishes.
+        let existingActive: SkillStoreRecord | null = null;
         for (const other of this.skills.values()) {
           if (
             other.skill_id !== skill.skill_id &&
             other.service === skill.service &&
-            other.status === "active"
+            other.status === "active" &&
+            other.deleted_at === null
           ) {
-            other.status = "superseded";
-            other.superseded_at = now;
-            other.payload.status = "superseded";
-            other.payload.superseded_at = now.toISOString();
+            existingActive = other;
+            break;
           }
         }
-        skill.status = "active";
-        skill.payload.status = "active";
-        skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
-        transition = "promoted";
+        if (
+          existingActive !== null &&
+          triggersHumanReview(existingActive.payload, skill.payload)
+        ) {
+          // Stay in pending-review; operator must explicitly
+          // approve via `mcp skill approve-review`. Counters still
+          // bumped — transition stays "none" so the loop logs
+          // accurately rather than reporting a phantom promotion.
+        } else {
+          // Promote pending → active. Mirror approveReview's
+          // supersession logic so the (service, status='active')
+          // invariant holds.
+          for (const other of this.skills.values()) {
+            if (
+              other.skill_id !== skill.skill_id &&
+              other.service === skill.service &&
+              other.status === "active"
+            ) {
+              other.status = "superseded";
+              other.superseded_at = now;
+              other.payload.status = "superseded";
+              other.payload.superseded_at = now.toISOString();
+            }
+          }
+          skill.status = "active";
+          skill.payload.status = "active";
+          skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
+          transition = "promoted";
+        }
       } else if (skill.status === "active") {
         // Freshness-sweep pass — schedule the next sweep.
         skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
@@ -372,6 +405,12 @@ export class InMemorySkillStore implements SkillStore {
     }
     skill.status = "active";
     skill.consecutive_failures = 0;
+    // Phase 3 follow-up — reactivate must clear verifier-failure
+    // state too so a previously-demoted skill doesn't re-demote on
+    // the next verifier failure and gets back on the freshness
+    // sweep queue.
+    skill.consecutive_verifier_failures = 0;
+    skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
     skill.payload.status = "active";
     return { record: skill, previously };
   }

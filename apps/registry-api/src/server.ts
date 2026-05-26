@@ -174,10 +174,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const { PrismaManifestStore } = await import("./prisma-store.js");
     const { PrismaSkillStore } = await import("./prisma-skill-store.js");
     const { PrismaExtractFailureStore } = await import("./prisma-extract-failure-store.js");
+    const { PrismaBotFailureStore } = await import("./prisma-bot-failure-store.js");
     serverOpts = {
       store: await PrismaManifestStore.fromEnv(),
       skillStore: await PrismaSkillStore.fromEnv(),
       extractFailureStore: await PrismaExtractFailureStore.fromEnv(),
+      // Phase 5 — without this, every restart wipes the 14-day
+      // discovery aggregation window because buildServer falls
+      // back to the in-memory variant.
+      botFailureStore: await PrismaBotFailureStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);

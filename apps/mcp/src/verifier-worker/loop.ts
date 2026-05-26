@@ -8,8 +8,8 @@
 //
 // LLM choice: defaults to UNIVERSAL_BOT_LLM_TIER=free (the chain we
 // shipped earlier — Gemini 2.0 Flash exp:free → Llama 3.2 90B
-// Vision:free → paid escape on 503). Operators can override with
-// `--llm-tier=cheap` for higher accuracy at higher cost.
+// Vision:free → paid escape on 503). Operators flip the env to
+// cheap/premium when they want higher accuracy at higher cost.
 //
 // Concurrency: one skill at a time per worker process. Multiple
 // workers can run safely because every transition runs in a Prisma
@@ -22,6 +22,7 @@
 import type { Skill } from "@trusty-squire/adapter-sdk";
 import {
   VerifierRegistryClient,
+  SkillSchemaDriftError,
   type VerifierQueueItem,
   type VerifierOutcomeResponse,
 } from "./registry-client.js";
@@ -104,9 +105,45 @@ export async function runOneBatch(opts: RunVerifierOpts): Promise<BatchSummary> 
     const startMs = Date.now();
     let outcomeKind: "success" | "failure" = "failure";
     let outcomeReason = "uncaught";
+    // Phase 3 follow-up — when the registry returns a skill we can't
+    // parse (schema drift between worker and writer), DO NOT post an
+    // outcome. The skill stays in the queue for the next sweep, and
+    // when the worker is updated to match the schema it'll be picked
+    // up cleanly. Posting a failure here would demote good skills.
+    let skill: Skill;
     try {
       log(`replay start: ${item.service} (skill_id=${item.skill_id}, status=${item.status})`);
-      const skill = await opts.client.fetchSkill(item.skill_id);
+      skill = await opts.client.fetchSkill(item.skill_id);
+    } catch (err) {
+      if (err instanceof SkillSchemaDriftError) {
+        log(
+          `SKIP: ${item.service} (skill_id=${item.skill_id}) — ${err.message} — leaving in queue for the next worker rev`,
+        );
+        continue;
+      }
+      // Network/HTTP error — fall through to the failure path below
+      // (a 500 from the registry IS a worker problem, but treating
+      // it as a skill failure errs on the safe side: the skill stays
+      // in the queue and three consecutive errors retire it; an
+      // operator notices long before that).
+      outcomeReason = `fetch_error: ${err instanceof Error ? err.message : String(err)}`;
+      try {
+        await opts.client.postOutcome({
+          skill_id: item.skill_id,
+          kind: "failure",
+          reason: outcomeReason,
+          duration_ms: Date.now() - startMs,
+        });
+      } catch {
+        // If the registry is unreachable both ways, the loop logs
+        // and moves on — same as the post-replay error path below.
+      }
+      log(`fetch error: ${item.service} — ${outcomeReason}`);
+      summary.failed += 1;
+      summary.transitions.none += 1;
+      continue;
+    }
+    try {
       const replay = await opts.replay({ skill, mode });
       const isOk =
         replay.kind === "ok" ||

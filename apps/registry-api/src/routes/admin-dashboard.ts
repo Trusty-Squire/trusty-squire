@@ -1,11 +1,12 @@
 // Operator dashboard — closed-loop strategy Phase 7.
 //
 // One route, `GET /admin`, returns a server-rendered HTML page with
-// four sections:
+// five sections:
 //   - Active skills (status, replay success, last verified)
-//   - Pending review (verifier queue)
+//   - Pending review (verifier queue staging)
+//   - Freshness due (active skills past their weekly sweep)
 //   - Discovery candidates (services with ≥3 user failures, no skill)
-//   - Recent universal-bot failures (raw telemetry, debug surface)
+//   - Demoted skills (auto-demoted or operator-demoted)
 //
 // Auth: same admin-bearer as the JSON admin endpoints. Browsers can't
 // easily set Authorization headers without JS, so we accept the
@@ -21,6 +22,7 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import type { SkillStore } from "../skill-store.js";
 import type { BotFailureStore } from "../bot-failure-store.js";
+import { bearerEquals } from "./admin.js";
 
 export interface AdminDashboardDeps {
   store: SkillStore;
@@ -45,8 +47,8 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       typeof authHeader === "string" && authHeader.startsWith("Bearer ")
         ? authHeader.slice("Bearer ".length)
         : undefined;
-    const presented = req.query.bearer ?? headerToken;
-    if (presented !== opts.adminBearer) {
+    const presented = req.query.bearer ?? headerToken ?? "";
+    if (!bearerEquals(presented, opts.adminBearer)) {
       reply
         .code(401)
         .type("text/plain")

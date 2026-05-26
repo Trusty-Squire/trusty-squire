@@ -139,37 +139,20 @@ export async function runVerifierWorkerCli(argv: readonly string[]): Promise<num
     }
   };
   if (args.workerMode === "discovery") {
-    const { runDiscoveryBatch, runDiscoveryLoop } = await import("./discovery-loop.js");
-    // The universal-bot invocation is deferred to a future
-    // wiring pass. For now the loop is observability-only —
-    // logs each candidate and what would be attempted. Wire to
-    // provisionAnyTool.handler when ready.
-    const runUniversalBot = async (input: { service: string }) => {
-      console.error(
-        `[discovery] TODO: invoke universal-bot for service=${input.service}. ` +
-          `Wire to provisionAnyTool.handler when discovery is ready to drive real signups.`,
-      );
-      return { kind: "failed" as const, reason: "discovery_bot_invocation_not_wired" };
-    };
-    const discOpts = {
-      client,
-      runUniversalBot,
-      once: args.once,
-      ...(args.limit !== undefined ? { limit: args.limit } : {}),
-      ...(args.intervalSeconds !== undefined
-        ? { intervalMs: args.intervalSeconds * 1000 }
-        : {}),
-    };
-    try {
-      if (args.once) await runDiscoveryBatch(discOpts);
-      else await runDiscoveryLoop(discOpts);
-      return 0;
-    } catch (err) {
-      console.error(
-        `discovery-worker: fatal: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return 1;
-    }
+    // The universal-bot invocation is not yet wired — provisionAnyTool
+    // reads session.json from disk, and the verifier worker runs as
+    // a privileged operator without that storage shape. Until the
+    // wiring decision lands (operator-credentials env vs separate
+    // session file vs spawned subprocess), refuse to run with a
+    // loud exit code so operators don't schedule this thinking it
+    // works. The discovery-loop module + tests remain, ready for
+    // wiring; only this CLI entry is gated.
+    console.error(
+      "verifier-worker: --mode=discovery is not yet wired to the universal bot. " +
+        "The discovery queue exists at GET /admin/discovery-candidates if you " +
+        "want to enumerate it manually; automated iteration lands in a follow-up.",
+    );
+    return 2;
   }
 
   const opts = {
