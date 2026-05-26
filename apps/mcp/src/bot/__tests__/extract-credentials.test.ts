@@ -86,6 +86,11 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText("napi_short123")).toBeNull();
   });
 
+  it("extracts a Replicate token by its r8_ prefix (rc.20)", () => {
+    const key = "r8_" + "X9zKvFp2QmL4nBcRtY7uHsJa6gWdEi3oZ8";
+    expect(extractApiKeyFromText(`Token: ${key}`)).toBe(key);
+  });
+
   it("rejects the truncated Neon display from visible page text", () => {
     // The exact failure mode that broke harvester pass 3: visible
     // text shows `napi_<48 chars>…` with an ellipsis. isTruncatedCapture

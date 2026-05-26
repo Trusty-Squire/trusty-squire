@@ -1481,6 +1481,13 @@ export function extractApiKeyFromText(text: string): string | null {
     // being in the input field's `value` attribute. rc.14 — surfaced
     // during the harvester rc.13 pass on Neon.
     /\bnapi_[a-zA-Z0-9]{30,80}\b/, // Neon
+    // Replicate API tokens. `r8_<40-char alnum>` per their docs. Shown
+    // in the table row after Create. The post-verify loop iterates,
+    // adds rows, but extractCredentials returned null every round
+    // until rc.20 because no regex matched. Added defensively after
+    // the rc.13 verification pass showed Replicate burning the full
+    // 12-round budget filling-creating tokens nobody could extract.
+    /\br8_[a-zA-Z0-9]{30,60}\b/, // Replicate
     // OpenRouter, Anthropic, OpenAI — these are the dominant
     // OAuth-completed-then-copy-needed services. Specific-prefix
     // patterns first so a labeled-pattern fallback isn't load-
