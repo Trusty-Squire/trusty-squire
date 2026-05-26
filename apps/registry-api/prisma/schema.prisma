@@ -80,6 +80,26 @@ model SkillRecord {
   replays_failed       Int      @default(0)
   consecutive_failures Int      @default(0)
 
+  // Verifier-worker counters (closed-loop staging gate). Tracked
+  // separately from end-user replays so a freshness-sweep failure
+  // doesn't contaminate the user-facing replay-success-rate stats,
+  // and so the promotion gate has authoritative numbers to read.
+  //   pending-review → bumped on every verifier run, promotes to
+  //   active once verifier_succeeded reaches the threshold (N=2)
+  //   without an interleaving failure. consecutive_verifier_failures
+  //   resets on success; reaching 3 in a row retires the skill.
+  verifier_succeeded            Int       @default(0)
+  verifier_failed               Int       @default(0)
+  consecutive_verifier_failures Int       @default(0)
+  last_verified_at              DateTime?
+  // When the freshness sweep should re-test this skill. NULL =
+  // never (pending-review skills get a value once they hit active).
+  next_freshness_due_at         DateTime?
+  // Per-skill monthly verifier spend ceiling, in cents. Defaults to
+  // $1/skill/month. When the verifier worker exceeds this it stops
+  // re-testing and the skill is auto-retired with reason="budget".
+  freshness_budget_cents        Int       @default(100)
+
   // Timestamps
   created_at           DateTime @default(now())
   last_replayed_at     DateTime?
@@ -95,6 +115,9 @@ model SkillRecord {
   @@index([service])
   @@index([status])
   @@index([deleted_at])
+  // Freshness sweep: verifier worker selects skills whose freshness
+  // window has elapsed in due-date order.
+  @@index([next_freshness_due_at])
 }
 
 // SkillReplayRecord — one row per replay outcome reported by the
