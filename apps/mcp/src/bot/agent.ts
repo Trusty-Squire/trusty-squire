@@ -501,13 +501,22 @@ function extractJsonObject(raw: string): Record<string, unknown> {
   // Tolerate models that wrap their reply in markdown fences.
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
   const candidate = fenced !== null && fenced[1] !== undefined ? fenced[1] : trimmed;
-  const match = candidate.match(/\{[\s\S]*\}/);
-  if (match === null) {
+  // F7 / 0.6.15-rc.11 — stack-based first-balanced-object extraction.
+  // The previous regex `\{[\s\S]*\}` was greedy and matched from the
+  // first `{` to the LAST `}` in the string. When an LLM emitted
+  // multiple JSON objects (e.g. {"kind":"fill",…}\n{"kind":"click",…}),
+  // the greedy match spanned both and JSON.parse failed with
+  // "Unexpected non-whitespace character after JSON at position N".
+  // The stack walker finds the first balanced `{…}` block respecting
+  // string-literal boundaries, so a single object always parses cleanly
+  // even when the model appends trailing prose or extra objects.
+  const objText = extractFirstBalancedObject(candidate);
+  if (objText === null) {
     throw new Error(`no JSON object in reply: ${raw.slice(0, 200)}`);
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(match[0]);
+    parsed = JSON.parse(objText);
   } catch (err) {
     throw new Error(
       `JSON.parse failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -522,6 +531,35 @@ function extractJsonObject(raw: string): Record<string, unknown> {
   const obj: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(parsed)) obj[k] = v;
   return obj;
+}
+
+// Find the first balanced `{ … }` block in `s`, respecting string
+// literals and escapes. Returns the substring (inclusive of braces) or
+// null when no balanced block exists. Tolerates trailing text after
+// the closing brace (which is the whole reason we need it — the
+// previous greedy regex couldn't).
+function extractFirstBalancedObject(s: string): string | null {
+  const open = s.indexOf("{");
+  if (open < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = open; i < s.length; i++) {
+    const c = s[i];
+    if (escape) { escape = false; continue; }
+    if (inString) {
+      if (c === "\\") { escape = true; continue; }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return s.slice(open, i + 1);
+    }
+  }
+  return null;
 }
 
 // Narrow `unknown` to a non-null object map.
@@ -3599,7 +3637,29 @@ ${formatInventory(input.inventory)}`,
           }
         } else if (nextStep.kind === "click") {
           await this.browser.click(nextStep.selector);
-          await this.browser.wait(2);
+          // F7 / 0.6.15-rc.11 — Modal-based credential reveals
+          // (OpenRouter, Anthropic, OpenAI Create-Key flows) render
+          // the new key into a modal AFTER a server round-trip — the
+          // prior blind 2s wait was racing the API response. The
+          // implicit-extract that follows this branch then found
+          // nothing, the round ended, and by the next round the modal
+          // had auto-closed. Poll up to 8s for the key to appear in
+          // the post-action DOM. Early-exit as soon as
+          // extractCredentials returns one — typical happy path on
+          // services without modal-delay returns in <1s. Saves both
+          // time (no overshoot wait) and correctness (catches the
+          // modal-render race).
+          const credentialDeadline = Date.now() + 8000;
+          let pollExtract: Record<string, string> = {};
+          while (Date.now() < credentialDeadline) {
+            await this.browser.wait(0.5);
+            try {
+              pollExtract = await this.extractCredentials();
+              if (pollExtract.api_key !== undefined) break;
+            } catch {
+              // Page mid-render — keep polling; next tick may settle.
+            }
+          }
         } else if (nextStep.kind === "fill") {
           await this.browser.type(nextStep.selector, nextStep.value);
         } else if (nextStep.kind === "select") {
