@@ -12,6 +12,9 @@
 import { describe, expect, it } from "vitest";
 import {
   SignupAgent,
+  detectEmailOtpGate,
+  detectManualLoginFallback,
+  detectSsoRestriction,
   findOAuthButton,
   findFirstOAuthButton,
   isLoginLoopState,
@@ -421,6 +424,102 @@ describe("isLoginLoopState", () => {
 
   it("returns null on a malformed URL", () => {
     expect(isLoginLoopState("not-a-url", [googleBtn], "google")).toBeNull();
+  });
+});
+
+// ───────── post-OAuth gate detectors (rc.24) ─────────
+
+describe("detectManualLoginFallback (rc.24)", () => {
+  const email = mk({ tag: "input", type: "email", selector: "#email" });
+  const password = mk({ tag: "input", type: "password", selector: "#pw" });
+
+  it("fires on DigitalOcean's /login with redirect_url + email + password inputs", () => {
+    expect(
+      detectManualLoginFallback(
+        "https://cloud.digitalocean.com/login?redirect_url=https%3A%2F%2Fcloud.digitalocean.com%2Faccount%2Fapi%2Ftokens",
+        [email, password],
+      ),
+    ).toBe(true);
+  });
+
+  it("requires BOTH email AND password input present", () => {
+    expect(detectManualLoginFallback("https://x.com/login", [email])).toBe(false);
+    expect(detectManualLoginFallback("https://x.com/login", [password])).toBe(false);
+  });
+
+  it("does not fire on a dashboard URL", () => {
+    expect(
+      detectManualLoginFallback("https://x.com/dashboard", [email, password]),
+    ).toBe(false);
+  });
+
+  it("does not fire on a malformed URL", () => {
+    expect(detectManualLoginFallback("not-a-url", [email, password])).toBe(false);
+  });
+});
+
+describe("detectEmailOtpGate (rc.24)", () => {
+  it("fires on Porter / Koyeb (WorkOS) email-verification URL", () => {
+    expect(
+      detectEmailOtpGate(
+        "https://auth.porter.run/email-verification?redirect_uri=…",
+        "Verify your email",
+        "",
+      ),
+    ).toBe(true);
+    expect(
+      detectEmailOtpGate(
+        "https://signin.koyeb.com/email-verification?redirect_uri=…",
+        "Verify your email",
+        "",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a 'Verify your email' title even with a non-matching URL", () => {
+    expect(detectEmailOtpGate("https://x.com/onboarding/step-2", "Verify your email", "")).toBe(true);
+  });
+
+  it("fires on a page-text 'we sent you a verification code to' phrasing", () => {
+    expect(
+      detectEmailOtpGate(
+        "https://x.com/dashboard",
+        "Welcome",
+        "We sent a 6-digit verification code to lunchboxfortwo@gmail.com",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not fire on a generic page that mentions email", () => {
+    expect(
+      detectEmailOtpGate("https://x.com/dashboard", "Dashboard", "Your email is configured."),
+    ).toBe(false);
+  });
+});
+
+describe("detectSsoRestriction (rc.24)", () => {
+  it("fires on Fly's 'SSO organization membership' phrasing", () => {
+    expect(
+      detectSsoRestriction(
+        "New tokens cannot be created — accounts in this SSO organization must use the org SSO portal.",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on 'managed via Single Sign-On' phrasing", () => {
+    expect(
+      detectSsoRestriction("This workspace is managed via Single Sign-On (SAML)."),
+    ).toBe(true);
+  });
+
+  it("fires on 'enforced by SAML' phrasing", () => {
+    expect(detectSsoRestriction("Token creation is enforced by SAML on this org.")).toBe(true);
+  });
+
+  it("does not fire on a generic mention of SSO as an option", () => {
+    expect(
+      detectSsoRestriction("You can optionally enable SSO from the security tab."),
+    ).toBe(false);
   });
 });
 

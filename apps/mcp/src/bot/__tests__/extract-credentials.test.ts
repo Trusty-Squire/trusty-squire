@@ -129,6 +129,18 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(`token=${jwt}`)).toBe(jwt);
   });
 
+  it("extracts a Zeabur sk- key (32 lowercase) — shorter than OpenAI legacy (rc.24)", () => {
+    const key = "sk-4hgbjcurt2lwtjbc7picghp3qhgag";
+    expect(extractApiKeyFromText(`API key '${key}' is visible`)).toBe(key);
+  });
+
+  it("Zeabur sk- regex does not steal mixed-case OpenAI legacy matches", () => {
+    // An OpenAI-legacy mixed-case key (>=40 chars) should still match
+    // the OpenAI legacy regex, NOT the Zeabur lowercase-only one.
+    const openaiLegacy = "sk-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf";
+    expect(extractApiKeyFromText(openaiLegacy)).toBe(openaiLegacy);
+  });
+
   it("rejects the truncated Neon display from visible page text", () => {
     // The exact failure mode that broke harvester pass 3: visible
     // text shows `napi_<48 chars>…` with an ellipsis. isTruncatedCapture

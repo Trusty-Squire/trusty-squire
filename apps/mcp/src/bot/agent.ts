@@ -1244,6 +1244,94 @@ export function pathOf(url: string): string {
   }
 }
 
+// rc.24 — three more early-abort detectors surfaced from the
+// registry-snapshot review of 200 failed signups. Each catches a
+// state where the bot has already OAuth'd but the service has
+// erected a gate the bot definitionally cannot pass. Returning the
+// gate kind lets the caller emit a precise terminal error rather
+// than burning the post-verify budget.
+export type PostOAuthGate =
+  | { kind: "ok" }
+  | { kind: "manual_login_fallback" }
+  | { kind: "email_otp_required" }
+  | { kind: "sso_restricted" };
+
+// (a) Manual-login fallback. DigitalOcean + Hyperbolic completed the
+// Google OAuth handshake on Google's side but the service didn't
+// honour the callback — the bot lands back on a manual /login page
+// with email + password inputs. Distinct from the rc.20 login-loop
+// (which assumes the page still surfaces OAuth provider buttons).
+export function detectManualLoginFallback(
+  url: string,
+  inventory: readonly InteractiveElement[],
+): boolean {
+  let path: string;
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const loginPath =
+    /\/(?:login|signin|sign-in|signup|sign-up|authenticate)(?:\/|$)/.test(path);
+  if (!loginPath) return false;
+  // Manual-login signal: email + password input pair on the page.
+  const hasEmail = inventory.some(
+    (e) => e.tag === "input" && e.type === "email",
+  );
+  const hasPassword = inventory.some(
+    (e) => e.tag === "input" && e.type === "password",
+  );
+  return hasEmail && hasPassword;
+}
+
+// (b) Email-OTP wall. Porter, Koyeb (both WorkOS-backed) send a 6-
+// or 8-digit code to the operator's email and gate further access
+// behind it. Signal: URL path or title literal "email-verification"
+// + a single short-numeric input in the inventory.
+export function detectEmailOtpGate(
+  url: string,
+  title: string,
+  pageText: string,
+): boolean {
+  let path: string;
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    path = "";
+  }
+  if (/email[-_]verification|verify[-_]email|email[-_]code|otp/.test(path)) {
+    return true;
+  }
+  const titleLower = title.toLowerCase();
+  if (
+    titleLower.includes("verify your email") ||
+    titleLower.includes("email verification")
+  ) {
+    return true;
+  }
+  // Page-text fallback for services that route OTP gates through
+  // generic URLs (the bot has the rendered body anyway). Conservative
+  // phrasing — must include a "we sent … code … to" or "enter …
+  // code … sent" shape with a bounded gap.
+  const lower = pageText.toLowerCase();
+  return (
+    /we sent[^.]{0,60}\bcode\b[^.]{0,40}to\b/.test(lower) ||
+    /enter[^.]{0,40}\bcode\b[^.]{0,40}\b(?:sent|email)/.test(lower)
+  );
+}
+
+// (c) SSO restriction (Fly.io class). Service rejects token-creation
+// for accounts whose org enforces SSO/SAML. Signal: phrase fragments
+// that explicitly name SSO/SAML/Single Sign-On as the blocker.
+export function detectSsoRestriction(pageText: string): boolean {
+  const lower = pageText.toLowerCase();
+  // Common phrasings observed: "managed via SSO", "SSO-managed",
+  // "Single Sign-On is required", "SSO organization membership".
+  return /(?:managed\s+via\s+(?:sso|single\s+sign-?on)|sso[\s-]?managed|sso\s+organization|single\s+sign-?on\s+is\s+required|enforced\s+by\s+(?:sso|saml))/.test(
+    lower,
+  );
+}
+
 // Scan the inventory for the first OAuth affordance among `providers`,
 // in order — the auto-prefer decision passes every provider the
 // profile has a session for. Returns the matched provider + element.
@@ -1512,6 +1600,12 @@ export function extractApiKeyFromText(text: string): string | null {
     // base64url with literal dots. Conservative bounds — under 20
     // chars per segment is almost never a real JWT.
     /\beyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b/, // JWT
+    // Zeabur's API key — `sk-<28-40 lowercase alnum>`. Shorter than
+    // OpenAI legacy (which is 40+ mixed-case). The lowercase-only
+    // character class differentiates from OpenAI legacy so this
+    // pattern only fires on Zeabur-style keys. Surfaced from the
+    // rc.23 snapshot review.
+    /\bsk-[a-z0-9]{28,38}\b/, // Zeabur
     // OpenRouter, Anthropic, OpenAI — these are the dominant
     // OAuth-completed-then-copy-needed services. Specific-prefix
     // patterns first so a labeled-pattern fallback isn't load-
@@ -3265,6 +3359,56 @@ export class SignupAgent {
             `keeps redirecting to a login page (${pathOf(retryState.url)}). The service may ` +
             `require manual completion of an onboarding step before its OAuth session ` +
             `finalizes — finish the signup manually.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+    }
+
+    // rc.24 — three additional post-OAuth gates surfaced from the
+    // registry-snapshot review. Each is a state the bot definitively
+    // cannot pass; emit a precise terminal error rather than burn the
+    // post-verify budget.
+    {
+      const gateState = await this.browser.getState();
+      const gateText = await this.browser.extractText().catch(() => "");
+      const gateInv = postOAuthInv;
+      // (a) Manual-login fallback (DigitalOcean, Hyperbolic). Service
+      // dropped the OAuth session and rendered a /login form with
+      // email + password inputs. Bot can't manually log in.
+      if (detectManualLoginFallback(gateState.url, gateInv)) {
+        return {
+          success: false,
+          error:
+            `oauth_session_not_persisted: signed in via ${provider.label} but ${task.service} ` +
+            `dropped the OAuth callback and rendered a manual /login form (${pathOf(gateState.url)}). ` +
+            `Finish the signup manually — this typically indicates anti-bot rejection of the ` +
+            `OAuth callback or a service-side session-storage issue.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+      // (b) Email-OTP wall (Porter, Koyeb / WorkOS-backed). Code went
+      // to operator's gmail; harvester can't read user-bound inbox.
+      if (detectEmailOtpGate(gateState.url, gateState.title, gateText)) {
+        return {
+          success: false,
+          error:
+            `email_otp_required: ${task.service} sent a verification code to the operator's ` +
+            `email (the harvester has no access to that inbox). Finish the signup manually by ` +
+            `entering the OTP from the email.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+      // (c) SSO restriction (Fly.io). Org SSO blocks programmatic
+      // token creation — the page explicitly says so.
+      if (detectSsoRestriction(gateText)) {
+        return {
+          success: false,
+          error:
+            `sso_restricted: ${task.service} requires SSO/SAML for token creation. The bot ` +
+            `cannot complete an SSO handshake. Finish via your organization's SSO portal.`,
           steps,
           ...this.resultTail(),
         };
