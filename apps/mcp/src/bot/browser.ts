@@ -2146,7 +2146,13 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const raw = await this.page.evaluate(() => {
       const SELECTOR =
-        'input,textarea,select,button,a,[role="button"],[role="checkbox"],[contenteditable=""],[contenteditable="true"]';
+        // rc.26 — added Radix/Headless-UI menu + option items so
+        // dropdown contents (Fireworks "Create API Key" → API Key /
+        // Service Account menu, Sentry's per-row permissions) end up
+        // in the planner's inventory. Without these, the bot saw a
+        // dropdown trigger button it could click but no items it
+        // could pick — looped 12 rounds re-clicking the trigger.
+        'input,textarea,select,button,a,[role="button"],[role="checkbox"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
 
       // Collect candidates across the document and every open shadow
       // root. Closed shadow roots are unreachable — accepted.
