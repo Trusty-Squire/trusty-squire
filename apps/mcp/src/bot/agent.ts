@@ -4195,12 +4195,24 @@ ${formatInventory(input.inventory)}`,
             // quotes the value. Accept it IF it's also present
             // verbatim in the visible page text — that's the
             // anti-hallucination guardrail.
-            const pageText = await this.browser
-              .extractText()
-              .catch(() => "");
+            // rc.38 — verify the planner-quoted value against both
+            // visible text AND every input's `value` attribute. The
+            // rc.37 Upstash retest showed the bot quoting a bare UUID
+            // it observed in a create-key modal whose UUID lived in
+            // an <input readonly value="…"> — textContent doesn't
+            // include input values, so the verbatim-in-page check
+            // rejected a real credential. Concatenating input values
+            // closes the gap without weakening the anti-hallucination
+            // guarantee (the candidate still has to appear SOMEWHERE
+            // verifiable on the page).
+            const [pageText, inputValues] = await Promise.all([
+              this.browser.extractText().catch(() => ""),
+              this.browser.extractAllInputValues().catch(() => [] as string[]),
+            ]);
+            const verifySource = pageText + "\n" + inputValues.join("\n");
             const quoted = extractQuotedTokenFromReason(
               nextStep.reason,
-              pageText,
+              verifySource,
             );
             if (quoted !== null) {
               credentials = { ...credentials, api_key: quoted };
