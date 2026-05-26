@@ -1609,12 +1609,12 @@ export function extractApiKeyFromText(text: string): string | null {
     // stays in lockstep with these.
     /\bpscale_tkn_[A-Za-z0-9]{30,60}\b/, // PlanetScale Service Token
     /\bsbp_[a-zA-Z0-9]{30,80}\b/, // Supabase Personal Access Token
-    // Baseten: `<8-12 lowercase>.<30+ mixed-case>`. The dot separator
-    // + alphanumeric body distinguishes it from version strings (too
-    // short on either side) and dotted ULID-like keys (mostly lowercase
-    // body). Verbatim-in-DOM check at the post-verify level rejects
-    // any false positive.
-    /\b[a-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/, // Baseten
+    // Baseten: `<6-12 alnum>.<30+ alnum>`. The dot separator + length
+    // bounds on both sides distinguish it from version strings (too
+    // short on either side). rc.35 — relaxed the prefix to mixed-case
+    // after the rc.33 broad sweep showed a Baseten key whose prefix
+    // had uppercase letters: `HP9tFTtm.txDl4vv7ayYsTwx9dQea47ylRdN4Brk3`.
+    /\b[A-Za-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/, // Baseten
     // Qdrant Cloud: `<UUID>|<55-char opaque>` — a literal pipe between
     // a key id and the secret body. Unique enough that no false-
     // positive guard is needed.

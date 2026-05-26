@@ -419,7 +419,7 @@
 
 - slug: upstash
   name: Upstash
-  signup_url: https://console.upstash.com/login
+  signup_url: https://console.upstash.com/auth/sign-in
   oauth_provider: github
   scope_hint: null
   status: pending

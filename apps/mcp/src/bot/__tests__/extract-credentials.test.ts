@@ -107,6 +107,15 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(`modal shows ${key}`)).toBe(key);
   });
 
+  it("extracts a Baseten key whose prefix is MIXED CASE (rc.35)", () => {
+    // Real Baseten key shape from the rc.33 broad sweep registry
+    // snapshot: prefix was 'HP9tFTtm', not lowercase. The rc.23
+    // regex with [a-z0-9] for the prefix rejected this; rc.35
+    // widened to [A-Za-z0-9].
+    const key = "HP9tFTtm.txDl4vv7ayYsTwx9dQea47ylRdN4Brk3";
+    expect(extractApiKeyFromText(`Modal shows ${key}`)).toBe(key);
+  });
+
   it("does not false-positive on version strings (rc.23 Baseten regex safety)", () => {
     // Short body on the right rules out version strings.
     expect(extractApiKeyFromText("v1.0.0")).toBeNull();

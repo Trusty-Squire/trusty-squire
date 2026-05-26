@@ -2194,10 +2194,15 @@ export class BrowserController {
         // rc.26 — added Radix/Headless-UI menu + option items so
         // dropdown contents (Fireworks "Create API Key" → API Key /
         // Service Account menu, Sentry's per-row permissions) end up
-        // in the planner's inventory. Without these, the bot saw a
-        // dropdown trigger button it could click but no items it
-        // could pick — looped 12 rounds re-clicking the trigger.
-        'input,textarea,select,button,a,[role="button"],[role="checkbox"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
+        // in the planner's inventory.
+        // rc.35 — added [role="link"] (Google account-chooser cards
+        // are <div role="link" data-identifier="…">), and <label>
+        // (Koyeb's onboarding renders each radio choice as a styled
+        // <label> wrapping a sr-only <input type=radio>; the visible
+        // click target is the label, but the bot's inventory selector
+        // didn't catch labels so the planner had no clickable target
+        // matching the visible button text).
+        'input,textarea,select,button,a,label,[role="button"],[role="link"],[role="checkbox"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
 
       // Collect candidates across the document and every open shadow
       // root. Closed shadow roots are unreachable — accepted.
