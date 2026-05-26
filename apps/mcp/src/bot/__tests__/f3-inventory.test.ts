@@ -16,6 +16,7 @@ import {
   formatInventory,
   isOauthOnlyChooser,
   parseSignupPlan,
+  splitKeyboardShortcut,
 } from "../agent.js";
 
 // Build an InteractiveElement with sane defaults — tests override
@@ -344,5 +345,70 @@ describe("parseSignupPlan — inventory-membership validation", () => {
     // Back-compat: the post-verify / dual-mode callers pass no set.
     const plan = parseSignupPlan(planJson("#anything", "#whatever"));
     expect(plan.submit_selector).toBe("#whatever");
+  });
+});
+
+describe("splitKeyboardShortcut (rc.17)", () => {
+  it("splits Resend's 'AddCtrl↩' into Add + Ctrl↩", () => {
+    expect(splitKeyboardShortcut("AddCtrl↩")).toEqual({
+      label: "Add",
+      shortcut: "Ctrl↩",
+    });
+  });
+
+  it("splits 'CancelEsc' into Cancel + Esc", () => {
+    expect(splitKeyboardShortcut("CancelEsc")).toEqual({
+      label: "Cancel",
+      shortcut: "Esc",
+    });
+  });
+
+  it("splits a ⌘+Enter style suffix", () => {
+    expect(splitKeyboardShortcut("Save⌘↩")).toEqual({
+      label: "Save",
+      shortcut: "⌘↩",
+    });
+  });
+
+  it("leaves a normal label alone", () => {
+    expect(splitKeyboardShortcut("Continue")).toEqual({
+      label: "Continue",
+      shortcut: null,
+    });
+  });
+
+  it("leaves a label with no glued suffix alone", () => {
+    expect(splitKeyboardShortcut("Create account")).toEqual({
+      label: "Create account",
+      shortcut: null,
+    });
+  });
+
+  it("does not split if the prefix would shrink below 2 chars (safety)", () => {
+    // "AEsc" — 1-char prefix "A" is too short to be a real label; keep
+    // the original so we don't lose information for genuinely short
+    // glued strings.
+    expect(splitKeyboardShortcut("AEsc")).toEqual({
+      label: "AEsc",
+      shortcut: null,
+    });
+  });
+
+  it("does not split a label that ends with letters matching key names mid-word", () => {
+    // "Tab" mid-label is a real word; only the lowercase→uppercase
+    // transition triggers the regex. "Settab" should NOT split (no
+    // capital transition before Tab).
+    expect(splitKeyboardShortcut("Settab")).toEqual({
+      label: "Settab",
+      shortcut: null,
+    });
+  });
+
+  it("renders the split form in formatInventory output", () => {
+    const html = formatInventory([
+      mk({ tag: "button", type: "submit", visibleText: "AddCtrl↩", selector: "#add" }),
+    ]);
+    expect(html).toMatch(/text="Add"/);
+    expect(html).toMatch(/shortcut="Ctrl↩"/);
   });
 });

@@ -698,6 +698,33 @@ export function parseSignupPlan(
 // with "Email" both in the body CTA and the footer made the planner
 // pick the wrong one and loop. Single-occurrence text is rendered
 // without the landmark tag to keep the inventory terse.
+//
+// rc.17 — split keyboard-shortcut suffixes out of button labels.
+// Resend / Linear / Notion-style buttons render the shortcut hint
+// glued to the label without a separator: "AddCtrl↩", "CancelEsc",
+// "Save⌘↩". The planner reads "AddCtrl↩" and gets confused — the
+// Resend trace showed the planner clicking "All domains" thinking
+// it was the Add button (because "AddCtrl↩" didn't pattern-match
+// "Add" cleanly). Exported for unit testing.
+export function splitKeyboardShortcut(text: string): {
+  label: string;
+  shortcut: string | null;
+} {
+  // Trailing keyboard hint = optional modifier (Ctrl/⌘/Cmd/Shift/Alt/
+  // Opt/Option/Meta), optional `+`, then one of: arrow-return symbols,
+  // named keys (Enter/Esc/Tab/Space/Return), or a single letter / Fn key.
+  // The suffix MUST start at a word boundary OR a transition from
+  // lowercase to uppercase ("AddCtrl" — Add↑↓Ctrl). Anchored to end-
+  // of-string.
+  const re =
+    /(?<=[a-z])(Ctrl|⌘|Cmd|Shift|Alt|Opt(?:ion)?|Meta)?\+?(?:[↩⏎⌫⌦⇧⌘⎋]|Enter|Esc|Tab|Space|Return|F\d{1,2})$/;
+  const m = re.exec(text);
+  if (m === null) return { label: text, shortcut: null };
+  const label = text.slice(0, m.index).trim();
+  if (label.length < 2) return { label: text, shortcut: null };
+  const shortcut = m[0];
+  return { label, shortcut };
+}
 export function formatInventory(inventory: readonly InteractiveElement[]): string {
   if (inventory.length === 0) return "(no interactive elements found on the page)";
   const textCounts = new Map<string, number>();
@@ -780,7 +807,9 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
         e.tag !== "select" &&
         e.visibleText !== null
       ) {
-        bits.push(`text=${JSON.stringify(e.visibleText)}`);
+        const { label, shortcut } = splitKeyboardShortcut(e.visibleText);
+        bits.push(`text=${JSON.stringify(label)}`);
+        if (shortcut !== null) bits.push(`shortcut=${JSON.stringify(shortcut)}`);
       }
       if (e.inConsentWidget) bits.push("[cookie-consent — avoid]");
       // F15 — disambiguating landmark tag for text-duplicates.
