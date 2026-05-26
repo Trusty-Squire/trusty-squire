@@ -85,10 +85,12 @@ Options:
   --dry / --full            Replay mode (default --full).
   --mode=verifier           Pending-review + freshness sweep (default).
   --mode=discovery          Iterate against universal-bot-failure
-                            candidates that have no skill yet. The
-                            actual bot invocation is gated until
-                            operator-credential wiring lands; for now
-                            this mode logs what would be attempted.
+                            candidates that have no skill yet. Drives
+                            the real universal bot; on success the
+                            existing auto-promote pipeline writes a
+                            pending-review skill to the registry.
+                            Requires TRUSTY_SQUIRE_MACHINE_TOKEN +
+                            TRUSTY_SQUIRE_ACCOUNT_ID in the env.
   --registry-url=<url>      Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=<token>    Override REGISTRY_ADMIN_BEARER.
 
@@ -139,20 +141,38 @@ export async function runVerifierWorkerCli(argv: readonly string[]): Promise<num
     }
   };
   if (args.workerMode === "discovery") {
-    // The universal-bot invocation is not yet wired — provisionAnyTool
-    // reads session.json from disk, and the verifier worker runs as
-    // a privileged operator without that storage shape. Until the
-    // wiring decision lands (operator-credentials env vs separate
-    // session file vs spawned subprocess), refuse to run with a
-    // loud exit code so operators don't schedule this thinking it
-    // works. The discovery-loop module + tests remain, ready for
-    // wiring; only this CLI entry is gated.
-    console.error(
-      "verifier-worker: --mode=discovery is not yet wired to the universal bot. " +
-        "The discovery queue exists at GET /admin/discovery-candidates if you " +
-        "want to enumerate it manually; automated iteration lands in a follow-up.",
+    const { runDiscoveryBatch, runDiscoveryLoop } = await import(
+      "./discovery-loop.js"
     );
-    return 2;
+    const { runDiscoveryBot } = await import("./discovery-bot.js");
+    // Wire the loop's injection point to the real bot. The function
+    // reads TRUSTY_SQUIRE_MACHINE_TOKEN / TRUSTY_SQUIRE_ACCOUNT_ID /
+    // TRUSTY_SQUIRE_API_BASE from env — same shape end-user MCPs use.
+    // Operator must run `mcp connect` on the verifier machine OR set
+    // those env vars explicitly. Missing creds → the function returns
+    // kind="failed" with an actionable reason and the loop marches on.
+    const discOpts = {
+      client,
+      runUniversalBot: async (input: { service: string }) => {
+        const outcome = await runDiscoveryBot(input);
+        return outcome;
+      },
+      once: args.once,
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      ...(args.intervalSeconds !== undefined
+        ? { intervalMs: args.intervalSeconds * 1000 }
+        : {}),
+    };
+    try {
+      if (args.once) await runDiscoveryBatch(discOpts);
+      else await runDiscoveryLoop(discOpts);
+      return 0;
+    } catch (err) {
+      console.error(
+        `discovery-worker: fatal: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
   }
 
   const opts = {

@@ -436,8 +436,24 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID. Required when running `mcp verifier-worker --mode=discovery` (inbox-alias scoping + auto-promote attribution). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
+
+### Verifier-worker env (`mcp verifier-worker`)
+
+The verifier worker runs as a Fly app or operator machine, not on
+end-user laptops. Two modes share one CLI; each requires different
+auth.
+
+| Env var | Required by | Effect |
+|---|---|---|
+| `REGISTRY_ADMIN_BEARER` | both modes | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
+| `TRUSTY_SQUIRE_REGISTRY_URL` | both | Registry base URL. Default `https://registry.trustysquire.ai`. |
+| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discovery only | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the verifier host). |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | discovery only | Inbox-alias scope + auto-promote attribution. |
+| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discovery only | Default-on. Set `0`/`off` to capture without publishing. |
+| `UNIVERSAL_BOT_LLM_TIER=free` | both (recommended) | Routes through the free OpenRouter chain. |
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |
