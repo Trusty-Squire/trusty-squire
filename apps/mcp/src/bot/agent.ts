@@ -124,12 +124,15 @@ const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
   /\byour\s+(?:free\s+)?trial\s+(?:is\s+)?ending\b/i,
   /\bupgrade\s+your\s+plan\s+to\b/i,
   /\bstart\s+your\s+paid\s+plan\b/i,
-  // rc.39 — Koyeb-class. "Koyeb requires credit card payment to
-  // access the platform" / "requires credit card to continue" /
-  // "billing setup is required". The planner phrases these
-  // explicitly in its done reason.
+  // rc.39 — Koyeb-class. Cover the variants the post-verify planner
+  // produces in its `done` reason when it gives up on a billing wall:
+  // "requires credit card payment", "credit card verification wall",
+  // "payment wall", "Pro plan payment required", "complete billing".
   /\brequir(?:es?|ing)\s+(?:a\s+)?credit\s+card\b/i,
-  /\bcomplet(?:e|ing)\s+billing\s+(?:setup|information|to\s+continue)\b/i,
+  /\b(?:credit\s+card|payment)\s+wall\b/i,
+  /\bcredit\s+card\s+verification\b/i,
+  /\b(?:plan\s+|account\s+)?payment\s+required\b/i,
+  /\bcomplet(?:e|ing)\s+(?:billing|payment)\b/i,
   /\bbilling\s+setup\s+(?:is\s+)?required\b/i,
 ];
 
@@ -3746,6 +3749,28 @@ export class SignupAgent {
         ...this.resultTail(),
       };
     }
+    // rc.39 — anti-bot interstitial that survived the post-OAuth
+    // landing. Turso's GitHub SSO callback runs a Cloudflare check
+    // that never clears for our Chromium fingerprint; the planner's
+    // done reason / wait reasons name the vendor explicitly. Classify
+    // as anti_bot_blocked so the operator sees an accurate status
+    // (and the harvester routes it the same way as the form-fill-
+    // phase anti-bot detector does).
+    const ANTI_BOT_REASON =
+      /\b(?:cloudflare\b.*?(?:verification|challenge|check)|just\s+a\s+moment|verifying\s+you\s+are\s+human|0\s+interactive\s+elements)/i;
+    if (
+      this.lastPostVerifyDoneReason !== null &&
+      ANTI_BOT_REASON.test(this.lastPostVerifyDoneReason)
+    ) {
+      return {
+        success: false,
+        error:
+          `anti_bot_blocked: ${task.service}'s post-OAuth landing is gated by an anti-bot ` +
+          `interstitial (Cloudflare or similar) the bot cannot clear — finish the signup manually.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
     return {
       success: false,
       error:
@@ -3996,6 +4021,15 @@ ${formatInventory(input.inventory)}`,
     // and inject a forced "no-progress" hint on the second repeat.
     let prevSignature: string | null = null;
     let prevInventorySize = -1;
+    // rc.39 — wait-loop tracker. Turso's GitHub OAuth handshake
+    // succeeds, then the SSO-callback page stays empty (0 elements)
+    // while a Cloudflare verification widget runs that never clears
+    // for this Chromium fingerprint. The planner kept emitting wait
+    // for all 12 rounds; the run timed out as oauth_onboarding_failed.
+    // Better classification: anti-bot block. Track consecutive wait
+    // rounds with no inventory change and break out with the proper
+    // status before burning the post-verify budget.
+    let consecutiveWaits = 0;
     // rc.39 — navigate-loop tracker. Perplexity / Koyeb / Porter all
     // had post-verify loops where the planner emitted `navigate`
     // 5-6 rounds in a row and the URL never changed — the service
@@ -4340,6 +4374,24 @@ ${formatInventory(input.inventory)}`,
       if (nextStep.kind === "done") {
         this.lastPostVerifyDoneReason = nextStep.reason;
         break;
+      }
+      // rc.39 — wait-loop break. The planner is asking us to wait
+      // round after round on an empty page (Turso's Cloudflare SSO
+      // callback). Cap at three consecutive waits with zero inventory
+      // and surface the empty-page reason so the caller can classify.
+      if (nextStep.kind === "wait" && inventory.length === 0) {
+        consecutiveWaits += 1;
+        if (consecutiveWaits >= 3) {
+          this.lastPostVerifyDoneReason =
+            `post-OAuth landing rendered 0 interactive elements for ${consecutiveWaits} rounds — ` +
+            `most recent planner reason: ${nextStep.reason}`;
+          args.steps.push(
+            `Post-verify: wait-loop on an empty page (${consecutiveWaits} consecutive rounds, 0 elements) — breaking out.`,
+          );
+          break;
+        }
+      } else {
+        consecutiveWaits = 0;
       }
       hint = undefined;
       try {
