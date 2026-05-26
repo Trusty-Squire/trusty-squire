@@ -216,16 +216,19 @@ export interface ProxyLLMClientOpts {
   apiBaseUrl: string;
   // Machine token issued at MCP install. Acts as the bearer here.
   machineToken: string;
-  // "cheap" routes to Gemini Flash on the server. "premium" routes to
-  // Sonnet — used by the parse-failure fallback path.
-  tier: "cheap" | "premium";
+  // "cheap"   → Gemini Flash class (paid). End-user default.
+  // "premium" → GPT-4o (paid). Parse-failure retry path.
+  // "free"    → OpenRouter free models with a paid escape-hatch.
+  //             Verifier-worker default; quality drops are tolerable
+  //             because nobody is waiting for the result.
+  tier: "cheap" | "premium" | "free";
 }
 
 export class ProxyLLMClient implements LLMClient {
   readonly name: string;
   private readonly apiBaseUrl: string;
   private readonly machineToken: string;
-  private readonly tier: "cheap" | "premium";
+  private readonly tier: "cheap" | "premium" | "free";
 
   constructor(opts: ProxyLLMClientOpts) {
     this.apiBaseUrl = opts.apiBaseUrl.replace(/\/+$/, "");
@@ -293,6 +296,14 @@ export interface PickLLMClientOpts {
   // Override the model used by whichever backend wins. Mainly for the
   // OpenRouter "cheapest serviceable" case.
   preferCheap?: boolean;
+  // Pick the tier explicitly. "free" routes to the OpenRouter free
+  // chain on the server, with a paid escape-hatch on rate-limit. Used
+  // by the closed-loop verifier worker (no user is waiting). When
+  // omitted: falls back to UNIVERSAL_BOT_LLM_TIER env, then "cheap".
+  // Note that "free" is only meaningful for the Trusty Squire proxy
+  // path — direct-BYOK (OpenRouter / Anthropic) ignores it because
+  // the user is paying for their own calls either way.
+  tier?: "cheap" | "premium" | "free";
 }
 
 // A pair of clients: a primary the agent uses for every call, plus an
@@ -343,15 +354,34 @@ export function pickLLMClient(opts: PickLLMClientOpts = {}): LLMClient {
 //
 // The Sonnet-via-OR premium routes through the same OpenRouter account
 // the user already pays for, so they get one bill, not two.
+// Resolve the effective primary tier from explicit opts → env →
+// "cheap" default. The env knob (UNIVERSAL_BOT_LLM_TIER=free) is
+// how the verifier worker flips behavior without threading the
+// option through every signup call site.
+function resolvePrimaryTier(
+  opts: PickLLMClientOpts,
+): "cheap" | "premium" | "free" {
+  if (opts.tier !== undefined) return opts.tier;
+  const envTier = process.env.UNIVERSAL_BOT_LLM_TIER;
+  if (envTier === "free" || envTier === "premium" || envTier === "cheap") {
+    return envTier;
+  }
+  return "cheap";
+}
+
 export function pickLLMPair(opts: PickLLMClientOpts = {}): LLMPair {
   // 1. Trusty Squire proxy (default for MCP installs).
   const machineToken = process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
   if (machineToken !== undefined && machineToken.length > 0) {
     const apiBaseUrl =
       process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
-    const primary = new ProxyLLMClient({ apiBaseUrl, machineToken, tier: "cheap" });
+    const primaryTier = resolvePrimaryTier(opts);
+    const primary = new ProxyLLMClient({ apiBaseUrl, machineToken, tier: primaryTier });
+    // Parse-failure premium retry: paid GPT-4o regardless of primary
+    // tier. A free→free run that fails to parse JSON is exactly the
+    // case where premium is worth the spend.
     const premium =
-      opts.preferCheap === true
+      opts.preferCheap === true || primaryTier === "free"
         ? new ProxyLLMClient({ apiBaseUrl, machineToken, tier: "premium" })
         : null;
     return { primary, premium };

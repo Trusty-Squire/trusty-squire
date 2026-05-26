@@ -200,6 +200,59 @@ describe("/v1/llm/chat", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("routes tier=free to the free-tier chain (free→free→paid)", async () => {
+    const captured: { body?: Record<string, unknown> } = {};
+    globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+      captured.body = JSON.parse(String((init as { body?: string }).body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" } }],
+          model: "google/gemini-2.0-flash-exp:free",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, tier: "free" },
+    });
+    expect(res.statusCode).toBe(200);
+    const sent = captured.body!;
+    expect(sent["model"]).toBe("google/gemini-2.0-flash-exp:free");
+    // The chain: primary (free) → fallback (free) → paid escape.
+    expect(sent["models"]).toEqual([
+      "google/gemini-2.0-flash-exp:free",
+      "meta-llama/llama-3.2-90b-vision-instruct:free",
+      "google/gemini-2.0-flash-001",
+    ]);
+  });
+
+  it("tier=premium uses GPT-4o and NO fallback chain", async () => {
+    const captured: { body?: Record<string, unknown> } = {};
+    globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+      captured.body = JSON.parse(String((init as { body?: string }).body ?? "{}"));
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "ok" } }], model: "openai/gpt-4o" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, tier: "premium" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(captured.body!["model"]).toBe("openai/gpt-4o");
+    // No fallback array on premium — failure of the parse-failure
+    // retry is itself the signal, not something to paper over.
+    expect(captured.body!["models"]).toBeUndefined();
+  });
+
   it("returns 503 when OPENROUTER_API_KEY is unset", async () => {
     delete process.env["OPENROUTER_API_KEY"];
     const deps = buildInMemoryDeps({

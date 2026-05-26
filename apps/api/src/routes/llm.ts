@@ -44,9 +44,14 @@ const chatBodySchema = z.object({
   system: z.string(),
   user: z.array(blockSchema).min(1).max(8),
   max_tokens: z.number().int().positive().max(8192),
-  // Optional cheap-mode hint. Defaults to "cheap" because the bot will
-  // pass that explicitly anyway. Premium is for the parse-failure retry.
-  tier: z.enum(["cheap", "premium"]).default("cheap"),
+  // Tier picks the model + fallback chain.
+  //   cheap   — Gemini Flash class. Default for end-user signups.
+  //   premium — GPT-4o class. Parse-failure retry path.
+  //   free    — OpenRouter free-tier models with a paid escape-hatch.
+  //             Used by the closed-loop verifier worker (no user is
+  //             waiting; quality drops are tolerable; rate-limit
+  //             failures auto-fall through to the paid escape).
+  tier: z.enum(["cheap", "premium", "free"]).default("cheap"),
 });
 
 const CHEAP_MODEL = process.env.LLM_PROXY_CHEAP_MODEL ?? "google/gemini-flash-1.5";
@@ -66,6 +71,25 @@ const CHEAP_FALLBACKS = [
   "google/gemini-flash-1.5-8b",
   "openai/gpt-4o-mini",
 ];
+
+// Free-tier chain. Designed for the closed-loop verifier worker —
+// running fresh signups to validate captured skills before promoting
+// them. The verifier is async + retriable, so the lower quality
+// (worse JSON adherence on free models, weaker vision on subtle
+// layouts) is acceptable. The chain ends in a PAID escape-hatch so
+// transient free-tier rate-limits don't stall the worker entirely.
+//
+// All three slots are env-overridable. The defaults are the
+// highest-availability free vision models on OpenRouter today; if
+// names rotate (free tiers churn faster than paid), point the env at
+// the new ids without a code change.
+const FREE_MODEL = process.env.LLM_PROXY_FREE_MODEL ?? "google/gemini-2.0-flash-exp:free";
+const FREE_FALLBACK_1 =
+  process.env.LLM_PROXY_FREE_FALLBACK_1 ?? "meta-llama/llama-3.2-90b-vision-instruct:free";
+// The paid escape kicks in only when both free models are unavailable.
+// Default matches CHEAP_MODEL so the operator's worst-case cost still
+// looks like a cheap-tier run, not a premium one.
+const FREE_ESCAPE = process.env.LLM_PROXY_FREE_ESCAPE ?? "google/gemini-2.0-flash-001";
 
 export interface LLMRouteDeps {
   machineTokenStore: MachineTokenStore;
@@ -130,7 +154,12 @@ export async function registerLLMRoute(
         : { type: "text" as const, text: b.text },
     );
 
-    const primaryModel = parsed.data.tier === "premium" ? PREMIUM_MODEL : CHEAP_MODEL;
+    const primaryModel =
+      parsed.data.tier === "premium"
+        ? PREMIUM_MODEL
+        : parsed.data.tier === "free"
+          ? FREE_MODEL
+          : CHEAP_MODEL;
     const body: Record<string, unknown> = {
       model: primaryModel,
       max_tokens: parsed.data.max_tokens,
@@ -141,6 +170,10 @@ export async function registerLLMRoute(
     };
     if (parsed.data.tier === "cheap" && CHEAP_FALLBACKS.length > 0) {
       body["models"] = [primaryModel, ...CHEAP_FALLBACKS];
+    } else if (parsed.data.tier === "free") {
+      // free → free → paid escape. OpenRouter caps at 3, which is
+      // exactly what we want here.
+      body["models"] = [FREE_MODEL, FREE_FALLBACK_1, FREE_ESCAPE];
     }
 
     try {

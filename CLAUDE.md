@@ -431,6 +431,7 @@ extension state on launch and won't reload mid-session.
 | Env var | Default | Effect |
 |---|---|---|
 | `UNIVERSAL_BOT_PREFER_CHEAP` | `true` | Gemini Flash primary, premium fallback only on parse-failure |
+| `UNIVERSAL_BOT_LLM_TIER` | `cheap` | Primary LLM tier — `cheap`, `premium`, or `free`. `free` routes through OpenRouter's free models with a paid escape-hatch; the closed-loop verifier worker sets this. End-user installs leave it unset. |
 | `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15`   | Per-signup circuit breaker |
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
@@ -445,6 +446,9 @@ extension state on launch and won't reload mid-session.
 | `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required` (alias: `MACHINE_TOKEN_QUOTA`, the prior name) |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
+| `LLM_PROXY_FREE_MODEL` | `google/gemini-2.0-flash-exp:free` | Free-tier primary (verifier worker). |
+| `LLM_PROXY_FREE_FALLBACK_1` | `meta-llama/llama-3.2-90b-vision-instruct:free` | Free-tier second-hop. |
+| `LLM_PROXY_FREE_ESCAPE` | `google/gemini-2.0-flash-001` | Paid escape-hatch when both free models 503/rate-limit. Costs less than cheap-tier defaults. |
 | `INBOX_BODY_RETENTION_DAYS` | `7` | Body_text/html nulled after this many days |
 | `INBOX_METADATA_RETENTION_DAYS` | `90` | ReceivedEmail rows deleted after this |
 | `PAIRING_TOKEN_RETENTION_HOURS` | `1` | PairingToken row sweep |
