@@ -47,18 +47,19 @@ export async function readOperatorOtp(
       : DEFAULT_API_BASE;
   const maxWait =
     input.maxWaitSeconds !== undefined ? input.maxWaitSeconds : 90;
-  const deadline = Date.now() + maxWait * 1000;
+  const startTime = Date.now();
+  const deadline = startTime + maxWait * 1000;
   let lastReason = "no_attempts";
   while (Date.now() < deadline) {
-    const remaining = Math.max(
-      10,
-      Math.ceil((deadline - Date.now()) / 1000),
-    );
+    // rc.32 — since_seconds is the elapsed time SINCE THIS POLL
+    // STARTED, plus a small lead-in. Tight by design — picks up
+    // only emails delivered AFTER the bot triggered the signup
+    // flow. The naive 120s window in rc.27 surfaced stale codes
+    // from prior attempts that were still in the inbox.
+    const elapsedSeconds = Math.ceil((Date.now() - startTime) / 1000);
+    const sinceSeconds = Math.max(10, elapsedSeconds + 15);
     const body = {
-      // Bound the inbox-search window to the time since this call
-      // started (plus a small lead-in for the email to actually
-      // land). Avoids picking up an unrelated stale OTP.
-      since_seconds: Math.min(120, remaining + 30),
+      since_seconds: sinceSeconds,
       ...(input.fromDomain !== undefined && input.fromDomain.length > 0
         ? { from_domain: input.fromDomain }
         : {}),
