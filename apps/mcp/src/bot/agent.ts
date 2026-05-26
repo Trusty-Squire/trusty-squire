@@ -25,6 +25,7 @@ import {
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
+import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
@@ -2882,6 +2883,14 @@ export class SignupAgent {
               machineToken: task.machineToken,
               apiBase: task.apiBase,
             });
+            // rc.18 — opt-in Telegram fallback. Bypasses the email
+            // path (which collapses to Sent only when GMAIL_USER ==
+            // account.email). No-op without TELEGRAM_BOT_TOKEN env.
+            void sendTelegramHeightenedAuth({
+              service: task.service,
+              digit: String(matchNum),
+              windowSeconds: 120,
+            });
           } else {
             // Extractor missed the number — Google phrasing has
             // drifted again. Surface a banner so the user knows to
@@ -2901,6 +2910,11 @@ export class SignupAgent {
               windowSeconds: 120,
               machineToken: task.machineToken,
               apiBase: task.apiBase,
+            });
+            void sendTelegramHeightenedAuth({
+              service: task.service,
+              digit: null,
+              windowSeconds: 120,
             });
           }
           // Either way (number found or not), the user can still
