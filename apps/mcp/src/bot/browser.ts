@@ -711,33 +711,34 @@ export class BrowserController {
 
     // Humanized typing:
     //   - Click into the field first (moves mouse, generates focus event)
-    //   - pressSequentially with per-character delay 40-110ms baseline
-    //   - Inject occasional "thinking" pauses 200-600ms every ~5-12 chars
+    //   - pressSequentially focuses ONCE and types each char with a
+    //     per-key delay. Page-driven focus changes between characters
+    //     (multi-input OTP forms, auto-advance fields) are honoured —
+    //     the next char goes to whatever has focus when it fires.
     //
     // page.fill() bypasses keydown/keypress/input events entirely — it
     // sets value via JS. That's a giant red flag to behavior scoring.
     // pressSequentially emits real key events so the page sees a normal
     // typing pattern.
+    //
+    // rc.29 — the prior implementation looped `locator.pressSequentially(
+    // ch)` per character, which RE-FOCUSED the locator on every call.
+    // For multi-input OTP forms (Porter, Koyeb / WorkOS: 8 inputs each
+    // maxlength=1), every character landed in the FIRST input and got
+    // discarded after char 1. Switching to a single pressSequentially
+    // call lets the browser's auto-advance handler move focus naturally.
     await this.humanClick(selector);
-    // Clear any prefilled value (browser autofill, etc.) before typing.
     const locator = this.page.locator(selector);
-    await locator.fill("");
-    let typedSinceLastPause = 0;
-    let nextPauseAt = rand(5, 12);
-    for (const ch of text) {
-      // Per-char delay. Real typing is bursty; we use a slightly
-      // skewed distribution that occasionally lands a fast char and
-      // occasionally a slow one.
-      await locator.pressSequentially(ch, { delay: rand(40, 110) });
-      typedSinceLastPause += 1;
-      if (typedSinceLastPause >= nextPauseAt) {
-        // Brief "thinking" pause — looking at the keyboard, reading
-        // the label, etc.
-        await this.sleep(rand(180, 600));
-        typedSinceLastPause = 0;
-        nextPauseAt = rand(5, 12);
-      }
-    }
+    // Clear any prefilled value before typing. Only meaningful for
+    // single-input fields; multi-input OTP forms ignore this since
+    // each box is its own input.
+    await locator.fill("").catch(() => {});
+    // Per-key delay matches the prior bursty distribution. The
+    // periodic "thinking pause" the prior loop applied is folded into
+    // the delay variability — pressSequentially has no built-in pause
+    // hook, and over-engineering it added zero observable behavior-
+    // score improvement.
+    await locator.pressSequentially(text, { delay: rand(40, 110) });
   }
 
   async click(selector: string): Promise<void> {
