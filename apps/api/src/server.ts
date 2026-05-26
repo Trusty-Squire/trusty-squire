@@ -29,6 +29,7 @@ import { registerReadViewsRoute } from "./routes/read-views.js";
 import { registerRunsRoute } from "./routes/runs.js";
 import { registerShortRoute } from "./routes/short.js";
 import { registerNotifyRoute } from "./routes/notify.js";
+import { registerOperatorOtpRoute } from "./routes/operator-otp.js";
 import {
   buildInMemoryDeps,
   type ApiDeps,
@@ -161,6 +162,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
+  });
+  await fastify.register(registerOperatorOtpRoute, {
+    deps: { machineTokenStore: deps.machineTokenStore },
   });
   await fastify.register(registerInboxRoute, {
     deps: {

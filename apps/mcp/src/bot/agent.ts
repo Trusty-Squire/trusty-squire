@@ -27,6 +27,7 @@ import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-log
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { redactCredentials } from "./redact.js";
+import { readOperatorOtp, fromDomainFromUrl } from "./read-otp.js";
 import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
@@ -2406,6 +2407,13 @@ export class SignupAgent {
   // Set per-task in signup(). Lets the uploader know which service
   // was being provisioned without threading it through every call.
   private currentService = "";
+  // rc.27 — set when the email_otp_required gate handler successfully
+  // fetched a code from the operator's gmail. Consumed by the next
+  // post-verify round's planner prompt as a hint so the planner can
+  // fill the verification input without burning rounds discovering
+  // it. Cleared once the loop emits a step that targets the OTP
+  // input, so the hint doesn't echo into later unrelated rounds.
+  private pendingOtpCode: string | null = null;
 
   constructor(
     private browser: BrowserController,
@@ -3410,17 +3418,52 @@ export class SignupAgent {
         };
       }
       // (b) Email-OTP wall (Porter, Koyeb / WorkOS-backed). Code went
-      // to operator's gmail; harvester can't read user-bound inbox.
+      // to the operator's gmail. rc.27 — instead of immediately
+      // aborting, try reading the OTP from the operator's inbox via
+      // POST /v1/inbox/poll-operator-otp. If a code arrives, push a
+      // step trail hint and continue to the post-verify loop —
+      // the planner sees the hint and fills the input.
       if (detectEmailOtpGate(gateState.url, gateState.title, gateText)) {
-        return {
-          success: false,
-          error:
-            `email_otp_required: ${task.service} sent a verification code to the operator's ` +
-            `email (the harvester has no access to that inbox). Finish the signup manually by ` +
-            `entering the OTP from the email.`,
-          steps,
-          ...this.resultTail(),
-        };
+        const domain = fromDomainFromUrl(gateState.url);
+        const machineToken = task.machineToken;
+        let otpResult: { code: string | null; reason: string };
+        if (
+          machineToken === undefined ||
+          machineToken.length === 0
+        ) {
+          otpResult = { code: null, reason: "no_machine_token" };
+        } else {
+          steps.push(
+            `Email-OTP gate detected (${pathOf(gateState.url)}) — polling operator gmail for the code` +
+              (domain !== null ? ` (from_domain=${domain})` : ""),
+          );
+          otpResult = await readOperatorOtp({
+            machineToken,
+            ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+            ...(domain !== null ? { fromDomain: domain } : {}),
+            maxWaitSeconds: 90,
+          });
+        }
+        if (otpResult.code !== null) {
+          // rc.27 — log the code's existence + length but never the
+          // digits. The planner gets the digits via a system-prompt
+          // hint passed through scopeHint-style on the next round.
+          steps.push(
+            `Email-OTP retrieved (${otpResult.code.length} digits, ending …${otpResult.code.slice(-2)}) — continuing into post-verify so the planner can fill the verification input.`,
+          );
+          this.pendingOtpCode = otpResult.code;
+          // Fall through to extract + postVerifyLoop normally.
+        } else {
+          return {
+            success: false,
+            error:
+              `email_otp_required: ${task.service} sent a verification code but the bot ` +
+              `couldn't fetch it from the operator's gmail (reason=${otpResult.reason}). ` +
+              `Finish the signup manually by entering the OTP from the email.`,
+            steps,
+            ...this.resultTail(),
+          };
+        }
       }
       // (c) SSO restriction (Fly.io). Org SSO blocks programmatic
       // token creation — the page explicitly says so.
@@ -3698,6 +3741,20 @@ ${formatInventory(input.inventory)}`,
     // string and keeps asking to extract it forever), or when the
     // planner's last step was rejected.
     let hint: string | undefined;
+    // rc.27 — when the email_otp gate handler retrieved a code from
+    // the operator's gmail, seed the FIRST round's hint with the
+    // code + explicit fill+submit instructions. Cleared after one
+    // round so it doesn't echo into unrelated downstream rounds.
+    if (this.pendingOtpCode !== null) {
+      hint =
+        `Operator email-OTP retrieved from gmail: code is "${this.pendingOtpCode}". ` +
+        `The current page is an email-verification gate. Find the SINGLE visible OTP/code input ` +
+        `on this page (it usually has placeholder text like "Code", "Verification code", or a ` +
+        `numeric placeholder; some sites render 6 individual digit inputs — in that case fill the ` +
+        `FIRST one and the browser auto-distributes). Issue {"kind":"fill", "selector":"…", ` +
+        `"value":"${this.pendingOtpCode}"} on it. NEXT round, click the Verify/Continue/Submit button.`;
+      this.pendingOtpCode = null;
+    }
     // Failed-extract counter. The stuck-loop detector below exempts
     // `extract` on the theory that "extract is its own progress signal"
     // — true when extract succeeds, FALSE when it returns no key. A
