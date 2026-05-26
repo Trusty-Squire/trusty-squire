@@ -1618,7 +1618,12 @@ export function extractApiKeyFromText(text: string): string | null {
     // Qdrant Cloud: `<UUID>|<55-char opaque>` — a literal pipe between
     // a key id and the secret body. Unique enough that no false-
     // positive guard is needed.
-    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9]{30,80}\b/i, // Qdrant
+    //
+    // rc.34 — extended the secret-body character class to include
+    // underscore (was [A-Za-z0-9]). The rc.33 broad sweep showed a
+    // Qdrant key with shape `<UUID>|t_<33-char>_<16-char>` — two
+    // mid-body underscores that the prior regex rejected at char 2.
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9_]{30,80}\b/i, // Qdrant
     // JWT (eyJ...eyJ...sig) — Convex's API "token" is a JWT. Other
     // services may emit JWTs as bearer secrets too. Three-segment
     // base64url with literal dots. Conservative bounds — under 20

@@ -120,6 +120,16 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(`API key visible: ${key}`)).toBe(key);
   });
 
+  it("extracts a Qdrant token whose secret body contains underscores (rc.34)", () => {
+    // Real Qdrant token shape observed in the rc.33 broad sweep:
+    // <UUID>|t_<alnum>_<alnum>. The rc.23 [A-Za-z0-9] class rejected
+    // at the underscore; allowing _ matches the full secret cleanly.
+    const key =
+      "7744c65e-fe94-49b8-bd02-b6f0a20d8d19|" +
+      "t_CXaR4h2wOXwQ1TbNKBO95PeUtZ4AVXeE6wC_iYzWjxwWt7bLzH5g";
+    expect(extractApiKeyFromText(`Visible: ${key}`)).toBe(key);
+  });
+
   it("extracts a JWT (eyJ.eyJ.sig) — Convex token shape (rc.23)", () => {
     // 3-segment base64url JWT
     const jwt =
