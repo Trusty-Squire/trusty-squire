@@ -1051,16 +1051,30 @@ export function detectAlreadySignedIn(args: {
   let dashboardyPath = false;
   try {
     const parsed = new URL(url);
+    // rc.37 — widened the dashboard-path allowlist after the rc.35
+    // sweep showed Upstash's post-OAuth landing was /redis (the
+    // product-segment route, not a generic /dashboard). Added
+    // /redis, /kafka, /vector, /cluster, /databases?, /instances?,
+    // /apps?, /deployments?, /services? — all common product-name
+    // routes that almost always indicate authenticated state.
     dashboardyPath =
-      /\/(?:new|dashboard|projects?|account|settings|workspace|home)(?:\/|$)/i.test(
+      /\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?)(?:\/|$)/i.test(
         parsed.pathname,
       ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname);
   } catch {
     // Malformed URL — skip URL signal.
   }
   if (dashboardyPath) {
+    // rc.37 — widened the creation-CTA vocabulary to include the
+    // dashboard-y "Create <product-noun>" pattern. Upstash's
+    // dashboard CTA reads "Create Database"; Convex / Neon /
+    // PlanetScale / similar all use this shape ("Create cluster",
+    // "Create instance", "Create deployment"). Without this the
+    // bot's F17 already-signed-in path fell through to form-fill
+    // and the planner clicked the CTA thinking it was a signup
+    // submit button.
     const CREATION_CTA =
-      /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key)|create(?:\s+(?:new|a|project|workspace))?)/i;
+      /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key|database|cluster|instance|service)|create(?:\s+(?:new|a|project|workspace|database|cluster|instance|deployment|app|service|index|environment))?)/i;
     if (
       inventory.some((e) => {
         const t = e.visibleText ?? e.ariaLabel ?? "";
