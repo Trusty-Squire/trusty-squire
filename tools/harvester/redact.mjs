@@ -37,7 +37,7 @@ const TOKEN_PATTERNS = [
   /\bsbp_[A-Za-z0-9]{30,}/gi,                       // Supabase
   // DB / vector
   /\bnapi_[a-zA-Z0-9]{30,80}/g,                     // Neon
-  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9_]{30,80}\b/gi, // Qdrant Cloud
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9_\-]{30,80}\b/gi, // Qdrant Cloud (rc.36)
   // AI / inference
   /\br8_[a-zA-Z0-9]{30,60}/g,                       // Replicate
   /\b[A-Za-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/g,     // Baseten (rc.35 mixed-case)

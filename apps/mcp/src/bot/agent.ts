@@ -1568,6 +1568,27 @@ export function extractQuotedTokenFromReason(
     if (candidate === undefined) continue;
     if (pageText.includes(candidate)) return candidate;
   }
+  // rc.36 — unquoted UUID fallback. Upstash's API key dialog shows a
+  // bare UUID (`b7dd0ff0-2497-4dc8-a793-8261a38e0339`) and the
+  // planner quotes it WITHOUT surrounding quote marks ("The full API
+  // key b7dd0ff0-… is visible"). The verbatim-in-page check is the
+  // safety net — random UUIDs sprinkled across dashboards (trace IDs,
+  // project IDs) only false-positive if the SAME UUID appears in the
+  // planner's reason. Keyword guard ('api key' / 'token' / 'secret'
+  // / 'credential' within 50 chars of the UUID) keeps unrelated
+  // UUIDs (project IDs, member IDs in a sidebar) from matching.
+  const uuidRe =
+    /\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
+  const keywordRe =
+    /\b(?:api[\s_-]?(?:key|token)|access[\s_-]?token|secret|credential)\b/i;
+  for (const m of reason.matchAll(uuidRe)) {
+    const candidate = m[1] ?? m[0];
+    if (!pageText.includes(candidate)) continue;
+    const start = Math.max(0, m.index - 50);
+    const end = Math.min(reason.length, m.index + candidate.length + 50);
+    const window = reason.slice(start, end);
+    if (keywordRe.test(window)) return candidate;
+  }
   return null;
 }
 
@@ -1619,11 +1640,13 @@ export function extractApiKeyFromText(text: string): string | null {
     // a key id and the secret body. Unique enough that no false-
     // positive guard is needed.
     //
-    // rc.34 — extended the secret-body character class to include
-    // underscore (was [A-Za-z0-9]). The rc.33 broad sweep showed a
-    // Qdrant key with shape `<UUID>|t_<33-char>_<16-char>` — two
-    // mid-body underscores that the prior regex rejected at char 2.
-    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9_]{30,80}\b/i, // Qdrant
+    // rc.34/rc.36 — extended the secret-body character class to
+    // include underscore + hyphen. rc.35 broad sweep surfaced
+    // another Qdrant shape with mid-body hyphens:
+    // `<UUID>|e8L7oyi-5fHa327u7x-IQN6WivtPlpIVjT-giIsrXDZW7P-8i2G9Pw`.
+    // [A-Za-z0-9_-] covers both observed shapes; the {30,80} length
+    // bound + UUID prefix keep false-positive risk near zero.
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9_\-]{30,80}\b/i, // Qdrant
     // JWT (eyJ...eyJ...sig) — Convex's API "token" is a JWT. Other
     // services may emit JWTs as bearer secrets too. Three-segment
     // base64url with literal dots. Conservative bounds — under 20

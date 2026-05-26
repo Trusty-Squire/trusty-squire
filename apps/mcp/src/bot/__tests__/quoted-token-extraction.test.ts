@@ -83,3 +83,44 @@ describe("extractQuotedTokenFromReason — guardrails", () => {
     expect(extractQuotedTokenFromReason("", "anything")).toBeNull();
   });
 });
+
+describe("extractQuotedTokenFromReason — bare-UUID fallback (rc.36)", () => {
+  it("extracts an unquoted UUID near 'API key' keyword (Upstash shape)", () => {
+    const reason =
+      "The full API key b7dd0ff0-2497-4dc8-a793-8261a38e0339 is visible in the modal dialog";
+    const page =
+      "Created token b7dd0ff0-2497-4dc8-a793-8261a38e0339 — copy it now.";
+    expect(extractQuotedTokenFromReason(reason, page)).toBe(
+      "b7dd0ff0-2497-4dc8-a793-8261a38e0339",
+    );
+  });
+
+  it("requires a credential keyword near the UUID (no false-positive on project IDs)", () => {
+    // Same UUID shape but the reason is talking about a project, not
+    // a credential. Should NOT match.
+    const reason =
+      "Created project b7dd0ff0-2497-4dc8-a793-8261a38e0339 in workspace.";
+    const page = "Project b7dd0ff0-2497-4dc8-a793-8261a38e0339 settings";
+    expect(extractQuotedTokenFromReason(reason, page)).toBeNull();
+  });
+
+  it("requires the UUID to ALSO appear in page text (no hallucinated UUIDs)", () => {
+    const reason =
+      "The API key b7dd0ff0-2497-4dc8-a793-8261a38e0339 is visible.";
+    // Page text has a DIFFERENT UUID.
+    const page = "Created cccccccc-cccc-cccc-cccc-cccccccccccc on the dashboard.";
+    expect(extractQuotedTokenFromReason(reason, page)).toBeNull();
+  });
+
+  it("falls back to bare-UUID only when quoted-token path didn't fire", () => {
+    // Both a quoted credential AND a UUID present — the quoted path
+    // wins because it's tried first.
+    const reason =
+      "The API key 'sk-myquotedkey-aaaaaaaaaaaa' is shown, also UUID b7dd0ff0-2497-4dc8-a793-8261a38e0339";
+    const page =
+      "Tokens: sk-myquotedkey-aaaaaaaaaaaa and b7dd0ff0-2497-4dc8-a793-8261a38e0339";
+    expect(extractQuotedTokenFromReason(reason, page)).toBe(
+      "sk-myquotedkey-aaaaaaaaaaaa",
+    );
+  });
+});
