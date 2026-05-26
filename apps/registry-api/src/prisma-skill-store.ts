@@ -13,11 +13,15 @@ import {
   type ListSkillsFilter,
   type RecordReplayInput,
   type RecordReplayResult,
+  type RecordVerifierOutcomeInput,
+  type RecordVerifierOutcomeResult,
   type SkillCaptureRecord,
   type SkillReplayRecord,
   type SkillStore,
   type SkillStoreRecord,
   SkillConflictError,
+  VERIFIER_FAILURE_THRESHOLD,
+  VERIFIER_PROMOTION_THRESHOLD,
 } from "./skill-store.js";
 import { triggersHumanReview } from "./skill-store-memory.js";
 
@@ -185,6 +189,133 @@ export class PrismaSkillStore implements SkillStore {
         replays_succeeded: skill.replays_succeeded,
         replays_failed: skill.replays_failed,
       };
+    });
+  }
+
+  async listVerifierQueue(opts: {
+    limit?: number;
+    now?: Date;
+  }): Promise<SkillStoreRecord[]> {
+    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    const now = opts.now ?? new Date();
+    // Two-part query, merged in app code:
+    //   1. pending-review with verifier_succeeded < threshold (the
+    //      staging gate). Capped at limit so a registry full of new
+    //      submissions doesn't starve the freshness sweep.
+    //   2. active with next_freshness_due_at <= now (the freshness
+    //      sweep). Capped at limit minus #1's hit count.
+    // The combination is then truncated back to the overall limit.
+    const pending = await this.client.skillRecord.findMany({
+      where: {
+        status: "pending-review",
+        deleted_at: null,
+        superseded_at: null,
+        verifier_succeeded: { lt: VERIFIER_PROMOTION_THRESHOLD },
+      },
+      orderBy: { created_at: "asc" },
+      take: limit,
+    });
+    const remaining = Math.max(0, limit - pending.length);
+    const due = remaining > 0
+      ? await this.client.skillRecord.findMany({
+          where: {
+            status: "active",
+            deleted_at: null,
+            superseded_at: null,
+            next_freshness_due_at: { lte: now },
+          },
+          orderBy: { next_freshness_due_at: "asc" },
+          take: remaining,
+        })
+      : [];
+    return [...pending, ...due].map((row) => toSkillStoreRecord(row as PrismaSkillRow));
+  }
+
+  async recordVerifierOutcome(
+    input: RecordVerifierOutcomeInput,
+  ): Promise<RecordVerifierOutcomeResult> {
+    const now = input.now ?? new Date();
+    void input.reason;
+    void input.duration_ms;
+    const oneWeek = 7 * 24 * 60 * 60 * 1000;
+    return this.client.$transaction(async (tx) => {
+      let skill: PrismaSkillRow;
+      if (input.kind === "success") {
+        skill = (await tx.skillRecord.update({
+          where: { skill_id: input.skill_id },
+          data: {
+            verifier_succeeded: { increment: 1 },
+            consecutive_verifier_failures: 0,
+            last_verified_at: now,
+          },
+        })) as unknown as PrismaSkillRow;
+      } else {
+        skill = (await tx.skillRecord.update({
+          where: { skill_id: input.skill_id },
+          data: {
+            verifier_failed: { increment: 1 },
+            consecutive_verifier_failures: { increment: 1 },
+          },
+        })) as unknown as PrismaSkillRow;
+      }
+
+      // Atomic transition checks. Each branch is its own UPDATE so a
+      // future concurrent verifier outcome can't double-promote /
+      // double-demote.
+      let transition: RecordVerifierOutcomeResult["transition"] = "none";
+      if (
+        input.kind === "success" &&
+        skill.status === "pending-review" &&
+        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
+      ) {
+        // Promote and supersede any older active row for the same
+        // service. Mirrors approveReview's invariant maintenance.
+        await tx.skillRecord.updateMany({
+          where: {
+            skill_id: { not: skill.skill_id },
+            service: skill.service,
+            status: "active",
+          },
+          data: { status: "superseded", superseded_at: now },
+        });
+        const promoted = (await tx.skillRecord.update({
+          where: { skill_id: input.skill_id },
+          data: {
+            status: "active",
+            next_freshness_due_at: new Date(now.getTime() + oneWeek),
+          },
+        })) as unknown as PrismaSkillRow;
+        skill = promoted;
+        transition = "promoted";
+      } else if (input.kind === "success" && skill.status === "active") {
+        // Freshness pass — schedule the next sweep.
+        skill = (await tx.skillRecord.update({
+          where: { skill_id: input.skill_id },
+          data: { next_freshness_due_at: new Date(now.getTime() + oneWeek) },
+        })) as unknown as PrismaSkillRow;
+      } else if (
+        input.kind === "failure" &&
+        skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
+      ) {
+        if (skill.status === "pending-review") {
+          // Never validated — retire. Capture sidecars survive for
+          // forensic value.
+          skill = (await tx.skillRecord.update({
+            where: { skill_id: input.skill_id },
+            data: { deleted_at: now },
+          })) as unknown as PrismaSkillRow;
+          transition = "retired";
+        } else if (skill.status === "active") {
+          // Regressed — demote and stop re-testing.
+          skill = (await tx.skillRecord.update({
+            where: { skill_id: input.skill_id },
+            data: { status: "demoted", next_freshness_due_at: null },
+          })) as unknown as PrismaSkillRow;
+          transition = "demoted";
+        }
+      }
+
+      return { record: toSkillStoreRecord(skill), transition };
     });
   }
 
@@ -389,6 +520,12 @@ type PrismaSkillRow = {
   replays_succeeded: number;
   replays_failed: number;
   consecutive_failures: number;
+  verifier_succeeded: number;
+  verifier_failed: number;
+  consecutive_verifier_failures: number;
+  last_verified_at: Date | null;
+  next_freshness_due_at: Date | null;
+  freshness_budget_cents: number;
   created_at: Date;
   last_replayed_at: Date | null;
   superseded_at: Date | null;
@@ -413,6 +550,12 @@ function toSkillStoreRecord(row: PrismaSkillRow): SkillStoreRecord {
     replays_succeeded: row.replays_succeeded,
     replays_failed: row.replays_failed,
     consecutive_failures: row.consecutive_failures,
+    verifier_succeeded: row.verifier_succeeded,
+    verifier_failed: row.verifier_failed,
+    consecutive_verifier_failures: row.consecutive_verifier_failures,
+    last_verified_at: row.last_verified_at,
+    next_freshness_due_at: row.next_freshness_due_at,
+    freshness_budget_cents: row.freshness_budget_cents,
     created_at: row.created_at,
     last_replayed_at: row.last_replayed_at,
     superseded_at: row.superseded_at,

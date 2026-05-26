@@ -17,6 +17,7 @@ import { MissingSessionError } from "./api-client.js";
 import { runCli } from "./install/cli.js";
 import { runServer } from "./server.js";
 import { runSkillCli } from "./skill-cli/cli.js";
+import { runVerifierWorkerCli } from "./verifier-worker/cli.js";
 import { VERSION } from "./version.js";
 
 const argv = process.argv.slice(2);
@@ -37,6 +38,7 @@ if (isVersionFlag) {
 
 const isServer = argv[0] === "server";
 const isSkill = argv[0] === "skill";
+const isVerifier = argv[0] === "verifier-worker";
 
 async function dispatch(): Promise<number> {
   if (isServer) {
@@ -48,6 +50,11 @@ async function dispatch(): Promise<number> {
   if (isSkill) {
     // skill CLI returns its own exit code (T30 error taxonomy).
     return await runSkillCli(argv.slice(1));
+  }
+  if (isVerifier) {
+    // verifier-worker — closed-loop strategy Phase 3. Runs the
+    // pending-review + freshness sweep against the registry.
+    return await runVerifierWorkerCli(argv.slice(1));
   }
   await runCli(argv);
   return 0;

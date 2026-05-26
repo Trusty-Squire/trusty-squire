@@ -198,6 +198,49 @@ model SkillCaptureRecord {
   @@index([run_id])
 }
 
+// UniversalBotFailureRecord — closed-loop strategy Phase 5.
+//
+// Posted by end-user MCPs whenever a universal-bot signup
+// terminally fails for a service. Drives the discovery worker
+// (Phase 6): services with ≥3 distinct user failures in the last
+// 14 days, where the registry has no active skill, become
+// discovery candidates the worker iterates against.
+//
+// Trust model: anyone with a machine token can post — these are
+// telemetry events, not authoritative facts. The registry trusts
+// reported_at via the server clock, not the client. Per-account
+// rate limiting (later) prevents one user spamming a service.
+//
+// Retention: 90 days (longer than the 14-day aggregation window
+// so we can backfill if the discovery worker adjusts the lookback).
+model UniversalBotFailureRecord {
+  id           String   @id @default(cuid())
+  // Slug the bot was trying to provision — exactly the form the
+  // discovery worker would re-attempt. Lowercased + slug-normalized
+  // before insert.
+  service      String
+  // Bot's terminal-failure classification: no_credentials,
+  // oauth_onboarding_failed, verification_not_sent,
+  // anti_bot_blocked, onboarding_blocked, captcha_blocked, etc.
+  error_kind   String
+  // Free-text reason from the bot (capped server-side to 2KB).
+  reason       String
+  // Whoever's machine token / account ran the signup. Used for
+  // (a) per-account rate limiting and (b) the "≥3 DISTINCT users"
+  // aggregation gate.
+  account_id   String
+  // Which MCP version produced the report. Helps triage "this
+  // class of failure went away after rc.39".
+  mcp_version  String
+  reported_at  DateTime @default(now())
+
+  // Aggregation is per (service, reported_at window). Indexed for
+  // that scan + the per-account rate-limit lookup.
+  @@index([service, reported_at(sort: Desc)])
+  @@index([account_id, reported_at(sort: Desc)])
+  @@index([reported_at])
+}
+
 // ExtractFailureSnapshot — DOM + screenshot from a universal-bot run
 // where extractCredentials() returned null. Auto-uploaded by the MCP
 // so DOM-shape regressions can be diagnosed without users needing to

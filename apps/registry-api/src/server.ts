@@ -6,6 +6,8 @@ import Fastify from "fastify";
 import { ManifestCache } from "./cache.js";
 import { registerAdaptersRoute } from "./routes/adapters.js";
 import { registerSkillsRoute } from "./routes/skills.js";
+import { registerAdminRoutes } from "./routes/admin.js";
+import { registerAdminDashboardRoute } from "./routes/admin-dashboard.js";
 import { registerExtractFailuresRoute } from "./routes/extract-failures.js";
 import { generateKeyPairSync } from "node:crypto";
 import { ManifestSigner } from "./signer.js";
@@ -18,11 +20,16 @@ import {
   MAX_SCREENSHOT_BYTES,
   type ExtractFailureStore,
 } from "./extract-failure-store.js";
+import { InMemoryBotFailureStore } from "./bot-failure-store-memory.js";
+import type { BotFailureStore } from "./bot-failure-store.js";
 
 export interface BuildServerOpts {
   store?: ManifestStore;
   skillStore?: SkillStore;
   extractFailureStore?: ExtractFailureStore;
+  // Closed-loop Phase 5. In-memory by default; production wires a
+  // Prisma-backed store at boot.
+  botFailureStore?: BotFailureStore;
   cache?: ManifestCache;
   signer?: ManifestSigner;
   // Public key (base64url SPKI DER) used to verify POST /skills
@@ -41,6 +48,12 @@ export interface BuildServerOpts {
   // an explicit URL + fetchFn.
   demotionWebhookUrl?: string;
   fetchFn?: typeof globalThis.fetch;
+  // Admin bearer for /admin/* endpoints (verifier worker auth).
+  // Resolution: opts.adminBearer → REGISTRY_ADMIN_BEARER env →
+  // undefined. Undefined keeps the routes returning 503 (Phase 3
+  // safety — easier to detect "admin not configured" than a silent
+  // 401 storm).
+  adminBearer?: string;
 }
 
 export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnType<typeof Fastify>> {
@@ -58,6 +71,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   const skillStore = opts.skillStore ?? new InMemorySkillStore();
   const extractFailureStore =
     opts.extractFailureStore ?? new InMemoryExtractFailureStore();
+  const botFailureStore =
+    opts.botFailureStore ?? new InMemoryBotFailureStore();
   const cache = opts.cache ?? new ManifestCache();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
@@ -112,6 +127,25 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   await fastify.register(registerExtractFailuresRoute, {
     store: extractFailureStore,
     resolveAccountId,
+  });
+
+  const adminBearer = opts.adminBearer ?? process.env.REGISTRY_ADMIN_BEARER;
+  await fastify.register(registerAdminRoutes, {
+    store: skillStore,
+    botFailureStore,
+    resolveAccountId,
+    ...(adminBearer !== undefined && adminBearer.length > 0
+      ? { adminBearer }
+      : {}),
+    ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
+    ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
+  });
+  await fastify.register(registerAdminDashboardRoute, {
+    store: skillStore,
+    botFailureStore,
+    ...(adminBearer !== undefined && adminBearer.length > 0
+      ? { adminBearer }
+      : {}),
   });
 
   // Hourly background pruner. Best-effort — server doesn't crash if

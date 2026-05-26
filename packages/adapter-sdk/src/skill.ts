@@ -621,6 +621,95 @@ export const SkillSchema = z
           "validator shape/regex checks still run.",
       ),
 
+    // Token cleanup (closed-loop strategy, Phase 4).
+    // Optional. When the verifier worker (and any future operator-run
+    // freshness sweep) successfully extracts a credential, it can call
+    // back into the service to delete that token so accounts don't
+    // accumulate verifier-tokens indefinitely. Cleanup is best-effort:
+    // a cleanup failure is logged but doesn't invalidate the verifier
+    // success — the skill itself worked, the housekeeping didn't.
+    //
+    // Two strategies for now:
+    //   - api_delete: DELETE / POST to a URL with the extracted token
+    //     as Bearer auth (works for services like OpenRouter, Pinecone,
+    //     Anthropic where the token authenticates its own deletion).
+    //   - dashboard_steps: additional SkillStep[] walked after extract
+    //     to drive the dashboard's "delete token" button. The bot
+    //     reuses the existing replay engine — same selectors, same
+    //     pre-validation — so the LLM fallback works here too.
+    //
+    // Skills with no cleanup hook leave their tokens behind. The
+    // accumulated verifier-tokens are the operator's problem to
+    // garbage-collect; this is acceptable while accounts are tied to
+    // operator infra and not to end users.
+    token_cleanup: z
+      .union([
+        z.object({
+          strategy: z.literal("none"),
+        }),
+        z.object({
+          strategy: z.literal("api_delete"),
+          // URL template — supports ${TOKEN_ID} and ${ACCOUNT} keys.
+          // The verifier looks up the just-extracted token's id (the
+          // service's own id, NOT the token value) and substitutes.
+          url_template: z
+            .string()
+            .url()
+            .describe(
+              "HTTP URL to call to delete the token. Supports " +
+                "${TOKEN_ID} / ${ACCOUNT} substitution. The token value " +
+                "itself is sent as Authorization: Bearer.",
+            ),
+          method: z
+            .enum(["DELETE", "POST", "PUT"])
+            .default("DELETE")
+            .describe("HTTP method. Most services use DELETE; some use POST /tokens/revoke."),
+          auth_scheme: z
+            .enum(["bearer_self", "api_key_header"])
+            .default("bearer_self")
+            .describe(
+              "How to authenticate the cleanup request. bearer_self: " +
+                "Authorization: Bearer <the extracted token>. " +
+                "api_key_header: X-API-Key: <the extracted token>.",
+            ),
+          // Some services (Anthropic, OpenAI) return the token id in
+          // the create response so future deletes can target it. The
+          // synthesizer captures this when present.
+          token_id_extractor: z
+            .object({
+              from: z
+                .enum(["response_json", "page_text"])
+                .describe(
+                  "Where to find the token's id. response_json: " +
+                    "available when extract step captured a creation " +
+                    "response. page_text: scrape the masked id off the " +
+                    "dashboard after creation.",
+                ),
+              regex: z.string().describe("Pattern to extract the id."),
+            })
+            .optional(),
+        }),
+        z.object({
+          strategy: z.literal("dashboard_steps"),
+          // Reuses SkillStepSchema — the verifier walks these the same
+          // way replay walks the main steps array.
+          steps: z
+            .array(SkillStepSchema)
+            .min(1)
+            .describe(
+              "Steps the verifier walks after a successful extract to " +
+                "delete the token via the dashboard. Pre-validation + " +
+                "LLM fallback rules apply.",
+            ),
+        }),
+      ])
+      .optional()
+      .describe(
+        "How the verifier worker cleans up after extracting a " +
+          "credential. Optional; defaults to no cleanup. Skills " +
+          "without this leave verifier-tokens behind.",
+      ),
+
     // Lineage
     source_run_ids: z
       .array(z.string().min(1))

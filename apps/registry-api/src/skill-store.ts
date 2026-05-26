@@ -24,6 +24,16 @@ export interface SkillStoreRecord {
   replays_succeeded: number;
   replays_failed: number;
   consecutive_failures: number;
+  // Two-tier registry counters (closed-loop strategy). Tracked
+  // separately from replays_* so verifier sweeps don't contaminate
+  // user-facing replay-success metrics. Backfilled to 2/null/2 for
+  // legacy skills (see prisma migration 20260526163000).
+  verifier_succeeded: number;
+  verifier_failed: number;
+  consecutive_verifier_failures: number;
+  last_verified_at: Date | null;
+  next_freshness_due_at: Date | null;
+  freshness_budget_cents: number;
   created_at: Date;
   last_replayed_at: Date | null;
   superseded_at: Date | null;
@@ -176,6 +186,38 @@ export interface SkillStore {
   deleteSkill(skill_id: string): Promise<boolean>;
 
   /**
+   * Pull the verifier worker's queue. Returns skills the worker should
+   * re-test next, in priority order:
+   *   1. pending-review skills awaiting promotion (the staging gate)
+   *   2. active skills whose next_freshness_due_at has passed
+   *      (the freshness sweep)
+   *
+   * Excludes deleted/superseded rows. Limit defaults to 20 to keep
+   * each worker pass bounded and avoid one app monopolizing the
+   * queue when multiple verifier replicas run.
+   */
+  listVerifierQueue(opts: {
+    limit?: number;
+    now?: Date;
+  }): Promise<SkillStoreRecord[]>;
+
+  /**
+   * Record a verifier outcome. Atomically updates verifier_*
+   * counters; auto-promotes pending-review → active when
+   * verifier_succeeded reaches the promotion threshold (N=2 today);
+   * auto-retires pending-review when consecutive_verifier_failures
+   * reaches 3 (the skill never validates); auto-demotes active →
+   * demoted when consecutive_verifier_failures reaches 3 (the skill
+   * regressed under freshness sweep).
+   *
+   * Returns the post-update record + a `transition` describing what
+   * happened ('promoted' | 'retired' | 'demoted' | 'none'), so the
+   * route layer can fire the existing demotion webhook + step trail
+   * with consistent semantics.
+   */
+  recordVerifierOutcome(input: RecordVerifierOutcomeInput): Promise<RecordVerifierOutcomeResult>;
+
+  /**
    * Count replay-outcome writes for an account in a recent window.
    * Backs the 60/min rate limit on POST /skills/:id/replay-outcome
    * (C9). Returns the count; the route layer decides whether to 429.
@@ -208,6 +250,37 @@ export interface ListSkillsFilter {
   status?: string;
   limit?: number;
 }
+
+// Inputs to recordVerifierOutcome.
+export interface RecordVerifierOutcomeInput {
+  skill_id: string;
+  kind: "success" | "failure";
+  // Free-text from the worker. Capped at 2000 chars by the route.
+  reason: string;
+  // Optional duration metric for cost tracking.
+  duration_ms?: number;
+  // Optional now() override for deterministic tests.
+  now?: Date;
+}
+
+export interface RecordVerifierOutcomeResult {
+  record: SkillStoreRecord;
+  // Describes the side effect (if any) the outcome caused.
+  transition:
+    | "promoted"      // pending-review reached N=2 successes → active
+    | "retired"       // pending-review reached 3 consecutive failures → deleted
+    | "demoted"       // active reached 3 consecutive verifier failures → demoted
+    | "none";         // counters bumped, no status change
+}
+
+// Promotion threshold — see DESIGN-skill-promoter.md and the
+// closed-loop strategy. N=2 successes from the verifier worker
+// flips pending-review → active.
+export const VERIFIER_PROMOTION_THRESHOLD = 2;
+
+// Three consecutive failures retire (pending-review) or demote
+// (active). Matches the existing replay-based demotion threshold.
+export const VERIFIER_FAILURE_THRESHOLD = 3;
 
 export interface InsertCaptureInput {
   content_hash: string;

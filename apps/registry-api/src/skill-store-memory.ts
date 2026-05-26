@@ -10,14 +10,21 @@ import type {
   ListSkillsFilter,
   RecordReplayInput,
   RecordReplayResult,
+  RecordVerifierOutcomeInput,
+  RecordVerifierOutcomeResult,
   SkillCaptureRecord,
   SkillReplayRecord,
   SkillStore,
   SkillStoreRecord,
 } from "./skill-store.js";
-import { SkillConflictError } from "./skill-store.js";
+import {
+  SkillConflictError,
+  VERIFIER_FAILURE_THRESHOLD,
+  VERIFIER_PROMOTION_THRESHOLD,
+} from "./skill-store.js";
 
 const DEMOTION_THRESHOLD = 3;
+const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class InMemorySkillStore implements SkillStore {
   // Explicit per-instance state (declared, not initialised inline).
@@ -78,6 +85,14 @@ export class InMemorySkillStore implements SkillStore {
       replays_succeeded: skill.replays_succeeded,
       replays_failed: skill.replays_failed,
       consecutive_failures: skill.consecutive_failures,
+      // New skills start un-verified. Phase 2 ships them as
+      // pending-review, the verifier flips them after N=2 wins.
+      verifier_succeeded: 0,
+      verifier_failed: 0,
+      consecutive_verifier_failures: 0,
+      last_verified_at: null,
+      next_freshness_due_at: null,
+      freshness_budget_cents: 100,
       created_at: new Date(skill.created_at),
       last_replayed_at: skill.last_replayed_at ? new Date(skill.last_replayed_at) : null,
       superseded_at: skill.superseded_at ? new Date(skill.superseded_at) : null,
@@ -193,6 +208,114 @@ export class InMemorySkillStore implements SkillStore {
       replays_succeeded: skill.replays_succeeded,
       replays_failed: skill.replays_failed,
     };
+  }
+
+  async listVerifierQueue(opts: {
+    limit?: number;
+    now?: Date;
+  }): Promise<SkillStoreRecord[]> {
+    const limit = Math.min(100, Math.max(1, opts.limit ?? 20));
+    const now = opts.now ?? new Date();
+    const pending: SkillStoreRecord[] = [];
+    const due: SkillStoreRecord[] = [];
+    for (const skill of this.skills.values()) {
+      if (skill.deleted_at !== null) continue;
+      if (skill.superseded_at !== null) continue;
+      if (
+        skill.status === "pending-review" &&
+        skill.verifier_succeeded < VERIFIER_PROMOTION_THRESHOLD
+      ) {
+        pending.push(skill);
+        continue;
+      }
+      if (
+        skill.status === "active" &&
+        skill.next_freshness_due_at !== null &&
+        skill.next_freshness_due_at <= now
+      ) {
+        due.push(skill);
+      }
+    }
+    // Pending first (the staging gate has user impact via shorter
+    // time-to-promotion); then due-list ordered by oldest-due-first
+    // so a skill that's overdue by a week doesn't keep losing the
+    // tiebreak to one freshly due.
+    pending.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+    due.sort(
+      (a, b) =>
+        (a.next_freshness_due_at?.getTime() ?? 0) -
+        (b.next_freshness_due_at?.getTime() ?? 0),
+    );
+    return [...pending, ...due].slice(0, limit);
+  }
+
+  async recordVerifierOutcome(
+    input: RecordVerifierOutcomeInput,
+  ): Promise<RecordVerifierOutcomeResult> {
+    const skill = this.skills.get(input.skill_id);
+    if (skill === undefined) {
+      throw new Error(`Cannot record verifier outcome for unknown skill ${input.skill_id}`);
+    }
+    void input.reason;
+    void input.duration_ms;
+    const now = input.now ?? new Date();
+    let transition: RecordVerifierOutcomeResult["transition"] = "none";
+
+    if (input.kind === "success") {
+      skill.verifier_succeeded += 1;
+      skill.consecutive_verifier_failures = 0;
+      skill.last_verified_at = now;
+      if (
+        skill.status === "pending-review" &&
+        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
+      ) {
+        // Promote pending → active. Mirror approveReview's
+        // supersession logic so the (service, status='active')
+        // invariant holds.
+        for (const other of this.skills.values()) {
+          if (
+            other.skill_id !== skill.skill_id &&
+            other.service === skill.service &&
+            other.status === "active"
+          ) {
+            other.status = "superseded";
+            other.superseded_at = now;
+            other.payload.status = "superseded";
+            other.payload.superseded_at = now.toISOString();
+          }
+        }
+        skill.status = "active";
+        skill.payload.status = "active";
+        skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
+        transition = "promoted";
+      } else if (skill.status === "active") {
+        // Freshness-sweep pass — schedule the next sweep.
+        skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
+      }
+    } else {
+      skill.verifier_failed += 1;
+      skill.consecutive_verifier_failures += 1;
+      if (
+        skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
+      ) {
+        if (skill.status === "pending-review") {
+          // Never validated — soft-retire by deleting. The capture
+          // is preserved in SkillCaptureRecord for forensics.
+          skill.deleted_at = now;
+          skill.payload.deleted_at = now.toISOString();
+          transition = "retired";
+        } else if (skill.status === "active") {
+          // Regressed — demote. Same outcome as 3 user-replay
+          // failures, just via the verifier path.
+          skill.status = "demoted";
+          skill.payload.status = "demoted";
+          // Stop re-testing — operator action is needed.
+          skill.next_freshness_due_at = null;
+          transition = "demoted";
+        }
+      }
+    }
+    return { record: skill, transition };
   }
 
   async listReplays(skill_id: string, limit: number): Promise<SkillReplayRecord[]> {

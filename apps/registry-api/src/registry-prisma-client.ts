@@ -4,11 +4,14 @@ export interface RegistryPrismaClient {
   $connect(): Promise<void>;
   $disconnect(): Promise<void>;
   $transaction<T>(fn: (tx: RegistryPrismaTransaction) => Promise<T>): Promise<T>;
+  $queryRawUnsafe<T = unknown>(query: string, ...args: unknown[]): Promise<T>;
   adapterManifestRecord: AdapterManifestDelegate;
   skillRecord: SkillRecordDelegate;
   skillReplayRecord: SkillReplayDelegate;
   skillCaptureRecord: SkillCaptureDelegate;
   extractFailureSnapshot: ExtractFailureSnapshotDelegate;
+  // Closed-loop Phase 5: telemetry for the discovery worker.
+  universalBotFailureRecord: UniversalBotFailureRecordDelegate;
 }
 
 export type RegistryPrismaTransaction = Omit<
@@ -66,6 +69,20 @@ interface SkillCaptureDelegate {
   deleteMany(args: {
     where: Record<string, unknown>;
   }): Promise<{ count: number }>;
+}
+
+interface UniversalBotFailureRecordDelegate {
+  create(args: { data: Record<string, unknown> }): Promise<{
+    id: string;
+    service: string;
+    error_kind: string;
+    reason: string;
+    account_id: string;
+    mcp_version: string;
+    reported_at: Date;
+  }>;
+  count(args: { where: Record<string, unknown> }): Promise<number>;
+  deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
 interface ExtractFailureSnapshotDelegate {
