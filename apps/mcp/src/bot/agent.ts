@@ -1094,6 +1094,19 @@ export function isOauthOnlyChooser(
 //      or "Google's Privacy Policy" out.
 // Returns null when the page has no such affordance — the planner then
 // falls back to form-fill. Exported for unit testing.
+//
+// rc.12 — sanity-cap the element's own visible text. A real sign-in
+// button is short ("Continue with Google" = 19 chars, "Sign in with
+// GitHub" = 19). When the element's visibleText runs longer than the
+// cap below, it is wrapping unrelated content — typically a marketing
+// card with a small provider logo nested inside. The OpenRouter case:
+// an <a> wrapping a model card whose textContent reads "anthropic/
+// claude-opus-4.7Model routing visualization…" and whose descendant
+// tree contains an <img alt="Google"> for a tiny G icon. The iconLabel
+// path then fired against the wrong element. Capping at 60 chars also
+// gates path 2 to truly icon-only elements (no own visible text) so a
+// card wrapper with one stray <img alt> can never match.
+const MAX_OAUTH_BUTTON_TEXT_CHARS = 60;
 export function findOAuthButton(
   inventory: readonly InteractiveElement[],
   provider: OAuthProviderId,
@@ -1113,15 +1126,26 @@ export function findOAuthButton(
       e.type === "submit" ||
       e.type === "button";
     if (!isButtonish) continue;
+    const visibleText = (e.visibleText ?? "").trim();
+    if (visibleText.length > MAX_OAUTH_BUTTON_TEXT_CHARS) continue;
     // 1. An <a> whose href routes through the provider's OAuth endpoint.
     const href = (e.href ?? "").toLowerCase();
     if (href.length > 0 && hrefRe.test(href)) return e;
-    // 2. Icon-only button — named only by a descendant img/svg.
-    if (keywordRe.test((e.iconLabel ?? "").toLowerCase())) return e;
+    // 2. Icon-only button — named only by a descendant img/svg. Require
+    //    the element to be truly icon-only (no own visible text); a
+    //    populated visibleText means the iconLabel signal is redundant
+    //    with path 3 below, and accepting it here lets a card wrapper
+    //    with a stray <img alt="Google"> inside match.
+    if (
+      visibleText.length === 0 &&
+      keywordRe.test((e.iconLabel ?? "").toLowerCase())
+    ) {
+      return e;
+    }
     // 3. Visible text / accessible label naming the provider + an
     //    auth verb. The auth verb requirement rejects nav and policy
     //    links that merely mention the provider.
-    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+    const text = `${visibleText} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();

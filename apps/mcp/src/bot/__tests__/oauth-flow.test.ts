@@ -277,6 +277,48 @@ describe("findOAuthButton", () => {
     });
     expect(findOAuthButton([policy], "google")).toBeNull();
   });
+
+  it("rejects a card-wrapper <a> whose descendants include a tiny provider icon (OpenRouter rc.12)", () => {
+    // OpenRouter's signup page wraps a model-showcase card in an <a>.
+    // Its textContent reads as a model card; a descendant <img alt> for
+    // a small "G" icon caused iconLabelFor() to surface "Google". Both
+    // signals must reject the wrapper — only short button labels qualify.
+    const cardWrapper = mk({
+      tag: "a",
+      visibleText:
+        "anthropic/claude-opus-4.7Model routing visualizationHigher AvailabilityReliable AI models via our distributed infrastruc",
+      iconLabel: "Google",
+      href: "/docs/guides/best-practices/uptime-optimization",
+      selector: "#card",
+    });
+    expect(findOAuthButton([cardWrapper], "google")).toBeNull();
+  });
+
+  it("rejects an icon-only-shaped <button> when the wrapping element also carries unrelated visible text", () => {
+    // A defensive variant of the OpenRouter case — same iconLabel
+    // signal but on a <button> whose own text exceeds the cap. Must
+    // still reject; iconLabel is only a valid signal on truly
+    // icon-only elements.
+    const wrapper = mk({
+      tag: "button",
+      visibleText: "Browse all 200+ models including Claude, GPT-4, Gemini, and Llama variants",
+      iconLabel: "Google",
+      selector: "#wrap",
+    });
+    expect(findOAuthButton([wrapper], "google")).toBeNull();
+  });
+
+  it("still accepts a truly icon-only button with no own visible text (Mistral regression guard)", () => {
+    // The original icon-only case must keep working post-tightening:
+    // visibleText is empty/null, iconLabel carries the provider name.
+    const iconBtn = mk({
+      tag: "button",
+      visibleText: null,
+      iconLabel: "Google",
+      selector: "#icon",
+    });
+    expect(findOAuthButton([iconBtn], "google")?.selector).toBe("#icon");
+  });
 });
 
 // ───────────────────── findFirstOAuthButton ─────────────────────
