@@ -31,6 +31,12 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   /\bsbp_[A-Za-z0-9]{30,}/gi,
   /\bnapi_[a-zA-Z0-9]{30,80}/g,
   /\br8_[a-zA-Z0-9]{30,60}/g,
+  // rc.23 — Baseten (8-12 lowercase . 30+ mixed-case)
+  /\b[a-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/g,
+  // rc.23 — Qdrant Cloud (UUID|opaque-55+)
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9]{30,80}\b/gi,
+  // rc.23 — JWT (Convex, others)
+  /\beyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b/g,
   /\btsm_[A-Za-z0-9]{30,}/g,
   /\bwhsec_[A-Za-z0-9+/=]{20,}/g,
   /\bcfut_[A-Za-z0-9]{40,}/g,

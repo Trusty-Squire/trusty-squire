@@ -1489,6 +1489,29 @@ export function extractApiKeyFromText(text: string): string | null {
     // the rc.13 verification pass showed Replicate burning the full
     // 12-round budget filling-creating tokens nobody could extract.
     /\br8_[a-zA-Z0-9]{30,60}\b/, // Replicate
+    // rc.23 — added after the post-rc.22 registry-snapshot review of
+    // 200 failed signups. Each pattern matches a token shape the
+    // bot's planner had already QUOTED in its `reason` field (i.e.
+    // the credential was visible on the page, just not in a shape
+    // any prior regex recognised). The redact.{ts,mjs} pattern set
+    // stays in lockstep with these.
+    /\bpscale_tkn_[A-Za-z0-9]{30,60}\b/, // PlanetScale Service Token
+    /\bsbp_[a-zA-Z0-9]{30,80}\b/, // Supabase Personal Access Token
+    // Baseten: `<8-12 lowercase>.<30+ mixed-case>`. The dot separator
+    // + alphanumeric body distinguishes it from version strings (too
+    // short on either side) and dotted ULID-like keys (mostly lowercase
+    // body). Verbatim-in-DOM check at the post-verify level rejects
+    // any false positive.
+    /\b[a-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/, // Baseten
+    // Qdrant Cloud: `<UUID>|<55-char opaque>` — a literal pipe between
+    // a key id and the secret body. Unique enough that no false-
+    // positive guard is needed.
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9]{30,80}\b/i, // Qdrant
+    // JWT (eyJ...eyJ...sig) — Convex's API "token" is a JWT. Other
+    // services may emit JWTs as bearer secrets too. Three-segment
+    // base64url with literal dots. Conservative bounds — under 20
+    // chars per segment is almost never a real JWT.
+    /\beyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b/, // JWT
     // OpenRouter, Anthropic, OpenAI — these are the dominant
     // OAuth-completed-then-copy-needed services. Specific-prefix
     // patterns first so a labeled-pattern fallback isn't load-

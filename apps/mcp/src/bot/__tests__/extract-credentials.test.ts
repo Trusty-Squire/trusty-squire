@@ -91,6 +91,44 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(`Token: ${key}`)).toBe(key);
   });
 
+  it("extracts a PlanetScale Service Token by pscale_tkn_ prefix (rc.23)", () => {
+    const key = "pscale_tkn_" + "s0LTv2btBUksKAmuNnlKwxfnidEbHIUiYAlTOEEOZj8";
+    expect(extractApiKeyFromText(`Token=${key}`)).toBe(key);
+  });
+
+  it("extracts a Supabase PAT by sbp_ prefix (rc.23)", () => {
+    const key = "sbp_" + "61c3fa224cb4fbbdb61648c6f6ba1f00047babab";
+    expect(extractApiKeyFromText(`copy ${key} from banner`)).toBe(key);
+  });
+
+  it("extracts a Baseten key by its dot-separated shape (rc.23)", () => {
+    // 8 lowercase alnum + '.' + 32 mixed-case alnum
+    const key = "y38s5kub.YFr4iVn4HVjUSW5cNlpGyL72PVwlDeso";
+    expect(extractApiKeyFromText(`modal shows ${key}`)).toBe(key);
+  });
+
+  it("does not false-positive on version strings (rc.23 Baseten regex safety)", () => {
+    // Short body on the right rules out version strings.
+    expect(extractApiKeyFromText("v1.0.0")).toBeNull();
+    expect(extractApiKeyFromText("2026.05.26")).toBeNull();
+  });
+
+  it("extracts a Qdrant Cloud token by its UUID|opaque shape (rc.23)", () => {
+    const key =
+      "8dd5f3b3-c05b-4ff0-927d-4cc94448c35b|" +
+      "7aRYo27E9AijT5f99SMl3H7LoDbqjETxQKODSwnAqpHM4bgCKNJPLw";
+    expect(extractApiKeyFromText(`API key visible: ${key}`)).toBe(key);
+  });
+
+  it("extracts a JWT (eyJ.eyJ.sig) — Convex token shape (rc.23)", () => {
+    // 3-segment base64url JWT
+    const jwt =
+      "eyJ" + "A".repeat(32) +
+      ".eyJ" + "B".repeat(40) +
+      "." + "C".repeat(43);
+    expect(extractApiKeyFromText(`token=${jwt}`)).toBe(jwt);
+  });
+
   it("rejects the truncated Neon display from visible page text", () => {
     // The exact failure mode that broke harvester pass 3: visible
     // text shows `napi_<48 chars>…` with an ellipsis. isTruncatedCapture

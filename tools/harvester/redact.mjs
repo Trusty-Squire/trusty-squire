@@ -37,8 +37,12 @@ const TOKEN_PATTERNS = [
   /\bsbp_[A-Za-z0-9]{30,}/gi,                       // Supabase
   // DB / vector
   /\bnapi_[a-zA-Z0-9]{30,80}/g,                     // Neon
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\|[A-Za-z0-9]{30,80}\b/gi, // Qdrant Cloud
   // AI / inference
   /\br8_[a-zA-Z0-9]{30,60}/g,                       // Replicate
+  /\b[a-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/g,        // Baseten
+  // JWT (Convex etc)
+  /\beyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b/g,
   // Infra creds we don't want in step trails either
   /\btsm_[A-Za-z0-9]{30,}/g,                        // Trusty Squire machine token
   /\bwhsec_[A-Za-z0-9+/=]{20,}/g,                   // Svix / Resend webhook secret
