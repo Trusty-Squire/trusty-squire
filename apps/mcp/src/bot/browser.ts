@@ -1282,10 +1282,25 @@ export class BrowserController {
     // HTML `disabled` attribute AND `aria-disabled="true"` are
     // honored — the latter covers ARIA-styled buttons (Radix, Headless
     // UI) that visually appear interactive but reject input.
+    //
+    // rc.16 — when the poll times out we now THROW instead of silently
+    // proceeding to a no-op click. PostHog's "Create key" submit stays
+    // aria-disabled until both an org/project access option AND a
+    // scopes preset are set; humanClick previously fired a mouse
+    // click at the disabled button (which does nothing), the page
+    // didn't change, and the post-verify no-progress detector
+    // re-planned generically. The planner kept retrying click on the
+    // same button because nothing in its hint named the specific
+    // root cause ("button is disabled — find what precondition is
+    // missing"). Throwing surfaces the disabled state explicitly to
+    // the planner via the executor's existing catch handler, so the
+    // next round's reason includes "click failed: target is
+    // aria-disabled" and the planner pivots to checking other fields.
     {
       const deadline = Date.now() + 6000;
+      let isDisabled = false;
       while (Date.now() < deadline) {
-        const isDisabled = await locator
+        isDisabled = await locator
           .first()
           .evaluate((el) => {
             if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement) {
@@ -1297,6 +1312,15 @@ export class BrowserController {
           .catch(() => false);
         if (!isDisabled) break;
         await this.sleep(150);
+      }
+      if (isDisabled) {
+        throw new Error(
+          "target is disabled (HTML disabled or aria-disabled=true) after 6s — " +
+            "the click would no-op. A required precondition is unmet: an empty " +
+            "input, an unselected dropdown, an unchecked agreement checkbox, or " +
+            "a missing preset/permission choice. Do NOT retry this click — pick a " +
+            "different action that fills the missing field first.",
+        );
       }
     }
     // Scroll the element into the viewport BEFORE measuring it. A
