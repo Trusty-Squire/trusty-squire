@@ -1332,6 +1332,27 @@ export function detectSsoRestriction(pageText: string): boolean {
   );
 }
 
+// (d) Stuck-on-Google-OAuth-screens (Upstash class). After
+// settleAfterOAuth the URL is STILL on accounts.google.com — the
+// handshake didn't redirect through to the service. Most common
+// shape: Clerk-mediated OAuth (Upstash's auth.upstash.com → Google
+// account chooser) where the chooser uses a clickable card the
+// post-verify planner can't reliably target, and the bot loops
+// trying. Defining trait: hostname accounts.google.com (or
+// accounts.googleusercontent.com) at the post-OAuth gate.
+export function detectStuckOnGoogleOAuth(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return (
+      h === "accounts.google.com" ||
+      h === "accounts.googleusercontent.com" ||
+      h.endsWith(".accounts.google.com")
+    );
+  } catch {
+    return false;
+  }
+}
+
 // Scan the inventory for the first OAuth affordance among `providers`,
 // in order — the auto-prefer decision passes every provider the
 // profile has a session for. Returns the matched provider + element.
@@ -3409,6 +3430,21 @@ export class SignupAgent {
           error:
             `sso_restricted: ${task.service} requires SSO/SAML for token creation. The bot ` +
             `cannot complete an SSO handshake. Finish via your organization's SSO portal.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+      // (d) Stuck on Google OAuth screens (Upstash class). Bot
+      // signed in via Google but the OAuth flow didn't redirect off
+      // accounts.google.com — usually a Clerk-mediated chooser the
+      // post-verify planner can't navigate.
+      if (detectStuckOnGoogleOAuth(gateState.url)) {
+        return {
+          success: false,
+          error:
+            `oauth_stuck_on_chooser: ${task.service}'s Google OAuth flow did not redirect off ` +
+            `accounts.google.com (${pathOf(gateState.url)}) — likely a Clerk/Auth0 account-chooser ` +
+            `screen the bot's post-OAuth loop can't navigate. Finish the signup manually.`,
           steps,
           ...this.resultTail(),
         };

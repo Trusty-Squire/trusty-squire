@@ -15,6 +15,7 @@ import {
   detectEmailOtpGate,
   detectManualLoginFallback,
   detectSsoRestriction,
+  detectStuckOnGoogleOAuth,
   findOAuthButton,
   findFirstOAuthButton,
   isLoginLoopState,
@@ -520,6 +521,31 @@ describe("detectSsoRestriction (rc.24)", () => {
     expect(
       detectSsoRestriction("You can optionally enable SSO from the security tab."),
     ).toBe(false);
+  });
+});
+
+describe("detectStuckOnGoogleOAuth (rc.24)", () => {
+  it("fires on Google account chooser URL — the Upstash case", () => {
+    expect(
+      detectStuckOnGoogleOAuth(
+        "https://accounts.google.com/v3/signin/accountchooser?access_type=offline&client_id=…",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on any accounts.google.com page", () => {
+    expect(detectStuckOnGoogleOAuth("https://accounts.google.com/")).toBe(true);
+    expect(
+      detectStuckOnGoogleOAuth("https://accounts.google.com/signin/oauth/consent?x=1"),
+    ).toBe(true);
+  });
+
+  it("does not fire on the service's own domain", () => {
+    expect(detectStuckOnGoogleOAuth("https://console.upstash.com/login")).toBe(false);
+  });
+
+  it("does not fire on a malformed URL", () => {
+    expect(detectStuckOnGoogleOAuth("not-a-url")).toBe(false);
   });
 });
 
