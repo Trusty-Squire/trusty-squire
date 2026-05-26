@@ -20,6 +20,7 @@ import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeJsonAtomic } from "./state.mjs";
+import { redactCredentials, redactSteps } from "./redact.mjs";
 
 const HALTS_DIR = join(homedir(), ".trusty-squire", "halts");
 
@@ -86,7 +87,7 @@ export function buildFailureReport(opts) {
     signup_url: service.signup_url,
     mcp_version_resolved: mcpVersionResolved,
     bot_status: final.status ?? "unknown",
-    error_message: final.error ?? null,
+    error_message: final.error !== undefined && final.error !== null ? redactCredentials(final.error) : null,
     classification,
     // Phase 2 — separate from `classification` (the harvester outcome).
     // failure_category is the subagent's decision input: one of
@@ -96,9 +97,9 @@ export function buildFailureReport(opts) {
     failure_category: opts.failureCategory ?? null,
     attempt_number: attemptNumber,
     consecutive_failures: consecutiveFailures,
-    step_trail: steps,
+    step_trail: redactSteps(steps),
     debug_artifacts: scanDebugArtifacts(debugDir, runStartedAt),
-    captured_planner_output: extractPlannerOutput(steps),
+    captured_planner_output: extractPlannerOutput(redactSteps(steps)),
     github_issue_url:
       issueNumber !== null && issueNumber !== undefined
         ? `https://github.com/${repo}/issues/${issueNumber}`

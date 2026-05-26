@@ -26,6 +26,7 @@ import {
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
+import { redactCredentials } from "./redact.js";
 import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
@@ -3581,7 +3582,13 @@ ${formatInventory(input.inventory)}`,
           "and never the whole line.";
         continue;
       }
-      args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${nextStep.reason}`);
+      // rc.22 — redact tokens before pushing to the step trail.
+      // The planner's reason field sometimes quotes the actual API
+      // value it just observed ("The full API token 'sbp_xxx' is
+      // visible…"); the harvester then posts step trails to a public
+      // GitHub issue, leaking the credential. Redactor patterns mirror
+      // tools/harvester/redact.mjs — defense in depth.
+      args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${redactCredentials(nextStep.reason)}`);
 
       // Dump this round's real page state + inventory in the E1
       // eval-corpus format so onboarding adapters can be iterated

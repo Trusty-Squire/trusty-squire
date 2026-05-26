@@ -31,6 +31,7 @@ import {
   resolveMcpVersion,
 } from "./failure-report.mjs";
 import { classifyFailure } from "./classify.mjs";
+import { redactCredentials, redactSteps } from "./redact.mjs";
 import { reportTick, REPORT_KINDS, maybeReportHaltedTick as maybeReportHaltedTickImpl } from "./telegram-report.mjs";
 
 async function maybeReportHaltedTick() {
@@ -512,14 +513,23 @@ function summarizeAttempt(entry, final, steps, attemptNumber, classification) {
   // Markdown block appended to the issue body + posted as a comment.
   // Includes the full step trail (truncated to keep the comment under
   // GitHub's 65k limit — 200 step lines is plenty in practice).
-  const trail = steps.slice(0, 200).map((s, i) => `${i + 1}. ${s}`).join("\n");
-  const moreSuffix = steps.length > 200 ? `\n  …(${steps.length - 200} more steps elided)` : "";
+  //
+  // SECURITY (2026-05-26): every piece of text in this comment is run
+  // through redactCredentials() before formatting. The planner's
+  // post-verify `reason` field sometimes quotes the actual API token
+  // it just observed ("The full API token 'sbp_xxx' is visible…"),
+  // and the agent.ts step trail prints the reason verbatim. Without
+  // redaction those secrets land in the public issue. Redactor lives
+  // in redact.mjs; new service-prefix patterns get added there.
+  const redactedSteps = redactSteps(steps);
+  const trail = redactedSteps.slice(0, 200).map((s, i) => `${i + 1}. ${s}`).join("\n");
+  const moreSuffix = redactedSteps.length > 200 ? `\n  …(${redactedSteps.length - 200} more steps elided)` : "";
   const credSummary = final.credentials
     ? `Extracted credentials: ${Object.keys(final.credentials).join(", ")}`
     : final.run_id
       ? `run_id=${final.run_id}`
       : final.error
-        ? `Error: ${final.error}`
+        ? `Error: ${redactCredentials(final.error)}`
         : "";
   return [
     `### Attempt ${attemptNumber} — ${new Date().toISOString()}`,
@@ -605,12 +615,13 @@ async function runOnce(pick) {
   // the circuit breaker advances on this tick.
   const owner = process.env.GH_REPO ?? "Trusty-Squire/trusty-squire";
   const issueUrl = `https://github.com/${owner}/issues/${issueNumber}`;
-  const errorOrSummary =
+  const errorOrSummary = redactCredentials(
     classification === "replay-ok"
       ? final.api_key !== undefined
         ? "API key extracted + stored in vault"
         : "signup completed"
-      : (final.error ?? final.message ?? "(no detail)");
+      : (final.error ?? final.message ?? "(no detail)"),
+  );
   await reportTick({
     kind: REPORT_KINDS.SIGNUP,
     service: entry.name,
