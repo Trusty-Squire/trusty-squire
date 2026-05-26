@@ -21,6 +21,7 @@ import {
   PrismaAliasStore,
   PrismaEmailStore,
   SesHandler,
+  ResendHandler,
   MailgunHandler,
   type AliasStore,
   type EmailStore,
@@ -103,6 +104,7 @@ export interface ApiDeps {
   inbox: InboxService;
   sesHandler: SesHandler;
   mailgunHandler: MailgunHandler;
+  resendHandler: ResendHandler;
   machineTokenStore: MachineTokenStore;
   llmUsageTracker: LLMUsageTracker;
   captchaEventStore: CaptchaEventStore;
@@ -287,6 +289,15 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     emailStore,
   });
 
+  // rc.19 — Resend inbound. Same alias-resolution + dedupe contract
+  // as SES/Mailgun handlers; payloads come from /v1/webhooks/resend-
+  // inbound which validates the Svix signature first.
+  const resendHandler = new ResendHandler({
+    aliasStore,
+    emailStore,
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
+  });
+
   const usedNonces = new Set<string>();
   const revokedMandates = new Set<string>();
   const validatorDeps: MandateValidatorDeps = {
@@ -355,6 +366,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     inbox,
     sesHandler,
     mailgunHandler,
+    resendHandler,
     machineTokenStore,
     llmUsageTracker,
     captchaEventStore,

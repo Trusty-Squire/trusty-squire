@@ -37,6 +37,13 @@ export {
 } from "./mailgun-handler.js";
 
 export {
+  ResendHandler,
+  type ResendHandlerDeps,
+  type ResendInboundPayload,
+  type ResendIngestOutcome,
+} from "./resend-handler.js";
+
+export {
   extractLinks,
   extractOtp,
   matchString,
