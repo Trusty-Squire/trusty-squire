@@ -1196,6 +1196,53 @@ export function findOAuthButton(
   return null;
 }
 
+// rc.20 — true when the post-OAuth landing page LOOKS like the same
+// login/auth UI the bot just OAuth'd from AND still surfaces an OAuth
+// affordance for the same provider. Services like Groq complete the
+// Google handshake server-side but bounce the user back to a
+// /authenticate page that requires one more click of the provider
+// button to actually finalize the session. Returns the OAuth button
+// to click (so the caller can pass it to startOAuth) or null when the
+// page is past that gate.
+//
+// Login-shaped path patterns: /login, /signin, /sign-in, /signup,
+// /sign-up, /auth, /authenticate, /authorize. Excludes /callback
+// (genuinely transient) and dashboard-shaped paths.
+export function isLoginLoopState(
+  url: string,
+  inventory: readonly InteractiveElement[],
+  provider: OAuthProviderId,
+): InteractiveElement | null {
+  let path: string;
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const loginPath =
+    /\/(?:login|signin|sign-in|signup|sign-up|auth|authenticate|authorize)(?:\/|$)/.test(
+      path,
+    );
+  if (!loginPath) return null;
+  // Defense in depth: if the page also shows authenticated-state
+  // markers (Sign out / Dashboard / billing widget) it isn't really
+  // a login loop — the OAuth-buttons are decoration. detectAlreadySignedIn
+  // returns false when ANY credential input is visible, but here we're
+  // checking the inverse — markers despite the login path.
+  if (detectAlreadySignedIn({ inventory, url })) return null;
+  return findOAuthButton(inventory, provider);
+}
+
+// Path-only formatter for step trail entries. Same parse semantics as
+// isLoginLoopState — best-effort, returns "(unparseable)" on failure.
+export function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return "(unparseable)";
+  }
+}
+
 // Scan the inventory for the first OAuth affordance among `providers`,
 // in order — the auto-prefer decision passes every provider the
 // profile has a session for. Returns the matched provider + element.
@@ -3132,6 +3179,67 @@ export class SignupAgent {
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
     );
 
+    // rc.20 — login-loop detection. Services like Groq complete the
+    // Google OAuth handshake server-side but redirect back to a
+    // login-looking page (/authenticate) where the user has to click
+    // "Continue with Google" ONE MORE TIME to actually finalize the
+    // session. The post-verify planner sees the same OAuth buttons it
+    // saw on the original signup page, picks `click` on the provider
+    // affordance, and the click triggers a popup-based re-OAuth that
+    // the planner-driven post-verify loop doesn't follow — so each
+    // iteration sees the same page text and the bot burns the round
+    // budget.
+    //
+    // Detect: post-OAuth URL path matches a known login-shaped pattern
+    // (/login, /signin, /authenticate, ...) AND the inventory still
+    // carries an OAuth affordance for the SAME provider we just used.
+    // Recovery: re-invoke runOAuthFlow ONCE with the new selector —
+    // the second handshake completes the session and lands on the
+    // dashboard. Bounded to one retry so a service that genuinely
+    // never finalizes can't trap us in a loop.
+    const postOAuthState = await this.browser.getState();
+    const postOAuthInv = await this.buildInventory(steps, [provider.id]);
+    const loopBtn = isLoginLoopState(postOAuthState.url, postOAuthInv, provider.id);
+    if (loopBtn !== null) {
+      steps.push(
+        `Post-OAuth: landed on a login-like page (${pathOf(postOAuthState.url)}) ` +
+          `with a ${provider.label} sign-in button still visible — service requires a ` +
+          `second click to finalize the session. Re-triggering OAuth once.`,
+      );
+      try {
+        await this.browser.startOAuth(loopBtn.selector);
+        await this.browser.wait(3);
+        await saveDebugSnapshot(this.browser, "oauth-loop-retry");
+        await this.browser.settleAfterOAuth();
+        await this.browser.wait(2);
+        steps.push(
+          `Post-OAuth: re-OAuth completed (url=${pathOf(this.browser.currentUrl())}).`,
+        );
+      } catch (err) {
+        steps.push(
+          `Post-OAuth: re-OAuth retry threw (${err instanceof Error ? err.message : String(err)}) — ` +
+            `continuing to post-verify loop anyway.`,
+        );
+      }
+      // After the retry, if we're STILL on a login-like page with the
+      // same provider button visible, the service has trapped us. Abort
+      // with a specific error rather than re-running the loop.
+      const retryState = await this.browser.getState();
+      const retryInv = await this.browser.extractInteractiveElements();
+      if (isLoginLoopState(retryState.url, retryInv, provider.id) !== null) {
+        return {
+          success: false,
+          error:
+            `oauth_loop_detected: signed in via ${provider.label} twice but ${task.service} ` +
+            `keeps redirecting to a login page (${pathOf(retryState.url)}). The service may ` +
+            `require manual completion of an onboarding step before its OAuth session ` +
+            `finalizes — finish the signup manually.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+    }
+
     let credentials = await this.extractCredentials();
     if (credentials.api_key === undefined) {
       credentials = await this.postVerifyLoop({
@@ -3598,6 +3706,58 @@ ${formatInventory(input.inventory)}`,
             defaultedSelects.length > 0
               ? `\n\nVisible DEFAULTED dropdowns on this page (value="" — React form-state likely treats these as UNTOUCHED, which silently fails submit):\n${defaultedSelects.join("\n")}\n\nIssue {"kind":"select", "option_text":"…"} to commit a choice. Even if the default visible label ("No workspace", "None") is what you want, you MUST emit the select step to register it with the form's state.`
               : "";
+          // rc.20 — also enumerate custom combobox triggers (Cohere's
+          // role picker, Fireworks's survey, similar). These render as
+          // <button role="combobox"> or as <button> with placeholder-
+          // shaped text ("Select your role", "Choose a country") and
+          // gate a submit-disabled state that the planner can't see.
+          // Surface them so the planner emits `select` instead of
+          // re-clicking the dead submit. Tightly scoped: must be a
+          // button-shaped element with role=combobox OR placeholder-
+          // shaped visible text, and NOT touched this run.
+          const SELECT_PROMPT_TEXT =
+            /^(?:select|choose|pick)\b|^select an?\b|\bselect\.{3}|\bchoose\.{3}/i;
+          const customComboboxes = inventory
+            .filter(
+              (e) =>
+                (e.role === "combobox" ||
+                  (e.tag === "button" &&
+                    SELECT_PROMPT_TEXT.test((e.visibleText ?? "").trim()))) &&
+                e.interactedThisRun !== true,
+            )
+            .slice(0, 5)
+            .map((e) => {
+              const label =
+                e.labelText ?? e.ariaLabel ?? e.name ?? e.visibleText ?? "(no label)";
+              return `  - ${JSON.stringify(label)} → selector=${e.selector}`;
+            });
+          const customComboboxHint =
+            customComboboxes.length > 0
+              ? `\n\nVisible custom comboboxes / placeholder-state pickers that you haven't touched yet:\n${customComboboxes.join("\n")}\n\nIssue {"kind":"select", "option_text":"…"} with a sensible option_text — these are commonly the gate on a submit-disabled state.`
+              : "";
+          // rc.20 — and enumerate unchecked agreement checkboxes.
+          // Mistral's TOS, GitHub-app sign-up, many onboarding forms
+          // gate submit on a checkbox that isn't yet ticked.
+          const uncheckedBoxes = inventory
+            .filter(
+              (e) =>
+                e.tag === "input" &&
+                e.type === "checkbox" &&
+                // We can't read the actual `checked` from the inventory
+                // shape, but interactedThisRun is set after a successful
+                // `check` step. Show checkboxes the bot hasn't touched.
+                e.interactedThisRun !== true,
+            )
+            .slice(0, 5)
+            .map((e) => {
+              const label =
+                e.labelText ?? e.ariaLabel ?? e.name ?? e.placeholder ?? "(no label)";
+              return `  - ${JSON.stringify(label)} → selector=${e.selector}`;
+            });
+          const uncheckedBoxHint =
+            uncheckedBoxes.length > 0
+              ? `\n\nVisible checkboxes you haven't ticked yet (often a TOS / agreement gate):\n${uncheckedBoxes.join("\n")}\n\nIssue {"kind":"check"} on any that look like agreements / required confirmations.`
+              : "";
           args.steps.push(
             sameSelector
               ? `Post-verify: no-progress detected — same ${nextStep.kind} on same selector, inventory unchanged. Re-planning instead of re-running.`
@@ -3612,7 +3772,9 @@ ${formatInventory(input.inventory)}`,
             `any unticked checkbox, {"kind":"select"} on any unselected dropdown, or ` +
             `{"kind":"done"} if there is genuinely nothing to do.` +
             emptyInputHint +
-            defaultedSelectHint;
+            defaultedSelectHint +
+            customComboboxHint +
+            uncheckedBoxHint;
           prevSignature = signature;
           prevInventorySize = inventory.length;
           continue;

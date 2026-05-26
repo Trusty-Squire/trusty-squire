@@ -14,6 +14,7 @@ import {
   SignupAgent,
   findOAuthButton,
   findFirstOAuthButton,
+  isLoginLoopState,
   parsePostVerifyStep,
   type AgentInbox,
 } from "../agent.js";
@@ -353,6 +354,73 @@ describe("findFirstOAuthButton", () => {
   it("returns null when no candidate's affordance is on the page", () => {
     const email = mk({ tag: "input", type: "email", selector: "#email" });
     expect(findFirstOAuthButton([email], ["google", "github"])).toBeNull();
+  });
+});
+
+// ───────────────────── isLoginLoopState (rc.20) ─────────────────────
+
+describe("isLoginLoopState", () => {
+  const googleBtn = mk({
+    tag: "button",
+    visibleText: "Continue with Google",
+    selector: "#g",
+  });
+
+  it("detects Groq-style /authenticate page with a Google button", () => {
+    const hit = isLoginLoopState(
+      "https://console.groq.com/authenticate",
+      [googleBtn],
+      "google",
+    );
+    expect(hit?.selector).toBe("#g");
+  });
+
+  it("detects /login + Google button as a loop", () => {
+    expect(
+      isLoginLoopState("https://service.com/login?next=/dashboard", [googleBtn], "google"),
+    ).not.toBeNull();
+  });
+
+  it("detects /signin path too", () => {
+    expect(
+      isLoginLoopState("https://service.com/signin", [googleBtn], "google"),
+    ).not.toBeNull();
+  });
+
+  it("returns null when the path is a dashboard route", () => {
+    expect(
+      isLoginLoopState("https://service.com/dashboard/api-keys", [googleBtn], "google"),
+    ).toBeNull();
+  });
+
+  it("returns null when the path is /callback (genuinely transient)", () => {
+    expect(
+      isLoginLoopState("https://service.com/oauth/callback", [googleBtn], "google"),
+    ).toBeNull();
+  });
+
+  it("returns null when the page has authenticated-state markers (Sign out)", () => {
+    // Even if the URL is /authenticate, a visible Sign-out link means the
+    // user IS signed in — detectAlreadySignedIn flips this case.
+    const signOut = mk({ tag: "a", visibleText: "Sign out", selector: "#signout" });
+    expect(
+      isLoginLoopState("https://service.com/authenticate", [signOut, googleBtn], "google"),
+    ).toBeNull();
+  });
+
+  it("returns null when the provider button is for a different provider", () => {
+    const githubBtn = mk({
+      tag: "button",
+      visibleText: "Continue with GitHub",
+      selector: "#gh",
+    });
+    expect(
+      isLoginLoopState("https://service.com/authenticate", [githubBtn], "google"),
+    ).toBeNull();
+  });
+
+  it("returns null on a malformed URL", () => {
+    expect(isLoginLoopState("not-a-url", [googleBtn], "google")).toBeNull();
   });
 });
 
