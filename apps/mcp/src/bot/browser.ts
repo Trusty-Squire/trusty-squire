@@ -1148,16 +1148,28 @@ export class BrowserController {
   //
   // Tries option-selector patterns in priority order — each tier
   // targets one combobox-library convention. The text-based final
-  // tier catches libraries that ship NO ARIA roles at all (Sentry's
-  // permissions picker is the canonical case: it uses `<div>`s with
-  // plain text for options and pure JS click handlers).
+  // tier catches libraries that ship NO ARIA roles at all.
   //
   //   1. [role=option]            — Radix, Headless UI, React Aria, cmdk
   //   2. [role=menuitem]          — ARIA menu pattern (libs that model
   //                                 a dropdown as a menu)
-  //   3. [role=listbox] li        — listbox container without role
+  //   3. [role=menuitemradio]     — react-select's per-row permission
+  //                                 picker shape (rc.15 — Sentry's
+  //                                 token-create grid). Identical shape
+  //                                 to menuitem for selection purposes,
+  //                                 distinct role string. Without this
+  //                                 tier Sentry's "Team permission =
+  //                                 Admin" never resolves and the loop
+  //                                 burns the post-verify budget.
+  //   4. [id^="react-select-"]    — defense-in-depth for any react-
+  //                                 select instance that drops the
+  //                                 role attribute. The id prefix is
+  //                                 baked into the library and is the
+  //                                 most stable signal short of the
+  //                                 role.
+  //   5. [role=listbox] li        — listbox container without role
   //                                 attribute on its children
-  //   4. text-based (matcher only) — after the trigger click, any newly-
+  //   6. text-based (matcher only) — after the trigger click, any newly-
   //                                 visible element whose text matches
   //                                 the planner-supplied label is
   //                                 almost certainly the option. Only
@@ -1175,6 +1187,8 @@ export class BrowserController {
     const patternSelectors: readonly string[] = [
       '[role="option"]:visible',
       '[role="menuitem"]:visible',
+      '[role="menuitemradio"]:visible',
+      '[id^="react-select-"][role*="menu"]:visible',
       '[role="listbox"]:visible li:visible',
     ];
     const triedDescriptors: string[] = [];
