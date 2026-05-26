@@ -105,24 +105,6 @@
     (2026-05-20, trustysquire.com SES) unblocked. This is the first
     post-revival test for Render.
 
-- slug: railway
-  name: Railway
-  signup_url: https://railway.com/login
-  oauth_provider: github
-  scope_hint: null
-  status: pending
-  notes: |
-    Railway's /login shows "Continue with Google" prominently at the
-    top AND "Log in using GitHub" in the footer. Operator confirmed
-    (2026-05-24) the actual working signup is via GitHub — Google
-    OAuth leads to dead-ends for new accounts. Configured here as
-    github so the OAuth-first scan keeps the GitHub button (footer
-    `<button type=button>Log in using GitHub`) in the ranked inventory
-    instead of dropping it as a -32 non-candidate OAuth button.
-    Originally validated end-to-end with lunchboxfortwo's GitHub
-    session; same identity is what the harvester chrome profile
-    carries via `mcp connect --provider=github`.
-
 - slug: posthog
   name: PostHog
   signup_url: https://app.posthog.com/signup
