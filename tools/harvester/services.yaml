@@ -317,10 +317,14 @@
   signup_url: https://app.koyeb.com/auth/signup
   oauth_provider: github
   scope_hint: null
-  status: pending
+  status: skip
   notes: |
-    Serverless container hosting. GitHub + Google OAuth. Free tier
-    exists; API token in account settings.
+    Serverless container hosting. GitHub OAuth completes, but a
+    credit-card verification wall now gates all API access (planner
+    consistently returns done with "Pro plan payment required").
+    Classified onboarding_blocked by the bot in rc.39 — keeping
+    skip until Koyeb restores a free tier that issues tokens
+    without billing setup.
 
 - slug: northflank
   name: Northflank
@@ -393,10 +397,15 @@
   signup_url: https://app.turso.tech/auth/signin
   oauth_provider: github
   scope_hint: null
-  status: pending
+  status: skip
   notes: |
-    libSQL (SQLite) edge. GitHub + Google OAuth. Free tier; API
-    token in account settings.
+    libSQL (SQLite) edge. GitHub OAuth handshake completes (the
+    rc.39 minimal-label matcher finds the bare "GitHub" button)
+    but the SSO callback at /login/sso-callback runs a Cloudflare
+    challenge that never clears for our Chromium fingerprint — 0
+    interactive elements for the full post-verify budget.
+    Classified anti_bot_blocked by the bot. Manual signup is the
+    realistic call.
 
 - slug: xata
   name: Xata
