@@ -1088,6 +1088,54 @@ export function detectAlreadySignedIn(args: {
   return false;
 }
 
+// rc.39 — companion to detectAlreadySignedIn for the form-fill stage.
+// The URL-based dashboard check above conservatively excludes /sign-up,
+// /signup, /register paths — but services like PlanetScale and Turso
+// serve a logged-in create-database / billing-wall form at /sign-up
+// when the user has an active session. The form-fill planner reliably
+// describes what it sees: "create the database on this PS-5 plan",
+// "Add credit card", "database name". Match those phrases in the
+// planner's notes and action reasons to pivot to post-verify instead
+// of fooling the form-fill loop into clicking a "create database"
+// button it mistakes for a signup submit.
+//
+// Patterns are intentionally conservative — they must mention an
+// authenticated-state product/billing noun, not just any verb. A
+// regular signup form's planner output ("name field", "submit
+// button") shouldn't match.
+export function detectFormFillIsDashboard(plan: {
+  readonly notes?: string;
+  readonly actions: readonly { readonly reason: string }[];
+}): boolean {
+  const haystack = [
+    plan.notes ?? "",
+    ...plan.actions.map((a) => a.reason ?? ""),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  // Billing / payment wall — the planner sees a credit-card / billing
+  // form, which is never a signup form.
+  const BILLING_WALL =
+    /\b(?:add (?:a )?(?:credit card|payment method)|enter (?:your )?(?:credit card|payment)|billing (?:information|details)|payment information required)\b/;
+  if (BILLING_WALL.test(haystack)) return true;
+
+  // Product-creation form — the planner describes creating a
+  // database / cluster / instance / deployment / app / project /
+  // workspace / service, which is post-signup territory.
+  const PRODUCT_CREATION =
+    /\b(?:create(?:s|d)?|creating|provision(?:s|ed|ing)?)\s+(?:the\s+|a\s+|new\s+)?(?:database|cluster|instance|deployment|app|service|project|workspace|index|environment|tenant)\b/;
+  if (PRODUCT_CREATION.test(haystack)) return true;
+
+  // Explicit "not a signup" / "logged in" / "dashboard" statements
+  // from the planner.
+  const EXPLICIT =
+    /\b(?:not\s+(?:a\s+)?(?:sign-?up|signup)|already\s+(?:signed[\s-]?in|logged[\s-]?in|authenticated)|logged[\s-]?in (?:dashboard|user))\b/;
+  if (EXPLICIT.test(haystack)) return true;
+
+  return false;
+}
+
 // True when the page has no fillable text input AND no button that
 // reads as an email-signup option — a genuinely OAuth/SSO-only
 // service with no form to automate (F3 Issue 4).
@@ -2105,6 +2153,22 @@ export class SignupAgent {
         `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
           (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
       );
+
+      // rc.39 — PlanetScale-class detection. The form-fill planner
+      // sometimes lands on a logged-in product page (PlanetScale's
+      // /sign-up redirects authenticated users to a create-database
+      // form; similar for Turso, Cockroach, etc.). detectAlreadySignedIn
+      // missed the URL signal because the path is /sign-up. But the
+      // planner's notes / action reasons describe the page accurately:
+      // "create the database on this PS-5 plan", "Add credit card",
+      // "database name field". Pivot to post-verify navigation rather
+      // than blindly filling the create-product form.
+      if (detectFormFillIsDashboard(plan)) {
+        steps.push(
+          "Form-fill planner described a logged-in product/billing page (not a signup form) — pivoting to post-verify navigation",
+        );
+        return { kind: "already_oauth" };
+      }
 
       // F14 — stuck-detection: if the plan picks ONLY click selectors
       // we already tried in the previous round without page progress,
@@ -3895,6 +3959,15 @@ ${formatInventory(input.inventory)}`,
     // and inject a forced "no-progress" hint on the second repeat.
     let prevSignature: string | null = null;
     let prevInventorySize = -1;
+    // rc.39 — navigate-loop tracker. Perplexity / Koyeb / Porter all
+    // had post-verify loops where the planner emitted `navigate`
+    // 5-6 rounds in a row and the URL never changed — the service
+    // silently redirected each attempt back to the same onboarding
+    // page. Track the URL state observed BEFORE each navigate; if
+    // two consecutive navigates fire from the same URL, the previous
+    // navigate produced no progress. Inject a hint forcing a CLICK
+    // on something visible in the current inventory.
+    let prevNavigateFromUrl: string | null = null;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
@@ -4011,6 +4084,50 @@ ${formatInventory(input.inventory)}`,
             // best-effort — telemetry upload is diagnostic, never load-bearing
           }
         })();
+      }
+
+      // rc.39 — navigate-loop detector. Perplexity/Koyeb/Porter spun
+      // 5+ rounds of `navigate` because each navigate landed back at
+      // the same URL — the service redirected past the requested URL.
+      // If THIS plan is also navigate and the URL we're observing now
+      // is the same one we navigated FROM last round, the previous
+      // navigate produced no progress. Inject a hint forcing a click.
+      if (nextStep.kind === "navigate" && prevNavigateFromUrl === state.url) {
+        const candidateClicks = inventory
+          .filter(
+            (e) =>
+              (e.tag === "button" ||
+                e.tag === "a" ||
+                e.role === "button" ||
+                e.role === "link") &&
+              e.interactedThisRun !== true,
+          )
+          .slice(0, 8)
+          .map((e) => {
+            const label =
+              e.visibleText ?? e.ariaLabel ?? e.labelText ?? "(no label)";
+            return `  - ${JSON.stringify(label)} → selector=${e.selector}`;
+          });
+        args.steps.push(
+          `Post-verify: navigate did not advance the page (URL still ${state.url}) — forcing a click on an inventory element.`,
+        );
+        hint =
+          `Your last 'navigate' to a guessed URL did NOT advance the page — the service ` +
+          `redirected you back to ${state.url}. STOP navigating and CLICK an element ` +
+          `from the current inventory below. The page is gating you behind an onboarding ` +
+          `CTA (e.g. "Get started", "Continue", "Activate") or a setup step that must be ` +
+          `clicked before the API console becomes reachable.` +
+          (candidateClicks.length > 0
+            ? `\n\nClickable elements you haven't tried:\n${candidateClicks.join("\n")}`
+            : "");
+        // Don't execute this navigate — re-plan with the hint.
+        prevNavigateFromUrl = null;
+        continue;
+      }
+      if (nextStep.kind === "navigate") {
+        prevNavigateFromUrl = state.url;
+      } else {
+        prevNavigateFromUrl = null;
       }
 
       // Stuck-loop detector. Re-planning steps (done/extract/login/
@@ -4584,6 +4701,14 @@ Strategy:
 - To reach API keys, prefer a {"kind":"navigate"} straight to the
   service's API-keys settings URL — note these usually live under the
   user/ACCOUNT settings, not a project or workspace's settings.
+- **EXCEPT** when the page has a very small inventory (5 or fewer elements)
+  and one of them is an onboarding CTA — patterns like "Get started",
+  "Continue", "Activate", "Enable API", "Start free trial", "Set up".
+  These are gating CTAs that unlock the API console; CLICKING them
+  is required, navigate will just redirect you back. If you've already
+  emitted a navigate once on this URL and the URL did not change on the
+  next round, that is the signal — the service is gating the route. Click
+  the visible CTA instead.
 - Otherwise click a dashboard menu link like "API Keys" / "Tokens" /
   "Developer" / "Settings" — using its inventory selector.
 - If there's an onboarding modal or a "Skip" link blocking, dismiss it.
