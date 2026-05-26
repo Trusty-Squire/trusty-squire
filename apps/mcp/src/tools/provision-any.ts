@@ -1379,7 +1379,8 @@ export async function runAutoPromote(args: {
     if (resp.status === 201) {
       stepsSink.push(
         `[auto-promote] published ${serviceSlug} ${result.skill.version} ` +
-          `(skill_id=${result.skill.skill_id}). Next ${serviceSlug} signup will hit the skill.`,
+          `(skill_id=${result.skill.skill_id}, status=pending-review). ` +
+          `Verifier worker will validate and promote to active; next ${serviceSlug} signup hits the skill once it does.`,
       );
       return;
     }

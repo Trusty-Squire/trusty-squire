@@ -504,7 +504,7 @@ async function cmdPromote(
   const parsed = parseFlags(argv);
   rejectUnknownFlags(
     parsed,
-    new Set(["run-id", "corpus-dir", "dry-run", "json"]),
+    new Set(["run-id", "corpus-dir", "dry-run", "json", "skip-verifier"]),
   );
   requirePositional(parsed, 1, "service");
   const service = parsed.positional[0]!;
@@ -523,10 +523,19 @@ async function cmdPromote(
   const dir = path.join(corpusRoot, service);
   const dryRun = parsed.booleans.has("dry-run");
   const json = parsed.booleans.has("json");
+  // --skip-verifier — operator vouches the skill is already validated
+  // and lands it directly as active. Default is pending-review (the
+  // two-tier registry's staging slot, gated by the verifier worker).
+  const skipVerifier = parsed.booleans.has("skip-verifier");
 
   // Stage 1 — synthesize. Capture-chain verification, step translation,
   // credential-spec inference, schema validation all happen here.
-  const result = promoteToSkill({ dir, service, run_id: runId });
+  const result = promoteToSkill({
+    dir,
+    service,
+    run_id: runId,
+    ...(skipVerifier ? { status: "active" as const } : {}),
+  });
   if (result.kind !== "ok") {
     const payload = {
       ok: false,
@@ -1157,8 +1166,10 @@ function printHelp(out: (line: string) => void): void {
   out(`Usage: npx @trusty-squire/mcp skill <subcommand> [args]
 
 Subcommands:
-  promote     <service> --run-id=<id> [--corpus-dir=<path>] [--dry-run] [--json]
+  promote     <service> --run-id=<id> [--corpus-dir=<path>] [--dry-run] [--json] [--skip-verifier]
               Synthesize a skill from corpus/onboarding/<service>/<run_id>/* and publish.
+              Lands as pending-review (verifier-worker gated) by default;
+              --skip-verifier publishes directly as active (operator vouching).
 
   list        [--service=X] [--status=S] [--limit=N] [--json]
               List skills with optional filters.

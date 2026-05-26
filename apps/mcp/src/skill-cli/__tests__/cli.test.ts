@@ -704,6 +704,91 @@ describe("promote", () => {
     expect(out.stdout.join("\n")).toMatch(/published/);
   });
 
+  it("publishes as pending-review by default (verifier-worker gate)", async () => {
+    // Phase 2 of the two-tier registry: skill:promote without an
+    // operator override lands in pending-review so the verifier
+    // worker has to validate before end-users see it.
+    const corpusRoot = mkdtempSync(join(tmpdir(), "promote-cli-pending-"));
+    const service = uniquePromoteService();
+    const { runId } = writeRailwayCorpus(corpusRoot, service);
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    let postedStatus: string | undefined;
+    const out: CapturedOutput = { stdout: [], stderr: [] };
+    const code = await runSkillCli(
+      ["promote", service, `--run-id=${runId}`, `--corpus-dir=${corpusRoot}`],
+      {
+        buildClient: () =>
+          new RegistryHttpClient({
+            baseUrl: "https://registry.test",
+            accountId: "test-acct",
+            fetchFn: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+              const body = JSON.parse(init?.body as string) as { skill: { status: string } };
+              postedStatus = body.skill.status;
+              return jsonResponse(201, {
+                ok: true,
+                skill_id: "01PEND0CDEFGHJKMNPQRSTVWX",
+                service,
+                version: "v1",
+                status: "pending-review",
+              });
+            }) as typeof globalThis.fetch,
+          }),
+        stdout: (line) => out.stdout.push(line),
+        stderr: (line) => out.stderr.push(line),
+        signingPrivateKey: privateKey,
+      },
+    );
+
+    expect(code).toBe(ExitCode.OK);
+    expect(postedStatus).toBe("pending-review");
+  });
+
+  it("--skip-verifier publishes directly as active", async () => {
+    // Operator escape hatch — vouching that the skill is already
+    // validated, bypass the verifier worker.
+    const corpusRoot = mkdtempSync(join(tmpdir(), "promote-cli-skip-"));
+    const service = uniquePromoteService();
+    const { runId } = writeRailwayCorpus(corpusRoot, service);
+    const { privateKey } = generateKeyPairSync("ed25519");
+
+    let postedStatus: string | undefined;
+    const out: CapturedOutput = { stdout: [], stderr: [] };
+    const code = await runSkillCli(
+      [
+        "promote",
+        service,
+        `--run-id=${runId}`,
+        `--corpus-dir=${corpusRoot}`,
+        "--skip-verifier",
+      ],
+      {
+        buildClient: () =>
+          new RegistryHttpClient({
+            baseUrl: "https://registry.test",
+            accountId: "test-acct",
+            fetchFn: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+              const body = JSON.parse(init?.body as string) as { skill: { status: string } };
+              postedStatus = body.skill.status;
+              return jsonResponse(201, {
+                ok: true,
+                skill_id: "01SKIP0CDEFGHJKMNPQRSTVWX",
+                service,
+                version: "v1",
+                status: "active",
+              });
+            }) as typeof globalThis.fetch,
+          }),
+        stdout: (line) => out.stdout.push(line),
+        stderr: (line) => out.stderr.push(line),
+        signingPrivateKey: privateKey,
+      },
+    );
+
+    expect(code).toBe(ExitCode.OK);
+    expect(postedStatus).toBe("active");
+  });
+
   it("--dry-run does not POST", async () => {
     const corpusRoot = mkdtempSync(join(tmpdir(), "promote-cli-dry-"));
     const service = uniquePromoteService();

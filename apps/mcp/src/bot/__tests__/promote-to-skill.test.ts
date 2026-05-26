@@ -196,7 +196,9 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(result.skill.version).toBe("v1");
     expect(result.skill.signup_url).toBe("https://railway.com/account/tokens");
     expect(result.skill.oauth_provider).toBeNull(); // no oauth_button step
-    expect(result.skill.status).toBe("active");
+    // Default is pending-review (two-tier registry staging slot);
+    // callers pass status: "active" to bypass the verifier worker.
+    expect(result.skill.status).toBe("pending-review");
     expect(result.skill.replays_succeeded).toBe(0);
   });
 

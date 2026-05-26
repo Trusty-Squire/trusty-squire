@@ -64,6 +64,15 @@ export interface PromoteInput {
    * synthesizer derives `${SERVICE}_API_KEY` (e.g. RAILWAY_API_KEY).
    */
   env_var_suggestion?: string;
+  /**
+   * Starting status for the synthesized skill. Defaults to
+   * `pending-review` (the two-tier registry's staging slot): the
+   * verifier worker flips it to `active` after N=2 fresh signups
+   * pass against the captured selectors. Callers pass `active`
+   * only when explicitly bypassing the verifier — `mcp skill
+   * promote --skip-verifier`.
+   */
+  status?: "pending-review" | "active";
 }
 
 export type PromoteResult =
@@ -231,7 +240,7 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     steps,
     credentials,
     source_run_ids: [input.run_id],
-    status: "active",
+    status: input.status ?? "pending-review",
     replays_succeeded: 0,
     replays_failed: 0,
     consecutive_failures: 0,
