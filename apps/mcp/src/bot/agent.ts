@@ -1124,7 +1124,7 @@ export function detectFormFillIsDashboard(plan: {
   // database / cluster / instance / deployment / app / project /
   // workspace / service, which is post-signup territory.
   const PRODUCT_CREATION =
-    /\b(?:create(?:s|d)?|creating|provision(?:s|ed|ing)?)\s+(?:the\s+|a\s+|new\s+)?(?:database|cluster|instance|deployment|app|service|project|workspace|index|environment|tenant)\b/;
+    /\b(?:create(?:s|d)?|creating|provision(?:s|ed|ing)?)\s+(?:(?:the|a|an|new|your|this)\s+){0,3}(?:database|cluster|instance|deployment|app|service|project|workspace|index|environment|tenant)\b/;
   if (PRODUCT_CREATION.test(haystack)) return true;
 
   // Explicit "not a signup" / "logged in" / "dashboard" statements
