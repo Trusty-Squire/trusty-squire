@@ -124,6 +124,13 @@ const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
   /\byour\s+(?:free\s+)?trial\s+(?:is\s+)?ending\b/i,
   /\bupgrade\s+your\s+plan\s+to\b/i,
   /\bstart\s+your\s+paid\s+plan\b/i,
+  // rc.39 — Koyeb-class. "Koyeb requires credit card payment to
+  // access the platform" / "requires credit card to continue" /
+  // "billing setup is required". The planner phrases these
+  // explicitly in its done reason.
+  /\brequir(?:es?|ing)\s+(?:a\s+)?credit\s+card\b/i,
+  /\bcomplet(?:e|ing)\s+billing\s+(?:setup|information|to\s+continue)\b/i,
+  /\bbilling\s+setup\s+(?:is\s+)?required\b/i,
 ];
 
 // Negators that, if they appear in the ~30 characters immediately
@@ -1256,6 +1263,18 @@ export function findOAuthButton(
       .trim();
     if (!keywordRe.test(text)) continue;
     if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text)) {
+      return e;
+    }
+    // rc.39 — minimal-label OAuth buttons. Some auth UIs render the
+    // provider as a bare keyword button: just "GitHub" or just "Google"
+    // (Turso, several Stytch / Clerk / Auth0 templates). When the
+    // VISIBLE text is essentially nothing but the provider keyword,
+    // accept it — no auth-verb required. The keyword regex already
+    // ensured the provider name is present; the length cap MAX_OAUTH_
+    // BUTTON_TEXT_CHARS (60) ensures it's still buttonish, not a
+    // paragraph that happens to mention the provider.
+    const stripped = visibleText.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (stripped === keyword || stripped === `with ${keyword}`) {
       return e;
     }
   }
@@ -2561,6 +2580,15 @@ export class SignupAgent {
   // it. Cleared once the loop emits a step that targets the OTP
   // input, so the hint doesn't echo into later unrelated rounds.
   private pendingOtpCode: string | null = null;
+  // rc.39 — when postVerifyLoop exits because the planner returned
+  // `done`, capture the planner's stated reason so the caller can
+  // factor it into paywall classification. Koyeb (and similar)
+  // shows a billing wall whose page text doesn't match the
+  // ONBOARDING_PAYWALL_PATTERNS regex set, but the planner accurately
+  // reasons about it in the done reason ("requires credit card payment
+  // to access the platform"). Mixing that into the paywall check
+  // upgrades these from oauth_onboarding_failed → onboarding_blocked.
+  private lastPostVerifyDoneReason: string | null = null;
 
   constructor(
     private browser: BrowserController,
@@ -2717,6 +2745,7 @@ export class SignupAgent {
     // deep inside postVerifyLoop after a failed extract) can label
     // the snapshot without us threading task through every method.
     this.currentService = task.service;
+    this.lastPostVerifyDoneReason = null;
     const rawTimeout = Number(process.env.UNIVERSAL_BOT_RUN_TIMEOUT_MS);
     const timeoutMs =
       Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 600_000;
@@ -3698,8 +3727,16 @@ export class SignupAgent {
 
     // No API key. Distinguish a billing/card wall (onboarding_blocked)
     // from a generic navigation miss — never grep-loop a paid wall.
+    // rc.39 — fold the planner's `done` reason into the text we
+    // grep. Some services (Koyeb) gate API issuance on a billing
+    // confirmation whose visible text doesn't match the regex set
+    // but whose planner reason clearly describes the wall.
     const finalText = await this.browser.extractText().catch(() => "");
-    if (isAtPaywall(finalText)) {
+    const paywallCheckText =
+      this.lastPostVerifyDoneReason !== null
+        ? `${finalText}\n${this.lastPostVerifyDoneReason}`
+        : finalText;
+    if (isAtPaywall(paywallCheckText)) {
       return {
         success: false,
         error:
@@ -4300,7 +4337,10 @@ ${formatInventory(input.inventory)}`,
         prevInventorySize = inventory.length;
       }
 
-      if (nextStep.kind === "done") break;
+      if (nextStep.kind === "done") {
+        this.lastPostVerifyDoneReason = nextStep.reason;
+        break;
+      }
       hint = undefined;
       try {
         if (nextStep.kind === "extract") {
