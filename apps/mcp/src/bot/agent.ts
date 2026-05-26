@@ -1396,6 +1396,14 @@ export function extractApiKeyFromText(text: string): string | null {
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
     /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
     /\bsntry[su]_[A-Za-z0-9_=\-]{20,}/, // Sentry org/user auth token
+    // Neon serverless Postgres. Modal renders `napi_<48-char-alnum>` and
+    // also shows a truncated `napi_xxx…` in the visible text below the
+    // input field. Without the prefix here, the bot saw the truncated
+    // display, isTruncatedCapture rejected the partial value, every
+    // pass returned null, and the planner gave up despite the full key
+    // being in the input field's `value` attribute. rc.14 — surfaced
+    // during the harvester rc.13 pass on Neon.
+    /\bnapi_[a-zA-Z0-9]{30,80}\b/, // Neon
     // OpenRouter, Anthropic, OpenAI — these are the dominant
     // OAuth-completed-then-copy-needed services. Specific-prefix
     // patterns first so a labeled-pattern fallback isn't load-

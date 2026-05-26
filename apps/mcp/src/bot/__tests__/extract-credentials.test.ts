@@ -69,6 +69,37 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     const key = "sntrys_" + "eyJpYXQiOjE3Nzkw".repeat(6) + "abcd";
     expect(extractApiKeyFromText(key)).toBe(key);
   });
+
+  it("extracts a Neon key by its napi_ prefix (rc.14)", () => {
+    // Neon's modal renders a truncated napi_xxx… in visible text but
+    // keeps the full value in the input field's value attribute. The
+    // bot's input-value scan (pass 3) reads the full key — only the
+    // prefix regex was missing.
+    const key = "napi_" + "oks9t4wy562g2efcbqknzio7xl63ush65rdkzib2f52p4y";
+    expect(extractApiKeyFromText(key)).toBe(key);
+  });
+
+  it("rejects a Neon-shaped value too short to be a real key", () => {
+    // Defensive: `napi_short` shouldn't match — the {30,80} length
+    // bound is what keeps a bare `napi_x` placeholder from being
+    // surfaced as a credential.
+    expect(extractApiKeyFromText("napi_short123")).toBeNull();
+  });
+
+  it("rejects the truncated Neon display from visible page text", () => {
+    // The exact failure mode that broke harvester pass 3: visible
+    // text shows `napi_<48 chars>…` with an ellipsis. isTruncatedCapture
+    // catches it; the bot then has to find the full value via the
+    // input-value scan. Verify here that the truncated marker is
+    // detected.
+    const truncated =
+      "Your new key: napi_oks9t4wy562g2efcbqknzio7xl63ush65rdkzib2f5… (click to copy)";
+    const hit = extractApiKeyFromText(truncated);
+    expect(hit).not.toBeNull();
+    if (hit !== null) {
+      expect(isTruncatedCapture(truncated, hit)).toBe(true);
+    }
+  });
 });
 
 describe("extractApiKeyFromText — labeled keys", () => {
