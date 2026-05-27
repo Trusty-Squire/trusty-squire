@@ -29,17 +29,25 @@
       flex: none; }
     #dot.ok { background: #3fb950; }
     #dot.err { background: #f85149; }
-    /* overflow:hidden + width:100%+min-width:0 are load-bearing for
-       scaleViewport. noVNC measures the screen DIV via
-       getBoundingClientRect to decide the scale factor; without
-       overflow:hidden the canvas it appends as a child grows the
-       parent to its natural framebuffer size, making the bounding
-       rect report "no need to scale". min-width:0 prevents a flex
-       child from staying at its content's intrinsic width. */
+    /* noVNC's scaleViewport is unreliable on mobile — its measurement
+       races flex layout and we've burned three releases on it. Just
+       do the scaling ourselves: width:100% + height:auto on the
+       canvas, with the screen DIV flex-centering whatever's inside.
+       The browser does aspect-preserving scaling from the canvas's
+       intrinsic dimensions (the framebuffer width/height attributes)
+       — exactly what we want, no JS involved. The !important is
+       required because noVNC writes inline `style.width`/`style.height`
+       on the canvas; without !important those would beat our rule. */
     #screen { flex: 1; position: relative; background: #0f1115;
               min-height: 0; min-width: 0; width: 100%;
-              overflow: hidden; }
-    #screen > canvas { max-width: 100%; max-height: 100%; }
+              overflow: hidden;
+              display: flex; align-items: center; justify-content: center; }
+    #screen > canvas {
+      display: block !important;
+      width: 100% !important;
+      height: auto !important;
+      max-height: 100% !important;
+    }
     /* Overlay siblings of #screen — `position: fixed` against the
        viewport, NOT positioned inside #screen. RFB appends a <canvas>
        child to #screen at connect time, and that canvas can cover any
@@ -120,29 +128,12 @@
     let rfb;
     try {
       rfb = new RFB(screen, wsUrl, { credentials: { password }, shared: true });
-      // Mobile-friendly geometry. scaleViewport CSS-scales the canvas
-      // to fit the screen DIV — works whether or not the server
-      // supports remote resize. resizeSession ALSO asks the X server
-      // to reshape its desktop to the canvas size, which avoids the
-      // tiny-text problem when the framebuffer is much larger than
-      // the phone. We turn both on; if remote resize succeeds the
-      // canvas redraws at native resolution, otherwise scaleViewport
-      // shrinks the original.
-      rfb.scaleViewport = true;
-      rfb.resizeSession = true;
-
-      // Re-apply the scale on any layout change (window resize,
-      // soft-keyboard pop, orientation flip). noVNC also does this
-      // internally on `connect`, but on at least one Android+noVNC-1.x
-      // combo the first scale fires before the flex layout finalizes,
-      // leaving the canvas at framebuffer-native size until something
-      // triggers a re-measure. A no-op assignment runs the setter,
-      // which re-reads the screen DIV's bounding rect and re-scales.
-      const reapplyScale = () => {
-        if (rfb) rfb.scaleViewport = true;
-      };
-      window.addEventListener("resize", reapplyScale);
-      window.addEventListener("orientationchange", reapplyScale);
+      // Disable BOTH server-side resize and noVNC's CSS scaling. The
+      // canvas styling above does aspect-preserving fit-to-width in
+      // pure CSS; touching either of these from JS introduces races
+      // we can't win on first paint.
+      rfb.scaleViewport = false;
+      rfb.resizeSession = false;
     } catch (err) {
       dot.className = "err";
       msg.textContent = "Could not start the login window: " + err;
@@ -152,10 +143,6 @@
       rfb.addEventListener("connect", () => {
         dot.className = "ok";
         msg.style.display = "none";
-        // Re-fire the scale after the canvas has actually been added
-        // to the DOM by RFB — the property assigned at construction
-        // time may have run against an empty container.
-        reapplyScale();
       });
       rfb.addEventListener("disconnect", () => {
         dot.className = "err";
