@@ -650,6 +650,11 @@ async function runHeadlessChrome(
       args: [
         `--window-position=0,0`,
         `--window-size=${HEADLESS_W},${HEADLESS_H}`,
+        // App mode strips the tabs, URL bar, and the "unsupported
+        // command-line flag" warning that otherwise eat the top
+        // third of a phone-shaped framebuffer when viewed through
+        // noVNC. The install page gets the full window.
+        `--app=${opts.url}`,
         // 0.6.15-rc.2 — render web content at 1.75× the natural pixel
         // density on the virtual display. Without this, noVNC's
         // scaleViewport scales 720×1280 down to the phone viewport
