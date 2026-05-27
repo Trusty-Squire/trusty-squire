@@ -99,15 +99,8 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
 // phone via noVNC (the spike's 1920x1080 was the UX mistake). 720x1280
 // is the smallest size that doesn't look pixel-y on a 1080p+ phone
 // screen, and stays bandwidth-friendly compared to 1080x1920.
-// Framebuffer dimensions for the headless rig. The shape determines
-// how much of a phone screen the rendered desktop fills after the
-// noVNC client's scaleViewport kicks in: width binds the scale on a
-// portrait phone (360 CSS px wide / 720 fb = 0.5), so the rendered
-// canvas height comes out at HEADLESS_H * 0.5. 1440 puts that at
-// ~720 CSS px — basically the full height of a Pixel/iPhone after
-// the #bar header, with no large empty gap below.
 const HEADLESS_W = 720;
-const HEADLESS_H = 1440;
+const HEADLESS_H = 1280;
 
 // The Debian/Ubuntu `novnc` package installs its web assets here — the
 // `core/` RFB library our branded page reuses (see runHeadlessChrome).

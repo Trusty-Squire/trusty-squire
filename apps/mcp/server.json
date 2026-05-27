@@ -7,12 +7,12 @@
     "source": "github",
     "subfolder": "apps/mcp"
   },
-  "version": "0.7.9",
+  "version": "0.7.10",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@trusty-squire/mcp",
-      "version": "0.7.9",
+      "version": "0.7.10",
       "transport": {
         "type": "stdio"
       }
