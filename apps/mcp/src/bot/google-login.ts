@@ -667,6 +667,11 @@ async function runHeadlessChrome(
         // a precise target on small phones.
         `--force-device-scale-factor=1.75`,
         "--disable-blink-features=AutomationControlled",
+        // Suppresses the "You are using an unsupported command-line
+        // flag: --no-sandbox" yellow infobar that otherwise eats the
+        // top strip of the framebuffer once we hand it to noVNC.
+        // Standard automation-test flag; doesn't affect OAuth/cookies.
+        "--test-type",
         "--no-sandbox",
         "--disable-dev-shm-usage",
       ],
