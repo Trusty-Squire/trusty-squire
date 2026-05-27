@@ -53,7 +53,11 @@ import {
   openInstallConfirmInBotChrome,
 } from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
-import { clearAllProviderMarkers, loggedInProviders } from "../bot/login-state.js";
+import {
+  clearAllProviderMarkers,
+  clearProviderCookies,
+  loggedInProviders,
+} from "../bot/login-state.js";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
 import chalk from "chalk";
@@ -345,12 +349,12 @@ async function connect(args: Argv): Promise<void> {
   );
 
   // --force-relogin means "redo the OAuth dance from scratch" — so
-  // wipe the cached provider markers from any prior connect run.
-  // Otherwise step 2/2 short-circuits when the marker file from an
-  // older session already names both providers, regardless of what
-  // this run actually signed into.
+  // wipe the marker AND the cached provider cookies. Otherwise step
+  // 1 short-circuits on a stale provider session and step 2/2 then
+  // sees both providers already "valid" without prompting noVNC.
   if (args.forceRelogin) {
     clearAllProviderMarkers();
+    await clearProviderCookies();
   }
   ui.section(1, 2, "Connect Google");
 

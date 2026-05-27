@@ -30,14 +30,6 @@
     #dot.ok { background: #3fb950; }
     #dot.err { background: #f85149; }
     #screen { flex: 1; position: relative; background: #0f1115; min-height: 0; }
-    /* TEMPORARY diagnostic overlay — prints live viewport + screen +
-       canvas dimensions so we can see what the user's phone actually
-       computes. Remove once mobile-fit is closed out. */
-    #diag { position: fixed; left: 8px; bottom: 8px;
-            background: rgba(0,0,0,0.75); color: #4ade80;
-            font: 11px/1.3 ui-monospace, monospace;
-            padding: 6px 8px; border-radius: 6px; z-index: 30;
-            pointer-events: none; white-space: pre; }
     /* Overlay siblings of #screen — `position: fixed` against the
        viewport, NOT positioned inside #screen. RFB appends a <canvas>
        child to #screen at connect time, and that canvas can cover any
@@ -94,7 +86,6 @@
          autocorrect="off" autocapitalize="off" spellcheck="false"
          aria-hidden="true" tabindex="-1" />
   <button id="kb" type="button" aria-label="Show keyboard">⌨</button>
-  <div id="diag">init…</div>
   <script type="module">
     import RFB from "./core/rfb.js";
 
@@ -128,27 +119,7 @@
       rfb.addEventListener("connect", () => {
         dot.className = "ok";
         msg.style.display = "none";
-        renderDiag();
       });
-
-      // Live debug overlay — see #diag in the CSS for context.
-      const diag = document.getElementById("diag");
-      function renderDiag() {
-        const sr = screen.getBoundingClientRect();
-        const c  = screen.querySelector("canvas");
-        const cr = c ? c.getBoundingClientRect() : null;
-        diag.textContent =
-          `vp ${innerWidth}x${innerHeight} dpr ${devicePixelRatio}\n` +
-          `screen ${Math.round(sr.width)}x${Math.round(sr.height)}\n` +
-          (c
-            ? `cv attr ${c.width}x${c.height} ` +
-              `css ${Math.round(cr.width)}x${Math.round(cr.height)}\n` +
-              `cv style "${c.style.width}" "${c.style.height}"`
-            : "cv (none yet)");
-      }
-      window.addEventListener("resize", renderDiag);
-      setTimeout(renderDiag, 200);
-      setTimeout(renderDiag, 2000);
       rfb.addEventListener("disconnect", () => {
         dot.className = "err";
         msg.style.display = "";

@@ -77,3 +77,36 @@ export function clearAllProviderMarkers(
     /* best-effort */
   }
 }
+
+// Wipe Google + GitHub cookies from the Chrome profile's SQLite
+// Cookies DB. Used by `connect --force-relogin` so the next OAuth
+// flow actually runs (instead of short-circuiting because the
+// provider session is still cached). MUST be called BEFORE Chrome
+// starts — the DB is locked while Chrome is running. Best-effort:
+// any error (no DB yet, locked, sqlite unavailable) is swallowed
+// so the install can still proceed.
+export async function clearProviderCookies(
+  profileDir: string = CHROME_PROFILE_DIR,
+): Promise<void> {
+  const dbPath = join(profileDir, "Default", "Cookies");
+  try {
+    // Use node:sqlite (Node 22+). Falls back to a no-op if the
+    // module isn't available on this Node version.
+    const sqlite = await import("node:sqlite").catch(() => null);
+    if (sqlite === null) return;
+    const db = new sqlite.DatabaseSync(dbPath);
+    try {
+      db.exec(
+        "DELETE FROM cookies WHERE " +
+          "host_key LIKE '%google.com%' OR " +
+          "host_key LIKE '%github.com%';",
+      );
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* best-effort — Chrome might be holding the lock, or the DB
+       doesn't exist yet on first install. The OAuth flow will still
+       work; it just won't be forced this run. */
+  }
+}
