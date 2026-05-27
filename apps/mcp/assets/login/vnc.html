@@ -29,25 +29,7 @@
       flex: none; }
     #dot.ok { background: #3fb950; }
     #dot.err { background: #f85149; }
-    /* noVNC's scaleViewport is unreliable on mobile — its measurement
-       races flex layout and we've burned three releases on it. Just
-       do the scaling ourselves: width:100% + height:auto on the
-       canvas, with the screen DIV flex-centering whatever's inside.
-       The browser does aspect-preserving scaling from the canvas's
-       intrinsic dimensions (the framebuffer width/height attributes)
-       — exactly what we want, no JS involved. The !important is
-       required because noVNC writes inline `style.width`/`style.height`
-       on the canvas; without !important those would beat our rule. */
-    #screen { flex: 1; position: relative; background: #0f1115;
-              min-height: 0; min-width: 0; width: 100%;
-              overflow: hidden;
-              display: flex; align-items: center; justify-content: center; }
-    #screen > canvas {
-      display: block !important;
-      width: 100% !important;
-      height: auto !important;
-      max-height: 100% !important;
-    }
+    #screen { flex: 1; position: relative; background: #0f1115; min-height: 0; }
     /* Overlay siblings of #screen — `position: fixed` against the
        viewport, NOT positioned inside #screen. RFB appends a <canvas>
        child to #screen at connect time, and that canvas can cover any
@@ -107,12 +89,12 @@
   <script type="module">
     import RFB from "./core/rfb.js";
 
-    // The VNC password rides in the URL fragment (#p=...), never
+    // The VNC password rides in the URL fragment (#password=...), never
     // the query string — a fragment is never sent to the server, so the
     // secret stays out of the cloudflared edge logs and any proxy.
-    // Accept the legacy `password=` key too in case any old bookmark
-    // outlived the rename.
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    // Accept both `p=` (current, short) and `password=` (legacy) so any
+    // saved URL keeps working.
     const password = params.get("p") || params.get("password") || "";
     const dot = document.getElementById("dot");
     const msg = document.getElementById("msg");
@@ -128,11 +110,7 @@
     let rfb;
     try {
       rfb = new RFB(screen, wsUrl, { credentials: { password }, shared: true });
-      // Disable BOTH server-side resize and noVNC's CSS scaling. The
-      // canvas styling above does aspect-preserving fit-to-width in
-      // pure CSS; touching either of these from JS introduces races
-      // we can't win on first paint.
-      rfb.scaleViewport = false;
+      rfb.scaleViewport = true;
       rfb.resizeSession = false;
     } catch (err) {
       dot.className = "err";
