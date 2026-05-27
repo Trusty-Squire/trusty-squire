@@ -4111,7 +4111,7 @@ ${formatInventory(input.inventory)}`,
       // value it just observed ("The full API token 'sbp_xxx' is
       // visible…"); the harvester then posts step trails to a public
       // GitHub issue, leaking the credential. Redactor patterns mirror
-      // tools/harvester/redact.mjs — defense in depth.
+      // tools/archived-harvester/redact.mjs — defense in depth.
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${redactCredentials(nextStep.reason)}`);
 
       // Dump this round's real page state + inventory in the E1

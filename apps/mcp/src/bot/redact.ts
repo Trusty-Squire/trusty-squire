@@ -14,7 +14,7 @@
 //
 // Conservative: only strips substrings matching service-specific
 // prefix patterns the bot itself produces. Same set as the
-// harvester's tools/harvester/redact.mjs — keep them in lockstep.
+// harvester's tools/archived-harvester/redact.mjs — keep them in lockstep.
 
 const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   /\bsk-or-v1-[a-f0-9]{40,80}/gi,

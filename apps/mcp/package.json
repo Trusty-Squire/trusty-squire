@@ -9,7 +9,9 @@
   },
   "files": [
     "dist",
-    "assets"
+    "assets",
+    "!dist/housekeeper",
+    "!dist/housekeeper/**"
   ],
   "publishConfig": {
     "access": "public"

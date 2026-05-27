@@ -440,20 +440,30 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
-### Verifier-worker env (`mcp verifier-worker`)
+### Housekeeper env (`mcp housekeeper`)
 
-The verifier worker runs as a Fly app or operator machine, not on
-end-user laptops. Two modes share one CLI; each requires different
-auth.
+The merged verifier + discoverer + harvester. Runs on the operator's
+headless dev server, NOT on end-user laptops, and NOT shipped in the
+npm tarball (`apps/mcp/package.json`'s `files` array excludes
+`dist/housekeeper`). Run from a source checkout:
+`node apps/mcp/dist/bin.js housekeeper [opts]`.
+
+Three queue modes share one CLI; each requires different auth.
 
 | Env var | Required by | Effect |
 |---|---|---|
-| `REGISTRY_ADMIN_BEARER` | both modes | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
-| `TRUSTY_SQUIRE_REGISTRY_URL` | both | Registry base URL. Default `https://registry.trustysquire.ai`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discovery only | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the verifier host). |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | discovery only | Inbox-alias scope + auto-promote attribution. |
-| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discovery only | Default-on. Set `0`/`off` to capture without publishing. |
-| `UNIVERSAL_BOT_LLM_TIER=free` | both (recommended) | Routes through the free OpenRouter chain. |
+| `REGISTRY_ADMIN_BEARER` | verifier, discovery | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
+| `TRUSTY_SQUIRE_REGISTRY_URL` | all modes | Registry base URL. Default `https://registry.trustysquire.ai`. |
+| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discovery, seed, --service | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the housekeeper host). |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | discovery, seed, --service | Inbox-alias scope + auto-promote attribution. |
+| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discovery, seed, --service | Default-on. Set `0`/`off` to capture without publishing. |
+| `UNIVERSAL_BOT_LLM_TIER=free` | all modes (recommended) | Routes through the free OpenRouter chain. |
+| `TELEGRAM_BOT_TOKEN` | `--telegram` notifier | Bot token from @BotFather. Chat id auto-resolved from getUpdates on first run, cached to `~/.trusty-squire/telegram-chat-id.txt`. |
+| `GH_REPO` | `--github-issues` notifier | `<owner>/<repo>` for issue posting. Default `Trusty-Squire/trusty-squire`. Requires `gh auth status` to succeed on the host. |
+
+The archived harvester lives at `tools/archived-harvester/`; its
+`services.yaml` is still the canonical curated list, consumed via
+`mcp housekeeper --queue=seed --from=tools/archived-harvester/services.yaml`.
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |

@@ -14,7 +14,7 @@
 // harvester.env already sets the token, so the harvester run is
 // covered automatically.
 //
-// chat_id resolution mirrors the harvester's tools/harvester/
+// chat_id resolution mirrors the harvester's tools/archived-harvester/
 // telegram.mjs: read ~/.trusty-squire/telegram-chat-id.txt (cached
 // from the first /start), fall back to getUpdates if absent, persist
 // the discovered id. Sharing the cache file with the harvester means
