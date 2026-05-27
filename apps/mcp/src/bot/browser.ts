@@ -2661,7 +2661,13 @@ export class BrowserController {
         // click target is the label, but the bot's inventory selector
         // didn't catch labels so the planner had no clickable target
         // matching the visible button text).
-        'input,textarea,select,button,a,label,[role="button"],[role="link"],[role="checkbox"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
+        // T38 — added [role="radio"] for onboarding wizards that mark
+        // each card with a semantic radio role (some Cloudinary /
+        // Stytch flows). Card-radio clusters with NO role are detected
+        // post-extraction by assignCardRadioGroups using bounding-box
+        // similarity, so this addition is just for the semantically-
+        // tagged case.
+        'input,textarea,select,button,a,label,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="option"],[role="combobox"],[contenteditable=""],[contenteditable="true"]';
 
       // Collect candidates across the document and every open shadow
       // root. Closed shadow roots are unreachable — accepted.
@@ -2816,6 +2822,18 @@ export class BrowserController {
       };
 
       const seen = new Set<Element>();
+      // T38 — parent identity + bounding-box dimensions + clickable
+      // bit, captured in lockstep with `out` so the Node-side
+      // assignCardRadioGroups can detect card-radio clusters without
+      // re-walking the DOM.
+      const parentIds = new Map<Element, number>();
+      let nextParentId = 0;
+      const clusterMeta: Array<{
+        parentId: number;
+        width: number;
+        height: number;
+        clickable: boolean;
+      }> = [];
       const out: Array<{
         tag: string;
         type: string | null;
@@ -2844,6 +2862,38 @@ export class BrowserController {
         seen.add(el);
         if (!isVisible(el) && !isCheckableHiddenByStyledLabel(el)) continue;
         const r = el.getBoundingClientRect();
+        // T38 — capture parent identity + dimensions in lockstep with
+        // the `out.push` below. Pure scalars only; no DOM nodes leak
+        // through serialization.
+        const parent = el.parentElement;
+        let parentId: number;
+        if (parent === null) {
+          parentId = -1;
+        } else if (parentIds.has(parent)) {
+          parentId = parentIds.get(parent) as number;
+        } else {
+          parentId = nextParentId++;
+          parentIds.set(parent, parentId);
+        }
+        const tagLower = el.tagName.toLowerCase();
+        const roleAttr = el.getAttribute("role");
+        const clickable =
+          tagLower === "button" ||
+          tagLower === "a" ||
+          tagLower === "label" ||
+          roleAttr === "button" ||
+          roleAttr === "link" ||
+          roleAttr === "radio" ||
+          roleAttr === "menuitem" ||
+          roleAttr === "menuitemradio" ||
+          roleAttr === "option" ||
+          window.getComputedStyle(el).cursor === "pointer";
+        clusterMeta.push({
+          parentId,
+          width: r.width,
+          height: r.height,
+          clickable,
+        });
         out.push({
           tag: el.tagName.toLowerCase(),
           type: el.getAttribute("type"),
@@ -2907,9 +2957,15 @@ export class BrowserController {
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
         });
       }
-      return out;
+      return { out, clusterMeta };
     });
-    return raw.map((e, i) => ({ ...e, index: i }));
+    // T38 — assign card-radio groups in Node (pure logic, unit-tested).
+    const groups = assignCardRadioGroups(raw.clusterMeta);
+    return raw.out.map((e, i) => ({
+      ...e,
+      index: i,
+      cardRadioGroup: groups[i] ?? null,
+    }));
   }
 
   // Resolve a selector against the live page for the verify step
@@ -3323,6 +3379,77 @@ export interface InteractiveElement {
   // the warning every round and the planner gets stuck in a select
   // loop. Default false (or absent).
   interactedThisRun?: boolean;
+  // T38 — card-radio cluster membership. Set on elements that are
+  // part of a "choose one of these N visually-similar siblings" group:
+  // onboarding wizards like Cloudinary's "What are you using
+  // Cloudinary for?" and Koyeb's use-case picker render their radio
+  // choices as styled cards/labels with no semantic radio role. The
+  // detector groups ≥2 sibling clickables that share parentElement
+  // and have bounding boxes within ±20%. The planner reads this to
+  // know exactly one card needs to be picked and "Continue" is the
+  // expected next step. Null/absent when not part of a group.
+  cardRadioGroup?: { id: number; position: number; total: number } | null;
+}
+
+// T38 — pure clustering logic. Identifies card-radio groups from a
+// flat list of inventory candidates: each candidate carries its
+// parent's identity (an integer assigned in DOM-walk order) plus
+// the rendered bounding-box dimensions. Returns one slot per
+// candidate, populated only for members of a qualifying group.
+//
+// A group qualifies when:
+//   - 2..8 clickable siblings share the same parent (a list of N
+//     things in a <ul> would usually exceed 8, and ≥9 sibling
+//     similar-sized clickables aren't a card-radio in practice);
+//   - their widths and heights agree within ±20% (real card grids
+//     line up to a CSS grid template, so this is loose enough for
+//     pixel rounding but tight enough to reject a button+text-link
+//     row).
+//
+// Exported so the unit tests can exercise the logic in Node — the
+// DOM-side caller in extractInteractiveElements feeds the same
+// shape from inside page.evaluate.
+export function assignCardRadioGroups(
+  candidates: ReadonlyArray<{
+    parentId: number;
+    width: number;
+    height: number;
+    clickable: boolean;
+  }>,
+): Array<{ id: number; position: number; total: number } | null> {
+  const result: Array<{ id: number; position: number; total: number } | null> =
+    new Array(candidates.length).fill(null);
+  // Bucket by parent.
+  const byParent = new Map<number, number[]>();
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (c === undefined || c.parentId < 0) continue;
+    const arr = byParent.get(c.parentId) ?? [];
+    arr.push(i);
+    byParent.set(c.parentId, arr);
+  }
+  let nextGroupId = 1;
+  // Iterate in insertion order — keeps group ids stable across runs
+  // for tests that exercise multiple clusters.
+  for (const indices of byParent.values()) {
+    if (indices.length < 2 || indices.length > 8) continue;
+    const clickableIdx = indices.filter((i) => candidates[i]?.clickable === true);
+    if (clickableIdx.length < 2) continue;
+    const widths = clickableIdx.map((i) => candidates[i]!.width);
+    const heights = clickableIdx.map((i) => candidates[i]!.height);
+    const minW = Math.min(...widths);
+    const minH = Math.min(...heights);
+    if (minW < 1 || minH < 1) continue; // degenerate — reject
+    const wRatio = Math.max(...widths) / minW;
+    const hRatio = Math.max(...heights) / minH;
+    if (wRatio > 1.2 || hRatio > 1.2) continue;
+    const groupId = nextGroupId++;
+    const total = clickableIdx.length;
+    clickableIdx.forEach((idx, pos) => {
+      result[idx] = { id: groupId, position: pos + 1, total };
+    });
+  }
+  return result;
 }
 
 // Score a button/link by how much its text reads like a signup

@@ -828,6 +828,14 @@ export function formatInventory(inventory: readonly InteractiveElement[]): strin
         if (shortcut !== null) bits.push(`shortcut=${JSON.stringify(shortcut)}`);
       }
       if (e.inConsentWidget) bits.push("[cookie-consent — avoid]");
+      // T38 — card-radio cluster annotation. Tells the planner "this
+      // is the Nth of M sibling cards; exactly one needs to be picked
+      // to advance past this wizard step."
+      if (e.cardRadioGroup !== null && e.cardRadioGroup !== undefined) {
+        bits.push(
+          `[card-radio ${e.cardRadioGroup.position}/${e.cardRadioGroup.total}]`,
+        );
+      }
       // F15 — disambiguating landmark tag for text-duplicates.
       if (
         isDuplicated(e) &&
@@ -5308,6 +5316,16 @@ Strategy:
 - Otherwise click a dashboard menu link like "API Keys" / "Tokens" /
   "Developer" / "Settings" — using its inventory selector.
 - If there's an onboarding modal or a "Skip" link blocking, dismiss it.
+- Some signup wizards present a CHOICE as a grid of clickable cards
+  (Cloudinary's "What are you trying to do?", Koyeb's use-case picker,
+  etc.) rather than as a standard \`<input type="radio">\`. Inventory
+  lines tagged \`[card-radio N/M]\` are members of one such group —
+  exactly one card needs to be clicked to advance past this wizard step.
+  Prefer cards whose text matches "personal", "individual", "starter",
+  "hobby", "free", "general", or "other"; if none clearly match, click
+  the FIRST card (least committal). After the click, expect a
+  "Continue" / "Next" button on the following round — do NOT return
+  "done" while a card-radio cluster is still visible.
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - If the page wants the user to create a project/key before showing it, fill the minimum and click create.
