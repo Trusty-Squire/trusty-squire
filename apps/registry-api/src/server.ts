@@ -9,6 +9,7 @@ import { registerSkillsRoute } from "./routes/skills.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAdminDashboardRoute } from "./routes/admin-dashboard.js";
 import { registerExtractFailuresRoute } from "./routes/extract-failures.js";
+import { registerServicesHealthRoute } from "./routes/services-health.js";
 import { generateKeyPairSync } from "node:crypto";
 import { ManifestSigner } from "./signer.js";
 import { InMemoryManifestStore, type ManifestStore } from "./store.js";
@@ -22,6 +23,17 @@ import {
 } from "./extract-failure-store.js";
 import { InMemoryBotFailureStore } from "./bot-failure-store-memory.js";
 import type { BotFailureStore } from "./bot-failure-store.js";
+import {
+  InMemoryProvisionAttemptStore,
+  type ProvisionAttemptStore,
+} from "./provision-attempt-store.js";
+
+function numEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.length === 0) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 export interface BuildServerOpts {
   store?: ManifestStore;
@@ -30,6 +42,9 @@ export interface BuildServerOpts {
   // Closed-loop Phase 5. In-memory by default; production wires a
   // Prisma-backed store at boot.
   botFailureStore?: BotFailureStore;
+  // T44 — per-attempt outcome store. Drives the compat-score endpoint.
+  // In-memory default; production wires a Prisma-backed store at boot.
+  provisionAttemptStore?: ProvisionAttemptStore;
   cache?: ManifestCache;
   signer?: ManifestSigner;
   // Public key (base64url SPKI DER) used to verify POST /skills
@@ -73,6 +88,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     opts.extractFailureStore ?? new InMemoryExtractFailureStore();
   const botFailureStore =
     opts.botFailureStore ?? new InMemoryBotFailureStore();
+  const provisionAttemptStore =
+    opts.provisionAttemptStore ?? new InMemoryProvisionAttemptStore();
   const cache = opts.cache ?? new ManifestCache();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
@@ -129,6 +146,19 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     resolveAccountId,
   });
 
+  // T44 — compat-score endpoints. Env tunables here surface through
+  // routes/services-health.ts → compat-score.ts.
+  await fastify.register(registerServicesHealthRoute, {
+    attemptStore: provisionAttemptStore,
+    skillStore,
+    resolveAccountId,
+    scoreOptions: {
+      halfLifeDays: numEnv("COMPAT_HALF_LIFE_DAYS", 14),
+      hardBlockThreshold: numEnv("COMPAT_HARD_BLOCK_THRESHOLD", -2),
+      strugglingCeiling: numEnv("COMPAT_STRUGGLING_THRESHOLD", 0),
+    },
+  });
+
   const adminBearer = opts.adminBearer ?? process.env.REGISTRY_ADMIN_BEARER;
   await fastify.register(registerAdminRoutes, {
     store: skillStore,
@@ -175,6 +205,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const { PrismaSkillStore } = await import("./prisma-skill-store.js");
     const { PrismaExtractFailureStore } = await import("./prisma-extract-failure-store.js");
     const { PrismaBotFailureStore } = await import("./prisma-bot-failure-store.js");
+    const { PrismaProvisionAttemptStore } = await import("./prisma-provision-attempt-store.js");
     serverOpts = {
       store: await PrismaManifestStore.fromEnv(),
       skillStore: await PrismaSkillStore.fromEnv(),
@@ -183,6 +214,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       // discovery aggregation window because buildServer falls
       // back to the in-memory variant.
       botFailureStore: await PrismaBotFailureStore.fromEnv(),
+      // T44 — production-mode persistence for the compat-score endpoint.
+      provisionAttemptStore: await PrismaProvisionAttemptStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);

@@ -34,8 +34,10 @@ import { VERSION } from "../version.js";
 import {
   clientFromEnv,
   generateProvisionId,
+  type ServiceHealthResponse,
   type SkillRegistryClient,
 } from "../skill-registry-client.js";
+import { categoryPeersOf } from "../data/service-categories.js";
 import { promoteToSkill } from "../bot/promote-to-skill.js";
 import { currentRunId, resolveCaptureDir } from "../bot/onboarding-capture.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
@@ -694,6 +696,20 @@ async function runSignupTask(
         return;
       }
     }
+
+    // T44 — compat-score preflight. If the registry already knows this
+    // service is hard-blocked for our bot, attach a `recommendation`
+    // to the eventual response so the agent can surface alternates to
+    // the user. Best-effort: any registry trouble means no
+    // recommendation this run.
+    let preflightHealth: ServiceHealthResponse | null = null;
+    if (registry !== null) {
+      const peers = categoryPeersOf(input.service);
+      const outcome = await registry.fetchServiceHealth(input.service, peers);
+      if (outcome.kind === "ok") {
+        preflightHealth = outcome.health;
+      }
+    }
     // The user pays nothing for LLM calls — the operator's OpenRouter
     // key handles them server-side, gated by the machine token's rolling
     // rate limit. Cheap tier is primary; premium is the fallback.
@@ -787,6 +803,49 @@ async function runSignupTask(
     }
 
     response = buildSignupResponse(input, result);
+
+    // T44 — if preflight saw hard-block, attach a recommendation to
+    // the response. Soft hint only; agent decides what to do.
+    if (
+      preflightHealth !== null &&
+      preflightHealth.state === "hard-block" &&
+      preflightHealth.alternates.length > 0
+    ) {
+      const altReadable = preflightHealth.alternates
+        .map((a) => a.service)
+        .join(", ");
+      response.recommendation = {
+        reason:
+          `trusty-squire's signup bot has struggled with ${input.service} ` +
+          `recently (${preflightHealth.failed_count} failed of ` +
+          `${preflightHealth.failed_count + preflightHealth.successful_count} ` +
+          `attempts) — alternates with working skills: ${altReadable}.`,
+        alternates: preflightHealth.alternates.map((a) => ({
+          slug: a.service,
+          state: a.state,
+          has_active_skill: a.has_active_skill,
+        })),
+      };
+    }
+
+    // T44 — record the attempt outcome regardless of state. Best-
+    // effort; failures here only mean the next provision's score
+    // won't see this data point.
+    if (registry !== null) {
+      const status: "success" | "failed" = result.success ? "success" : "failed";
+      const attemptArgs: Parameters<typeof registry.recordProvisionAttempt>[0] = {
+        service: input.service,
+        status,
+        mcpVersion: VERSION,
+      };
+      if (!result.success && result.error !== undefined) {
+        attemptArgs.failureKind = result.error;
+      }
+      if (input.signup_url !== undefined) {
+        attemptArgs.signupUrl = input.signup_url;
+      }
+      void registry.recordProvisionAttempt(attemptArgs);
+    }
 
     // Persist the collected keys into the account's vault. Fire-and-
     // forget — the credentials are already in `response`, so a vault

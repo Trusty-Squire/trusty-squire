@@ -298,3 +298,45 @@ model ExtractFailureSnapshot {
   @@index([expires_at])
   @@index([service])
 }
+
+// T44 — one row per universal-bot signup attempt, success OR failure.
+// Together with the existing SkillRecord rows (skill-active state) and
+// UniversalBotFailureRecord (failure-class telemetry), this is the
+// source of truth for the per-service compatibility score that
+// /v1/services/:slug/health derives.
+//
+// Why not just count UniversalBotFailureRecord? That table only has
+// FAILURES — the score needs to weigh recent successes against recent
+// failures, with time decay so a service that used to fail but
+// recently succeeded recovers.
+model ProvisionAttempt {
+  id           String   @id @default(cuid())
+  // Canonical service slug (registry style: anthropic-api, together-ai).
+  // The bot's poster MUST normalize harvester-style slugs (anthropic,
+  // together) before insert.
+  service      String
+  // "success" | "failed". Score derivation is sign-only; no partial-
+  // success tracking for v1.
+  status       String
+  // Optional failure classification — same vocabulary as
+  // UniversalBotFailureRecord.error_kind. Populated when status="failed".
+  failure_kind String?
+  // The signup URL the bot actually navigated to (not the static yaml
+  // value). Captures the chroma-style slug-vs-signup_url bug — if we
+  // ever see signupUrl=chroma.com for service=chroma, we know the bot
+  // resolved the URL wrong this run.
+  signup_url   String?
+  // S3 prefix where the bot uploaded screenshots + trail for this
+  // attempt — populated by T45 once that ships. Null until then.
+  artifacts_uri String?
+  // Whose account ran this attempt. Used by the score derivation in
+  // case we want per-account scoring later (today: global score).
+  account_id   String
+  mcp_version  String
+  occurred_at  DateTime @default(now())
+
+  // Hot paths: list-by-service (score derivation) and list-recent
+  // (admin dashboard).
+  @@index([service, occurred_at(sort: Desc)])
+  @@index([occurred_at(sort: Desc)])
+}

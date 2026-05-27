@@ -99,6 +99,31 @@ export interface PostReplayOutcomeResult {
   demoted?: boolean;
 }
 
+// T44 — compatibility-score response from /v1/services/:slug/health.
+// Shape mirrors the registry-api route exactly so a malformed cast
+// here turns into a JSON parse error, not a silently-wrong feature.
+export interface ServiceHealthAlternate {
+  service: string;
+  state: "skill-active" | "working" | "struggling" | "hard-block";
+  compat_score: number;
+  has_active_skill: boolean;
+}
+
+export interface ServiceHealthResponse {
+  service: string;
+  state: "skill-active" | "working" | "struggling" | "hard-block";
+  compat_score: number;
+  has_active_skill: boolean;
+  successful_count: number;
+  failed_count: number;
+  last_attempt_at: string | null;
+  alternates: ServiceHealthAlternate[];
+}
+
+export type ServiceHealthOutcome =
+  | { kind: "ok"; health: ServiceHealthResponse }
+  | { kind: "unavailable"; reason: string };
+
 // ── Client ───────────────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -284,6 +309,79 @@ export class SkillRegistryClient {
    */
   invalidateCache(service: string): void {
     this.cache.delete(service);
+  }
+
+  /**
+   * T44 — fetch compatibility-score health for a service, optionally
+   * with category-peer alternates. Fire-and-forget: failures here
+   * mean "no recommendation this run," not "abort the provision."
+   */
+  async fetchServiceHealth(
+    service: string,
+    peers: readonly string[] = [],
+  ): Promise<ServiceHealthOutcome> {
+    const peersQuery =
+      peers.length > 0 ? `?peers=${peers.map(encodeURIComponent).join(",")}` : "";
+    const url =
+      `${this.baseUrl}/v1/services/${encodeURIComponent(service)}/health${peersQuery}`;
+    const attempt = await this.fetchGetWithRetry(url, {
+      "x-account-id": this.accountId,
+    });
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
+    }
+    if (!attempt.response.ok) {
+      return {
+        kind: "unavailable",
+        reason: `registry returned HTTP ${attempt.response.status}`,
+      };
+    }
+    try {
+      const body = (await attempt.response.json()) as ServiceHealthResponse;
+      return { kind: "ok", health: body };
+    } catch (e) {
+      return {
+        kind: "unavailable",
+        reason: `malformed health response: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  }
+
+  /**
+   * T44 — record a universal-bot signup outcome. Fire-and-forget;
+   * a 4xx/5xx here only means the score won't reflect this attempt.
+   */
+  async recordProvisionAttempt(input: {
+    service: string;
+    status: "success" | "failed";
+    failureKind?: string;
+    signupUrl?: string;
+    mcpVersion: string;
+  }): Promise<{ kind: "ok" } | { kind: "unavailable"; reason: string }> {
+    const url = `${this.baseUrl}/v1/services/${encodeURIComponent(input.service)}/attempts`;
+    const attempt = await this.fetchPostWithRetry(
+      url,
+      {
+        "content-type": "application/json",
+        "x-account-id": this.accountId,
+      },
+      JSON.stringify({
+        status: input.status,
+        ...(input.failureKind !== undefined ? { failure_kind: input.failureKind } : {}),
+        ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
+        mcp_version: input.mcpVersion,
+      }),
+    );
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
+    }
+    if (!attempt.response.ok) {
+      return {
+        kind: "unavailable",
+        reason: `registry returned HTTP ${attempt.response.status}`,
+      };
+    }
+    return { kind: "ok" };
   }
 
   // ── Internals ──────────────────────────────────────────────────────

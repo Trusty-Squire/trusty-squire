@@ -12,6 +12,8 @@ export interface RegistryPrismaClient {
   extractFailureSnapshot: ExtractFailureSnapshotDelegate;
   // Closed-loop Phase 5: telemetry for the discovery worker.
   universalBotFailureRecord: UniversalBotFailureRecordDelegate;
+  // T44: per-attempt outcome rows for the compat-score endpoint.
+  provisionAttempt: ProvisionAttemptDelegate;
 }
 
 export type RegistryPrismaTransaction = Omit<
@@ -83,6 +85,31 @@ interface UniversalBotFailureRecordDelegate {
   }>;
   count(args: { where: Record<string, unknown> }): Promise<number>;
   deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+}
+
+interface ProvisionAttemptDelegate {
+  create(args: {
+    data: Record<string, unknown>;
+    select?: Record<string, boolean>;
+  }): Promise<{ id: string }>;
+  findMany(args: {
+    where: Record<string, unknown>;
+    orderBy?: Record<string, unknown>;
+    take?: number;
+  }): Promise<
+    Array<{
+      id: string;
+      service: string;
+      status: string;
+      failure_kind: string | null;
+      signup_url: string | null;
+      artifacts_uri: string | null;
+      account_id: string;
+      mcp_version: string;
+      occurred_at: Date;
+    }>
+  >;
+  count(args: { where: Record<string, unknown> }): Promise<number>;
 }
 
 interface ExtractFailureSnapshotDelegate {
