@@ -173,6 +173,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   await fastify.register(registerAdminDashboardRoute, {
     store: skillStore,
     botFailureStore,
+    // T45 — surface the "Recent failures" gallery.
+    provisionAttemptStore,
+    extractFailureStore,
     ...(adminBearer !== undefined && adminBearer.length > 0
       ? { adminBearer }
       : {}),

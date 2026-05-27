@@ -34,6 +34,8 @@ function mkAttempt(
     failure_kind: null,
     signup_url: null,
     artifacts_uri: null,
+    provision_id: null,
+    step_trail: null,
     account_id: "test-acct",
     mcp_version: "0.7.x",
     occurred_at: new Date(Date.now() - ageDays * DAY),

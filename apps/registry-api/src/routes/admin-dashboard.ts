@@ -22,11 +22,24 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import type { SkillStore } from "../skill-store.js";
 import type { BotFailureStore } from "../bot-failure-store.js";
+import type {
+  ProvisionAttemptRecord,
+  ProvisionAttemptStore,
+} from "../provision-attempt-store.js";
+import type {
+  ExtractFailureStore,
+  ExtractFailureSummary,
+} from "../extract-failure-store.js";
 import { bearerEquals } from "./admin.js";
 
 export interface AdminDashboardDeps {
   store: SkillStore;
   botFailureStore?: BotFailureStore;
+  // T45 — additional stores feeding the "Recent failed attempts"
+  // section. Optional so test bootstraps that don't exercise this
+  // path can omit them.
+  provisionAttemptStore?: ProvisionAttemptStore;
+  extractFailureStore?: ExtractFailureStore;
   adminBearer?: string;
 }
 
@@ -77,11 +90,36 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
     const activeSkills = allSkills.filter((s) => s.status === "active");
     const demotedSkills = allSkills.filter((s) => s.status === "demoted");
 
+    // T45 — load recent failures (and one slice of per-attempt
+    // screenshots each) only when both stores are wired. Older
+    // bootstraps that don't pass these get the original 5-section
+    // dashboard verbatim.
+    const recentFailures: ProvisionAttemptRecord[] =
+      opts.provisionAttemptStore !== undefined
+        ? await opts.provisionAttemptStore.listRecentFailures(20)
+        : [];
+    const failureArtifacts = new Map<string, ExtractFailureSummary[]>();
+    if (
+      opts.extractFailureStore !== undefined &&
+      recentFailures.length > 0
+    ) {
+      for (const attempt of recentFailures) {
+        if (attempt.provision_id === null) continue;
+        // Hot path is fine here — admin views serve to one operator.
+        const snapshots = await opts.extractFailureStore.listByProvisionId(
+          attempt.provision_id,
+        );
+        failureArtifacts.set(attempt.provision_id, snapshots);
+      }
+    }
+
     const html = renderDashboard({
       activeSkills,
       demotedSkills,
       verifierQueue,
       discoveryCandidates,
+      recentFailures,
+      failureArtifacts,
     });
     reply.code(200).type("text/html; charset=utf-8").send(html);
   });
@@ -92,6 +130,8 @@ function renderDashboard(args: {
   demotedSkills: Awaited<ReturnType<SkillStore["listSkills"]>>;
   verifierQueue: Awaited<ReturnType<SkillStore["listVerifierQueue"]>>;
   discoveryCandidates: Awaited<ReturnType<NonNullable<BotFailureStore>["listDiscoveryCandidates"]>>;
+  recentFailures: ProvisionAttemptRecord[];
+  failureArtifacts: Map<string, ExtractFailureSummary[]>;
 }): string {
   const css = `
     body { font: 14px/1.45 -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #1d1d1f; }
@@ -119,7 +159,7 @@ function renderDashboard(args: {
     "<head>",
     "  <meta charset=\"utf-8\" />",
     "  <title>Trusty Squire — Registry Admin</title>",
-    `  <style>${css}</style>`,
+    `  <style>${css}${RECENT_FAILURES_CSS}</style>`,
     "</head>",
     "<body>",
     `  <h1>Trusty Squire — Registry Admin</h1>`,
@@ -129,12 +169,14 @@ function renderDashboard(args: {
     `    <a href="#freshness">Freshness due (${args.verifierQueue.filter((s) => s.status === "active").length})</a>`,
     `    <a href="#discovery">Discovery candidates (${args.discoveryCandidates.length})</a>`,
     `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
+    `    <a href="#failures">Recent failures (${args.recentFailures.length})</a>`,
     `  </nav>`,
     renderActiveSection(args.activeSkills),
     renderPendingSection(args.verifierQueue),
     renderFreshnessSection(args.verifierQueue),
     renderDiscoverySection(args.discoveryCandidates),
     renderDemotedSection(args.demotedSkills),
+    renderRecentFailuresSection(args.recentFailures, args.failureArtifacts),
     "</body>",
     "</html>",
   ].join("\n");
@@ -300,6 +342,73 @@ function section(id: string, title: string, desc: string, body: string): string 
     <div class="desc">${desc}</div>
     ${body}
   </section>`;
+}
+
+// T45 — additional CSS for the failures gallery + per-attempt step
+// trail. Layered on top of the dashboard's base CSS so the section
+// has its own visual density.
+const RECENT_FAILURES_CSS = `
+  .attempt { border: 1px solid #e5e5ea; border-radius: 6px; padding: 12px; margin-bottom: 12px; background: #fff; }
+  .attempt-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  .attempt-head .service { font-weight: 600; font-size: 14px; }
+  .attempt-head .kind { color: #b3261e; font-family: ui-monospace, monospace; font-size: 12px; }
+  .attempt-head .when { color: #6e6e73; font-size: 12px; }
+  .attempt-head .pid { color: #6e6e73; font-size: 11px; font-family: ui-monospace, monospace; }
+  details.trail { margin-top: 8px; }
+  details.trail summary { color: #6e6e73; font-size: 12px; cursor: pointer; }
+  details.trail pre { background: #f5f5f7; padding: 8px; border-radius: 4px; max-height: 200px; overflow: auto; white-space: pre-wrap; font-size: 11px; line-height: 1.4; margin: 6px 0 0; }
+  .thumbs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .thumbs a { display: block; border: 1px solid #d2d2d7; border-radius: 4px; padding: 4px 8px; font-size: 11px; color: #1d1d1f; text-decoration: none; font-family: ui-monospace, monospace; }
+  .thumbs a:hover { background: #f5f5f7; }
+`;
+
+function renderRecentFailuresSection(
+  failures: readonly ProvisionAttemptRecord[],
+  artifacts: ReadonlyMap<string, ExtractFailureSummary[]>,
+): string {
+  if (failures.length === 0) {
+    return section(
+      "failures",
+      "Recent failed attempts",
+      "Universal-bot signup failures. Linked snapshots (round screenshots, extract failures) are shown when the MCP tagged them with a matching provision_id.",
+      `<div class="empty">No failed attempts on record.</div>`,
+    );
+  }
+  const cards = failures
+    .map((f) => {
+      const snapshots =
+        f.provision_id !== null ? artifacts.get(f.provision_id) ?? [] : [];
+      const thumbs =
+        snapshots.length === 0
+          ? `<div class="empty" style="font-size:12px;padding:4px 0;">No screenshot snapshots tagged with this attempt's provision_id.</div>`
+          : `<div class="thumbs">${snapshots
+              .map(
+                (s) =>
+                  `<a href="/v1/extract-failures/${esc(s.id)}/jpeg" target="_blank">${esc(s.step_label)} · ${(s.screenshot_bytes / 1024).toFixed(1)}KB</a>`,
+              )
+              .join("")}</div>`;
+      const trail =
+        f.step_trail === null || f.step_trail.length === 0
+          ? ""
+          : `<details class="trail"><summary>Step trail (${f.step_trail.length} chars)</summary><pre>${esc(f.step_trail)}</pre></details>`;
+      return `<div class="attempt">
+        <div class="attempt-head">
+          <span class="service">${esc(f.service)}</span>
+          <span class="kind">${esc(f.failure_kind ?? "unknown")}</span>
+          <span class="when">${formatDate(f.occurred_at)}</span>
+          ${f.provision_id !== null ? `<span class="pid">${esc(f.provision_id)}</span>` : ""}
+        </div>
+        ${trail}
+        ${thumbs}
+      </div>`;
+    })
+    .join("\n");
+  return section(
+    "failures",
+    "Recent failed attempts",
+    "Universal-bot signup failures, newest first. Click a snapshot to view the screenshot.",
+    cards,
+  );
 }
 
 function esc(s: string): string {

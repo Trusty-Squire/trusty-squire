@@ -294,9 +294,15 @@ model ExtractFailureSnapshot {
   html_bytes       Int
   screenshot_bytes Int      @default(0)
 
+  // T45 — correlation id matching the parent ProvisionAttempt. Null
+  // for snapshots uploaded outside a provision_any_service flow
+  // (older runs, ad-hoc test uploads).
+  provision_id     String?
+
   @@index([account_id, uploaded_at(sort: Desc)])
   @@index([expires_at])
   @@index([service])
+  @@index([provision_id])
 }
 
 // T44 — one row per universal-bot signup attempt, success OR failure.
@@ -326,9 +332,23 @@ model ProvisionAttempt {
   // ever see signupUrl=chroma.com for service=chroma, we know the bot
   // resolved the URL wrong this run.
   signup_url   String?
-  // S3 prefix where the bot uploaded screenshots + trail for this
-  // attempt — populated by T45 once that ships. Null until then.
+  // Reserved for the S3 prefix once large-artifact uploads land.
+  // The current T45 wiring stores the step trail inline (step_trail
+  // below) and threads provision_id across ExtractFailureSnapshot
+  // rows; an artifacts_uri value is only set when artifacts grow
+  // past the inline budget (none today).
   artifacts_uri String?
+  // T45 — correlation id linking this attempt to the (potentially
+  // many) ExtractFailureSnapshot rows uploaded during the same
+  // provision_any_service run. Same value the MCP sets on each
+  // round/extract upload, so the admin dashboard can JOIN them
+  // for a "recent failures with thumbnails" view.
+  provision_id String?
+  // T45 — serialized step trail for failures that never reach the
+  // post-verify loop (captcha_blocked, oauth_required, anti_bot_blocked)
+  // and therefore upload no round-snapshots. Capped to ~32KB by the
+  // store layer; a much larger trail truncates with a marker.
+  step_trail   String?
   // Whose account ran this attempt. Used by the score derivation in
   // case we want per-account scoring later (today: global score).
   account_id   String

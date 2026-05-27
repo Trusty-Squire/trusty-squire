@@ -79,9 +79,20 @@ export class PrismaExtractFailureStore implements ExtractFailureStore {
         screenshot_jpeg,
         html_bytes,
         screenshot_bytes,
+        ...(payload.provision_id !== undefined
+          ? { provision_id: payload.provision_id }
+          : {}),
       },
     })) as ExtractFailureRow;
     return toSummary(row);
+  }
+
+  async listByProvisionId(provision_id: string): Promise<ExtractFailureSummary[]> {
+    const rows = await this.client.extractFailureSnapshot.findMany({
+      where: { provision_id, expires_at: { gt: new Date() } },
+      orderBy: { uploaded_at: "asc" },
+    });
+    return rows.map((row) => toSummary(row as ExtractFailureRow));
   }
 
   async list(account_id: string, limit = 50): Promise<ExtractFailureSummary[]> {
@@ -132,6 +143,7 @@ type ExtractFailureRow = {
   screenshot_jpeg: Buffer | null;
   html_bytes: number;
   screenshot_bytes: number;
+  provision_id?: string | null;
 };
 
 function toSummary(row: ExtractFailureRow): ExtractFailureSummary {
@@ -147,5 +159,6 @@ function toSummary(row: ExtractFailureRow): ExtractFailureSummary {
     extract_reason: row.extract_reason,
     html_bytes: row.html_bytes,
     screenshot_bytes: row.screenshot_bytes,
+    provision_id: row.provision_id ?? null,
   };
 }

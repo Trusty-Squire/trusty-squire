@@ -48,6 +48,9 @@ export interface ExtractFailureUpload {
   // JPEG bytes base64-encoded — matches what the bot already produces.
   // Optional: a future feature-flag may suppress screenshot upload.
   screenshot_jpeg_base64?: string;
+  // T45 — correlation id linking this snapshot to a ProvisionAttempt
+  // from the same run. Optional for backwards-compat with older MCPs.
+  provision_id?: string;
 }
 
 export interface ExtractFailureSummary {
@@ -62,6 +65,7 @@ export interface ExtractFailureSummary {
   extract_reason: string;
   html_bytes: number;
   screenshot_bytes: number;
+  provision_id: string | null;
 }
 
 export interface ExtractFailureDetail extends ExtractFailureSummary {
@@ -90,6 +94,10 @@ export interface ExtractFailureStore {
   upload(account_id: string, payload: ExtractFailureUpload): Promise<ExtractFailureSummary>;
   list(account_id: string, limit?: number): Promise<ExtractFailureSummary[]>;
   get(account_id: string, id: string): Promise<ExtractFailureDetail | null>;
+  // T45 — admin-side view: all snapshots tagged with one provision_id
+  // (i.e. one provision_any_service run), oldest-first. Used by the
+  // /admin recent-failures gallery.
+  listByProvisionId(provision_id: string): Promise<ExtractFailureSummary[]>;
   // Returns the number of rows pruned. Called by the server's cron or
   // ad-hoc; safe to call on every list() too (cheap when nothing is
   // expired).
@@ -112,6 +120,14 @@ interface InMemoryRow {
   screenshot_jpeg: Buffer | null;
   html_bytes: number;
   screenshot_bytes: number;
+  provision_id: string | null;
+}
+
+export interface ExtractFailureStoreListByProvisionId {
+  /** T45 — fetch all snapshots tagged with the same provision_id (one
+   *  run's per-round uploads), oldest-first. Used by the admin
+   *  dashboard's "recent failed attempts" view. */
+  listByProvisionId(provision_id: string): Promise<ExtractFailureSummary[]>;
 }
 
 export class InMemoryExtractFailureStore implements ExtractFailureStore {
@@ -177,6 +193,7 @@ export class InMemoryExtractFailureStore implements ExtractFailureStore {
       screenshot_jpeg,
       html_bytes,
       screenshot_bytes,
+      provision_id: payload.provision_id ?? null,
     };
     this.rows.set(id, row);
 
@@ -225,6 +242,21 @@ export class InMemoryExtractFailureStore implements ExtractFailureStore {
     return pruned;
   }
 
+  // T45 — admin dashboard view: all snapshots from a single
+  // provision_any_service run, oldest-first (so the trail reads in
+  // chronological order). Crosses account boundaries because admin
+  // routes already gate by REGISTRY_ADMIN_BEARER; no per-account
+  // filter here.
+  async listByProvisionId(provision_id: string): Promise<ExtractFailureSummary[]> {
+    const out: ExtractFailureSummary[] = [];
+    for (const row of this.rows.values()) {
+      if (row.provision_id !== provision_id) continue;
+      out.push(this.toSummary(row));
+    }
+    out.sort((a, b) => a.uploaded_at.getTime() - b.uploaded_at.getTime());
+    return out;
+  }
+
   private toSummary(row: InMemoryRow): ExtractFailureSummary {
     return {
       id: row.id,
@@ -238,6 +270,7 @@ export class InMemoryExtractFailureStore implements ExtractFailureStore {
       extract_reason: row.extract_reason,
       html_bytes: row.html_bytes,
       screenshot_bytes: row.screenshot_bytes,
+      provision_id: row.provision_id,
     };
   }
 }

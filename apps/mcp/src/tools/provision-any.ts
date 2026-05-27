@@ -671,6 +671,10 @@ async function runSignupTask(
   ctx: RunContext,
 ): Promise<void> {
   let response: Record<string, unknown>;
+  // T45 — correlation id for this provision call. Threaded into every
+  // round/extract upload AND the final attempt-recording so the
+  // admin dashboard can JOIN per-attempt screenshots + step trail.
+  const provisionId = generateProvisionId();
   try {
     // ── Skill promoter Tier-2 router ────────────────────────────────
     // Before launching the universal bot, check the registry for an
@@ -765,13 +769,13 @@ async function runSignupTask(
       // never abort the signup. Scoped by account_id so the matching
       // MCP fetch tools (list_extract_failures / get_extract_failure)
       // see the same snapshots.
-      extractFailureUploader: buildExtractFailureUploader(ctx.accountId),
+      extractFailureUploader: buildExtractFailureUploader(ctx.accountId, provisionId),
       // Per-round telemetry — every post-verify round's DOM +
       // screenshot lands in the registry, not just the ones that
       // fail at extract. Default-on as of 0.6.14-rc.11 so stuck-loop
       // bugs (Railway token-create no-op) are diagnosable without
       // needing to reproduce the run locally.
-      roundUploader: buildRoundUploader(ctx.accountId),
+      roundUploader: buildRoundUploader(ctx.accountId, provisionId),
       // Heightened-auth notifier credentials — the agent's
       // notifyHeightenedAuth call (Google number-match) reads these
       // because session.json's machine_token is NOT exported as an
@@ -831,18 +835,28 @@ async function runSignupTask(
     // T44 — record the attempt outcome regardless of state. Best-
     // effort; failures here only mean the next provision's score
     // won't see this data point.
+    // T45 — also include provisionId (links to ExtractFailureSnapshot
+    // rows from the same run) and the serialized step trail (for
+    // failures that bail BEFORE the post-verify loop and therefore
+    // upload no round snapshots).
     if (registry !== null) {
       const status: "success" | "failed" = result.success ? "success" : "failed";
       const attemptArgs: Parameters<typeof registry.recordProvisionAttempt>[0] = {
         service: input.service,
         status,
         mcpVersion: VERSION,
+        provisionId,
       };
       if (!result.success && result.error !== undefined) {
         attemptArgs.failureKind = result.error;
       }
       if (input.signup_url !== undefined) {
         attemptArgs.signupUrl = input.signup_url;
+      }
+      // Only attach the trail on failure — successful runs already
+      // have richer artifacts on the corpus/skill path.
+      if (!result.success && ctx.stepsSink.length > 0) {
+        attemptArgs.stepTrail = ctx.stepsSink.join("\n");
       }
       void registry.recordProvisionAttempt(attemptArgs);
     }
@@ -1219,6 +1233,7 @@ async function postCredentialsToVault(
 // abort a signup.
 function buildExtractFailureUploader(
   accountId: string,
+  provisionId?: string,
 ): (input: {
   service: string;
   url: string;
@@ -1248,6 +1263,9 @@ function buildExtractFailureUploader(
         ...(input.screenshot_jpeg_base64 !== undefined
           ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
           : {}),
+        // T45 — tag with the parent provision_id so the admin
+        // dashboard can group snapshots by attempt.
+        ...(provisionId !== undefined ? { provision_id: provisionId } : {}),
       };
       await fetch(`${registryBase}/v1/extract-failures`, {
         method: "POST",
@@ -1280,6 +1298,7 @@ function buildExtractFailureUploader(
 // way. Account-scoped identically.
 function buildRoundUploader(
   accountId: string,
+  provisionId?: string,
 ): (input: {
   service: string;
   round: number;
@@ -1310,6 +1329,8 @@ function buildRoundUploader(
         ...(input.screenshot_jpeg_base64 !== undefined
           ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
           : {}),
+        // T45 — same parent correlation id as the extract-failure path.
+        ...(provisionId !== undefined ? { provision_id: provisionId } : {}),
       };
       await fetch(`${registryBase}/v1/extract-failures`, {
         method: "POST",

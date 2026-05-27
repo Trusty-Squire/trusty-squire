@@ -93,7 +93,7 @@ interface ProvisionAttemptDelegate {
     select?: Record<string, boolean>;
   }): Promise<{ id: string }>;
   findMany(args: {
-    where: Record<string, unknown>;
+    where?: Record<string, unknown>;
     orderBy?: Record<string, unknown>;
     take?: number;
   }): Promise<
@@ -104,6 +104,10 @@ interface ProvisionAttemptDelegate {
       failure_kind: string | null;
       signup_url: string | null;
       artifacts_uri: string | null;
+      // T45 fields. Optional in the runtime type so older rows
+      // (pre-migration) don't crash the mapper.
+      provision_id?: string | null;
+      step_trail?: string | null;
       account_id: string;
       mcp_version: string;
       occurred_at: Date;

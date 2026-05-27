@@ -357,6 +357,13 @@ export class SkillRegistryClient {
     failureKind?: string;
     signupUrl?: string;
     mcpVersion: string;
+    // T45 — correlation id linking this attempt to the
+    // ExtractFailureSnapshot rows uploaded during the same run.
+    provisionId?: string;
+    // T45 — serialized step trail (newline-joined ctx.stepsSink) for
+    // failures that bail before the post-verify loop and therefore
+    // upload no per-round snapshots. Truncated server-side past 32KB.
+    stepTrail?: string;
   }): Promise<{ kind: "ok" } | { kind: "unavailable"; reason: string }> {
     const url = `${this.baseUrl}/v1/services/${encodeURIComponent(input.service)}/attempts`;
     const attempt = await this.fetchPostWithRetry(
@@ -369,6 +376,8 @@ export class SkillRegistryClient {
         status: input.status,
         ...(input.failureKind !== undefined ? { failure_kind: input.failureKind } : {}),
         ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
+        ...(input.provisionId !== undefined ? { provision_id: input.provisionId } : {}),
+        ...(input.stepTrail !== undefined ? { step_trail: input.stepTrail } : {}),
         mcp_version: input.mcpVersion,
       }),
     );

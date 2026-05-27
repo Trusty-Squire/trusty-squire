@@ -31,6 +31,13 @@ const PostBodySchema = z.object({
   failure_kind: z.string().min(1).max(120).optional(),
   signup_url: z.string().max(2048).optional(),
   mcp_version: z.string().min(1).max(40),
+  // T45 — correlation id linking this attempt to ExtractFailureSnapshot
+  // rows uploaded during the same provision_any_service call.
+  provision_id: z.string().min(1).max(120).optional(),
+  // T45 — inline step trail (truncated server-side past 32KB) for
+  // failures that bail before any ExtractFailureSnapshot rows
+  // exist for this run.
+  step_trail: z.string().max(64 * 1024).optional(),
 });
 
 const PeerSlugList = z
@@ -89,6 +96,12 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
           : {}),
         ...(parsed.data.signup_url !== undefined
           ? { signup_url: parsed.data.signup_url }
+          : {}),
+        ...(parsed.data.provision_id !== undefined
+          ? { provision_id: parsed.data.provision_id }
+          : {}),
+        ...(parsed.data.step_trail !== undefined
+          ? { step_trail: parsed.data.step_trail }
           : {}),
         account_id,
         mcp_version: parsed.data.mcp_version,

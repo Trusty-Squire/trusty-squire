@@ -35,6 +35,11 @@ const UploadBodySchema = z.object({
   html: z.string().min(1),
   // Optional JPEG, base64 encoded.
   screenshot_jpeg_base64: z.string().optional(),
+  // T45 — correlation id linking this snapshot to a ProvisionAttempt
+  // row uploaded from the same provision_any_service run. The MCP
+  // generates a fresh provision_id per run; older clients omit this
+  // field and the snapshot stays unlinked.
+  provision_id: z.string().min(1).max(120).optional(),
 });
 
 export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRouteDeps> = async (
@@ -50,10 +55,11 @@ export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRou
     }
     const account_id = resolveAccountId(request);
     try {
-      const { screenshot_jpeg_base64, ...payload } = parsed.data;
+      const { screenshot_jpeg_base64, provision_id, ...payload } = parsed.data;
       const upload = {
         ...payload,
         ...(screenshot_jpeg_base64 !== undefined ? { screenshot_jpeg_base64 } : {}),
+        ...(provision_id !== undefined ? { provision_id } : {}),
       };
       const summary = await store.upload(account_id, upload);
       return reply.code(201).send(summary);
