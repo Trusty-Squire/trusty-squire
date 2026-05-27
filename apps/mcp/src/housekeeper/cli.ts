@@ -54,6 +54,7 @@ interface ParsedArgs {
   replayMode: ReplayMode;
   queueMode: QueueMode;
   service: string | undefined;
+  oauthProvider: "google" | "github" | undefined;
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
@@ -69,6 +70,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     replayMode: "full",
     queueMode: "verifier",
     service: undefined,
+    oauthProvider: undefined,
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
@@ -87,6 +89,13 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
       args.service = arg.slice("--service=".length);
+    } else if (arg.startsWith("--oauth-provider=")) {
+      const v = arg.slice("--oauth-provider=".length);
+      if (v !== "google" && v !== "github") {
+        console.error(`housekeeper: --oauth-provider must be google|github (got ${v})`);
+        process.exit(2);
+      }
+      args.oauthProvider = v;
     } else if (arg.startsWith("--from=")) {
       args.seedPath = arg.slice("--from=".length);
     } else if (arg.startsWith("--limit=")) {
@@ -130,6 +139,11 @@ Queue modes (pick one — default: verifier):
                             services.yaml). Status:skip excluded.
   --service=SLUG            Ad-hoc single-service mode. Overrides
                             --queue. Bot runs once against SLUG.
+  --oauth-provider=google|github
+                            Force the bot's OAuth-first scan to look
+                            for THIS provider on the signup page.
+                            Use alongside --service= when the YAML
+                            isn't being read.
 
 Notifier flags (combine freely; log notifier always on):
   --telegram                Send each outcome via TELEGRAM_BOT_TOKEN.
@@ -192,7 +206,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // Pick queue provider. --service overrides --queue.
   let queue: QueueProvider;
   if (args.service !== undefined && args.service.length > 0) {
-    queue = new AdHocServiceQueue(args.service);
+    queue = new AdHocServiceQueue(args.service, args.oauthProvider);
   } else if (args.queueMode === "verifier") {
     queue = new RegistryVerifierQueue(client);
   } else if (args.queueMode === "discovery") {
@@ -235,7 +249,10 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   let discover: HousekeeperOpts["discover"];
   if (queue.name !== "verifier") {
     const { runDiscoveryBot } = await import("./discovery-bot.js");
-    discover = async (input: { service: string }) => runDiscoveryBot(input);
+    discover = async (input: {
+      service: string;
+      oauthProvider?: "google" | "github";
+    }) => runDiscoveryBot(input);
   }
 
   const opts: HousekeeperOpts = {

@@ -36,6 +36,13 @@ export type HousekeeperTask =
   | {
       kind: "discover";
       service: string;
+      // Optional OAuth provider hint from the curated YAML (or
+      // future telemetry sources). Forces the bot's OAuth-first
+      // scan to look for THIS provider rather than relying on
+      // the bot profile's logged-in-providers cache. Plumbed
+      // through to UniversalSignupBot.signup() so the OAuth-first
+      // detection actually fires when the YAML declares one.
+      oauthProvider?: "google" | "github";
       // Optional metadata for the notifier surfaces (telegram, GH issue).
       // Discovery candidates come with telemetry counts; seed/ad-hoc
       // tasks leave this null.
@@ -127,10 +134,17 @@ export class YamlSeedQueue implements QueueProvider {
     if (this.cache === null) {
       this.cache = await this.load();
     }
-    return this.cache.slice(0, limit).map((e) => ({
-      kind: "discover" as const,
-      service: e.slug,
-    }));
+    return this.cache.slice(0, limit).map((e) => {
+      const oauthProvider =
+        e.oauth_provider === "google" || e.oauth_provider === "github"
+          ? e.oauth_provider
+          : undefined;
+      return {
+        kind: "discover" as const,
+        service: e.slug,
+        ...(oauthProvider !== undefined ? { oauthProvider } : {}),
+      };
+    });
   }
 
   private async load(): Promise<YamlServiceEntry[]> {
@@ -153,10 +167,25 @@ export class YamlSeedQueue implements QueueProvider {
 export class AdHocServiceQueue implements QueueProvider {
   readonly name = "ad-hoc";
   private fired = false;
-  constructor(private readonly service: string) {}
+  constructor(
+    private readonly service: string,
+    // Optional OAuth hint — same shape the YAML seed queue would emit.
+    // Forces the bot's OAuth-first scan to look for THIS provider on
+    // the signup page rather than relying on the bot profile's
+    // logged-in-providers cache (often empty on a fresh box).
+    private readonly oauthProvider?: "google" | "github",
+  ) {}
   async fetch(_limit: number): Promise<HousekeeperTask[]> {
     if (this.fired) return [];
     this.fired = true;
-    return [{ kind: "discover", service: this.service }];
+    return [
+      {
+        kind: "discover",
+        service: this.service,
+        ...(this.oauthProvider !== undefined
+          ? { oauthProvider: this.oauthProvider }
+          : {}),
+      },
+    ];
   }
 }

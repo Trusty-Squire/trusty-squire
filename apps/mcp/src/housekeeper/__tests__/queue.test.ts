@@ -158,6 +158,46 @@ ${Array.from({ length: 30 }, (_, i) => `  - { slug: svc${i} }`).join("\n")}
     expect(tasks).toHaveLength(5);
   });
 
+  it("propagates oauth_provider from YAML to the task (bug fix)", async () => {
+    // The bot's OAuth-first scan only fires when oauthCandidates is
+    // non-empty. resolveOAuthCandidates returns [task.oauthProvider]
+    // when set, OR the bot's logged-in-providers cache otherwise. A
+    // fresh box has an empty cache, so the YAML hint is the ONLY
+    // way to force OAuth on first visit. The seed queue must thread
+    // it through; the previous version silently dropped the field.
+    const yamlText = `services:
+  - { slug: cloudinary, oauth_provider: google }
+  - { slug: railway, oauth_provider: github }
+  - { slug: ipinfo }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+    });
+    const tasks = await queue.fetch(10);
+    expect(tasks).toHaveLength(3);
+    expect(tasks[0]).toMatchObject({
+      kind: "discover",
+      service: "cloudinary",
+      oauthProvider: "google",
+    });
+    expect(tasks[1]).toMatchObject({ service: "railway", oauthProvider: "github" });
+    // No oauth_provider in YAML → field absent (not undefined-as-value).
+    expect("oauthProvider" in tasks[2]!).toBe(false);
+  });
+
+  it("ignores invalid oauth_provider values rather than passing them through", async () => {
+    const yamlText = `services:
+  - { slug: weirdsvc, oauth_provider: discord }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+    });
+    const tasks = await queue.fetch(10);
+    expect("oauthProvider" in tasks[0]!).toBe(false);
+  });
+
   it("skips entries with malformed shape (missing slug)", async () => {
     const yamlText = `services:
   - { name: bad }

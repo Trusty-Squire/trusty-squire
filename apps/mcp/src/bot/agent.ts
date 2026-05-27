@@ -1677,6 +1677,118 @@ export function extractQuotedTokenFromReason(
   return null;
 }
 
+// Phase E — multi-credential planner-prose parser. When a service
+// exposes several distinct credentials on the same page (Cloudinary:
+// cloud_name + api_key + api_secret; Algolia: application_id +
+// admin_api_key + search_api_key; Twilio: account_sid + auth_token;
+// Stripe: publishable_key + secret_key), the post-verify planner is
+// instructed (Phase E prompt update) to label each value explicitly
+// in its extract reason. This parser pulls those labels + values out
+// and returns them as { [label]: value }.
+//
+// The label vocabulary is whitelisted to known credential-shaped
+// names so the parser doesn't false-match prose like "the
+// dashboard_url is …" or "the project_name is …". Anything outside
+// the whitelist is dropped to keep credentials objects clean.
+//
+// Returns empty record when nothing parsed. Caller folds the result
+// into the credentials dict; falls back to single-cred extraction
+// when this returns empty.
+export function extractAllLabeledTokensFromReason(
+  reason: string,
+  pageText: string,
+): Record<string, string> {
+  // Whitelist of credential labels we recognize. Snake_case canonical;
+  // the matcher tolerates the LLM emitting hyphenated or PascalCase
+  // variants. Each entry maps a normalized form back to the canonical
+  // snake_case used in the credentials Record.
+  const LABEL_ALIASES: Record<string, string> = {
+    api_key: "api_key",
+    apikey: "api_key",
+    api_token: "api_key",
+    apitoken: "api_key",
+    access_token: "access_token",
+    accesstoken: "access_token",
+    api_secret: "api_secret",
+    apisecret: "api_secret",
+    secret_key: "secret_key",
+    secretkey: "secret_key",
+    publishable_key: "publishable_key",
+    publishablekey: "publishable_key",
+    client_id: "client_id",
+    clientid: "client_id",
+    client_secret: "client_secret",
+    clientsecret: "client_secret",
+    cloud_name: "cloud_name",
+    cloudname: "cloud_name",
+    application_id: "application_id",
+    applicationid: "application_id",
+    app_id: "application_id",
+    appid: "application_id",
+    admin_api_key: "admin_api_key",
+    adminapikey: "admin_api_key",
+    search_api_key: "search_api_key",
+    searchapikey: "search_api_key",
+    monitoring_api_key: "monitoring_api_key",
+    account_sid: "account_sid",
+    accountsid: "account_sid",
+    auth_token: "auth_token",
+    authtoken: "auth_token",
+    sandbox_secret: "sandbox_secret",
+    sandboxsecret: "sandbox_secret",
+    org_id: "org_id",
+    orgid: "org_id",
+    organization_id: "org_id",
+    consumer_key: "consumer_key",
+    consumer_secret: "consumer_secret",
+    access_token_secret: "access_token_secret",
+    project_api_key: "project_api_key",
+    personal_api_key: "personal_api_key",
+    app_key: "app_key",
+    appkey: "app_key",
+  };
+
+  const out: Record<string, string> = {};
+
+  // Build the label-alternation from the whitelist keys. Restricting
+  // the regex to KNOWN labels avoids the greedy-match-eats-real-label
+  // bug (without this, "shows: application_id" would match as
+  // label='shows' / value='application_id' and consume the real
+  // 'application_id' that follows). Longer aliases first so the
+  // regex prefers `admin_api_key` over `api_key` at the same start.
+  const labelKeys = Object.keys(LABEL_ALIASES).sort(
+    (a, b) => b.length - a.length,
+  );
+  const labelAlt = labelKeys.map(escapeRegex).join("|");
+  // Hyphen variants — the LLM sometimes emits `cloud-name` instead of
+  // `cloud_name`. Replace _ with [-_] inside each alternative.
+  const labelAltLoose = labelAlt.replace(/_/g, "[-_]");
+  const labeledRe = new RegExp(
+    `\\b(${labelAltLoose})\\b\\s*(?:=|:|\\bis\\b)\\s*['"\`]?([A-Za-z0-9_\\-]{4,80})['"\`]?`,
+    "gi",
+  );
+  for (const m of reason.matchAll(labeledRe)) {
+    const rawLabel = (m[1] ?? "").toLowerCase().replace(/-/g, "_");
+    const normalized = rawLabel.replace(/_+/g, "_");
+    const canonical = LABEL_ALIASES[normalized];
+    const value = m[2];
+    if (canonical === undefined || value === undefined) continue;
+    // Anti-hallucination — value must appear in the page text /
+    // input values (same guardrail extractQuotedTokenFromReason uses).
+    if (!pageText.includes(value)) continue;
+    // First-wins. The planner sometimes restates the same label
+    // multiple times (rounds 4/5/10 in the Cloudinary trace); the
+    // first labeled value is the one we want.
+    if (out[canonical] === undefined) out[canonical] = value;
+  }
+
+  return out;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
@@ -4552,6 +4664,33 @@ ${formatInventory(input.inventory)}`,
               this.browser.extractAllInputValues().catch(() => [] as string[]),
             ]);
             const verifySource = pageText + "\n" + inputValues.join("\n");
+            // Phase E — multi-cred-aware extraction. Try the labeled
+            // multi-credential parser FIRST. If the planner labeled
+            // 2+ distinct credentials in its reason, fold them all
+            // into the credentials Record. If the parser found at
+            // least one new value (cloud_name, api_secret, etc. —
+            // anything beyond the single api_key the legacy path
+            // captures), prefer this. Falls through to the single-
+            // value extractQuotedTokenFromReason when no labeled
+            // tokens parsed (single-cred services, ad-hoc planner
+            // prose without explicit labels).
+            const labeled = extractAllLabeledTokensFromReason(
+              nextStep.reason,
+              verifySource,
+            );
+            const labeledKeys = Object.keys(labeled);
+            if (labeledKeys.length >= 2 || (labeledKeys.length === 1 && labeled["api_key"] === undefined)) {
+              credentials = { ...credentials, ...labeled };
+              const summary = labeledKeys
+                .map((k) => `${k}=${labeled[k]!.slice(0, 4)}…${labeled[k]!.slice(-4)}`)
+                .join(", ");
+              args.steps.push(
+                `Post-verify ${round + 1}/${args.maxRounds}: extracted ${labeledKeys.length} labeled credential(s) ` +
+                  `via Phase E parser (${summary})`,
+              );
+              consecutiveFailedExtracts = 0;
+              continue;
+            }
             const quoted = extractQuotedTokenFromReason(
               nextStep.reason,
               verifySource,
@@ -4918,6 +5057,26 @@ Schema:
 
 Strategy:
 - If a FULL, untruncated API key is visible, return {"kind":"extract"}.
+- **MULTI-CREDENTIAL SERVICES** — when the page shows TWO OR MORE
+  DISTINCT labeled credentials (e.g. Cloudinary shows cloud_name +
+  api_key + api_secret; Algolia shows application_id + admin_api_key +
+  search_api_key; Twilio shows account_sid + auth_token; Stripe shows
+  publishable_key + secret_key; AWS shows access_key_id +
+  secret_access_key) — return ONE {"kind":"extract"} step whose reason
+  labels EVERY visible credential in the format
+  \`<canonical_label>='<value>'\` (use SINGLE quotes around values).
+  The bot's labeled-extractor will pull EACH labeled value into the
+  credentials object. Example reason:
+  "The Cloudinary API Keys page shows cloud_name='dlq4xgrca' and
+  api_key='491741466469613' in the table; api_secret is hidden behind
+  a Reveal button."
+  Use the standard canonical labels: api_key, api_secret, secret_key,
+  publishable_key, access_token, client_id, client_secret, cloud_name,
+  application_id, admin_api_key, search_api_key, account_sid,
+  auth_token, app_key, org_id, consumer_key, consumer_secret,
+  access_token_secret, project_api_key, personal_api_key.
+  If only ONE credential is visible, omit the labels and quote the
+  value as before — the single-cred fallback handles that path.
 - A key shown masked or truncated (with "...", dots, or "•") is NOT
   extractable — its full value is shown only once, at creation. Do NOT
   return "extract" for a masked key, and do not return "extract" twice

@@ -62,7 +62,7 @@ function flushStepTrail(steps: readonly string[], service: string): void {
 }
 
 export async function runDiscoveryBot(
-  input: { service: string },
+  input: { service: string; oauthProvider?: "google" | "github" },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
   const machineToken = cfg.machineToken ?? process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
@@ -127,6 +127,14 @@ export async function runDiscoveryBot(
       stepsSink,
       machineToken,
       apiBase,
+      // YAML-declared OAuth hint forces the bot's OAuth-first scan
+      // to look for THIS provider. Without it the scan falls back
+      // on the bot profile's logged-in-providers cache, which is
+      // often empty (the cache only writes after a successful prior
+      // OAuth handshake — chicken-and-egg for fresh services).
+      ...(input.oauthProvider !== undefined
+        ? { oauthProvider: input.oauthProvider }
+        : {}),
     });
   } catch (err) {
     // Dump the step trail before bailing — without it, debugging
