@@ -26,6 +26,7 @@ import {
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
+import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
 import { redactCredentials } from "./redact.js";
 import { readOperatorOtp, fromDomainFromUrl } from "./read-otp.js";
 import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
@@ -1884,13 +1885,55 @@ export class SignupAgent {
       steps.push(`${label} captcha gate skipped — session already captcha-blocked (${kind}).`);
       return { found: true, solved: false, blocked: true, kind };
     }
-    const result = await this.browser.solveVisibleCaptcha();
+    let result = await this.browser.solveVisibleCaptcha();
     if (!result.found) {
       return { found: false, solved: false, blocked: false, kind: "turnstile" };
     }
     steps.push(
       `${label} captcha (${result.kind}): ${result.solved ? "solved" : "NOT solved (timeout)"}`,
     );
+    // Tier 3 — when Tier 2 click-and-wait times out on a reCAPTCHA v2
+    // image challenge AND TWOCAPTCHA_API_KEY is configured, fall
+    // through to the third-party solver. Reads sitekey from the
+    // page, submits to 2Captcha, polls for the token (~30-90s),
+    // injects into the hidden g-recaptcha-response textarea + fires
+    // the widget's onSuccess callback. Turnstile is intentionally
+    // skipped — Cloudflare's challenge scores at the IP layer; a
+    // solver-issued token gets rejected anyway.
+    if (
+      !result.solved &&
+      result.kind === "recaptcha" &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
+      const sitekey = await this.browser.extractRecaptchaSitekey();
+      if (sitekey !== null) {
+        const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+        if (pageUrl !== undefined) {
+          steps.push(`${label} captcha: Tier 3 — submitting sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`);
+          const solveRes = await this.captchaSolver.solveRecaptchaV2({
+            sitekey,
+            pageUrl,
+          });
+          if (solveRes.kind === "ok") {
+            const injected = await this.browser.injectRecaptchaToken(solveRes.token);
+            if (injected) {
+              steps.push(
+                `${label} captcha: Tier 3 solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+              );
+              result = { ...result, solved: true };
+            } else {
+              steps.push(
+                `${label} captcha: Tier 3 token arrived but page injection failed — captcha stays blocked`,
+              );
+            }
+          } else {
+            steps.push(`${label} captcha: Tier 3 ${solveRes.kind}` +
+              ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+              ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : ""));
+          }
+        }
+      }
+    }
     // rc.32 — forensic snapshot after the captcha attempt. Without
     // this, the only snapshot near the captcha is the pre-fill one
     // taken BEFORE the click, so when a Turnstile fails to solve we
@@ -2592,6 +2635,20 @@ export class SignupAgent {
   // to access the platform"). Mixing that into the paywall check
   // upgrades these from oauth_onboarding_failed → onboarding_blocked.
   private lastPostVerifyDoneReason: string | null = null;
+  // Stashed at signup() entry so deep postVerifyLoop code (the
+  // heightened-auth detector below) can fire notifyHeightenedAuth
+  // without threading task through every method. Mirrors the
+  // currentService pattern.
+  private currentMachineToken: string | undefined = undefined;
+  private currentApiBase: string | undefined = undefined;
+  // Once per signup — fire the heightened-auth notifier at most one
+  // time even if the planner returns done with a challenge phrasing
+  // multiple times before the loop fully exits.
+  private heightenedAuthFired = false;
+  // Tier 3 captcha solver (2Captcha). Constructed eagerly so the
+  // isAvailable() check in runCaptchaGate is cheap; opt-in via the
+  // TWOCAPTCHA_API_KEY env var read at construction.
+  private readonly captchaSolver?: TwoCaptchaSolver;
 
   constructor(
     private browser: BrowserController,
@@ -2599,6 +2656,9 @@ export class SignupAgent {
     opts: {
       extractFailureUploader?: ExtractFailureUploader;
       roundUploader?: RoundUploader;
+      // Inject a pre-constructed solver — tests pass a stub that
+      // returns canned tokens without hitting 2captcha.com.
+      captchaSolver?: TwoCaptchaSolver;
     } = {},
   ) {
     if (llm === undefined) {
@@ -2618,6 +2678,7 @@ export class SignupAgent {
     if (opts.roundUploader !== undefined) {
       this.roundUploader = opts.roundUploader;
     }
+    this.captchaSolver = opts.captchaSolver ?? new TwoCaptchaSolver();
   }
 
   // Read-only view of how many calls landed on which backend. Exported
@@ -2749,6 +2810,13 @@ export class SignupAgent {
     // the snapshot without us threading task through every method.
     this.currentService = task.service;
     this.lastPostVerifyDoneReason = null;
+    // Stash for the post-verify heightened-auth notifier — the
+    // detection point is deep inside postVerifyLoop where it sees
+    // the planner's `done` reason naming a Google challenge. Same
+    // path runOAuthFlow uses for the in-handshake case.
+    this.currentMachineToken = task.machineToken;
+    this.currentApiBase = task.apiBase;
+    this.heightenedAuthFired = false;
     const rawTimeout = Number(process.env.UNIVERSAL_BOT_RUN_TIMEOUT_MS);
     const timeoutMs =
       Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 600_000;
@@ -3962,6 +4030,47 @@ ${formatInventory(input.inventory)}`,
   // Drive the browser toward the API key after the account exists —
   // used by BOTH the email-verification path and the OAuth path (T9).
   // Each round asks Claude what to do next given the current page; we
+  // Heightened-auth detector for the POST-VERIFY path. runOAuthFlow
+  // catches Google's device-verification challenge during the OAuth
+  // handshake itself; this catches the case where the planner
+  // bumped into the same challenge mid-post-verify (Algolia, etc.).
+  // Patterns match the planner's natural-language done-reason; the
+  // number-match is extracted with the same shape the bot's
+  // existing extractGoogleNumberMatch expects ("tap 71", "number 42").
+  // Fire-and-forget; idempotent per-signup via heightenedAuthFired.
+  private maybeFirePostVerifyHeightenedAuth(
+    reason: string,
+    service: string,
+    steps: string[],
+  ): boolean {
+    if (this.heightenedAuthFired) return false;
+    const CHALLENGE_PATTERNS =
+      /\b(?:device verification|security challenge|2[- ]?step|2fa|number(?: match)?(?: on (?:your |the )?(?:phone|screen|device))?|tap \d+|tap the number|confirm.{0,15}sign[- ]?in|verify it'?s you)\b/i;
+    if (!CHALLENGE_PATTERNS.test(reason)) return false;
+    const digitMatch = reason.match(/\btap (\d{1,3})\b|\bnumber (\d{1,3})\b/i);
+    const digit =
+      digitMatch !== null ? (digitMatch[1] ?? digitMatch[2] ?? null) : null;
+    this.heightenedAuthFired = true;
+    const msg = digit !== null
+      ? `Google challenge detected mid-post-verify: tap ${digit} on your phone — 2 minute window`
+      : `Google challenge detected mid-post-verify (number extractor missed it — read the planner reason): ${reason.slice(0, 200)}`;
+    console.error(`[universal-bot] ${msg}`);
+    steps.push(`Post-verify: ${msg}`);
+    void notifyHeightenedAuth({
+      service,
+      digit,
+      windowSeconds: 120,
+      machineToken: this.currentMachineToken,
+      apiBase: this.currentApiBase,
+    });
+    void sendTelegramHeightenedAuth({
+      service,
+      digit,
+      windowSeconds: 120,
+    });
+    return true;
+  }
+
   // stop when Claude says "done" or when we extract a credential.
   // Bounded by maxRounds so a confused agent can't burn the context.
   //
@@ -4372,6 +4481,30 @@ ${formatInventory(input.inventory)}`,
       }
 
       if (nextStep.kind === "done") {
+        // When the planner bails because it encountered Google's
+        // device-verification challenge mid-post-verify (Algolia +
+        // similar redirect their `signup_url` to a sign-in page,
+        // OAuth handoff happens AFTER runOAuthFlow already exited),
+        // fire the heightened-auth notifier AND wait the 2-minute
+        // window for the operator to tap their phone. After the
+        // wait, re-read the page state and continue post-verify —
+        // Google's challenge typically clears within seconds of the
+        // tap and the dashboard becomes accessible.
+        if (
+          this.maybeFirePostVerifyHeightenedAuth(
+            nextStep.reason,
+            args.service,
+            args.steps,
+          )
+        ) {
+          args.steps.push(
+            "Post-verify: waiting 120s for the operator to clear Google's device challenge",
+          );
+          await this.browser.wait(120);
+          // Re-loop — next iteration's waitForFormReady + inventory
+          // read see the post-challenge dashboard.
+          continue;
+        }
         this.lastPostVerifyDoneReason = nextStep.reason;
         break;
       }

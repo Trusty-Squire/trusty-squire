@@ -44,6 +44,23 @@ export type DiscoveryBotOutcome =
   | { kind: "blocked"; reason: string }
   | { kind: "failed"; reason: string };
 
+// Dumps the bot's step trail to stderr so the housekeeper log shows
+// the full planner/inventory/Plan trace alongside the discover
+// outcome. Without this, run_timeout / bot_crash failures look
+// opaque ("exceeded 600s") with no diagnostic surface.
+function flushStepTrail(steps: readonly string[], service: string): void {
+  if (steps.length === 0) {
+    process.stderr.write(`[housekeeper] ${service}: (no step trail captured)\n`);
+    return;
+  }
+  process.stderr.write(
+    `[housekeeper] ${service} step trail (${steps.length} step(s)):\n`,
+  );
+  for (const s of steps) {
+    process.stderr.write(`  ${s}\n`);
+  }
+}
+
 export async function runDiscoveryBot(
   input: { service: string },
   cfg: DiscoveryBotConfig = {},
@@ -73,8 +90,12 @@ export async function runDiscoveryBot(
   const inboxClient =
     cfg.inboxClient ?? new InboxClient({ baseUrl: apiBase, apiKey: machineToken });
 
+  // run_id is VarChar(26) on the inbox EmailAlias model. Keep the
+  // prefix short ("hk-" for housekeeper) so timestamp + entropy fit.
+  // Mirrors the `mcp-<ts>-<rand>` shape provision-any.ts produces,
+  // which already fits comfortably.
   const runId =
-    `discovery-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+    `hk-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 
   let alias: string;
   try {
@@ -108,11 +129,17 @@ export async function runDiscoveryBot(
       apiBase,
     });
   } catch (err) {
+    // Dump the step trail before bailing — without it, debugging
+    // mid-run failures requires re-running the whole thing.
+    flushStepTrail(stepsSink, input.service);
     return {
       kind: "failed",
       reason: `bot crash: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+  // Always flush — operator wants to see what happened on success
+  // (to vet the capture) AND on failure (to diagnose).
+  flushStepTrail(stepsSink, input.service);
 
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).

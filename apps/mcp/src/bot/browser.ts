@@ -1726,6 +1726,108 @@ export class BrowserController {
     }
   }
 
+  // Tier 3 captcha-solver support — extract the reCAPTCHA sitekey
+  // from the page so a third-party solver can submit it. Returns
+  // null when no v2 widget is present (Tier 3 only handles v2;
+  // Turnstile + reCAPTCHA v3 are scoring-based and solvers don't
+  // help). Reads from the standard places sites declare it:
+  //   1. <div class="g-recaptcha" data-sitekey="...">
+  //   2. <iframe src="...?k=SITEKEY&...">  (api2/anchor frame)
+  //   3. <script>...sitekey: '...'...</script> via window globals
+  async extractRecaptchaSitekey(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      const sitekey = await this.page.evaluate(() => {
+        // 1. div[data-sitekey] — the standard reCAPTCHA v2 anchor.
+        const div = document.querySelector<HTMLElement>(
+          "[data-sitekey], div.g-recaptcha[data-sitekey]",
+        );
+        if (div !== null) {
+          const k = div.getAttribute("data-sitekey");
+          if (k !== null && k.length > 10) return k;
+        }
+        // 2. The api2 iframe src carries ?k=SITEKEY.
+        const iframes = Array.from(
+          document.querySelectorAll<HTMLIFrameElement>(
+            'iframe[src*="recaptcha/api2"], iframe[src*="recaptcha/enterprise"]',
+          ),
+        );
+        for (const ifr of iframes) {
+          const url = new URL(ifr.src);
+          const k = url.searchParams.get("k");
+          if (k !== null && k.length > 10) return k;
+        }
+        return null;
+      });
+      return sitekey;
+    } catch {
+      return null;
+    }
+  }
+
+  // Inject a 2Captcha-resolved token into the page's hidden
+  // g-recaptcha-response textarea AND fire any onSuccess callback
+  // the widget registered with grecaptcha.render(). Without firing
+  // the callback the page often doesn't "see" the token even though
+  // the DOM input is populated.
+  //
+  // Returns true on success, false if no recaptcha widget present.
+  async injectRecaptchaToken(token: string): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      const injected = await this.page.evaluate((tok: string) => {
+        // 1. Populate every g-recaptcha-response textarea on the page
+        //    (some pages render multiple widgets).
+        const inputs = Array.from(
+          document.querySelectorAll<HTMLTextAreaElement>(
+            'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+          ),
+        );
+        if (inputs.length === 0) return false;
+        for (const input of inputs) {
+          input.value = tok;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        // 2. Fire the widget's onSuccess callback if registered. The
+        //    callbacks are stored on `___grecaptcha_cfg.clients`; the
+        //    exact tree is undocumented and shifts across versions
+        //    so a defensive walk is the only reliable way.
+        try {
+          const cfg = (window as unknown as {
+            ___grecaptcha_cfg?: { clients?: Record<string, unknown> };
+          }).___grecaptcha_cfg;
+          if (cfg !== undefined && cfg.clients !== undefined) {
+            const fire = (obj: unknown): void => {
+              if (obj === null || typeof obj !== "object") return;
+              for (const [, v] of Object.entries(obj as Record<string, unknown>)) {
+                if (v === null || typeof v !== "object") continue;
+                if ("callback" in v && typeof (v as { callback: unknown }).callback === "function") {
+                  try {
+                    (v as { callback: (t: string) => void }).callback(tok);
+                  } catch {
+                    // best-effort — at worst we miss the callback,
+                    // but the DOM input is populated which most
+                    // sites' server-side validation reads.
+                  }
+                }
+                fire(v);
+              }
+            };
+            fire(cfg.clients);
+          }
+        } catch {
+          // grecaptcha not on window — page may use a wrapper
+          // (Stytch, Clerk). DOM injection is still in place.
+        }
+        return true;
+      }, token);
+      return injected;
+    } catch {
+      return false;
+    }
+  }
+
   // Small mouse wiggle near the current position. Used during prewarm
   // so the page sees pointer events before we navigate away.
   private async jitterMouse(): Promise<void> {
