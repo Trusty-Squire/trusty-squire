@@ -17,7 +17,6 @@ import { MissingSessionError } from "./api-client.js";
 import { runCli } from "./install/cli.js";
 import { runServer } from "./server.js";
 import { runSkillCli } from "./skill-cli/cli.js";
-import { runHousekeeperCli } from "./housekeeper/cli.js";
 import { VERSION } from "./version.js";
 
 const argv = process.argv.slice(2);
@@ -52,9 +51,11 @@ async function dispatch(): Promise<number> {
     return await runSkillCli(argv.slice(1));
   }
   if (isHousekeeper) {
-    // housekeeper — merged verifier + discoverer + harvester.
-    // Operator-only tool, excluded from the npm tarball; run from
-    // a source checkout on the operator host.
+    // Operator-only tool, excluded from the published tarball
+    // (apps/mcp/package.json `files` strips dist/housekeeper). The
+    // import must be dynamic so end-user installs don't fault at
+    // module-load time on the missing path.
+    const { runHousekeeperCli } = await import("./housekeeper/cli.js");
     return await runHousekeeperCli(argv.slice(1));
   }
   await runCli(argv);
