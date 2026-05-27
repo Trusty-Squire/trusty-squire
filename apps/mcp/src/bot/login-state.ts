@@ -64,3 +64,16 @@ export function clearProviderLoggedIn(
     /* best-effort */
   }
 }
+
+// Wipe the marker entirely. Used by `connect --force-relogin` so the
+// step-2/2 prompt reflects THIS run's actual cookie state instead of
+// silently relying on the union of every prior session. Best-effort.
+export function clearAllProviderMarkers(
+  profileDir: string = CHROME_PROFILE_DIR,
+): void {
+  try {
+    writeFileSync(markerPath(profileDir), JSON.stringify([]), "utf8");
+  } catch {
+    /* best-effort */
+  }
+}

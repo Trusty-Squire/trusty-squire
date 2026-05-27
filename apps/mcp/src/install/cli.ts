@@ -53,7 +53,7 @@ import {
   openInstallConfirmInBotChrome,
 } from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
-import { loggedInProviders } from "../bot/login-state.js";
+import { clearAllProviderMarkers, loggedInProviders } from "../bot/login-state.js";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
 import chalk from "chalk";
@@ -343,6 +343,15 @@ async function connect(args: Argv): Promise<void> {
   console.warn(
     "You need to connect your Google and/or GitHub OAuth accounts to use Trusty Squire.",
   );
+
+  // --force-relogin means "redo the OAuth dance from scratch" — so
+  // wipe the cached provider markers from any prior connect run.
+  // Otherwise step 2/2 short-circuits when the marker file from an
+  // older session already names both providers, regardless of what
+  // this run actually signed into.
+  if (args.forceRelogin) {
+    clearAllProviderMarkers();
+  }
   ui.section(1, 2, "Connect Google");
 
   // Detect egress class so the asn rides along in the install payload
