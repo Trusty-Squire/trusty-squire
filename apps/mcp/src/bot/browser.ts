@@ -1998,6 +1998,363 @@ export class BrowserController {
     });
   }
 
+  // DOM-proximity labeled credential candidates. Walks every visible
+  // input/code/text element looking for credential-shape strings,
+  // pairs each one with its nearest credential-label text in the DOM
+  // tree, and returns the labeled tuples for the multi-cred extractor
+  // to fold into the credentials Record.
+  //
+  // Complements the Phase E planner-quoted extractor — when the
+  // planner's prose doesn't explicitly label values (multi-cred page
+  // where the planner missed one), this DOM-grounded pass picks them
+  // up via the visible labels the page itself renders.
+  //
+  // Returns shape:
+  //   { value: "<credential-shape string>",
+  //     label: "<the closest matching label text>" | null,
+  //     isMasked: true if the value looks like a redacted display
+  //               (••••, ****, contains "•" or runs of "*") }
+  //
+  // The caller (agent.ts extractAllLabeledCandidates path) maps label
+  // text to canonical credential keys using the same vocabulary the
+  // Phase E parser uses.
+  async extractLabeledCredentialCandidates(): Promise<
+    Array<{
+      value: string;
+      label: string | null;
+      isMasked: boolean;
+      hasRevealButton: boolean;
+    }>
+  > {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const LABEL_PHRASES = [
+        // Generic
+        "api key", "api token", "api secret", "secret key", "access key",
+        "access token", "auth token", "bearer token", "personal access token",
+        "client id", "client secret", "client key",
+        // Cloudinary
+        "cloud name", "cloudname",
+        // Algolia
+        "application id", "app id", "admin api key", "search api key",
+        "monitoring api key", "search-only api key",
+        // Twilio
+        "account sid", "auth token",
+        // Stripe
+        "publishable key", "secret key",
+        // AWS
+        "access key id", "secret access key",
+        // OAuth1
+        "consumer key", "consumer secret", "access token secret",
+        // Misc
+        "project api key", "personal api key", "organization id", "org id",
+        "app key", "app secret",
+      ];
+
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        return r.width > 2 && r.height > 2;
+      };
+      const isCredentialShape = (s: string): boolean => {
+        // Reasonable credential length range
+        if (s.length < 6 || s.length > 256) return false;
+        // Reject pure prose (spaces inside)
+        if (/\s/.test(s)) return false;
+        // Must include some entropy markers: digit + letter combo OR
+        // a credential prefix like sk_/pk_/api_/ etc.
+        const hasDigit = /\d/.test(s);
+        const hasLetter = /[A-Za-z]/.test(s);
+        if (!hasDigit && !hasLetter) return false;
+        // Reject pure URL fragments
+        if (/^https?:\/\//i.test(s)) return false;
+        // Reject simple words / capitalized phrases
+        if (/^[A-Za-z]+$/.test(s) && s.length < 12) return false;
+        return true;
+      };
+      const isMaskedShape = (s: string): boolean => {
+        // Common mask glyphs: bullet, asterisk, em-dash spam
+        if (/[•●⬤]{3,}/.test(s)) return true;
+        if (/\*{4,}/.test(s)) return true;
+        if (/^[•*]+$/.test(s)) return true;
+        return false;
+      };
+
+      // Compute element-center coords for proximity matching.
+      const centerOf = (el: Element): { x: number; y: number } => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      };
+
+      // Collect every visible label-text bounding box on the page.
+      // Each label entry = { phrase, x, y }. We pre-compute these so
+      // the per-candidate inner loop is O(L) not O(L * N).
+      type LabelHit = { phrase: string; x: number; y: number; el: Element };
+      const labelHits: LabelHit[] = [];
+      document.querySelectorAll("body *").forEach((el) => {
+        if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
+        if (!isVisible(el)) return;
+        // Only consider DIRECT text content — child element text gets
+        // claimed by THOSE elements' own label scans.
+        let direct = "";
+        el.childNodes.forEach((n) => {
+          if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";
+        });
+        direct = direct.trim().toLowerCase();
+        if (direct.length === 0 || direct.length > 100) return;
+        for (const phrase of LABEL_PHRASES) {
+          if (direct.includes(phrase)) {
+            const c = centerOf(el);
+            labelHits.push({ phrase, x: c.x, y: c.y, el });
+            break; // one label per element is enough
+          }
+        }
+      });
+
+      // Detect reveal buttons (eye / show / unmask icons) — any visible
+      // button or [role=button] / svg whose aria-label / title / text
+      // matches the reveal vocabulary. We only check WHETHER one exists
+      // near a candidate; the clicker (revealMaskedCredentials below)
+      // does the actual click pass.
+      const REVEAL_PATTERN = /\b(?:reveal|show|unmask|view|toggle|copy)\b/i;
+      const revealButtons: Array<{ x: number; y: number; el: Element }> = [];
+      document
+        .querySelectorAll<HTMLElement>(
+          'button, [role="button"], a, [aria-label], [title]',
+        )
+        .forEach((el) => {
+          if (!isVisible(el)) return;
+          const hay =
+            `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`;
+          if (!REVEAL_PATTERN.test(hay)) return;
+          const c = centerOf(el);
+          revealButtons.push({ x: c.x, y: c.y, el });
+        });
+
+      // For each candidate, find nearest label by Euclidean distance.
+      const findNearestLabel = (x: number, y: number): string | null => {
+        let best: { phrase: string; d: number } | null = null;
+        for (const lh of labelHits) {
+          const dx = lh.x - x;
+          const dy = lh.y - y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          // Conservative cap — labels more than 400px away from the
+          // value aren't visually grouped with it. Roughly: a typical
+          // table-row width.
+          if (d > 400) continue;
+          if (best === null || d < best.d) best = { phrase: lh.phrase, d };
+        }
+        return best?.phrase ?? null;
+      };
+      const hasNearbyReveal = (x: number, y: number): boolean => {
+        for (const rb of revealButtons) {
+          const dx = rb.x - x;
+          const dy = rb.y - y;
+          // Reveal/copy buttons are usually right next to the value —
+          // 200px is generous.
+          if (Math.sqrt(dx * dx + dy * dy) < 200) return true;
+        }
+        return false;
+      };
+
+      const seen = new Set<string>();
+      const out: Array<{
+        value: string;
+        label: string | null;
+        isMasked: boolean;
+        hasRevealButton: boolean;
+      }> = [];
+      const pushCandidate = (value: string, el: Element): void => {
+        const trimmed = value.trim();
+        if (trimmed.length === 0) return;
+        const masked = isMaskedShape(trimmed);
+        if (!masked && !isCredentialShape(trimmed)) return;
+        if (seen.has(trimmed)) return;
+        seen.add(trimmed);
+        const c = centerOf(el);
+        const label = findNearestLabel(c.x, c.y);
+        const hasReveal = masked ? hasNearbyReveal(c.x, c.y) : false;
+        out.push({
+          value: trimmed,
+          label,
+          isMasked: masked,
+          hasRevealButton: hasReveal,
+        });
+      };
+
+      // 1. <input> / <textarea> values (visible only).
+      document.querySelectorAll("input, textarea").forEach((el) => {
+        if (
+          el instanceof HTMLInputElement &&
+          (el.type === "hidden" || el.type === "password")
+        ) return;
+        if (!isVisible(el)) return;
+        const value =
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+            ? el.value
+            : "";
+        if (value.length > 0) pushCandidate(value, el);
+      });
+
+      // 2. Direct text content in visible leaf elements.
+      document.querySelectorAll("body *").forEach((el) => {
+        if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
+        if (!isVisible(el)) return;
+        let direct = "";
+        el.childNodes.forEach((n) => {
+          if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";
+        });
+        direct = direct.trim();
+        if (direct.length === 0 || direct.length > 256) return;
+        pushCandidate(direct, el);
+      });
+
+      // 3. Structural containers (code/pre/kbd) where the credential
+      //    is interpolated through nested spans.
+      document
+        .querySelectorAll('code, pre, kbd, samp, [role="textbox"]')
+        .forEach((el) => {
+          if (!isVisible(el)) return;
+          const full = (el.textContent ?? "").trim();
+          if (full.length === 0 || full.length > 256) return;
+          pushCandidate(full, el);
+        });
+
+      return out;
+    });
+  }
+
+  // Click every visible "Reveal" / "Show" / "Eye" / "Copy" button on
+  // the page that sits next to a masked credential display. Used as a
+  // pre-extract pass for services like Cloudinary that hide the
+  // api_secret behind a click-to-reveal icon. Best-effort: failures
+  // don't throw; subsequent extract pass tries whatever surfaced.
+  // Returns the number of buttons successfully clicked.
+  async revealMaskedCredentials(): Promise<{
+    clicked: number;
+    diagnostic: string[];
+  }> {
+    if (this.page === null) throw new Error("Browser not started");
+    const page = this.page;
+    const probe = await page.evaluate(() => {
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        return r.width > 2 && r.height > 2;
+      };
+      // Walk up to the nearest "row-like" ancestor — a <tr>, a <li>,
+      // or any container ≤ 800px wide with limited height. Cloudinary,
+      // Algolia, Twilio all use table rows; clicking the reveal in
+      // ROW X must populate the value in ROW X, not some neighbor row.
+      const rowAncestor = (el: Element): Element | null => {
+        let cur: Element | null = el;
+        for (let i = 0; i < 8 && cur !== null; i++) {
+          if (cur.tagName === "TR" || cur.tagName === "LI") return cur;
+          const r = cur.getBoundingClientRect();
+          if (r.width > 200 && r.width < 900 && r.height < 200) return cur;
+          cur = cur.parentElement;
+        }
+        return el.parentElement;
+      };
+
+      // 1. Find masked-display elements + their row containers.
+      type Masked = { el: Element; row: Element | null };
+      const masked: Masked[] = [];
+      document.querySelectorAll("body *").forEach((el) => {
+        if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
+        if (!isVisible(el)) return;
+        let direct = "";
+        el.childNodes.forEach((n) => {
+          if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";
+        });
+        const t = direct.trim();
+        if (t.length < 3 || t.length > 100) return;
+        if (!/[•●⬤*]{3,}/.test(t) && !/^[•*]+$/.test(t)) return;
+        masked.push({ el, row: rowAncestor(el) });
+      });
+      document
+        .querySelectorAll<HTMLInputElement>('input[type="password"]')
+        .forEach((el) => {
+          if (!isVisible(el)) return;
+          masked.push({ el, row: rowAncestor(el) });
+        });
+      if (masked.length === 0) {
+        return { selectors: [] as string[], diagnostic: ["no_masked_displays"] };
+      }
+
+      // 2. Classify candidate buttons. Prefer SHOW/REVEAL/EYE; fall
+      //    back to COPY only when no show button exists in the row.
+      //    (Copy generally puts value in clipboard, not in DOM —
+      //    which our extractor can't read in headless.)
+      const SHOW_PATTERN = /\b(?:reveal|show|unmask|view|toggle|eye)\b/i;
+      const COPY_PATTERN = /\bcopy\b/i;
+
+      const collectButtonsInRow = (
+        row: Element | null,
+      ): { showBtns: Element[]; copyBtns: Element[] } => {
+        const showBtns: Element[] = [];
+        const copyBtns: Element[] = [];
+        if (row === null) return { showBtns, copyBtns };
+        row
+          .querySelectorAll<HTMLElement>(
+            'button, [role="button"], a[role="button"], [aria-label], [title]',
+          )
+          .forEach((el) => {
+            if (!isVisible(el)) return;
+            const hay =
+              `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""} ${el.className ?? ""}`;
+            if (SHOW_PATTERN.test(hay)) showBtns.push(el);
+            else if (COPY_PATTERN.test(hay)) copyBtns.push(el);
+          });
+        return { showBtns, copyBtns };
+      };
+
+      const selectorFor = (el: Element): string => {
+        const tag = el.tagName.toLowerCase();
+        const all = Array.from(document.querySelectorAll(tag));
+        const idx = all.indexOf(el);
+        return `${tag}:nth-of-type(${idx + 1})`;
+      };
+
+      const selectors: string[] = [];
+      const diagnostic: string[] = [];
+      const usedRows = new Set<Element>();
+      for (const m of masked) {
+        if (m.row === null) continue;
+        if (usedRows.has(m.row)) continue;
+        usedRows.add(m.row);
+        const { showBtns, copyBtns } = collectButtonsInRow(m.row);
+        if (showBtns.length > 0) {
+          const btn = showBtns[0]!;
+          const sel = selectorFor(btn);
+          selectors.push(sel);
+          const label = (btn.textContent ?? btn.getAttribute("aria-label") ?? btn.getAttribute("title") ?? "").trim().slice(0, 40);
+          diagnostic.push(`row→show:"${label}"→${sel}`);
+        } else if (copyBtns.length > 0) {
+          diagnostic.push(
+            `row→copy_only_no_show_button (copy='${copyBtns.length} found' — skipped, would only populate clipboard not DOM)`,
+          );
+        } else {
+          diagnostic.push("row→no_buttons_found");
+        }
+      }
+      return { selectors, diagnostic };
+    });
+
+    let clicked = 0;
+    for (const sel of probe.selectors) {
+      try {
+        await page.locator(sel).first().click({ timeout: 1500 });
+        clicked += 1;
+        // Reveal click often triggers a fetch (Cloudinary returns the
+        // secret over an XHR before populating the DOM). Wait longer
+        // than the previous 150ms.
+        await this.sleep(800);
+      } catch {
+        // Click failed — best-effort.
+      }
+    }
+    return { clicked, diagnostic: probe.diagnostic };
+  }
+
   async extractCredentialCandidates(): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(() => {

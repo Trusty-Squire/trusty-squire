@@ -486,6 +486,28 @@ async function tryReplayLearnedSkill(
   // recent_steps log shows the skill attempt before any bot output.
   ctx.stepsSink.push(`[skill-promoter] fetched skill ${skill.skill_id} v${skill.version} for ${serviceSlug}`);
 
+  // Show-once routing (post-Phase-E): when ANY credential in the
+  // skill is marked visibility="show_once_at_creation" (Cloudinary
+  // api_secret class), replay is structurally impossible — the
+  // secret only existed visibly at the moment of original creation
+  // and the dashboard masks it permanently after. Skip replay and
+  // fall through to fresh-signup-each-time. The bot's universal
+  // signup path naturally generates a new email alias → new account
+  // → re-captures the secret while it's freshly visible.
+  const hasShowOnce = skill.credentials.some(
+    (c) => c.visibility === "show_once_at_creation",
+  );
+  if (hasShowOnce) {
+    const showOnceNames = skill.credentials
+      .filter((c) => c.visibility === "show_once_at_creation")
+      .map((c) => c.name ?? "api_key")
+      .join(", ");
+    ctx.stepsSink.push(
+      `[skill-promoter] skipping replay — skill has show_once_at_creation credential(s) [${showOnceNames}]; routing to fresh signup`,
+    );
+    return null;
+  }
+
   const browser = new BrowserController({ humanize: true });
   let dryOutcome: Awaited<ReturnType<typeof replaySkill>>;
   try {

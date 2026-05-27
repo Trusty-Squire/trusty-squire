@@ -388,6 +388,36 @@ export const SkillCredentialSpecSchema = z
         "What env var the user should export (e.g. RAILWAY_API_KEY). " +
           "Surfaces in the vault UI and in the post-signup CLI output.",
       ),
+    // Replay-strategy hint (post-Phase-E iteration). Services like
+    // Cloudinary, Twilio, Stripe show the api_secret ONLY ONCE — at
+    // the moment the key is created. Subsequent visits to the
+    // dashboard show the value masked permanently. The router uses
+    // this flag to decide between two replay strategies:
+    //
+    //   - "always_visible" (default, backwards-compatible) → the
+    //     standard replay path. Sign in to the existing account,
+    //     navigate to the dashboard, re-extract the values via the
+    //     captured steps. Works for ~80% of dev SaaS.
+    //
+    //   - "show_once_at_creation" → bypass replay entirely; treat
+    //     every provision as a fresh signup (new email alias →
+    //     new account → capture the secret while it's visible).
+    //     Avoids accumulating-N-failed-rotation-attempts and email-
+    //     OTP gates that gate rotation.
+    //
+    // The synthesizer auto-marks this from the planner's prose ("the
+    // secret will not be shown again", "shown only once at creation",
+    // "you cannot retrieve this later"). Operators can override the
+    // synthesizer's call via `mcp skill edit`.
+    visibility: z
+      .enum(["always_visible", "show_once_at_creation"])
+      .default("always_visible")
+      .describe(
+        "When the credential is readable from the dashboard. " +
+          "always_visible → standard replay works. " +
+          "show_once_at_creation → router skips replay and routes " +
+          "to fresh-signup-each-time (Cloudinary api_secret class).",
+      ),
     post_extract_validator: z
       .object({
         min_length: z

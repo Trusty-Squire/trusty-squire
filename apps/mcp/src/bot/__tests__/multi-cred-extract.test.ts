@@ -108,6 +108,50 @@ describe("extractAllLabeledTokensFromReason — Twilio + Stripe shapes", () => {
   });
 });
 
+describe("extractAllLabeledTokensFromReason — prose-word rejection (Cloudinary regression)", () => {
+  it("does NOT capture 'hidden' as the value of api_secret in 'api_secret is hidden behind asterisks'", async () => {
+    // Real Cloudinary planner reason from the live trace. Without the
+    // PROSE_BLACKLIST guard, the regex matched `api_secret is hidden`
+    // and the anti-hallucination check passed (the word "hidden" is
+    // in the same reason as pageText). Result: bogus secret in the
+    // credentials dict.
+    const reason =
+      "The Cloudinary API Keys page shows cloud_name='dlq4xgrca' and " +
+      "api_key='491741466469613' in the table; api_secret is hidden " +
+      "behind asterisks.";
+    const page = "dlq4xgrca 491741466469613 hidden behind asterisks";
+    const out = extractAllLabeledTokensFromReason(reason, page);
+    expect(out["api_secret"]).toBeUndefined();
+    expect(out).toEqual({
+      cloud_name: "dlq4xgrca",
+      api_key: "491741466469613",
+    });
+  });
+
+  it("rejects 'masked', 'shown', 'visible' and similar status words", async () => {
+    for (const word of ["masked", "shown", "visible", "redacted", "missing"]) {
+      const reason = `api_secret is ${word} on the page`;
+      const page = `${word} on the page`;
+      const out = extractAllLabeledTokensFromReason(reason, page);
+      expect(out["api_secret"], `failed on word: ${word}`).toBeUndefined();
+    }
+  });
+
+  it("rejects pure-word values even with credential labels (api_key is foo)", async () => {
+    const reason = "api_key is empty and api_secret is null";
+    const page = "empty null";
+    const out = extractAllLabeledTokensFromReason(reason, page);
+    expect(out).toEqual({});
+  });
+
+  it("ACCEPTS credential-shape values in 'is' prose (mixed alpha+digit ≥16ch)", async () => {
+    const reason = "The api_key is 491741466469613 in the table";
+    const page = "491741466469613";
+    const out = extractAllLabeledTokensFromReason(reason, page);
+    expect(out).toEqual({ api_key: "491741466469613" });
+  });
+});
+
 describe("extractAllLabeledTokensFromReason — anti-hallucination guardrails", () => {
   it("drops labeled values that don't appear in the page text", () => {
     const reason =

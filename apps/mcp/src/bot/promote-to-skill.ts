@@ -877,13 +877,77 @@ function inferCredentialSpec(
   // require knowing the service's /whoami URL, which the synthesizer
   // can't infer. Operators set it via skill:edit (C5).
   const validator = validatorForShape(shapeHint, rounds);
+  // Detect "shown once at creation" phrasing in the extract step's
+  // captured reason + the surrounding round texts. Cloudinary,
+  // Twilio auth_token-once-shown, Stripe rotation flows all surface
+  // explicit warnings like "the secret will not be shown again",
+  // "make sure to copy it now", "this is the only time you'll see
+  // this token". When present, the router skips replay and routes
+  // to fresh-signup-each-time. False positives are bounded — the
+  // worst case is the router does extra signups, never the wrong
+  // credentials.
+  const visibility = inferVisibility(extractStep, rounds);
   const spec: SkillCredentialSpec = {
     type: "api_key",
     shape_hint: shapeHint,
     env_var_suggestion: envVar,
+    visibility,
     post_extract_validator: validator,
   };
   return { kind: "ok", spec };
+}
+
+// Show-once vocabulary. The synthesizer scans the planner's prose
+// for these markers. Captured from real-world dashboard copy across
+// Cloudinary, Twilio, Stripe, AWS, GitHub PATs, etc.
+const SHOW_ONCE_PHRASES: readonly RegExp[] = [
+  /\b(?:will not be|won'?t be|cannot be|can'?t be|never)\s+(?:shown|displayed|visible|retrievable|recovered)\s+again\b/i,
+  /\b(?:only|sole|one[- ]?time)\s+(?:time|chance|opportunity)\s+(?:you'?ll|you will|to)\s+(?:see|view|copy)\b/i,
+  /\bshow(?:n|ing)?\s+(?:only\s+)?once\b/i,
+  /\bdisplay(?:ed|ing)?\s+only\s+once\b/i,
+  /\bmake\s+sure\s+(?:to\s+)?(?:copy|save)\s+(?:it|this|now)\b/i,
+  /\bcopy\s+(?:it|this|now)\s+(?:before|now)\b/i,
+  /\b(?:save|copy)\s+(?:the\s+)?(?:secret|token|key|credential)\s+now\b/i,
+  /\b(?:this\s+is\s+the\s+)?(?:only|sole)\s+time\b.*\b(?:see|view|copy|displayed)\b/i,
+  /\bafter\s+(?:closing|leaving|navigating|refreshing).*(?:cannot|won'?t|will not).*(?:retrieve|see|recover)\b/i,
+];
+
+function inferVisibility(
+  extractStep: SkillStep,
+  rounds: OnboardingCaseFile[],
+): "always_visible" | "show_once_at_creation" {
+  // Source 1: the extract step's planner-quoted reason (from the
+  // round's `observed.reason` — we preserve this in step provenance).
+  // We don't have direct access to the original reason from the
+  // SkillStep alone, so scan the rounds' planner reasons up to the
+  // round that produced the extract.
+  const roundIndex = extractStep.provenance?.round_index;
+  if (typeof roundIndex !== "number") return "always_visible";
+  const haystack: string[] = [];
+  for (const r of rounds) {
+    const observed = r.observed as unknown as { reason?: string } | undefined;
+    if (observed?.reason !== undefined && typeof observed.reason === "string") {
+      haystack.push(observed.reason);
+    }
+    // Source 2: page html — strip tags for a coarse text view. The
+    // warning banner ("the secret will not be shown again") is part
+    // of the dashboard's rendered DOM at the credential-creation
+    // moment, so it surfaces here even when the planner didn't quote
+    // the warning explicitly in its reason.
+    if (typeof r.state?.html === "string") {
+      const text = r.state.html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ");
+      haystack.push(text.slice(0, 8000));
+    }
+  }
+  const joined = haystack.join(" \n ");
+  for (const re of SHOW_ONCE_PHRASES) {
+    if (re.test(joined)) return "show_once_at_creation";
+  }
+  return "always_visible";
 }
 
 function validatorForShape(
@@ -1237,6 +1301,7 @@ function buildCredentialSpecForMulti(
     type: "api_key",
     shape_hint: shape,
     env_var_suggestion: envVar,
+    visibility: "always_visible",
     post_extract_validator: {
       min_length: shape === "uuid" ? 36 : 16,
       max_length: shape === "uuid" ? 36 : 512,

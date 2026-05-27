@@ -1105,3 +1105,116 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     expect(named).toHaveLength(0);
   });
 });
+
+// ── Visibility / show-once-at-creation detection ────────────────────────
+
+function showOnceRounds(service: string, phrase: string): OnboardingRoundCapture[] {
+  return [
+    {
+      service,
+      round: 0,
+      oauth: true,
+      state: {
+        url: `https://${service}.example/dashboard/api-keys`,
+        title: "API Keys",
+        html: `<html><body><h1>API Keys</h1><div>${phrase}</div></body></html>`,
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Copy",
+          selector: "button.copy-btn",
+          role: "button",
+        }),
+      ],
+      observed: {
+        kind: "navigate",
+        url: `https://${service}.example/dashboard/api-keys`,
+        reason: "Navigate to API Keys page",
+      },
+    },
+    {
+      service,
+      round: 1,
+      oauth: true,
+      state: {
+        url: `https://${service}.example/dashboard/api-keys`,
+        title: "API Keys",
+        html: `<html><body>4e768abbf134297cb8f2d505830935 ${phrase}</body></html>`,
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Copy",
+          selector: "button.copy-btn",
+          role: "button",
+        }),
+      ],
+      observed: {
+        kind: "extract",
+        reason: `The API key '4e768abbf134297cb8f2d505830935' is visible. Note: ${phrase}`,
+      },
+    },
+  ];
+}
+
+describe("promoteToSkill — visibility detection", () => {
+  it("defaults to always_visible when no show-once phrasing is present", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(railwayRounds(service));
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.credentials[0]!.visibility).toBe("always_visible");
+  });
+
+  it("marks show_once_at_creation when planner reason includes 'will not be shown again'", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(
+      showOnceRounds(service, "This secret will not be shown again"),
+    );
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.credentials[0]!.visibility).toBe("show_once_at_creation");
+  });
+
+  it("marks show_once_at_creation on 'displayed only once' phrasing", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(
+      showOnceRounds(service, "This key is displayed only once for security reasons."),
+    );
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.credentials[0]!.visibility).toBe("show_once_at_creation");
+  });
+
+  it("marks show_once_at_creation on 'make sure to copy' phrasing", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(
+      showOnceRounds(service, "Make sure to copy this token now — you won't be able to see it again."),
+    );
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.credentials[0]!.visibility).toBe("show_once_at_creation");
+  });
+
+  it("does NOT trigger on benign uses of 'copy'", () => {
+    // "Click Copy to get the key" should NOT trip the regex — it's
+    // a normal Copy-button affordance, not a show-once warning.
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(
+      showOnceRounds(service, "Click the Copy button to copy your key to clipboard."),
+    );
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.credentials[0]!.visibility).toBe("always_visible");
+  });
+});

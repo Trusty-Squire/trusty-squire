@@ -1763,23 +1763,72 @@ export function extractAllLabeledTokensFromReason(
   // Hyphen variants — the LLM sometimes emits `cloud-name` instead of
   // `cloud_name`. Replace _ with [-_] inside each alternative.
   const labelAltLoose = labelAlt.replace(/_/g, "[-_]");
-  const labeledRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*(?:=|:|\\bis\\b)\\s*['"\`]?([A-Za-z0-9_\\-]{4,80})['"\`]?`,
+  // Two patterns:
+  //
+  // (A) Strict QUOTED form — `label='value'` / `label="value"` /
+  //     `label:'value'` etc. Trusts the value as credential-shape
+  //     because the planner was instructed (Phase E prompt) to quote.
+  //
+  // (B) Prose `label is value` form — required for natural-language
+  //     extracts but DANGEROUS. The Cloudinary trace produced
+  //     "api_secret is hidden behind asterisks" — the prose-pattern
+  //     greedily captured `hidden` as the value, then the
+  //     anti-hallucination check passed (the word "hidden" was in
+  //     pageText/reason). Mitigations: (1) require the value to LOOK
+  //     credential-shape (mixed alpha+digit, ≥16 chars, OR a known
+  //     credential prefix); (2) hard-reject a curated set of common
+  //     English status words that look label-like in extract prose.
+  const quotedRe = new RegExp(
+    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_\\-]{4,80})['"\`]`,
     "gi",
   );
-  for (const m of reason.matchAll(labeledRe)) {
+  for (const m of reason.matchAll(quotedRe)) {
     const rawLabel = (m[1] ?? "").toLowerCase().replace(/-/g, "_");
     const normalized = rawLabel.replace(/_+/g, "_");
     const canonical = LABEL_ALIASES[normalized];
     const value = m[2];
     if (canonical === undefined || value === undefined) continue;
-    // Anti-hallucination — value must appear in the page text /
-    // input values (same guardrail extractQuotedTokenFromReason uses).
     if (!pageText.includes(value)) continue;
-    // First-wins. The planner sometimes restates the same label
-    // multiple times (rounds 4/5/10 in the Cloudinary trace); the
-    // first labeled value is the one we want.
     if (out[canonical] === undefined) out[canonical] = value;
+  }
+
+  // English status words that show up in planner prose alongside
+  // a credential label but are NEVER the credential value itself.
+  // Each is a literal lowercase comparison after value-lowercase.
+  const PROSE_BLACKLIST = new Set<string>([
+    "hidden", "masked", "shown", "visible", "available", "missing",
+    "unavailable", "redacted", "obscured", "concealed", "secret",
+    "true", "false", "null", "none", "empty", "unset", "undefined",
+    "displayed", "revealed", "asterisks", "bullets", "dots", "stars",
+    "blurred", "encrypted",
+  ]);
+  const looksCredentialShape = (v: string): boolean => {
+    if (v.length >= 16) return true; // long-enough tokens are presumed real
+    if (/^[A-Za-z]+$/.test(v)) return false; // pure word → suspect
+    if (/^\d{10,}$/.test(v)) return true; // long all-digit (Cloudinary api_key)
+    if (/[_\-]/.test(v) && /[a-z]/i.test(v) && /\d/.test(v)) return true; // mixed
+    if (/^[a-z]+_[A-Za-z0-9]/i.test(v)) return true; // prefix_ style (sk_…, npm_…)
+    if (/\d/.test(v) && /[A-Za-z]/.test(v)) return true; // alphanumeric mix
+    return false; // pure short word → reject as suspect
+  };
+  // Same separator vocab as quoted, plus optional quotes around the
+  // value. The credential-shape + blacklist guards run on the
+  // captured (possibly-unquoted) value.
+  const proseRe = new RegExp(
+    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_\\-]{4,80})['"\`]?`,
+    "gi",
+  );
+  for (const m of reason.matchAll(proseRe)) {
+    const rawLabel = (m[1] ?? "").toLowerCase().replace(/-/g, "_");
+    const normalized = rawLabel.replace(/_+/g, "_");
+    const canonical = LABEL_ALIASES[normalized];
+    const value = m[2];
+    if (canonical === undefined || value === undefined) continue;
+    if (out[canonical] !== undefined) continue; // quoted-form already won
+    if (PROSE_BLACKLIST.has(value.toLowerCase())) continue;
+    if (!looksCredentialShape(value)) continue;
+    if (!pageText.includes(value)) continue;
+    out[canonical] = value;
   }
 
   return out;
@@ -4191,6 +4240,74 @@ ${formatInventory(input.inventory)}`,
   // with the just-created account (SendPulse). On the OAuth path it is
   // absent: there is no password, and the Google session already
   // authenticated the user — a `login` step is then a no-op.
+  // Tier 4 — DOM-proximity labeled extraction. Walks the page's
+  // visible DOM via the BrowserController helper, pairs each
+  // credential-shape string with the nearest credential-label text,
+  // returns the canonical-key → value map. Used as a fallback after
+  // the Phase E planner-quoted path when the planner mentioned only
+  // one of several visible credentials.
+  private async extractFromDomProximity(): Promise<Record<string, string>> {
+    // Vocabulary matches the LABEL_ALIASES used by Phase E so the
+    // canonical keys stay consistent across paths.
+    const LABEL_TO_KEY: Record<string, string> = {
+      "api key": "api_key",
+      "api token": "api_key",
+      "api secret": "api_secret",
+      "secret key": "secret_key",
+      "publishable key": "publishable_key",
+      "access key": "access_key_id",
+      "access key id": "access_key_id",
+      "access token": "access_token",
+      "bearer token": "access_token",
+      "personal access token": "access_token",
+      "auth token": "auth_token",
+      "client id": "client_id",
+      "client secret": "client_secret",
+      "client key": "client_id",
+      "cloud name": "cloud_name",
+      "cloudname": "cloud_name",
+      "application id": "application_id",
+      "app id": "application_id",
+      "admin api key": "admin_api_key",
+      "search api key": "search_api_key",
+      "search-only api key": "search_api_key",
+      "monitoring api key": "monitoring_api_key",
+      "account sid": "account_sid",
+      "secret access key": "secret_access_key",
+      "consumer key": "consumer_key",
+      "consumer secret": "consumer_secret",
+      "access token secret": "access_token_secret",
+      "project api key": "project_api_key",
+      "personal api key": "personal_api_key",
+      "organization id": "org_id",
+      "org id": "org_id",
+      "app key": "app_key",
+      "app secret": "app_secret",
+    };
+    let labeled: Awaited<
+      ReturnType<BrowserController["extractLabeledCredentialCandidates"]>
+    > = [];
+    try {
+      labeled = await this.browser.extractLabeledCredentialCandidates();
+    } catch {
+      return {};
+    }
+    const out: Record<string, string> = {};
+    for (const c of labeled) {
+      // Skip masked values — even if we have a label, the on-DOM
+      // string is bullets, not the real credential. The reveal pass
+      // ran before this so anything still masked is genuinely
+      // unreachable.
+      if (c.isMasked) continue;
+      if (c.label === null) continue;
+      const canonical = LABEL_TO_KEY[c.label];
+      if (canonical === undefined) continue;
+      if (out[canonical] !== undefined) continue; // first-wins
+      out[canonical] = c.value;
+    }
+    return out;
+  }
+
   private async postVerifyLoop(args: {
     service: string;
     credentials?: { email: string; password: string } | undefined;
@@ -4688,6 +4805,56 @@ ${formatInventory(input.inventory)}`,
                 `Post-verify ${round + 1}/${args.maxRounds}: extracted ${labeledKeys.length} labeled credential(s) ` +
                   `via Phase E parser (${summary})`,
               );
+              // When the planner's reason explicitly flags a masked
+              // credential ("api_secret is masked", "hidden behind
+              // asterisks", "click Reveal to show"), Phase E only
+              // captured the visible values — try to reveal + extract
+              // the rest on the same round before continuing. Without
+              // this, the loop returns success with a partial bundle
+              // and never tries the reveal click.
+              const MASKED_HINT =
+                /\b(?:masked|hidden|bullets?|asterisks?|••+|\*{3,}|reveal|unmask)\b/i;
+              if (MASKED_HINT.test(nextStep.reason)) {
+                try {
+                  const revealRes = await this.browser.revealMaskedCredentials();
+                  args.steps.push(
+                    `Post-verify ${round + 1}/${args.maxRounds}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
+                  );
+                  if (revealRes.clicked > 0) {
+                    const labeledAfter = await this.extractFromDomProximity();
+                    const newKeys = Object.keys(labeledAfter).filter(
+                      (k) => credentials[k] === undefined,
+                    );
+                    if (newKeys.length > 0) {
+                      for (const k of newKeys) credentials[k] = labeledAfter[k]!;
+                      args.steps.push(
+                        `Post-verify ${round + 1}/${args.maxRounds}: post-reveal DOM-proximity extracted ${newKeys.length} more (${newKeys.join(", ")})`,
+                      );
+                    } else {
+                      // Surface ALL labeled candidates we found, so
+                      // we can see whether the value is on-page but
+                      // mislabeled vs. genuinely not surfaced.
+                      const allLabeled =
+                        await this.browser.extractLabeledCredentialCandidates();
+                      const summary = allLabeled
+                        .filter((c) => !c.isMasked)
+                        .slice(0, 8)
+                        .map(
+                          (c) =>
+                            `${c.value.slice(0, 6)}…(${c.value.length}ch)/${c.label ?? "no-label"}`,
+                        )
+                        .join(", ");
+                      args.steps.push(
+                        `Post-verify ${round + 1}/${args.maxRounds}: post-reveal had ${allLabeled.length} candidates; visible: ${summary}`,
+                      );
+                    }
+                  }
+                } catch (err) {
+                  args.steps.push(
+                    `Post-verify ${round + 1}/${args.maxRounds}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
+                  );
+                }
+              }
               consecutiveFailedExtracts = 0;
               continue;
             }
@@ -4700,6 +4867,40 @@ ${formatInventory(input.inventory)}`,
               args.steps.push(
                 `Post-verify ${round + 1}/${args.maxRounds}: extracted token via ` +
                   `planner-quoted fallback (${quoted.slice(0, 4)}…${quoted.slice(-4)})`,
+              );
+              consecutiveFailedExtracts = 0;
+              continue;
+            }
+            // Tier 4 — DOM-proximity labeled credential extraction.
+            // Run BEFORE bailing the extract. Walks the visible DOM,
+            // finds credential-shape strings, pairs each with its
+            // nearest credential-label text by Euclidean center
+            // distance. Catches multi-cred pages where the planner
+            // mentioned ONE value but the DOM shows several (the
+            // planner's narrative-style extract reason missed the
+            // sibling labels). Also tries to unmask hidden secrets
+            // first by clicking visible Reveal/Eye/Copy buttons.
+            try {
+              await this.browser.revealMaskedCredentials();
+            } catch {
+              // Best-effort; never block the extract pass on a
+              // reveal-click failure.
+            }
+            const labeledFromDom = await this.extractFromDomProximity();
+            const newKeys = Object.keys(labeledFromDom).filter(
+              (k) => credentials[k] === undefined,
+            );
+            if (newKeys.length > 0) {
+              for (const k of newKeys) credentials[k] = labeledFromDom[k]!;
+              const summary = newKeys
+                .map((k) => {
+                  const v = labeledFromDom[k]!;
+                  return `${k}=${v.slice(0, 4)}…${v.slice(-4)}`;
+                })
+                .join(", ");
+              args.steps.push(
+                `Post-verify ${round + 1}/${args.maxRounds}: extracted ${newKeys.length} labeled credential(s) ` +
+                  `via DOM-proximity fallback (${summary})`,
               );
               consecutiveFailedExtracts = 0;
               continue;
@@ -5082,6 +5283,17 @@ Strategy:
   return "extract" for a masked key, and do not return "extract" twice
   in a row. Instead click "Create API Key" / "New API Key" / "Generate"
   to make a fresh key, then extract its full value.
+- **REVEAL-CLICK BEFORE EXTRACT** — when a credential is shown masked
+  (•••••, asterisks, dots) AND there is a VISIBLE "Show", "Reveal",
+  "Eye", or eye-icon button NEXT TO IT (typically same row in a
+  credentials table — Cloudinary, Twilio, Stripe all follow this
+  pattern for api_secret / auth_token / secret_key), emit a CLICK
+  on that show/reveal button FIRST. Do NOT return extract on the same
+  round as the masked display — the masked text would be parsed as
+  the value. Next round the value will be visible and your extract
+  step can quote it. The bot's reveal-pass is a fallback; explicit
+  clicks via the planner are more reliable because you can see the
+  exact button in the screenshot.
 - To reach API keys, prefer a {"kind":"navigate"} straight to the
   service's API-keys settings URL — note these usually live under the
   user/ACCOUNT settings, not a project or workspace's settings.
