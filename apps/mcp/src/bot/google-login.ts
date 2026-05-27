@@ -477,10 +477,13 @@ function buildVncWebDir(): string {
         `installed novnc package has an unexpected layout`,
     );
   }
-  writeFileSync(
-    join(webDir, "vnc.html"),
-    readFileSync(loginAssetPath("vnc.html"), "utf8"),
-  );
+  const branded = readFileSync(loginAssetPath("vnc.html"), "utf8");
+  writeFileSync(join(webDir, "vnc.html"), branded);
+  // Also write index.html so the URL printed to the user's terminal can
+  // drop `/vnc.html` — every saved character matters on a phone, where
+  // line-wrapping the URL across two terminal lines makes copy/paste
+  // hostile. websockify's static server returns index.html for `/`.
+  writeFileSync(join(webDir, "index.html"), branded);
   return webDir;
 }
 
@@ -711,7 +714,10 @@ async function runHeadlessChrome(
       // the URL is ~80 chars and the cold-start hurts.
       let bannerUrl: string;
       if (usingNamedTunnel) {
-        bannerUrl = `https://${namedTunnelHost}/vnc.html#password=${vncPassword}`;
+        // No `/vnc.html` — websockify serves the same content as
+        // index.html (buildVncWebDir writes both). Shorter URL fits
+        // one line on a phone terminal.
+        bannerUrl = `https://${namedTunnelHost}/#p=${vncPassword}`;
       } else {
         const cf = spawnBg("cloudflared", [
           "tunnel",
@@ -720,7 +726,7 @@ async function runHeadlessChrome(
         ]);
         rig.procs.push(cf);
         const tunnelUrl = await awaitTunnelUrl(cf, 30000);
-        const longVncUrl = `${tunnelUrl}/vnc.html#password=${vncPassword}`;
+        const longVncUrl = `${tunnelUrl}/#p=${vncPassword}`;
 
         // G15 (deprecated by G16): shorten the cloudflared URL through
         // the API when we have an API base — much less transcription-

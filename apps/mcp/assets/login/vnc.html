@@ -89,11 +89,13 @@
   <script type="module">
     import RFB from "./core/rfb.js";
 
-    // The VNC password rides in the URL fragment (#password=...), never
+    // The VNC password rides in the URL fragment (#p=...), never
     // the query string — a fragment is never sent to the server, so the
     // secret stays out of the cloudflared edge logs and any proxy.
+    // Accept the legacy `password=` key too in case any old bookmark
+    // outlived the rename.
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-    const password = params.get("password") || "";
+    const password = params.get("p") || params.get("password") || "";
     const dot = document.getElementById("dot");
     const msg = document.getElementById("msg");
     const screen = document.getElementById("screen");
@@ -108,8 +110,14 @@
     let rfb;
     try {
       rfb = new RFB(screen, wsUrl, { credentials: { password }, shared: true });
+      // Mobile-friendly geometry. resizeSession asks the X server to
+      // reshape its desktop to the canvas size, so the Chrome window
+      // ends up sized to fit a phone instead of a 1280×720 viewport
+      // that the user has to pan around. scaleViewport stays on as a
+      // safety net for X servers without RandR (Xvfb has it; older
+      // x11vnc builds occasionally drop the SetDesktopSize message).
       rfb.scaleViewport = true;
-      rfb.resizeSession = false;
+      rfb.resizeSession = true;
     } catch (err) {
       dot.className = "err";
       msg.textContent = "Could not start the login window: " + err;
