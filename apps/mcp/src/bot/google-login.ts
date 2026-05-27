@@ -655,17 +655,6 @@ async function runHeadlessChrome(
         // third of a phone-shaped framebuffer when viewed through
         // noVNC. The install page gets the full window.
         `--app=${opts.url}`,
-        // 0.6.15-rc.2 — render web content at 1.75× the natural pixel
-        // density on the virtual display. Without this, noVNC's
-        // scaleViewport scales 720×1280 down to the phone viewport
-        // (e.g. 393×852 on a modern iPhone = ~55% of original), so
-        // tap targets that were already small at 1× become unreadable.
-        // 1.75× means the page lays out as if on a ~411-wide phone,
-        // which most modern web apps render touch-friendly defaults
-        // for. Higher (2×) cuts horizontal space too much for sign-in
-        // forms; lower (1.5×) still leaves the GitHub login button
-        // a precise target on small phones.
-        `--force-device-scale-factor=1.75`,
         "--disable-blink-features=AutomationControlled",
         // Suppresses the "You are using an unsupported command-line
         // flag: --no-sandbox" yellow infobar that otherwise eats the
