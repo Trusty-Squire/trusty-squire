@@ -536,9 +536,19 @@ async function promptYesNo(message: string, defaultYes: boolean): Promise<boolea
 async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
   if (args.skipSecondary) return;
   const present = new Set(loggedInProviders());
-  if (present.size === 0) return; // step 1 didn't seed anything — no basis to ask
-  if (present.has("google") && present.has("github")) return; // both already connected
-  const missing: OAuthProviderId = present.has("google") ? "github" : "google";
+  // Force-relogin means "redo the OAuth dance", so even if the marker
+  // (or stale Chrome-profile cookies from a prior session) suggests
+  // both providers are already connected, prompt step 2 anyway —
+  // otherwise the user can never re-seed the secondary provider via
+  // `connect`. Step 1's label is "Connect Google", so we treat GitHub
+  // as the secondary in that case.
+  if (!args.forceRelogin) {
+    if (present.size === 0) return; // step 1 didn't seed anything — no basis to ask
+    if (present.has("google") && present.has("github")) return; // both already connected
+  }
+  const missing: OAuthProviderId = args.forceRelogin
+    ? (present.has("github") && !present.has("google") ? "google" : "github")
+    : (present.has("google") ? "github" : "google");
   const missingLabel = missing === "google" ? "Google" : "GitHub";
   const missingExamples =
     missing === "github"
