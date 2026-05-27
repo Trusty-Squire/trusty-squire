@@ -891,7 +891,11 @@ function inferCredentialSpec(
     type: "api_key",
     shape_hint: shapeHint,
     env_var_suggestion: envVar,
-    visibility,
+    // Only emit visibility when show-once — keeps canonical bytes
+    // identical for the 95% of skills that are always_visible
+    // (existing signed skills remain valid). Absent → treated as
+    // always_visible by the replay router.
+    ...(visibility === "show_once_at_creation" ? { visibility } : {}),
     post_extract_validator: validator,
   };
   return { kind: "ok", spec };
@@ -1301,7 +1305,10 @@ function buildCredentialSpecForMulti(
     type: "api_key",
     shape_hint: shape,
     env_var_suggestion: envVar,
-    visibility: "always_visible",
+    // Default to absent (== always_visible). Multi-cred skills get
+    // a per-credential visibility flag added by the visibility-
+    // inference pass only when show-once phrasing was detected for
+    // that specific credential.
     post_extract_validator: {
       min_length: shape === "uuid" ? 36 : 16,
       max_length: shape === "uuid" ? 36 : 512,

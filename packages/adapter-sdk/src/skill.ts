@@ -411,12 +411,17 @@ export const SkillCredentialSpecSchema = z
     // synthesizer's call via `mcp skill edit`.
     visibility: z
       .enum(["always_visible", "show_once_at_creation"])
-      .default("always_visible")
+      .optional()
       .describe(
         "When the credential is readable from the dashboard. " +
-          "always_visible → standard replay works. " +
+          "Optional for backward-compat: absence is equivalent to " +
+          "always_visible. Multi-cred-aware code (the replay router, " +
+          "the synthesizer) treats undefined === always_visible. " +
           "show_once_at_creation → router skips replay and routes " +
-          "to fresh-signup-each-time (Cloudinary api_secret class).",
+          "to fresh-signup-each-time (Cloudinary api_secret class). " +
+          "Synthesizer only emits this field when it detects the " +
+          "show-once phrasing — keeps canonical bytes unchanged for " +
+          "legacy skills.",
       ),
     post_extract_validator: z
       .object({

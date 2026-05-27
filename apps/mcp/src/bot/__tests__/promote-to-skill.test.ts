@@ -1169,7 +1169,9 @@ describe("promoteToSkill — visibility detection", () => {
     const result = promoteToSkill({ dir, service, run_id: runId });
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
-    expect(result.skill.credentials[0]!.visibility).toBe("always_visible");
+    // Default: visibility omitted from canonical bytes (backwards-
+    // compatible — existing signed skills keep their signatures).
+    expect(result.skill.credentials[0]!.visibility).toBeUndefined();
   });
 
   it("marks show_once_at_creation when planner reason includes 'will not be shown again'", () => {
@@ -1215,6 +1217,8 @@ describe("promoteToSkill — visibility detection", () => {
     const result = promoteToSkill({ dir, service, run_id: runId });
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
-    expect(result.skill.credentials[0]!.visibility).toBe("always_visible");
+    // Default: visibility omitted from canonical bytes (backwards-
+    // compatible — existing signed skills keep their signatures).
+    expect(result.skill.credentials[0]!.visibility).toBeUndefined();
   });
 });
