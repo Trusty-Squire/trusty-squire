@@ -221,11 +221,13 @@ describe("/v1/llm/chat", () => {
     });
     expect(res.statusCode).toBe(200);
     const sent = captured.body!;
-    expect(sent["model"]).toBe("google/gemini-2.0-flash-exp:free");
-    // The chain: primary (free) → fallback (free) → paid escape.
+    // 0.8.2-rc.9: free-tier primary is OpenRouter's curated router
+    // model `openrouter/free` (handles upstream model sunset
+    // automatically) with a cheap paid backstop + the paid escape.
+    expect(sent["model"]).toBe("openrouter/free");
     expect(sent["models"]).toEqual([
-      "google/gemini-2.0-flash-exp:free",
-      "meta-llama/llama-3.2-90b-vision-instruct:free",
+      "openrouter/free",
+      "google/gemini-flash-1.5-8b",
       "google/gemini-2.0-flash-001",
     ]);
   });

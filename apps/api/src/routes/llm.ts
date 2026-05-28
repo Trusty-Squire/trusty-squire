@@ -83,9 +83,16 @@ const CHEAP_FALLBACKS = [
 // highest-availability free vision models on OpenRouter today; if
 // names rotate (free tiers churn faster than paid), point the env at
 // the new ids without a code change.
-const FREE_MODEL = process.env.LLM_PROXY_FREE_MODEL ?? "google/gemini-2.0-flash-exp:free";
+// 0.8.2-rc.9 — switched from specific model IDs to OpenRouter's
+// curated free router. Both prior models (gemini-2.0-flash-exp:free
+// and llama-3.2-90b-vision-instruct:free) were sunset by OR; live
+// requests were silently 404→404→paid-escape. The router model
+// `openrouter/free` handles the churn — when OR rotates which free
+// models are live, we don't have to. Fallback stays a paid cheap
+// model so a 502 from the router doesn't strand the verifier worker.
+const FREE_MODEL = process.env.LLM_PROXY_FREE_MODEL ?? "openrouter/free";
 const FREE_FALLBACK_1 =
-  process.env.LLM_PROXY_FREE_FALLBACK_1 ?? "meta-llama/llama-3.2-90b-vision-instruct:free";
+  process.env.LLM_PROXY_FREE_FALLBACK_1 ?? "google/gemini-flash-1.5-8b";
 // The paid escape kicks in only when both free models are unavailable.
 // Default matches CHEAP_MODEL so the operator's worst-case cost still
 // looks like a cheap-tier run, not a premium one.

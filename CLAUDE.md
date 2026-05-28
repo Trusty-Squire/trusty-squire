@@ -466,9 +466,9 @@ consumed via `mcp housekeeper --queue=seed --from=tools/housekeeper-services.yam
 | `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required`. |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
-| `LLM_PROXY_FREE_MODEL` | `google/gemini-2.0-flash-exp:free` | Free-tier primary (verifier worker). |
-| `LLM_PROXY_FREE_FALLBACK_1` | `meta-llama/llama-3.2-90b-vision-instruct:free` | Free-tier second-hop. |
-| `LLM_PROXY_FREE_ESCAPE` | `google/gemini-2.0-flash-001` | Paid escape-hatch when both free models 503/rate-limit. Costs less than cheap-tier defaults. |
+| `LLM_PROXY_FREE_MODEL` | `openrouter/free` | Free-tier primary — OpenRouter's curated free router (verifier worker). Survives the sunset-and-replace churn that took out the prior pinned-ID setup (0.8.2-rc.9). |
+| `LLM_PROXY_FREE_FALLBACK_1` | `google/gemini-flash-1.5-8b` | Cheap paid backstop. Reasoning-model variability can give the router an empty-content reply; this catches that case instead of falling to the full paid escape. |
+| `LLM_PROXY_FREE_ESCAPE` | `google/gemini-2.0-flash-001` | Paid escape-hatch when the router + cheap backstop both fail. Costs less than cheap-tier defaults. |
 | `INBOX_BODY_RETENTION_DAYS` | `7` | Body_text/html nulled after this many days |
 | `INBOX_METADATA_RETENTION_DAYS` | `90` | ReceivedEmail rows deleted after this |
 | `PAIRING_TOKEN_RETENTION_HOURS` | `1` | PairingToken row sweep |
