@@ -4818,6 +4818,16 @@ ${formatInventory(input.inventory)}`,
     ).length;
     let roundsSinceLastNewCredential = 0;
     const MAX_ROUNDS_AWAITING_MORE_CREDENTIALS = 3;
+    // 0.8.2-rc.15 — track the credential count at LOOP ENTRY. If the
+    // initial extractCredentials() seed (line 4690) already filled
+    // api_key from an inscrutable hidden field on the post-OAuth
+    // landing (Cloudinary's billing/plans page exposes the api_key
+    // via a federated remoteEntry.js asset chain), we must NOT exit
+    // on round 0 — the loop hasn't had a chance to navigate to the
+    // labeled api-keys page where cloud_name + api_secret live.
+    // Tracked separately from lastCredentialKeyCount because
+    // lastCredentialKeyCount also moves on legitimate accumulation.
+    const seedCredentialKeyCount = lastCredentialKeyCount;
     for (let round = 0; round < args.maxRounds; round++) {
       const currentCredentialKeyCount = Object.keys(credentials).filter(
         (k) => !NON_CREDENTIAL_KEYS.has(k),
@@ -4832,11 +4842,21 @@ ${formatInventory(input.inventory)}`,
       // planner returns `done`, the budget expires, or we've made
       // no credential progress for MAX_ROUNDS_AWAITING_MORE_CREDENTIALS
       // consecutive rounds. Single-cred services keep the legacy
-      // behavior of returning the moment api_key surfaces.
+      // behavior of returning the moment api_key surfaces — EXCEPT
+      // on round 0 when nothing new has been extracted since loop
+      // entry: that means the api_key came from the implicit pre-
+      // loop seed (extractCredentials before the loop body), and
+      // the planner hasn't had a chance to navigate yet. Multi-
+      // cred services typically expose api_key via an embedded
+      // SDK config string on the post-OAuth landing page well
+      // before cloud_name + api_secret appear in a labeled table.
       const inMultiCredMode = isMultiCredBundle(credentials);
+      const onlyHaveSeedCredentials =
+        round === 0 && currentCredentialKeyCount === seedCredentialKeyCount;
       if (
         !inMultiCredMode &&
-        (credentials.api_key !== undefined || credentials.username !== undefined)
+        (credentials.api_key !== undefined || credentials.username !== undefined) &&
+        !onlyHaveSeedCredentials
       ) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
         return credentials;

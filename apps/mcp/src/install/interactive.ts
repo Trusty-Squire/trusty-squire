@@ -186,16 +186,27 @@ async function pickAdvancedOptions(): Promise<{
   proxyUrl?: string;
   registryEnabled: boolean;
   registryUrl?: string;
+  llmChoice?: LlmChoice;
+  byokKey?: string;
 }> {
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (proxy, skill registry)",
+      message: "Configure advanced options? (LLM provider, proxy, skill registry)",
       initialValue: false,
     }),
   );
   if (!wantAdvanced) {
+    // Defaults: managed LLM, skill registry on, no proxy. Most users
+    // never touch these — the install just goes.
     return { registryEnabled: true };
   }
+
+  // LLM provider. Most users want the managed default — Trusty Squire
+  // pays via the routed free + paid fallback chain. BYOK is for users
+  // who want Anthropic / OpenAI / OpenRouter billing on their own
+  // account (still pays after ACCOUNT_FREE_QUOTA for the service
+  // either way — that's a separate axis from who pays for LLM calls).
+  const { choice: llmChoice, byokKey } = await pickLlmConfig();
 
   // Residential proxy. Most users skip this — datacenter egress is
   // re-routed through our proxy automatically when configured; only
@@ -257,6 +268,8 @@ async function pickAdvancedOptions(): Promise<{
 
   return {
     registryEnabled,
+    llmChoice,
+    ...(byokKey !== undefined ? { byokKey } : {}),
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
     ...(registryUrl !== undefined ? { registryUrl } : {}),
   };
@@ -313,9 +326,10 @@ export async function runInteractiveSetup(opts: {
   const detected = await detectInstalledAgents();
   const target = opts.initialTarget ?? (await pickAgent(detected));
 
-  const { choice: llmChoice, byokKey } = await pickLlmConfig();
   // Default-no advanced when --proxy-url isn't passed; if it IS passed,
   // jump straight to confirming the value rather than asking yes/no.
+  // LLM picker is INSIDE advanced — most users don't touch it; the
+  // managed default works out of the box.
   const advanced =
     opts.initialProxyUrl !== undefined || opts.initialRegistryUrl !== undefined
       ? {
@@ -326,6 +340,10 @@ export async function runInteractiveSetup(opts: {
             : {}),
         }
       : await pickAdvancedOptions();
+
+  // LLM defaults to managed_free when the user skipped Advanced.
+  const llmChoice: LlmChoice = advanced.llmChoice ?? "managed_free";
+  const byokKey = advanced.byokKey;
 
   const config: InteractiveConfig = {
     target,
