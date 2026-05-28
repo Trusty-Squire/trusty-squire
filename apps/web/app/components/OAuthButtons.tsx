@@ -2,12 +2,12 @@
 // the API's OAuth start route (proxied, same-origin). An optional
 // `next` rides through so the user returns where they started.
 //
-// `connectedProviders` greys-out rows the bot's Chrome profile already
-// has a cookie for — driven by the `?already=<csv>` query param the
-// install CLI appends in 0.8.0-rc.3. A user re-running `connect`
-// shouldn't be invited to redo a provider sign-in they've already
-// completed; the row stays clickable for an explicit reconnect, but
-// the ✓ + greyed styling tells them they don't need to.
+// `connectedProviders` is the set of providers the bot's Chrome
+// profile already has cookies for. We use it to add a subtle "1-tap
+// sign-in" hint on those rows (the OAuth round-trip will be silent),
+// but we do NOT show a ✓ badge — the user is still being asked to
+// click something here, and a checkmark implying "you're done" would
+// overpromise the actual state.
 
 export type ProviderId = "google" | "github";
 
@@ -23,31 +23,23 @@ export function OAuthButtons({
   return (
     <div className="auth-actions">
       <a
-        className={`oauth-btn${connected.has("google") ? " oauth-btn--connected" : ""}`}
+        className="oauth-btn"
         href={`/v1/auth/oauth/google/start${query}`}
       >
         <GoogleIcon />
-        {connected.has("google") ? (
-          <>
-            <span className="oauth-check" aria-hidden="true">✓</span>
-            <span>Google connected — reconnect</span>
-          </>
-        ) : (
-          "Continue with Google"
+        <span>Continue with Google</span>
+        {connected.has("google") && (
+          <span className="oauth-hint">1-tap</span>
         )}
       </a>
       <a
-        className={`oauth-btn${connected.has("github") ? " oauth-btn--connected" : ""}`}
+        className="oauth-btn"
         href={`/v1/auth/oauth/github/start${query}`}
       >
         <GitHubIcon />
-        {connected.has("github") ? (
-          <>
-            <span className="oauth-check" aria-hidden="true">✓</span>
-            <span>GitHub connected — reconnect</span>
-          </>
-        ) : (
-          "Continue with GitHub"
+        <span>Continue with GitHub</span>
+        {connected.has("github") && (
+          <span className="oauth-hint">1-tap</span>
         )}
       </a>
     </div>
