@@ -200,6 +200,102 @@ describe("/v1/llm/chat", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("retries free-tier WITHOUT openrouter/free when first call returns empty content", async () => {
+    // 0.8.2-rc.10: reasoning-style free models routed by openrouter/free
+    // sometimes return HTTP 200 with empty content. The proxy detects
+    // this + retries with the router dropped from the chain, so the
+    // cheap paid backstop serves the response.
+    const captures: Array<Record<string, unknown>> = [];
+    let call = 0;
+    globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String((init as { body?: string }).body ?? "{}"));
+      captures.push(body);
+      call += 1;
+      if (call === 1) {
+        // First call: 200 with empty content (the reasoning-model
+        // failure mode we're guarding against).
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: null } }],
+            model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      // Retry: cheap backstop replies normally.
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok from backstop" } }],
+          model: "google/gemini-flash-1.5-8b",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, tier: "free" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { text: string; backend: string };
+    expect(body.text).toBe("ok from backstop");
+    expect(body.backend).toBe("proxy:google/gemini-flash-1.5-8b");
+
+    // Exactly two upstream calls — first with the full chain, second
+    // with the router dropped (cheap backstop becomes primary).
+    expect(captures).toHaveLength(2);
+    expect(captures[0]!.model).toBe("openrouter/free");
+    expect(captures[1]!.model).toBe("google/gemini-flash-1.5-8b");
+    expect(captures[1]!.models).toEqual([
+      "google/gemini-flash-1.5-8b",
+      "google/gemini-2.0-flash-001",
+    ]);
+  });
+
+  it("attaches provider.ignore on free-tier requests when LLM_PROXY_FREE_IGNORE_PROVIDERS is set", async () => {
+    // The provider blacklist needs to be set BEFORE the route module
+    // is imported (the const is evaluated at module-load time). The
+    // existing buildServer() in beforeEach already loaded with empty
+    // ignore, so we rebuild here with the env var in place.
+    process.env.LLM_PROXY_FREE_IGNORE_PROVIDERS = "Nvidia,Moonshot";
+    vi.resetModules();
+    const captured: { body?: Record<string, unknown> } = {};
+    globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+      captured.body = JSON.parse(String((init as { body?: string }).body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" } }],
+          model: "google/gemma-4-31b-it:free",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    // Rebuild the server so it picks up the new env value.
+    const { buildServer: buildServer2 } = await import("../server.js");
+    const { buildInMemoryDeps: depsBuilder } = await import("../services/deps.js");
+    const app2 = await buildServer2({
+      deps: depsBuilder({ sessionSecret: "s", customerId: "ts-test", pollIntervalMs: 1 }),
+    });
+
+    const tok = (await app2.inject({ method: "POST", url: "/v1/install" }).then((r) =>
+      r.json() as { machine_token: string },
+    )).machine_token;
+    const res = await app2.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": tok },
+      payload: { ...VALID_BODY, tier: "free" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(captured.body!["provider"]).toEqual({ ignore: ["Nvidia", "Moonshot"] });
+
+    await app2.close();
+    delete process.env.LLM_PROXY_FREE_IGNORE_PROVIDERS;
+  });
+
   it("routes tier=free to the free-tier chain (free→free→paid)", async () => {
     const captured: { body?: Record<string, unknown> } = {};
     globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {

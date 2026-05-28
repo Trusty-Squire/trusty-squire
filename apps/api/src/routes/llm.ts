@@ -93,6 +93,24 @@ const CHEAP_FALLBACKS = [
 const FREE_MODEL = process.env.LLM_PROXY_FREE_MODEL ?? "openrouter/free";
 const FREE_FALLBACK_1 =
   process.env.LLM_PROXY_FREE_FALLBACK_1 ?? "google/gemini-flash-1.5-8b";
+
+// 0.8.2-rc.10 — provider-level blacklist. OpenRouter's `provider.ignore`
+// takes a list of provider company names (e.g. "Nvidia", "Together") —
+// any model hosted by an ignored provider is skipped at routing time.
+// Per-model blacklist isn't supported by OR; provider is the finest
+// granularity available. Used for tier=free to dodge providers that
+// host reasoning-style models which return empty content (the
+// retry-on-empty path is a defense-in-depth backstop).
+//
+// Comma-separated env var so the operator can rotate without a deploy:
+//   LLM_PROXY_FREE_IGNORE_PROVIDERS=Nvidia,Moonshot
+// Empty / unset = no ignore filter.
+const FREE_IGNORE_PROVIDERS: string[] = (
+  process.env.LLM_PROXY_FREE_IGNORE_PROVIDERS ?? ""
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
 // The paid escape kicks in only when both free models are unavailable.
 // Default matches CHEAP_MODEL so the operator's worst-case cost still
 // looks like a cheap-tier run, not a premium one.
@@ -181,9 +199,26 @@ export async function registerLLMRoute(
       // free → free → paid escape. OpenRouter caps at 3, which is
       // exactly what we want here.
       body["models"] = [FREE_MODEL, FREE_FALLBACK_1, FREE_ESCAPE];
+      // Provider-level blacklist (rc.10). If the operator has flagged
+      // certain providers (e.g. Nvidia for empty-content reasoning
+      // models), OR will skip them at routing time. No effect when
+      // the env var is empty.
+      if (FREE_IGNORE_PROVIDERS.length > 0) {
+        body["provider"] = { ignore: FREE_IGNORE_PROVIDERS };
+      }
     }
 
-    try {
+    // 0.8.2-rc.9 — when openrouter/free routes to a reasoning-style
+    // free model, OR can return HTTP 200 with empty content (the
+    // reasoning goes into a separate field the OR aggregator
+    // discards). About 20% of free-tier requests hit this. The fix:
+    // detect the empty-content case + retry once with FREE_MODEL
+    // dropped from the chain, so the next entry (cheap paid backstop)
+    // serves the response. The retry only applies on tier=free; cheap
+    // and premium never use openrouter/free.
+    const callOpenRouter = async (
+      requestBody: Record<string, unknown>,
+    ): Promise<{ ok: true; data: OrResponse } | { ok: false }> => {
       const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -192,24 +227,50 @@ export async function registerLLMRoute(
           "HTTP-Referer": "https://trustysquire.ai",
           "X-Title": "Trusty Squire LLM Proxy",
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
       });
       if (!orRes.ok) {
         const text = await orRes.text();
-        fastify.log.warn({ status: orRes.status, body: text.slice(0, 500) }, "openrouter upstream error");
+        fastify.log.warn(
+          { status: orRes.status, body: text.slice(0, 500) },
+          "openrouter upstream error",
+        );
         reply.code(502).send({ error: "upstream_error", upstream_status: orRes.status });
-        return;
+        return { ok: false };
       }
-      const data = (await orRes.json()) as {
-        choices: Array<{ message: { content: string } }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
-        model?: string;
-      };
-      const text = data.choices[0]?.message.content;
+      const data = (await orRes.json()) as OrResponse;
+      return { ok: true, data };
+    };
+
+    try {
+      let result = await callOpenRouter(body);
+      if (!result.ok) return;
+      let text = result.data.choices[0]?.message.content;
+
+      // Empty-content retry. Only on tier=free where the router can
+      // route to a reasoning-style model with empty content. Drop
+      // FREE_MODEL from the chain on the retry — start with the
+      // cheap paid backstop so we get an actual reply.
+      if (
+        typeof text !== "string" &&
+        parsed.data.tier === "free"
+      ) {
+        const upstreamModel = result.data.model ?? primaryModel;
+        fastify.log.warn(
+          { upstream_model: upstreamModel },
+          "openrouter/free empty content — retrying without router",
+        );
+        const retryBody = { ...body, model: FREE_FALLBACK_1, models: [FREE_FALLBACK_1, FREE_ESCAPE] };
+        result = await callOpenRouter(retryBody);
+        if (!result.ok) return;
+        text = result.data.choices[0]?.message.content;
+      }
+
       if (typeof text !== "string") {
         reply.code(502).send({ error: "upstream_empty_reply" });
         return;
       }
+      const data = result.data;
       reply.send({
         text,
         backend: data.model !== undefined ? `proxy:${data.model}` : `proxy:${primaryModel}`,
@@ -221,4 +282,10 @@ export async function registerLLMRoute(
       reply.code(502).send({ error: "upstream_unreachable" });
     }
   });
+}
+
+interface OrResponse {
+  choices: Array<{ message: { content: string } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  model?: string;
 }
