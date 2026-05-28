@@ -1,0 +1,99 @@
+name: Release registry
+
+# Tests + (on main) deploys `@trusty-squire/registry` to Fly.
+#
+# The registry has no version semantics — it's a service, not a
+# library. Lifecycle:
+#   - push to main:    run tests, then `flyctl deploy` to
+#                      `trusty-squire-registry` on Fly.
+#   - push to staging: run tests only (no deploy).
+#
+# Path filter: only fires on changes that could affect the registry
+# image (apps/registry, root lockfile, this workflow). Unrelated
+# commits to mcp/api/web skip CI entirely.
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - "apps/registry/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/release-registry.yml"
+
+# One release run per branch at a time; don't cancel an in-flight
+# deploy mid-rollout.
+concurrency:
+  group: release-registry-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Free ~25GB by removing preinstalled toolchains we don't use.
+      # The monorepo's Next.js apps (apps/web, apps/pwa) blow past
+      # the runner's inode quota when their node_modules land; even
+      # though we filter the install below, the lockfile resolution
+      # still touches them.
+      - name: Free disk space on runner
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
+          sudo docker system prune -af --volumes || true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+
+      # Install only registry's dep tree (registry + transitive
+      # workspace deps), not the entire monorepo. Same reason as
+      # the mcp release workflow: full install creates ~4M symlinks
+      # across Next.js apps and exceeds the runner's inode quota.
+      - name: Install (registry dep tree only)
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/registry...'
+
+      # Registry uses Prisma — generate the client before tsc/test
+      # so import-time type lookups resolve.
+      - name: Prisma generate
+        working-directory: apps/registry
+        run: pnpm exec prisma generate
+
+      - name: Build
+        run: pnpm --filter '@trusty-squire/registry' build
+
+      - name: Test
+        run: pnpm --filter '@trusty-squire/registry' test
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Deploy from the monorepo root (same as the operator's local
+      # `flyctl deploy --config apps/registry/fly.toml ...`). The
+      # Dockerfile.fly path is relative to the build context, which
+      # must be the repo root because the Dockerfile copies workspace
+      # deps from packages/ and apps/.
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${FLY_API_TOKEN:-}" ]]; then
+            echo "::error::FLY_API_TOKEN is not set. Add it as a repo secret before merging this workflow."
+            exit 1
+          fi
+          flyctl deploy --config apps/registry/fly.toml --dockerfile apps/registry/Dockerfile.fly --remote-only
