@@ -101,6 +101,10 @@ describe("YamlSeedQueue", () => {
     name: Koyeb
     status: skip
     notes: billing wall
+  - slug: twilio
+    name: Twilio
+    status: needs-manual
+    notes: phone gate
   - slug: perplexity
     name: Perplexity AI
 `;
@@ -109,7 +113,11 @@ describe("YamlSeedQueue", () => {
       readFn: async () => yamlText,
     });
     const tasks = await queue.fetch(10);
-    // status:skip filtered by default; others included.
+    // status:skip + status:needs-manual filtered by default; others
+    // included. needs-manual joined the default-filter set in
+    // 0.8.2-rc.2 — services explicitly flagged as requiring a human
+    // (phone gate, fresh-MX silent drop, OAuth wizard) shouldn't eat
+    // bot time on every overnight batch.
     expect(tasks).toHaveLength(2);
     expect(tasks.map((t) => (t.kind === "discover" ? t.service : ""))).toEqual([
       "openrouter",

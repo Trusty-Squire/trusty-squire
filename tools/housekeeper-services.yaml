@@ -32,10 +32,13 @@
 #                       hold         — temporarily paused (e.g. waiting
 #                                       for an upstream fix). Same effect
 #                                       as skip but signals intent.
-#                     The runtime per-attempt state (running, replay-ok,
-#                     failed, needs-manual) lives on the GitHub issue's
-#                     labels, NOT here — this file is hand-edited config,
-#                     not a state DB.
+#                       needs-manual — service requires a human (phone
+#                                       gate, fresh-MX silent drop,
+#                                       OAuth wizard, manual onboarding).
+#                                       Filtered by default like `skip`;
+#                                       use the notes field to record the
+#                                       reason so operators can re-test
+#                                       when the upstream gate clears.
 
 - slug: ipinfo
   name: IPInfo
@@ -149,10 +152,12 @@
   signup_url: https://console.mistral.ai/auth/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    LLM API. Google OAuth available alongside email signup. First-
-    time attempt should validate clean OAuth-first path.
+    oauth_loop_detected — bot signs in via Google twice but Mistral
+    keeps redirecting to /signup. The service requires a manual
+    onboarding step (workspace creation) before its OAuth session
+    finalizes. Re-test if Mistral streamlines onboarding.
 
 - slug: neon
   name: Neon
@@ -181,11 +186,12 @@
   signup_url: https://console.groq.com/login
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    LLM inference. Google + GitHub OAuth. API-key visibility is
-    behind a "create new key" modal — F10-class copy-button path
-    likely applies.
+    oauth_loop_detected — bot signs in via Google twice but Groq
+    keeps redirecting back to /authenticate. Same shape as Mistral
+    (manual onboarding step gates OAuth finalize). Re-test when
+    Groq simplifies their onboarding.
 
 - slug: pinecone
   name: Pinecone
@@ -225,10 +231,13 @@
   signup_url: https://fireworks.ai/login
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    LLM inference. Google + GitHub OAuth on /login. API key in
-    dashboard > API keys after first project create.
+    verification_not_sent — trustysquire.com is fresh-MX and
+    Fireworks silently withheld the verification email. Vendor-side
+    policy, not a bot bug. The /login page offers Google + GitHub
+    OAuth — if we can force OAuth-first reliably we may flip this
+    back to pending.
 
 - slug: deepinfra
   name: DeepInfra
@@ -256,10 +265,12 @@
   signup_url: https://dashboard.cohere.com/welcome/login
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    LLM inference (Command, Embed). Google + GitHub OAuth. Trial keys
-    issue immediately; production keys require billing.
+    verification_not_sent — trustysquire.com fresh-MX silent-drop
+    (same vendor-side policy as Fireworks). /welcome/login does
+    offer Google + GitHub OAuth — re-test if we add reliable
+    OAuth-first routing for vendors with both flows.
 
 - slug: hyperbolic
   name: Hyperbolic

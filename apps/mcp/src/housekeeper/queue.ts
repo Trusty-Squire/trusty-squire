@@ -132,7 +132,11 @@ export class YamlSeedQueue implements QueueProvider {
     private readonly opts: {
       path: string;
       // Filter — anything whose status is in this set is skipped.
-      // Default: ["skip"]. Use empty set to disable filtering.
+      // Default: ["skip", "needs-manual"]. Use empty set to disable
+      // filtering. `needs-manual` is in the default set because the
+      // overnight batch runs an operator queue and those services are
+      // known to require human action (phone gate, fresh-MX silent
+      // drop, etc.) — we don't want them eating bot time every run.
       excludeStatuses?: ReadonlySet<string>;
       // Read function injection for tests.
       readFn?: (path: string) => Promise<string>;
@@ -164,7 +168,8 @@ export class YamlSeedQueue implements QueueProvider {
     const text = await reader(this.opts.path);
     const parsed = parseYaml(text) as YamlSeedFile | YamlServiceEntry[];
     const services = Array.isArray(parsed) ? parsed : (parsed.services ?? []);
-    const exclude = this.opts.excludeStatuses ?? new Set(["skip"]);
+    const exclude =
+      this.opts.excludeStatuses ?? new Set(["skip", "needs-manual"]);
     return services.filter((e) => {
       if (e === null || typeof e !== "object") return false;
       if (typeof e.slug !== "string" || e.slug.length === 0) return false;
