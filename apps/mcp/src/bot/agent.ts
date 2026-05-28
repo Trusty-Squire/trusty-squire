@@ -4265,14 +4265,20 @@ export class SignupAgent {
     }
 
     let credentials = await this.extractCredentials();
-    if (credentials.api_key === undefined) {
-      credentials = await this.postVerifyLoop({
-        service: task.service,
-        maxRounds: task.postVerifyMaxRounds ?? 12,
-        steps,
-        ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
-      });
-    }
+    // 0.8.2-rc.15 — always enter postVerifyLoop. The legacy short-
+    // circuit ("only call postVerifyLoop if api_key wasn't already
+    // visible") returned early on multi-cred services that happen to
+    // land with api_key plain-visible — cloud_name + api_secret on
+    // Cloudinary, application_id + admin_api_key on Algolia — and the
+    // siblings were never extracted. postVerifyLoop's top-of-iter
+    // early-exit is itself multi-cred-aware (rc.13), so when there's
+    // nothing more to do, it returns on the first iteration.
+    credentials = await this.postVerifyLoop({
+      service: task.service,
+      maxRounds: task.postVerifyMaxRounds ?? 12,
+      steps,
+      ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+    });
     if (credentials.api_key !== undefined) {
       return {
         success: true,
@@ -4682,6 +4688,24 @@ ${formatInventory(input.inventory)}`,
     scopeHint?: string | undefined;
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
+    // 0.8.2-rc.15 — also seed DOM-proximity at loop entry. If the
+    // bot lands directly on the api-keys page (Cloudinary navigates
+    // through onboarding to the dashboard automatically, sometimes
+    // landing on /settings/api-keys), labeled siblings are visible
+    // immediately and the loop's top-of-iter check (which respects
+    // isMultiCredBundle) can hold the loop open for the planner to
+    // emit an explicit extract. Without this seed, only api_key
+    // would be set on entry and isMultiCredBundle would return
+    // false → loop exits with a partial bundle.
+    try {
+      const labeledSeed = await this.extractFromDomProximity();
+      for (const [k, v] of Object.entries(labeledSeed)) {
+        if (credentials[k] === undefined) credentials[k] = v;
+      }
+    } catch {
+      // Non-fatal — the planner's explicit extract round will run
+      // DOM-proximity again, this is just an opportunistic seed.
+    }
     let loginAttempts = 0;
     let planFailures = 0;
     // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
