@@ -2047,6 +2047,47 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Keys that the postVerifyLoop's accumulator stores for housekeeping —
+// they're NOT extracted credentials and must NOT count as "we found
+// something" when deciding whether an extract round succeeded.
+const NON_CREDENTIAL_KEYS = new Set<string>([
+  "api_key_truncated", // truncated stub from extractCredentials Pass 1
+  "password", // signup form metadata (email-verification path)
+  "email", // signup form metadata
+]);
+
+// True iff the credentials Record holds at least one extracted value
+// (api_key, username, or any labeled multi-cred field). Excludes
+// metadata + truncated stubs. Used to decide "this extract round
+// produced something — continue the loop / capture a synthetic extract
+// round" vs "every tier missed — try the planner-quoted fallback".
+export function hasAnyExtractedCredential(
+  creds: Record<string, string>,
+): boolean {
+  for (const key of Object.keys(creds)) {
+    if (NON_CREDENTIAL_KEYS.has(key)) continue;
+    return true;
+  }
+  return false;
+}
+
+// True iff the credentials Record contains a multi-credential bundle
+// — anything beyond the legacy single api_key/username pair. Used by
+// the post-verify loop's early-exit so a partial multi-cred capture
+// doesn't return prematurely (Cloudinary's api_key surfaces 4-5
+// rounds before api_secret; the legacy exit fired the moment api_key
+// was set, losing cloud_name + api_secret).
+export function isMultiCredBundle(
+  creds: Record<string, string>,
+): boolean {
+  for (const key of Object.keys(creds)) {
+    if (NON_CREDENTIAL_KEYS.has(key)) continue;
+    if (key === "api_key" || key === "username") continue;
+    return true;
+  }
+  return false;
+}
+
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
@@ -4742,9 +4783,51 @@ ${formatInventory(input.inventory)}`,
     // contiguous 0..N-1 chain regardless of how many planner re-plans
     // happen mid-run.
     let capturedRound = 0;
+    // 0.8.2-rc.12 — multi-cred-aware loop exit. Track the number of
+    // distinct credential keys we've accumulated; if we're in a
+    // multi-cred bundle (cloud_name, api_secret, application_id, …)
+    // keep planning past the first api_key surfacing so siblings can
+    // accumulate. Bounded by `roundsSinceLastNewCredential` so a
+    // page that never produces a sibling doesn't loop forever.
+    let lastCredentialKeyCount = Object.keys(credentials).filter(
+      (k) => !NON_CREDENTIAL_KEYS.has(k),
+    ).length;
+    let roundsSinceLastNewCredential = 0;
+    const MAX_ROUNDS_AWAITING_MORE_CREDENTIALS = 3;
     for (let round = 0; round < args.maxRounds; round++) {
-      if (credentials.api_key !== undefined || credentials.username !== undefined) {
+      const currentCredentialKeyCount = Object.keys(credentials).filter(
+        (k) => !NON_CREDENTIAL_KEYS.has(k),
+      ).length;
+      if (currentCredentialKeyCount > lastCredentialKeyCount) {
+        roundsSinceLastNewCredential = 0;
+        lastCredentialKeyCount = currentCredentialKeyCount;
+      } else if (lastCredentialKeyCount > 0) {
+        roundsSinceLastNewCredential += 1;
+      }
+      // Multi-cred services hold the loop open until either the
+      // planner returns `done`, the budget expires, or we've made
+      // no credential progress for MAX_ROUNDS_AWAITING_MORE_CREDENTIALS
+      // consecutive rounds. Single-cred services keep the legacy
+      // behavior of returning the moment api_key surfaces.
+      const inMultiCredMode = isMultiCredBundle(credentials);
+      if (
+        !inMultiCredMode &&
+        (credentials.api_key !== undefined || credentials.username !== undefined)
+      ) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
+        return credentials;
+      }
+      if (
+        inMultiCredMode &&
+        roundsSinceLastNewCredential >= MAX_ROUNDS_AWAITING_MORE_CREDENTIALS &&
+        (credentials.api_key !== undefined || credentials.username !== undefined)
+      ) {
+        const summary = Object.keys(credentials)
+          .filter((k) => !NON_CREDENTIAL_KEYS.has(k))
+          .join(", ");
+        args.steps.push(
+          `Post-verify: multi-cred bundle stable for ${roundsSinceLastNewCredential} rounds — returning what we have (${summary}).`,
+        );
         return credentials;
       }
       // Settle the page first — the previous round's click may have
@@ -5253,149 +5336,150 @@ ${formatInventory(input.inventory)}`,
       hint = undefined;
       try {
         if (nextStep.kind === "extract") {
-          credentials = await this.extractCredentials();
-          if (credentials.api_key === undefined) {
-            // rc.28 — planner-quoted-token fallback. The regex
-            // library missed (IPInfo's 14-char hex; some other
-            // shape) but the planner's reason often literally
-            // quotes the value. Accept it IF it's also present
-            // verbatim in the visible page text — that's the
-            // anti-hallucination guardrail.
-            // rc.38 — verify the planner-quoted value against both
-            // visible text AND every input's `value` attribute. The
-            // rc.37 Upstash retest showed the bot quoting a bare UUID
-            // it observed in a create-key modal whose UUID lived in
-            // an <input readonly value="…"> — textContent doesn't
-            // include input values, so the verbatim-in-page check
-            // rejected a real credential. Concatenating input values
-            // closes the gap without weakening the anti-hallucination
-            // guarantee (the candidate still has to appear SOMEWHERE
-            // verifiable on the page).
-            const [pageText, inputValues] = await Promise.all([
-              this.browser.extractText().catch(() => ""),
-              this.browser.extractAllInputValues().catch(() => [] as string[]),
-            ]);
-            const verifySource = pageText + "\n" + inputValues.join("\n");
-            // Phase E — multi-cred-aware extraction. Try the labeled
-            // multi-credential parser FIRST. If the planner labeled
-            // 2+ distinct credentials in its reason, fold them all
-            // into the credentials Record. If the parser found at
-            // least one new value (cloud_name, api_secret, etc. —
-            // anything beyond the single api_key the legacy path
-            // captures), prefer this. Falls through to the single-
-            // value extractQuotedTokenFromReason when no labeled
-            // tokens parsed (single-cred services, ad-hoc planner
-            // prose without explicit labels).
-            const labeled = extractAllLabeledTokensFromReason(
-              nextStep.reason,
-              verifySource,
+          // 0.8.2-rc.12 — multi-cred preservation + always-on Phase E.
+          //
+          // Pre-rc.12 the extract step was a tower of "if no api_key,
+          // try Phase E; else done." That short-circuit silently lost
+          // cloud_name + api_secret on Cloudinary-class services whose
+          // api_key is plain-visible to the legacy regex extractor —
+          // the legacy path filled credentials.api_key, the if-branch
+          // skipped Phase E entirely, and the loop's top-of-iter exit
+          // returned a partial bundle.
+          //
+          // New shape: run the legacy extractor, Phase E, the reveal
+          // pass, and DOM-proximity UNCONDITIONALLY on every extract
+          // round, merging each into `credentials` first-wins. A later
+          // pass never clobbers a value an earlier pass labeled. This
+          // mirrors the design doc: Phase E is the multi-cred surface;
+          // single-cred is just multi-cred-with-one-key.
+          const [pageText, inputValues] = await Promise.all([
+            this.browser.extractText().catch(() => ""),
+            this.browser.extractAllInputValues().catch(() => [] as string[]),
+          ]);
+          const verifySource = pageText + "\n" + inputValues.join("\n");
+
+          // Tier 1 — legacy single-cred extractor (api_key by shape).
+          // Merge into the running accumulator instead of overwriting;
+          // a Phase E label captured on a prior round wins over a
+          // later legacy regex hit.
+          const legacy = await this.extractCredentials();
+          for (const [k, v] of Object.entries(legacy)) {
+            if (credentials[k] === undefined) credentials[k] = v;
+          }
+
+          // Tier 2 — Phase E labeled-token parser over the planner's
+          // reason. Picks up cloud_name='dlq4xgrca' / api_key='4917…'
+          // / application_id='X' / admin_api_key='…' style narrative.
+          const labeled = extractAllLabeledTokensFromReason(
+            nextStep.reason,
+            verifySource,
+          );
+          const labeledNewKeys = Object.keys(labeled).filter(
+            (k) => credentials[k] === undefined,
+          );
+          if (labeledNewKeys.length > 0) {
+            for (const k of labeledNewKeys) credentials[k] = labeled[k]!;
+            const summary = labeledNewKeys
+              .map((k) => `${k}=${labeled[k]!.slice(0, 4)}…${labeled[k]!.slice(-4)}`)
+              .join(", ");
+            args.steps.push(
+              `Post-verify ${round + 1}/${args.maxRounds}: Phase E surfaced ${labeledNewKeys.length} labeled credential(s) (${summary})`,
             );
-            const labeledKeys = Object.keys(labeled);
-            if (labeledKeys.length >= 2 || (labeledKeys.length === 1 && labeled["api_key"] === undefined)) {
-              credentials = { ...credentials, ...labeled };
-              const summary = labeledKeys
-                .map((k) => `${k}=${labeled[k]!.slice(0, 4)}…${labeled[k]!.slice(-4)}`)
-                .join(", ");
+          }
+
+          // Tier 2.5 — reveal-then-extract when the planner explicitly
+          // flagged a masked credential. Fires whether or not we
+          // already have other credentials — Cloudinary's api_secret
+          // sits beside an already-visible api_key in the table.
+          const MASKED_HINT =
+            /\b(?:masked|hidden|bullets?|asterisks?|••+|\*{3,}|reveal|unmask)\b/i;
+          if (MASKED_HINT.test(nextStep.reason)) {
+            try {
+              const revealRes = await this.browser.revealMaskedCredentials();
               args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: extracted ${labeledKeys.length} labeled credential(s) ` +
-                  `via Phase E parser (${summary})`,
+                `Post-verify ${round + 1}/${args.maxRounds}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
               );
-              // When the planner's reason explicitly flags a masked
-              // credential ("api_secret is masked", "hidden behind
-              // asterisks", "click Reveal to show"), Phase E only
-              // captured the visible values — try to reveal + extract
-              // the rest on the same round before continuing. Without
-              // this, the loop returns success with a partial bundle
-              // and never tries the reveal click.
-              const MASKED_HINT =
-                /\b(?:masked|hidden|bullets?|asterisks?|••+|\*{3,}|reveal|unmask)\b/i;
-              if (MASKED_HINT.test(nextStep.reason)) {
-                try {
-                  const revealRes = await this.browser.revealMaskedCredentials();
+              if (revealRes.clicked > 0) {
+                const labeledAfter = await this.extractFromDomProximity();
+                const afterNewKeys = Object.keys(labeledAfter).filter(
+                  (k) => credentials[k] === undefined,
+                );
+                if (afterNewKeys.length > 0) {
+                  for (const k of afterNewKeys) credentials[k] = labeledAfter[k]!;
                   args.steps.push(
-                    `Post-verify ${round + 1}/${args.maxRounds}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
+                    `Post-verify ${round + 1}/${args.maxRounds}: post-reveal DOM-proximity extracted ${afterNewKeys.length} more (${afterNewKeys.join(", ")})`,
                   );
-                  if (revealRes.clicked > 0) {
-                    const labeledAfter = await this.extractFromDomProximity();
-                    const newKeys = Object.keys(labeledAfter).filter(
-                      (k) => credentials[k] === undefined,
-                    );
-                    if (newKeys.length > 0) {
-                      for (const k of newKeys) credentials[k] = labeledAfter[k]!;
-                      args.steps.push(
-                        `Post-verify ${round + 1}/${args.maxRounds}: post-reveal DOM-proximity extracted ${newKeys.length} more (${newKeys.join(", ")})`,
-                      );
-                    } else {
-                      // Surface ALL labeled candidates we found, so
-                      // we can see whether the value is on-page but
-                      // mislabeled vs. genuinely not surfaced.
-                      const allLabeled =
-                        await this.browser.extractLabeledCredentialCandidates();
-                      const summary = allLabeled
-                        .filter((c) => !c.isMasked)
-                        .slice(0, 8)
-                        .map(
-                          (c) =>
-                            `${c.value.slice(0, 6)}…(${c.value.length}ch)/${c.label ?? "no-label"}`,
-                        )
-                        .join(", ");
-                      args.steps.push(
-                        `Post-verify ${round + 1}/${args.maxRounds}: post-reveal had ${allLabeled.length} candidates; visible: ${summary}`,
-                      );
-                    }
-                  }
-                } catch (err) {
+                } else {
+                  // Diagnostic: which candidates were seen on the page?
+                  // Helps debug "Reveal click landed but the value
+                  // didn't appear in proximity to a known label".
+                  const allLabeled =
+                    await this.browser.extractLabeledCredentialCandidates();
+                  const candSummary = allLabeled
+                    .filter((c) => !c.isMasked)
+                    .slice(0, 8)
+                    .map(
+                      (c) =>
+                        `${c.value.slice(0, 6)}…(${c.value.length}ch)/${c.label ?? "no-label"}`,
+                    )
+                    .join(", ");
                   args.steps.push(
-                    `Post-verify ${round + 1}/${args.maxRounds}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
+                    `Post-verify ${round + 1}/${args.maxRounds}: post-reveal had ${allLabeled.length} candidates; visible: ${candSummary}`,
                   );
                 }
               }
-              consecutiveFailedExtracts = 0;
-              continue;
+            } catch (err) {
+              args.steps.push(
+                `Post-verify ${round + 1}/${args.maxRounds}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
+              );
             }
+          }
+
+          // Tier 3 — DOM-proximity labeled extractor. Walks the
+          // visible DOM, pairs credential-shape strings with their
+          // nearest credential-label text. Catches services whose
+          // planner-reason narrative missed sibling labels but whose
+          // DOM still has them as <td>/<dt> pairs.
+          try {
+            const labeledFromDom = await this.extractFromDomProximity();
+            const domNewKeys = Object.keys(labeledFromDom).filter(
+              (k) => credentials[k] === undefined,
+            );
+            if (domNewKeys.length > 0) {
+              for (const k of domNewKeys) credentials[k] = labeledFromDom[k]!;
+              const summary = domNewKeys
+                .map((k) => `${k}=${labeledFromDom[k]!.slice(0, 4)}…${labeledFromDom[k]!.slice(-4)}`)
+                .join(", ");
+              args.steps.push(
+                `Post-verify ${round + 1}/${args.maxRounds}: DOM-proximity surfaced ${domNewKeys.length} more (${summary})`,
+              );
+            }
+          } catch {
+            // best-effort; never abort an extract pass on DOM-proximity
+            // failure (page mid-navigation etc).
+          }
+
+          // Anything found across all tiers? hasMultiCredCredentials
+          // also catches non-api_key labels (cloud_name, application_id).
+          if (hasAnyExtractedCredential(credentials)) {
+            consecutiveFailedExtracts = 0;
+            continue;
+          }
+
+          // True extract failure — every tier missed. Try the legacy
+          // single-value planner-quoted fallback for services whose
+          // planner prose just bare-quotes the value without a known
+          // label vocabulary (Railway UUID-only, IPInfo 14-hex).
+          {
             const quoted = extractQuotedTokenFromReason(
               nextStep.reason,
               verifySource,
             );
             if (quoted !== null) {
-              credentials = { ...credentials, api_key: quoted };
+              credentials.api_key = quoted;
               args.steps.push(
                 `Post-verify ${round + 1}/${args.maxRounds}: extracted token via ` +
                   `planner-quoted fallback (${quoted.slice(0, 4)}…${quoted.slice(-4)})`,
-              );
-              consecutiveFailedExtracts = 0;
-              continue;
-            }
-            // Tier 4 — DOM-proximity labeled credential extraction.
-            // Run BEFORE bailing the extract. Walks the visible DOM,
-            // finds credential-shape strings, pairs each with its
-            // nearest credential-label text by Euclidean center
-            // distance. Catches multi-cred pages where the planner
-            // mentioned ONE value but the DOM shows several (the
-            // planner's narrative-style extract reason missed the
-            // sibling labels). Also tries to unmask hidden secrets
-            // first by clicking visible Reveal/Eye/Copy buttons.
-            try {
-              await this.browser.revealMaskedCredentials();
-            } catch {
-              // Best-effort; never block the extract pass on a
-              // reveal-click failure.
-            }
-            const labeledFromDom = await this.extractFromDomProximity();
-            const newKeys = Object.keys(labeledFromDom).filter(
-              (k) => credentials[k] === undefined,
-            );
-            if (newKeys.length > 0) {
-              for (const k of newKeys) credentials[k] = labeledFromDom[k]!;
-              const summary = newKeys
-                .map((k) => {
-                  const v = labeledFromDom[k]!;
-                  return `${k}=${v.slice(0, 4)}…${v.slice(-4)}`;
-                })
-                .join(", ");
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: extracted ${newKeys.length} labeled credential(s) ` +
-                  `via DOM-proximity fallback (${summary})`,
               );
               consecutiveFailedExtracts = 0;
               continue;
@@ -5465,8 +5549,6 @@ ${formatInventory(input.inventory)}`,
                 "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
                 "generate a fresh one — its full value is shown once, on creation.";
             }
-          } else {
-            consecutiveFailedExtracts = 0;
           }
         } else if (nextStep.kind === "click") {
           await this.browser.click(nextStep.selector);
@@ -5482,13 +5564,22 @@ ${formatInventory(input.inventory)}`,
           // services without modal-delay returns in <1s. Saves both
           // time (no overshoot wait) and correctness (catches the
           // modal-render race).
+          // 0.8.2-rc.12 — merge polled extract into the running
+          // credentials accumulator (was previously assigned to a
+          // throwaway `pollExtract` local). On modal-key reveal
+          // flows (OpenRouter, Anthropic, OpenAI) the credential
+          // appears only here, and the legacy assignment was lost
+          // unless the next round's top-of-iter re-read just
+          // happened to find it again — a flaky guarantee.
           const credentialDeadline = Date.now() + 8000;
-          let pollExtract: Record<string, string> = {};
           while (Date.now() < credentialDeadline) {
             await this.browser.wait(0.5);
             try {
-              pollExtract = await this.extractCredentials();
-              if (pollExtract.api_key !== undefined) break;
+              const pollExtract = await this.extractCredentials();
+              for (const [k, v] of Object.entries(pollExtract)) {
+                if (credentials[k] === undefined) credentials[k] = v;
+              }
+              if (credentials.api_key !== undefined) break;
             } catch {
               // Page mid-render — keep polling; next tick may settle.
             }
@@ -5571,10 +5662,25 @@ ${formatInventory(input.inventory)}`,
       }
       // Re-extract — but tolerate the page still navigating from the
       // step just taken; the next round settles and re-reads.
-      const hadCredentialsBefore =
-        credentials.api_key !== undefined || credentials.username !== undefined;
+      // 0.8.2-rc.12 — MERGE into the running accumulator. The pre-
+      // rc.12 unconditional assignment wiped multi-cred fields the
+      // explicit extract round just accumulated (cloud_name, api_secret,
+      // etc.); on the next round's top-of-iter early-exit, only the
+      // legacy single api_key survived.
+      // 0.8.2-rc.12 — count distinct credential keys before re-extract
+      // so the synthetic-extract trigger fires on ANY new key, not just
+      // the legacy api_key / username pair. A cloudinary reveal click
+      // can produce a fresh api_secret while api_key was already set;
+      // the pre-rc.12 trigger silently skipped the synthetic capture
+      // and the synthesizer then rejected on no_extract_step.
+      const credCountBefore = Object.keys(credentials).filter(
+        (k) => !NON_CREDENTIAL_KEYS.has(k),
+      ).length;
       try {
-        credentials = await this.extractCredentials();
+        const reExtract = await this.extractCredentials();
+        for (const [k, v] of Object.entries(reExtract)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
       } catch {
         // page mid-navigation — next round's waitForFormReady handles it
       }
@@ -5591,9 +5697,10 @@ ${formatInventory(input.inventory)}`,
       // RIGHT NOW (the action just ran, the token row is now visible).
       // Best-effort — a capture failure must never block returning the
       // credential we already have.
-      const haveNewCredentials =
-        !hadCredentialsBefore &&
-        (credentials.api_key !== undefined || credentials.username !== undefined);
+      const credCountAfter = Object.keys(credentials).filter(
+        (k) => !NON_CREDENTIAL_KEYS.has(k),
+      ).length;
+      const haveNewCredentials = credCountAfter > credCountBefore;
       if (haveNewCredentials && nextStep.kind !== "extract") {
         try {
           const [postState, postInventory] = await Promise.all([

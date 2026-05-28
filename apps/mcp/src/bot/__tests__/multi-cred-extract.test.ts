@@ -7,7 +7,11 @@
 // guardrail).
 
 import { describe, expect, it } from "vitest";
-import { extractAllLabeledTokensFromReason } from "../agent.js";
+import {
+  extractAllLabeledTokensFromReason,
+  hasAnyExtractedCredential,
+  isMultiCredBundle,
+} from "../agent.js";
 
 describe("extractAllLabeledTokensFromReason — single-cred passthrough", () => {
   it("returns empty for single-cred prose without labels (legacy path)", () => {
@@ -222,5 +226,111 @@ describe("extractAllLabeledTokensFromReason — label syntax tolerance", () => {
       api_key: "4917abcdefghijkl",
       cloud_name: "dlq4xgrca",
     });
+  });
+});
+
+// 0.8.2-rc.13 — predicates guarding the multi-cred-aware loop exit.
+//
+// hasAnyExtractedCredential discriminates "did any tier surface a
+// credential this round" — used to decide whether the planner-quoted
+// fallback should fire. isMultiCredBundle discriminates "we're now
+// past the legacy single api_key/username shape" — used by the
+// post-verify loop's top-of-iter to hold the loop open for sibling
+// credentials.
+describe("hasAnyExtractedCredential", () => {
+  it("returns false for an empty Record", () => {
+    expect(hasAnyExtractedCredential({})).toBe(false);
+  });
+
+  it("returns false for housekeeping-only Records", () => {
+    // api_key_truncated is a diagnostic stub from extractCredentials's
+    // Pass 1, not a real extracted credential. email + password are
+    // signup-form metadata from the email-verification path.
+    expect(
+      hasAnyExtractedCredential({
+        api_key_truncated: "abc...",
+        email: "ts@example.com",
+        password: "hunter2",
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true for a single api_key", () => {
+    expect(hasAnyExtractedCredential({ api_key: "x" })).toBe(true);
+  });
+
+  it("returns true for a multi-cred bundle", () => {
+    expect(
+      hasAnyExtractedCredential({
+        cloud_name: "dlq4xgrca",
+        api_key: "4917",
+        api_secret: "xyz",
+      }),
+    ).toBe(true);
+  });
+
+  it("returns true for a multi-cred bundle that LACKS api_key", () => {
+    // Partial captures: cloud_name + api_secret without api_key yet.
+    // The loop should still treat this as "we found something".
+    expect(
+      hasAnyExtractedCredential({
+        cloud_name: "dlq4xgrca",
+        api_secret: "xyz",
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("isMultiCredBundle", () => {
+  it("returns false for an empty Record", () => {
+    expect(isMultiCredBundle({})).toBe(false);
+  });
+
+  it("returns false for an api_key only", () => {
+    // Single-cred services (Resend, IPInfo, OpenRouter) stay on the
+    // legacy early-exit path — exit the loop on first api_key.
+    expect(isMultiCredBundle({ api_key: "x" })).toBe(false);
+  });
+
+  it("returns false for a username/api_key pair (email-verification path)", () => {
+    expect(
+      isMultiCredBundle({ api_key: "x", username: "alice" }),
+    ).toBe(false);
+  });
+
+  it("returns false when only housekeeping keys are present", () => {
+    expect(
+      isMultiCredBundle({
+        api_key: "x",
+        api_key_truncated: "stub",
+        email: "ts@example.com",
+        password: "hunter2",
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true for cloud_name + api_key (Cloudinary)", () => {
+    expect(
+      isMultiCredBundle({ cloud_name: "dlq4xgrca", api_key: "x" }),
+    ).toBe(true);
+  });
+
+  it("returns true for application_id + admin_api_key + search_api_key (Algolia)", () => {
+    expect(
+      isMultiCredBundle({
+        application_id: "ABC",
+        admin_api_key: "x",
+        search_api_key: "y",
+      }),
+    ).toBe(true);
+  });
+
+  it("returns true when sibling labels surface BEFORE the api_key", () => {
+    // The Cloudinary race: cloud_name comes first; api_key hasn't
+    // appeared yet. The loop must keep planning, not exit, even
+    // though api_key is undefined.
+    expect(
+      isMultiCredBundle({ cloud_name: "dlq4xgrca" }),
+    ).toBe(true);
   });
 });
