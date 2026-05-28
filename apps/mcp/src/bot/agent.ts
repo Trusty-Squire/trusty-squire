@@ -5571,6 +5571,13 @@ ${formatInventory(input.inventory)}`,
           // appears only here, and the legacy assignment was lost
           // unless the next round's top-of-iter re-read just
           // happened to find it again — a flaky guarantee.
+          //
+          // 0.8.2-rc.15 — also poll DOM-proximity. A click that
+          // reveals an api_secret next to a known label (Cloudinary
+          // reveal click → api_secret becomes visible next to "API
+          // Secret" text) wouldn't surface in the legacy api_key-
+          // shaped regex, so a multi-cred reveal landed nothing
+          // unless the explicit extract round re-fired afterward.
           const credentialDeadline = Date.now() + 8000;
           while (Date.now() < credentialDeadline) {
             await this.browser.wait(0.5);
@@ -5579,6 +5586,20 @@ ${formatInventory(input.inventory)}`,
               for (const [k, v] of Object.entries(pollExtract)) {
                 if (credentials[k] === undefined) credentials[k] = v;
               }
+              try {
+                const pollLabeled = await this.extractFromDomProximity();
+                for (const [k, v] of Object.entries(pollLabeled)) {
+                  if (credentials[k] === undefined) credentials[k] = v;
+                }
+              } catch {
+                // DOM-proximity failure is non-fatal; we'll retry
+                // the next tick or fall through to the next round.
+              }
+              // Early-exit when we have an api_key — most services'
+              // happy path completes in <1s. Multi-cred siblings
+              // (api_secret, cloud_name) keep accumulating across
+              // subsequent rounds; we don't hold the inner poll for
+              // them here.
               if (credentials.api_key !== undefined) break;
             } catch {
               // Page mid-render — keep polling; next tick may settle.
