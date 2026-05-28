@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "0.8.0-rc.3",
+  "version": "0.8.0-rc.4",
   "mcpName": "io.github.Trusty-Squire/mcp",
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API, with the bundled universal signup bot.",
@@ -40,6 +40,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@clack/prompts": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@trusty-squire/adapter-sdk": "workspace:*",
     "boxen": "^8.0.1",

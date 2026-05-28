@@ -60,6 +60,7 @@ import {
 } from "../bot/login-state.js";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
+import { runInteractiveSetup, shouldRunInteractive, showOutro } from "./interactive.js";
 import chalk from "chalk";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -109,6 +110,17 @@ type Argv = {
   // scripted installs that only need one provider. Default: false
   // (i.e., user gets the prompt, default-answer yes).
   skipSecondary: boolean;
+  // --no-interactive: skip the clack picker even in a TTY. Useful for
+  // scripted runs that still want a normal Chrome confirm (i.e. don't
+  // imply --skip-browser).
+  noInteractive: boolean;
+  // 0.8.1: choices the interactive picker collected (or that --llm /
+  // --byok-key flags pre-filled). Threaded into writeAgentConfig +
+  // maybeOfferSecondaryProvider so the picker's "I only want Google"
+  // choice is honored downstream.
+  llmChoice?: import("./interactive.js").LlmChoice;
+  byokKey?: string;
+  oauthProviders?: ("google" | "github")[];
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -137,6 +149,7 @@ function parseArgs(argv: string[]): Argv {
   let skipBrowser = false;
   let forceRelogin = false;
   let skipSecondary = false;
+  let noInteractive = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -169,9 +182,19 @@ function parseArgs(argv: string[]): Argv {
       forceRelogin = true;
     } else if (arg === "--skip-secondary") {
       skipSecondary = true;
+    } else if (arg === "--no-interactive") {
+      noInteractive = true;
     }
   }
-  const args: Argv = { command, apiBase, skipBrowser, forceRelogin, noRegistry, skipSecondary };
+  const args: Argv = {
+    command,
+    apiBase,
+    skipBrowser,
+    forceRelogin,
+    noRegistry,
+    skipSecondary,
+    noInteractive,
+  };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (registryUrl !== undefined && registryUrl.length > 0) args.registryUrl = registryUrl;
@@ -321,8 +344,38 @@ export async function runCli(argv: string[]): Promise<void> {
 }
 
 async function connect(args: Argv): Promise<void> {
-  ui.heading("Trusty Squire");
-  ui.hint("Setting up this machine.");
+  // 0.8.1 — interactive picker (clack), Goose-flavored. Walks the
+  // user through agent / OAuth providers / LLM choice / advanced
+  // before the install ceremony fires. The picker fills in args so
+  // the rest of this function is unchanged.
+  const wantInteractive =
+    !args.noInteractive &&
+    shouldRunInteractive({
+      hasTty: process.stdin.isTTY === true,
+      skipBrowser: args.skipBrowser,
+      forceRelogin: args.forceRelogin,
+    });
+  if (wantInteractive) {
+    const picker = await runInteractiveSetup({
+      ...(args.target !== undefined ? { initialTarget: args.target } : {}),
+      ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
+      ...(args.registryUrl !== undefined ? { initialRegistryUrl: args.registryUrl } : {}),
+      registryEnabled: !args.noRegistry,
+    });
+    args.target = picker.target;
+    args.llmChoice = picker.llmChoice;
+    if (picker.byokKey !== undefined) args.byokKey = picker.byokKey;
+    args.oauthProviders = picker.oauthProviders;
+    if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
+    if (!picker.registryEnabled) {
+      args.noRegistry = true;
+    } else if (picker.registryUrl !== undefined) {
+      args.registryUrl = picker.registryUrl;
+    }
+  } else {
+    ui.heading("Trusty Squire");
+    ui.hint("Setting up this machine.");
+  }
 
   const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
@@ -447,12 +500,19 @@ async function connect(args: Argv): Promise<void> {
     await maybeOfferSecondaryProvider(args);
   }
 
-  ui.divider();
-  ui.panel(
-    `Squire on duty. Restart ${agent.display_name} to pick up the new tools.\n\n` +
-      `Try it — ask your agent: ${ui.code(`"sign me up for Resend"`)}`,
-    { color: "wine" },
-  );
+  // Visual consistency: when the picker was running, close with
+  // clack's `outro` so the bookends match. The flag-driven path keeps
+  // the boxen panel (its callers are typically CI / logs where
+  // clack's box would look noisier).
+  const closingLine =
+    `Squire on duty. Restart ${agent.display_name} to pick up the new tools. ` +
+    `Try it — ask your agent: ${ui.code(`"sign me up for Resend"`)}`;
+  if (wantInteractive) {
+    showOutro(closingLine);
+  } else {
+    ui.divider();
+    ui.panel(closingLine, { color: "wine" });
+  }
 }
 
 // Runs the browser-based install confirm flow.
@@ -553,6 +613,12 @@ async function promptYesNo(message: string, defaultYes: boolean): Promise<boolea
 // come back via `mcp login --provider=<other>` anytime.
 async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
   if (args.skipSecondary) return;
+  // 0.8.1 — if the interactive picker collected an oauthProviders
+  // shortlist, honor it: only prompt for missing providers the user
+  // actually wants. (Empty shortlist = user opted out of OAuth
+  // entirely; no prompt.)
+  const desired = args.oauthProviders;
+  if (desired !== undefined && desired.length === 0) return;
   const present = new Set(loggedInProviders());
   // Force-relogin means "redo the OAuth dance", so even if the marker
   // (or stale Chrome-profile cookies from a prior session) suggests
@@ -568,6 +634,9 @@ async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
   const missing: OAuthProviderId = args.forceRelogin
     ? (present.has("github") && !present.has("google") ? "google" : "github")
     : (present.has("google") ? "github" : "google");
+  // Honor the picker's shortlist — if the user said they only want
+  // Google, don't ambush them with a GitHub prompt afterwards.
+  if (desired !== undefined && !desired.includes(missing)) return;
   const missingLabel = missing === "google" ? "Google" : "GitHub";
   const missingExamples =
     missing === "github"
@@ -626,6 +695,25 @@ async function writeAgentConfig(
   // entirely with --no-registry (which omits the var → router skips).
   if (!args.noRegistry) {
     env.TRUSTY_SQUIRE_REGISTRY_URL = args.registryUrl ?? DEFAULT_REGISTRY_URL;
+  }
+  // 0.8.1 — LLM choice from the interactive picker (or future
+  // --llm/--byok-key flags). BYOK paths write the provider key as
+  // env; the server's LLM client picks the matching path. The
+  // managed-free path omits keys entirely so the server routes
+  // through our proxy (the rate-limited /v1/llm/chat endpoint).
+  switch (args.llmChoice) {
+    case "byok_openrouter":
+      if (args.byokKey !== undefined) env.OPENROUTER_API_KEY = args.byokKey;
+      break;
+    case "byok_anthropic":
+      if (args.byokKey !== undefined) env.ANTHROPIC_API_KEY = args.byokKey;
+      break;
+    case "byok_openai":
+      if (args.byokKey !== undefined) env.OPENAI_API_KEY = args.byokKey;
+      break;
+    // "managed_free" / "skip" / undefined → no LLM env. The server's
+    // proxy path is the default; "skip" means the user will set keys
+    // themselves outside this CLI.
   }
   await agent.writeConfig({
     command: launch.command,
@@ -847,6 +935,7 @@ function printHelp(): void {
   console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
   console.warn(`  --registry-url=<url>         use a non-default skill registry`);
   console.warn(`  --no-registry                disable the Tier-2 router entirely`);
+  console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);
   console.warn(`  ${ui.code("npx @trusty-squire/mcp connect")}`);
