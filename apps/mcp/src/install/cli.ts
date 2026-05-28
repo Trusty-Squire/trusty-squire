@@ -60,6 +60,7 @@ import {
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
+import type { BrowserContext } from "playwright";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
 import { runInteractiveSetup, shouldRunInteractive, showOutro } from "./interactive.js";
@@ -107,22 +108,14 @@ type Argv = {
   // Use this to switch the bound Google account or recover a
   // suspect-stale session.
   forceRelogin: boolean;
-  // --skip-secondary: don't prompt for the secondary provider after
-  // the primary install (or preflight-detected) completes. For CI /
-  // scripted installs that only need one provider. Default: false
-  // (i.e., user gets the prompt, default-answer yes).
-  skipSecondary: boolean;
   // --no-interactive: skip the clack picker even in a TTY. Useful for
   // scripted runs that still want a normal Chrome confirm (i.e. don't
   // imply --skip-browser).
   noInteractive: boolean;
   // 0.8.1: choices the interactive picker collected (or that --llm /
-  // --byok-key flags pre-filled). Threaded into writeAgentConfig +
-  // maybeOfferSecondaryProvider so the picker's "I only want Google"
-  // choice is honored downstream.
+  // --byok-key flags pre-filled). Threaded into writeAgentConfig.
   llmChoice?: import("./interactive.js").LlmChoice;
   byokKey?: string;
-  oauthProviders?: ("google" | "github")[];
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -150,7 +143,6 @@ function parseArgs(argv: string[]): Argv {
   let providerArg: ProviderArg | undefined;
   let skipBrowser = false;
   let forceRelogin = false;
-  let skipSecondary = false;
   let noInteractive = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
@@ -183,7 +175,9 @@ function parseArgs(argv: string[]): Argv {
     } else if (arg === "--force-relogin") {
       forceRelogin = true;
     } else if (arg === "--skip-secondary") {
-      skipSecondary = true;
+      // No-op: kept as a flag for backwards-compat. The 0.8.2 wizard
+      // collapsed step 1 + step 2 into one browser session, so there
+      // is no "secondary" stage left to skip.
     } else if (arg === "--no-interactive") {
       noInteractive = true;
     }
@@ -194,7 +188,6 @@ function parseArgs(argv: string[]): Argv {
     skipBrowser,
     forceRelogin,
     noRegistry,
-    skipSecondary,
     noInteractive,
   };
   if (target !== undefined) args.target = target;
@@ -359,23 +352,19 @@ async function connect(args: Argv): Promise<void> {
     });
   if (wantInteractive) {
     // The bot's Chrome profile may already have provider cookies from
-    // a prior install — surface that to the picker so it can skip the
-    // OAuth step (when both connected) or default-uncheck the
-    // already-done provider (when one connected). Source of truth is
-    // the on-disk marker file the bot writes after a successful
-    // ensureOAuthSession.
-    const alreadyConnected = new Set(loggedInProviders());
+    // 0.8.2 — picker no longer asks about OAuth providers. The
+    // install wizard rendered in the bot's Chrome handles the
+    // Google + (optional) GitHub flow directly; the CLI just
+    // surfaces agent + LLM + advanced.
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
       ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
       ...(args.registryUrl !== undefined ? { initialRegistryUrl: args.registryUrl } : {}),
       registryEnabled: !args.noRegistry,
-      alreadyConnected,
     });
     args.target = picker.target;
     args.llmChoice = picker.llmChoice;
     if (picker.byokKey !== undefined) args.byokKey = picker.byokKey;
-    args.oauthProviders = picker.oauthProviders;
     if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     if (!picker.registryEnabled) {
       args.noRegistry = true;
@@ -407,10 +396,6 @@ async function connect(args: Argv): Promise<void> {
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
-      // Even on a fast-path preflight pass, offer the secondary
-      // provider if only one is connected. This is the natural prompt
-      // for users who originally chose "skip" at step 2.
-      await maybeOfferSecondaryProvider(args);
       ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
       return;
     }
@@ -418,22 +403,17 @@ async function connect(args: Argv): Promise<void> {
 
   console.warn("");
   console.warn(
-    "You need to connect your Google and/or GitHub OAuth accounts to use Trusty Squire.",
+    "Opening the Trusty Squire install page in a browser. " +
+      "The page walks you through signing in with Google and (optionally) GitHub.",
   );
 
-  // --force-relogin means "redo the OAuth dance from scratch" — so
-  // wipe the marker AND the cached provider cookies. Otherwise step
-  // 1 short-circuits on a stale provider session and step 2/2 then
-  // sees both providers already "valid" without prompting noVNC.
+  // --force-relogin means "redo the OAuth dance from scratch" — wipe
+  // the bot's profile cookies + marker so the install wizard sees a
+  // clean slate. The user signs in fresh inside the bot Chrome.
   if (args.forceRelogin) {
     clearAllProviderMarkers();
     await clearProviderCookies();
   }
-  // Step 1 opens trustysquire's install/confirm page in the bot's
-  // Chrome. That page accepts either Google or GitHub — so the label
-  // here is neutral. Step 2 (maybeOfferSecondaryProvider) prompts for
-  // whichever provider is still missing afterwards.
-  ui.section(1, 2, "Sign in to Trusty Squire");
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
@@ -526,13 +506,6 @@ async function connect(args: Argv): Promise<void> {
         `  ${ui.code("npx @trusty-squire/mcp login [--provider=google|github]")}`,
       { title: "Heads up", color: "yellow" },
     );
-  }
-
-  // Step 2 of the install ceremony — defaults to yes, opt out with
-  // --skip-secondary. Silent no-op on --skip-browser runs (no primary
-  // session was seeded so there's no basis for the prompt).
-  if (!args.skipBrowser) {
-    await maybeOfferSecondaryProvider(args);
   }
 
   // Visual consistency: when the picker was running, close with
@@ -634,78 +607,6 @@ async function promptYesNo(message: string, defaultYes: boolean): Promise<boolea
   }
 }
 
-// Step 2 of the install ceremony: offer to add a session for the
-// OTHER provider so the bot can complete OAuth signups against
-// services that only support the one we didn't pick at step 1.
-//
-// Triggers when:
-//   - `connect` finished step 1 successfully (primary session seeded), AND
-//   - the bot's profile has a session for exactly one of {google, github}, AND
-//   - `--skip-secondary` is not set
-//
-// Defaults to yes — one extra noVNC sign-in at install time beats
-// being surprised mid-run later. The user can dismiss with "n" and
-// come back via `mcp login --provider=<other>` anytime.
-async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
-  if (args.skipSecondary) return;
-  // 0.8.1 — if the interactive picker collected an oauthProviders
-  // shortlist, honor it: only prompt for missing providers the user
-  // actually wants. (Empty shortlist = user opted out of OAuth
-  // entirely; no prompt.)
-  const desired = args.oauthProviders;
-  if (desired !== undefined && desired.length === 0) return;
-  const present = new Set(loggedInProviders());
-  // Force-relogin means "redo the OAuth dance", so even if the marker
-  // (or stale Chrome-profile cookies from a prior session) suggests
-  // both providers are already connected, prompt step 2 anyway —
-  // otherwise the user can never re-seed the secondary provider via
-  // `connect`. Step 1 accepts either provider on the trustysquire
-  // install page, so we treat GitHub
-  // as the secondary in that case.
-  if (!args.forceRelogin) {
-    if (present.size === 0) return; // step 1 didn't seed anything — no basis to ask
-    if (present.has("google") && present.has("github")) return; // both already connected
-  }
-  const missing: OAuthProviderId = args.forceRelogin
-    ? (present.has("github") && !present.has("google") ? "google" : "github")
-    : (present.has("google") ? "github" : "google");
-  // Honor the picker's shortlist — if the user said they only want
-  // Google, don't ambush them with a GitHub prompt afterwards.
-  if (desired !== undefined && !desired.includes(missing)) return;
-  const missingLabel = missing === "google" ? "Google" : "GitHub";
-  const missingExamples =
-    missing === "github"
-      ? "Railway, Vercel, parts of Cloudflare"
-      : "Resend, IPInfo, Postmark";
-
-  console.warn("");
-  ui.hint(
-    `Some services are ${missingLabel}-only (${missingExamples}).`,
-  );
-  ui.section(2, 2, `Connect ${missingLabel}`);
-  const yes = await promptYesNo(`Add ${missingLabel}?`, true);
-  if (!yes) {
-    ui.hint(
-      `Skipped. Add anytime: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
-    );
-    return;
-  }
-  console.warn(`Opening browser for ${missingLabel} sign-in…`);
-  const result = await ensureOAuthSession({
-    provider: missing,
-    apiBaseUrl: args.apiBase,
-  });
-  if (result.status === "logged_in" || result.status === "already_valid") {
-    await recordConnectedProvider(missing);
-    ui.success(`${missingLabel} session added.`);
-  } else {
-    ui.warn(
-      `${missingLabel} sign-in didn't complete (${result.status}). ` +
-        `Retry: ${ui.code(`npx @trusty-squire/mcp login --provider=${missing}`)}`,
-    );
-  }
-}
-
 // Writes the host agent's MCP config — extracted so both the normal
 // install path and the preflight-already-provisioned shortcut share
 // one implementation.
@@ -784,19 +685,37 @@ async function runInstallClaim(
   // Wrapper object so TS can narrow `state.value` after a `=== null`
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: { token: string; account_id: string } | null } = { value: null };
-  const pollOnce = async (): Promise<boolean> => {
-    if (state.value !== null) return true;
-    const status = await installPoll(apiBase, initiate.setup_code);
-    if (status.status === "claimed" && status.agent_session_token !== undefined) {
-      state.value = {
-        token: status.agent_session_token,
-        account_id: status.account_id ?? "",
-      };
-      return true;
+  // 0.8.2 — the wizard's "Finish" button navigates to /install/done.
+  // The bot waits for that URL before closing Chrome, so the user
+  // gets a chance to complete optional step 2 (GitHub) AND any
+  // future steps (payment). The API poll still runs so we cache
+  // the agent_session_token from the /claim moment, but it no longer
+  // triggers Chrome teardown on its own.
+  const pollOnce = async (context: BrowserContext): Promise<boolean> => {
+    // Keep state.value warm — the install moves to "claimed" the
+    // instant the user finishes step 1, even though we don't tear
+    // down until they hit /install/done.
+    if (state.value === null) {
+      const status = await installPoll(apiBase, initiate.setup_code);
+      if (status.status === "claimed" && status.agent_session_token !== undefined) {
+        state.value = {
+          token: status.agent_session_token,
+          account_id: status.account_id ?? "",
+        };
+      } else if (status.status === "expired") {
+        // Bail loudly: state.value stays null and the caller
+        // reports the install never completed.
+        return true;
+      }
     }
-    // Expired: also stop Chrome (returning true) — the outer check
-    // sees state.value === null and reports the install failed.
-    return status.status === "expired";
+    // Done when the wizard navigated to /install/done. We don't
+    // require ALL pages to be there — the user might have a stale
+    // tab open; the most recent navigation is what matters.
+    for (const page of context.pages()) {
+      const url = page.url();
+      if (/\/install\/done(\?|$|#)/.test(url)) return true;
+    }
+    return false;
   };
 
   if (skipBrowser) {
@@ -830,18 +749,12 @@ async function runInstallClaim(
   }
 
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
-  // in there once; that sign-in does both the trustysquire claim AND
-  // the bot's provider-session seeding in one event. apiBaseUrl
-  // threads through to the headless rig so it can shorten the
-  // cloudflared tunnel URL to `trustysquire.ai/g/<slug>` before
-  // printing it in the banner (G15).
-  //
-  // 0.8.0-rc.3 — append `?already=<csv>` listing providers the bot
-  // already has a cookie for, so apps/web/install can render a ✓
-  // badge on those rows and the user doesn't re-sign-in unnecessarily
-  // on a `--force-relogin` or follow-up `connect` run.
+  // The wizard page reads provider state from /v1/auth/whoami so no
+  // CLI-side hint is needed. apiBaseUrl threads through to the
+  // headless rig so it can shorten the cloudflared tunnel URL to
+  // `trustysquire.ai/g/<slug>` before printing it in the banner (G15).
   const result = await openInstallConfirmInBotChrome({
-    confirmUrl: appendAlreadyParam(initiate.confirm_url, loggedInProviders()),
+    confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
     apiBaseUrl: apiBase,
   });
@@ -868,33 +781,6 @@ async function runInstallClaim(
     agent_session_token: state.value.token,
     account_id: state.value.account_id,
   };
-}
-
-// Decorate the trustysquire install URL with the providers the bot's
-// local Chrome profile already has cookies for. The install page reads
-// the `already` query param and renders a ✓ badge next to those rows
-// so the user doesn't re-sign-in unnecessarily.
-//
-// Exported for tests. URL.searchParams handles encoding + idempotency
-// (re-running connect twice doesn't keep concatenating the param).
-export function appendAlreadyParam(
-  confirmUrl: string,
-  providers: readonly string[],
-): string {
-  if (providers.length === 0) return confirmUrl;
-  let url: URL;
-  try {
-    url = new URL(confirmUrl);
-  } catch {
-    // Malformed URLs come from the API — propagate as-is rather than
-    // crashing the install. The page will render without badges.
-    return confirmUrl;
-  }
-  // Sort for stable URLs (helps the page memo/cache + makes tests
-  // deterministic).
-  const csv = [...new Set(providers)].sort().join(",");
-  url.searchParams.set("already", csv);
-  return url.toString();
 }
 
 async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {

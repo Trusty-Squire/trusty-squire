@@ -2,7 +2,7 @@
 // TUI that walks the user through agent selection, OAuth providers,
 // and LLM provider config before the install ceremony fires.
 //
-// Powered by @clack/prompts (select / multiselect / text / confirm /
+// Powered by @clack/prompts (select / text / confirm /
 // note / intro / outro primitives, with consistent box styling).
 // Activated when stdin is a TTY and the user didn't pass enough flags
 // to imply scripted install. CI / piped input falls through to the
@@ -12,7 +12,6 @@ import {
   intro,
   outro,
   select,
-  multiselect,
   confirm,
   text,
   note,
@@ -24,13 +23,11 @@ import chalk from "chalk";
 import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
 
 // What the picker resolves to. The caller spreads this into its Argv
-// + threads the LLM bits into writeAgentConfig.
+// + threads the LLM bits into writeAgentConfig. The picker no longer
+// asks about OAuth providers — the install wizard rendered in the
+// bot's Chrome owns that conversation as of 0.8.2.
 export interface InteractiveConfig {
   target: AgentTarget;
-  // Providers the user wants connected. Empty means "skip OAuth entirely"
-  // — they're declining auto-OAuth and will sign up to each service
-  // manually. Rare but legal.
-  oauthProviders: ("google" | "github")[];
   // Which LLM call path the universal bot should use. Maps to
   // UNIVERSAL_BOT_LLM_TIER + optional BYOK key in the written MCP config.
   llmChoice: LlmChoice;
@@ -125,58 +122,6 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
     }),
   );
   return value as AgentTarget;
-}
-
-async function pickOAuthProviders(
-  alreadyConnected: ReadonlySet<"google" | "github">,
-): Promise<("google" | "github")[]> {
-  // If the bot's Chrome already has cookies for both providers, the
-  // picker step is pure friction — skip it and report both as
-  // "wanted" so downstream prompts (maybeOfferSecondaryProvider) see
-  // a satisfied state and don't ask either.
-  if (alreadyConnected.has("google") && alreadyConnected.has("github")) {
-    note(
-      `${chalk.green("✓")} Google and GitHub already connected — skipping OAuth step.`,
-      "OAuth providers",
-    );
-    return ["google", "github"];
-  }
-
-  // Default-select only the providers NOT yet connected. The user can
-  // tick a connected one to mean "reconnect" (force a fresh cookie),
-  // but the typical-case default is "just fill in what's missing."
-  const initialValues: ("google" | "github")[] = [];
-  if (!alreadyConnected.has("google")) initialValues.push("google");
-  if (!alreadyConnected.has("github")) initialValues.push("github");
-
-  const baseHint = {
-    google: "Resend, IPInfo, Postmark, most SaaS",
-    github: "Railway, Vercel, Cloudflare, dev tools",
-  } as const;
-
-  function hintFor(p: "google" | "github"): string {
-    return alreadyConnected.has(p)
-      ? `already logged in ✓ — tick to reconnect`
-      : baseHint[p];
-  }
-
-  const value = bailIfCancelled(
-    await multiselect<"google" | "github">({
-      message: "Connect OAuth providers (most services accept one of these)",
-      initialValues,
-      options: [
-        { value: "google", label: "Google", hint: hintFor("google") },
-        { value: "github", label: "GitHub", hint: hintFor("github") },
-      ],
-      required: false,
-    }),
-  );
-  // Merge picker selections with already-connected — a connected
-  // provider the user didn't tick is still "wanted" (they just don't
-  // need to redo it). Downstream logic should treat both sets as
-  // available providers.
-  const merged = new Set<"google" | "github">([...alreadyConnected, ...value]);
-  return [...merged];
 }
 
 async function pickLlmConfig(): Promise<{ choice: LlmChoice; byokKey?: string }> {
@@ -321,12 +266,8 @@ function summarize(config: InteractiveConfig): void {
   const lines: string[] = [];
   const agentLabel = AGENTS[config.target].display_name;
   lines.push(`${chalk.dim("Agent:        ")}${chalk.bold(agentLabel)}`);
-  const providers =
-    config.oauthProviders.length > 0
-      ? config.oauthProviders.map((p) => (p === "google" ? "Google" : "GitHub")).join(" + ")
-      : chalk.dim("(none — manual signup only)");
-  lines.push(`${chalk.dim("OAuth:        ")}${providers}`);
   lines.push(`${chalk.dim("LLM:          ")}${llmChoiceLabel(config.llmChoice)}`);
+  lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
   if (config.proxyUrl !== undefined) {
     lines.push(`${chalk.dim("Proxy:        ")}${config.proxyUrl}`);
   }
@@ -365,11 +306,6 @@ export async function runInteractiveSetup(opts: {
   initialProxyUrl?: string;
   initialRegistryUrl?: string;
   registryEnabled: boolean;
-  // The bot's Chrome profile's current OAuth state — drives the
-  // OAuth picker's "skip if both connected / default-uncheck the
-  // already-done ones" UX (the user shouldn't be invited to redo
-  // a sign-in they already have).
-  alreadyConnected: ReadonlySet<"google" | "github">;
 }): Promise<InteractiveConfig> {
   showIntro();
 
@@ -377,7 +313,6 @@ export async function runInteractiveSetup(opts: {
   const detected = await detectInstalledAgents();
   const target = opts.initialTarget ?? (await pickAgent(detected));
 
-  const oauthProviders = await pickOAuthProviders(opts.alreadyConnected);
   const { choice: llmChoice, byokKey } = await pickLlmConfig();
   // Default-no advanced when --proxy-url isn't passed; if it IS passed,
   // jump straight to confirming the value rather than asking yes/no.
@@ -394,7 +329,6 @@ export async function runInteractiveSetup(opts: {
 
   const config: InteractiveConfig = {
     target,
-    oauthProviders,
     llmChoice,
     ...(byokKey !== undefined ? { byokKey } : {}),
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),

@@ -177,6 +177,9 @@ export interface ApiPrismaClient {
     findUnique(args: {
       where: Record<string, unknown>;
     }): Promise<OAuthIdentityRow | null>;
+    findMany(args: {
+      where: Record<string, unknown>;
+    }): Promise<OAuthIdentityRow[]>;
   };
   device: {
     upsert(args: {

@@ -868,9 +868,13 @@ export async function ensureOAuthSession(opts?: {
 // Google for the bot" step after install.
 export async function openInstallConfirmInBotChrome(opts: {
   confirmUrl: string;
-  // Returns true once the API has flipped the install to claimed.
-  // Re-polled every 3s while Chrome is open.
-  pollUntilClaimed: () => Promise<boolean>;
+  // Returns true when the install ceremony is fully done. The caller
+  // composes the predicate: typically "(install claim cached) AND
+  // (page navigated to /install/done)" — the wizard fires the
+  // navigation when the user clicks Finish, after the optional
+  // GitHub-connect step. The context argument lets the caller inspect
+  // page URLs without re-launching Chrome.
+  pollUntilClaimed: (context: BrowserContext) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
   // G15: API base URL used to shorten the headless cloudflared
@@ -890,7 +894,7 @@ export async function openInstallConfirmInBotChrome(opts: {
       bannerLabel:
         `You'll see a Chrome window with the Trusty Squire install page. ` +
         `Sign in there to connect this machine — you only sign in once.`,
-      pollUntilDone: () => opts.pollUntilClaimed(),
+      pollUntilDone: (context) => opts.pollUntilClaimed(context),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       // The user's sign-in inside this Chrome leaves a provider session
       // in the persistent profile. We don't know WHICH provider they

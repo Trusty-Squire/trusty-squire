@@ -1,101 +1,88 @@
 "use client";
 
+// Install wizard — one browser session, three steps.
+//
+//   1. Sign in with Google   (required — also binds the trustysquire
+//                             account so the install can be claimed)
+//   2. Connect GitHub        (recommended, skippable — most dev tools
+//                             accept GitHub OAuth; some only accept
+//                             GitHub)
+//   3. Add payment method    (future — slot wired but hidden)
+//
+// State is derived from /v1/auth/whoami + /v1/mcp/install/<token>/state,
+// polled every 3s after each redirect-return. The bot's Chrome stays
+// on this page until the user clicks Finish (which navigates to
+// /install/done — the bot's poll watches for that URL).
+
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ApiError, apiGet, apiPost } from "../lib/api";
-import { OAuthButtons, type ProviderId } from "../components/OAuthButtons";
 import { useQueryParam } from "../lib/use-query-param";
 
-type Phase =
-  | "loading"
-  | "ready"
-  | "claiming"
-  | "done"
-  | "needs_login"
-  | "expired"
-  | "error";
+type Provider = "google" | "github";
 
 interface InstallStatus {
   status: string;
   agent_identity?: string | null;
 }
 
-const loadingStyle = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: "9px",
-} as const;
+interface WhoamiResponse {
+  signed_in: boolean;
+  account_id?: string;
+  identities: Provider[];
+}
+
+// Page-level state machine. Most renders are determined by `step` +
+// the wizard step states; the rarer ones (loading the page, invalid
+// token, expired install, server error) get their own branches.
+type PageState =
+  | "loading"
+  | "wizard"
+  | "expired"
+  | "error"
+  | "invalid_token";
 
 export default function InstallPage() {
+  const router = useRouter();
   const token = useQueryParam("token");
-  // Set when the user signed in mid-flow — the OAuth round-trip carries
-  // `&claim=1` back. They already consented (clicked Approve before the
-  // sign-in detour), so the install finishes automatically on return
-  // rather than dumping them on the confirm screen again.
-  const autoClaim = useQueryParam("claim") === "1";
-  // 0.8.0-rc.3: the install CLI appends `?already=<csv>` listing
-  // providers the bot's Chrome profile already has a cookie for, so
-  // we can render the OAuth row with a ✓ + greyed-out style instead
-  // of inviting the user to re-sign-in to a provider they've already
-  // connected. The CSV is comma-separated; any unknown values are
-  // dropped here so a future provider added on the CLI side can't
-  // crash this page.
-  const alreadyParam = useQueryParam("already") ?? "";
-  const connectedProviders: ProviderId[] = alreadyParam
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter((v): v is ProviderId => v === "google" || v === "github");
-  const [phase, setPhase] = useState<Phase>("loading");
+  const [page, setPage] = useState<PageState>("loading");
   const [agent, setAgent] = useState<string | null>(null);
+  const [identities, setIdentities] = useState<Provider[]>([]);
+  const [installClaimed, setInstallClaimed] = useState(false);
+  const [skippedGithub, setSkippedGithub] = useState(false);
   const [errorText, setErrorText] = useState("");
 
+  // Returning from the OAuth round-trip — fire the claim if we
+  // weren't already claimed. The wizard then continues to step 2.
+  const returnedFromAuth = useQueryParam("claim") === "1";
+
+  // Initial load: fetch state + whoami in parallel.
   useEffect(() => {
-    if (token === null) return;
+    if (token === null) {
+      setPage("invalid_token");
+      return;
+    }
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
-        const status = await apiGet<InstallStatus>(
-          `/v1/mcp/install/${encodeURIComponent(token)}/state`,
-        );
+        const [state, whoami] = await Promise.all([
+          apiGet<InstallStatus>(
+            `/v1/mcp/install/${encodeURIComponent(token)}/state`,
+          ),
+          apiGet<WhoamiResponse>(`/v1/auth/whoami`),
+        ]);
         if (cancelled) return;
-        if (status.status === "expired") {
-          setPhase("expired");
+        if (state.status === "expired") {
+          setPage("expired");
           return;
         }
-        if (status.status !== "pending") {
-          setPhase("done");
-          return;
-        }
-        setAgent(status.agent_identity ?? null);
-        if (!autoClaim) {
-          setPhase("ready");
-          return;
-        }
-        // Back from sign-in — finish the claim the user already approved.
-        setPhase("claiming");
-        try {
-          await apiPost(
-            `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
-            status.agent_identity
-              ? { agent_identity: status.agent_identity }
-              : {},
-          );
-          if (!cancelled) setPhase("done");
-        } catch (err) {
-          if (cancelled) return;
-          if (err instanceof ApiError && err.status === 401) {
-            setPhase("needs_login");
-          } else {
-            setPhase("error");
-            setErrorText(
-              err instanceof Error ? err.message : "Install failed. Try again.",
-            );
-          }
-        }
+        setAgent(state.agent_identity ?? null);
+        setIdentities(whoami.identities);
+        setInstallClaimed(state.status === "claimed");
+        setPage("wizard");
       } catch (err) {
         if (cancelled) return;
-        setPhase("error");
+        setPage("error");
         setErrorText(
           err instanceof Error
             ? err.message
@@ -106,136 +93,272 @@ export default function InstallPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, autoClaim]);
+  }, [token]);
 
-  const claimInstall = useCallback(async () => {
-    if (token === null) return;
-    setPhase("claiming");
-    try {
-      await apiPost(
-        `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
-        agent !== null ? { agent_identity: agent } : {},
-      );
-      setPhase("done");
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        setPhase("needs_login");
-        return;
+  // Auto-claim after the OAuth round-trip returns. The wizard's
+  // step 1 ✓ depends on BOTH whoami.identities ⊇ ["google"] AND the
+  // install being claimed. The claim is idempotent so re-firing on
+  // a refresh is safe.
+  useEffect(() => {
+    if (
+      !returnedFromAuth ||
+      token === null ||
+      page !== "wizard" ||
+      installClaimed ||
+      !identities.includes("google")
+    )
+      return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        await apiPost(
+          `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
+          agent !== null ? { agent_identity: agent } : {},
+        );
+        if (cancelled) return;
+        setInstallClaimed(true);
+        // Strip the claim=1 marker so a page refresh doesn't try to
+        // claim again (the API would reject the duplicate cleanly,
+        // but the URL noise serves no purpose).
+        router.replace(`/install?token=${encodeURIComponent(token)}`);
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) {
+          // Race: whoami said signed-in but the cookie wasn't accepted.
+          // Fall through to the wizard — step 1 will still surface
+          // Continue-with-Google.
+          return;
+        }
+        setPage("error");
+        setErrorText(
+          err instanceof Error ? err.message : "Install failed. Try again.",
+        );
       }
-      setPhase("error");
-      setErrorText(
-        err instanceof Error ? err.message : "Install failed. Try again.",
-      );
-    }
-  }, [token, agent]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [returnedFromAuth, token, page, installClaimed, identities, agent, router]);
 
+  // Light polling on whoami — covers the case where the user does
+  // step 2 (GitHub) and the round-trip's redirect re-renders the
+  // page. Poll only while the wizard is active and step 2 hasn't
+  // landed yet, then stop.
+  useEffect(() => {
+    if (page !== "wizard") return;
+    if (identities.includes("github") || skippedGithub) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const whoami = await apiGet<WhoamiResponse>(`/v1/auth/whoami`);
+        if (!cancelled) setIdentities(whoami.identities);
+      } catch {
+        // Ignore transient poll errors.
+      }
+    };
+    const id = window.setInterval(tick, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [page, identities, skippedGithub]);
+
+  const startGoogle = useCallback(() => {
+    if (token === null) return;
+    window.location.href =
+      `/v1/auth/oauth/google/start?next=` +
+      encodeURIComponent(`/install?token=${encodeURIComponent(token)}&claim=1`);
+  }, [token]);
+
+  const startGithub = useCallback(() => {
+    if (token === null) return;
+    window.location.href =
+      `/v1/auth/oauth/github/start?next=` +
+      encodeURIComponent(`/install?token=${encodeURIComponent(token)}`);
+  }, [token]);
+
+  const skipGithub = useCallback(() => {
+    setSkippedGithub(true);
+  }, []);
+
+  const finish = useCallback(() => {
+    router.push("/install/done");
+  }, [router]);
+
+  // ---- Render branches -----------------------------------------------
+
+  if (page === "loading") {
+    return (
+      <Shell>
+        <p className="auth-sub" style={loadingStyle}>
+          <span className="spinner" /> Loading install request…
+        </p>
+      </Shell>
+    );
+  }
+
+  if (page === "invalid_token") {
+    return (
+      <Shell>
+        <h1>Invalid install link</h1>
+        <p className="auth-sub">
+          This link is missing its setup token. Run{" "}
+          <code>npx @trusty-squire/mcp connect</code> again for a fresh one.
+        </p>
+      </Shell>
+    );
+  }
+
+  if (page === "expired") {
+    return (
+      <Shell>
+        <h1>Install link expired</h1>
+        <p className="auth-sub">
+          Install links last 10 minutes. Run{" "}
+          <code>npx @trusty-squire/mcp connect</code> again for a fresh one.
+        </p>
+      </Shell>
+    );
+  }
+
+  if (page === "error") {
+    return (
+      <Shell>
+        <h1>Something went wrong</h1>
+        <p className="auth-sub">{errorText}</p>
+      </Shell>
+    );
+  }
+
+  // page === "wizard"
+  const step1Done = installClaimed && identities.includes("google");
+  const step2Done = identities.includes("github");
+  const step2Skipped = skippedGithub && !step2Done;
+  const canFinish = step1Done; // step 2 is optional
+
+  return (
+    <Shell>
+      <h1>Set up Trusty Squire</h1>
+      <p className="auth-sub">
+        {agent === null
+          ? "Connect your coding agent to your account."
+          : `Connect ${agent} to your account.`}
+      </p>
+
+      <ol className="wizard">
+        <WizardStep
+          number={1}
+          title="Sign in with Google"
+          required
+          status={step1Done ? "done" : "pending"}
+        >
+          {!step1Done && (
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={startGoogle}
+            >
+              Continue with Google
+            </button>
+          )}
+        </WizardStep>
+
+        <WizardStep
+          number={2}
+          title="Connect GitHub"
+          hint="Highly recommended — some services (Railway, Vercel) only accept GitHub."
+          status={step2Done ? "done" : step2Skipped ? "skipped" : "pending"}
+          disabled={!step1Done}
+        >
+          {step1Done && !step2Done && !step2Skipped && (
+            <div className="wizard-actions">
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={startGithub}
+              >
+                Connect GitHub
+              </button>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={skipGithub}
+              >
+                Skip for now
+              </button>
+            </div>
+          )}
+        </WizardStep>
+      </ol>
+
+      {canFinish && (
+        <button className="btn-primary wizard-finish" type="button" onClick={finish}>
+          Finish
+        </button>
+      )}
+    </Shell>
+  );
+}
+
+// ---- Sub-components --------------------------------------------------
+
+const loadingStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "9px",
+} as const;
+
+function Shell({ children }: { children: React.ReactNode }) {
   return (
     <main className="auth-wrap">
       <div className="auth-card">
         <div className="mark">
           <ShieldMark />
         </div>
-
-        {token === null ? (
-          <>
-            <h1>Invalid install link</h1>
-            <p className="auth-sub">
-              This link is missing its setup token. Run{" "}
-              <code>npx @trusty-squire/mcp install</code> again for a fresh
-              one.
-            </p>
-          </>
-        ) : (
-          <>
-            {(phase === "loading" || phase === "claiming") && (
-              <p className="auth-sub" style={loadingStyle}>
-                <span className="spinner" />
-                {phase === "loading"
-                  ? "Loading install request…"
-                  : "Connecting…"}
-              </p>
-            )}
-
-            {phase === "ready" && (
-              <>
-                <h1>Connect a CLI</h1>
-                <p className="auth-sub">
-                  An agent on your machine wants to connect to your Trusty
-                  Squire account.
-                </p>
-                <div className="pair-agent">
-                  <div className="glyph">
-                    <TerminalGlyph />
-                  </div>
-                  <div>
-                    <div className="pa-name">{agent ?? "Coding agent"}</div>
-                    <div className="pa-sub">
-                      Requesting access to your account
-                    </div>
-                  </div>
-                </div>
-                <button
-                  className="btn-primary"
-                  type="button"
-                  onClick={claimInstall}
-                >
-                  Approve &amp; connect
-                </button>
-              </>
-            )}
-
-            {phase === "done" && (
-              <>
-                <h1>
-                  <span className="pair-ok">✓</span> Connected
-                </h1>
-                <p className="auth-sub">
-                  Your CLI is connected. Head back to your terminal — or open
-                  your vault.
-                </p>
-                <div className="auth-actions">
-                  <Link className="oauth-btn" href="/vault">
-                    Open your vault
-                  </Link>
-                </div>
-              </>
-            )}
-
-            {phase === "needs_login" && (
-              <>
-                <h1>Sign in to approve</h1>
-                <p className="auth-sub">
-                  Sign in and we&apos;ll bring you right back to finish
-                  connecting your CLI.
-                </p>
-                <OAuthButtons
-                  next={`/install?token=${encodeURIComponent(token)}&claim=1`}
-                  connectedProviders={connectedProviders}
-                />
-              </>
-            )}
-
-            {phase === "expired" && (
-              <>
-                <h1>Install link expired</h1>
-                <p className="auth-sub">
-                  Install links last 10 minutes. Run{" "}
-                  <code>npx @trusty-squire/mcp install</code> again for a
-                  fresh one.
-                </p>
-              </>
-            )}
-
-            {phase === "error" && (
-              <>
-                <h1>Something went wrong</h1>
-                <p className="auth-sub">{errorText}</p>
-              </>
-            )}
-          </>
-        )}
+        {children}
       </div>
     </main>
+  );
+}
+
+type StepStatus = "pending" | "done" | "skipped";
+
+function WizardStep({
+  number,
+  title,
+  hint,
+  required,
+  status,
+  disabled,
+  children,
+}: {
+  number: number;
+  title: string;
+  hint?: string;
+  required?: boolean;
+  status: StepStatus;
+  disabled?: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <li className={`wizard-step wizard-step--${status}${disabled ? " wizard-step--disabled" : ""}`}>
+      <div className="wizard-step-head">
+        <span className="wizard-step-num" aria-hidden="true">
+          {status === "done" ? "✓" : status === "skipped" ? "—" : number}
+        </span>
+        <div className="wizard-step-body">
+          <div className="wizard-step-title">
+            {title}
+            <span className="wizard-step-tag">
+              {required ? "Required" : status === "skipped" ? "Skipped" : "Optional"}
+            </span>
+          </div>
+          {hint !== undefined && <div className="wizard-step-hint">{hint}</div>}
+        </div>
+      </div>
+      {children !== undefined && <div className="wizard-step-actions">{children}</div>}
+    </li>
   );
 }
 
@@ -259,23 +382,6 @@ function ShieldMark() {
       >
         {"{ }"}
       </text>
-    </svg>
-  );
-}
-
-function TerminalGlyph() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M5 7l4 4-4 4" />
-      <path d="M12 16h7" />
     </svg>
   );
 }
