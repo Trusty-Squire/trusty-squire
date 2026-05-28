@@ -23,14 +23,6 @@ export {
 } from "./inbox-service.js";
 
 export {
-  SesHandler,
-  type IngestOutcome,
-  type RawEmailFetcher,
-  type SesHandlerDeps,
-  type SesInboundNotification,
-} from "./ses-handler.js";
-
-export {
   MailgunHandler,
   type MailgunHandlerDeps,
   type MailgunInboundPayload,

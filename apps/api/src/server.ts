@@ -15,7 +15,6 @@ import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
 import { registerInboxRoute } from "./routes/inbox.js";
 import { registerLLMRoute } from "./routes/llm.js";
-import { registerSesWebhookRoute } from "./routes/ses-webhook.js";
 import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
@@ -135,7 +134,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerOAuthRoute, { deps });
   await fastify.register(registerMandatesRoute, { deps, requireWeb: auth.requireWeb });
-  await fastify.register(registerSesWebhookRoute, { deps });
   await fastify.register(registerResendWebhookRoute, {
     deps: {
       resendHandler: deps.resendHandler,

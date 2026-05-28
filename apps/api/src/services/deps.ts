@@ -20,12 +20,10 @@ import {
   InMemoryEmailStore,
   PrismaAliasStore,
   PrismaEmailStore,
-  SesHandler,
   ResendHandler,
   MailgunHandler,
   type AliasStore,
   type EmailStore,
-  type RawEmailFetcher,
 } from "@trusty-squire/inbox";
 import {
   CredentialVault,
@@ -102,7 +100,6 @@ export interface ApiDeps {
   vault: VaultClient;
   credentialStore: CredentialStore;
   inbox: InboxService;
-  sesHandler: SesHandler;
   mailgunHandler: MailgunHandler;
   resendHandler: ResendHandler;
   machineTokenStore: MachineTokenStore;
@@ -238,52 +235,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     ...(opts.pollIntervalMs !== undefined ? { pollIntervalMs: opts.pollIntervalMs } : {}),
   });
 
-  // S3 fetcher for inbound SES emails. In production we use a real S3 client;
-  // tests/dev get a mock that returns empty buffers. This is the same fetch
-  // path the ses-webhook route uses for personal-Gmail forwarding, just
-  // exposed through the SesHandler abstraction so the inbox-store fallback
-  // works too. Lazy-init keeps buildInMemoryDeps sync and avoids loading the
-  // AWS SDK in test runs.
-  let fetcher: RawEmailFetcher;
-  if (process.env.NODE_ENV === "production") {
-    type S3ClientCtor = typeof import("@aws-sdk/client-s3").S3Client;
-    type GetObjectCmdCtor = typeof import("@aws-sdk/client-s3").GetObjectCommand;
-    let s3Bits: Promise<{ s3: InstanceType<S3ClientCtor>; GetObjectCommand: GetObjectCmdCtor }> | null = null;
-    const getS3 = (): Promise<{ s3: InstanceType<S3ClientCtor>; GetObjectCommand: GetObjectCmdCtor }> => {
-      if (s3Bits === null) {
-        s3Bits = (async () => {
-          const mod = await import("@aws-sdk/client-s3");
-          return {
-            s3: new mod.S3Client({ region: process.env.AWS_REGION ?? "us-east-1" }),
-            GetObjectCommand: mod.GetObjectCommand,
-          };
-        })();
-      }
-      return s3Bits;
-    };
-    fetcher = {
-      async fetch(bucket: string, key: string): Promise<Buffer> {
-        const { s3, GetObjectCommand } = await getS3();
-        const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-        if (res.Body === undefined) throw new Error("s3_empty_body");
-        const chunks: Buffer[] = [];
-        // @ts-expect-error — AWS SDK v3 stream typing
-        for await (const chunk of res.Body) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        }
-        return Buffer.concat(chunks);
-      },
-    };
-  } else {
-    fetcher = { fetch: async () => Buffer.from("") };
-  }
-
-  const sesHandler = new SesHandler({
-    aliasStore,
-    emailStore,
-    fetcher,
-  });
-
   const mailgunHandler = new MailgunHandler({
     aliasStore,
     emailStore,
@@ -364,7 +315,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     vault,
     credentialStore,
     inbox,
-    sesHandler,
     mailgunHandler,
     resendHandler,
     machineTokenStore,

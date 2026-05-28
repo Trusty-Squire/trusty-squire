@@ -14,7 +14,6 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1045.0",
     "@fastify/cookie": "^9.4.0",
     "@fastify/rate-limit": "^9.1.0",
     "@prisma/client": "^5.22.0",

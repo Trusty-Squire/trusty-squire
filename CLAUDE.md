@@ -22,34 +22,25 @@ orchestration.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
-OpenRouter for LLM, AWS SES for inbound mail.
+OpenRouter for LLM, Resend for inbound + outbound mail.
 
 ## Current State
 
 ### Production, deployed, verified end-to-end
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
-- **Inbound mail pipeline — REVIVED 2026-05-20 on `trustysquire.com`.**
-  SES → S3 → SNS → `/v1/webhooks/ses` → Prisma. End-to-end verified
-  (Cloudflare MX → SES inbound rule → SNS → webhook → ReceivedEmail).
-  Alias domain is now `INBOX_ALIAS_DOMAIN=trustysquire.com` (set on
-  `trusty-squire-api`). The previous mothball decision (2026-05-18,
-  TODOS M1) was reverted after the Render-class form-fill path shipped
-  via F3 — verification email is the only remaining bottleneck for
-  those signups.
-  - **DO NOT restore SES on `trustysquire.ai`.** Its MX is at Google
-    Workspaces and bouncing it breaks personal email (`dani@`, `hello@`,
-    …).
+- **Inbound mail pipeline — Resend-backed on `trustysquire.com`.**
+  Resend webhook → `/v1/webhooks/resend-inbound` → Prisma. Verified via
+  Svix-style HMAC-SHA256 signature with `RESEND_INBOUND_SECRET`. Alias
+  domain is `INBOX_ALIAS_DOMAIN=trustysquire.com` (set on
+  `trusty-squire-api`). The historic SES + S3 + SNS pipeline was
+  retired (no more AWS dependency) — Resend handles both outbound and
+  inbound now.
   - **Young-domain caveat:** `trustysquire.com` is a fresh-MX domain;
     some services (Resend, Postmark, historically) still silently
     withhold verification mails to fresh-MX. Render-class services
     don't gate on this. Diagnose via the bot's
     `verification_not_sent` status.
-  - **AWS SES account is in sandbox** (pending production access
-    review, submitted 2026-05-20). Sandbox restricts OUTBOUND only;
-    inbound works unconditionally. Self-tests via `aws ses send-email`
-    will appear to silently drop — that's the sandbox + self-loop, not
-    the pipeline.
 - **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
   Prisma schemas live in **two separate databases** on one cluster —
   they cannot share a database (`prisma db push` drops any table
@@ -324,20 +315,20 @@ bin symlink and would catch any regression of the above.
 | `INBOX_DATABASE_URL` | Postgres URL — `trustysquire_inbox` db (inbox schema) |
 | `AUTH_DATABASE_URL`  | Postgres URL — `trustysquire` db (api schema) |
 | `OPENROUTER_API_KEY` | Operator's OpenRouter key for `/v1/llm/chat` proxy |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | SES + S3 for inbound mail |
-| `AWS_REGION` | `us-east-1` |
-| `SES_INBOUND_BUCKET` / `SES_INBOUND_PREFIX` | Raw email storage |
+| `RESEND_API_KEY` | Resend outbound (SES-replacement) |
+| `RESEND_INBOUND_SECRET` | Svix-style HMAC for `/v1/webhooks/resend-inbound` |
 | `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Outbound Gmail forwarding |
 | `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
 | `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
 
-**Webhook auth:** inbound mail arrives only via SES (`/v1/webhooks/ses`),
-which verifies the SNS signing certificate — no pre-shared secret needed.
-The Mailgun, Resend, postfix, and fly-email webhook routes were removed;
-SES is the sole inbound path. The inbox schema gained an `issued_to`
-column for alias ownership; run `pnpm -F @trusty-squire/inbox prisma
-migrate deploy` against the inbox database on the next deploy.
+**Webhook auth:** inbound mail arrives via Resend's webhook
+(`/v1/webhooks/resend-inbound`), verified by a Svix-style HMAC-SHA256
+signature against `RESEND_INBOUND_SECRET`. The SES + S3 + SNS pipeline
+was retired; Mailgun + postfix + fly-email routes never shipped. The
+inbox schema has an `issued_to` column for alias ownership; run
+`pnpm -F @trusty-squire/inbox prisma migrate deploy` against the
+inbox database on the next deploy.
 
 ### Skill registry (0.7.0)
 
@@ -462,9 +453,8 @@ Three queue modes share one CLI; each requires different auth.
 | `TELEGRAM_BOT_TOKEN` | `--telegram` notifier | Bot token from @BotFather. Chat id auto-resolved from getUpdates on first run, cached to `~/.trusty-squire/telegram-chat-id.txt`. |
 | `GH_REPO` | `--github-issues` notifier | `<owner>/<repo>` for issue posting. Default `Trusty-Squire/trusty-squire`. Requires `gh auth status` to succeed on the host. |
 
-The archived harvester lives at `tools/archived-harvester/`; its
-`services.yaml` is still the canonical curated list, consumed via
-`mcp housekeeper --queue=seed --from=tools/archived-harvester/services.yaml`.
+The curated services queue lives at `tools/housekeeper-services.yaml`,
+consumed via `mcp housekeeper --queue=seed --from=tools/housekeeper-services.yaml`.
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |

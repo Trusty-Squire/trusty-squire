@@ -14,7 +14,7 @@
 //   # curated harvester run (the old harvester)
 //   REGISTRY_ADMIN_BEARER=… TRUSTY_SQUIRE_MACHINE_TOKEN=… \
 //   TRUSTY_SQUIRE_ACCOUNT_ID=… mcp housekeeper \
-//   --queue=seed --from=tools/archived-harvester/services.yaml --once
+//   --queue=seed --from=tools/housekeeper-services.yaml --once
 //
 //   # ad-hoc single service
 //   mcp housekeeper --service=openrouter
