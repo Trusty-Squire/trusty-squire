@@ -5925,17 +5925,30 @@ Strategy:
   return "extract" for a masked key, and do not return "extract" twice
   in a row. Instead click "Create API Key" / "New API Key" / "Generate"
   to make a fresh key, then extract its full value.
-- **REVEAL-CLICK BEFORE EXTRACT** — when a credential is shown masked
-  (•••••, asterisks, dots) AND there is a VISIBLE "Show", "Reveal",
-  "Eye", or eye-icon button NEXT TO IT (typically same row in a
-  credentials table — Cloudinary, Twilio, Stripe all follow this
-  pattern for api_secret / auth_token / secret_key), emit a CLICK
-  on that show/reveal button FIRST. Do NOT return extract on the same
-  round as the masked display — the masked text would be parsed as
-  the value. Next round the value will be visible and your extract
-  step can quote it. The bot's reveal-pass is a fallback; explicit
-  clicks via the planner are more reliable because you can see the
-  exact button in the screenshot.
+- **PARTIAL MULTI-CRED EXTRACT IS BETTER THAN ZERO** — on a multi-
+  cred page where some credentials are visible and others are masked
+  behind a Reveal button, return {"kind":"extract"} NOW for the
+  visible labels (the bot's labeled extractor folds them into the
+  credentials bundle) AND in the same reason field flag the masked
+  credential so the bot's automatic reveal pass fires. Example
+  reason for Cloudinary: "cloud_name='dlq4xgrca' and
+  api_key='491741466469613' are visible in the table; api_secret is
+  hidden behind a Reveal button — please unmask." The masked
+  credential's label MUST appear with one of the trigger words
+  (masked / hidden / reveal / unmask / bullets / asterisks) so the
+  reveal pass triggers. Do this BEFORE attempting any explicit
+  reveal click — getting the visible values into the bundle first
+  means a failed reveal click only loses the masked credential, not
+  the visible ones too.
+- **REVEAL-CLICK AS A FALLBACK** — when the page has ONLY a masked
+  credential (no visible siblings) AND there is a VISIBLE "Show",
+  "Reveal", "Eye", or eye-icon button next to it, emit a CLICK on
+  that button. If a previous reveal click had no effect (the page's
+  inventory and screenshot look identical), do NOT keep retrying —
+  emit {"kind":"extract"} anyway: the bot's labeled extractor will
+  capture whatever IS visible (even if just a cloud_name with no
+  api_secret) and return the partial bundle to the caller, which is
+  more useful than five wasted rounds of clicking a dead reveal.
 - To reach API keys, prefer a {"kind":"navigate"} straight to the
   service's API-keys settings URL — note these usually live under the
   user/ACCOUNT settings, not a project or workspace's settings.

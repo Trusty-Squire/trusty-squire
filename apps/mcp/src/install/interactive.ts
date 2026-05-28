@@ -127,28 +127,28 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
 async function pickLlmConfig(): Promise<{ choice: LlmChoice; byokKey?: string }> {
   const choice = bailIfCancelled(
     await select<LlmChoice>({
-      message: "How should the bot pay for LLM calls? (Claude vision powers form-fill on every signup)",
+      message: "Which LLM should the bot use for form planning?",
       initialValue: "managed_free",
       options: [
         {
           value: "managed_free",
-          label: "Free tier",
-          hint: "We cover the first ~10 signups, then ask you to upgrade",
+          label: "Managed (default)",
+          hint: "Trusty Squire pays for LLM calls via our routed free + paid fallback chain",
         },
         {
           value: "byok_openrouter",
           label: "OpenRouter",
-          hint: "BYOK — use your own OpenRouter key",
+          hint: "BYOK — your own OpenRouter key pays for LLM calls",
         },
         {
           value: "byok_anthropic",
           label: "Anthropic",
-          hint: "BYOK — use your own Anthropic key (direct Claude API)",
+          hint: "BYOK — your own Anthropic key (direct Claude API)",
         },
         {
           value: "byok_openai",
           label: "OpenAI",
-          hint: "BYOK — use your own OpenAI key (GPT-4 vision)",
+          hint: "BYOK — your own OpenAI key (GPT-4 vision)",
         },
         {
           value: "skip",
@@ -282,7 +282,7 @@ function summarize(config: InteractiveConfig): void {
 function llmChoiceLabel(c: LlmChoice): string {
   switch (c) {
     case "managed_free":
-      return "Free tier (we cover ~10 signups)";
+      return "Managed (Trusty Squire pays for LLM)";
     case "byok_openrouter":
       return "OpenRouter (BYOK)";
     case "byok_anthropic":
