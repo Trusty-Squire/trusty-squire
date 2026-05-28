@@ -135,4 +135,30 @@ describe("detectExistingAccountNoExtract", () => {
       }),
     ).toBe(false);
   });
+
+  it("matches Neon's existing-key listing shape (key name + created + last used, no mask glyph)", () => {
+    // The actual page text Neon's bot capture produced for the stuck
+    // mppra92f run — no `•••` because Neon never shows the value at
+    // all, but multiple listing-row signals are present on a URL that
+    // names the API-keys page. The rc.12 detector picks this up via
+    // the 2+-existing-key-word path.
+    expect(
+      detectExistingAccountNoExtract({
+        url: "https://console.neon.tech/app/org-foo/settings#api-keys",
+        pageText:
+          "Create new API key. Org-wide Key name ts-7229 Created May 28, 2026 Last used never",
+        lastPlannerReason: "",
+      }),
+    ).toBe(true);
+  });
+
+  it("matches when a mask glyph appears next to an 'API keys' header on a keys URL", () => {
+    expect(
+      detectExistingAccountNoExtract({
+        url: "https://example.test/api-keys",
+        pageText: "API keys\nname1 •••••••••• actions",
+        lastPlannerReason: "",
+      }),
+    ).toBe(true);
+  });
 });

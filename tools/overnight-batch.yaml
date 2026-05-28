@@ -61,20 +61,16 @@
   signup_url: https://sentry.io/signup/
   oauth_provider: google
   scope_hint: max permissions on every scope dropdown — Admin > Write > Read
-  status: needs-manual
   notes: |
-    rc.8 regression — sentry's permission-grid combobox stopped
-    revealing its options on click. Executor patches all known
-    popover patterns ([role="option"]:visible, [role="menuitem"],
-    [id^="react-select-"], [role="listbox"], text="Admin") but
-    Sentry's new dropdown trigger doesn't open a popover the
-    executor recognizes. Burns the LLM budget retrying with
-    different selectors. Sentry's UI may have shifted to a
-    non-standard combobox pattern (post-OAuth landing's permission
-    grid now uses a custom widget that needs investigation).
+    rc.11 unblocks sentry: selectFromCombobox now (a) resolves
+    `<label for="X">` selectors to `#X` before clicking so a label-
+    pointer planner pick doesn't waste rounds and (b) falls back to
+    a react-select keyboard idiom (Alt+Down + type-to-filter + Enter)
+    when the existing role-based tiers find no visible options. Both
+    paths verify the pick committed via aria-activedescendant / value
+    / surrounding-text diff so a no-op click never returns success.
     Multi-row scope grid (Project / Team / Member / Issue / Event /
     Release / Organization). scope_hint steers each row to Admin/Write.
-    rc.12 system prompt has a paragraph specifically for this shape.
 - slug: render
   name: Render
   signup_url: https://dashboard.render.com/register

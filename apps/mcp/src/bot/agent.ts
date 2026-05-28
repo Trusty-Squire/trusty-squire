@@ -241,10 +241,16 @@ const EXISTING_KEY_URL_HINT =
   /(?:api[-_/]keys?|api[-_/]tokens?|auth[-_/]tokens?|personal[-_/]access[-_/]tokens?|\/keys(?:\b|\/|$)|\/tokens(?:\b|\/|$)|\/settings\/keys\b|\/settings\/tokens\b|#api[-_/]keys\b|#api[-_/]tokens\b)/i;
 const MASKED_KEY_GLYPHS =
   /(?:•{3,}|\*{3,}|─•|·{3,}|•{3,}|x{6,}|[A-Za-z0-9]{2,4}[•*]{5,})/;
+// 0.8.2-rc.12 — widened to catch Neon's existing-key list shape
+// (the per-row layout has a "Key name" header + "Created <date>" +
+// "Last used <date|never>" — no glyph, no "existing" word, just the
+// columns of an API-key listing table). The conservative AND with
+// EXISTING_KEY_URL_HINT keeps this from misfiring on marketing copy
+// elsewhere on a non-keys URL.
 const EXISTING_KEY_WORDS =
-  /\b(?:existing\s+(?:api\s+)?(?:key|token)|previously\s+created|created\s+by\b|api\s+keys?\s*\(\d+\)|tokens?\s*\(\d+\)|reveal|copy\s+key)\b/i;
+  /\b(?:existing\s+(?:api\s+)?(?:key|token)|previously\s+created|created\s+by\b|api\s+keys?\s*\(\d+\)|tokens?\s*\(\d+\)|reveal|copy\s+key|key\s+name\b|last\s+used\b|created(?:\s+\w+){0,3}\s+(?:\d{1,2},?\s+)?\d{4}\b)/i;
 const NO_CREATE_AFFORDANCE_HINT =
-  /\b(?:cannot\s+(?:reveal|extract|read)|values?\s+(?:is\s+)?masked|only\s+shown\s+once|cannot\s+(?:see|view|copy)\s+(?:the\s+)?(?:key|secret|value))\b/i;
+  /\b(?:cannot\s+(?:reveal|extract|read)|values?\s+(?:is\s+)?masked|only\s+shown\s+once|cannot\s+(?:see|view|copy)\s+(?:the\s+)?(?:key|secret|value)|key\s+(?:value|secret)\s+(?:is\s+)?(?:not\s+)?(?:available|recoverable|extractable|shown))\b/i;
 
 export function detectExistingAccountNoExtract(input: {
   url: string;
@@ -257,14 +263,34 @@ export function detectExistingAccountNoExtract(input: {
   if (NO_CREATE_AFFORDANCE_HINT.test(input.lastPlannerReason)) {
     return true;
   }
-  // Otherwise require BOTH a mask glyph and an existing-key word in
-  // the page text. Either alone is too weak: vendors decorate
-  // marketing tiles with bullet-pointed dots; "existing" appears in
-  // unrelated dashboard copy.
-  return (
-    MASKED_KEY_GLYPHS.test(input.pageText) &&
-    EXISTING_KEY_WORDS.test(input.pageText)
-  );
+  // 0.8.2-rc.12 — three independent positive paths, ANY of which is
+  // enough since we already gated on the URL matching an API-keys
+  // page (which alone weeds out the marketing-tile false-positives
+  // the conservative pre-rc.12 path was protecting against):
+  //   1. Mask glyphs in the page (•••, asterisks, ··· — the literal
+  //      "value is hidden" decoration most vendors use).
+  //   2. Two or more existing-key word patterns matched (a key
+  //      LISTING shape: "Key name" + "Last used" + "Created <date>"
+  //      is unmistakable when found on a /keys-style URL).
+  //   3. Mask glyph PLUS any existing-key word (the original
+  //      detector — keeps the conservative behavior for vendors
+  //      whose listing UI uses different column labels).
+  const hasMaskGlyph = MASKED_KEY_GLYPHS.test(input.pageText);
+  // Tally up to 5 distinct existing-key signals; 2+ is enough.
+  const existingKeyMatches: string[] = [];
+  const allWords = input.pageText.match(new RegExp(EXISTING_KEY_WORDS, "gi"));
+  if (allWords !== null) {
+    const distinct = new Set<string>();
+    for (const m of allWords) {
+      distinct.add(m.toLowerCase().replace(/\s+/g, " "));
+      if (distinct.size >= 5) break;
+    }
+    existingKeyMatches.push(...distinct);
+  }
+  if (hasMaskGlyph && existingKeyMatches.length >= 1) return true;
+  if (existingKeyMatches.length >= 2) return true;
+  if (hasMaskGlyph && /\bAPI\s+keys?\b/i.test(input.pageText)) return true;
+  return false;
 }
 
 // Pick the next fallback URL to try from STUCK_LOOP_FALLBACK_PATHS
@@ -5071,6 +5097,39 @@ ${formatInventory(input.inventory)}`,
           // root happens to share /settings with the API-keys page
           // doesn't land short of the actual page.
           if (stuckFiresAtUrl >= 2) {
+            // 0.8.2-rc.12 — when the bot is ALREADY on a URL that names
+            // an API-keys page (path contains /keys, /tokens, /api-keys,
+            // etc.) AND the page text shows masked-credential markers,
+            // the dashboard is genuinely showing a pre-existing key
+            // we can't unmask (Neon's `ts-7229` is the canonical case —
+            // the value was revealed once at create-time and is gone).
+            // Skip the fallback-URL navigate entirely (it would land
+            // on a 404 for vendors whose api-keys page lives at an
+            // org-scoped URL like `/app/<org>/settings#api-keys`) and
+            // classify as existing_account_no_extract directly.
+            try {
+              const stuckPageText = await this.browser
+                .extractText()
+                .catch(() => "");
+              if (
+                detectExistingAccountNoExtract({
+                  url: state.url,
+                  pageText: stuckPageText,
+                  lastPlannerReason: nextStep.reason,
+                })
+              ) {
+                this.lastPostVerifyDoneReason =
+                  `[existing_account_no_extract] stuck-loop at ${state.url} on an existing API-keys page with masked credentials; ` +
+                  `latest planner reason: ${nextStep.reason}`;
+                args.steps.push(
+                  `Post-verify: stuck-loop on an existing-keys page — classified as existing_account_no_extract, breaking out.`,
+                );
+                break;
+              }
+            } catch {
+              // best-effort — fall through to the regular fallback path
+              // if the page-text read failed.
+            }
             const fallback = pickStuckLoopFallbackUrl(state.url, triedFallbackUrls);
             if (fallback !== null) {
               triedFallbackUrls.add(fallback);
@@ -5093,7 +5152,12 @@ ${formatInventory(input.inventory)}`,
               prevSignature = null;
               prevInventorySize = -1;
               hint = undefined;
-              capturedRound += 1;
+              // Don't bump capturedRound — captureOnboardingRound above
+              // already wrote a capture for this round (the stuck-loop
+              // detector runs AFTER the capture, so the planner's
+              // observed step IS on disk). Bumping again here would
+              // leave a phantom gap in the chain that verifyCaptureChain
+              // rejects as missing_round.
               continue;
             }
             // Every plausible fallback URL has been tried and we're
