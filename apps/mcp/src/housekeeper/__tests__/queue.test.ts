@@ -8,6 +8,7 @@ import {
   RegistryDiscoveryQueue,
   YamlSeedQueue,
   AdHocServiceQueue,
+  lookupServiceInYaml,
 } from "../queue.js";
 import type { VerifierQueueItem } from "../registry-client.js";
 
@@ -198,6 +199,40 @@ ${Array.from({ length: 30 }, (_, i) => `  - { slug: svc${i} }`).join("\n")}
     expect("oauthProvider" in tasks[0]!).toBe(false);
   });
 
+  it("propagates signup_url from YAML to the task (0.8.1-rc.3)", async () => {
+    // Pre-rc.3 the YAML's signup_url was read into YamlServiceEntry
+    // but the fetch() map dropped it on the floor. The bot then fell
+    // back to guessSignupUrl(slug) which yields https://<slug>.com/
+    // signup — wrong for ipinfo.io, console.anthropic.com,
+    // console.mistral.ai, etc. Five oauth_required failures in the
+    // overnight batch were really wrong-URL navigations to a
+    // domain-parked .com that didn't have the OAuth button.
+    const yamlText = `services:
+  - { slug: ipinfo, signup_url: 'https://ipinfo.io/signup' }
+  - { slug: anthropic, signup_url: 'https://console.anthropic.com/login', oauth_provider: google }
+  - { slug: nourl }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+    });
+    const tasks = await queue.fetch(10);
+    expect(tasks).toHaveLength(3);
+    expect(tasks[0]).toMatchObject({
+      kind: "discover",
+      service: "ipinfo",
+      signupUrl: "https://ipinfo.io/signup",
+    });
+    expect(tasks[1]).toMatchObject({
+      service: "anthropic",
+      signupUrl: "https://console.anthropic.com/login",
+      oauthProvider: "google",
+    });
+    // No signup_url → field absent (not undefined-as-value, so spread
+    // composition stays clean).
+    expect("signupUrl" in tasks[2]!).toBe(false);
+  });
+
   it("skips entries with malformed shape (missing slug)", async () => {
     const yamlText = `services:
   - { name: bad }
@@ -223,5 +258,56 @@ describe("AdHocServiceQueue", () => {
     const queue = new AdHocServiceQueue("railway");
     await queue.fetch(10);
     expect(await queue.fetch(10)).toEqual([]);
+  });
+
+  it("propagates the optional signupUrl onto the task (0.8.1-rc.3)", async () => {
+    const queue = new AdHocServiceQueue("ipinfo", "google", "https://ipinfo.io/signup");
+    const tasks = await queue.fetch(10);
+    expect(tasks).toEqual([
+      {
+        kind: "discover",
+        service: "ipinfo",
+        oauthProvider: "google",
+        signupUrl: "https://ipinfo.io/signup",
+      },
+    ]);
+  });
+});
+
+describe("lookupServiceInYaml", () => {
+  it("returns the matching entry for a known slug", async () => {
+    const yamlText = `services:
+  - { slug: ipinfo, signup_url: 'https://ipinfo.io/signup', oauth_provider: google }
+  - { slug: resend, signup_url: 'https://resend.com/signup' }
+`;
+    const entry = await lookupServiceInYaml(
+      "/fake/path",
+      "ipinfo",
+      async () => yamlText,
+    );
+    expect(entry).toMatchObject({
+      slug: "ipinfo",
+      signup_url: "https://ipinfo.io/signup",
+      oauth_provider: "google",
+    });
+  });
+
+  it("returns null when the slug isn't in the file", async () => {
+    const yamlText = `services:
+  - { slug: resend }
+`;
+    const entry = await lookupServiceInYaml("/fake/path", "ipinfo", async () => yamlText);
+    expect(entry).toBeNull();
+  });
+
+  it("returns null on a read failure rather than throwing", async () => {
+    const entry = await lookupServiceInYaml(
+      "/fake/path",
+      "ipinfo",
+      async () => {
+        throw new Error("ENOENT");
+      },
+    );
+    expect(entry).toBeNull();
   });
 });

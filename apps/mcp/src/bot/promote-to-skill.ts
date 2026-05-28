@@ -283,6 +283,22 @@ function synthesizeSteps(
   runId: string,
 ): StepsOk | PromoteRejection {
   const steps: SkillStep[] = [];
+  // 0.8.1 — soft-drop policy for intermediate click rounds. The bot's
+  // planner captures every round it tried, including failed clicks on
+  // disabled buttons (Cloudinary's "card radio" rows), ambiguous
+  // duplicate-label clicks (PostHog's settings nav), and no-progress
+  // retries against unchanged inventory. The synthesizer used to hard-
+  // reject the entire skill on any of these — even when later rounds
+  // recovered with a real extract step. Now: when a click/check round
+  // fails text-hint resolution we DROP it and continue, recording the
+  // rejection. If we never reach a clean extract we surface the
+  // first dropped rejection so the operator still sees what went
+  // wrong. Fill/select rounds remain hard rejections — those are
+  // load-bearing (Sentry's permission grid). The replay engine
+  // tolerates a sparser step graph (it walks linearly until a
+  // credential surfaces); intermediate nav clicks are largely
+  // re-discoverable at replay time anyway.
+  let firstSoftRejection: PromoteRejection | null = null;
 
   for (let i = 0; i < rounds.length; i++) {
     const round = rounds[i]!;
@@ -297,14 +313,32 @@ function synthesizeSteps(
     };
 
     const translated = translateStep(round.observed, round.inventory, provenance, i, round.state.html);
-    if (translated.kind !== "ok") return translated;
-    if (translated.step !== null) steps.push(translated.step);
+    if (translated.kind === "ok") {
+      if (translated.step !== null) steps.push(translated.step);
+      continue;
+    }
+    // Soft-drop intermediate click/check rounds with text-resolution
+    // failures — see the policy comment above.
+    const isSoftDroppable =
+      (round.observed.kind === "click" || round.observed.kind === "check") &&
+      (translated.error_kind === "missing_text_hint" ||
+        translated.error_kind === "ambiguous_text_match" ||
+        translated.error_kind === "inventory_entry_not_found");
+    if (isSoftDroppable) {
+      if (firstSoftRejection === null) firstSoftRejection = translated;
+      continue;
+    }
+    return translated;
   }
 
   // A valid skill needs at least one step. The bot may emit a "done"
   // round (which we drop above), so a capture with only done is
   // effectively empty.
   if (steps.length === 0) {
+    // Soft-drop preserved its first rejection — surface that instead
+    // of the generic no_extract_step error so the operator sees the
+    // actual diagnostic.
+    if (firstSoftRejection !== null) return firstSoftRejection;
     return {
       kind: "rejected",
       stage: "synthesis",
@@ -323,6 +357,7 @@ function synthesizeSteps(
     (s) => s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
   );
   if (!hasExtract) {
+    if (firstSoftRejection !== null) return firstSoftRejection;
     return {
       kind: "rejected",
       stage: "synthesis",
@@ -636,12 +671,19 @@ function resolveLabelHint(
   }
 
   // Resolution order for fill/select: matching <label for=> text,
-  // then placeholder, then aria-label, then the nearest preceding
-  // visible text. Inventory carries the first three directly; the
-  // bot's element-extraction logic already does the <label for=>
-  // matching, so labelText is authoritative when present.
+  // then placeholder, then aria-label, then visibleText for combobox-
+  // shaped buttons (Resend / OpenAI / many Radix-based dashboards
+  // ship their selects as <button role="combobox"> with the current
+  // value as visibleText and no labelText — the only stable hint is
+  // that visible value text). The bot's element-extraction logic
+  // already does the <label for=> matching, so labelText is
+  // authoritative when present.
+  const comboboxButtonText =
+    match.role === "combobox" && match.tag === "button"
+      ? match.visibleText ?? null
+      : null;
   const hint =
-    (match.labelText ?? match.placeholder ?? match.ariaLabel ?? "")
+    (match.labelText ?? match.placeholder ?? match.ariaLabel ?? comboboxButtonText ?? "")
       .trim();
   if (hint.length === 0) {
     return {

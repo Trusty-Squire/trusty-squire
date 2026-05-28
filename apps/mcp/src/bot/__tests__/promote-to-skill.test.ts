@@ -653,7 +653,15 @@ describe("promoteToSkill — chain rejections", () => {
     expect(result.error_kind).toBe("no_extract_step");
   });
 
-  it("rejects when a click target's text matches multiple inventory entries", () => {
+  it("soft-drops an ambiguous click when a later extract round recovers (0.8.1)", () => {
+    // Pre-0.8.1 this case rejected the whole skill on ambiguous_text_match
+    // — the synthesizer refused to translate a click that resolved to two
+    // same-labeled inventory elements. In practice the bot's planner
+    // captures these noise rounds constantly (failed click on
+    // disabled-but-text-collision buttons, no-progress retries on a
+    // duplicate-label dashboard nav). When a clean extract follows, the
+    // skill is recoverable by dropping the noise click — the replay
+    // engine walks linearly and finds the credential.
     const service = uniqueService();
     const rounds: OnboardingRoundCapture[] = [
       {
@@ -708,6 +716,55 @@ describe("promoteToSkill — chain rejections", () => {
 
     const { dir, runId } = setupCaptures(rounds);
     const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    // The ambiguous click was dropped; only the navigate (added by
+    // the synthesizer's first-step-navigate rule) + extract remain.
+    const kinds = result.skill.steps.map((s) => s.kind);
+    expect(kinds).not.toContain("click");
+    expect(kinds.some((k) => k === "extract_via_regex" || k === "extract_via_copy_button")).toBe(true);
+  });
+
+  it("surfaces the soft-drop rejection when no extract round follows (0.8.1)", () => {
+    // When a click is soft-dropped AND nothing downstream produces an
+    // extract step, we surface the FIRST soft-drop rejection rather
+    // than the generic no_extract_step — operator wants the actual
+    // diagnostic (which round had the ambiguous label) so they can
+    // fix the planner prompt or re-capture.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com",
+          title: "Dashboard",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "button",
+            visibleText: "Create",
+            selector: "button.create-1",
+            role: "button",
+          }),
+          inventoryElement({
+            index: 1,
+            tag: "button",
+            visibleText: "Create",
+            selector: "button.create-2",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.create-1", reason: "create" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
     expect(result.kind).toBe("rejected");
     if (result.kind !== "rejected") return;
     expect(result.stage).toBe("synthesis");
@@ -715,7 +772,12 @@ describe("promoteToSkill — chain rejections", () => {
     expect(result.offending_round).toBe(0);
   });
 
-  it("rejects when an inventory element has no visible text or aria-label", () => {
+  it("soft-drops a click whose element has no visible text or aria-label (0.8.1)", () => {
+    // Was a hard reject pre-0.8.1. Cloudinary's "card radio" disabled
+    // buttons are the canonical case: the planner picked them, but they
+    // have no text/aria-label of any kind. The bot's NEXT round shows the
+    // planner re-routing to a real target, so the failed click should
+    // be dropped — not the entire skill rejected.
     const service = uniqueService();
     const rounds: OnboardingRoundCapture[] = [
       {
@@ -763,13 +825,16 @@ describe("promoteToSkill — chain rejections", () => {
 
     const { dir, runId } = setupCaptures(rounds);
     const result = promoteToSkill({ dir, service, run_id: runId });
-    expect(result.kind).toBe("rejected");
-    if (result.kind !== "rejected") return;
-    expect(result.stage).toBe("synthesis");
-    expect(result.error_kind).toBe("missing_text_hint");
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.steps.some((s) => s.kind === "click")).toBe(false);
   });
 
-  it("rejects when the captured selector isn't in this round's inventory", () => {
+  it("soft-drops a click whose selector isn't in inventory when extract recovers (0.8.1)", () => {
+    // Was a hard reject pre-0.8.1. Symptom: the planner emitted a
+    // selector the bot couldn't find (model-invention, or DOM raced the
+    // capture). When a subsequent round produces a clean extract, drop
+    // the broken-selector click and continue.
     const service = uniqueService();
     const rounds: OnboardingRoundCapture[] = [
       {
@@ -816,10 +881,78 @@ describe("promoteToSkill — chain rejections", () => {
 
     const { dir, runId } = setupCaptures(rounds);
     const result = promoteToSkill({ dir, service, run_id: runId });
-    expect(result.kind).toBe("rejected");
-    if (result.kind !== "rejected") return;
-    expect(result.stage).toBe("synthesis");
-    expect(result.error_kind).toBe("inventory_entry_not_found");
+    expect(result.kind).toBe("ok");
+  });
+});
+
+// ── Combobox-button visibleText fallback ─────────────────────────────
+
+describe("promoteToSkill — fill/select hint resolution (0.8.1)", () => {
+  it("uses visibleText as the label hint for combobox-shaped buttons", () => {
+    // Resend / OpenAI / Radix-based dashboards ship their selects as
+    // <button role="combobox"> with the current value rendered as
+    // visibleText and no labelText / placeholder / ariaLabel. Pre-0.8.1
+    // resolveLabelHint rejected these with missing_text_hint. Now we
+    // fall back to visibleText for that specific shape (combobox role
+    // + button tag), letting the synthesizer keep the select step.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com",
+          title: "Pick",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            role: "combobox",
+            visibleText: "All domains",
+            selector: "form > div > button",
+          }),
+        ],
+        observed: {
+          kind: "select",
+          selector: "form > div > button",
+          option_text: "All domains",
+          reason: "pick All domains",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://example.com/done",
+          title: "Done",
+          html: "<html>Token: re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const selectStep = result.skill.steps.find((s) => s.kind === "select");
+    expect(selectStep).toBeDefined();
+    if (selectStep === undefined || selectStep.kind !== "select") return;
+    expect(selectStep.label_hint).toBe("All domains");
+    expect(selectStep.option_text).toBe("All domains");
   });
 });
 

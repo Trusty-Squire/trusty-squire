@@ -62,7 +62,12 @@ function flushStepTrail(steps: readonly string[], service: string): void {
 }
 
 export async function runDiscoveryBot(
-  input: { service: string; oauthProvider?: "google" | "github" },
+  input: {
+    service: string;
+    oauthProvider?: "google" | "github";
+    /** Canonical signup URL (curated YAML override). */
+    signupUrl?: string;
+  },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
   const machineToken = cfg.machineToken ?? process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
@@ -135,6 +140,13 @@ export async function runDiscoveryBot(
       ...(input.oauthProvider !== undefined
         ? { oauthProvider: input.oauthProvider }
         : {}),
+      // YAML-declared signup URL overrides guessSignupUrl(slug). The
+      // guess defaults to https://<slug>.com/signup which gets the
+      // wrong host for any non-`.com` service (ipinfo.io, anthropic
+      // console subdomain, etc.). Five oauth_required failures in the
+      // overnight batch were really wrong-URL navigations to parked
+      // / unrelated `.com` pages that didn't have the OAuth button.
+      ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
     });
   } catch (err) {
     // Dump the step trail before bailing — without it, debugging
@@ -152,6 +164,13 @@ export async function runDiscoveryBot(
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).
   if (result.success && cfg.skipAutoPromote !== true && isAutoPromoteEnabled(process.env)) {
+    // Snapshot the sink length so we can flush ONLY the auto-promote
+    // additions to stderr. Before this fix the bot's step trail was
+    // flushed above and then auto-promote silently pushed new entries
+    // onto the same array — they never reached stderr, so operators
+    // saw `promoted=0` in the batch summary and had no diagnostic
+    // surface for why every successful capture failed to publish.
+    const sinkLenBeforePromote = stepsSink.length;
     try {
       await runAutoPromote({
         service: input.service,
@@ -165,6 +184,15 @@ export async function runDiscoveryBot(
       stepsSink.push(
         `[discovery] auto-promote raised: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    const promoteSteps = stepsSink.slice(sinkLenBeforePromote);
+    if (promoteSteps.length > 0) {
+      process.stderr.write(
+        `[housekeeper] ${input.service} auto-promote (${promoteSteps.length} step(s)):\n`,
+      );
+      for (const s of promoteSteps) {
+        process.stderr.write(`  ${s}\n`);
+      }
     }
   }
 
