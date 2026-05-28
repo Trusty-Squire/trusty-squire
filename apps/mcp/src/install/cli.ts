@@ -356,11 +356,19 @@ async function connect(args: Argv): Promise<void> {
       forceRelogin: args.forceRelogin,
     });
   if (wantInteractive) {
+    // The bot's Chrome profile may already have provider cookies from
+    // a prior install — surface that to the picker so it can skip the
+    // OAuth step (when both connected) or default-uncheck the
+    // already-done provider (when one connected). Source of truth is
+    // the on-disk marker file the bot writes after a successful
+    // ensureOAuthSession.
+    const alreadyConnected = new Set(loggedInProviders());
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
       ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
       ...(args.registryUrl !== undefined ? { initialRegistryUrl: args.registryUrl } : {}),
       registryEnabled: !args.noRegistry,
+      alreadyConnected,
     });
     args.target = picker.target;
     args.llmChoice = picker.llmChoice;

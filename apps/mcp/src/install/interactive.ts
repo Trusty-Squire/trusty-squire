@@ -127,23 +127,56 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
   return value as AgentTarget;
 }
 
-async function pickOAuthProviders(): Promise<("google" | "github")[]> {
+async function pickOAuthProviders(
+  alreadyConnected: ReadonlySet<"google" | "github">,
+): Promise<("google" | "github")[]> {
+  // If the bot's Chrome already has cookies for both providers, the
+  // picker step is pure friction — skip it and report both as
+  // "wanted" so downstream prompts (maybeOfferSecondaryProvider) see
+  // a satisfied state and don't ask either.
+  if (alreadyConnected.has("google") && alreadyConnected.has("github")) {
+    note(
+      `${chalk.green("✓")} Google and GitHub already connected — skipping OAuth step.`,
+      "OAuth providers",
+    );
+    return ["google", "github"];
+  }
+
+  // Default-select only the providers NOT yet connected. The user can
+  // tick a connected one to mean "reconnect" (force a fresh cookie),
+  // but the typical-case default is "just fill in what's missing."
+  const initialValues: ("google" | "github")[] = [];
+  if (!alreadyConnected.has("google")) initialValues.push("google");
+  if (!alreadyConnected.has("github")) initialValues.push("github");
+
+  const baseHint = {
+    google: "Resend, IPInfo, Postmark, most SaaS",
+    github: "Railway, Vercel, Cloudflare, dev tools",
+  } as const;
+
+  function hintFor(p: "google" | "github"): string {
+    return alreadyConnected.has(p)
+      ? `already logged in ✓ — tick to reconnect`
+      : baseHint[p];
+  }
+
   const value = bailIfCancelled(
     await multiselect<"google" | "github">({
-      message: "Connect OAuth providers (recommended — most services accept one of these)",
-      // Both checked by default — services like Railway only accept
-      // GitHub, services like Resend only accept Google, so the
-      // default-everything path serves the broadest user. Users
-      // who only want one can uncheck.
-      initialValues: ["google", "github"],
+      message: "Connect OAuth providers (most services accept one of these)",
+      initialValues,
       options: [
-        { value: "google", label: "Google", hint: "Resend, IPInfo, Postmark, most SaaS" },
-        { value: "github", label: "GitHub", hint: "Railway, Vercel, Cloudflare, dev tools" },
+        { value: "google", label: "Google", hint: hintFor("google") },
+        { value: "github", label: "GitHub", hint: hintFor("github") },
       ],
       required: false,
     }),
   );
-  return value;
+  // Merge picker selections with already-connected — a connected
+  // provider the user didn't tick is still "wanted" (they just don't
+  // need to redo it). Downstream logic should treat both sets as
+  // available providers.
+  const merged = new Set<"google" | "github">([...alreadyConnected, ...value]);
+  return [...merged];
 }
 
 async function pickLlmConfig(): Promise<{ choice: LlmChoice; byokKey?: string }> {
@@ -332,6 +365,11 @@ export async function runInteractiveSetup(opts: {
   initialProxyUrl?: string;
   initialRegistryUrl?: string;
   registryEnabled: boolean;
+  // The bot's Chrome profile's current OAuth state — drives the
+  // OAuth picker's "skip if both connected / default-uncheck the
+  // already-done ones" UX (the user shouldn't be invited to redo
+  // a sign-in they already have).
+  alreadyConnected: ReadonlySet<"google" | "github">;
 }): Promise<InteractiveConfig> {
   showIntro();
 
@@ -339,7 +377,7 @@ export async function runInteractiveSetup(opts: {
   const detected = await detectInstalledAgents();
   const target = opts.initialTarget ?? (await pickAgent(detected));
 
-  const oauthProviders = await pickOAuthProviders();
+  const oauthProviders = await pickOAuthProviders(opts.alreadyConnected);
   const { choice: llmChoice, byokKey } = await pickLlmConfig();
   // Default-no advanced when --proxy-url isn't passed; if it IS passed,
   // jump straight to confirming the value rather than asking yes/no.
