@@ -241,6 +241,19 @@ export interface ProxyLLMClientOpts {
 // stack 4 seconds of retries on top of every planner call.
 const PROXY_RETRY_STATUSES = new Set([502, 503, 504]);
 const PROXY_RETRY_DELAYS_MS = [250, 500, 1000];
+// Per-request timeout. The proxy's worst-observed planner-call latency
+// for a 1280x720 screenshot is ~12s; we set this generous enough to
+// cover the long tail without freezing the post-verify loop when the
+// upstream stalls without ever responding. The rc.6 batch surfaced
+// this: sentry's first post-verify planner call hung for 3+ minutes
+// because fetch() has no built-in timeout — the upstream proxy was
+// holding the connection open while its own OpenRouter upstream was
+// degraded. AbortController + 45s timeout converts that hang into a
+// retry-able error.
+const PROXY_REQUEST_TIMEOUT_MS = Number.parseInt(
+  process.env.PROXY_REQUEST_TIMEOUT_MS ?? "45000",
+  10,
+);
 
 function shouldRetryProxyError(
   status: number,
@@ -296,6 +309,14 @@ export class ProxyLLMClient implements LLMClient {
       attempt++
     ) {
       let resp: Response;
+      // Per-attempt AbortController to bound fetch latency. Without
+      // this, a stalled upstream wedges the bot's run for minutes
+      // because Node's fetch() inherits no timeout from anywhere.
+      const abort = new AbortController();
+      const timeoutHandle = setTimeout(
+        () => abort.abort(new Error("proxy request timed out")),
+        PROXY_REQUEST_TIMEOUT_MS,
+      );
       try {
         resp = await fetch(`${this.apiBaseUrl}/v1/llm/chat`, {
           method: "POST",
@@ -304,18 +325,25 @@ export class ProxyLLMClient implements LLMClient {
             "x-machine-token": this.machineToken,
           },
           body: payload,
+          signal: abort.signal,
         });
       } catch (err) {
-        // Network-level failure (DNS, connection reset). Treat as
-        // transient and retry — fetch() throws TypeError("fetch
-        // failed") in this case, which is exactly the upstream blip we
-        // want to ride through.
+        // Network-level failure (DNS, connection reset, OR our abort).
+        // Treat as transient and retry — fetch() throws TypeError("fetch
+        // failed") in this case, AbortError when our timeout fires.
         lastErr = err instanceof Error ? err : new Error(String(err));
+        const isAbort =
+          lastErr.name === "AbortError" || /timed out|aborted/i.test(lastErr.message);
+        const msg = isAbort
+          ? `proxy request stalled for >${Math.round(PROXY_REQUEST_TIMEOUT_MS / 1000)}s`
+          : `network error: ${lastErr.message}`;
         if (attempt < PROXY_RETRY_DELAYS_MS.length) {
           await new Promise((r) => setTimeout(r, PROXY_RETRY_DELAYS_MS[attempt]));
           continue;
         }
-        throw new Error(`${this.name}: network error: ${lastErr.message}`);
+        throw new Error(`${this.name}: ${msg}`);
+      } finally {
+        clearTimeout(timeoutHandle);
       }
 
       if (resp.status === 429) {

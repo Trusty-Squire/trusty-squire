@@ -153,6 +153,50 @@ describe("ProxyLLMClient — retry on transient upstream errors", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  // 0.8.2-rc.7 — Per-request AbortController timeout. The rc.6 batch
+  // surfaced that the proxy can hang the bot for minutes when the
+  // upstream is degraded but stays connected (no 502, just slow). The
+  // fix bounds each attempt with a 45s timeout (default; overridable
+  // via PROXY_REQUEST_TIMEOUT_MS). When the timeout fires, the fetch
+  // throws AbortError which the existing retry path catches and
+  // surfaces the same way a network error does.
+  it("aborts a stalled attempt and retries on the next one", async () => {
+    let callCount = 0;
+    const fetchMock = vi.fn(
+      async (
+        _url: string,
+        init: RequestInit & { signal?: AbortSignal },
+      ): Promise<Response> => {
+        callCount += 1;
+        if (callCount === 1) {
+          // Stall — only rejects when the AbortController fires.
+          return new Promise((_resolve, reject) => {
+            const sig = init.signal;
+            if (sig !== undefined) {
+              sig.addEventListener("abort", () => {
+                const err = new Error("aborted");
+                err.name = "AbortError";
+                reject(err);
+              });
+            }
+          });
+        }
+        return mockResponse(200, JSON.stringify({ text: "ok" }));
+      },
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = newClient().createMessage(REQUEST_FIXTURE);
+    // Drive: the default 45000ms abort timer fires (we configured
+    // fake timers, so this is instantaneous in test time), then the
+    // 250ms backoff before the second attempt.
+    await vi.advanceTimersByTimeAsync(45000);
+    await vi.advanceTimersByTimeAsync(250);
+    const resp = await promise;
+    expect(resp.text).toBe("ok");
+    expect(callCount).toBe(2);
+  });
+
   it("retries on a 200 carrying an upstream-error envelope (defensive)", async () => {
     const fetchMock = vi
       .fn()
