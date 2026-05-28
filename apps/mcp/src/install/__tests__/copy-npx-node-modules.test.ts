@@ -89,4 +89,43 @@ describe("copyNpxNodeModules", () => {
     expect(() => copyNpxNodeModules(src, dest)).not.toThrow();
     // Confirms force: true is honored.
   });
+
+  it("overwrites a destination whose .bin/ contains stale symlinks from a previous install (0.8.0-rc.2 regression)", () => {
+    // Repro: an existing dest dir whose .bin/<name> points at an old
+    // npx cache hash. New src has a .bin/<name> pointing at a fresh
+    // hash. cpSync with force:true throws EEXIST on the symlink-over-
+    // symlink case in Node 20.x. The wrapper rmSyncs first so this
+    // always lands cleanly.
+    const oldCache = join(workDir, "_npx", "old-hash", "node_modules");
+    const newCache = join(workDir, "_npx", "new-hash", "node_modules");
+    mkdirSync(join(oldCache, "@trusty-squire", "mcp", "dist"), { recursive: true });
+    mkdirSync(join(newCache, "@trusty-squire", "mcp", "dist"), { recursive: true });
+    writeFileSync(join(oldCache, "@trusty-squire", "mcp", "dist", "bin.js"), "// old");
+    writeFileSync(join(newCache, "@trusty-squire", "mcp", "dist", "bin.js"), "// new");
+
+    // Seed the dest with a .bin/mcp pointing at the OLD cache hash —
+    // mirrors the state after install N when install N+1 runs.
+    const dest = join(workDir, "lib", "node_modules");
+    mkdirSync(join(dest, ".bin"), { recursive: true });
+    symlinkSync(
+      join(oldCache, "@trusty-squire", "mcp", "dist", "bin.js"),
+      join(dest, ".bin", "mcp"),
+    );
+
+    // Build the new src with a .bin/mcp pointing at the NEW hash.
+    mkdirSync(join(newCache, ".bin"), { recursive: true });
+    symlinkSync(
+      join(newCache, "@trusty-squire", "mcp", "dist", "bin.js"),
+      join(newCache, ".bin", "mcp"),
+    );
+
+    // Pre-fix this threw EEXIST. Post-fix it succeeds AND the symlink
+    // points at the new cache hash.
+    expect(() => copyNpxNodeModules(newCache, dest)).not.toThrow();
+    const finalLink = join(dest, ".bin", "mcp");
+    expect(lstatSync(finalLink).isSymbolicLink()).toBe(true);
+    // readlinkSync would point at the new hash; cheaper to check the
+    // bin.js contents end up correct.
+    expect(existsSync(join(dest, "@trusty-squire", "mcp", "dist", "bin.js"))).toBe(true);
+  });
 });

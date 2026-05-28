@@ -39,7 +39,7 @@
 // entrypoint guard, no top-level execution.
 
 import process from "node:process";
-import { cpSync } from "node:fs";
+import { cpSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -221,8 +221,18 @@ function isAgentTarget(s: string): s is AgentTarget {
  * `verbatimSymlinks: true` copies symlinks as symlinks (no target stat)
  * — node's runtime resolver dereferences .bin lazily anyway, so the
  * resulting tree still works for MCP-server launches.
+ *
+ * On re-install, the destination's `.bin/` already contains symlinks
+ * pointing at the PREVIOUS npx cache hash (a different dir for every
+ * new install). Node's cpSync with `force: true` doesn't unlink an
+ * existing symlink before writing a new one at the same name — it
+ * throws EEXIST instead. Wipe the destination first so the copy
+ * always lands cleanly. This costs ~1s on disk but the alternative is
+ * the install silently leaves users on the ephemeral cache path,
+ * which breaks days later when npx GCs the cache.
  */
 export function copyNpxNodeModules(src: string, dest: string): void {
+  rmSync(dest, { recursive: true, force: true });
   cpSync(src, dest, {
     recursive: true,
     force: true,
