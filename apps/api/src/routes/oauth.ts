@@ -143,7 +143,15 @@ export const registerOAuthRoute: FastifyPluginAsync<{ deps: ApiDeps }> = async (
 
     const now = opts.deps.now?.() ?? new Date();
 
-    // Resolve the account.
+    // Resolve the account. Priority order:
+    //   1. Identity already exists → use that account (idempotent re-sign-in).
+    //   2. Caller is already signed in (ts_session cookie valid) → bind the
+    //      new identity to the current account. This is the install
+    //      wizard's "step 2: connect GitHub" path — the user is already
+    //      bound to a Google account and we want GitHub to ALSO map to it,
+    //      even if the GitHub email differs from the Google email.
+    //   3. Same-email account exists → bind the identity to it.
+    //   4. New account.
     let account = null;
     const existing = await opts.deps.oauthIdentityStore.findByProvider(
       identity.provider,
@@ -155,9 +163,14 @@ export const registerOAuthRoute: FastifyPluginAsync<{ deps: ApiDeps }> = async (
 
     let isNewAccount = false;
     if (account === null) {
-      // No identity link yet — attach to a same-email account if one
-      // exists, otherwise create a fresh account.
-      account = await opts.deps.accountStore.findAccountByEmail(identity.email);
+      // Step 2: already-signed-in caller binding a secondary identity.
+      // req.auth is populated by the resolveAuth preHandler.
+      if (req.auth?.kind === "web") {
+        account = await opts.deps.accountStore.findAccountById(req.auth.account_id);
+      }
+      if (account === null) {
+        account = await opts.deps.accountStore.findAccountByEmail(identity.email);
+      }
       if (account === null) {
         account = await opts.deps.accountStore.createAccount(
           identity.email,

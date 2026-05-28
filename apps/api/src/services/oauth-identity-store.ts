@@ -21,6 +21,10 @@ export interface OAuthIdentityStore {
     provider: string,
     providerUserId: string,
   ): Promise<OAuthIdentityRecord | null>;
+  // Identities bound to one account. Used by /v1/auth/whoami so the
+  // install wizard can know which providers the user has connected
+  // without having to read the bot Chrome profile.
+  listByAccount(accountId: string): Promise<OAuthIdentityRecord[]>;
   create(input: {
     account_id: string;
     provider: string;
@@ -40,6 +44,12 @@ export class InMemoryOAuthIdentityStore implements OAuthIdentityStore {
       (r) => r.provider === provider && r.provider_user_id === providerUserId,
     );
     return row === undefined ? null : { ...row };
+  }
+
+  async listByAccount(accountId: string): Promise<OAuthIdentityRecord[]> {
+    return this.rows
+      .filter((r) => r.account_id === accountId)
+      .map((r) => ({ ...r }));
   }
 
   async create(input: {
@@ -79,6 +89,13 @@ export class PrismaOAuthIdentityStore implements OAuthIdentityStore {
       },
     });
     return row === null ? null : this.toRecord(row);
+  }
+
+  async listByAccount(accountId: string): Promise<OAuthIdentityRecord[]> {
+    const rows = await this.prisma.oAuthIdentity.findMany({
+      where: { account_id: accountId },
+    });
+    return rows.map((r) => this.toRecord(r));
   }
 
   async create(input: {
