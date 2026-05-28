@@ -1071,10 +1071,35 @@ export class BrowserController {
   async selectOption(selector: string, optionMatcher?: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
-    const tagName = await this.page
-      .locator(selector)
+    let activeSelector = selector;
+    let tagName = await this.page
+      .locator(activeSelector)
       .first()
       .evaluate((node) => node.tagName.toLowerCase());
+
+    // 0.8.2-rc.21 — Railway-class fix. The captured selector frequently
+    // points at a `<label>` (the inventory ranker prefers visible-text
+    // elements). If that label's `for=` association resolves to a
+    // native `<select>`, take the native path instead of routing into
+    // selectFromCombobox — native selects don't reveal their options
+    // via any DOM pattern in headless Chromium (they're OS-rendered),
+    // so the combobox path is guaranteed to fail for them. Without
+    // this redirect, every captured Railway/legacy-form `<select>`
+    // step replays as "no options found after click."
+    if (tagName === "label") {
+      const resolved = await this.resolveLabelToInput(activeSelector);
+      if (resolved !== activeSelector) {
+        const resolvedTag = await this.page
+          .locator(resolved)
+          .first()
+          .evaluate((node) => node.tagName.toLowerCase())
+          .catch(() => "");
+        if (resolvedTag === "select") {
+          activeSelector = resolved;
+          tagName = "select";
+        }
+      }
+    }
 
     if (tagName === "select") {
       // Native path. rc.15 — keep value="" options selectable. The
@@ -1086,12 +1111,12 @@ export class BrowserController {
       // (with the first option's value, even if empty), and a matched
       // text-based pick is honored verbatim — including empty values.
       const allValues = await this.page
-        .locator(`${selector} option`)
+        .locator(`${activeSelector} option`)
         .evaluateAll((opts) =>
           opts.map((o) => (o instanceof HTMLOptionElement ? o.value : "")),
         );
       if (allValues.length === 0) {
-        throw new Error(`<select> ${selector} has no selectable option`);
+        throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
       // Default to the first NON-empty value when the planner gave no
       // hint — historic behavior, kept because "Select…" placeholder
@@ -1105,7 +1130,7 @@ export class BrowserController {
         // option's text matches. Wrap in an object so we can
         // distinguish "matched to empty value" from "no match".
         const matched = await this.page
-          .locator(`${selector} option`)
+          .locator(`${activeSelector} option`)
           .evaluateAll(
             (opts, needle) => {
               const hit = opts
@@ -1120,9 +1145,9 @@ export class BrowserController {
         }
       }
       if (chosenValue === undefined) {
-        throw new Error(`<select> ${selector} has no selectable option`);
+        throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
-      await this.page.selectOption(selector, chosenValue);
+      await this.page.selectOption(activeSelector, chosenValue);
       // rc.17 — mark the element as touched so subsequent inventory
       // reads can suppress the DEFAULTED-dropdown warning for it.
       // Without this, a select whose committed value is "" (Railway's
@@ -1130,7 +1155,7 @@ export class BrowserController {
       // the planner gets stuck in a select→select→… loop trying to
       // satisfy a warning the form has already satisfied.
       await this.page
-        .locator(selector)
+        .locator(activeSelector)
         .first()
         .evaluate((el) => {
           if (el instanceof HTMLElement) el.setAttribute("data-ts-touched", "1");
@@ -1141,7 +1166,7 @@ export class BrowserController {
 
     // Custom combobox path. Sentry, Radix, Headless UI, React Aria
     // — every modern React picker emits role=option on its items.
-    await this.selectFromCombobox(selector, optionMatcher);
+    await this.selectFromCombobox(activeSelector, optionMatcher);
   }
 
   // F11 (+rc.7 hardening): click a combobox trigger, wait for the

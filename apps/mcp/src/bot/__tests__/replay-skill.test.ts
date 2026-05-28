@@ -1160,4 +1160,150 @@ describe("replaySkill — rc.8 fallback fixes", () => {
       expect(result.credential).toBe("re_BE8uGo5d_Q2j25xhijRTYNcKXkcUdTSaH");
     }
   });
+
+  // ── 0.8.2-rc.21 — validator-blind uuid_token tier ─────────────────
+  // The synthesizer picks `uuid_token` as its fallback pattern. The
+  // pre-rc.21 replay engine then filtered candidates ONLY through
+  // the post_extract_validator's length range. When that range was
+  // narrow (e.g. {36, 36} from a stray UUID on the page) AND the
+  // real key was a different length, the validator-filtered tier
+  // missed it and the engine threw a generic
+  // "No credential matching pattern uuid_token" — leaving operators
+  // with no signal about WHAT was on the page.
+  // The rc.21 tier extracts a plausible candidate (digit-required,
+  // alphanumeric, not a path/version) using a wider 8-128 range so
+  // validateCredential can run and surface the more-informative
+  // `validator_failed` outcome — and rescue cases where the
+  // validator turns out to be wider than the validator-filtered
+  // tier's narrow per-step interpretation. ONLY fires for
+  // uuid_token (never prefixed shapes — see negative test below).
+  it("surfaces a shorter token to validateCredential when validator was narrowed by an unrelated UUID", async () => {
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://ipinfo.io/dashboard", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "IPINFO_API_KEY",
+            // Wrong validator — the synthesizer inferred uuid from
+            // an unrelated tracking UUID elsewhere on the page. The
+            // real key is 14 chars. Tight 36/36 forces the per-step
+            // validator-filtered tier to skip the real key.
+            post_extract_validator: { min_length: 36, max_length: 36 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("DashboardAPI Tokenf9a062f02fadf5cURL Example");
+    b.setCandidatesFor([
+      "Dashboard",
+      "f9a062f02fadf5", // ← real key, 14 chars (below 36-char floor)
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    // The rc.21 tier surfaces the 14-char candidate so the engine
+    // can return validator_failed (with the actual value) instead
+    // of the opaque step_failed "No credential matching pattern …".
+    // validator_failed is operationally useful: the registry sees
+    // a credential was extracted but its shape is wrong, which is
+    // the signal a synthesizer-bug retraining run needs.
+    expect(result.kind).toBe("validator_failed");
+    if (result.kind === "validator_failed") {
+      expect(result.got).toBe("f9a062f02fadf5");
+    }
+  });
+
+  it("rescues IPInfo-class token when the validator's bounds happen to be wide enough", async () => {
+    // The validator-filtered tier (pre-rc.21) requires the candidate
+    // to fit STRICTLY within validator bounds. A wider validator (the
+    // post-rc.8 synthesizer's `opaque` path that infers length from
+    // the captured HTML — produces ~12-16 for IPInfo) lets the existing
+    // tier extract cleanly. This test just confirms the standard
+    // success path still works; rc.21's added tier is downstream and
+    // doesn't change this case.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://ipinfo.io/dashboard", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "IPINFO_API_KEY",
+            post_extract_validator: { min_length: 12, max_length: 16 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("DashboardAPI Tokenf9a062f02fadf5cURL Example");
+    b.setCandidatesFor(["Dashboard", "f9a062f02fadf5"]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe("f9a062f02fadf5");
+    }
+  });
+
+  it("does NOT fire validator-blind tier for prefixed patterns (only uuid_token)", async () => {
+    // Defensive: a Resend skill (prefix:re_) that mistakenly captured
+    // an empty page must NOT fall through to grabbing arbitrary
+    // candidate text. Only uuid_token triggers the wider net.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_regex", pattern_name: "resend", provenance }],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "prefix:re_",
+            env_var_suggestion: "RESEND_API_KEY",
+            post_extract_validator: { min_length: 30, max_length: 30 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("only nav strings on this page, no re_ key visible");
+    b.setCandidatesFor(["NavLink123abcdef", "AnotherLink789xyz"]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
+  });
+
+  it("validator-blind tier skips URL-like and dotted candidates", async () => {
+    // Documentation snippets in <code> blocks shouldn't false-positive.
+    // The "/" and "." filters keep paths + version strings out.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_regex", pattern_name: "uuid_token", provenance }],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "X_API_KEY",
+            post_extract_validator: { min_length: 36, max_length: 36 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("no labeled key here");
+    b.setCandidatesFor([
+      "v1.2.3",
+      "/api/v1/keys",
+      "https://example.com",
+      "abc.def123",
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
+  });
 });

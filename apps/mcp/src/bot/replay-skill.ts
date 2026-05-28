@@ -780,7 +780,18 @@ async function executeStep(
       // 0.8.2-rc.3 — apply near_text_hint filter when present so
       // Sentry-grid rows land on the right <select>. The original
       // `inventory.find` would unilaterally pick the first match.
-      const allMatches = inventory.filter((el) => matchesLabelHint(el, step.label_hint));
+      //
+      // 0.8.2-rc.21 — also restrict to fillable elements (input /
+      // textarea / select). Without this, a Railway-class form where
+      // a `<label for="select-X">` shares labelText with its
+      // `<select id="select-X">` would silently pick the label —
+      // and selectOption(label, …) would then route into the
+      // combobox path and fail because native selects don't reveal
+      // options via DOM patterns. Pre-validation already filters
+      // this way; the executor was lagging.
+      const allMatches = inventory.filter(
+        (el) => isFillable(el) && matchesLabelHint(el, step.label_hint),
+      );
       if (allMatches.length === 0) {
         throw new Error(`No select matches label_hint=${step.label_hint}`);
       }
@@ -951,6 +962,45 @@ async function executeStep(
             if (cand.length > validator.max_length) continue;
             if (!/\d/.test(cand)) continue; // skip pure-letter nav strings
             if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue; // sanity
+            return { kind: "extract_ok", value: cand, via: "regex" };
+          }
+        } catch {
+          // Fall through to the canonical error below.
+        }
+      }
+      // 0.8.2-rc.21 — validator-blind last-resort tier for uuid_token.
+      // The synthesizer's `uuid_token` is its FALLBACK pattern when no
+      // recognised prefix matches the captured HTML. inferShapeHint
+      // then sets the validator to {36, 36} if ANY uuid-shaped string
+      // appears on the page — even an unrelated request/session ID.
+      // On IPInfo's dashboard the actual API key is a bare 14-char
+      // hex string in a <code> element AND the HTML also contains
+      // an unrelated 36-char tracking UUID, so the validator above
+      // narrows to 36/36 and the real 14-char value is filtered out.
+      // This tier fires only when:
+      //   - the captured pattern was the fallback uuid_token (so we
+      //     KNOW the synthesizer guessed about the shape — never for
+      //     prefix-anchored patterns like sk-or-v1-, re_, etc.)
+      //   - every prior tier (labeled regex, UUID poll, copy-button
+      //     colocation, validator-filtered candidate scan) failed
+      // Scans structural <code>/<pre>/<kbd>/<samp>-class candidates
+      // (extractCredentialCandidates filters to these explicitly so
+      // page chrome / nav strings don't appear here) with a wider
+      // 8-128 char range, digit-required, alphanumeric-only. The
+      // registry's post_extract_validator runs downstream and rejects
+      // shapes that don't satisfy the credential's published shape,
+      // so a false-positive surfaces as a validator-reject rather
+      // than a published bad credential.
+      if (step.pattern_name === "uuid_token") {
+        try {
+          const candidates = await browser.extractCredentialCandidates();
+          for (const cand of candidates) {
+            if (cand.length < 8 || cand.length > 128) continue;
+            if (!/\d/.test(cand)) continue;
+            if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+            // Skip values that look like a URL/path/route — those
+            // show up in <code> blocks for documentation snippets.
+            if (cand.includes("/") || cand.includes(".")) continue;
             return { kind: "extract_ok", value: cand, via: "regex" };
           }
         } catch {

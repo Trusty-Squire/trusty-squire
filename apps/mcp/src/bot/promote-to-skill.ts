@@ -314,7 +314,34 @@ function synthesizeSteps(
 
     const translated = translateStep(round.observed, round.inventory, provenance, i, round.state.html);
     if (translated.kind === "ok") {
-      if (translated.step !== null) steps.push(translated.step);
+      if (translated.step !== null) {
+        // 0.8.2-rc.21 — dedup consecutive identical steps. The bot
+        // sometimes records a single action twice in a row (the
+        // planner re-evaluates an unchanged inventory and proposes
+        // the same step). Captured naively, the replay engine fails
+        // on the second execution because the action has already
+        // been taken (e.g. selecting the workspace that's now
+        // already selected). Compare structurally on everything
+        // except provenance — same kind + same load-bearing fields
+        // means it's the same intent.
+        //
+        // Extract steps are EXEMPT from dedup: on multi-cred pages
+        // (Twitter-class) two consecutive copy-button extracts can
+        // resolve to the same near_text_hint while sourcing
+        // genuinely different credentials. The downstream
+        // duplicate_credential_produces guard is the right place to
+        // surface that as a synthesis error — collapsing here would
+        // hide it.
+        const prev = steps.length > 0 ? steps[steps.length - 1]! : null;
+        const isExtract =
+          translated.step.kind === "extract_via_copy_button" ||
+          translated.step.kind === "extract_via_regex" ||
+          translated.step.kind === "extract_via_copy_button_named" ||
+          translated.step.kind === "extract_via_regex_named";
+        if (prev === null || isExtract || !stepsEquivalent(prev, translated.step)) {
+          steps.push(translated.step);
+        }
+      }
       continue;
     }
     // Soft-drop intermediate click/check rounds with text-resolution
@@ -371,6 +398,28 @@ function synthesizeSteps(
   }
 
   return { kind: "ok", steps };
+}
+
+// 0.8.2-rc.21 — structural equality between two skill steps, ignoring
+// `provenance` (which differs per-round even when intent is identical).
+// Used to dedup consecutive duplicates emitted by the synthesizer when
+// the planner re-records an unchanged action.
+//
+// extract_* kinds NEVER dedup — the multi-cred bundle invariant
+// requires the duplicate-produces rejection downstream to see both
+// extract steps. Collapsing two extracts that produce the same value
+// would silently turn a duplicate into a successful single-cred skill.
+function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind.startsWith("extract")) return false;
+  // Strip provenance + JSON-compare. Cheap, exhaustive, doesn't drift
+  // when SkillStep gains new fields — every new field auto-participates.
+  const stripped = (s: SkillStep): Record<string, unknown> => {
+    const out: Record<string, unknown> = { ...s };
+    delete out.provenance;
+    return out;
+  };
+  return JSON.stringify(stripped(a)) === JSON.stringify(stripped(b));
 }
 
 // Returns { step: null } for kinds the synthesizer intentionally drops
