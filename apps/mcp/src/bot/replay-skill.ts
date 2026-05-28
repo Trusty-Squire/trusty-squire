@@ -1201,17 +1201,31 @@ async function validateCredential(
   fetchFn?: typeof globalThis.fetch,
 ): Promise<ValidatorOk | ValidatorFail> {
   const validator = spec.post_extract_validator;
-  if (value.length < validator.min_length) {
-    return {
-      ok: false,
-      reason: `Credential length ${value.length} is below min_length ${validator.min_length}.`,
-    };
-  }
-  if (value.length > validator.max_length) {
-    return {
-      ok: false,
-      reason: `Credential length ${value.length} exceeds max_length ${validator.max_length}.`,
-    };
+  // 0.8.3 — length bounds are advisory when the regex library
+  // recognises the value's shape. The synthesizer computes
+  // min/max_length from a single observed example at capture time
+  // and frequently misjudges (e.g. replicate captured at 36 chars
+  // but real keys are 40 chars; shape inference also misidentifies
+  // some prefix-keyed services as "uuid" which then locks
+  // min/max=36/36). The extractApiKeyFromText library is the real
+  // shape gate — if it recognises the value as a known credential
+  // pattern, trust it over the per-skill length bound. Falsey
+  // (no recognised prefix) → length bounds still gate, which
+  // keeps "IDNameIDKeyStatusCreated"-style garbage out.
+  const recognisedByLibrary = extractApiKeyFromText(value) === value;
+  if (!recognisedByLibrary) {
+    if (value.length < validator.min_length) {
+      return {
+        ok: false,
+        reason: `Credential length ${value.length} is below min_length ${validator.min_length}.`,
+      };
+    }
+    if (value.length > validator.max_length) {
+      return {
+        ok: false,
+        reason: `Credential length ${value.length} exceeds max_length ${validator.max_length}.`,
+      };
+    }
   }
   if (validator.shape_regex !== undefined) {
     try {

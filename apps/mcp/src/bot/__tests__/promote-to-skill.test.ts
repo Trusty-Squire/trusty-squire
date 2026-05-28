@@ -391,8 +391,14 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     if (result.kind !== "ok") throw new Error("expected ok");
 
     expect(result.skill.credentials[0]!.shape_hint).toBe("uuid");
-    expect(result.skill.credentials[0]!.post_extract_validator.min_length).toBe(36);
-    expect(result.skill.credentials[0]!.post_extract_validator.max_length).toBe(36);
+    // 0.8.3 — uuid validator widened from {36, 36} to {32, 80} so
+    // shape-misinference (page has a UUID-shaped distractor near a
+    // non-UUID credential) doesn't lock the validator down to a
+    // range the real credential can never satisfy. Real UUIDs still
+    // fall inside the range; replicate-class r8_…40-char keys
+    // (mis-tagged as uuid in some captures) also pass.
+    expect(result.skill.credentials[0]!.post_extract_validator.min_length).toBe(32);
+    expect(result.skill.credentials[0]!.post_extract_validator.max_length).toBe(80);
   });
 
   it("derives env_var_suggestion from the service slug", () => {

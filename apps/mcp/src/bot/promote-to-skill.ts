@@ -1151,7 +1151,13 @@ function validatorForShape(
 ): { min_length: number; max_length: number } {
   switch (shape) {
     case "uuid":
-      return { min_length: 36, max_length: 36 };
+      // 0.8.3 — widened from {36, 36} so we cover cases where shape
+      // inference flagged the credential as "uuid" because the page
+      // had an unrelated UUID-shaped distractor near a non-UUID
+      // credential. Replicate captured at 36 but real keys are 40
+      // chars; widening lets the validator stop rejecting the
+      // actually-correct extract.
+      return { min_length: 32, max_length: 80 };
     case "prefix:re_":
       return { min_length: 24, max_length: 64 };
     case "prefix:sk_live":
@@ -1177,10 +1183,29 @@ function validatorForShape(
       // the most-likely value's length. IPInfo's 14-char API token
       // is the canonical case. Fall back to a wide range if no
       // value can be inferred (rare).
-      return inferOpaqueValidatorFromHtml(rounds) ?? { min_length: 8, max_length: 64 };
+      //
+      // 0.8.3 — clamp the inferred bounds to PLAUSIBLE ranges so a
+      // synthesizer mishap (capturing a 10-char masked stub like
+      // "demo_token" as "the credential") doesn't lock the validator
+      // to a range so tight the real 56-char key can never satisfy it.
+      // Min stays low (services with short keys exist) but max never
+      // drops below 64.
+      return clampOpaqueValidator(
+        inferOpaqueValidatorFromHtml(rounds) ?? { min_length: 8, max_length: 64 },
+      );
     case "username_password":
       return { min_length: 8, max_length: 256 };
   }
+}
+
+function clampOpaqueValidator(v: {
+  min_length: number;
+  max_length: number;
+}): { min_length: number; max_length: number } {
+  return {
+    min_length: Math.max(4, v.min_length),
+    max_length: Math.max(64, v.max_length),
+  };
 }
 
 // Scan the last round's HTML for short alphanumeric tokens that look
