@@ -98,6 +98,19 @@ export interface ReplayInput {
    * sentinel_http_check configured never invoke this.
    */
   fetchFn?: typeof globalThis.fetch;
+  /**
+   * 0.8.2-rc.19 — bypass the "skill must be active" guard. The verifier
+   * loop NEEDS to replay pending-review skills (and sometimes demoted
+   * ones) to gather the outcome data that drives promote/demote
+   * transitions; without this flag, the loop is dead-on-arrival.
+   *
+   * `superseded` is still rejected even with bypass — that status
+   * means a newer version is the canonical one; replaying the older
+   * one is wasted effort.
+   *
+   * Default: false. Router (live-user provision) MUST leave it false.
+   */
+  bypassStatusGuard?: boolean;
 }
 
 export interface LLMFallbackInput {
@@ -141,14 +154,26 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   const llmFallback = input.llmFallback;
   const templateValues = input.templateValues ?? {};
 
-  // Router-level guard: a demoted or pending-review skill is not
-  // replay-eligible. The router should have filtered these out, but
-  // we double-check at the boundary in case something hand-feeds us
-  // a skill record from a stale cache.
-  if (skill.status !== "active") {
+  // Router-level guard: a demoted, pending-review, or superseded
+  // skill is not replay-eligible for end-user provisions. The router
+  // should have filtered these out, but we double-check at the
+  // boundary in case something hand-feeds us a skill record from a
+  // stale cache.
+  //
+  // The verifier loop bypasses this guard via bypassStatusGuard=true
+  // (set by housekeeper-loop on the verifier queue) so it can gather
+  // replay outcomes that drive promote/demote transitions. Even with
+  // bypass, `superseded` stays gated — a newer version is canonical
+  // and replaying the older one is wasted effort.
+  const bypass = input.bypassStatusGuard === true;
+  const guardBlocks =
+    skill.status === "superseded" || (!bypass && skill.status !== "active");
+  if (guardBlocks) {
     return {
       kind: "skill_demoted",
-      reason: `Skill status is ${skill.status}; replay is only valid for status=active.`,
+      reason: bypass
+        ? `Skill status is ${skill.status}; verifier replay still rejects superseded versions.`
+        : `Skill status is ${skill.status}; replay is only valid for status=active.`,
     };
   }
 

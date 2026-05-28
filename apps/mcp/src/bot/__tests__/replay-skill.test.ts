@@ -195,6 +195,55 @@ describe("replaySkill — status guards", () => {
     });
     expect(result.kind).toBe("skill_demoted");
   });
+
+  it("with bypassStatusGuard=true, REPLAYS a pending-review skill", async () => {
+    // 0.8.2-rc.19 — the verifier loop hits this branch. Without
+    // bypassStatusGuard the loop is dead-on-arrival (every pending-
+    // review skill returns skill_demoted before any step runs).
+    const b = stubBrowser();
+    const result = await replaySkill({
+      skill: skillWith(
+        [{ kind: "navigate", url: "https://example.com", provenance }],
+        { status: "pending-review" },
+      ),
+      browser: b.controller,
+      bypassStatusGuard: true,
+      mode: "dry",
+    });
+    expect(result.kind).not.toBe("skill_demoted");
+  });
+
+  it("with bypassStatusGuard=true, also REPLAYS a demoted skill", async () => {
+    // A demoted skill can recover — the verifier should still gather
+    // outcomes against it. Decision to re-promote is the registry's,
+    // based on the accumulated counter.
+    const b = stubBrowser();
+    const result = await replaySkill({
+      skill: skillWith(
+        [{ kind: "navigate", url: "https://example.com", provenance }],
+        { status: "demoted" },
+      ),
+      browser: b.controller,
+      bypassStatusGuard: true,
+      mode: "dry",
+    });
+    expect(result.kind).not.toBe("skill_demoted");
+  });
+
+  it("with bypassStatusGuard=true, STILL refuses to replay a superseded skill", async () => {
+    // Superseded means a newer version is canonical — replaying the
+    // older one wastes cycles. Bypass doesn't unlock this status.
+    const b = stubBrowser();
+    const result = await replaySkill({
+      skill: skillWith(
+        [{ kind: "navigate", url: "https://example.com", provenance }],
+        { status: "superseded" },
+      ),
+      browser: b.controller,
+      bypassStatusGuard: true,
+    });
+    expect(result.kind).toBe("skill_demoted");
+  });
 });
 
 // ── Dry mode ────────────────────────────────────────────────────────

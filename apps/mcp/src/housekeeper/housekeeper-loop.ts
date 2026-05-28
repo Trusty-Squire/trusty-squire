@@ -35,6 +35,14 @@ export type ReplayMode = "dry" | "full";
 export type ReplayRunner = (input: {
   skill: Skill;
   mode: ReplayMode;
+  // 0.8.2-rc.19 — verifier-queue replays target pending-review (and
+  // sometimes demoted) skills by design — that's the whole point of
+  // the verifier loop, to gather replay outcomes that drive promote/
+  // demote transitions. The router's "active-only" guard inside
+  // replaySkill() blocks these by default. Set true on the verifier
+  // path to bypass that guard. Always false (default) on the router
+  // path, where a non-active skill must never be replayed.
+  bypassStatusGuard?: boolean;
 }) => Promise<ReplayOutcome>;
 
 export type DiscoveryBotRunner = (input: {
@@ -249,7 +257,15 @@ async function handleReplay(
   let outcomeKind: "success" | "failure" = "failure";
   let outcomeReason = "uncaught";
   try {
-    const replay = await opts.replay({ skill, mode: opts.replayMode ?? "full" });
+    const replay = await opts.replay({
+      skill,
+      mode: opts.replayMode ?? "full",
+      // Verifier mode is the one place a non-active skill IS a valid
+      // replay target. Pending-review skills need replay outcomes to
+      // get promoted to active in the first place — the chicken-and-
+      // egg the router-side guard would otherwise create.
+      bypassStatusGuard: opts.queue.name === "verifier",
+    });
     const isOk =
       replay.kind === "ok" || replay.kind === "ok_multi" || replay.kind === "dry_pass";
     outcomeKind = isOk ? "success" : "failure";

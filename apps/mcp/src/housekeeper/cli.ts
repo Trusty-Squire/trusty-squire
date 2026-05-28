@@ -257,11 +257,17 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   const replay = async (input: {
     skill: import("@trusty-squire/adapter-sdk").Skill;
     mode: "dry" | "full";
+    bypassStatusGuard?: boolean;
   }): Promise<ReplayOutcome> => {
     const browser = new BrowserController({});
     try {
       await browser.start();
-      return await replaySkill({ skill: input.skill, browser, mode: input.mode });
+      return await replaySkill({
+        skill: input.skill,
+        browser,
+        mode: input.mode,
+        ...(input.bypassStatusGuard === true ? { bypassStatusGuard: true } : {}),
+      });
     } finally {
       try {
         await browser.close();
