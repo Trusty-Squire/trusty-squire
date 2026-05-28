@@ -954,6 +954,154 @@ describe("promoteToSkill — fill/select hint resolution (0.8.1)", () => {
     expect(selectStep.label_hint).toBe("All domains");
     expect(selectStep.option_text).toBe("All domains");
   });
+
+  it("emits near_text_hint for an ambiguous select when a unique nearby label exists (Sentry grid, 0.8.2-rc.3)", () => {
+    // Sentry's permission grid is the canonical case: each row's
+    // <select> reports labelText="Permission". Pre-rc.3 the synthesizer
+    // hard-rejected with ambiguous_text_match. Now: the inventory's
+    // nearby visible text uniquely identifies each row (Project / Team
+    // / Member), so the synthesizer emits near_text_hint and the skill
+    // is promotable.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://sentry.io/settings/api/applications/new/",
+          title: "Sentry Permissions",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          // Row 1: Project (label) + select labeled "Permission".
+          inventoryElement({
+            index: 0,
+            tag: "div",
+            visibleText: "Project",
+            selector: "div.row-project > h4",
+          }),
+          inventoryElement({
+            index: 1,
+            tag: "select",
+            labelText: "Permission",
+            selector: "select.row-project-perm",
+            selectOptions: [
+              { value: "no", text: "No Access" },
+              { value: "read", text: "Read" },
+              { value: "write", text: "Write" },
+              { value: "admin", text: "Admin" },
+            ],
+          }),
+          // Row 2: Team + select labeled "Permission".
+          inventoryElement({
+            index: 2,
+            tag: "div",
+            visibleText: "Team",
+            selector: "div.row-team > h4",
+          }),
+          inventoryElement({
+            index: 3,
+            tag: "select",
+            labelText: "Permission",
+            selector: "select.row-team-perm",
+            selectOptions: [
+              { value: "no", text: "No Access" },
+              { value: "read", text: "Read" },
+              { value: "write", text: "Write" },
+              { value: "admin", text: "Admin" },
+            ],
+          }),
+        ],
+        observed: {
+          kind: "select",
+          selector: "select.row-team-perm",
+          option_text: "Admin",
+          reason: "Set Team permission to Admin",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://sentry.io/done",
+          title: "Done",
+          html: "<html>Token: sntrys_abcdefghijklmnopqrstuvw</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const selectStep = result.skill.steps.find((s) => s.kind === "select");
+    expect(selectStep).toBeDefined();
+    if (selectStep === undefined || selectStep.kind !== "select") return;
+    expect(selectStep.label_hint).toBe("Permission");
+    // The disambiguator must point at THIS row (Team), not the sibling
+    // (Project).
+    expect(selectStep.near_text_hint).toBe("Team");
+    expect(selectStep.option_text).toBe("Admin");
+  });
+
+  it("still rejects when label_hint collides AND no unique nearby text disambiguates (0.8.2-rc.3 fallback)", () => {
+    // Two inputs sharing the same labelText AND surrounded by the same
+    // sibling text — there's nothing to use as a disambiguator. The
+    // synthesizer falls back to ambiguous_text_match.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com",
+          title: "Twin Inputs",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            labelText: "Name",
+            selector: "input.a",
+          }),
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            labelText: "Name",
+            selector: "input.b",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input.a",
+          value: "Alice",
+          reason: "fill name",
+        },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") return;
+    expect(result.error_kind).toBe("ambiguous_text_match");
+    expect(result.message).toMatch(/no unique nearby visible text/);
+  });
 });
 
 // ── Drop unsupported / flow-control step kinds ───────────────────────

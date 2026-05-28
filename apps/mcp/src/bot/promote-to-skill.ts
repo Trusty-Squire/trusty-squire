@@ -451,6 +451,9 @@ function translateStep(
         step: {
           kind: "fill",
           label_hint: hintResult.hint,
+          ...(hintResult.near_text_hint !== undefined
+            ? { near_text_hint: hintResult.near_text_hint }
+            : {}),
           value_template: valueTemplate,
           provenance,
         },
@@ -483,6 +486,9 @@ function translateStep(
         step: {
           kind: "select",
           label_hint: hintResult.hint,
+          ...(hintResult.near_text_hint !== undefined
+            ? { near_text_hint: hintResult.near_text_hint }
+            : {}),
           option_text: observed.option_text,
           provenance,
         },
@@ -650,6 +656,13 @@ function inferRoleHint(
 interface LabelHintOk {
   kind: "ok";
   hint: string;
+  // 0.8.2-rc.3 — schema-level disambiguator for Sentry-class permission
+  // grids and any multi-row form where every row's input shares the
+  // same label. When present, the replay engine narrows ambiguous
+  // label_hint matches by "has unique nearby visible text containing
+  // near_text_hint" before failing. Only populated when a collision
+  // forced disambiguation — single-cred forms emit just `hint`.
+  near_text_hint?: string;
 }
 
 function resolveLabelHint(
@@ -712,20 +725,107 @@ function resolveLabelHint(
         e.placeholder?.trim() === hint ||
         e.ariaLabel?.trim() === hint),
   );
-  if (duplicates.length > 0) {
-    return {
-      kind: "rejected",
-      stage: "synthesis",
-      error_kind: "ambiguous_text_match",
-      message:
-        `Label hint ${JSON.stringify(hint)} matches ${duplicates.length + 1} input/select elements. ` +
-        `Cannot uniquely identify the fill target by label.`,
-      offending_round: roundIndex,
-      synthesizer_version: SYNTHESIZER_VERSION,
-    };
+  if (duplicates.length === 0) {
+    return { kind: "ok", hint };
+  }
+  // 0.8.2-rc.3 — schema-level disambiguator. Look for a unique
+  // visible-text element near `match` (Sentry's grid: each row has
+  // its name like "Project" / "Team" / "Member" as a heading near the
+  // row's <select>). The bot's inventory is roughly DOM-ordered, so
+  // "near" means within a small ±index window. We pick the FIRST
+  // candidate whose text:
+  //   1. is non-empty (some labels carry just whitespace),
+  //   2. does NOT appear in any sibling-row's window (uniqueness),
+  //   3. is short enough to be a heading (≤40 chars; longer text is
+  //      typically a description paragraph, useless as a disambiguator).
+  // Failure to find one means we still can't disambiguate — fall back
+  // to the pre-rc.3 hard rejection.
+  const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
+  if (nearTextHint !== null) {
+    return { kind: "ok", hint, near_text_hint: nearTextHint };
+  }
+  return {
+    kind: "rejected",
+    stage: "synthesis",
+    error_kind: "ambiguous_text_match",
+    message:
+      `Label hint ${JSON.stringify(hint)} matches ${duplicates.length + 1} input/select elements ` +
+      `AND no unique nearby visible text could be found to disambiguate via near_text_hint. ` +
+      `Hand-edit the skill with a row-identifying hint, or re-capture with a tighter prompt.`,
+    offending_round: roundIndex,
+    synthesizer_version: SYNTHESIZER_VERSION,
+  };
+}
+
+// 0.8.2-rc.3 — find a nearby visible-text snippet that uniquely
+// pins `target` over `siblings`. The row-label-immediately-before-row-
+// control pattern (Sentry's permission grid) is the canonical case:
+//   [Project label] [Project select] [Team label] [Team select]
+// "Team" sits right before the team select and right after the project
+// select. Distance-equality breaks symmetry; we resolve it by
+// considering ONLY texts that appear in the small window BEFORE the
+// target (the typical row-header position), then checking they don't
+// also appear before any sibling. Returns null when no such snippet
+// exists.
+function pickRowDisambiguator(
+  target: InteractiveElement,
+  siblings: readonly InteractiveElement[],
+  inventory: readonly InteractiveElement[],
+): string | null {
+  const WINDOW = 5;
+  const targetIdx = inventory.findIndex((e) => e.selector === target.selector);
+  if (targetIdx === -1) return null;
+
+  const visibleTextOf = (el: InteractiveElement): string =>
+    (el.visibleText ?? el.ariaLabel ?? el.title ?? "").trim();
+
+  // Collect text snippets that appear in the WINDOW entries
+  // immediately PRECEDING each sibling. These are the "row labels"
+  // we want to exclude from target's candidate set.
+  const siblingPrecedingTexts = new Set<string>();
+  for (const sib of siblings) {
+    const sibIdx = inventory.findIndex((e) => e.selector === sib.selector);
+    if (sibIdx === -1) continue;
+    const start = Math.max(0, sibIdx - WINDOW);
+    for (let i = start; i < sibIdx; i++) {
+      const t = visibleTextOf(inventory[i]!).toLowerCase();
+      if (t.length > 0) siblingPrecedingTexts.add(t);
+    }
   }
 
-  return { kind: "ok", hint };
+  // Walk backward from target picking the closest preceding visible-
+  // text element whose text is unique vs. siblings' preceding texts.
+  const start = Math.max(0, targetIdx - WINDOW);
+  for (let i = targetIdx - 1; i >= start; i--) {
+    const text = visibleTextOf(inventory[i]!);
+    if (text.length === 0) continue;
+    if (text.length > 40) continue;
+    if (siblingPrecedingTexts.has(text.toLowerCase())) continue;
+    return text;
+  }
+
+  // Backward sweep failed — fall back to a forward sweep within the
+  // window for forms where the row label appears AFTER the input (rare
+  // — typically right-aligned column-style layouts).
+  const siblingFollowingTexts = new Set<string>();
+  for (const sib of siblings) {
+    const sibIdx = inventory.findIndex((e) => e.selector === sib.selector);
+    if (sibIdx === -1) continue;
+    const end = Math.min(inventory.length, sibIdx + WINDOW + 1);
+    for (let i = sibIdx + 1; i < end; i++) {
+      const t = visibleTextOf(inventory[i]!).toLowerCase();
+      if (t.length > 0) siblingFollowingTexts.add(t);
+    }
+  }
+  const endIdx = Math.min(inventory.length, targetIdx + WINDOW + 1);
+  for (let i = targetIdx + 1; i < endIdx; i++) {
+    const text = visibleTextOf(inventory[i]!);
+    if (text.length === 0) continue;
+    if (text.length > 40) continue;
+    if (siblingFollowingTexts.has(text.toLowerCase())) continue;
+    return text;
+  }
+  return null;
 }
 
 // ── Extract step + credential spec inference ─────────────────────────

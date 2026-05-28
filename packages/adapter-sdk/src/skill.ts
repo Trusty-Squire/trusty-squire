@@ -151,6 +151,26 @@ const FillStepSchema = z
           "placeholder, then aria-label, then visibleText of nearest " +
           "preceding text node.",
       ),
+    // Schema v2 (2026-05-28). Sentry-class permission grids and any
+    // multi-row form where every row's input shares the same label
+    // (e.g. each row's "Permission" select labeled "Permission") were
+    // hard-rejecting at synthesize time as `ambiguous_text_match`.
+    // near_text_hint pins the specific row via nearby unique visible
+    // text (e.g. "Project", "Team", "Member"). Optional + additive —
+    // the synthesizer only emits it when a sibling collision is
+    // detected, so single-cred skills' canonical bytes don't shift.
+    near_text_hint: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional disambiguator when multiple inputs share the same " +
+          "label_hint on the page (Sentry's permission grid, settings " +
+          "rows with repeated 'Permission' selects). The replay engine " +
+          "filters label-hint matches by 'has unique nearby visible " +
+          "text containing near_text_hint' before failing. Pick a " +
+          "row-identifying word visible adjacent to the target input.",
+      ),
     value_template: z
       .string()
       .min(1)
@@ -171,6 +191,22 @@ const SelectStepSchema = z
       .string()
       .min(1)
       .describe("Same resolution rules as `fill`."),
+    // Same rationale as FillStepSchema.near_text_hint — see above.
+    // Sentry's per-row scope dropdowns are the canonical case: seven
+    // rows, every row's select labeled "Permission", every row needs
+    // its own option picked.
+    near_text_hint: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional disambiguator when multiple selects share the same " +
+          "label_hint (Sentry's permission grid: Project / Team / " +
+          "Member / Issue / Event / Release / Organization rows all " +
+          "ship a select labeled 'Permission'). The replay engine " +
+          "filters label-hint matches by 'has unique nearby visible " +
+          "text containing near_text_hint' before failing.",
+      ),
     option_text: z
       .string()
       .min(1)

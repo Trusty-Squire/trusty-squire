@@ -492,13 +492,31 @@ async function preValidateStep(
         };
       }
       if (matches.length > 1) {
-        const picked = disambiguateFillMatches(matches);
-        if (picked === null) {
+        // 0.8.2-rc.3 — schema v1+ optional near_text_hint narrows
+        // ambiguous rows BEFORE the heuristic disambiguator fires.
+        // The synthesizer emits near_text_hint only when it observed
+        // a collision at capture time, so its presence here means
+        // "the original capture had the same ambiguity, and this is
+        // the row identifier that resolved it then". Old skills
+        // (without near_text_hint) skip straight to the heuristic
+        // disambiguator — full backward compat.
+        const filtered = filterByNearTextHint(matches, step.near_text_hint, inventory);
+        if (filtered.length === 1) return { ok: true, match: filtered[0]! };
+        if (filtered.length === 0) {
           return {
             ok: false,
             reason:
               `label_hint=${JSON.stringify(step.label_hint)} matched ${matches.length} inputs; ` +
-              `disambiguator could not uniquely identify the fill target.`,
+              `near_text_hint=${JSON.stringify(step.near_text_hint)} filtered to none.`,
+          };
+        }
+        const picked = disambiguateFillMatches(filtered);
+        if (picked === null) {
+          return {
+            ok: false,
+            reason:
+              `label_hint=${JSON.stringify(step.label_hint)} matched ${filtered.length} inputs ` +
+              `(after near_text_hint filter); disambiguator could not uniquely identify the fill target.`,
           };
         }
         return { ok: true, match: picked };
@@ -516,9 +534,18 @@ async function preValidateStep(
         };
       }
       if (matches.length > 1) {
+        // 0.8.2-rc.3 — same near_text_hint disambiguation path as fill,
+        // for Sentry-class permission grids where every row's <select>
+        // shares the same label.
+        const filtered = filterByNearTextHint(matches, step.near_text_hint, inventory);
+        if (filtered.length === 1) return { ok: true, match: filtered[0]! };
         return {
           ok: false,
-          reason: `label_hint=${JSON.stringify(step.label_hint)} matched ${matches.length} selects.`,
+          reason:
+            `label_hint=${JSON.stringify(step.label_hint)} matched ${matches.length} selects` +
+            (step.near_text_hint !== undefined
+              ? `; near_text_hint=${JSON.stringify(step.near_text_hint)} filtered to ${filtered.length}.`
+              : `; no near_text_hint provided.`),
         };
       }
       return { ok: true, match: matches[0]! };
@@ -700,11 +727,21 @@ async function executeStep(
       // rc.25 — share the disambiguator with preValidate so execute
       // doesn't unilaterally pick `inventory.find`'s first hit when
       // the page has more than one matching input.
+      // 0.8.2-rc.3 — schema-level near_text_hint runs first (mirrors
+      // preValidate). When the synthesizer emitted it, the captured
+      // page had this exact ambiguity and this is the row identifier
+      // that pinned the right target then; trust it here.
+      const narrowed = matches.length === 1
+        ? matches
+        : filterByNearTextHint(matches, step.near_text_hint, inventory);
       const match =
-        matches.length === 1 ? matches[0]! : disambiguateFillMatches(matches);
+        narrowed.length === 1 ? narrowed[0]! : disambiguateFillMatches(narrowed);
       if (match === null) {
         throw new Error(
-          `label_hint=${step.label_hint} matched ${matches.length} inputs; ` +
+          `label_hint=${step.label_hint} matched ${matches.length} inputs ` +
+            (step.near_text_hint !== undefined
+              ? `(near_text_hint=${step.near_text_hint} narrowed to ${narrowed.length}); `
+              : `; `) +
             `disambiguator could not uniquely identify the fill target.`,
         );
       }
@@ -715,10 +752,23 @@ async function executeStep(
 
     case "select": {
       const inventory = await browser.extractInteractiveElements();
-      const match = inventory.find((el) => matchesLabelHint(el, step.label_hint));
-      if (match === undefined) {
+      // 0.8.2-rc.3 — apply near_text_hint filter when present so
+      // Sentry-grid rows land on the right <select>. The original
+      // `inventory.find` would unilaterally pick the first match.
+      const allMatches = inventory.filter((el) => matchesLabelHint(el, step.label_hint));
+      if (allMatches.length === 0) {
         throw new Error(`No select matches label_hint=${step.label_hint}`);
       }
+      const narrowed = allMatches.length === 1
+        ? allMatches
+        : filterByNearTextHint(allMatches, step.near_text_hint, inventory);
+      if (narrowed.length === 0) {
+        throw new Error(
+          `label_hint=${step.label_hint} matched ${allMatches.length} selects; ` +
+            `near_text_hint=${step.near_text_hint ?? "<none>"} filtered to none.`,
+        );
+      }
+      const match = narrowed[0]!;
       await browser.selectOption(match.selector, step.option_text);
       return { kind: "selected" };
     }
@@ -1234,6 +1284,94 @@ function matchesRole(el: InteractiveElement, role: "button" | "link" | "tab" | "
 function isCopyButton(el: InteractiveElement): boolean {
   const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
   return /^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|key|to\s+clipboard)\b/i.test(text);
+}
+
+// 0.8.2-rc.3 — narrow ambiguous fill/select matches by the schema-
+// level near_text_hint. When the hint is absent (old skills),
+// matches pass through unchanged. When set, we score each match by
+// the SIGNED distance to the nearest occurrence of the hint, with
+// "hint just before the match" (positive small distance) ranked
+// above "hint just after the match" (negative small distance).
+//
+// This mirrors how row labels work in the DOM: the typical layout is
+//   [Row N label] [Row N input] [Row N+1 label] [Row N+1 input]
+// so the hint text for row N sits immediately BEFORE row N's input.
+// Sentry's permission grid follows this; so does most grid/form
+// markup. Right-aligned column layouts (label after input) are
+// supported as a tiebreaker — the closest-preceding wins, but if
+// nothing precedes within window the closest-following wins.
+function filterByNearTextHint(
+  matches: readonly InteractiveElement[],
+  hint: string | undefined,
+  inventory: readonly InteractiveElement[],
+): InteractiveElement[] {
+  if (hint === undefined || hint.length === 0) return [...matches];
+  const lower = hint.toLowerCase();
+
+  // For each match, compute (signedDist, absDist) for the nearest
+  // hint occurrence. signedDist > 0 → hint precedes match (preferred);
+  // signedDist < 0 → hint follows match (acceptable fallback). The
+  // tiebreaker is the smallest absolute distance — closest wins.
+  type Scored = {
+    el: InteractiveElement;
+    bestPreceding: number; // smallest "hint at i < elIdx" distance
+    bestFollowing: number; // smallest "hint at i > elIdx" distance
+  };
+  const scored: Scored[] = matches.map((el) => {
+    const elIdx = inventory.findIndex((x) => x.selector === el.selector);
+    let bestPreceding = Number.POSITIVE_INFINITY;
+    let bestFollowing = Number.POSITIVE_INFINITY;
+    if (elIdx !== -1) {
+      for (let i = 0; i < inventory.length; i++) {
+        const text = (
+          inventory[i]!.visibleText ?? inventory[i]!.ariaLabel ?? ""
+        ).toLowerCase();
+        if (!text.includes(lower)) continue;
+        const d = elIdx - i; // positive when hint precedes match
+        if (d > 0 && d < bestPreceding) bestPreceding = d;
+        if (d < 0 && -d < bestFollowing) bestFollowing = -d;
+      }
+    }
+    return { el, bestPreceding, bestFollowing };
+  });
+
+  // No match sees the hint anywhere — caller treats as "no valid
+  // disambiguation".
+  if (
+    scored.every(
+      (s) =>
+        !Number.isFinite(s.bestPreceding) && !Number.isFinite(s.bestFollowing),
+    )
+  ) {
+    return [];
+  }
+
+  // First pass: pick the unique winner by closest PRECEDING hint.
+  // Most grid layouts disambiguate cleanly here.
+  let minPreceding = Number.POSITIVE_INFINITY;
+  for (const s of scored)
+    if (s.bestPreceding < minPreceding) minPreceding = s.bestPreceding;
+  if (Number.isFinite(minPreceding)) {
+    const winners = scored.filter((s) => s.bestPreceding === minPreceding);
+    if (winners.length === 1) return [winners[0]!.el];
+  }
+
+  // Second pass: fall back to closest FOLLOWING hint (label after
+  // input, rare).
+  let minFollowing = Number.POSITIVE_INFINITY;
+  for (const s of scored)
+    if (s.bestFollowing < minFollowing) minFollowing = s.bestFollowing;
+  if (Number.isFinite(minFollowing)) {
+    const winners = scored.filter((s) => s.bestFollowing === minFollowing);
+    if (winners.length === 1) return [winners[0]!.el];
+  }
+
+  // Genuine tie — defer to the caller's legacy heuristic disambiguator
+  // by returning all matches that have the hint in their ±5 window.
+  const windowFiltered = matches.filter((el) =>
+    nearTextHintMatches(el, hint, inventory),
+  );
+  return windowFiltered.length > 0 ? windowFiltered : [...matches];
 }
 
 function nearTextHintMatches(

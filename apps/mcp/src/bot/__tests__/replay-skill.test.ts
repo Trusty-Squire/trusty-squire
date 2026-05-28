@@ -715,6 +715,81 @@ describe("replaySkill — fill-label disambiguation (rc.24)", () => {
 
     expect(result.kind).toBe("step_failed");
   });
+
+  it("near_text_hint narrows an ambiguous select to the right row (Sentry grid, 0.8.2-rc.3)", async () => {
+    // Two <select>s both labeled "Permission"; nearby visible text
+    // distinguishes them (Project vs Team). near_text_hint = "Team"
+    // must pin select.b.
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "div",
+        visibleText: "Project",
+        selector: "div.project-header",
+      }),
+      inv({
+        tag: "select",
+        labelText: "Permission",
+        selector: "select.a",
+      }),
+      inv({
+        tag: "div",
+        visibleText: "Team",
+        selector: "div.team-header",
+      }),
+      inv({
+        tag: "select",
+        labelText: "Permission",
+        selector: "select.b",
+      }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "select",
+          label_hint: "Permission",
+          near_text_hint: "Team",
+          option_text: "Admin",
+          provenance,
+        },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    const selects = b.history.filter((c) => c.method === "selectOption");
+    expect(selects).toHaveLength(1);
+    expect(selects[0]!.args[0]).toBe("select.b");
+    expect(selects[0]!.args[1]).toBe("Admin");
+    expect(["ok", "step_failed", "extraction_failed"]).toContain(result.kind);
+  });
+
+  it("falls back gracefully when no near_text_hint is provided (back-compat with schema v1 skills)", async () => {
+    // Old skills with no near_text_hint still hit the heuristic
+    // disambiguator. With two ambiguous selects and no disambiguator,
+    // we expect step_failed (not a crash).
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "select", labelText: "Permission", selector: "select.a" }),
+      inv({ tag: "select", labelText: "Permission", selector: "select.b" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "select",
+          label_hint: "Permission",
+          option_text: "Admin",
+          provenance,
+        },
+      ]),
+      browser: b.controller,
+      mode: "dry",
+    });
+
+    expect(result.kind).toBe("step_failed");
+  });
 });
 
 // ── T27: sentinel HTTP check ────────────────────────────────────────
