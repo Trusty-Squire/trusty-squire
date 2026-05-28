@@ -120,8 +120,17 @@ function formatEvent(event: NotifierEvent): string {
         : event.outcome === "skipped"
           ? "⏭️"
           : "❌";
+    // 0.8.2-rc.20 — always render the transition line, including
+    // when it's `none`. Pre-fix we omitted it for transition=none,
+    // which made failure messages look like state changes even when
+    // they weren't ("Reason: skill_demoted..." reads as "the skill
+    // got demoted" without a counter-signal). Always-rendered: every
+    // alert tells the operator at a glance whether the registry
+    // actually changed.
     const transitionLine =
-      event.transition !== "none" ? `\nTransition: ${event.transition}` : "";
+      event.transition === "none"
+        ? `\nTransition: none (no registry state change)`
+        : `\nTransition: ${event.transition}`;
     return (
       `${emoji} Replay [${event.queue}] ${event.service}\n` +
       `Skill: ${event.service} (${event.skill_id.slice(0, 10)}…)\n` +
