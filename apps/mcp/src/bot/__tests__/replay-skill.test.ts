@@ -58,9 +58,22 @@ function stubBrowser(): StubBrowser {
   let candidates: string[] = [];
   let clipboard = "";
 
+  // Track the last URL the stub navigated to so currentUrl() can
+  // report consistently — the rc.22 navigate-step drift detector
+  // calls browser.currentUrl() after every goto.
+  let lastUrl = "";
   const controller = {
     async goto(url: string) {
       history.push({ method: "goto", args: [url] });
+      lastUrl = url;
+    },
+    currentUrl(): string {
+      return lastUrl;
+    },
+    oauthPageClosed(): boolean {
+      // Default: behave as if the OAuth popup closed cleanly. Tests
+      // that exercise the drift path can swap a different stub.
+      return true;
     },
     async click(selector: string) {
       history.push({ method: "click", args: [selector] });
@@ -1305,5 +1318,160 @@ describe("replaySkill — rc.8 fallback fixes", () => {
 
     const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
     expect(result.kind).toBe("step_failed");
+  });
+
+  // ── 0.8.2-rc.22 — copy-button executor falls back to text scan ────
+  it("recovers via validator-filtered candidates when no Copy button is visible (extract_via_copy_button)", async () => {
+    // Railway-class page: the captured skill expected a Copy button to
+    // appear after Create, but on replay the token renders inline in a
+    // <code> element with no copy affordance. Per "don't fail unless
+    // laws of physics forbid success" the executor must scan for a
+    // credential-shaped string instead of throwing.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_copy_button", near_text_hint: "Your token", provenance }],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "RW_API_KEY",
+            post_extract_validator: { min_length: 36, max_length: 36 },
+          },
+        ],
+      },
+    );
+    // No Copy button on the page at all.
+    b.setInventoryFor("extract", [
+      inv({ tag: "code", visibleText: "abc", selector: "code.token" }),
+    ]);
+    b.setCandidatesFor([
+      "Dashboard",
+      "5588a1c2-7c4d-4e2c-9c41-1234567890ab", // ← the token (36 chars, has digits)
+    ]);
+    b.setTextFor("no labeled key here");
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe("5588a1c2-7c4d-4e2c-9c41-1234567890ab");
+    }
+  });
+
+  it("fails cleanly with diagnostic URL/inventory context when no Copy button AND no valid candidate", async () => {
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://example.com/tokens", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "X_API_KEY",
+            post_extract_validator: { min_length: 36, max_length: 36 },
+          },
+        ],
+      },
+    );
+    b.setInventoryFor("extract", [
+      inv({ tag: "div", visibleText: "no copy button here", selector: "div.x" }),
+    ]);
+    b.setCandidatesFor(["Dashboard", "Settings"]); // no valid candidates
+    b.setTextFor("no key here at all");
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
+    if (result.kind === "step_failed") {
+      // Diagnostic context (url + inventory counts) so we can triage
+      // without re-running.
+      expect(result.reason).toMatch(/url=https:\/\/example\.com\/tokens/);
+      expect(result.reason).toMatch(/inventory=1/);
+      expect(result.reason).toMatch(/copyButtons=0/);
+    }
+  });
+});
+
+// ── URL drift detection + OAuth recovery (0.8.2-rc.22) ───────────────
+
+describe("detectNavigationDrift", () => {
+  it("returns null when URLs match exactly", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift("https://railway.com/account/tokens", "https://railway.com/account/tokens"),
+    ).toBeNull();
+  });
+
+  it("returns null for a non-login same-origin redirect", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift("https://example.com/signup/welcome", "https://example.com/signup"),
+    ).toBeNull();
+  });
+
+  it("flags a same-origin redirect to /login", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift("https://railway.com/login", "https://railway.com/account/tokens"),
+    ).toMatch(/login/);
+  });
+
+  it("flags a same-origin redirect to /signin", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift("https://example.com/signin?next=/dashboard", "https://example.com/dashboard"),
+    ).toMatch(/login/);
+  });
+
+  it("flags a cross-domain redirect to Google's OAuth", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift(
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id=x",
+        "https://example.com/dashboard",
+      ),
+    ).toMatch(/google/);
+  });
+
+  it("flags a cross-domain redirect to GitHub's OAuth", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift(
+        "https://github.com/login/oauth/authorize?client_id=x",
+        "https://example.com/dashboard",
+      ),
+    ).toMatch(/github/);
+  });
+
+  it("does NOT flag a cross-domain redirect to an unrelated domain (analytics, CDN)", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift("https://cdn.example.org/redirect", "https://example.com/dashboard"),
+    ).toBeNull();
+  });
+});
+
+describe("inferProviderFromUrl", () => {
+  it("identifies Google subdomains", async () => {
+    const { inferProviderFromUrl } = await import("../replay-skill.js");
+    expect(inferProviderFromUrl("https://accounts.google.com/foo")).toBe("google");
+    expect(inferProviderFromUrl("https://www.google.com/")).toBe("google");
+  });
+
+  it("identifies GitHub subdomains", async () => {
+    const { inferProviderFromUrl } = await import("../replay-skill.js");
+    expect(inferProviderFromUrl("https://github.com/login")).toBe("github");
+  });
+
+  it("returns null for non-provider URLs", async () => {
+    const { inferProviderFromUrl } = await import("../replay-skill.js");
+    expect(inferProviderFromUrl("https://example.com/x")).toBeNull();
+  });
+
+  it("returns null for malformed URLs", async () => {
+    const { inferProviderFromUrl } = await import("../replay-skill.js");
+    expect(inferProviderFromUrl("not-a-url")).toBeNull();
   });
 });

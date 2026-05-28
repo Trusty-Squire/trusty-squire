@@ -52,7 +52,8 @@ import type {
 } from "@trusty-squire/adapter-sdk";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { loggedInProviders } from "./login-state.js";
-import { isTruncatedCapture, extractApiKeyFromText } from "./agent.js";
+import { isTruncatedCapture, extractApiKeyFromText, findOAuthButton } from "./agent.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -580,7 +581,15 @@ async function preValidateStep(
       const inventory = await browser.extractInteractiveElements();
       const copyButtons = inventory.filter(isCopyButton);
       if (copyButtons.length === 0) {
-        return { ok: false, reason: "No Copy button visible on page." };
+        // 0.8.2-rc.22 — pre-validation no longer hard-fails when the
+        // Copy button is missing. The executor's text-extraction
+        // fallback (extractCredentialCandidates + body-text regex +
+        // validator-blind tier) can still recover the credential when
+        // it's rendered on the page without a Copy affordance.
+        // Architecturally: pre-validation ranges over "is this step
+        // attempt-able"; the executor decides if attempt-able means
+        // "click and read" or "scan page text and validate."
+        return { ok: true };
       }
       if (copyButtons.length === 1) {
         return { ok: true, match: copyButtons[0]! };
@@ -689,13 +698,46 @@ async function executeStep(
   skill: Skill,
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
-    case "navigate":
+    case "navigate": {
       await browser.goto(step.url);
       // Tiny settle for SPA-style apps that fire route handlers
       // post-DOMContentLoaded. The bot's runPrewarm waits 2s
       // post-navigate too.
       await browser.wait(2);
+      // 0.8.2-rc.22 — URL drift detection. When a skill's signup_url
+      // assumes the user is authenticated (Railway's /account/tokens
+      // captured after OAuth was done in a prior session), the
+      // unauthenticated bot lands on a login page instead. Downstream
+      // label_hint resolution then matches login-page elements that
+      // coincidentally share names with the captured page ("Name"
+      // input, "Workspace" select, "Create" button — all common on
+      // signup OR login forms), producing false-positive step
+      // successes. The replay then fails at the LAST step ("No Copy
+      // button visible") with a misleading reason. Catch the drift at
+      // step 0 so the verifier reports the real cause: this skill
+      // needs an OAuth step it doesn't have.
+      const landedUrl = browser.currentUrl();
+      const driftReason = detectNavigationDrift(landedUrl, step.url);
+      if (driftReason !== null) {
+        // 0.8.2-rc.22 — drive the OAuth handshake. Captured skills
+        // for OAuth-protected services (Railway, Sentry, etc.) often
+        // assume an authenticated session because the original capture
+        // was recorded in a profile that already had OAuth cookies.
+        // At replay time the persistent profile usually has the same
+        // cookies (subsequent OAuth round-trips through the provider
+        // auto-approve from the cached session). Click the OAuth
+        // button, wait for the round-trip to complete, re-navigate to
+        // the expected URL, and continue. Only bail to needs_login
+        // when no OAuth path is recoverable (no provider session, no
+        // OAuth button on the page).
+        const recovered = await attemptOAuthRecovery(browser, step.url);
+        if (recovered.kind === "ok") {
+          return { kind: "navigated" };
+        }
+        return { kind: "needs_login", provider: recovered.provider };
+      }
       return { kind: "navigated" };
+    }
 
     case "click_oauth_button": {
       // Profile-session guard. If the user hasn't run `mcp login` for
@@ -810,23 +852,60 @@ async function executeStep(
     }
 
     case "extract_via_copy_button": {
-      const inventory = await browser.extractInteractiveElements();
-      const copyButtons = inventory.filter(isCopyButton);
-      const target = copyButtons.length === 1
-        ? copyButtons[0]!
-        : copyButtons.find((btn) => nearTextHintMatches(btn, step.near_text_hint, inventory))!;
-      if (target === undefined) {
-        throw new Error("Copy button disappeared between pre-validation and execution.");
+      // 0.8.2-rc.22 — poll for the Copy button OR a validator-passing
+      // candidate to appear, up to 8s. The captured skill assumes the
+      // post-Create UI renders synchronously, but services like
+      // Railway take 1-3s to paint the new-token row. Pre-rc.22 the
+      // executor ran a single inventory inspection and gave up; that
+      // cost us every replay where the credential needed a beat to
+      // appear.
+      //
+      // Loop exits on whichever happens first:
+      //   (a) target Copy button materialises → break, click + run
+      //       the normal extraction tiers.
+      //   (b) a credential-shaped candidate appears in
+      //       extractCredentialCandidates that satisfies the skill's
+      //       post_extract_validator → return it directly without
+      //       needing a Copy click.
+      // If neither shows up in 8s, fall through to the existing
+      // candidate/body/clipboard/fallback chain with the LAST polled
+      // inventory + emptiness, ending in the diagnostic throw.
+      const fallbackValidatorPoll =
+        skill.credentials[0]?.post_extract_validator;
+      const pollDeadline = Date.now() + 8000;
+      let inventory = await browser.extractInteractiveElements();
+      let copyButtons = inventory.filter(isCopyButton);
+      let target = copyButtons.length === 1
+        ? copyButtons[0]
+        : copyButtons.find((btn) => nearTextHintMatches(btn, step.near_text_hint, inventory));
+      while (target === undefined && Date.now() < pollDeadline) {
+        // Bail-on-found: a validator-passing candidate appearing first
+        // is the credential. We don't need the Copy button anymore.
+        if (fallbackValidatorPoll !== undefined) {
+          try {
+            const polled = await browser.extractCredentialCandidates();
+            for (const cand of polled) {
+              if (cand.length < fallbackValidatorPoll.min_length) continue;
+              if (cand.length > fallbackValidatorPoll.max_length) continue;
+              if (!/\d/.test(cand)) continue;
+              if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+              return { kind: "extract_ok", value: cand, via: "copy_button" };
+            }
+          } catch {
+            // Non-fatal — fall through to next poll tick.
+          }
+        }
+        await browser.wait(0.5);
+        inventory = await browser.extractInteractiveElements();
+        copyButtons = inventory.filter(isCopyButton);
+        target = copyButtons.length === 1
+          ? copyButtons[0]
+          : copyButtons.find((btn) => nearTextHintMatches(btn, step.near_text_hint, inventory));
       }
-      // Click the Copy button. The bot already does this in
-      // tryCopyButtonExtraction; we mirror the contract: click, brief
-      // wait, then read navigator.clipboard.readText() via the page
-      // context. clipboardText() on BrowserController would be ideal
-      // but doesn't exist yet — we use page.evaluate via the
-      // extractCredentialCandidates pathway, falling back to text
-      // scan if clipboard access is denied.
-      await browser.click(target.selector);
-      await browser.wait(1);
+      if (target !== undefined) {
+        await browser.click(target.selector);
+        await browser.wait(1);
+      }
       // BrowserController.extractCredentialCandidates pulls visible
       // candidates (input values + direct text); it does NOT read the
       // clipboard yet. We use it as the primary source and fall back
@@ -884,9 +963,41 @@ async function executeStep(
         // Clipboard read failed (permission denied, no clipboard
         // contents). Fall through to the canonical error.
       }
-      throw new Error(
-        "Copy button clicked but no credential matched the regex library in candidates, body text, or clipboard.",
-      );
+      // 0.8.2-rc.22 — validator-filtered candidate scan. Mirrors the
+      // identical tier in `extract_via_regex` so that copy_button
+      // steps can recover when (a) the Copy button isn't on the
+      // page at all (replay reached this step without a Copy
+      // affordance — Railway-class pages where the token renders
+      // inline) or (b) the click + clipboard contract didn't yield
+      // a recognised prefix but a credential-shaped string IS
+      // sitting on the page.
+      const fallbackValidator = skill.credentials[0]?.post_extract_validator;
+      if (fallbackValidator !== undefined) {
+        try {
+          const cands = await browser.extractCredentialCandidates();
+          for (const cand of cands) {
+            if (cand.length < fallbackValidator.min_length) continue;
+            if (cand.length > fallbackValidator.max_length) continue;
+            if (!/\d/.test(cand)) continue;
+            if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+            return { kind: "extract_ok", value: cand, via: "copy_button" };
+          }
+        } catch {
+          // Fall through to the canonical error below.
+        }
+      }
+      // Diagnostic context — keeps a short trail of "what did the bot
+      // see when extract failed" so we can iterate without re-running.
+      // url + inventory.length is enough to triage 90% of cases; full
+      // snapshots would require a new sink and aren't worth the
+      // complexity here.
+      const diag =
+        ` [url=${browser.currentUrl()} inventory=${inventory.length} copyButtons=${copyButtons.length}]`;
+      const failureReason =
+        target === undefined
+          ? `No Copy button on page and no credential-shaped string passed the validator.${diag}`
+          : `Copy button clicked but no credential matched the regex library in candidates, body text, or clipboard.${diag}`;
+      throw new Error(failureReason);
     }
 
     case "extract_via_regex": {
@@ -1598,4 +1709,159 @@ async function preValidateAllExtractsInDryMode(
     }
   }
   return null;
+}
+
+// ── URL-drift detection (0.8.2-rc.22) ────────────────────────────────
+
+// Patterns that indicate the bot landed on a login/auth page instead
+// of the expected target. Catches:
+//   - same-domain redirects to /login, /signin, /signup, /auth/*
+//   - cross-domain redirects to known OAuth providers
+//   - Railway's specific /login pattern
+// False-positive risk is low: signup pages with "/login" in the path
+// are rare and usually intentional (e.g., the form lives at the
+// `signup_url` itself), so a redirect that ends up on a path matching
+// these patterns is overwhelmingly a real auth wall.
+const LOGIN_PATH_RE = /\/(login|signin|sign[-_]in|auth|sso)(?:[/?#]|$)/i;
+const OAUTH_PROVIDER_HOSTS = new Set([
+  "accounts.google.com",
+  "github.com",
+  "auth0.com",
+  "login.microsoftonline.com",
+]);
+
+// Returns null when the current URL is consistent with the requested
+// URL (same origin, no login-path redirect). Returns a short reason
+// string when drift is detected. Exported for unit tests.
+export function detectNavigationDrift(
+  currentUrl: string,
+  expectedUrl: string,
+): string | null {
+  let cur: URL;
+  let exp: URL;
+  try {
+    cur = new URL(currentUrl);
+    exp = new URL(expectedUrl);
+  } catch {
+    // If either URL is unparseable, don't claim drift — the caller's
+    // next step will fail with a clearer error.
+    return null;
+  }
+  // Cross-domain landing on a known OAuth provider — unambiguous.
+  if (
+    cur.hostname !== exp.hostname &&
+    OAUTH_PROVIDER_HOSTS.has(cur.hostname)
+  ) {
+    return `redirected to OAuth provider ${cur.hostname}`;
+  }
+  // Same-origin redirect to a login-shaped path — covers Railway's
+  // /login fallback when /account/tokens is hit unauthenticated.
+  if (cur.hostname === exp.hostname && cur.pathname !== exp.pathname) {
+    if (LOGIN_PATH_RE.test(cur.pathname)) {
+      return `same-origin redirect to login path ${cur.pathname}`;
+    }
+  }
+  return null;
+}
+
+export function inferProviderFromUrl(url: string): "google" | "github" | null {
+  try {
+    const u = new URL(url);
+    if (/^(?:.+\.)?google\.com$/i.test(u.hostname)) return "google";
+    if (/^(?:.+\.)?github\.com$/i.test(u.hostname)) return "github";
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+// ── OAuth recovery during replay (0.8.2-rc.22) ───────────────────────
+
+// When a navigate step lands on a login page (URL drift detected),
+// the replay engine attempts to drive the OAuth handshake using the
+// bot's persistent profile's cached session cookies. This is the
+// non-failing path for skills captured against authenticated services
+// — Railway, Sentry, Anthropic, etc. — whose synthesizer didn't emit
+// an explicit `click_oauth_button` step because the original signup
+// rode an existing browser session.
+//
+// Recovery succeeds (returns ok) when:
+//   - the current page has an OAuth button matching one of the
+//     profile's logged-in providers
+//   - clicking the button + waiting for the round-trip leaves the
+//     bot back on the expected service domain
+//   - re-navigating to the expected URL doesn't drift again
+//
+// Otherwise returns needs_login with the best-guess provider so the
+// caller surfaces a real "give the user a way to log in" signal.
+//
+// Cookie-driven OAuth typically completes in 2-5s end-to-end (provider
+// auto-approves from the cached session). 30s budget covers slower
+// providers + the rare "show the account chooser" interstitial. If the
+// provider demands real user interaction (2FA challenge, missing-scope
+// consent), the budget will tick down without resolution and we bail
+// to needs_login — that's the "laws of physics" boundary: a verifier
+// process running without a human can't complete a challenge.
+async function attemptOAuthRecovery(
+  browser: BrowserController,
+  expectedUrl: string,
+): Promise<
+  { kind: "ok" } | { kind: "needs_login"; provider: OAuthProviderId }
+> {
+  const profiles = loggedInProviders();
+  if (profiles.length === 0) {
+    return { kind: "needs_login", provider: "google" };
+  }
+  // Inventory once. Look for an OAuth button matching any provider
+  // we have a cached session for. Prefer the first match in profile
+  // order so a Google-first user doesn't end up bound to GitHub on
+  // services that offer both.
+  const inventory = await browser.extractInteractiveElements();
+  let pickedProvider: OAuthProviderId | null = null;
+  let pickedButton: ReturnType<typeof findOAuthButton> | null = null;
+  for (const p of profiles) {
+    const btn = findOAuthButton(inventory, p);
+    if (btn !== null) {
+      pickedProvider = p;
+      pickedButton = btn;
+      break;
+    }
+  }
+  if (pickedProvider === null || pickedButton === null) {
+    // The page may genuinely be a non-OAuth login form (some services
+    // also offer password auth). The replay can't synthesize a
+    // password; surface needs_login with a guess based on the URL.
+    const guess = inferProviderFromUrl(browser.currentUrl()) ?? "google";
+    return { kind: "needs_login", provider: guess };
+  }
+  // Drive the click. startOAuth adopts whichever Chrome target
+  // catches the redirect (popup OR same-tab). After the click, poll
+  // for the round-trip to complete: either the popup closes, OR the
+  // active page's URL returns to the expected service domain.
+  await browser.startOAuth(pickedButton.selector);
+  const expectedHost = new URL(expectedUrl).hostname;
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    await browser.wait(1);
+    if (browser.oauthPageClosed()) break;
+    let host: string;
+    try {
+      host = new URL(browser.currentUrl()).hostname;
+    } catch {
+      continue;
+    }
+    if (host === expectedHost) break;
+  }
+  // Verify we're actually back. Re-navigate to the exact expected URL
+  // so the rest of the skill executes against the page it was
+  // captured against (not, e.g., a /welcome or /dashboard landing).
+  await browser.goto(expectedUrl);
+  await browser.wait(2);
+  const drift = detectNavigationDrift(browser.currentUrl(), expectedUrl);
+  if (drift !== null) {
+    // OAuth round-trip didn't unlock the destination — likely
+    // expired cookies. The user needs to re-run `mcp login`.
+    return { kind: "needs_login", provider: pickedProvider };
+  }
+  return { kind: "ok" };
 }

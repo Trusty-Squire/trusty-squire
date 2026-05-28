@@ -262,10 +262,27 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     const browser = new BrowserController({});
     try {
       await browser.start();
+      // 0.8.2-rc.22 — synthesize template values for verifier replays.
+      // The provision path supplies these (TOKEN_NAME, EMAIL_ALIAS)
+      // from the live signup context; the verifier has no such
+      // context — without defaults, substituteTemplate leaves
+      // `${TOKEN_NAME}` literal and services like Railway reject the
+      // invalid name silently, leaving the post-Create form unchanged
+      // and the credential-extract step thinking "no Copy button on
+      // page." The verifier just needs SOMETHING name-shaped and an
+      // alias that won't collide; per-skill stable names keep the
+      // tokens table on the service side readable.
+      const verifierTag = input.skill.skill_id.slice(-6).toLowerCase();
+      const tsTag = Date.now().toString(36);
       return await replaySkill({
         skill: input.skill,
         browser,
         mode: input.mode,
+        templateValues: {
+          TOKEN_NAME: `verifier-${verifierTag}-${tsTag}`,
+          EMAIL_ALIAS: `verifier-${verifierTag}-${tsTag}@trustysquire.com`,
+          USER_DISPLAY_NAME: `Verifier ${verifierTag}`,
+        },
         ...(input.bypassStatusGuard === true ? { bypassStatusGuard: true } : {}),
       });
     } finally {
