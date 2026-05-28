@@ -2828,6 +2828,12 @@ export class SignupAgent {
       // Inject a pre-constructed solver — tests pass a stub that
       // returns canned tokens without hitting 2captcha.com.
       captchaSolver?: TwoCaptchaSolver;
+      // Override Google's 2-step-verification wait timeout. Default
+      // 120s (matches the human "unlock phone, open Google app, tap"
+      // window). Tests pass a tiny value (e.g. 10ms) so they don't
+      // wall-clock-burn through the full deadline waiting for a
+      // FakeBrowser that's never going to advance its state.
+      googleChallengeTimeoutMs?: number;
     } = {},
   ) {
     if (llm === undefined) {
@@ -2848,7 +2854,14 @@ export class SignupAgent {
       this.roundUploader = opts.roundUploader;
     }
     this.captchaSolver = opts.captchaSolver ?? new TwoCaptchaSolver();
+    if (opts.googleChallengeTimeoutMs !== undefined) {
+      this.googleChallengeTimeoutMs = opts.googleChallengeTimeoutMs;
+    }
   }
+
+  // Default: 2 minutes — enough time for the human to unlock phone,
+  // open the Google app, and tap a verification number.
+  private googleChallengeTimeoutMs = 120_000;
 
   // Read-only view of how many calls landed on which backend. Exported
   // through SignupResult.llm_backends so tests and ops can verify the
@@ -4040,7 +4053,7 @@ export class SignupAgent {
     provider: { id: OAuthProviderId; label: string; classifyAuthState: (url: string, body: string) => string },
     steps: string[],
   ): Promise<boolean> {
-    const deadline = Date.now() + 120_000;
+    const deadline = Date.now() + this.googleChallengeTimeoutMs;
     while (Date.now() < deadline) {
       await this.browser.wait(3);
       if (this.browser.oauthPageClosed()) return true;

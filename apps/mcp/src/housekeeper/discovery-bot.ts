@@ -40,7 +40,17 @@ export interface DiscoveryBotConfig {
 }
 
 export type DiscoveryBotOutcome =
-  | { kind: "ok"; reason: string; credential_kind?: string }
+  | {
+      kind: "ok";
+      reason: string;
+      credential_kind?: string;
+      // 0.8.2-rc.4 — surface the auto-promote outcome to the
+      // housekeeper-loop's summary counter. Undefined means
+      // auto-promote didn't run (env disabled). Otherwise carries
+      // the discriminated result from runAutoPromote so the
+      // batch summary can credit promoted=N accurately.
+      auto_promote?: import("../tools/provision-any.js").AutoPromoteResult;
+    }
   | { kind: "blocked"; reason: string }
   | { kind: "failed"; reason: string };
 
@@ -163,6 +173,9 @@ export async function runDiscoveryBot(
 
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).
+  let promoteOutcome:
+    | import("../tools/provision-any.js").AutoPromoteResult
+    | undefined;
   if (result.success && cfg.skipAutoPromote !== true && isAutoPromoteEnabled(process.env)) {
     // Snapshot the sink length so we can flush ONLY the auto-promote
     // additions to stderr. Before this fix the bot's step trail was
@@ -172,7 +185,7 @@ export async function runDiscoveryBot(
     // surface for why every successful capture failed to publish.
     const sinkLenBeforePromote = stepsSink.length;
     try {
-      await runAutoPromote({
+      promoteOutcome = await runAutoPromote({
         service: input.service,
         stepsSink,
         accountId,
@@ -184,6 +197,7 @@ export async function runDiscoveryBot(
       stepsSink.push(
         `[discovery] auto-promote raised: ${err instanceof Error ? err.message : String(err)}`,
       );
+      promoteOutcome = { kind: "rejected", reason: "unexpected_throw" };
     }
     const promoteSteps = stepsSink.slice(sinkLenBeforePromote);
     if (promoteSteps.length > 0) {
@@ -202,6 +216,7 @@ export async function runDiscoveryBot(
     return {
       kind: "ok",
       reason: `signed up via ${result.via ?? "bot"}; extracted ${credCount} credential(s)`,
+      ...(promoteOutcome !== undefined ? { auto_promote: promoteOutcome } : {}),
     };
   }
 

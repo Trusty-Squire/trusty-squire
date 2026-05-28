@@ -131,7 +131,22 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
         if (outcome.kind === "ok") summary.succeeded += 1;
         else if (outcome.kind === "blocked") summary.blocked += 1;
         else summary.failed += 1;
-        summary.transitions.none += 1;
+        // 0.8.2-rc.4 — credit `promoted` accurately. Pre-fix this
+        // always bumped `none` even when auto-promote published a
+        // skill to the registry, so the batch summary said
+        // promoted=0 while skills WERE landing. Now an ok outcome
+        // with a published or idempotent auto_promote result counts
+        // as promoted; everything else stays in none.
+        if (
+          outcome.kind === "ok" &&
+          outcome.auto_promote !== undefined &&
+          (outcome.auto_promote.kind === "published" ||
+            outcome.auto_promote.kind === "idempotent")
+        ) {
+          summary.transitions.promoted += 1;
+        } else {
+          summary.transitions.none += 1;
+        }
         await fanOutNotifier(notifiers, log, {
           kind: "discover_outcome",
           queue: opts.queue.name,

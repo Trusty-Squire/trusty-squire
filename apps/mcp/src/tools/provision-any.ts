@@ -1371,12 +1371,29 @@ export function isAutoPromoteEnabled(env: NodeJS.ProcessEnv): boolean {
 // Exported for unit testing. Production callers pass {service,
 // stepsSink: ctx.stepsSink, accountId: ctx.accountId}; tests inject
 // a `fetchFn` to assert on the registry POST without a real network.
+//
+// Returns a discriminated result so callers (housekeeper-loop's
+// batch summary) can credit `promoted=N` accurately instead of
+// rolling every discover task into `none`. stepsSink keeps the
+// per-step narrative for the operator log; the return value is
+// for counters.
+export type AutoPromoteResult =
+  | { kind: "published"; skill_id: string; version: string }
+  | { kind: "idempotent"; skill_id: string; version: string }
+  // No capture / env disabled / registry URL missing — there was
+  // nothing to publish. Distinct from "rejected" so summary counts
+  // don't conflate "we tried and failed" with "we didn't try."
+  | { kind: "skipped"; reason: string }
+  // Synthesizer rejected the capture, registry returned non-2xx,
+  // network failed, etc. Real failure.
+  | { kind: "rejected"; reason: string };
+
 export async function runAutoPromote(args: {
   service: string;
   stepsSink: string[];
   accountId: string;
   fetchFn?: typeof globalThis.fetch;
-}): Promise<void> {
+}): Promise<AutoPromoteResult> {
   const { service, stepsSink } = args;
   const fetchFn = args.fetchFn ?? globalThis.fetch;
   try {
@@ -1392,14 +1409,14 @@ export async function runAutoPromote(args: {
       stepsSink.push(
         "[auto-promote] capture directory is disabled (TRUSTY_SQUIRE_ONBOARDING_CAPTURE=off) — nothing to promote.",
       );
-      return;
+      return { kind: "skipped", reason: "capture_dir_disabled" };
     }
     const runId = currentRunId();
     if (runId === undefined) {
       stepsSink.push(
         "[auto-promote] no captures written this run (bot may have taken the fast path) — skipping.",
       );
-      return;
+      return { kind: "skipped", reason: "no_capture_this_run" };
     }
 
     // 2. Registry URL must be configured.
@@ -1408,7 +1425,7 @@ export async function runAutoPromote(args: {
       stepsSink.push(
         "[auto-promote] TRUSTY_SQUIRE_REGISTRY_URL is unset — no registry to publish to.",
       );
-      return;
+      return { kind: "skipped", reason: "no_registry_url" };
     }
 
     // 3. Synthesize. promoteToSkill is pure (filesystem + Zod); any
@@ -1424,7 +1441,10 @@ export async function runAutoPromote(args: {
       stepsSink.push(
         `[auto-promote] synthesizer rejected: ${result.stage} / ${result.error_kind} — ${result.message}`,
       );
-      return;
+      return {
+        kind: "rejected",
+        reason: `synthesizer:${result.error_kind}`,
+      };
     }
 
     // 4. Sign. rc.13 — when SKILL_SIGNING_PRIVATE_KEY is unset,
@@ -1475,7 +1495,7 @@ export async function runAutoPromote(args: {
       stepsSink.push(
         `[auto-promote] POST /skills failed (${err instanceof Error ? err.message : String(err)}).`,
       );
-      return;
+      return { kind: "rejected", reason: "network_error" };
     }
 
     if (resp.status === 201) {
@@ -1484,7 +1504,11 @@ export async function runAutoPromote(args: {
           `(skill_id=${result.skill.skill_id}, status=pending-review). ` +
           `Verifier worker will validate and promote to active; next ${serviceSlug} signup hits the skill once it does.`,
       );
-      return;
+      return {
+        kind: "published",
+        skill_id: result.skill.skill_id,
+        version: result.skill.version,
+      };
     }
     if (resp.status === 200) {
       // Idempotent re-publish (same skill_id). Already in the registry
@@ -1492,7 +1516,11 @@ export async function runAutoPromote(args: {
       stepsSink.push(
         `[auto-promote] ${serviceSlug} ${result.skill.version} already published (idempotent).`,
       );
-      return;
+      return {
+        kind: "idempotent",
+        skill_id: result.skill.skill_id,
+        version: result.skill.version,
+      };
     }
     if (resp.status === 401) {
       // Bad signature — either SKILL_VERIFY_PUBLIC_KEY mismatch on
@@ -1500,7 +1528,7 @@ export async function runAutoPromote(args: {
       stepsSink.push(
         `[auto-promote] registry rejected signature (HTTP 401). Check that SKILL_SIGNING_PRIVATE_KEY here matches SKILL_VERIFY_PUBLIC_KEY on the registry.`,
       );
-      return;
+      return { kind: "rejected", reason: "signature_invalid" };
     }
     // Anything else: log status + try to surface the registry's detail.
     let detail = "";
@@ -1513,11 +1541,13 @@ export async function runAutoPromote(args: {
     stepsSink.push(
       `[auto-promote] HTTP ${resp.status} from registry${detail.length > 0 ? ": " + detail : ""}.`,
     );
+    return { kind: "rejected", reason: `http_${resp.status}` };
   } catch (err) {
     // Defense-in-depth: any unexpected throw lands here. Never let
     // auto-promote take down the parent signup task.
     stepsSink.push(
       `[auto-promote] unexpected failure (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
     );
+    return { kind: "rejected", reason: "unexpected_throw" };
   }
 }

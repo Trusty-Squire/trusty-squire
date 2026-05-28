@@ -199,7 +199,14 @@ function isController(_v: unknown): _v is BrowserController {
 function newAgent(browser: FakeOAuthBrowser, llm?: LLMClient): SignupAgent {
   const asController: unknown = browser;
   if (!isController(asController)) throw new Error("unreachable");
-  return new SignupAgent(asController, llm ?? new QueueLLM(["{}"]));
+  // 10ms Google-challenge timeout so the "needs_login on challenge"
+  // test doesn't wall-clock-burn 120 seconds waiting for a FakeBrowser
+  // that's never going to leave the challenge state. The test runs in
+  // ~10ms instead of 120s — and CI's vitest worker stops timing out
+  // its IPC heartbeat (which was the root of the rc.3 flake).
+  return new SignupAgent(asController, llm ?? new QueueLLM(["{}"]), {
+    googleChallengeTimeoutMs: 10,
+  });
 }
 
 const CONSENT_BASIC: ScriptPage = {

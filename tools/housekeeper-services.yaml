@@ -81,10 +81,12 @@
   signup_url: https://account.postmarkapp.com/sign_up
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    reCAPTCHA v3 scoring — Tier-1 behavior simulation should pass.
-    Previously verified post-captcha success.
+    verification_not_sent on trustysquire.com — Postmark silently drops
+    verification mail to fresh-MX domains (vendor anti-spam policy). Confirmed
+    again on rc.3 run. Manual signup required until inbox revival on the
+    trustysquire.com domain.
 
 - slug: sentry
   name: Sentry
@@ -198,10 +200,11 @@
   signup_url: https://app.pinecone.io/?sessionType=signup
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    Vector DB. Google + GitHub OAuth. Free tier exists; API key
-    surfaces in dashboard after project creation.
+    OAuth-loop after Google sign-in — Pinecone's workspace-creation step
+    gates OAuth finalize. Same shape as mistral/groq. Manual signup +
+    API-key fetch is the realistic call.
 
 # ── Phase 2 expansion (82 OAuth services, target = 100 total) ──
 # All entries below are UNTESTED with the universal bot. OAuth provider
