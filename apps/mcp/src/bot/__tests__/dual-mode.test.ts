@@ -124,6 +124,65 @@ describe("SignupAgent dual-mode LLM fallback", () => {
     expect(premium.callCount).toBe(0);
   });
 
+  // 0.8.2-rc.8 — failed createMessage calls don't tick llmCallCount.
+  // The rc.7 sentry batch surfaced this: 2 upstream-blip retries
+  // consumed 2 of the 15 budget units before the proxy's own
+  // retry-with-backoff gave up and surfaced an error. Counting those
+  // failed calls against the planner's budget is wrong — they
+  // produced no plan and the planner has to re-issue the request
+  // anyway. Behave like a meter: only count consumption that actually
+  // delivered a reply.
+  it("does NOT tick llmCallCount when createMessage throws", async () => {
+    class FailingThenOkLLM implements LLMClient {
+      readonly name = "flake";
+      public callCount = 0;
+      async createMessage(): Promise<LLMResponse> {
+        this.callCount += 1;
+        if (this.callCount <= 2) {
+          throw new Error("upstream_error: 502");
+        }
+        return { text: `{"value":99}`, backend: this.name };
+      }
+    }
+    const primary = new FailingThenOkLLM();
+    const agent = agentWithPair({ primary, premium: null });
+
+    // First two calls throw. Capture the budget state by attempting
+    // and rescuing each one, then a third call should succeed.
+    await expect(
+      callLLM(agent, {
+        system: "",
+        userBlocks: [],
+        maxTokens: 100,
+        parse: (raw) => JSON.parse(raw) as unknown,
+      }),
+    ).rejects.toThrow(/502/);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((agent as any).llmCallCount).toBe(0);
+
+    await expect(
+      callLLM(agent, {
+        system: "",
+        userBlocks: [],
+        maxTokens: 100,
+        parse: (raw) => JSON.parse(raw) as unknown,
+      }),
+    ).rejects.toThrow(/502/);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((agent as any).llmCallCount).toBe(0);
+
+    const ok = await callLLM<{ value: number }>(agent, {
+      system: "",
+      userBlocks: [],
+      maxTokens: 100,
+      parse: (raw) => JSON.parse(raw) as { value: number },
+    });
+    expect(ok).toEqual({ value: 99 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((agent as any).llmCallCount).toBe(1);
+    expect(primary.callCount).toBe(3);
+  });
+
   it("throws LLMCallBudgetExceeded when the cap is hit", async () => {
     // Set the budget low using the env var, then build a fresh agent.
     const original = process.env["UNIVERSAL_BOT_MAX_LLM_CALLS"];

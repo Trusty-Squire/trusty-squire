@@ -2982,12 +2982,22 @@ export class SignupAgent {
       if (this.llmCallCount >= MAX_LLM_CALLS_PER_SIGNUP) {
         throw new LLMCallBudgetExceeded(MAX_LLM_CALLS_PER_SIGNUP);
       }
-      this.llmCallCount += 1;
+      // 0.8.2-rc.8 — count the call only AFTER the upstream actually
+      // replied. The old code incremented before the proxy fetch which
+      // means a proxy 502 (caught & surfaced after the 4-attempt retry
+      // budget exhausts) cost the same budget unit as a real planner
+      // reply. The rc.7 sentry batch run hit this: 2 upstream-blip
+      // retries consumed 2 of the 15 calls on top of the 9 successful
+      // post-verify rounds — the planner ran out of budget on the 8th
+      // permission scope, 5 short of the API key. Failed calls produce
+      // no progress; charging them against the budget is wrong. Behave
+      // like a meter: only count consumption that actually delivered.
       const resp = await client.createMessage({
         system: args.system,
         user: args.userBlocks,
         max_tokens: args.maxTokens,
       });
+      this.llmCallCount += 1;
       this.backendsUsed.push(resp.backend);
       return resp.text;
     };
