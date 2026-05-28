@@ -4818,16 +4818,18 @@ ${formatInventory(input.inventory)}`,
     ).length;
     let roundsSinceLastNewCredential = 0;
     const MAX_ROUNDS_AWAITING_MORE_CREDENTIALS = 3;
-    // 0.8.2-rc.15 — track the credential count at LOOP ENTRY. If the
-    // initial extractCredentials() seed (line 4690) already filled
-    // api_key from an inscrutable hidden field on the post-OAuth
-    // landing (Cloudinary's billing/plans page exposes the api_key
-    // via a federated remoteEntry.js asset chain), we must NOT exit
-    // on round 0 — the loop hasn't had a chance to navigate to the
-    // labeled api-keys page where cloud_name + api_secret live.
-    // Tracked separately from lastCredentialKeyCount because
-    // lastCredentialKeyCount also moves on legitimate accumulation.
-    const seedCredentialKeyCount = lastCredentialKeyCount;
+    // 0.8.2-rc.16 — when the loop's pre-entry seed already had a
+    // credential (Cloudinary's billing/plans page exposes the api_key
+    // via a hidden field that extractCredentials catches), we cannot
+    // trust that result as authoritative for multi-cred: the bot
+    // hasn't navigated to a labeled api-keys page yet, so cloud_name
+    // + api_secret are not yet visible to extractFromDomProximity.
+    // Hold the loop open until the planner has issued at least one
+    // explicit extract step — only then has the bot affirmatively
+    // surveyed the labeled credentials surface.
+    const seedHadCredential =
+      credentials.api_key !== undefined || credentials.username !== undefined;
+    let plannerExtractEmitted = false;
     for (let round = 0; round < args.maxRounds; round++) {
       const currentCredentialKeyCount = Object.keys(credentials).filter(
         (k) => !NON_CREDENTIAL_KEYS.has(k),
@@ -4843,20 +4845,15 @@ ${formatInventory(input.inventory)}`,
       // no credential progress for MAX_ROUNDS_AWAITING_MORE_CREDENTIALS
       // consecutive rounds. Single-cred services keep the legacy
       // behavior of returning the moment api_key surfaces — EXCEPT
-      // on round 0 when nothing new has been extracted since loop
-      // entry: that means the api_key came from the implicit pre-
-      // loop seed (extractCredentials before the loop body), and
-      // the planner hasn't had a chance to navigate yet. Multi-
-      // cred services typically expose api_key via an embedded
-      // SDK config string on the post-OAuth landing page well
-      // before cloud_name + api_secret appear in a labeled table.
+      // when the api_key came from the pre-loop seed and the
+      // planner hasn't yet emitted an explicit extract step. In
+      // that case we let the planner run until extract fires.
       const inMultiCredMode = isMultiCredBundle(credentials);
-      const onlyHaveSeedCredentials =
-        round === 0 && currentCredentialKeyCount === seedCredentialKeyCount;
+      const haveOnlySeedCredentials = seedHadCredential && !plannerExtractEmitted;
       if (
         !inMultiCredMode &&
         (credentials.api_key !== undefined || credentials.username !== undefined) &&
-        !onlyHaveSeedCredentials
+        !haveOnlySeedCredentials
       ) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
         return credentials;
@@ -5380,6 +5377,13 @@ ${formatInventory(input.inventory)}`,
       hint = undefined;
       try {
         if (nextStep.kind === "extract") {
+          // rc.16 — record that the planner has now affirmatively
+          // asked to extract from the current page. The top-of-iter
+          // early-exit consults this to distinguish "api_key came
+          // from a hidden field on a billing page" (don't exit) from
+          // "api_key came from a labeled credential row the planner
+          // just observed" (safe to exit on single-cred services).
+          plannerExtractEmitted = true;
           // 0.8.2-rc.12 — multi-cred preservation + always-on Phase E.
           //
           // Pre-rc.12 the extract step was a tower of "if no api_key,
