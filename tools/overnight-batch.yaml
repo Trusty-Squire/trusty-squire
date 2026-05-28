@@ -18,15 +18,24 @@
   signup_url: https://openrouter.ai/sign-up
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    Copy-button extract path (the F10 case). /sign-up is required for
-    first-time OAuth — Clerk's /sign-in errors with "External Account
-    was not found" when the Google identity has no existing account.
-    /sign-up renders Clerk's OAuth buttons in a brief disabled
-    cl-loading state; rc.20's humanClickLocator click-guard polls for
-    them to enable before clicking. Cloudflare Turnstile is also on
-    the page but doesn't gate the OAuth buttons specifically.
+    Copy-button extract path (the F10 case) — was working pre-0.8.2.
+    On the rc.5 run the page rendered the models browse (45 element(s),
+    44 low-ranked buttons dropped — the "Get API Key" CTA is being
+    suppressed by the button-rank filter). Planner notes confirm it
+    sees "Get API Key" but can't locate it in the surviving inventory
+    after ranking trim. Bot's planning_failed: 0-action plan. This is
+    a button-ranking issue (separate from the rc.5 fixes); revisit
+    once we widen button-cap heuristics or openrouter restores the
+    Clerk OAuth scaffold on first visit.
+    Previously: /sign-up is required for first-time OAuth — Clerk's
+    /sign-in errors with "External Account was not found" when the
+    Google identity has no existing account. /sign-up rendered Clerk's
+    OAuth buttons in a brief disabled cl-loading state; rc.20's
+    humanClickLocator click-guard polled for them to enable before
+    clicking. Cloudflare Turnstile is also on the page but doesn't
+    gate the OAuth buttons specifically.
 - slug: resend
   name: Resend
   signup_url: https://resend.com/signup
@@ -72,11 +81,21 @@
   signup_url: https://app.posthog.com/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
-    Slow SPA — the planner has historically raced the form render.
-    Watch for "no Name input" style failures; bump waitForFormReady
-    if needed.
+    rc.5 update: already-signed-in dashboard detection now correctly
+    fires (Hand off setup + project picker affordances unblock the
+    detectAlreadySignedIn signal set). But PostHog separates its
+    PUBLIC project token (window.JS_POSTHOG_API_KEY, embedded in
+    page JS — the bot extracts this) from the PRIVATE Personal API
+    Key (at us.posthog.com/me/settings/api-keys, behind 2 nav clicks
+    and a key-name modal). The planner finds the JS token first and
+    bails after the bot rejects its non-credential shape. Surfaces
+    as no_credentials_after_already_signed_in. Needs a per-service
+    navigation hint (Settings → User → API keys) or operator should
+    fetch manually. Marking needs-manual until either ships.
+    Previously: Slow SPA — the planner has historically raced the
+    form render.
 - slug: anthropic
   name: Anthropic API
   signup_url: https://console.anthropic.com/login
@@ -156,8 +175,15 @@
   signup_url: https://replicate.com/signin
   oauth_provider: github
   scope_hint: null
-  status: pending
+  status: needs-manual
   notes: |
+    GitHub triggered "verify it's you" device challenge on the rc.3 +
+    rc.5 runs. This is an operator-side state: re-run
+    `npx @trusty-squire/mcp login --provider=github` and clear the
+    challenge in the browser before re-queuing replicate. The bot's
+    OAuth-abort message says exactly this. Not a code fix — the
+    challenge gate is GitHub-side anti-bot triggered by our IP +
+    fingerprint pattern.
     Model hosting + inference. GitHub OAuth is primary (sign-in shows
     GitHub button prominently); Google also offered. API key surfaces
     in account settings after signup.

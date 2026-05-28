@@ -2440,12 +2440,30 @@ export class SignupAgent {
         // Parse/validation failure — includes a hallucinated selector
         // rejected by the inventory check. An error replan.
         const reason = err instanceof Error ? err.message : String(err);
-        if (++errorReplans > MAX_ERROR_REPLANS) {
+        // 0.8.2-rc.6 — mirror the post-verify upstream-blip carve-out.
+        // The form-fill planner is also vulnerable to sustained
+        // upstream-proxy degradation: the rc.3 + rc.5 batch runs
+        // showed openrouter / resend / sentry losing 4+ consecutive
+        // proxy calls in a row when the free-tier upstream was
+        // throttling. Don't punt to planning_failed for upstream
+        // weather — keep re-planning until the budget runs out at the
+        // top-level F2 deadline, OR a true logic failure shows up.
+        const isUpstreamBlip =
+          /\b50[234]\b/.test(reason) ||
+          /\bupstream_(?:error|unreachable)\b/i.test(reason) ||
+          /\bnetwork error\b/i.test(reason);
+        if (!isUpstreamBlip && ++errorReplans > MAX_ERROR_REPLANS) {
           return { kind: "planning_failed", reason: `planner output never validated: ${reason}` };
         }
-        steps.push(`⚠ plan rejected (${reason}) — re-planning`);
-        hint =
-          "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
+        steps.push(
+          isUpstreamBlip
+            ? `⚠ planner request hit a transient upstream blip (${reason}) — retrying`
+            : `⚠ plan rejected (${reason}) — re-planning`,
+        );
+        if (!isUpstreamBlip) {
+          hint =
+            "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
+        }
         continue;
       }
       steps.push(
@@ -4404,6 +4422,15 @@ ${formatInventory(input.inventory)}`,
     let credentials = await this.extractCredentials();
     let loginAttempts = 0;
     let planFailures = 0;
+    // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
+    // gate planFailures (so a transient 502 won't push us into the
+    // terminal stop branch after 4 rounds), but is still bounded so a
+    // permanently-down proxy can't loop forever. Generous because each
+    // blip costs ~5s of network + retry-backoff and the run already
+    // has a 10-min top-level timeout — but tight enough that a truly
+    // dead upstream doesn't burn the whole maxRounds budget on noise.
+    let upstreamBlipRetries = 0;
+    const MAX_UPSTREAM_BLIP_RETRIES = 8;
     const oauth = args.credentials === undefined;
     // Re-plan hint for the next round — set when an `extract` step
     // found no key, which means the visible key text is masked /
@@ -4526,19 +4553,53 @@ ${formatInventory(input.inventory)}`,
         // form-fill planner has. Bounded so a persistently broken
         // planner still terminates.
         const reason = err instanceof Error ? err.message : String(err);
-        planFailures += 1;
+        // 0.8.2-rc.6 — distinguish upstream-blip from planner-logic
+        // failure. The proxy retry-with-backoff (rc.5) handles most
+        // transient 502s within a single call, but during a sustained
+        // upstream degradation the retry budget exhausts and surfaces
+        // here as a planFailure. Counting those toward the 4x stop
+        // threshold is wrong — they're not the planner's fault, the
+        // upstream is just temporarily unavailable. We allow these to
+        // burn a round (forward progress is impossible without a
+        // planner reply) but don't tick planFailures, so a transient
+        // blip can't push us into the terminal stop branch.
+        const isUpstreamBlip =
+          /\b50[234]\b/.test(reason) ||
+          /\bupstream_(?:error|unreachable)\b/i.test(reason) ||
+          /\bnetwork error\b/i.test(reason);
+        if (isUpstreamBlip) {
+          upstreamBlipRetries += 1;
+          if (upstreamBlipRetries > MAX_UPSTREAM_BLIP_RETRIES) {
+            args.steps.push(
+              `Post-verify round ${round}: upstream proxy degraded for ${upstreamBlipRetries} rounds — stopping (likely sustained outage).`,
+            );
+            break;
+          }
+        } else {
+          planFailures += 1;
+        }
         if (planFailures > 3) {
           args.steps.push(
             `Post-verify round ${round}: planner failed ${planFailures}x (${reason}) — stopping.`,
           );
           break;
         }
-        args.steps.push(`Post-verify round ${round}: planner output rejected (${reason}) — re-planning.`);
-        hint =
-          "Your previous step was REJECTED. A click/fill/select `selector` must be " +
-          "EXACTLY the value after `selector=` on one inventory line — copy only that " +
-          "value (it runs to the end of the line), never the leading `[n] tag …` part " +
-          "and never the whole line.";
+        const label = isUpstreamBlip ? "transient upstream blip" : "planner output rejected";
+        args.steps.push(
+          `Post-verify round ${round}: ${label} (${reason})` +
+            (isUpstreamBlip
+              ? ` — retrying (${upstreamBlipRetries}/${MAX_UPSTREAM_BLIP_RETRIES}).`
+              : " — re-planning."),
+        );
+        // No re-plan hint on an upstream blip — the planner's previous
+        // output (if any) was fine; only the request itself failed.
+        if (!isUpstreamBlip) {
+          hint =
+            "Your previous step was REJECTED. A click/fill/select `selector` must be " +
+            "EXACTLY the value after `selector=` on one inventory line — copy only that " +
+            "value (it runs to the end of the line), never the leading `[n] tag …` part " +
+            "and never the whole line.";
+        }
         continue;
       }
       // rc.22 — redact tokens before pushing to the step trail.

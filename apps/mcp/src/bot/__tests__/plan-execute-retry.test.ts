@@ -347,6 +347,76 @@ describe("planExecuteWithRetry", () => {
     expect(steps.some((s) => /not a checkbox/i.test(s))).toBe(true);
   });
 
+  // 0.8.2-rc.6 — Upstream-blip carve-out. The free-tier proxy returns
+  // 502 with {"error":"upstream_error","upstream_status":429} on
+  // sustained upstream throttling. Pre-rc.6, the form-fill planner's
+  // catch block counted these toward errorReplans and gave up after
+  // 2 (resulting in planning_failed: "planner output never validated:
+  // ... 502 ..." — which is misleading because the planner's reply
+  // never came; only the request itself failed). The carve-out
+  // distinguishes upstream blips from planner-logic failures and
+  // allows the loop to keep retrying through transient upstream
+  // weather while STILL bailing fast on a real logic failure.
+  it("does NOT exhaust errorReplans on upstream 502/upstream_error blips", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    // Custom LLM stub that throws the proxy's upstream-blip error
+    // three times in a row, then returns a valid plan. Pre-rc.6 this
+    // failed planning_failed after the 3rd throw; rc.6 should ride
+    // through and submit successfully.
+    class BlippyLLM implements LLMClient {
+      readonly name = "blippy";
+      public calls = 0;
+      async createMessage(): Promise<LLMResponse> {
+        this.calls += 1;
+        if (this.calls <= 3) {
+          throw new Error(
+            'trusty-squire-proxy:free: 502 {"error":"upstream_error","upstream_status":429}',
+          );
+        }
+        return { text: fillPlan("#email", "#go"), backend: this.name };
+      }
+    }
+    const llm = new BlippyLLM();
+
+    // Use the same runLoop machinery, but inject the BlippyLLM.
+    const asController: unknown = browser;
+    if (!isController(asController)) throw new Error("unreachable");
+    const agent = new SignupAgent(asController, llm as unknown as LLMClient);
+    const steps: string[] = [];
+    const fillValues = {
+      email: "bot@inbox.test",
+      password: "Pw-test-12345",
+      name: "Test Bot",
+      username: "testbot12",
+      company: "Trusty Squire",
+      literal: "",
+    };
+    const fn = (
+      agent as unknown as {
+        planExecuteWithRetry: (
+          t: { service: string; email: string },
+          fv: typeof fillValues,
+          s: string[],
+        ) => Promise<Outcome>;
+      }
+    ).planExecuteWithRetry.bind(agent);
+    const outcome = await fn(
+      { service: "Test", email: "bot@inbox.test" },
+      fillValues,
+      steps,
+    );
+
+    expect(outcome.kind).toBe("submitted");
+    expect(llm.calls).toBe(4); // 3 blips + 1 successful plan
+    expect(steps.some((s) => /transient upstream blip/i.test(s))).toBe(true);
+  });
+
   it("re-plans when the submit button is disabled, instead of failing", async () => {
     const browser = new FakeBrowser();
     browser.inventoryQueue = [
