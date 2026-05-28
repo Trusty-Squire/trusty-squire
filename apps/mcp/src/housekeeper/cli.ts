@@ -275,9 +275,24 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       // `${TOKEN_NAME}` literal and services like Railway reject the
       // invalid name silently, leaving the post-Create form unchanged
       // and the credential-extract step thinking "no Copy button on
-      // page." The verifier just needs SOMETHING name-shaped and an
-      // alias that won't collide; per-skill stable names keep the
-      // tokens table on the service side readable.
+      // page."
+      //
+      // 0.8.3 — the previous `verifier-${tag}-${ts}` pattern produced
+      // 24-char alphanumeric+dash strings that LOOK credential-shaped
+      // to the post-Create extract step. On services that render the
+      // token name in the listing alongside a masked key, the
+      // validator-blind extract tier picked up the NAME instead of
+      // the key, and the resulting capture poisoned the next
+      // synthesizer run with a fake "credential" that was actually
+      // the bot's own input.
+      //
+      // The fix: include DOTS in the synthesized values. The
+      // validator-blind tier in replay-skill.ts explicitly skips
+      // candidates containing `.` (`if (cand.includes("/") || cand.includes("."))`)
+      // because credential values almost never have dots, while docs
+      // snippets and route paths do. Dots in our verifier names mean
+      // the synthesizer's heuristics can never confuse them with
+      // credentials.
       const verifierTag = input.skill.skill_id.slice(-6).toLowerCase();
       const tsTag = Date.now().toString(36);
       return await replaySkill({
@@ -285,9 +300,9 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         browser,
         mode: input.mode,
         templateValues: {
-          TOKEN_NAME: `verifier-${verifierTag}-${tsTag}`,
-          EMAIL_ALIAS: `verifier-${verifierTag}-${tsTag}@trustysquire.com`,
-          USER_DISPLAY_NAME: `Verifier ${verifierTag}`,
+          TOKEN_NAME: `verifier.${verifierTag}.${tsTag}`,
+          EMAIL_ALIAS: `verifier.${verifierTag}.${tsTag}@trustysquire.com`,
+          USER_DISPLAY_NAME: `Verifier.${verifierTag}`,
         },
         ...(input.bypassStatusGuard === true ? { bypassStatusGuard: true } : {}),
       });
