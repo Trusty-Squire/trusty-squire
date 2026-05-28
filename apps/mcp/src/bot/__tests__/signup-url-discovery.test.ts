@@ -235,4 +235,89 @@ describe("detectAlreadySignedIn (F17)", () => {
       }),
     ).toBe(false);
   });
+
+  // 0.8.2-rc.5 — PostHog regression. The bot navigated to
+  // https://app.posthog.com/signup which auto-redirected to
+  // us.posthog.com/project/440416/onboarding for the already-signed-in
+  // user. None of signal 1/2/3 matched, so the bot bailed
+  // `oauth_required`. The wizard's only affordances are project picker
+  // + account avatar + "Hand off setup" — a strong post-auth signal.
+  describe("PostHog-class onboarding wizard (TS-1923)", () => {
+    const POSTHOG_URL =
+      "https://us.posthog.com/project/440416/onboarding?next=%2Fhome";
+
+    it("fires on a 'Hand off setup' skip-onboarding affordance", () => {
+      expect(
+        detectAlreadySignedIn({
+          url: POSTHOG_URL,
+          inventory: [
+            mkEl({ tag: "button", visibleText: "Default project" }),
+            mkEl({ tag: "button", visibleText: "BBento" }),
+            mkEl({ tag: "button", visibleText: "Hand off setup" }),
+          ],
+        }),
+      ).toBe(true);
+    });
+
+    it("fires on 'Skip onboarding' / 'Continue to dashboard'", () => {
+      for (const text of [
+        "Skip onboarding",
+        "Skip for now",
+        "Continue to dashboard",
+        "Continue to app",
+        "Invite teammates",
+        "Finish setup",
+      ]) {
+        expect(
+          detectAlreadySignedIn({
+            url: POSTHOG_URL,
+            inventory: [mkEl({ tag: "button", visibleText: text })],
+          }),
+          `should fire on "${text}"`,
+        ).toBe(true);
+      }
+    });
+
+    it("fires on workspace-picker pattern with no signup/OAuth affordance", () => {
+      // Backstop signal — a project/workspace picker visible and no
+      // signup/oauth CTA is highly indicative of authenticated state.
+      expect(
+        detectAlreadySignedIn({
+          url: POSTHOG_URL,
+          inventory: [
+            mkEl({ tag: "button", visibleText: "Default project" }),
+            mkEl({ tag: "a", visibleText: "Settings" }),
+          ],
+        }),
+      ).toBe(true);
+    });
+
+    it("does NOT fire when both a workspace label AND a signup affordance are present", () => {
+      // A signup chooser page that mentions "project" should not trip
+      // the backstop signal.
+      expect(
+        detectAlreadySignedIn({
+          url: POSTHOG_URL,
+          inventory: [
+            mkEl({ tag: "button", visibleText: "Continue with Google" }),
+            mkEl({ tag: "a", visibleText: "Your project starts here" }),
+          ],
+        }),
+      ).toBe(false);
+    });
+
+    it("respects the credential-input precondition (no fire even with handoff button)", () => {
+      // Email/password input visible → not authenticated, no matter
+      // what dashboard-y affordance is also present.
+      expect(
+        detectAlreadySignedIn({
+          url: POSTHOG_URL,
+          inventory: [
+            mkEl({ tag: "input", type: "email" }),
+            mkEl({ tag: "button", visibleText: "Hand off setup" }),
+          ],
+        }),
+      ).toBe(false);
+    });
+  });
 });

@@ -135,6 +135,22 @@ const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
   /\b(?:plan\s+|account\s+)?payment\s+required\b/i,
   /\bcomplet(?:e|ing)\s+(?:billing|payment)\b/i,
   /\bbilling\s+setup\s+(?:is\s+)?required\b/i,
+  // 0.8.2-rc.5 — Together.ai's post-OAuth landing surfaces a "payment
+  // form" gate that the post-verify planner reliably describes in its
+  // `done` reason:
+  //
+  //   "This page shows a payment form, and it's not possible to proceed
+  //    further without inputting payment information."
+  //
+  // None of the rc.39 patterns covered "payment form" / "payment
+  // information" — together fell through to `oauth_onboarding_failed`,
+  // which is misleading (the OAuth handshake succeeded; the wall is
+  // billing). Patterns are scoped to the "form/information requirement"
+  // shape so a marketing tile mentioning "payment information" doesn't
+  // false-positive.
+  /\bpayment\s+form\b/i,
+  /\binput(?:ting)?\s+payment\s+information\b/i,
+  /\benter(?:ing)?\s+payment\s+information\b/i,
 ];
 
 // Negators that, if they appear in the ~30 characters immediately
@@ -1100,6 +1116,55 @@ export function detectAlreadySignedIn(args: {
         return CREATION_CTA.test(t.trim());
       })
     ) {
+      return true;
+    }
+
+    // 0.8.2-rc.5 — PostHog-class onboarding wizard. When the URL is
+    // dashboard-y (path like /project/<id>/onboarding) and the page
+    // shows project-picker / account-menu / onboarding-skip
+    // affordances WITHOUT a credential input or OAuth provider button,
+    // the user is authenticated and the wizard is interstitial. The
+    // rc.3 overnight run for posthog landed exactly here and bailed
+    // `oauth_required` because the inventory had only:
+    //   - "Default project" (project picker)
+    //   - "BBento" (account avatar toggle)
+    //   - "Hand off setup" (skip-onboarding affordance)
+    //
+    // Detect this shape via a second-tier signal set. Conservative —
+    // we already gated on "no credential inputs" and "dashboardyPath",
+    // so a true signup chooser (which has neither of those AND the
+    // path is /signup or /login) cannot reach this branch.
+    const POST_AUTH_AFFORDANCE =
+      /^\s*(?:hand\s*off\s*setup|skip\s*(?:onboarding|setup|for\s*now)|invite\s*(?:teammates|members|your\s*team)|set\s*up\s*billing|finish\s*setup|get\s*started|continue\s*to\s*(?:dashboard|app|console))\s*$/i;
+    // Workspace / project / org picker shape. We pattern-match
+    // generously because PostHog's reads "Default project" but other
+    // SaaS dashboards read "My workspace" / "Acme org" / similar. The
+    // structural cue is "button with one of the workspace-noun words"
+    // — see TS-1923 (PostHog rc.3 regression).
+    const WORKSPACE_PICKER =
+      /\b(?:workspace|workspaces|project(?:s)?|organization|organizations|team(?:s)?)\b/i;
+    const hasPostAuthAffordance = inventory.some((e) =>
+      POST_AUTH_AFFORDANCE.test((e.visibleText ?? e.ariaLabel ?? "").trim()),
+    );
+    if (hasPostAuthAffordance) {
+      // Single signal — the skip-onboarding / handoff verb is strong
+      // enough on its own. No login page ever offers "Hand off setup".
+      return true;
+    }
+    // Weaker pair: a workspace-picker shape AND the page lacks a
+    // primary call-to-action that reads as signup ("Continue with
+    // Google", "Sign up", etc.). Used as a backstop for SPA dashboards
+    // whose only visible buttons are picker toggles.
+    const hasWorkspacePicker = inventory.some((e) =>
+      WORKSPACE_PICKER.test((e.visibleText ?? e.ariaLabel ?? "").trim()),
+    );
+    const hasSignupOrOAuthAffordance = inventory.some((e) => {
+      const t = (e.visibleText ?? e.ariaLabel ?? "").trim();
+      return /\b(?:sign[\s-]*up|signup|continue\s+with|log\s+in\s+with|sign\s+in\s+with)\b/i.test(
+        t,
+      );
+    });
+    if (hasWorkspacePicker && !hasSignupOrOAuthAffordance) {
       return true;
     }
   }

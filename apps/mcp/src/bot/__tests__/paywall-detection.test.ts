@@ -34,6 +34,24 @@ describe("isAtPaywall — positive (real paywalls)", () => {
       true,
     );
   });
+
+  // 0.8.2-rc.5 — Together.ai's post-OAuth landing. The post-verify
+  // planner's `done` reason described the gate, but neither phrase was
+  // in the rc.39 pattern set.
+  it("matches Together.ai's 'payment form' done-reason", () => {
+    expect(
+      isAtPaywall(
+        "This page shows a payment form, and it's not possible to proceed " +
+          "further without inputting payment information.",
+      ),
+    ).toBe(true);
+  });
+
+  it("matches 'enter payment information' phrasing", () => {
+    expect(isAtPaywall("Please enter payment information to continue.")).toBe(
+      true,
+    );
+  });
 });
 
 describe("isAtPaywall — negative (free-plan marketing text)", () => {

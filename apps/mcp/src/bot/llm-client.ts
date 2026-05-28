@@ -224,6 +224,38 @@ export interface ProxyLLMClientOpts {
   tier: "cheap" | "premium" | "free";
 }
 
+// 0.8.2-rc.5 — transient upstream-status set. The proxy returns 502
+// with `{"error":"upstream_error","upstream_status":429}` when its own
+// OpenRouter / Anthropic upstream rate-limits, and `{"error":
+// "upstream_unreachable"}` on a network blip. These are not the bot's
+// fault — the operator's free-tier upstream throttled. Retrying with
+// exponential backoff almost always succeeds within a few hundred
+// milliseconds and lets the planner make forward progress instead of
+// burning a planFailures slot.
+//
+// We do NOT retry on 429 from the proxy itself (per-machine-token rate
+// limit — backing off doesn't help; that's per-hour). We DO retry on
+// 502/503/504 and on the proxy's own "upstream_*" envelopes inside a
+// 200/4xx body (because the proxy sometimes 200s with an error envelope
+// for upstream issues — defensive). Hard cap at 3 attempts so we don't
+// stack 4 seconds of retries on top of every planner call.
+const PROXY_RETRY_STATUSES = new Set([502, 503, 504]);
+const PROXY_RETRY_DELAYS_MS = [250, 500, 1000];
+
+function shouldRetryProxyError(
+  status: number,
+  bodyText: string,
+): boolean {
+  if (PROXY_RETRY_STATUSES.has(status)) return true;
+  // Some upstream paths surface as a 2xx with an error envelope —
+  // tolerate just in case. The actual rc.3 logs showed 502s though, so
+  // this is belt-and-braces.
+  if (status >= 200 && status < 300 && /"error":\s*"upstream_/i.test(bodyText)) {
+    return true;
+  }
+  return false;
+}
+
 export class ProxyLLMClient implements LLMClient {
   readonly name: string;
   private readonly apiBaseUrl: string;
@@ -251,42 +283,93 @@ export class ProxyLLMClient implements LLMClient {
       max_tokens: req.max_tokens,
       tier: this.tier,
     };
+    const payload = JSON.stringify(body);
 
-    const resp = await fetch(`${this.apiBaseUrl}/v1/llm/chat`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-machine-token": this.machineToken,
-      },
-      body: JSON.stringify(body),
-    });
+    // Retry-with-backoff for transient upstream errors. The total
+    // attempt budget is 1 + PROXY_RETRY_DELAYS_MS.length = 4 attempts.
+    // After the last attempt we surface the most recent error to the
+    // caller, same shape as before.
+    let lastErr: Error | null = null;
+    for (
+      let attempt = 0;
+      attempt <= PROXY_RETRY_DELAYS_MS.length;
+      attempt++
+    ) {
+      let resp: Response;
+      try {
+        resp = await fetch(`${this.apiBaseUrl}/v1/llm/chat`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-machine-token": this.machineToken,
+          },
+          body: payload,
+        });
+      } catch (err) {
+        // Network-level failure (DNS, connection reset). Treat as
+        // transient and retry — fetch() throws TypeError("fetch
+        // failed") in this case, which is exactly the upstream blip we
+        // want to ride through.
+        lastErr = err instanceof Error ? err : new Error(String(err));
+        if (attempt < PROXY_RETRY_DELAYS_MS.length) {
+          await new Promise((r) => setTimeout(r, PROXY_RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+        throw new Error(`${this.name}: network error: ${lastErr.message}`);
+      }
 
-    if (resp.status === 429) {
-      const data = (await resp.json().catch(() => ({}))) as { hourly_limit?: number };
-      throw new Error(
-        `${this.name}: rate-limited (hourly cap: ${data.hourly_limit ?? "?"}). Wait or set UNIVERSAL_BOT_MAX_LLM_CALLS=10 to bail sooner.`,
-      );
-    }
-    if (resp.status === 503) {
-      throw new Error(`${this.name}: proxy not configured server-side (503)`);
-    }
-    if (!resp.ok) {
+      if (resp.status === 429) {
+        // Per-machine-token rolling cap — NOT a transient upstream
+        // issue. Backing off doesn't help (the cap is hourly), so
+        // surface immediately the way the original code did.
+        const data = (await resp.json().catch(() => ({}))) as { hourly_limit?: number };
+        throw new Error(
+          `${this.name}: rate-limited (hourly cap: ${data.hourly_limit ?? "?"}). Wait or set UNIVERSAL_BOT_MAX_LLM_CALLS=10 to bail sooner.`,
+        );
+      }
+
+      if (resp.ok) {
+        // Some 200s carry an upstream error envelope — peek at the
+        // body before parsing it as a normal response.
+        const text = await resp.text();
+        if (shouldRetryProxyError(resp.status, text)) {
+          lastErr = new Error(`${this.name}: ${resp.status} ${text.slice(0, 300)}`);
+          if (attempt < PROXY_RETRY_DELAYS_MS.length) {
+            await new Promise((r) => setTimeout(r, PROXY_RETRY_DELAYS_MS[attempt]));
+            continue;
+          }
+          throw lastErr;
+        }
+        const data = JSON.parse(text) as {
+          text: string;
+          backend?: string;
+          input_tokens?: number;
+          output_tokens?: number;
+        };
+        return {
+          text: data.text,
+          backend: data.backend ?? this.name,
+          ...(data.input_tokens !== undefined ? { input_tokens: data.input_tokens } : {}),
+          ...(data.output_tokens !== undefined ? { output_tokens: data.output_tokens } : {}),
+        };
+      }
+
       const text = await resp.text().catch(() => "");
+      if (shouldRetryProxyError(resp.status, text)) {
+        lastErr = new Error(`${this.name}: ${resp.status} ${text.slice(0, 300)}`);
+        if (attempt < PROXY_RETRY_DELAYS_MS.length) {
+          await new Promise((r) => setTimeout(r, PROXY_RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+        throw lastErr;
+      }
+      // Non-retryable error status (e.g. 400 invalid request, 401
+      // unauthorized) — fail fast.
       throw new Error(`${this.name}: ${resp.status} ${text.slice(0, 300)}`);
     }
 
-    const data = (await resp.json()) as {
-      text: string;
-      backend?: string;
-      input_tokens?: number;
-      output_tokens?: number;
-    };
-    return {
-      text: data.text,
-      backend: data.backend ?? this.name,
-      ...(data.input_tokens !== undefined ? { input_tokens: data.input_tokens } : {}),
-      ...(data.output_tokens !== undefined ? { output_tokens: data.output_tokens } : {}),
-    };
+    // Unreachable — the loop either returns, continues, or throws.
+    throw lastErr ?? new Error(`${this.name}: retry budget exhausted`);
   }
 }
 
