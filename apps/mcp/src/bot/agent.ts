@@ -191,6 +191,116 @@ export class LLMCallBudgetExceeded extends Error {
   }
 }
 
+// 0.8.2-rc.10 — common dashboard paths that vendors host their
+// per-account API key UI at. Ordered most-specific first so a
+// fallback navigate doesn't land short of the actual page. Returned
+// as an array of path-strings; the caller composes them onto the
+// origin of the currently-stuck URL and skips any already tried.
+//
+// Patterns harvested from Anthropic (settings/keys), Sentry
+// (settings/account/api/auth-tokens), Neon (settings#api-keys),
+// Render (account/api-keys), Postmark (account/api_tokens),
+// OpenRouter (keys), and a long tail of vendors converging on the
+// same conventions.
+const STUCK_LOOP_FALLBACK_PATHS: readonly string[] = [
+  "/settings/keys",
+  "/settings/api-keys",
+  "/settings/api_keys",
+  "/settings/tokens",
+  "/settings/api-tokens",
+  "/settings/account/api/auth-tokens/",
+  "/account/api-keys",
+  "/account/api_tokens",
+  "/account/keys",
+  "/account/tokens",
+  "/api-keys",
+  "/api_keys",
+  "/keys",
+  "/tokens",
+  "/auth-tokens",
+  "/dashboard/api-keys",
+  "/dashboard/keys",
+];
+
+// 0.8.2-rc.10 — heuristic for "this account already exists on the
+// service and its API keys are masked, with no path to reveal them."
+// The test identity (methoxine@gmail.com) accumulates state across
+// batches; subsequent runs land on a dashboard whose API-keys page
+// shows only the NAMES of existing keys (the values were revealed
+// once at create-time and aren't recoverable). Without this
+// classifier those runs fall through to a generic
+// oauth_onboarding_failed and the harvester treats them like a
+// repairable bug.
+//
+// Conservative rules: must be on a URL that names an API-key page
+// (keys / api-keys / api-tokens / auth-tokens / api_keys), AND the
+// page text shows BOTH a masking glyph pattern (•••, ***, ─•) AND
+// an existing-key word, OR the planner's last reason explicitly
+// describes the same shape.
+const EXISTING_KEY_URL_HINT =
+  /(?:api[-_/]keys?|api[-_/]tokens?|auth[-_/]tokens?|personal[-_/]access[-_/]tokens?|\/keys(?:\b|\/|$)|\/tokens(?:\b|\/|$)|\/settings\/keys\b|\/settings\/tokens\b|#api[-_/]keys\b|#api[-_/]tokens\b)/i;
+const MASKED_KEY_GLYPHS =
+  /(?:•{3,}|\*{3,}|─•|·{3,}|•{3,}|x{6,}|[A-Za-z0-9]{2,4}[•*]{5,})/;
+const EXISTING_KEY_WORDS =
+  /\b(?:existing\s+(?:api\s+)?(?:key|token)|previously\s+created|created\s+by\b|api\s+keys?\s*\(\d+\)|tokens?\s*\(\d+\)|reveal|copy\s+key)\b/i;
+const NO_CREATE_AFFORDANCE_HINT =
+  /\b(?:cannot\s+(?:reveal|extract|read)|values?\s+(?:is\s+)?masked|only\s+shown\s+once|cannot\s+(?:see|view|copy)\s+(?:the\s+)?(?:key|secret|value))\b/i;
+
+export function detectExistingAccountNoExtract(input: {
+  url: string;
+  pageText: string;
+  lastPlannerReason: string;
+}): boolean {
+  if (!EXISTING_KEY_URL_HINT.test(input.url)) return false;
+  // Planner reason naming the no-reveal shape is the strongest single
+  // signal — the planner has SEEN the page and is describing it.
+  if (NO_CREATE_AFFORDANCE_HINT.test(input.lastPlannerReason)) {
+    return true;
+  }
+  // Otherwise require BOTH a mask glyph and an existing-key word in
+  // the page text. Either alone is too weak: vendors decorate
+  // marketing tiles with bullet-pointed dots; "existing" appears in
+  // unrelated dashboard copy.
+  return (
+    MASKED_KEY_GLYPHS.test(input.pageText) &&
+    EXISTING_KEY_WORDS.test(input.pageText)
+  );
+}
+
+// Pick the next fallback URL to try from STUCK_LOOP_FALLBACK_PATHS
+// keyed against the origin of the currently-stuck URL. Returns null
+// when every path has already been attempted. Exported for unit tests.
+export function pickStuckLoopFallbackUrl(
+  currentUrl: string,
+  alreadyTried: ReadonlySet<string>,
+): string | null {
+  let origin: string;
+  try {
+    origin = new URL(currentUrl).origin;
+  } catch {
+    return null;
+  }
+  // Skip a candidate when the current URL's path ALREADY matches it
+  // (case-insensitive, trailing-slash tolerant). The planner is stuck
+  // ON the page the candidate points to — navigating to the same URL
+  // again won't break the cycle, only a different path will.
+  const currentPath = (() => {
+    try {
+      return new URL(currentUrl).pathname.replace(/\/+$/, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+  for (const path of STUCK_LOOP_FALLBACK_PATHS) {
+    const candidate = `${origin}${path}`;
+    if (alreadyTried.has(candidate)) continue;
+    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
+    if (candidatePath === currentPath) continue;
+    return candidate;
+  }
+  return null;
+}
+
 // Best-effort canonical signup URL for a service when the caller
 // didn't pass one. Most dev-SaaS targets (Resend, Postmark, Mailgun,
 // MailerSend, IPInfo, Stripe, PostHog) live at <name>.com/signup —
@@ -3353,6 +3463,40 @@ export class SignupAgent {
               ...this.resultTail(),
             };
           }
+          // 0.8.2-rc.10 — same sentinel-pattern routing the runOAuthFlow
+          // path uses. The post-verify loop sets lastPostVerifyDoneReason
+          // with [stuck_loop] or [existing_account_no_extract] markers
+          // when it bails on a planner-loop or pre-existing-key state;
+          // surface those distinctly rather than as the generic
+          // no_credentials_after_already_signed_in.
+          if (
+            this.lastPostVerifyDoneReason !== null &&
+            this.lastPostVerifyDoneReason.startsWith("[stuck_loop]")
+          ) {
+            return {
+              success: false,
+              error:
+                `planner_stuck: ${task.service}'s dashboard re-picked the same step repeatedly ` +
+                `with no inventory change and the bot's hardcoded API-key URL fallbacks did not ` +
+                `advance the page — finish the signup manually.`,
+              steps,
+              ...this.resultTail(),
+            };
+          }
+          if (
+            this.lastPostVerifyDoneReason !== null &&
+            this.lastPostVerifyDoneReason.startsWith("[existing_account_no_extract]")
+          ) {
+            return {
+              success: false,
+              error:
+                `existing_account_no_extract: ${task.service}'s dashboard shows pre-existing API ` +
+                `keys for this identity but the values are masked and unrecoverable — wipe the ` +
+                `test identity's account on ${task.service} or sign in manually and reveal the key.`,
+              steps,
+              ...this.resultTail(),
+            };
+          }
           return {
             success: false,
             error:
@@ -4114,6 +4258,47 @@ export class SignupAgent {
         ...this.resultTail(),
       };
     }
+    // 0.8.2-rc.10 — planner stuck-loop, fallback URLs exhausted. The
+    // postVerifyLoop marks this with the [stuck_loop] sentinel so the
+    // operator sees a distinct status (it's not an "OAuth onboarding"
+    // failure — OAuth succeeded; the planner got stuck on the
+    // post-OAuth navigation).
+    if (
+      this.lastPostVerifyDoneReason !== null &&
+      this.lastPostVerifyDoneReason.startsWith("[stuck_loop]")
+    ) {
+      return {
+        success: false,
+        error:
+          `planner_stuck: ${task.service}'s post-OAuth dashboard re-picked the same step ` +
+          `repeatedly with no inventory change and the bot's hardcoded API-key URL fallbacks ` +
+          `did not advance the page — finish the signup manually.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
+    // 0.8.2-rc.10 — existing-account state with no extractable
+    // credential. The postVerifyLoop's existing-key detector
+    // (detectExistingAccountNoExtract) classifies a run that lands on
+    // an authenticated dashboard whose API-keys page surfaces only
+    // masked existing keys + no path to a fresh value. Surfacing this
+    // distinctly so the harvester can flag it (e.g. periodically wipe
+    // the chrome profile for the test identity) rather than treat it
+    // as a real bot failure.
+    if (
+      this.lastPostVerifyDoneReason !== null &&
+      this.lastPostVerifyDoneReason.startsWith("[existing_account_no_extract]")
+    ) {
+      return {
+        success: false,
+        error:
+          `existing_account_no_extract: ${task.service}'s dashboard shows pre-existing API ` +
+          `keys for this identity but the values are masked and unrecoverable — wipe the ` +
+          `test identity's account on ${task.service} or sign in manually and reveal the key.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
     return {
       success: false,
       error:
@@ -4500,6 +4685,26 @@ ${formatInventory(input.inventory)}`,
     // navigate produced no progress. Inject a hint forcing a CLICK
     // on something visible in the current inventory.
     let prevNavigateFromUrl: string | null = null;
+    // 0.8.2-rc.10 — escalation for the stuck-loop detector.
+    //
+    // The existing detector injects a re-plan hint when the planner
+    // returns the same kind+selector twice with no inventory change,
+    // but the planner often ignores the "pick a different KIND" hint
+    // and just picks a slightly different SELECTOR for another click.
+    // Anthropic's batch failure (rc.8) showed 6 wasted rounds of this
+    // before a navigate finally broke the cycle: clicking the sidebar
+    // "API Keys" link on a dashboard that wasn't routing to it.
+    //
+    // Escalation strategy: after N stuck-fires within the SAME URL,
+    // try a hard navigate to a guessed API-keys URL (one per origin).
+    // If the URL has already advanced past the stuck zone, reset the
+    // counter. After every fallback URL is exhausted AND we're still
+    // stuck, mark the run [stuck_loop] so the caller surfaces the
+    // dedicated error code instead of the generic
+    // oauth_onboarding_failed.
+    let stuckFiresAtUrl = 0;
+    let lastStuckFireUrl: string | null = null;
+    const triedFallbackUrls = new Set<string>();
     // 0.8.1 — capture chain index is independent of the planner loop
     // round. The loop has two early-`continue` paths (page mid-navigation
     // throw, planner-rejection re-plan) that increment `round` WITHOUT
@@ -4847,6 +5052,63 @@ ${formatInventory(input.inventory)}`,
             uncheckedBoxes.length > 0
               ? `\n\nVisible checkboxes you haven't ticked yet (often a TOS / agreement gate):\n${uncheckedBoxes.join("\n")}\n\nIssue {"kind":"check"} on any that look like agreements / required confirmations.`
               : "";
+          // 0.8.2-rc.10 — escalation. Track stuck-fires per URL so we
+          // can switch tactics once the gentle re-plan hint has clearly
+          // failed (the planner refuses to break the cycle on its own,
+          // see the Anthropic six-round pattern in rc.8).
+          if (lastStuckFireUrl === state.url) {
+            stuckFiresAtUrl += 1;
+          } else {
+            stuckFiresAtUrl = 1;
+            lastStuckFireUrl = state.url;
+          }
+          // After two stuck fires at the same URL, escalate to a
+          // hardcoded /settings/keys-style navigation. Vendors almost
+          // always have ONE canonical path; the dashboard often gates
+          // it behind a sidebar link the planner can't reliably resolve
+          // (Anthropic, Neon, Sentry, Mistral, …). The fallback list is
+          // ordered most-specific first so a service whose dashboard
+          // root happens to share /settings with the API-keys page
+          // doesn't land short of the actual page.
+          if (stuckFiresAtUrl >= 2) {
+            const fallback = pickStuckLoopFallbackUrl(state.url, triedFallbackUrls);
+            if (fallback !== null) {
+              triedFallbackUrls.add(fallback);
+              args.steps.push(
+                `Post-verify: stuck-loop detected ${stuckFiresAtUrl}x at ${state.url} — escalating to a hardcoded API-key URL: ${fallback}`,
+              );
+              try {
+                await this.browser.goto(fallback);
+                await this.browser.waitForInteractiveDom(5, 15_000);
+              } catch (err) {
+                args.steps.push(
+                  `Post-verify: stuck-loop fallback navigate failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+                );
+              }
+              // Reset signature tracking so the next round starts clean
+              // against the new URL's inventory. Don't reset
+              // stuckFiresAtUrl here — it's keyed by URL and the URL
+              // about to be observed will be different, which naturally
+              // resets it on the next loop entry.
+              prevSignature = null;
+              prevInventorySize = -1;
+              hint = undefined;
+              capturedRound += 1;
+              continue;
+            }
+            // Every plausible fallback URL has been tried and we're
+            // still stuck. Mark with the [stuck_loop] sentinel so the
+            // caller surfaces planner_stuck instead of the generic
+            // oauth_onboarding_failed, then break out of the loop.
+            this.lastPostVerifyDoneReason =
+              `[stuck_loop] planner re-picked the same ${nextStep.kind} step ${stuckFiresAtUrl} times at ${state.url} with no inventory change; ` +
+              `hardcoded API-key URL fallbacks exhausted (tried: ${[...triedFallbackUrls].join(", ") || "none"}). ` +
+              `Latest planner reason: ${nextStep.reason}`;
+            args.steps.push(
+              `Post-verify: stuck-loop unresolvable — breaking out with planner_stuck.`,
+            );
+            break;
+          }
           args.steps.push(
             sameSelector
               ? `Post-verify: no-progress detected — same ${nextStep.kind} on same selector, inventory unchanged. Re-planning instead of re-running.`
@@ -5312,6 +5574,45 @@ ${formatInventory(input.inventory)}`,
           // best-effort — synthetic capture is auto-promote plumbing,
           // never load-bearing for the parent signup
         }
+      }
+    }
+    // 0.8.2-rc.10 — existing-account-no-extract classifier. Runs once
+    // at loop exit when no credential surfaced AND no more specific
+    // marker (paywall, anti-bot, stuck_loop) was already set on
+    // lastPostVerifyDoneReason. The test identity
+    // (methoxine@gmail.com) accumulates real signups across batches;
+    // re-running against the same vendor lands the bot on an
+    // authenticated dashboard whose API-keys page shows a masked
+    // pre-existing key it cannot reveal (most vendors only show the
+    // key value once at create-time). Reporting these as
+    // oauth_onboarding_failed is misleading — the bot did navigate
+    // correctly, the state is just unrecoverable for this identity.
+    const alreadyClassified =
+      this.lastPostVerifyDoneReason !== null &&
+      this.lastPostVerifyDoneReason.startsWith("[");
+    if (
+      credentials.api_key === undefined &&
+      credentials.username === undefined &&
+      !alreadyClassified
+    ) {
+      try {
+        const finalState = await this.browser.getState();
+        const finalText = await this.browser.extractText().catch(() => "");
+        if (
+          detectExistingAccountNoExtract({
+            url: finalState.url,
+            pageText: finalText,
+            lastPlannerReason: this.lastPostVerifyDoneReason ?? "",
+          })
+        ) {
+          this.lastPostVerifyDoneReason =
+            `[existing_account_no_extract] at ${finalState.url}; latest planner reason: ${this.lastPostVerifyDoneReason ?? "(none — loop exhausted)"}`;
+          args.steps.push(
+            "Post-verify: classified as existing_account_no_extract — masked pre-existing key on an authenticated dashboard.",
+          );
+        }
+      } catch {
+        // best-effort classifier — never block returning the (empty) credentials
       }
     }
     return credentials;
