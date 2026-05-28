@@ -4,15 +4,15 @@ name: CI
 #
 # The previous workspace-wide `pnpm lint / typecheck / test` had been
 # broken for weeks (31 lint errors, typecheck failures in api +
-# registry-api). It blocked every release and trained agents to ignore
+# registry). It blocked every release and trained agents to ignore
 # CI red. This config scopes to packages with green status so:
 #   - red = real new breakage, not historical noise
 #   - releases can land
 #
 # Skipped (TODO: fix and re-enable):
 #   - typecheck @trusty-squire/api          (prisma model name drift)
-#   - typecheck @trusty-squire/registry-api (prisma + fastify plugin opts)
-#   - test     @trusty-squire/registry-api  (4 failing — same prisma drift)
+#   - typecheck @trusty-squire/registry (prisma + fastify plugin opts)
+#   - test     @trusty-squire/registry  (4 failing — same prisma drift)
 #   - lint                                  (31 errors, mostly apps/web
 #                                           floating promises + unused vars)
 
@@ -43,7 +43,7 @@ jobs:
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package typecheck on the green set. Workspace-wide pnpm -r
-      # typecheck includes apps/api + apps/registry-api which have
+      # typecheck includes apps/api + apps/registry which have
       # pre-existing type errors tracked separately.
       - name: Typecheck (green packages)
         run: |
@@ -85,7 +85,7 @@ jobs:
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package test on the green set. Workspace-wide `pnpm -r test`
-      # currently fails because @trusty-squire/registry-api has 4 failing
+      # currently fails because @trusty-squire/registry has 4 failing
       # tests (prisma model name drift — same root cause as its typecheck
       # failure). Tracked separately.
       - name: Test (green packages)

@@ -3,7 +3,7 @@
 // Strategy: inject a mock `fetchFn` and exercise every branch of
 // fetchActiveSkill + postReplayOutcome. No network, no Fastify.
 // The shape of "success body" matches what GET /skills/:service
-// actually returns from apps/registry-api/src/routes/skills.ts.
+// actually returns from apps/registry/src/routes/skills.ts.
 
 import { describe, expect, it } from "vitest";
 import type { Skill } from "@trusty-squire/adapter-sdk";

@@ -37,7 +37,7 @@ export class PrismaSkillStore implements SkillStore {
   }
 
   static fromClient(client: RegistryPrismaClient): PrismaSkillStore {
-    // For tests + the registry-api server which already maintains a
+    // For tests + the registry server which already maintains a
     // single PrismaClient. Skipping $connect — the caller owns the
     // lifecycle.
     return new PrismaSkillStore(client);

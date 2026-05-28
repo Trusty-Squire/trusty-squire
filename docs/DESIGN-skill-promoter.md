@@ -3,7 +3,7 @@
 **Status:** Draft for review
 **Owner:** TBD
 **Target release:** 0.7.0
-**Depends on:** 0.6.13 (universal bot fixes), existing `onboarding-capture.ts`, `registry-api`
+**Depends on:** 0.6.13 (universal bot fixes), existing `onboarding-capture.ts`, `registry`
 **Supersedes:** the implicit "manual adapter authoring" assumption baked into `packages/adapters/`
 
 ---
@@ -18,7 +18,7 @@ successful run's full state-stream into `apps/mcp/corpus/onboarding/` via
 
 This doc proposes the **Skill Promoter**: a one-way pipeline that ingests
 captures from successful runs, synthesizes a structured Skill record, validates
-it via a clean replay, and publishes it to `registry-api`. Subsequent
+it via a clean replay, and publishes it to `registry`. Subsequent
 `provision` calls check the registry first and replay the skill in
 ~30 seconds instead of cold-pathing through the LLM planner for ~6 minutes.
 
@@ -96,8 +96,8 @@ Three things forcing the conversation:
 2. **The capture infrastructure already exists.** `onboarding-capture.ts` writes
    one JSON per post-verify round, env-gated by `TRUSTY_SQUIRE_ONBOARDING_CAPTURE`.
    This is the harvester's input format. Nobody's reading from it.
-3. **`registry-api` is the right home and is already shipping signed manifests.**
-   `apps/registry-api/src/publish.ts` already does manifest validation + signing
+3. **`registry` is the right home and is already shipping signed manifests.**
+   `apps/registry/src/publish.ts` already does manifest validation + signing
    + insertion. A learned skill is just a manifest with a confidence score and a
    mutable lifecycle. The infrastructure to host both is the same code.
 
@@ -127,7 +127,7 @@ universal bot and the authored adapters. State that explicitly:
 │  • Selector hints + replay graph + credential shape                  │
 │  • Confidence score: rises with successful replays, falls on failure │
 │  • Self-demotes after N consecutive failures (page changed)          │
-│  • Stored in registry-api with signature + mutable success metadata  │
+│  • Stored in registry with signature + mutable success metadata  │
 │  • Best for: the long tail of services the universal bot can solve   │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Tier 1 — UNIVERSAL BOT (pathfinder)                                 │
@@ -148,7 +148,7 @@ A skill is a **structured replay graph** plus enough metadata to make replay
 robust to small page changes.
 
 ```typescript
-// apps/registry-api/src/types.ts (extended)
+// apps/registry/src/types.ts (extended)
 export interface Skill {
   // Identity
   service: string;              // canonical name, lowercase ("railway")
@@ -237,7 +237,7 @@ export interface SkillCredentialSpec {
                                                      │
                                                      ▼
                                             ┌─────────────────┐
-                                            │ registry-api    │
+                                            │ registry    │
                                             │ POST /skills    │
                                             └─────────────────┘
 ```
@@ -306,7 +306,7 @@ just re-uses it.
 ### Stage 4 — Sign
 
 Same `ManifestSigner` as the existing manifest publish flow
-(`apps/registry-api/src/signer.ts`). Skills are signed exactly like adapters.
+(`apps/registry/src/signer.ts`). Skills are signed exactly like adapters.
 This matters because:
 - Consumers (the universal-bot router) verify signatures before replay. A
   tampered skill record can't redirect a signup to a phishing URL.
@@ -314,7 +314,7 @@ This matters because:
 
 ### Stage 5 — Publish
 
-`POST /skills` to `registry-api`. Idempotent on `(service, skill_id)`. If a
+`POST /skills` to `registry`. Idempotent on `(service, skill_id)`. If a
 skill already exists for the service, the new one is published alongside the
 old one with an incremented internal version, and the old one is marked
 `superseded` after the new one's `replays_succeeded` ticks past 3 (rolling
@@ -668,7 +668,7 @@ In rough dependency order:
 3. **Replay engine** — `apps/mcp/src/bot/replay-skill.ts`. Walks a skill,
    executes each step against a browser, falls back to LLM per-step. Returns
    `ReplayOutcome`. (~250 LoC + ~300 LoC tests)
-4. **Registry endpoints** — `apps/registry-api/src/routes/skills.ts`.
+4. **Registry endpoints** — `apps/registry/src/routes/skills.ts`.
    `GET /skills/:service`, `POST /skills`, `POST /skills/:id/replay-outcome`.
    Mirrors the existing manifest routes. Prisma migration adds the `skills`
    and `skill_replays` tables. (~200 LoC + ~250 LoC tests)
@@ -876,7 +876,7 @@ Subagent flagged as **2× under**. Realistic: ~2200 LoC + ~2000 LoC tests.
 | ID | Severity | Finding | Fix |
 |---|---|---|---|
 | **E1** | CRITICAL | Trust boundary inversion — local captures unsigned; hand-edits propagate to signed output | Capture-format integrity hash chain in `onboarding-capture.ts`; promoter verifies before synthesis |
-| **E2** | HIGH | Shared schema in `packages/adapter-sdk` between MCP and registry-api; drift = client-side pass, server-side reject | Version Zod schema; both sides pin major version; registry rejects unknown minor with clear message |
+| **E2** | HIGH | Shared schema in `packages/adapter-sdk` between MCP and registry; drift = client-side pass, server-side reject | Version Zod schema; both sides pin major version; registry rejects unknown minor with clear message |
 | **E3** | MEDIUM | `consecutive_failures` race condition under concurrent replays | Atomic increment in store layer (Postgres `UPDATE … SET consecutive_failures = consecutive_failures + 1`) |
 | **E4** | HIGH | Replay-test session reuse (Open Q2) unresolved — structural blocker | Dry-mode default, `--full` opt-in; codify in design before implementation |
 | **E5** | MEDIUM | Replay engine estimate ~250 LoC is 2-3× under given per-step LLM-fallback integration | Re-estimate to ~600 LoC |
@@ -941,7 +941,7 @@ Subagent flagged as **2× under**. Realistic: ~2200 LoC + ~2000 LoC tests.
 
 | ID | Severity | Finding | Fix |
 |---|---|---|---|
-| **D1** | CRITICAL | Capture upload at publish missing — `source_run_ids` point to local laptop dirs that won't exist 6 months later | Content-hash captures into registry-api as sidecars; reference by hash |
+| **D1** | CRITICAL | Capture upload at publish missing — `source_run_ids` point to local laptop dirs that won't exist 6 months later | Content-hash captures into registry as sidecars; reference by hash |
 | **D2** | CRITICAL | Structured rejection records absent in `corpus/skills-failed/` and `skills-pending/` | Mandatory `rejection.json` sibling: `{stage, error_kind, message, offending_step?, expected?, actual?, synthesizer_version, replay_test_log_path}` |
 | **D3** | HIGH | Full CLI surface unspecified | Spec all commands: `skill:promote | list | show | diff | edit | demote | reactivate | replay-test | delete` with flags (`--dry-run | --json | --service | --run-id | --from-pending | --force`) and exit codes per error family |
 | **D4** | HIGH | Schema in doc, not code | Zod `.describe()` on every field; auto-generate `docs/skill-schema.md` |

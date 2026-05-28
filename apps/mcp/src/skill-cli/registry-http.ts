@@ -135,7 +135,7 @@ export function clientFromEnvOrThrow(opts?: Partial<RegistryHttpOpts>): Registry
   if (baseUrl === undefined || baseUrl.trim().length === 0) {
     throw new CliExit(
       ExitCode.CONFIG,
-      "TRUSTY_SQUIRE_REGISTRY_URL is not set. Set it to the registry-api base URL " +
+      "TRUSTY_SQUIRE_REGISTRY_URL is not set. Set it to the registry base URL " +
         "(e.g. https://registry.trustysquire.com) before running skill commands.",
     );
   }

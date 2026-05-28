@@ -36,7 +36,7 @@ trusty-squire/
 │   └── adapters/
 │       └── resend/         # Reference adapter (chunk 3)
 └── apps/
-    ├── registry-api/       # Adapter manifest registry (chunk 9)
+    ├── registry/       # Adapter manifest registry (chunk 9)
     ├── api/                # Main backend gateway (chunk 10)
     ├── mcp/                # MCP server for coding agents (chunk 11)
     └── pwa/                # User-facing web app (chunk 12)

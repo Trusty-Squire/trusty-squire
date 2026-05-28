@@ -1,4 +1,4 @@
-// HTTP client wrapping calls to apps/api + apps/registry-api.
+// HTTP client wrapping calls to apps/api + apps/registry.
 //
 // All methods return parsed JSON or throw a typed error. The client
 // is the only thing the MCP tools touch — tests inject a mock to
@@ -32,10 +32,10 @@ export interface ApiClientConfig {
   fetch?: typeof fetch;
   // Self-reported in headers so the API ledger can attribute actions.
   agentIdentity?: string;
-  // Account identifier — sent as `x-account-id` to the registry-api,
+  // Account identifier — sent as `x-account-id` to the registry,
   // which uses it for scoping (extract-failure snapshots, skill
   // uploads, etc.). Optional because dev/test MCPs may not yet have
-  // a paired account; the registry-api falls back to "anonymous"
+  // a paired account; the registry falls back to "anonymous"
   // when this header is missing.
   accountId?: string;
 }
@@ -162,7 +162,7 @@ export class ApiClient {
 
   // Upload a DOM + screenshot snapshot from a universal-bot run
   // where extractCredentials() returned null. Lives on the
-  // registry-api (not apps/api) because the diagnostic data is
+  // registry (not apps/api) because the diagnostic data is
   // operator-facing, not a hot-path workflow. Best-effort: failures
   // here MUST NOT abort the signup. Caller wraps in try/catch.
   async uploadExtractFailure(input: {
@@ -290,7 +290,7 @@ export class ApiClient {
     if (this.config.agentIdentity !== undefined) {
       h["X-Squire-Agent-Identity"] = this.config.agentIdentity;
     }
-    // The registry-api scopes its reads to `x-account-id`. Main API
+    // The registry scopes its reads to `x-account-id`. Main API
     // ignores unknown headers, so it's safe to always send.
     if (this.config.accountId !== undefined) {
       h["x-account-id"] = this.config.accountId;

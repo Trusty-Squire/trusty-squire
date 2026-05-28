@@ -11,7 +11,7 @@
 //   help
 //
 // Environment:
-//   TRUSTY_SQUIRE_REGISTRY_URL — base URL of the registry-api (required)
+//   TRUSTY_SQUIRE_REGISTRY_URL — base URL of the registry (required)
 //   TRUSTY_SQUIRE_ACCOUNT_ID   — x-account-id header value (optional)
 //
 // Exit codes — see errors.ts (ExitCode). Distinct codes per failure
@@ -1208,7 +1208,7 @@ Subcommands:
               Print this message.
 
 Environment:
-  TRUSTY_SQUIRE_REGISTRY_URL    Required. Base URL of registry-api.
+  TRUSTY_SQUIRE_REGISTRY_URL    Required. Base URL of registry.
   TRUSTY_SQUIRE_ACCOUNT_ID      Optional. Sent as x-account-id.
 
 Exit codes:

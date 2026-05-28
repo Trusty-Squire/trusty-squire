@@ -1,4 +1,4 @@
-# fly.toml — registry-api (Tier-2 Learned Skill registry).
+# fly.toml — registry (Tier-2 Learned Skill registry).
 #
 # Distinct from apps/api/fly.toml (which runs the universal-bot
 # orchestrator API at trusty-squire-api). This is `trusty-squire-registry`,
@@ -25,7 +25,7 @@ primary_region = "iad"
 # changes land before any request hits the new code. If migrate
 # fails, fly aborts the deploy and keeps serving the old version.
 [deploy]
-  release_command = "pnpm -F @trusty-squire/registry-api exec prisma migrate deploy --schema=/app/apps/registry-api/prisma/schema.prisma"
+  release_command = "pnpm -F @trusty-squire/registry exec prisma migrate deploy --schema=/app/apps/registry/prisma/schema.prisma"
 
 [env]
   NODE_ENV = "production"

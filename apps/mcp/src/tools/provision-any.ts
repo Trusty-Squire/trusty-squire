@@ -763,7 +763,7 @@ async function runSignupTask(
       // surface live progress (the bot pushes into ctx.stepsSink).
       stepsSink: ctx.stepsSink,
       // Diagnostic uploader — auto-uploads DOM + screenshot snapshots
-      // to the registry-api whenever extractCredentials() returns
+      // to the registry whenever extractCredentials() returns
       // null. Lets us diagnose UI-shape regressions without users
       // needing to enable debug env vars. Best-effort; failures here
       // never abort the signup. Scoped by account_id so the matching
@@ -1244,7 +1244,7 @@ function buildExtractFailureUploader(
   html: string;
   screenshot_jpeg_base64?: string;
 }) => Promise<void> {
-  // The registry-api lives at a separate origin. Resolution order
+  // The registry lives at a separate origin. Resolution order
   // matches the rest of the MCP: explicit env override, then prod
   // default. Defined here (not as a module const) so tests can flip
   // the env var and re-build the uploader.

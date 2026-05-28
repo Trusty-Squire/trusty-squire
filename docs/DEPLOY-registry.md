@@ -1,6 +1,6 @@
-# Deploying `registry-api` to Fly.io
+# Deploying `registry` to Fly.io
 
-The registry-api is the Skill Promoter backend — it stores the
+The registry is the Skill Promoter backend — it stores the
 Tier-2 Learned Skills the MCP router serves before falling through
 to the universal bot.
 
@@ -12,7 +12,7 @@ checklist. Routine deploys after first-time setup are one command:
 
 ```
 ┌─────────────────────┐         ┌──────────────────────────┐
-│ trusty-squire MCP   │◀────────│ registry-api             │
+│ trusty-squire MCP   │◀────────│ registry             │
 │ (router phase)      │  HTTPS  │ trusty-squire-registry   │
 └─────────────────────┘         │ (this app)               │
         │                       │                          │
@@ -40,7 +40,7 @@ You'll need:
 ### 1. Generate the Ed25519 signing key
 
 The registry signs every skill envelope as it stores it. The
-private key is held by registry-api only; the public key gets
+private key is held by registry only; the public key gets
 distributed to anyone verifying skills.
 
 ```bash
@@ -82,7 +82,7 @@ fly secrets set --app trusty-squire-registry \
 ### 3. Create the Fly app
 
 ```bash
-cd apps/registry-api
+cd apps/registry
 fly launch --no-deploy --copy-config --name trusty-squire-registry --region iad
 ```
 
@@ -103,7 +103,7 @@ fly secrets set --app trusty-squire-registry \
 ### 5. Deploy
 
 ```bash
-cd apps/registry-api
+cd apps/registry
 fly deploy
 ```
 
@@ -161,7 +161,7 @@ npx @trusty-squire/mcp skill show 01HZZZNONEXISTENTSKILLID0X
 Once first-time setup is done:
 
 ```bash
-cd apps/registry-api
+cd apps/registry
 fly deploy
 ```
 
@@ -182,7 +182,7 @@ Failed to load /node_modules/zod/lib/index.mjs (imported by
 …the Dockerfile is missing `--shamefully-hoist` on the
 `pnpm install` and/or `--preserve-symlinks --preserve-symlinks-main`
 on the runtime CMD. Both are present in
-`apps/registry-api/Dockerfile.fly` as of phase 8 fix
+`apps/registry/Dockerfile.fly` as of phase 8 fix
 (commit acd4671). If the file is hand-edited and you strip them
 out, the runtime can't resolve transitive deps imported from
 workspace-package `dist/` files. Vitest masks this in dev because

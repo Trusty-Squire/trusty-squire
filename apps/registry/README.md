@@ -1,4 +1,4 @@
-# registry-api
+# registry
 
 Adapter manifest registry. Decouples adapter releases from runtime releases; provides kill-switch (`disabled_at`) without redeploying the runtime.
 
@@ -9,7 +9,7 @@ publish CLI ──→ Postgres (trusty_squire_registry) ──→ HTTP ──→
 ## Local dev
 
 ```bash
-pnpm --filter @trusty-squire/registry-api dev
+pnpm --filter @trusty-squire/registry dev
 # Listens on :3001 by default. Override with REGISTRY_API_PORT.
 ```
 

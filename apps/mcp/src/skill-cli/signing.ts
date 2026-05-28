@@ -1,6 +1,6 @@
 // Client-side Ed25519 signer for skill publishes (Phase 7).
 //
-// Mirrors the registry-api ManifestSigner contract so the bytes the
+// Mirrors the registry ManifestSigner contract so the bytes the
 // server verifies are byte-identical to what we sign here:
 //
 //   sign:   canonicalize(skill) → Ed25519(SHA-512 over those bytes)

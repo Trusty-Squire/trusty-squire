@@ -209,7 +209,7 @@ trusty-squire/
 │   ├── mcp/         The MCP server users install. Bundles the universal
 │   │                signup bot at src/bot/ (Playwright + Claude vision,
 │   │                tiered captcha). The bot is NOT a separate package.
-│   ├── registry-api/Skill registry — published Skill recipes + the
+│   ├── registry/    Skill registry — published Skill recipes + the
 │   │                housekeeper backplane (extract failures, bot-failure
 │   │                aggregation, compat-score). Sole publish surface
 │   │                since the native-provision sunset (0.8).
@@ -335,7 +335,7 @@ inbox database on the next deploy.
 
 ### Skill registry (0.7.0)
 
-Lives at `apps/registry-api/`. Separate Fly app:
+Lives at `apps/registry/`. Separate Fly app:
 `trusty-squire-registry`. Holds skills, capture sidecars, replay
 outcomes, extract failures. The mcp package is its only public
 client (universal bot reports outcomes; skill CLI publishes +

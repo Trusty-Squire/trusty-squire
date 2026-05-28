@@ -92,7 +92,7 @@ memory, auto-resume harvester after fix-rc publishes.
 ### Harvester subagent Phase 5 — scale + multi-machine [strategic]
 services.yaml 15 → 200. Route Cloudflare-protected services to a
 Mac-based harvester (real GPU). Central queue coordination via
-registry-api (not FS state).
+registry (not FS state).
 
 ### services.yaml +10 expansion [~1 hour data curation]
 Bring the queue from 15 → 25 with confident Google-OAuth additions:

@@ -158,7 +158,7 @@ Lives in the MCP package (shipped with each install) — simpler than a registry
 ## Tests
 
 - `apps/mcp/src/data/__tests__/service-categories.test.ts` — lookup by slug, category peers.
-- `apps/registry-api/src/routes/__tests__/services-health.test.ts` — `compatScore` math + classification + alternates ordering.
+- `apps/registry/src/routes/__tests__/services-health.test.ts` — `compatScore` math + classification + alternates ordering.
 - `apps/mcp/src/tools/__tests__/provision-any-recommendation.test.ts` — preflight surfaces recommendation only when state is `hard-block`.
 
 ---

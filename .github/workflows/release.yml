@@ -102,7 +102,7 @@ jobs:
       # Tests are the real safety net — once cleanup lands, re-enable the
       # `pnpm lint` and `pnpm typecheck` steps above the test step.
       #
-      # Scope: only the MCP package tests gate publishing. The registry-api
+      # Scope: only the MCP package tests gate publishing. The registry
       # has pre-existing replay-skill test flakiness that doesn't affect the
       # MCP we're publishing here. Workspace-wide tests still run in ci.yml
       # for signal — they just don't block publishes.

@@ -1,6 +1,6 @@
 // skill-registry-client.ts — HTTP client for the Tier-2 skill
 // registry. Sits between the MCP-side router (provision-any.ts) and
-// the registry-api endpoints added in Phase 4. Three responsibilities:
+// the registry endpoints added in Phase 4. Three responsibilities:
 //
 //   1. Fetch the active skill for a service (`GET /skills/:service`),
 //      validate the signed payload via the SkillSchema, and return a
@@ -31,7 +31,7 @@ import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
 // ── Public API ───────────────────────────────────────────────────────
 
 export interface SkillRegistryClientOpts {
-  /** Base URL for the registry-api. e.g. https://registry.trustysquire.com */
+  /** Base URL for the registry. e.g. https://registry.trustysquire.com */
   baseUrl: string;
   /**
    * Request timeout in ms. Default 3s — short enough that a
@@ -100,7 +100,7 @@ export interface PostReplayOutcomeResult {
 }
 
 // T44 — compatibility-score response from /v1/services/:slug/health.
-// Shape mirrors the registry-api route exactly so a malformed cast
+// Shape mirrors the registry route exactly so a malformed cast
 // here turns into a JSON parse error, not a silently-wrong feature.
 export interface ServiceHealthAlternate {
   service: string;
@@ -203,7 +203,7 @@ export class SkillRegistryClient {
       };
     }
 
-    // Defensive parsing. The registry-api should always return this
+    // Defensive parsing. The registry should always return this
     // shape, but a version mismatch or bad deploy could send something
     // we don't recognise — fail open rather than crash.
     if (

@@ -2,8 +2,8 @@
 // (the manifest equivalent) but for the SkillRecord + SkillReplayRecord
 // tables. Two implementations live alongside this interface:
 //
-//   - InMemorySkillStore   (apps/registry-api/src/skill-store-memory.ts)
-//   - PrismaSkillStore     (apps/registry-api/src/prisma-skill-store.ts)
+//   - InMemorySkillStore   (apps/registry/src/skill-store-memory.ts)
+//   - PrismaSkillStore     (apps/registry/src/prisma-skill-store.ts)
 //
 // Tests use the in-memory store; production wires up Prisma.
 

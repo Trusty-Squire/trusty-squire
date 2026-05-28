@@ -1,4 +1,4 @@
-// registry-api server bootstrap. Defaults to in-memory stores for
+// Skill registry server bootstrap. Defaults to in-memory stores for
 // dev — production wires Prisma-backed stores at boot (out-of-package
 // to keep this app's dep surface minimal).
 
@@ -50,7 +50,7 @@ export interface BuildServerOpts {
   // env → undefined.
   skillVerifyPublicKey?: string;
   // Account ID resolver — production wires this to JWT middleware
-  // (or whatever auth scheme registry-api ends up adopting). Tests
+  // (or whatever auth scheme the registry ends up adopting). Tests
   // inject a header reader.
   resolveAccountId?: (req: { headers: Record<string, unknown> }) => string;
   // T20 — Demotion webhook URL. Defaults to the env var
@@ -93,7 +93,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   //   1. Explicit opts.signer (tests inject one)
   //   2. ADAPTER_SIGNING_PRIVATE_KEY env (production — base64url PKCS8)
   //   3. Ephemeral key (dev only — restart invalidates every previous
-  //      signature, surfaces as `signed_by: "registry-api-dev"`).
+  //      signature, surfaces as `signed_by: "registry-dev"`).
   //
   // The env path is the production deploy contract. fly.toml ships a
   // placeholder; the real key gets injected via `fly secrets set` and
@@ -102,10 +102,10 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   if (opts.signer !== undefined) {
     signer = opts.signer;
   } else if (process.env.ADAPTER_SIGNING_PRIVATE_KEY !== undefined && process.env.ADAPTER_SIGNING_PRIVATE_KEY.length > 0) {
-    signer = ManifestSigner.fromEnv(process.env, "registry-api");
+    signer = ManifestSigner.fromEnv(process.env, "registry");
   } else {
     const { privateKey } = generateKeyPairSync("ed25519");
-    signer = ManifestSigner.fromKeyObject(privateKey, "registry-api-dev");
+    signer = ManifestSigner.fromKeyObject(privateKey, "registry-dev");
   }
   const resolveAccountId =
     opts.resolveAccountId ??

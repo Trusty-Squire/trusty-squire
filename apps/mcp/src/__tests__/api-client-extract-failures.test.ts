@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../api-client.js";
 
 describe("ApiClient extract-failure diagnostics", () => {
-  it("sends x-account-id to registry-api diagnostic endpoints", async () => {
+  it("sends x-account-id to registry diagnostic endpoints", async () => {
     let capturedUrl = "";
     let capturedHeaders: HeadersInit | undefined;
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

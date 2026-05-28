@@ -1,4 +1,4 @@
-# Fly.io deploy image for registry-api (Tier-2 Learned Skill registry).
+# Fly.io deploy image for registry (Tier-2 Learned Skill registry).
 #
 # Single-stage build, mirrors apps/api/Dockerfile.fly. Builds the whole
 # workspace and runs `node dist/server.js` as the entrypoint. Prisma
@@ -35,15 +35,15 @@ COPY . .
 # around this in dev; `node dist/server.js` in production does not.
 RUN pnpm install --frozen-lockfile --shamefully-hoist
 
-# Generate the Prisma client for registry-api's schema. This writes to
-# apps/registry-api/node_modules/.prisma/registry-client so it does
+# Generate the Prisma client for registry's schema. This writes to
+# apps/registry/node_modules/.prisma/registry-client so it does
 # not collide with other workspace Prisma schemas.
-RUN pnpm -F @trusty-squire/registry-api exec prisma generate --schema=/app/apps/registry-api/prisma/schema.prisma
+RUN pnpm -F @trusty-squire/registry exec prisma generate --schema=/app/apps/registry/prisma/schema.prisma
 
-# Build the adapter-sdk first (registry-api depends on its compiled
-# output for schema validation), then registry-api itself. The
+# Build the adapter-sdk first (registry depends on its compiled
+# output for schema validation), then registry itself. The
 # `...` filter syntax includes dependencies.
-RUN pnpm --filter @trusty-squire/registry-api... build
+RUN pnpm --filter @trusty-squire/registry... build
 
 ENV NODE_ENV=production
 
@@ -65,4 +65,4 @@ EXPOSE 8080
 # /app/node_modules/zod. With --preserve-symlinks, resolution walks
 # `node_modules/@trusty-squire/adapter-sdk → node_modules → /app` and
 # finds /app/node_modules/zod (hoisted by --shamefully-hoist above).
-CMD ["node", "--preserve-symlinks", "--preserve-symlinks-main", "apps/registry-api/dist/server.js"]
+CMD ["node", "--preserve-symlinks", "--preserve-symlinks-main", "apps/registry/dist/server.js"]

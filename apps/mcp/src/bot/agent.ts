@@ -2776,7 +2776,7 @@ export class SignupAgent {
   }
 
   // Diagnostic uploader — best-effort. When set, the post-verify
-  // loop uploads the current DOM + screenshot to the registry-api
+  // loop uploads the current DOM + screenshot to the registry
   // after a failed extract pass, so UI-shape regressions can be
   // diagnosed without users needing to configure debug env vars.
   // Wired from the MCP layer; undefined in unit-test contexts.

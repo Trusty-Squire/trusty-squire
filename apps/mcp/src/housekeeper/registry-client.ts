@@ -1,4 +1,4 @@
-// HTTP client to registry-api's admin endpoints. The verifier worker
+// HTTP client to registry's admin endpoints. The verifier worker
 // uses these to pull the queue and report outcomes; the discovery
 // worker (Phase 6) will use a different set on the same client shape.
 

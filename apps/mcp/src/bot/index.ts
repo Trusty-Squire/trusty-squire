@@ -83,7 +83,7 @@ export interface UniversalSignupRequest {
   // DOM danger-phrase scraper still gates.
   allowBlindOAuthConsent?: boolean | undefined;
   // Diagnostic uploader — best-effort. The MCP layer wires this to
-  // the registry-api's POST /v1/extract-failures endpoint so the
+  // the registry's POST /v1/extract-failures endpoint so the
   // agent can capture DOM + screenshots when extractCredentials()
   // fails despite the LLM asserting a credential was visible.
   // Undefined in unit tests and in installs that haven't yet paired
