@@ -2347,7 +2347,36 @@ export class BrowserController {
         const trimmed = value.trim();
         if (trimmed.length === 0) return;
         const masked = isMaskedShape(trimmed);
-        if (!masked && !isCredentialShape(trimmed)) return;
+        if (!masked && !isCredentialShape(trimmed)) {
+          // 0.8.2-rc.17 — when the whole text-node string has
+          // whitespace (Cloudinary's "Cloud name: dlq4xgrca" sits
+          // in a SINGLE <div> with the label and value glued
+          // together), isCredentialShape rejects the whole string.
+          // Try to split on the canonical label-value separator
+          // patterns ("Label: value", "Label = value", "Label\nvalue")
+          // and re-evaluate each side. The token side gets the
+          // candidate slot; the label side already lives on its own
+          // (we don't need to push it). First-wins on duplicates.
+          const split =
+            /^([A-Za-z][A-Za-z _-]{1,40}?)\s*[:=]\s*([A-Za-z0-9._\-]{4,256})$/.exec(
+              trimmed,
+            );
+          if (split === null) return;
+          const valueToken = split[2];
+          if (valueToken === undefined) return;
+          if (!isCredentialShape(valueToken)) return;
+          if (seen.has(valueToken)) return;
+          seen.add(valueToken);
+          const c = centerOf(el);
+          const label = findNearestLabel(c.x, c.y);
+          out.push({
+            value: valueToken,
+            label,
+            isMasked: false,
+            hasRevealButton: false,
+          });
+          return;
+        }
         if (seen.has(trimmed)) return;
         seen.add(trimmed);
         const c = centerOf(el);
