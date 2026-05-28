@@ -1183,7 +1183,20 @@ export class BrowserController {
     optionMatcher?: string,
   ): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.humanClick(triggerSelector);
+    // 0.8.2-rc.11 — selector normalization. The planner sometimes
+    // emits a selector pointing at a `<label for="X">` instead of the
+    // associated `<input id="X">` — the label has the visible text
+    // ("Project") so the inventory ranking surfaces it as the target.
+    // Clicking a label is NOT equivalent to clicking the input for
+    // react-select: the synthetic focus DOES move to the input via
+    // the `for` association, but no mouse-down lands on the
+    // react-select control, so the menu never opens. Resolve the
+    // label to its associated input here so downstream tiers (the
+    // keyboard fallback in particular) actually see an input target.
+    const normalizedSelector = await this.resolveLabelToInput(
+      triggerSelector,
+    );
+    await this.humanClick(normalizedSelector);
 
     const patternSelectors: readonly string[] = [
       '[role="option"]:visible',
@@ -1207,6 +1220,20 @@ export class BrowserController {
       return;
     }
 
+    // 0.8.2-rc.11 — keyboard-driven react-select fallback. Sentry's
+    // permission-grid combobox (Project--permission, Team--permission,
+    // …) is a react-select 5 instance: clicking the inner <input> only
+    // focuses it; the menu opens on keyboard activity. The standard
+    // pattern is: Alt+Down (or just type a character) to open + filter,
+    // then Enter to commit. Try Alt+Down first so an instance with
+    // visible options but no role="option" still works; then if a
+    // matcher was given, type-to-filter + Enter so a hidden listbox
+    // narrows directly to the right option.
+    if (await this.tryReactSelectKeyboardPick(normalizedSelector, optionMatcher)) {
+      return;
+    }
+    triedDescriptors.push("react-select keyboard (Alt+Down, type-to-filter, Enter)");
+
     // ARIA tiers all empty. Text-based fallback, only if the planner
     // told us WHICH option to pick — without a matcher, "first text
     // on the page" would click unrelated UI.
@@ -1224,11 +1251,164 @@ export class BrowserController {
     }
 
     throw new Error(
-      `combobox ${triggerSelector}: no options found after click. ` +
+      `combobox ${triggerSelector}` +
+        (normalizedSelector !== triggerSelector ? ` (normalized to ${normalizedSelector})` : "") +
+        `: no options found after click. ` +
         `Tried: ${triedDescriptors.join(", ")}. ` +
         `The trigger may not have opened a popover, or the popover uses ` +
         `an option pattern this executor doesn't recognize.`,
     );
+  }
+
+  // 0.8.2-rc.11 — resolve a `<label for="X">` selector to `#X` so the
+  // executor lands on the actual input rather than the label decoration.
+  // The planner-emitted inventory line for Sentry's permission grid
+  // sometimes targets the label (the visible text is "Project", which
+  // lives on the <label>, not the <input>); a click on a label only
+  // synthetically focuses its `for` target, which is insufficient to
+  // open a react-select menu. Returns the original selector unchanged
+  // when the resolution doesn't apply (target isn't a label, has no
+  // `for`, or the `for`-id doesn't resolve to an input).
+  private async resolveLabelToInput(selector: string): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      const resolvedId = await this.page
+        .locator(selector)
+        .first()
+        .evaluate((node) => {
+          if (!(node instanceof HTMLLabelElement)) return null;
+          const forAttr = node.htmlFor;
+          if (forAttr.length === 0) return null;
+          const target = node.ownerDocument.getElementById(forAttr);
+          if (target === null) return null;
+          // Only redirect when the target is input/textarea/select. A
+          // label pointing at a non-form element (rare; React Aria
+          // does it for a labelled-by relationship) shouldn't trigger
+          // the redirect.
+          const tag = target.tagName.toLowerCase();
+          if (tag !== "input" && tag !== "textarea" && tag !== "select") {
+            return null;
+          }
+          return forAttr;
+        });
+      if (resolvedId === null) return selector;
+      // CSS-escape the id so unusual characters (Sentry's `--` separator
+      // is fine, but the helper is defensive against future ids that
+      // include `.`, spaces, …) don't break the locator.
+      const escaped = (
+        typeof (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS?.escape ===
+        "function"
+          ? (globalThis as { CSS: { escape: (s: string) => string } }).CSS.escape(resolvedId)
+          : resolvedId.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1")
+      );
+      return `#${escaped}`;
+    } catch {
+      return selector;
+    }
+  }
+
+  // 0.8.2-rc.11 — keyboard-driven react-select interaction. The
+  // trigger is the inner <input>; opening the menu via mouse click
+  // alone isn't reliable on every react-select instance (Sentry's
+  // permission grid). Sequence:
+  //   1. focus the trigger (the click already happened in
+  //      selectFromCombobox, but a defensive .focus() handles the
+  //      case where the click went to a sibling overlay).
+  //   2. press Alt+ArrowDown — react-select binds this to open the
+  //      menu and select the first option.
+  //   3. if a matcher was given, type its first 1-3 letters to filter
+  //      the menu down to the right option, then press Enter to
+  //      commit.
+  //   4. if no matcher, ArrowDown was already issued — press Enter to
+  //      commit the first option.
+  // Verify via the input's aria-activedescendant or value attribute
+  // changing (react-select updates one or the other on selection).
+  // Returns true on success, false when the page didn't react.
+  private async tryReactSelectKeyboardPick(
+    triggerSelector: string,
+    optionMatcher?: string,
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const triggerLocator = this.page.locator(triggerSelector);
+    try {
+      const tagName = await triggerLocator
+        .first()
+        .evaluate((node) => node.tagName.toLowerCase());
+      // Limit this path to input-typed triggers; native <select> and
+      // <button role="combobox"> are handled by other tiers. The
+      // selectFromCombobox caller has already returned for matching
+      // [role="option"] tiers, so we only reach here on patterns where
+      // the trigger is an input.
+      if (tagName !== "input") return false;
+    } catch {
+      return false;
+    }
+    try {
+      await triggerLocator.first().focus({ timeout: 1500 });
+    } catch {
+      return false;
+    }
+    // Snapshot the input's relevant attributes BEFORE opening so we
+    // can verify that the pick actually committed.
+    const before = await triggerLocator
+      .first()
+      .evaluate((node) => ({
+        activedescendant: node.getAttribute("aria-activedescendant") ?? "",
+        value: node instanceof HTMLInputElement ? node.value : "",
+        // react-select 5 mirrors the selected value into the closest
+        // .css-{hash}-singleValue node; grab the trigger's surrounding
+        // text so a successful pick produces an observable change.
+        surroundingText:
+          node.parentElement?.parentElement?.parentElement?.textContent ?? "",
+      }))
+      .catch(() => ({ activedescendant: "", value: "", surroundingText: "" }));
+
+    // Press Alt+ArrowDown to open + highlight the first option, then
+    // if a matcher exists, type to filter, then Enter.
+    try {
+      await this.page.keyboard.press("Alt+ArrowDown");
+    } catch {
+      return false;
+    }
+    // Wait briefly for the menu to render.
+    await this.wait(0.4);
+    if (optionMatcher !== undefined && optionMatcher.length > 0) {
+      // Type a few characters to filter; react-select narrows on each
+      // keystroke. Capping at 6 keeps the input from overshooting on
+      // a long matcher when the first few characters already narrow
+      // to a single option ("Admin" → typing "Adm" is enough).
+      const typed = optionMatcher.slice(0, 6);
+      try {
+        await triggerLocator.first().pressSequentially(typed, { delay: 25 });
+      } catch {
+        return false;
+      }
+      await this.wait(0.35);
+    }
+    try {
+      await this.page.keyboard.press("Enter");
+    } catch {
+      return false;
+    }
+    await this.wait(0.5);
+
+    const after = await triggerLocator
+      .first()
+      .evaluate((node) => ({
+        activedescendant: node.getAttribute("aria-activedescendant") ?? "",
+        value: node instanceof HTMLInputElement ? node.value : "",
+        surroundingText:
+          node.parentElement?.parentElement?.parentElement?.textContent ?? "",
+      }))
+      .catch(() => ({ activedescendant: "", value: "", surroundingText: "" }));
+    // A successful pick produces at least one observable change.
+    // react-select clears the input's value once a selection commits
+    // (the chosen label moves into a sibling singleValue node), so the
+    // surrounding-text diff is the strongest signal.
+    if (before.surroundingText !== after.surroundingText) return true;
+    if (before.activedescendant !== after.activedescendant) return true;
+    if (before.value !== after.value) return true;
+    return false;
   }
 
   // F11: pick an option from a Playwright Locator already-narrowed to
