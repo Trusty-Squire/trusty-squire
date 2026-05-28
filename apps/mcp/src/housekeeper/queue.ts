@@ -186,6 +186,13 @@ export class AdHocServiceQueue implements QueueProvider {
     // the signup page rather than relying on the bot profile's
     // logged-in-providers cache (often empty on a fresh box).
     private readonly oauthProvider?: "google" | "github",
+    // Optional canonical signup URL — populated by the CLI when the
+    // operator pairs `--service=` with `--from=<yaml>` so single-
+    // service ad-hoc runs benefit from the same curated URLs the
+    // seed queue uses. Without this the bot falls back to
+    // guessSignupUrl(slug) → https://<slug>.com/signup which is
+    // wrong for any non-.com service (ipinfo.io etc.).
+    private readonly signupUrl?: string,
   ) {}
   async fetch(_limit: number): Promise<HousekeeperTask[]> {
     if (this.fired) return [];
@@ -197,7 +204,32 @@ export class AdHocServiceQueue implements QueueProvider {
         ...(this.oauthProvider !== undefined
           ? { oauthProvider: this.oauthProvider }
           : {}),
+        ...(this.signupUrl !== undefined && this.signupUrl.length > 0
+          ? { signupUrl: this.signupUrl }
+          : {}),
       },
     ];
+  }
+}
+
+// Look up one service slug in a YAML seed file. Used by the CLI to
+// pre-populate AdHocServiceQueue with the YAML's signup_url +
+// oauth_provider so `--service=X` matches the seed-queue behaviour
+// when an operator pairs it with `--from=<yaml>`. Returns null when
+// the file isn't found, the slug isn't in the file, or the file is
+// malformed — the caller falls back to the slug-only AdHocServiceQueue.
+export async function lookupServiceInYaml(
+  path: string,
+  slug: string,
+  readFn?: (p: string) => Promise<string>,
+): Promise<YamlServiceEntry | null> {
+  try {
+    const reader = readFn ?? ((p: string) => readFile(p, "utf8"));
+    const text = await reader(path);
+    const parsed = parseYaml(text) as YamlSeedFile | YamlServiceEntry[];
+    const list = Array.isArray(parsed) ? parsed : (parsed.services ?? []);
+    return list.find((e) => e?.slug === slug) ?? null;
+  } catch {
+    return null;
   }
 }

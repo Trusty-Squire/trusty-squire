@@ -8,6 +8,7 @@ import {
   RegistryDiscoveryQueue,
   YamlSeedQueue,
   AdHocServiceQueue,
+  lookupServiceInYaml,
 } from "../queue.js";
 import type { VerifierQueueItem } from "../registry-client.js";
 
@@ -257,5 +258,56 @@ describe("AdHocServiceQueue", () => {
     const queue = new AdHocServiceQueue("railway");
     await queue.fetch(10);
     expect(await queue.fetch(10)).toEqual([]);
+  });
+
+  it("propagates the optional signupUrl onto the task (0.8.1-rc.3)", async () => {
+    const queue = new AdHocServiceQueue("ipinfo", "google", "https://ipinfo.io/signup");
+    const tasks = await queue.fetch(10);
+    expect(tasks).toEqual([
+      {
+        kind: "discover",
+        service: "ipinfo",
+        oauthProvider: "google",
+        signupUrl: "https://ipinfo.io/signup",
+      },
+    ]);
+  });
+});
+
+describe("lookupServiceInYaml", () => {
+  it("returns the matching entry for a known slug", async () => {
+    const yamlText = `services:
+  - { slug: ipinfo, signup_url: 'https://ipinfo.io/signup', oauth_provider: google }
+  - { slug: resend, signup_url: 'https://resend.com/signup' }
+`;
+    const entry = await lookupServiceInYaml(
+      "/fake/path",
+      "ipinfo",
+      async () => yamlText,
+    );
+    expect(entry).toMatchObject({
+      slug: "ipinfo",
+      signup_url: "https://ipinfo.io/signup",
+      oauth_provider: "google",
+    });
+  });
+
+  it("returns null when the slug isn't in the file", async () => {
+    const yamlText = `services:
+  - { slug: resend }
+`;
+    const entry = await lookupServiceInYaml("/fake/path", "ipinfo", async () => yamlText);
+    expect(entry).toBeNull();
+  });
+
+  it("returns null on a read failure rather than throwing", async () => {
+    const entry = await lookupServiceInYaml(
+      "/fake/path",
+      "ipinfo",
+      async () => {
+        throw new Error("ENOENT");
+      },
+    );
+    expect(entry).toBeNull();
   });
 });

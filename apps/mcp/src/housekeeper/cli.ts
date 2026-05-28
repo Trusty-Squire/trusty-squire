@@ -39,6 +39,7 @@ import {
   RegistryDiscoveryQueue,
   YamlSeedQueue,
   AdHocServiceQueue,
+  lookupServiceInYaml,
   type QueueProvider,
 } from "./queue.js";
 import { LogNotifier, type Notifier } from "./notifier.js";
@@ -206,7 +207,34 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // Pick queue provider. --service overrides --queue.
   let queue: QueueProvider;
   if (args.service !== undefined && args.service.length > 0) {
-    queue = new AdHocServiceQueue(args.service, args.oauthProvider);
+    // When --from=<yaml> is also set, try to enrich the ad-hoc task
+    // with that YAML's curated signup_url + oauth_provider for the
+    // matching slug. Without this enrichment, ad-hoc runs against
+    // services with non-.com domains (ipinfo.io, console.anthropic.com)
+    // hit guessSignupUrl(slug) → https://<slug>.com/signup which is
+    // wrong for most non-trivial services. Falls back silently to
+    // slug-only if the YAML doesn't have the slug or can't be parsed.
+    let signupUrl: string | undefined;
+    let oauthProvider = args.oauthProvider;
+    if (args.seedPath !== undefined && args.seedPath.length > 0) {
+      const yamlEntry = await lookupServiceInYaml(args.seedPath, args.service);
+      if (yamlEntry !== null) {
+        if (
+          signupUrl === undefined &&
+          typeof yamlEntry.signup_url === "string" &&
+          yamlEntry.signup_url.length > 0
+        ) {
+          signupUrl = yamlEntry.signup_url;
+        }
+        if (
+          oauthProvider === undefined &&
+          (yamlEntry.oauth_provider === "google" || yamlEntry.oauth_provider === "github")
+        ) {
+          oauthProvider = yamlEntry.oauth_provider;
+        }
+      }
+    }
+    queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl);
   } else if (args.queueMode === "verifier") {
     queue = new RegistryVerifierQueue(client);
   } else if (args.queueMode === "discovery") {
@@ -249,9 +277,14 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   let discover: HousekeeperOpts["discover"];
   if (queue.name !== "verifier") {
     const { runDiscoveryBot } = await import("./discovery-bot.js");
+    // The lambda has to mirror DiscoveryBotRunner's full shape — the
+    // previous version dropped signupUrl on the floor (rc.3 plumbed
+    // the YAML field through the task queue, but the cli's discover
+    // lambda was still constructing a 2-field input and stripping it).
     discover = async (input: {
       service: string;
       oauthProvider?: "google" | "github";
+      signupUrl?: string;
     }) => runDiscoveryBot(input);
   }
 
