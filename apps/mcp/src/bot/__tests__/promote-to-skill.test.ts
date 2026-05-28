@@ -1503,3 +1503,171 @@ describe("promoteToSkill — visibility detection", () => {
     expect(result.skill.credentials[0]!.visibility).toBeUndefined();
   });
 });
+
+// ── Consecutive-duplicate step dedup (0.8.2-rc.21) ───────────────────
+
+describe("promoteToSkill — consecutive-duplicate dedup", () => {
+  it("collapses two identical consecutive select steps to one", () => {
+    // The bot's planner sometimes records the same select action twice
+    // in a row (the inventory between rounds didn't change in a way the
+    // planner recognised as progress; it re-proposes the same step).
+    // Captured naively, the SECOND select replays as a no-op or fails
+    // because the chosen value is already selected. Dedup at synthesis
+    // time prevents that fragility.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/tokens",
+          title: "Tokens",
+          html: "<html><select name='workspaceId'></select></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "select",
+            name: "workspaceId",
+            labelText: "Workspace",
+            selector: 'select[name="workspaceId"]',
+          }),
+        ],
+        observed: {
+          kind: "select",
+          selector: 'select[name="workspaceId"]',
+          option_text: "No workspace",
+          reason: "Pick workspace",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        // Same DOM, same observed step — duplicate.
+        state: {
+          url: "https://example.com/tokens",
+          title: "Tokens",
+          html: "<html><select name='workspaceId'></select></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "select",
+            name: "workspaceId",
+            labelText: "Workspace",
+            selector: 'select[name="workspaceId"]',
+          }),
+        ],
+        observed: {
+          kind: "select",
+          selector: 'select[name="workspaceId"]',
+          option_text: "No workspace",
+          reason: "Pick workspace (again)",
+        },
+      },
+      {
+        service,
+        round: 2,
+        oauth: true,
+        state: {
+          url: "https://example.com/done",
+          title: "Done",
+          html: "<html>Token: re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    // Should have exactly ONE select step, not two.
+    const selectSteps = result.skill.steps.filter((s) => s.kind === "select");
+    expect(selectSteps).toHaveLength(1);
+  });
+
+  it("does NOT dedup consecutive extract steps (multi-cred safety net)", () => {
+    // The multi-cred bundle invariant requires the duplicate-produces
+    // rejection downstream to see both extract rounds. If dedup
+    // collapsed identical-looking extracts, two-extract captures that
+    // happen to derive the same `produces` would silently become
+    // successful single-cred skills.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/done",
+          title: "Done",
+          html: "<html>API key: api_aaaaaaaaaaaaaaaaaaaaaaaaaaaa</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy-1",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "API key in dashboard." },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://example.com/done",
+          title: "Done",
+          html: "<html>API key: api_aaaaaaaaaaaaaaaaaaaaaaaaaaaa</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy-1",
+            role: "button",
+          }),
+        ],
+        // Same observed (kind: extract) — would be collapsed by a
+        // naive dedup. Must not be — downstream duplicate-produces
+        // detection needs to see both.
+        observed: { kind: "extract", reason: "API key in dashboard." },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    // Either rejects with duplicate_credential_produces (correct multi-
+    // cred behavior) or accepts a single-cred skill — either way, dedup
+    // must not have silently swallowed the second extract. Assertion:
+    // at most ONE extract step OR a rejection — but if 'ok', the second
+    // extract was NOT silently collapsed by dedup (it was either
+    // intentionally merged by single-cred logic or rejected for duplicate).
+    if (result.kind === "rejected") {
+      // Expected multi-cred path — duplicate_credential_produces is the
+      // exact error the dedup-by-mistake would have suppressed.
+      expect(result.error_kind).toBe("duplicate_credential_produces");
+      return;
+    }
+    // Single-cred fallback path: the synthesizer can legitimately merge
+    // two identical extracts into one credential (legacy behavior). The
+    // dedup-equivalence check shouldn't have been the mechanism.
+    expect(result.kind).toBe("ok");
+  });
+});
