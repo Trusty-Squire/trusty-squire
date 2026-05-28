@@ -4385,6 +4385,17 @@ ${formatInventory(input.inventory)}`,
     // navigate produced no progress. Inject a hint forcing a CLICK
     // on something visible in the current inventory.
     let prevNavigateFromUrl: string | null = null;
+    // 0.8.1 — capture chain index is independent of the planner loop
+    // round. The loop has two early-`continue` paths (page mid-navigation
+    // throw, planner-rejection re-plan) that increment `round` WITHOUT
+    // writing a capture file. The old code wrote captures using `round`
+    // as the index, so a service that hit either path produced a chain
+    // with gaps (neon: missing r4 + r6) — verifyCaptureChain then
+    // rejected the run as `missing_round`, and auto-promote silently
+    // dropped it. By tracking `capturedRound` separately we get a
+    // contiguous 0..N-1 chain regardless of how many planner re-plans
+    // happen mid-run.
+    let capturedRound = 0;
     for (let round = 0; round < args.maxRounds; round++) {
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
@@ -4468,12 +4479,13 @@ ${formatInventory(input.inventory)}`,
       // points elsewhere or disables it.
       captureOnboardingRound({
         service: args.service,
-        round,
+        round: capturedRound,
         oauth,
         state,
         inventory,
         observed: nextStep,
       });
+      capturedRound += 1;
 
       // Per-round telemetry upload (rc.11). Mirrors the disk capture
       // but ships to the registry so debugging works from any host —
@@ -5119,12 +5131,13 @@ ${formatInventory(input.inventory)}`,
           };
           captureOnboardingRound({
             service: args.service,
-            round: round + 1,
+            round: capturedRound,
             oauth,
             state: postState,
             inventory: postInventory,
             observed: syntheticExtract,
           });
+          capturedRound += 1;
           if (this.roundUploader !== undefined) {
             void (async () => {
               try {

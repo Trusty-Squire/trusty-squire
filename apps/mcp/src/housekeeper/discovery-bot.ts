@@ -152,6 +152,13 @@ export async function runDiscoveryBot(
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).
   if (result.success && cfg.skipAutoPromote !== true && isAutoPromoteEnabled(process.env)) {
+    // Snapshot the sink length so we can flush ONLY the auto-promote
+    // additions to stderr. Before this fix the bot's step trail was
+    // flushed above and then auto-promote silently pushed new entries
+    // onto the same array — they never reached stderr, so operators
+    // saw `promoted=0` in the batch summary and had no diagnostic
+    // surface for why every successful capture failed to publish.
+    const sinkLenBeforePromote = stepsSink.length;
     try {
       await runAutoPromote({
         service: input.service,
@@ -165,6 +172,15 @@ export async function runDiscoveryBot(
       stepsSink.push(
         `[discovery] auto-promote raised: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    const promoteSteps = stepsSink.slice(sinkLenBeforePromote);
+    if (promoteSteps.length > 0) {
+      process.stderr.write(
+        `[housekeeper] ${input.service} auto-promote (${promoteSteps.length} step(s)):\n`,
+      );
+      for (const s of promoteSteps) {
+        process.stderr.write(`  ${s}\n`);
+      }
     }
   }
 
