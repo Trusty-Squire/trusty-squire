@@ -141,44 +141,52 @@ describe("POST /skills", () => {
     await server.close();
   });
 
-  it("accepts a valid Ed25519 signature when skillVerifyPublicKey is configured", async () => {
+  // 0.8.3 — signature is accepted as an opaque field but no longer
+  // enforced. Trust boundary moved to the verifier worker: a forged
+  // or malicious skill that doesn't replay against the live service
+  // rots in pending-review until consecutive failures retire it.
+  // These tests encode the new contract — any signature value lands
+  // in the store; the publish route never returns 401 for signature
+  // shape or mismatch.
+  it("accepts any signature value (signing is no longer enforced)", async () => {
     const { skillStore, signer } = buildTestServer();
-    // Build a matching key-pair so we can produce a real signature
-    // the server's verifier will accept.
-    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-    const publicKeyB64 = publicKey
-      .export({ format: "der", type: "spki" })
-      .toString("base64url");
-    const skill = validSkill();
-    const canonicalJson = canonicalize(skill);
-    if (typeof canonicalJson !== "string") {
-      throw new Error("canonicalize returned non-string");
-    }
-    const signature = Buffer.from(
-      nodeSign(null, Buffer.from(canonicalJson, "utf8"), privateKey),
-    ).toString("base64url");
-
-    const server = await buildServer({
-      skillStore,
-      signer,
-      skillVerifyPublicKey: publicKeyB64,
-    });
+    const server = await buildServer({ skillStore, signer });
 
     const response = await server.inject({
       method: "POST",
       url: "/skills",
-      payload: { skill, signature },
+      payload: {
+        skill: validSkill(),
+        signature: "x".repeat(64), // arbitrary opaque bytes
+      },
     });
 
     expect(response.statusCode).toBe(201);
     await server.close();
   });
 
-  it("rejects a mismatched signature with 401 when skillVerifyPublicKey is configured", async () => {
+  it("accepts a too-short signature (length check removed)", async () => {
     const { skillStore, signer } = buildTestServer();
-    // Configure with one public key, sign with a DIFFERENT private
-    // key — verification must fail even though the signature itself
-    // is well-formed.
+    const server = await buildServer({ skillStore, signer });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill(),
+        signature: "tooshort",
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    await server.close();
+  });
+
+  it("ignores skillVerifyPublicKey when configured (legacy opt is a no-op)", async () => {
+    // The old code path performed Ed25519 verify when this option
+    // was set; the new contract treats the option as advisory only,
+    // so a mismatched signature must still get a 201.
+    const { skillStore, signer } = buildTestServer();
     const { publicKey } = generateKeyPairSync("ed25519");
     const wrongPair = generateKeyPairSync("ed25519");
     const publicKeyB64 = publicKey
@@ -205,27 +213,7 @@ describe("POST /skills", () => {
       payload: { skill, signature },
     });
 
-    expect(response.statusCode).toBe(401);
-    expect(response.json().error).toBe("invalid_signature");
-    await server.close();
-  });
-
-  it("rejects a too-short signature with 401", async () => {
-    const { skillStore, signer } = buildTestServer();
-    const server = await buildServer({ skillStore, signer });
-
-    const response = await server.inject({
-      method: "POST",
-      url: "/skills",
-      payload: {
-        skill: validSkill(),
-        signature: "tooshort",
-      },
-    });
-
-    expect(response.statusCode).toBe(401);
-    expect(response.json().error).toBe("invalid_signature");
-
+    expect(response.statusCode).toBe(201);
     await server.close();
   });
 

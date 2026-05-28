@@ -86,7 +86,8 @@ export class InMemorySkillStore implements SkillStore {
       replays_failed: skill.replays_failed,
       consecutive_failures: skill.consecutive_failures,
       // New skills start un-verified. Phase 2 ships them as
-      // pending-review, the verifier flips them after N=2 wins.
+      // pending-review, the verifier flips them after the first
+      // win (VERIFIER_PROMOTION_THRESHOLD = 1).
       verifier_succeeded: 0,
       verifier_failed: 0,
       consecutive_verifier_failures: 0,

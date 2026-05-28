@@ -15,7 +15,7 @@
 // On a successful signup, the function fires auto-promote (when
 // TRUSTY_SQUIRE_AUTO_PROMOTE is set — default-on as of rc.14) so
 // the captured corpus becomes a pending-review skill the verifier
-// will later promote on N=2.
+// will later promote on the first verifier success.
 
 import { randomBytes } from "node:crypto";
 import { UniversalSignupBot } from "../bot/index.js";

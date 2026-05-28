@@ -95,46 +95,32 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
       });
     }
 
-    // 2. Verify the signature. Two modes:
+    // 2. Signature acceptance.
     //
-    //    (a) `skillVerifyPublicKey` is configured (production) —
-    //        Ed25519 verify against the canonical bytes of the parsed
-    //        skill. A failure here is a 401, full stop; the route is
-    //        the trust boundary, no fallback.
-    //    (b) `skillVerifyPublicKey` is unset (dev/staging) — fall back
-    //        to the length-only stub and log a warn per publish so the
-    //        operator knows verification is off. This mode exists
-    //        because the promoter doesn't yet have a publish path
-    //        (Phase 7); when it lands and the verify key is rolled
-    //        out, leaving it unset becomes a misconfiguration.
-    if (body.signature.length < 16) {
-      return reply.code(401).send({
-        ok: false,
-        error: "invalid_signature",
-        detail: "Signature too short — promoter must sign skills before publishing.",
-      });
-    }
-    if (opts.skillVerifyPublicKey !== undefined) {
-      const ok = verifySkillSignature(
-        skill,
-        body.signature,
-        opts.skillVerifyPublicKey,
-      );
-      if (!ok) {
-        return reply.code(401).send({
-          ok: false,
-          error: "invalid_signature",
-          detail:
-            "Ed25519 signature did not verify against the registry's configured public key.",
-        });
-      }
-    } else {
-      req.log.warn(
-        { skill_id: skill.skill_id, service: skill.service },
-        "skill published without signature verification — SKILL_VERIFY_PUBLIC_KEY is not set. " +
-          "This is acceptable in dev/staging but MUST be set in production.",
-      );
-    }
+    // Historical design (Phase 7) had this route Ed25519-verify
+    // every publish against SKILL_VERIFY_PUBLIC_KEY, with a length-
+    // only fallback when the key was unset. That design assumed
+    // the upload step was the trust boundary — anyone forging a
+    // skill body should be rejected before persistence.
+    //
+    // Real-world architecture differs: every published skill enters
+    // pending-review and only gets promoted to `active` once the
+    // verifier worker has driven a full browser replay that ends
+    // in a validator-passing credential. The verifier IS the trust
+    // signal. A spoofed/malicious skill that doesn't match the
+    // service's live UX fails verification and rots in pending-
+    // review until consecutive failures retire it. Signing solved
+    // a problem (skill-shape spoofing) that the verifier already
+    // owns.
+    //
+    // We still accept the `signature` field on the request body
+    // so existing client emit (provision-any auto-promote +
+    // `mcp skill promote`) keeps working unchanged — it just no
+    // longer matters server-side. Pruning the client emit is a
+    // future cleanup; ordering matters because client and server
+    // upgrades roll out separately.
+    void opts.skillVerifyPublicKey;
+    void verifySkillSignature;
 
     // 3. Persist. SkillConflictError on (skill_id) collision means the
     //    promoter re-ran with the same input — that's idempotent

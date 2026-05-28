@@ -6,7 +6,7 @@
 //   - GET /admin/verifier/queue returns pending-review skills first,
 //     then freshness-due active skills
 //   - POST /admin/skills/:id/verifier-outcome bumps verifier_succeeded
-//     atomically and promotes at threshold (N=2)
+//     atomically and promotes at threshold (1)
 //   - 3 consecutive verifier failures on pending-review → retired
 //   - 3 consecutive verifier failures on active → demoted +
 //     next_freshness_due_at cleared
@@ -201,7 +201,13 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
     await server.close();
   });
 
-  it("bumps counters without changing status on a single success", async () => {
+  // 0.8.3 — VERIFIER_PROMOTION_THRESHOLD dropped from 2 to 1. The
+  // verifier is the trust signal: one full browser replay ending in
+  // a validator-passing credential is enough evidence to flip
+  // pending-review → active. Waiting for a second pass added latency
+  // (skills stalled at succ=1 between queue cycles) without adding
+  // real safety.
+  it("promotes pending-review → active on the first success", async () => {
     const { skillStore, build } = buildAdminServer();
     const server = await build();
     const skillId = id("B1");
@@ -220,14 +226,15 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.transition).toBe("none");
-    expect(body.status).toBe("pending-review");
+    expect(body.transition).toBe("promoted");
+    expect(body.status).toBe("active");
     expect(body.verifier_succeeded).toBe(1);
     expect(body.last_verified_at).not.toBeNull();
+    expect(body.next_freshness_due_at).not.toBeNull();
     await server.close();
   });
 
-  it("promotes pending-review → active on the second success (N=2)", async () => {
+  it("subsequent successes on an already-active skill are no-op transitions", async () => {
     const { skillStore, build } = buildAdminServer();
     const server = await build();
     const skillId = id("B2");
@@ -238,24 +245,25 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
       signed_by: "test",
     });
 
+    // First success promotes.
     await server.inject({
       method: "POST",
       url: `/admin/skills/${skillId}/verifier-outcome`,
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "1/2" },
+      payload: { kind: "success", reason: "first" },
     });
+    // Second success on active just bumps counters.
     const res = await server.inject({
       method: "POST",
       url: `/admin/skills/${skillId}/verifier-outcome`,
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "2/2 — promote" },
+      payload: { kind: "success", reason: "second on active" },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.transition).toBe("promoted");
+    expect(body.transition).toBe("none");
     expect(body.status).toBe("active");
     expect(body.verifier_succeeded).toBe(2);
-    expect(body.next_freshness_due_at).not.toBeNull();
     await server.close();
   });
 
@@ -345,15 +353,9 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
       signed_at: new Date(),
       signed_by: "test",
     });
-    // Single success → no webhook (transition=none).
-    await server.inject({
-      method: "POST",
-      url: `/admin/skills/${skillId}/verifier-outcome`,
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "1/2" },
-    });
-    // Then three failures → retire (verifier_succeeded stays at 1
-    // which is still under threshold, consecutive_failures hits 3).
+    // 3 failures straight from pending-review → retire (no successes
+    // so the threshold-1 promotion path never fires; consecutive
+    // failures hit 3 → retire).
     for (let i = 0; i < 3; i++) {
       await server.inject({
         method: "POST",
@@ -415,19 +417,20 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
       signed_at: new Date(),
       signed_by: "test",
     });
-    // Two successes — should normally promote, but the C11 gate
-    // should hold the skill in pending-review.
+    // First success would promote under the N=1 threshold; the C11
+    // gate must hold. Second success exercises that the gate keeps
+    // holding under repeated wins.
     await server.inject({
       method: "POST",
       url: `/admin/skills/${incomingId}/verifier-outcome`,
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "1/2" },
+      payload: { kind: "success", reason: "first — would normally promote" },
     });
     const res = await server.inject({
       method: "POST",
       url: `/admin/skills/${incomingId}/verifier-outcome`,
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "2/2 — would promote without gate" },
+      payload: { kind: "success", reason: "second — gate should still hold" },
     });
     const body = res.json();
     expect(body.transition).toBe("none");

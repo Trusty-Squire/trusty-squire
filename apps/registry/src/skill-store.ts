@@ -204,7 +204,7 @@ export interface SkillStore {
   /**
    * Record a verifier outcome. Atomically updates verifier_*
    * counters; auto-promotes pending-review → active when
-   * verifier_succeeded reaches the promotion threshold (N=2 today);
+   * verifier_succeeded reaches the promotion threshold (1 today);
    * auto-retires pending-review when consecutive_verifier_failures
    * reaches 3 (the skill never validates); auto-demotes active →
    * demoted when consecutive_verifier_failures reaches 3 (the skill
@@ -267,16 +267,25 @@ export interface RecordVerifierOutcomeResult {
   record: SkillStoreRecord;
   // Describes the side effect (if any) the outcome caused.
   transition:
-    | "promoted"      // pending-review reached N=2 successes → active
+    | "promoted"      // pending-review reached 1 success → active
     | "retired"       // pending-review reached 3 consecutive failures → deleted
     | "demoted"       // active reached 3 consecutive verifier failures → demoted
     | "none";         // counters bumped, no status change
 }
 
 // Promotion threshold — see DESIGN-skill-promoter.md and the
-// closed-loop strategy. N=2 successes from the verifier worker
-// flips pending-review → active.
-export const VERIFIER_PROMOTION_THRESHOLD = 2;
+// closed-loop strategy. ONE verifier success flips pending-review
+// → active. The verifier IS the trust signal: a single full
+// browser replay that ended in a validator-passing credential is
+// strong evidence the skill works against the live service.
+// Waiting for N=2 added latency without adding meaningful safety
+// (a flaky service still flakes on the second pass too) and meant
+// the closed loop stalled with skills sitting at succ=1 forever
+// when the queue cycle didn't naturally bring them back.
+//
+// Demotion still requires 3 consecutive failures — symmetric
+// boldness on entry vs symmetric caution on exit.
+export const VERIFIER_PROMOTION_THRESHOLD = 1;
 
 // Three consecutive failures retire (pending-review) or demote
 // (active). Matches the existing replay-based demotion threshold.

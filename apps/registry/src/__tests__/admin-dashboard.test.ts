@@ -174,7 +174,7 @@ describe("GET /admin (dashboard)", () => {
       url: `/admin?bearer=${ADMIN_BEARER}`,
     });
     expect(res.body).toContain("perplexity");
-    expect(res.body).toContain("0/2"); // verifier_succeeded / threshold
+    expect(res.body).toContain("0/1"); // verifier_succeeded / threshold
     await server.close();
   });
 

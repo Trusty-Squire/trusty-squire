@@ -227,7 +227,7 @@ function renderPendingSection(
       <td>${esc(s.service)}</td>
       <td>${esc(s.version)}</td>
       <td><code>${esc(s.skill_id.slice(0, 10))}…</code></td>
-      <td class="num">${s.verifier_succeeded}/2</td>
+      <td class="num">${s.verifier_succeeded}/1</td>
       <td class="num">${s.consecutive_verifier_failures}/3</td>
       <td>${formatDate(s.created_at)}</td>
     </tr>`;
@@ -235,7 +235,7 @@ function renderPendingSection(
   return section(
     "pending",
     "Pending review",
-    "Awaiting verifier worker (N=2 successful fresh signups to promote; 3 consecutive failures to retire).",
+    "Awaiting verifier worker (1 successful fresh signup to promote; 3 consecutive failures to retire).",
     `<table>
       <thead>
         <tr><th>Service</th><th>Ver.</th><th>ID</th><th>Successes</th><th>Cons. failures</th><th>Created</th></tr>
