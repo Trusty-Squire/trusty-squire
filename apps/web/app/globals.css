@@ -405,6 +405,46 @@ footer{border-top:1px solid var(--line);padding:34px 0}
   background:var(--accent-fill);color:#fff;transition:background .12s}
 .btn-primary:hover{background:var(--accent-fill-h)}
 .btn-primary:disabled{opacity:.6;cursor:default}
+/* Secondary button for the wizard's "Skip" path — same metrics as
+   primary but quieter so the primary CTA stays focal. */
+.btn-secondary{display:flex;align-items:center;justify-content:center;gap:8px;
+  width:100%;padding:12px 16px;border-radius:10px;font:inherit;
+  font-size:14.5px;font-weight:500;cursor:pointer;
+  background:transparent;color:var(--muted);
+  border:1px solid var(--line2);transition:border-color .12s,color .12s}
+.btn-secondary:hover{border-color:var(--accent);color:var(--fg)}
+
+/* Install wizard — vertical step list. The number badges anchor each
+   row left; the title + hint sit beside; per-step actions render
+   below. Disabled steps (gated on prior completion) grey out but
+   still render so the user sees the road ahead. */
+.wizard{list-style:none;padding:0;margin:24px 0 0;display:flex;
+  flex-direction:column;gap:12px}
+.wizard-step{padding:14px;border-radius:12px;border:1px solid var(--line);
+  background:var(--surface);transition:opacity .15s,border-color .15s}
+.wizard-step--disabled{opacity:.45}
+.wizard-step--done{border-color:rgba(125,209,129,.4)}
+.wizard-step-head{display:flex;align-items:flex-start;gap:12px}
+.wizard-step-num{width:26px;height:26px;border-radius:50%;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--raised);border:1px solid var(--line2);
+  font-size:13px;font-weight:600;color:var(--muted)}
+.wizard-step--done .wizard-step-num{background:rgba(125,209,129,.18);
+  border-color:rgba(125,209,129,.45);color:#7dd181}
+.wizard-step--skipped .wizard-step-num{color:var(--muted)}
+.wizard-step-body{flex:1 1 auto;min-width:0}
+.wizard-step-title{font-size:14.5px;font-weight:600;display:flex;
+  align-items:center;gap:10px;flex-wrap:wrap}
+.wizard-step-tag{font-size:11px;font-weight:500;color:var(--muted);
+  background:var(--raised);border:1px solid var(--line2);
+  padding:1px 7px;border-radius:999px;text-transform:uppercase;
+  letter-spacing:.4px}
+.wizard-step-hint{margin-top:3px;font-size:12.5px;color:var(--muted);
+  line-height:1.45}
+.wizard-step-actions{margin-top:14px}
+.wizard-actions{display:flex;flex-direction:column;gap:8px}
+.wizard-finish{margin-top:24px}
+
 .spinner{width:15px;height:15px;border-radius:50%;flex:0 0 auto;
   border:2px solid var(--line2);border-top-color:var(--accent);
   animation:spin .7s linear infinite;display:inline-block}
