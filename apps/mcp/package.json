@@ -1,10 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-<<<<<<< Updated upstream
   "version": "0.8.3-rc.0",
-=======
-  "version": "0.8.3-rc.0",
->>>>>>> Stashed changes
   "mcpName": "io.github.Trusty-Squire/mcp",
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API, with the bundled universal signup bot.",
