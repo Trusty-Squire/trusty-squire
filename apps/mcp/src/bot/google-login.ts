@@ -128,6 +128,34 @@ async function hasProviderSession(
   return cookies.some((c) => target.cookies.includes(c.name));
 }
 
+// Inspect the bot Chrome profile on disk and return the set of OAuth
+// providers whose session cookies are currently present. The marker
+// file at logged-in-providers.json is a write-once memo from prior
+// runs and can lie (cookies expire, the user logs out from the
+// provider's site, etc.). This function is the source of truth.
+//
+// Cost is ~1-1.5s for the persistent-context launch + cookie read +
+// teardown. We only call it at install boundaries (after the install
+// confirm seeds whatever provider the user clicked, before the
+// secondary-provider prompt fires) so the latency is acceptable.
+export async function detectActiveProviderSessions(
+  profileDir: string = CHROME_PROFILE_DIR,
+): Promise<OAuthProviderId[]> {
+  const chromium = resolveChromium();
+  const ctx = await chromium.launchPersistentContext(profileDir, {
+    headless: true,
+  });
+  try {
+    const present: OAuthProviderId[] = [];
+    for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
+      if (await hasProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
+    }
+    return present;
+  } finally {
+    await ctx.close();
+  }
+}
+
 // --- T5: Google auth-page state detection ------------------------------
 // After the bot clicks "Sign in with Google" on a service the browser
 // lands on a Google page. This classifies which one — so the OAuth

@@ -49,6 +49,7 @@ import { openSessionStorage, type SessionData } from "../session.js";
 import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
+  detectActiveProviderSessions,
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
 } from "../bot/google-login.js";
@@ -57,6 +58,7 @@ import {
   clearAllProviderMarkers,
   clearProviderCookies,
   loggedInProviders,
+  markProviderLoggedIn,
 } from "../bot/login-state.js";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
@@ -486,9 +488,34 @@ async function connect(args: Argv): Promise<void> {
   await storage.write(session);
   ui.success(`Session saved (${storage.backendName()})`);
 
-  // Backfill connected_providers from the bot-side marker the browser
-  // confirm seeded. The user's provider choice on the web form
-  // determines which one is present here.
+  // 0.8.1 — the bot's persistent profile may have a stale provider
+  // marker from a previous install (the marker is sticky on disk).
+  // The install confirm above only seeded one provider (whichever
+  // OAuth button the user clicked on trustysquire.com), so trusting
+  // the marker would make the step-2 secondary-provider prompt
+  // short-circuit incorrectly. Probe live cookies + rewrite the
+  // marker so loggedInProviders() returns ground truth.
+  try {
+    const actual = await ui.withSpinner({
+      start: "Checking provider sessions",
+      done: "Provider sessions checked",
+      fail: () => "Provider session check failed (continuing)",
+      task: () => detectActiveProviderSessions(),
+    });
+    if (actual !== null) {
+      clearAllProviderMarkers();
+      for (const p of actual) markProviderLoggedIn(p);
+    }
+  } catch {
+    // Best-effort: a probe failure (rare — playwright launch should
+    // succeed if the install confirm just opened Chrome there) just
+    // leaves the marker as-is. The downstream secondary prompt's
+    // logic still has the maybeOfferSecondaryProvider escape hatch
+    // (yes/no prompt with the default-yes), so the user can still
+    // reach GitHub even if we mis-identified the live state.
+  }
+
+  // Backfill connected_providers from the (now-fresh) bot-side marker.
   for (const p of loggedInProviders()) await recordConnectedProvider(p);
 
   await writeAgentConfig(target, agent, args);
