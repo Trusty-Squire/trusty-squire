@@ -40,6 +40,7 @@ export type ReplayRunner = (input: {
 export type DiscoveryBotRunner = (input: {
   service: string;
   oauthProvider?: "google" | "github";
+  signupUrl?: string;
 }) => Promise<DiscoveryBotOutcome>;
 
 export interface HousekeeperOpts {
@@ -307,6 +308,7 @@ async function handleDiscover(
     ...(task.oauthProvider !== undefined
       ? { oauthProvider: task.oauthProvider }
       : {}),
+    ...(task.signupUrl !== undefined ? { signupUrl: task.signupUrl } : {}),
   });
   log(`discover end:   ${task.service} → ${outcome.kind} (${outcome.reason.slice(0, 120)})`);
   return outcome;

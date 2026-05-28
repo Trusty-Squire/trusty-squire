@@ -62,7 +62,12 @@ function flushStepTrail(steps: readonly string[], service: string): void {
 }
 
 export async function runDiscoveryBot(
-  input: { service: string; oauthProvider?: "google" | "github" },
+  input: {
+    service: string;
+    oauthProvider?: "google" | "github";
+    /** Canonical signup URL (curated YAML override). */
+    signupUrl?: string;
+  },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
   const machineToken = cfg.machineToken ?? process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
@@ -135,6 +140,13 @@ export async function runDiscoveryBot(
       ...(input.oauthProvider !== undefined
         ? { oauthProvider: input.oauthProvider }
         : {}),
+      // YAML-declared signup URL overrides guessSignupUrl(slug). The
+      // guess defaults to https://<slug>.com/signup which gets the
+      // wrong host for any non-`.com` service (ipinfo.io, anthropic
+      // console subdomain, etc.). Five oauth_required failures in the
+      // overnight batch were really wrong-URL navigations to parked
+      // / unrelated `.com` pages that didn't have the OAuth button.
+      ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
     });
   } catch (err) {
     // Dump the step trail before bailing — without it, debugging

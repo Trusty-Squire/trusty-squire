@@ -201,6 +201,33 @@ describe("runDiscoveryBot — outcome mapping", () => {
     expect(result.kind).toBe("failed");
     expect((result as { reason: string }).reason).toMatch(/createAlias.*inbox 503/);
   });
+
+  it("forwards the YAML signupUrl to bot.signup (0.8.1-rc.3)", async () => {
+    let capturedSignupUrl: string | undefined;
+    const bot = {
+      signup: async (args: { signupUrl?: string }) => {
+        capturedSignupUrl = args.signupUrl;
+        return {
+          success: true,
+          credentials: { api_key: "sk-test-yaml-url" },
+          steps: [],
+          via: "bot",
+        } as SignupResult;
+      },
+    };
+    const result = await runDiscoveryBot(
+      { service: "ipinfo", signupUrl: "https://ipinfo.io/signup" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        skipAutoPromote: true,
+      },
+    );
+    expect(result.kind).toBe("ok");
+    expect(capturedSignupUrl).toBe("https://ipinfo.io/signup");
+  });
 });
 
 // 0.8.1 — auto-promote steps were pushed to the bot's step trail AFTER

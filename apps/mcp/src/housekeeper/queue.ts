@@ -43,6 +43,15 @@ export type HousekeeperTask =
       // through to UniversalSignupBot.signup() so the OAuth-first
       // detection actually fires when the YAML declares one.
       oauthProvider?: "google" | "github";
+      // Optional canonical signup URL from the curated YAML. Without
+      // this the bot calls guessSignupUrl(slug) which defaults to
+      // https://<slug>.com/signup — wrong for any service whose
+      // public domain isn't `.com` (ipinfo.io, plaid.com vs api.plaid,
+      // anthropic.com vs console.anthropic.com). The YAML knows the
+      // real URL; pre-0.8.1-rc.3 it was read into YamlServiceEntry
+      // but never plumbed to the task. Fix surfaces 5 oauth_required
+      // failures that were really wrong-URL navigations.
+      signupUrl?: string;
       // Optional metadata for the notifier surfaces (telegram, GH issue).
       // Discovery candidates come with telemetry counts; seed/ad-hoc
       // tasks leave this null.
@@ -143,6 +152,9 @@ export class YamlSeedQueue implements QueueProvider {
         kind: "discover" as const,
         service: e.slug,
         ...(oauthProvider !== undefined ? { oauthProvider } : {}),
+        ...(e.signup_url !== undefined && e.signup_url.length > 0
+          ? { signupUrl: e.signup_url }
+          : {}),
       };
     });
   }
