@@ -366,7 +366,11 @@ async function connect(args: Argv): Promise<void> {
     clearAllProviderMarkers();
     await clearProviderCookies();
   }
-  ui.section(1, 2, "Connect Google");
+  // Step 1 opens trustysquire's install/confirm page in the bot's
+  // Chrome. That page accepts either Google or GitHub — so the label
+  // here is neutral. Step 2 (maybeOfferSecondaryProvider) prompts for
+  // whichever provider is still missing afterwards.
+  ui.section(1, 2, "Sign in to Trusty Squire");
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
@@ -554,7 +558,8 @@ async function maybeOfferSecondaryProvider(args: Argv): Promise<void> {
   // (or stale Chrome-profile cookies from a prior session) suggests
   // both providers are already connected, prompt step 2 anyway —
   // otherwise the user can never re-seed the secondary provider via
-  // `connect`. Step 1's label is "Connect Google", so we treat GitHub
+  // `connect`. Step 1 accepts either provider on the trustysquire
+  // install page, so we treat GitHub
   // as the secondary in that case.
   if (!args.forceRelogin) {
     if (present.size === 0) return; // step 1 didn't seed anything — no basis to ask
@@ -707,8 +712,13 @@ async function runInstallClaim(
   // threads through to the headless rig so it can shorten the
   // cloudflared tunnel URL to `trustysquire.ai/g/<slug>` before
   // printing it in the banner (G15).
+  //
+  // 0.8.0-rc.3 — append `?already=<csv>` listing providers the bot
+  // already has a cookie for, so apps/web/install can render a ✓
+  // badge on those rows and the user doesn't re-sign-in unnecessarily
+  // on a `--force-relogin` or follow-up `connect` run.
   const result = await openInstallConfirmInBotChrome({
-    confirmUrl: initiate.confirm_url,
+    confirmUrl: appendAlreadyParam(initiate.confirm_url, loggedInProviders()),
     pollUntilClaimed: pollOnce,
     apiBaseUrl: apiBase,
   });
@@ -735,6 +745,33 @@ async function runInstallClaim(
     agent_session_token: state.value.token,
     account_id: state.value.account_id,
   };
+}
+
+// Decorate the trustysquire install URL with the providers the bot's
+// local Chrome profile already has cookies for. The install page reads
+// the `already` query param and renders a ✓ badge next to those rows
+// so the user doesn't re-sign-in unnecessarily.
+//
+// Exported for tests. URL.searchParams handles encoding + idempotency
+// (re-running connect twice doesn't keep concatenating the param).
+export function appendAlreadyParam(
+  confirmUrl: string,
+  providers: readonly string[],
+): string {
+  if (providers.length === 0) return confirmUrl;
+  let url: URL;
+  try {
+    url = new URL(confirmUrl);
+  } catch {
+    // Malformed URLs come from the API — propagate as-is rather than
+    // crashing the install. The page will render without badges.
+    return confirmUrl;
+  }
+  // Sort for stable URLs (helps the page memo/cache + makes tests
+  // deterministic).
+  const csv = [...new Set(providers)].sort().join(",");
+  url.searchParams.set("already", csv);
+  return url.toString();
 }
 
 async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTarget> {

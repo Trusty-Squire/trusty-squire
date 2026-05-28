@@ -1,18 +1,54 @@
 // "Continue with Google / GitHub" — plain links that full-navigate to
 // the API's OAuth start route (proxied, same-origin). An optional
 // `next` rides through so the user returns where they started.
+//
+// `connectedProviders` greys-out rows the bot's Chrome profile already
+// has a cookie for — driven by the `?already=<csv>` query param the
+// install CLI appends in 0.8.0-rc.3. A user re-running `connect`
+// shouldn't be invited to redo a provider sign-in they've already
+// completed; the row stays clickable for an explicit reconnect, but
+// the ✓ + greyed styling tells them they don't need to.
 
-export function OAuthButtons({ next }: { next?: string }) {
+export type ProviderId = "google" | "github";
+
+export function OAuthButtons({
+  next,
+  connectedProviders,
+}: {
+  next?: string;
+  connectedProviders?: readonly ProviderId[];
+}) {
   const query = next !== undefined ? `?next=${encodeURIComponent(next)}` : "";
+  const connected = new Set(connectedProviders ?? []);
   return (
     <div className="auth-actions">
-      <a className="oauth-btn" href={`/v1/auth/oauth/google/start${query}`}>
+      <a
+        className={`oauth-btn${connected.has("google") ? " oauth-btn--connected" : ""}`}
+        href={`/v1/auth/oauth/google/start${query}`}
+      >
         <GoogleIcon />
-        Continue with Google
+        {connected.has("google") ? (
+          <>
+            <span className="oauth-check" aria-hidden="true">✓</span>
+            <span>Google connected — reconnect</span>
+          </>
+        ) : (
+          "Continue with Google"
+        )}
       </a>
-      <a className="oauth-btn" href={`/v1/auth/oauth/github/start${query}`}>
+      <a
+        className={`oauth-btn${connected.has("github") ? " oauth-btn--connected" : ""}`}
+        href={`/v1/auth/oauth/github/start${query}`}
+      >
         <GitHubIcon />
-        Continue with GitHub
+        {connected.has("github") ? (
+          <>
+            <span className="oauth-check" aria-hidden="true">✓</span>
+            <span>GitHub connected — reconnect</span>
+          </>
+        ) : (
+          "Continue with GitHub"
+        )}
       </a>
     </div>
   );

@@ -380,6 +380,13 @@ footer{border-top:1px solid var(--line);padding:34px 0}
   transition:border-color .12s,background .12s}
 .oauth-btn:hover{background:var(--raised);border-color:rgba(139,137,255,.45)}
 .oauth-btn svg{width:18px;height:18px;flex:0 0 auto}
+/* Provider row the bot's Chrome profile already has a cookie for —
+   greyed-out + ✓ badge tells the user not to redo this one. Still
+   clickable (the link reads "reconnect") for the deliberate switch
+   path. */
+.oauth-btn--connected{color:var(--muted);background:transparent}
+.oauth-btn--connected:hover{background:var(--surface);border-color:var(--line2)}
+.oauth-check{color:#7dd181;font-weight:600;margin-right:2px}
 .auth-err{margin-top:16px;font-size:13px;color:#ff6b6b;text-align:center}
 
 /* pairing flow */

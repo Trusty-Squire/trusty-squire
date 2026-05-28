@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ApiError, apiGet, apiPost } from "../lib/api";
-import { OAuthButtons } from "../components/OAuthButtons";
+import { OAuthButtons, type ProviderId } from "../components/OAuthButtons";
 import { useQueryParam } from "../lib/use-query-param";
 
 type Phase =
@@ -34,6 +34,18 @@ export default function InstallPage() {
   // sign-in detour), so the install finishes automatically on return
   // rather than dumping them on the confirm screen again.
   const autoClaim = useQueryParam("claim") === "1";
+  // 0.8.0-rc.3: the install CLI appends `?already=<csv>` listing
+  // providers the bot's Chrome profile already has a cookie for, so
+  // we can render the OAuth row with a ✓ + greyed-out style instead
+  // of inviting the user to re-sign-in to a provider they've already
+  // connected. The CSV is comma-separated; any unknown values are
+  // dropped here so a future provider added on the CLI side can't
+  // crash this page.
+  const alreadyParam = useQueryParam("already") ?? "";
+  const connectedProviders: ProviderId[] = alreadyParam
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((v): v is ProviderId => v === "google" || v === "github");
   const [phase, setPhase] = useState<Phase>("loading");
   const [agent, setAgent] = useState<string | null>(null);
   const [errorText, setErrorText] = useState("");
@@ -198,6 +210,7 @@ export default function InstallPage() {
                 </p>
                 <OAuthButtons
                   next={`/install?token=${encodeURIComponent(token)}&claim=1`}
+                  connectedProviders={connectedProviders}
                 />
               </>
             )}
