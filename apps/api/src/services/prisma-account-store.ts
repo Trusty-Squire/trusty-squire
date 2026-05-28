@@ -6,12 +6,10 @@
 // restart/redeploy.
 
 import { ulid } from "ulid";
-import type { Mandate } from "@trusty-squire/mandate-validator";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   AccountRecord,
   AccountStore,
-  ActiveMandateRecord,
   DeviceRecord,
 } from "./in-memory-account-store.js";
 
@@ -86,38 +84,6 @@ export class PrismaAccountStore implements AccountStore {
       where: { id: signingDeviceId },
       data: { revoked_at: now },
     });
-  }
-
-  async setActiveMandate(record: ActiveMandateRecord): Promise<void> {
-    const data = {
-      signed_by_device: record.signed_by_device,
-      vouchflow_device_token: record.vouchflow_device_token,
-      session_id: record.session_id,
-      installed_at: record.installed_at,
-      mandate: record.mandate,
-    };
-    await this.prisma.activeMandate.upsert({
-      where: { account_id: record.account_id },
-      create: { account_id: record.account_id, ...data },
-      update: data,
-    });
-  }
-
-  async getActiveMandate(accountId: string): Promise<ActiveMandateRecord | null> {
-    const row = await this.prisma.activeMandate.findUnique({
-      where: { account_id: accountId },
-    });
-    if (row === null) return null;
-    return {
-      account_id: row.account_id,
-      // JSON column → Mandate. The mandate validator re-checks the
-      // signature/shape on use; this is just the storage boundary.
-      mandate: row.mandate as Mandate,
-      signed_by_device: row.signed_by_device,
-      vouchflow_device_token: row.vouchflow_device_token,
-      session_id: row.session_id,
-      installed_at: row.installed_at,
-    };
   }
 
   private toAccount(row: {

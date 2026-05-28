@@ -4,7 +4,7 @@
 
 import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DeviceAssertion, VaultStoreInput } from "@trusty-squire/runtime";
+import type { DeviceAssertion, VaultStoreInput } from "../credential-vault.js";
 import {
   CredentialNotFoundError,
   CredentialVault,

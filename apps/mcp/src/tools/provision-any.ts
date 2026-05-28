@@ -7,7 +7,7 @@
 //
 // ASYNC MODEL: a real signup takes 3-8 minutes — well past the ~60s hard
 // timeout Claude Code (and most MCP hosts) put on a single tool call. So
-// `provision_any_service` does NOT block: it starts the run in the
+// `provision` does NOT block: it starts the run in the
 // background inside this server process, returns a run_id immediately,
 // and the caller polls `check_provision_status` until the run leaves the
 // "running" state.
@@ -71,7 +71,7 @@ export const provisionAnyInputSchema = z.object({
     .optional()
     .describe(
       "OAuth scopes the user has EXPLICITLY approved beyond basic identity (openid/email/profile). " +
-        "Use this ONLY after asking the user — if a previous run returned status=oauth_consent_needs_review with a requested_scopes list, ask the user 'Service X is requesting these scopes: [...] — approve?', and if they say yes, re-run provision_any_service with the same exact scope strings here. " +
+        "Use this ONLY after asking the user — if a previous run returned status=oauth_consent_needs_review with a requested_scopes list, ask the user 'Service X is requesting these scopes: [...] — approve?', and if they say yes, re-run provision with the same exact scope strings here. " +
         "Do NOT preemptively pass scopes the user hasn't seen. The bot enforces the consent boundary; this parameter is how the user lifts it.",
     ),
   allow_blind_oauth_consent: z
@@ -88,7 +88,7 @@ export const provisionAnyInputSchema = z.object({
 export type ProvisionAnyInput = z.infer<typeof provisionAnyInputSchema>;
 
 export const checkProvisionStatusInputSchema = z.object({
-  run_id: z.string().describe("The run_id returned by provision_any_service."),
+  run_id: z.string().describe("The run_id returned by provision."),
 });
 
 export type CheckProvisionStatusInput = z.infer<typeof checkProvisionStatusInputSchema>;
@@ -141,7 +141,7 @@ const CHECK_STATUS_JSON_SCHEMA = {
   properties: {
     run_id: {
       type: "string",
-      description: "The run_id returned by provision_any_service.",
+      description: "The run_id returned by provision.",
     },
   },
 } as const;
@@ -188,9 +188,9 @@ IMMEDIATE RESPONSES (no run started):
 - status="not_installed" → Trusty Squire isn't connected; tell the user to run \`npx @trusty-squire/mcp connect\`.
 - status="error" → could not reach the API to set up the signup.`;
 
-const CHECK_DESCRIPTION = `Check the status of a signup started by provision_any_service.
+const CHECK_DESCRIPTION = `Check the status of a signup started by provision.
 
-Pass the run_id from provision_any_service. Poll about once a minute
+Pass the run_id from provision. Poll about once a minute
 until status is no longer "running".
 
 A "running" response carries recent_steps (the bot's live progress trail)
@@ -216,7 +216,7 @@ RESPONSES:
   tell the user to run \`npx @trusty-squire/mcp login\`, then retry.
 - status="oauth_consent_needs_review" → the OAuth consent screen needs a human call. Two sub-cases:
   (a) requested_scopes is non-empty (URL-parseable scopes): SHOW unauthorized_scopes to the
-      user, ask "approve these scopes?", and if yes call provision_any_service AGAIN with
+      user, ask "approve these scopes?", and if yes call provision AGAIN with
       allow_extra_oauth_scopes set to that list.
   (b) requested_scopes is EMPTY (GitHub Apps and similar — permissions in the app manifest,
       not the URL): the bot's DOM safety scraper saw a scope-grant verb phrase (Drive/Gmail/
@@ -231,8 +231,8 @@ RESPONSES:
 - status="error" → the run crashed; show error.
 - status="unknown_run" → no such run (it expired, or the MCP server restarted).`;
 
-export const provisionAnyTool = {
-  name: "provision_any_service",
+export const provisionTool = {
+  name: "provision",
   description: PROVISION_DESCRIPTION,
   jsonInputSchema: PROVISION_ANY_JSON_SCHEMA,
   inputSchema: provisionAnyInputSchema,
@@ -364,7 +364,7 @@ export const checkProvisionStatusTool = {
         run_id: input.run_id,
         message:
           "No signup run with that run_id. It may have finished and been evicted, " +
-          "or the MCP server restarted since it started. Start a new provision_any_service run.",
+          "or the MCP server restarted since it started. Start a new provision run.",
       };
     }
     if (record.result === undefined) {
@@ -407,7 +407,7 @@ interface RunContext {
   // reads it for live mid-run progress (Google number-match etc.).
   stepsSink: string[];
   // Correlation ID for the skill promoter (D8). Generated at
-  // provision_any_service entry, propagated through every registry
+  // provision entry, propagated through every registry
   // call + bot run + vault write. Useful for forensics: one log
   // grep finds every event tied to this signup attempt.
   provisionId: string;
@@ -992,7 +992,7 @@ export function buildSignupResponse(
       message:
         `The bot has no usable provider session for an OAuth signup. Tell the user to run ` +
         `\`npx @trusty-squire/mcp login\` once (add \`--provider=github\` for a GitHub signup), ` +
-        `then retry provision_any_service with oauth_provider. The error field names the exact command.`,
+        `then retry provision with oauth_provider. The error field names the exact command.`,
     };
   }
 
@@ -1021,7 +1021,7 @@ export function buildSignupResponse(
         `${input.service} requires ${providerLabel} OAuth but the bot has no ${providerLabel} ` +
         `session configured. Tell the user to run: ` +
         `\`npx @trusty-squire/mcp login --provider=${provider}\`. ` +
-        `Once they confirm sign-in completed, retry provision_any_service.`,
+        `Once they confirm sign-in completed, retry provision.`,
     };
   }
 
@@ -1044,7 +1044,7 @@ export function buildSignupResponse(
         unauthorized.length > 0
           ? `${input.service}'s OAuth consent screen requested scopes the user has not approved: ` +
             `[${unauthorized.join(", ")}]. Show the full requested list to the user, ask for ` +
-            `explicit approval, and if granted re-run provision_any_service with ` +
+            `explicit approval, and if granted re-run provision with ` +
             `allow_extra_oauth_scopes=${JSON.stringify(unauthorized)}. ` +
             `Otherwise tell the user to sign up manually at ` +
             `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`

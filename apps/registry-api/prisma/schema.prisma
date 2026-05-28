@@ -1,7 +1,11 @@
 // Registry persistence schema. Lives in trusty_squire_registry —
-// adapter manifests are public read-only data with their own
-// retention story (we keep all versions forever; disabled flips
-// flip the kill-switch but don't delete).
+// Skills are public read-only data with their own retention story
+// (we keep all versions forever; disabled flips flip the kill-switch
+// but don't delete).
+//
+// The AdapterManifestRecord table (hand-authored native-provision
+// manifests, never populated in production) was dropped in 0.8 along
+// with the native-provision sunset. See the 20260527180000 migration.
 
 generator client {
   provider = "prisma-client-js"
@@ -14,40 +18,8 @@ datasource db {
   url      = env("REGISTRY_DATABASE_URL")
 }
 
-model AdapterManifestRecord {
-  service          String
-  version          String
-  // Full manifest JSON exactly as published — this is the bytes
-  // the runtime reads to drive a flow. Any change here would
-  // change the canonical-bytes-derived signature.
-  manifest_json    Json
-  signature        String
-  signed_at        DateTime
-  signed_by        String
-
-  // Kill-switch + reason. Disabled versions return 410 Gone;
-  // older non-disabled versions of the same service still serve
-  // (operators can pin to a known-good prior).
-  disabled_at      DateTime?
-  disabled_reason  String?
-
-  created_at       DateTime  @default(now())
-
-  @@id([service, version])
-  @@index([service])
-  @@index([disabled_at])
-}
-
-// SkillRecord — Tier-2 Learned Skills (0.7.0).
-//
-// Lives in the same database as AdapterManifestRecord but in a
-// separate table. The user-visible "unified" routing experience
-// (Decision 2 → option A) is delivered at the route layer, which
-// resolves "what runs this service?" against both tables and returns
-// whichever tier has an active record. Two storage tables + one router
-// lookup gives us the unified UX without forcing Prisma migrations on
-// the existing immutable AdapterManifestRecord every time the skill
-// schema iterates.
+// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this is the
+// registry's only published-recipe table.
 //
 // `payload_json` carries the full SkillSchema-validated JSON. Health
 // counters live as columns rather than inside the JSON so atomic SQL
@@ -62,8 +34,8 @@ model SkillRecord {
   service              String
   version              String
 
-  // Signed payload + signature. Same signer infrastructure as
-  // AdapterManifestRecord; signature attests to the payload bytes.
+  // Signed payload + signature. Ed25519 over the canonical-bytes of
+  // payload_json; signature attests to the payload bytes.
   payload_json         Json
   signature            String
   signed_at            DateTime
@@ -295,7 +267,7 @@ model ExtractFailureSnapshot {
   screenshot_bytes Int      @default(0)
 
   // T45 — correlation id matching the parent ProvisionAttempt. Null
-  // for snapshots uploaded outside a provision_any_service flow
+  // for snapshots uploaded outside a provision flow
   // (older runs, ad-hoc test uploads).
   provision_id     String?
 
@@ -340,7 +312,7 @@ model ProvisionAttempt {
   artifacts_uri String?
   // T45 — correlation id linking this attempt to the (potentially
   // many) ExtractFailureSnapshot rows uploaded during the same
-  // provision_any_service run. Same value the MCP sets on each
+  // provision run. Same value the MCP sets on each
   // round/extract upload, so the admin dashboard can JOIN them
   // for a "recent failures with thumbnails" view.
   provision_id String?

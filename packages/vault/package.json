@@ -22,7 +22,6 @@
     "prisma:migrate:dev": "prisma migrate dev --schema=prisma/schema.prisma"
   },
   "dependencies": {
-    "@trusty-squire/runtime": "workspace:*",
     "@prisma/client": "^5.22.0",
     "ulid": "^2.3.0"
   },

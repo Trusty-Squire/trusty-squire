@@ -3,7 +3,15 @@
 // implementations free of Prisma typings.
 
 import type { Buffer } from "node:buffer";
-import type { CredentialType } from "@trusty-squire/runtime";
+
+// Credential-type vocabulary the vault accepts. Inlined here in 0.8
+// after the runtime package was sunset; this list is the universal
+// signup bot's working set + the historic native-provision values
+// (api_key, oauth_token, etc.). Kept as a string union rather than a
+// strict enum because the universal-bot synthesizer occasionally
+// invents service-specific kind names ("admin_api_key",
+// "search_api_key", …) that don't fit a closed set.
+export type CredentialType = string;
 
 export interface CredentialRecord {
   id: string;

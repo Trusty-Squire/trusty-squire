@@ -3715,7 +3715,7 @@ export class SignupAgent {
           "oauth_consent_needs_review",
           `${provider.label} consent requests non-basic scopes: [${unauthorized.join(", ")}]. ` +
             `All requested scopes: [${scopes.join(", ")}]. ` +
-            `To proceed, re-run provision_any_service with allow_extra_oauth_scopes set to ` +
+            `To proceed, re-run provision with allow_extra_oauth_scopes set to ` +
             `the scopes the user has explicitly approved.`,
           steps,
         );

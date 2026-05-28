@@ -6,8 +6,13 @@
 // envelope is still done by CredentialVault; this only persists rows.
 
 import { Buffer } from "node:buffer";
-import type { CredentialType } from "@trusty-squire/runtime";
 import type { CredentialRecord, CredentialStore } from "@trusty-squire/vault";
+
+// Free text on the DB side. The runtime package's CredentialType enum
+// used to be the source of truth before its 0.8 sunset; today the
+// universal-bot path writes whatever kind name it captured. Keep the
+// store typing loose and let callers narrow.
+type CredentialType = string;
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
 interface CredentialRow {

@@ -1,16 +1,21 @@
-// Ed25519 manifest signer. Signs the canonical-bytes of the manifest
-// JSON; the published `signature` field is base64url-encoded.
+// Ed25519 signer for published Skills. Signs canonical-bytes of the
+// Skill JSON; the published `signature` field is base64url-encoded.
 //
-// Key material lives in env vars (ADAPTER_SIGNING_PRIVATE_KEY +
-// ADAPTER_SIGNING_PUBLIC_KEY) as base64url-encoded DER (PKCS8 for
+// Key material lives in env vars as base64url-encoded DER (PKCS8 for
 // private, SPKI for public). This matches what
 // `crypto.generateKeyPairSync('ed25519')` produces directly via
 // `.export({ format: 'der', type: 'pkcs8' / 'spki' })`.
+//
+// The env var name is `ADAPTER_SIGNING_PRIVATE_KEY` (and the class
+// keeps the historical `ManifestSigner` name) — both predate the 0.8
+// native-provision sunset, but renaming them now would require a
+// fly-secrets dance and offers no functional gain. The signed payload
+// today is always a Skill.
 
 import { Buffer } from "node:buffer";
 import { createPrivateKey, createPublicKey, sign as nodeSign, verify as nodeVerify, type KeyObject } from "node:crypto";
 import canonicalize from "canonicalize";
-import type { AdapterManifest, Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/adapter-sdk";
 
 export class SignerConfigError extends Error {
   constructor(message: string) {
@@ -55,20 +60,6 @@ export class ManifestSigner {
     return new ManifestSigner(privateKey, signedBy);
   }
 
-  sign(manifest: AdapterManifest): SignedManifestEnvelope {
-    const bytes = canonicalBytes(manifest);
-    const sig = nodeSign(null, bytes, this.privateKey);
-    return {
-      signature: Buffer.from(sig).toString("base64url"),
-      signed_at: new Date().toISOString(),
-      signed_by: this.signedBy,
-    };
-  }
-
-  // Sign a Skill (Tier-2 learned skill). Same Ed25519 + canonical
-  // bytes scheme as adapter manifests — kept separate from sign() so
-  // the type signature stays narrow and a manifest signer can't be
-  // accidentally passed a skill object (or vice versa).
   signSkill(skill: Skill): SignedManifestEnvelope {
     const bytes = canonicalBytes(skill);
     const sig = nodeSign(null, bytes, this.privateKey);
@@ -80,16 +71,6 @@ export class ManifestSigner {
   }
 }
 
-// Standalone verifier for tests + future RegistryClient hardening.
-// Public key is base64url-encoded SPKI DER.
-export function verifyManifestSignature(
-  manifest: AdapterManifest,
-  signatureB64: string,
-  publicKeyB64: string,
-): boolean {
-  return verifyEd25519(manifest, signatureB64, publicKeyB64);
-}
-
 // Verify the signature on a published Skill. Used by the registry's
 // POST /skills route when SKILL_VERIFY_PUBLIC_KEY is configured.
 // Returns false for any failure path (malformed key, malformed
@@ -97,14 +78,6 @@ export function verifyManifestSignature(
 // cleanly to a 401 response.
 export function verifySkillSignature(
   skill: Skill,
-  signatureB64: string,
-  publicKeyB64: string,
-): boolean {
-  return verifyEd25519(skill, signatureB64, publicKeyB64);
-}
-
-function verifyEd25519(
-  payload: AdapterManifest | Skill,
   signatureB64: string,
   publicKeyB64: string,
 ): boolean {
@@ -122,13 +95,13 @@ function verifyEd25519(
     return false;
   }
   try {
-    return nodeVerify(null, canonicalBytes(payload), pub, sig);
+    return nodeVerify(null, canonicalBytes(skill), pub, sig);
   } catch {
     return false;
   }
 }
 
-function canonicalBytes(payload: AdapterManifest | Skill): Buffer {
+function canonicalBytes(payload: Skill): Buffer {
   const json = canonicalize(payload);
   if (typeof json !== "string") {
     throw new SignerConfigError("payload could not be canonicalized");

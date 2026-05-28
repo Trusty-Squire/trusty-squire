@@ -8,7 +8,7 @@
 // are fragile on ext4 and Google's device-bound (DBSC) cookies do not
 // survive a copy — so OAuth runs queue through this mutex instead.
 //
-// `provision_any_service` is async (it returns a run_id and works in
+// `provision` is async (it returns a run_id and works in
 // the background), so two OAuth runs genuinely can overlap in one MCP
 // server process. The second one waits here for the first to release.
 

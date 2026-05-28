@@ -16,12 +16,6 @@
 
 import { Buffer } from "node:buffer";
 import { ulid } from "ulid";
-import type {
-  DeviceAssertion,
-  VaultClient,
-  VaultEntry,
-  VaultStoreInput,
-} from "@trusty-squire/runtime";
 import {
   aadForDek,
   aadForValue,
@@ -33,10 +27,49 @@ import type { KMSClient } from "./kms-client.js";
 import type {
   CredentialRecord,
   CredentialStore,
+  CredentialType,
   VaultAuditEventInput,
   VaultAuditStore,
   VaultRequester,
 } from "./types.js";
+
+// VaultClient surface — inlined here in 0.8 after the runtime
+// package was sunset. Same shape as the historic runtime-side
+// definition (chunk 5): a user-facing retrieve() with a fresh
+// device assertion + a system-side retrieveForRuntime() for
+// rotations and the universal-bot post-extract write path.
+export interface VaultStoreInput {
+  account_id: string;
+  subscription_id: string;
+  type: CredentialType;
+  value: string;
+  env_var_suggestion: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface VaultEntry {
+  reference: string;
+  type: CredentialType;
+  created_at: string;
+}
+
+export interface DeviceAssertion {
+  signature: string;
+  signed_at: string;
+  signing_device_id: string;
+}
+
+export interface VaultClient {
+  store(input: VaultStoreInput): Promise<VaultEntry>;
+  retrieve(
+    reference: string,
+    purpose: string,
+    deviceAssertion: DeviceAssertion,
+  ): Promise<string>;
+  retrieveForRuntime(reference: string, purpose: string): Promise<string>;
+  delete(reference: string): Promise<void>;
+  rotate(reference: string, newValue: string): Promise<void>;
+}
 
 const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000; // 1h
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1h

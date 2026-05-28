@@ -537,7 +537,7 @@ export const SkillSchema = z
       .regex(/^[a-z0-9][a-z0-9-]*$/, "must be lowercase-with-dashes")
       .describe(
         "Canonical service slug. Matches the slug agents use in " +
-          "provision_any_service. Examples: railway, openrouter, " +
+          "provision. Examples: railway, openrouter, " +
           "stripe. The registry enforces (service, version) " +
           "uniqueness.",
       ),

@@ -1,103 +1,28 @@
-// Tests for each MCP tool's handler against a mock ApiClient.
+// Tests for the surviving MCP tools.
+//
+// The native-provision cluster (provision/cancel/get_usage/list_services/
+// list_subscriptions/rotate_credential/wait_for_approval) was sunset in
+// 0.8 along with the runtime + mandate-validator packages. What's left:
+// the universal provision tool, its async status poll, the two vault
+// reads, and the extract-failure diagnostic pair.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import {
-  cancelTool,
   checkProvisionStatusTool,
   getCredentialTool,
-  getUsageTool,
   listCredentialsTool,
-  listServicesTool,
-  listSubscriptionsTool,
   provisionTool,
-  rotateCredentialTool,
   TOOLS,
-  waitForApprovalTool,
 } from "../tools/index.js";
-import { waitForApprovalImpl } from "../tools/wait-for-approval.js";
-
-// ── Minimal mock ApiClient that satisfies the surface our tools touch.
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
-    createRun: vi.fn(),
-    getRun: vi.fn(),
     getCredential: vi.fn(),
     listCredentials: vi.fn(),
-    listSubscriptions: vi.fn(),
-    cancelSubscription: vi.fn(),
-    getUsage: vi.fn(),
-    listServices: vi.fn(),
     ...overrides,
   } as unknown as ApiClient;
 }
-
-describe("provision", () => {
-  it("returns status=active when the API decision is silent", async () => {
-    const api = makeMockApi({
-      listServices: vi.fn().mockResolvedValue({
-        adapters: [{ service: "resend", category: "email" }],
-      }),
-      createRun: vi.fn().mockResolvedValue({
-        decision: "silent",
-        run: { id: "run-1", state: "PROVISIONING" },
-      }),
-    } as unknown as ApiClient);
-    const parsed = provisionTool.inputSchema.parse({
-      service: "resend",
-      project_name: "demo",
-    });
-    const res = (await provisionTool.handler(parsed, api)) as { status: string };
-    expect(res.status).toBe("active");
-  });
-
-  it("returns status=pending_approval with the approval_url when needs_approval", async () => {
-    const api = makeMockApi({
-      listServices: vi.fn().mockResolvedValue({ adapters: [] }),
-      createRun: vi.fn().mockResolvedValue({
-        decision: "needs_approval",
-        run: { id: "run-2", state: "PENDING_APPROVAL" },
-        approval_url: "https://app.test/approve/abc",
-        reasons: ["above_silent_max"],
-        required_confidence: "high",
-      }),
-    } as unknown as ApiClient);
-    const parsed = provisionTool.inputSchema.parse({
-      service: "stripe",
-      project_name: "demo",
-      category: "payments",
-      cost_cents: 5000,
-      recurrence: "monthly",
-    });
-    const res = (await provisionTool.handler(parsed, api)) as {
-      status: string;
-      approval_url: string;
-    };
-    expect(res.status).toBe("pending_approval");
-    expect(res.approval_url).toBe("https://app.test/approve/abc");
-  });
-
-  it("category is auto-resolved from the registry when omitted", async () => {
-    const createRun = vi.fn().mockResolvedValue({
-      decision: "silent",
-      run: { id: "x", state: "PROVISIONING" },
-    });
-    const api = makeMockApi({
-      listServices: vi.fn().mockResolvedValue({
-        adapters: [{ service: "resend", category: "email" }],
-      }),
-      createRun,
-    } as unknown as ApiClient);
-    const parsed = provisionTool.inputSchema.parse({
-      service: "resend",
-      project_name: "demo",
-    });
-    await provisionTool.handler(parsed, api);
-    const arg = (createRun.mock.calls[0] as [{ category: string }])[0];
-    expect(arg.category).toBe("email");
-  });
-});
 
 describe("get_credential", () => {
   it("passes the purpose through to the API", async () => {
@@ -164,177 +89,8 @@ describe("list_credentials", () => {
   });
 });
 
-describe("list_services", () => {
-  it("returns ranked-by-default registry results", async () => {
-    const api = makeMockApi({
-      listServices: vi.fn().mockResolvedValue({
-        adapters: [
-          {
-            service: "resend",
-            latest_version: "0.1.0",
-            display_name: "Resend",
-            category: "email",
-            homepage: "https://resend.com",
-            description: null,
-          },
-          {
-            service: "postmark",
-            latest_version: "0.1.0",
-            display_name: "Postmark",
-            category: "email",
-            homepage: "https://postmarkapp.com",
-            description: null,
-          },
-        ],
-      }),
-    } as unknown as ApiClient);
-    const parsed = listServicesTool.inputSchema.parse({});
-    const res = (await listServicesTool.handler(parsed, api)) as {
-      services: Array<{ service: string }>;
-    };
-    expect(res.services.map((s) => s.service)).toEqual(["resend", "postmark"]);
-  });
-
-  it("query filters the directory by substring", async () => {
-    const api = makeMockApi({
-      listServices: vi.fn().mockResolvedValue({
-        adapters: [
-          { service: "resend", display_name: "Resend", category: "email", latest_version: "0.1.0", homepage: "", description: null },
-          { service: "postmark", display_name: "Postmark", category: "email", latest_version: "0.1.0", homepage: "", description: null },
-        ],
-      }),
-    } as unknown as ApiClient);
-    const parsed = listServicesTool.inputSchema.parse({ query: "post" });
-    const res = (await listServicesTool.handler(parsed, api)) as {
-      services: Array<{ service: string }>;
-    };
-    expect(res.services).toHaveLength(1);
-    expect(res.services[0]?.service).toBe("postmark");
-  });
-});
-
-describe("list_subscriptions / cancel / get_usage / rotate_credential", () => {
-  it("list_subscriptions proxies to the API", async () => {
-    const listSubscriptions = vi.fn().mockResolvedValue({ subscriptions: [{ id: "s1" }] });
-    const api = makeMockApi({ listSubscriptions } as unknown as ApiClient);
-    const parsed = listSubscriptionsTool.inputSchema.parse({});
-    const res = (await listSubscriptionsTool.handler(parsed, api)) as {
-      subscriptions: unknown[];
-    };
-    expect(res.subscriptions).toHaveLength(1);
-  });
-
-  it("cancel proxies to the API", async () => {
-    const cancelSubscription = vi.fn().mockResolvedValue({ ok: true });
-    const api = makeMockApi({ cancelSubscription } as unknown as ApiClient);
-    const parsed = cancelTool.inputSchema.parse({ subscription_id: "s1" });
-    await cancelTool.handler(parsed, api);
-    expect(cancelSubscription).toHaveBeenCalledWith("s1");
-  });
-
-  it("get_usage proxies to the API", async () => {
-    const getUsage = vi.fn().mockResolvedValue({
-      monthly: { spent_cents: 0, budget_cents: 1000, remaining_cents: 1000 },
-      daily: { spent_cents: 0, silent_max_cents: 500 },
-      mandate_id: "m1",
-    });
-    const api = makeMockApi({ getUsage } as unknown as ApiClient);
-    const parsed = getUsageTool.inputSchema.parse({});
-    const res = (await getUsageTool.handler(parsed, api)) as {
-      monthly: { budget_cents: number };
-    };
-    expect(res.monthly.budget_cents).toBe(1000);
-  });
-
-  it("rotate_credential returns the v0 stub response", async () => {
-    const api = makeMockApi({} as unknown as ApiClient);
-    const parsed = rotateCredentialTool.inputSchema.parse({ reference: "vault://x" });
-    const res = (await rotateCredentialTool.handler(parsed, api)) as { status: string };
-    expect(res.status).toBe("not_implemented");
-  });
-});
-
-describe("wait_for_approval", () => {
-  it("returns granted once state leaves PENDING_APPROVAL", async () => {
-    const states = ["PENDING_APPROVAL", "PENDING_APPROVAL", "PROVISIONING"];
-    const api = makeMockApi({
-      getRun: vi.fn(async () => ({
-        id: "r1",
-        state: states.shift() ?? "PROVISIONING",
-        service: "x",
-        plan: "free",
-        project_name: "p",
-        subscription_id: null,
-        failure_reason: null,
-        created_at: "",
-        completed_at: null,
-      })),
-    } as unknown as ApiClient);
-
-    const sleep = vi.fn(async () => {});
-    const res = await waitForApprovalImpl(
-      { run_id: "r1", timeout_seconds: 30, poll_interval_seconds: 1 },
-      api,
-      { sleep },
-    );
-    expect(res.status).toBe("granted");
-    expect(res.run_state).toBe("PROVISIONING");
-    expect(sleep).toHaveBeenCalledTimes(2);
-  });
-
-  it("returns timeout when the deadline passes", async () => {
-    const api = makeMockApi({
-      getRun: vi.fn(async () => ({
-        id: "r1",
-        state: "PENDING_APPROVAL",
-        service: "x",
-        plan: "free",
-        project_name: "p",
-        subscription_id: null,
-        failure_reason: null,
-        created_at: "",
-        completed_at: null,
-      })),
-    } as unknown as ApiClient);
-
-    let virtualNow = 0;
-    const sleep = vi.fn(async (ms: number) => {
-      virtualNow += ms;
-    });
-    const res = await waitForApprovalImpl(
-      { run_id: "r1", timeout_seconds: 1, poll_interval_seconds: 1 },
-      api,
-      { sleep, now: () => virtualNow },
-    );
-    expect(res.status).toBe("timeout");
-  });
-
-  it("returns denied when state goes REJECTED", async () => {
-    const api = makeMockApi({
-      getRun: vi.fn(async () => ({
-        id: "r1",
-        state: "REJECTED",
-        service: "x",
-        plan: "free",
-        project_name: "p",
-        subscription_id: null,
-        failure_reason: "approval_denied",
-        created_at: "",
-        completed_at: null,
-      })),
-    } as unknown as ApiClient);
-    const res = await waitForApprovalImpl(
-      { run_id: "r1", timeout_seconds: 30, poll_interval_seconds: 1 },
-      api,
-      { sleep: async () => {} },
-    );
-    expect(res.status).toBe("denied");
-    expect(res.reason).toBe("approval_denied");
-  });
-});
-
 describe("TOOLS registry", () => {
-  it("exposes the public MCP tools — the native-provision cluster is unregistered", () => {
+  it("exposes the post-0.8 public surface — six tools, no native-provision cluster", () => {
     expect(TOOLS).toHaveLength(6);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "check_provision_status",
@@ -342,13 +98,13 @@ describe("TOOLS registry", () => {
       "get_extract_failure",
       "list_credentials",
       "list_extract_failures",
-      "provision_any_service",
+      "provision",
     ]);
   });
 
   it("includes the async provision pair (start + status poll)", () => {
     const names = TOOLS.map((t) => t.name);
-    expect(names).toContain("provision_any_service");
+    expect(names).toContain("provision");
     expect(names).toContain("check_provision_status");
   });
 
@@ -366,23 +122,12 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("provision's description tells the agent NOT to redirect users to manual signup", () => {
-    expect(provisionTool.description).toMatch(/DO NOT instruct the user to sign up manually/);
-  });
-
-  it("waitForApprovalTool input schema accepts default poll/timeout", () => {
-    expect(() => waitForApprovalTool.inputSchema.parse({ run_id: "r1" })).not.toThrow();
+  it("provision's description tells the agent to poll check_provision_status (the long-running contract)", () => {
+    expect(provisionTool.description).toMatch(/poll check_provision_status/);
   });
 });
 
 describe("ApiCallError surface", () => {
-  beforeEach(() => {
-    vi.useRealTimers();
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("preserves status + code so the agent can decide how to handle", () => {
     const err = new ApiCallError(403, "wrong_account", "denied");
     expect(err.status).toBe(403);

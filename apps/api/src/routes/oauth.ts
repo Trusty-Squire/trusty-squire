@@ -13,7 +13,6 @@ import { randomBytes } from "node:crypto";
 import { type FastifyPluginAsync } from "fastify";
 import { issueSession } from "../auth/session.js";
 import { setSessionCookie } from "../auth/middleware.js";
-import { stubMandate } from "../auth/stub-mandate.js";
 import {
   buildAuthorizeUrl,
   exchangeCode,
@@ -176,10 +175,6 @@ export const registerOAuthRoute: FastifyPluginAsync<{ deps: ApiDeps }> = async (
 
     // Brand-new accounts get the stub mandate so mandate-aware code
     // keeps working without a signing ceremony.
-    if (isNewAccount) {
-      await opts.deps.accountStore.setActiveMandate(stubMandate(account.id, now));
-    }
-
     const { record, jwt } = issueSession({
       account_id: account.id,
       ip: req.ip ?? null,

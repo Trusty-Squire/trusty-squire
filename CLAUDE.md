@@ -11,14 +11,18 @@ of a user, within a user-signed spending mandate. The MCP server runs
 on the user's machine; an API on Fly.io handles persistence and
 orchestration.
 
-**Two provisioning paths:**
+**One provisioning path:**
 
-1. **`provision`** — native adapters for services with known signup APIs
-   (Resend, Stripe, etc.). Mandate-bounded, vault-backed, full
-   approval flow.
-2. **`provision_any_service`** — universal browser-automation bot
-   (Playwright + Claude vision) for any other service. Account-bound,
-   free up to `ACCOUNT_FREE_QUOTA` signups before billing kicks in.
+**`provision`** — universal browser-automation bot (Playwright + Claude
+vision) for any SaaS signup. Account-bound, vault-backed, free up to
+`ACCOUNT_FREE_QUOTA` signups before billing kicks in. Closed-loop with
+the skill registry: successful runs publish a Skill that subsequent
+provisions replay in ~30s instead of the bot's ~6min.
+
+A second tool path (hand-authored manifests + mandate engine + approval
+flow, formerly `provision_any_service` vs. `provision`) was sunset in
+0.8 — the bot covered every service the team would have written a
+native adapter for, faster than the manifest work paid for itself.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
@@ -130,12 +134,10 @@ OpenRouter for LLM, Resend for inbound + outbound mail.
 | PostHog     | ⚠ slow SPA | Form load races our planner; not captcha    |
 
 ### In-memory (not persisted, restart-vulnerable)
-- `approvalTokenStore`, `runStore`, `adapterRegistry`,
-  `vaultAuditStore`. These belong to the deferred native-`provision`
-  cluster (adapter registry + mandate engine + native adapters) and
-  are not yet exercised in production. `accountStore`, `sessionStore`,
-  `agentSessionStore`, and `credentialStore` are Prisma-backed when a
-  DB is wired.
+- `vaultAuditStore`. The vault audit log isn't backed by Postgres yet —
+  loses on restart. Everything else (`accountStore`, `sessionStore`,
+  `agentSessionStore`, `credentialStore`) is Prisma-backed once a DB
+  is wired.
 
 ## Active Sprint/Task
 
@@ -194,8 +196,8 @@ can be tuned against real data.
    (`captcha_blocked` kind in MCP response), retention-cron stats
    on `/v1/install/status`, domain prewarm at agent level,
    PostHog SPA wait, billing surface, per-account quota
-   aggregation, native-`provision` reactivation — all still
-   queued but not blocking the closed-loop work.
+   aggregation — all still queued but not blocking the
+   closed-loop work.
 
 ## Environment Details
 
@@ -207,12 +209,13 @@ trusty-squire/
 │   ├── mcp/         The MCP server users install. Bundles the universal
 │   │                signup bot at src/bot/ (Playwright + Claude vision,
 │   │                tiered captcha). The bot is NOT a separate package.
-│   ├── pwa/         Web UI for approvals + pairing.
-│   ├── registry-api/Adapter registry (used by native provision path).
+│   ├── registry-api/Skill registry — published Skill recipes + the
+│   │                housekeeper backplane (extract failures, bot-failure
+│   │                aggregation, compat-score). Sole publish surface
+│   │                since the native-provision sunset (0.8).
 │   └── tooling/     Internal scripts (Vouchflow stub, etc.)
 ├── packages/
 │   ├── inbox/       Email alias + inbound parsing. Owns inbox Prisma schema.
-│   ├── runtime/     Run state machine; mandate-validator + run-context.
 │   ├── vault/       Encrypted credential store.
 │   └── ...          Other shared libs (auth, http-clients, etc.)
 └── CLAUDE.md        This file.

@@ -36,7 +36,7 @@ const UploadBodySchema = z.object({
   // Optional JPEG, base64 encoded.
   screenshot_jpeg_base64: z.string().optional(),
   // T45 — correlation id linking this snapshot to a ProvisionAttempt
-  // row uploaded from the same provision_any_service run. The MCP
+  // row uploaded from the same provision run. The MCP
   // generates a fresh provision_id per run; older clients omit this
   // field and the snapshot stays unlinked.
   provision_id: z.string().min(1).max(120).optional(),

@@ -24,7 +24,7 @@
 //      up the new shape (T11 / D6).
 //
 //   3. **Dry mode stops before the credential-creating click.** The
-//      universal bot's `provision_any_service` is a one-shot operation
+//      universal bot's `provision` is a one-shot operation
 //      on most services (Railway, Sentry, OpenRouter) — running it
 //      twice burns an alias. Dry mode is the default for replay-test
 //      and for the router's pre-flight validation; full mode is

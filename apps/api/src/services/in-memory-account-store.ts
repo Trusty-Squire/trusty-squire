@@ -1,12 +1,11 @@
-// Minimal in-memory Account + Device + Mandate storage for the API.
+// Minimal in-memory Account + Device storage for the API.
 //
-// The runtime package's RunStore already handles Run/RunEvent; this
-// store covers Account-scoped data the API gateway owns (account row,
-// device list, current active mandate). Tests + dev use this; the
-// Prisma-backed equivalent lives outside this package (deploy concern).
+// Covers Account-scoped data the API gateway owns (account row,
+// device list). The mandate-store machinery was retired in 0.8 with
+// the native-provision sunset. Tests + dev use this store; the
+// Prisma-backed equivalent lives in prisma-account-store.ts.
 
 import { ulid } from "ulid";
-import type { Mandate } from "@trusty-squire/mandate-validator";
 
 export interface AccountRecord {
   id: string;
@@ -27,15 +26,6 @@ export interface DeviceRecord {
   revoked_at: Date | null;
 }
 
-export interface ActiveMandateRecord {
-  account_id: string;
-  mandate: Mandate;
-  signed_by_device: string;
-  vouchflow_device_token: string;
-  session_id: string;
-  installed_at: Date;
-}
-
 export interface AccountStore {
   createAccount(email: string, displayName: string): Promise<AccountRecord>;
   findAccountByEmail(email: string): Promise<AccountRecord | null>;
@@ -49,16 +39,12 @@ export interface AccountStore {
   }): Promise<void>;
   listDevices(accountId: string): Promise<DeviceRecord[]>;
   markDeviceRevoked(signingDeviceId: string, now: Date): Promise<void>;
-
-  setActiveMandate(record: ActiveMandateRecord): Promise<void>;
-  getActiveMandate(accountId: string): Promise<ActiveMandateRecord | null>;
 }
 
 export class InMemoryAccountStore implements AccountStore {
   private readonly accounts = new Map<string, AccountRecord>();
   private readonly accountsByEmail = new Map<string, string>();
   private readonly devices = new Map<string, DeviceRecord>();
-  private readonly activeMandates = new Map<string, ActiveMandateRecord>();
 
   async createAccount(email: string, displayName: string): Promise<AccountRecord> {
     const existing = this.accountsByEmail.get(email.toLowerCase());
@@ -121,14 +107,5 @@ export class InMemoryAccountStore implements AccountStore {
     const d = this.devices.get(signingDeviceId);
     if (d === undefined) return;
     d.revoked_at = now;
-  }
-
-  async setActiveMandate(record: ActiveMandateRecord): Promise<void> {
-    this.activeMandates.set(record.account_id, { ...record });
-  }
-
-  async getActiveMandate(accountId: string): Promise<ActiveMandateRecord | null> {
-    const r = this.activeMandates.get(accountId);
-    return r === undefined ? null : { ...r };
   }
 }

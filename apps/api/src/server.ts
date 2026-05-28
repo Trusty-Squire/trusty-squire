@@ -8,9 +8,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import { loadVouchflowConfig, isStubMode } from "./config/vouchflow.js";
-import { makeStubVouchflowVerifier } from "./config/stub-verifier.js";
 import { makeAuthMiddleware } from "./auth/middleware.js";
-import { registerAccountsRoute } from "./routes/accounts.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
 import { registerInboxRoute } from "./routes/inbox.js";
@@ -18,14 +16,10 @@ import { registerLLMRoute } from "./routes/llm.js";
 import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
-import { registerApprovalsRoute } from "./routes/approvals.js";
 import { registerCredentialsRoute } from "./routes/credentials.js";
 import { registerVaultRoute } from "./routes/vault.js";
-import { registerMandatesRoute } from "./routes/mandates.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
-import { registerReadViewsRoute } from "./routes/read-views.js";
-import { registerRunsRoute } from "./routes/runs.js";
 import { registerShortRoute } from "./routes/short.js";
 import { registerNotifyRoute } from "./routes/notify.js";
 import { registerOperatorOtpRoute } from "./routes/operator-otp.js";
@@ -56,18 +50,12 @@ function defaultPwaBaseUrl(): string {
 }
 
 export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyInstance> {
-  // If stub mode is enabled, create a test verifier that accepts any bundle
-  const stubVerifier = isStubMode()
-    ? makeStubVouchflowVerifier(loadVouchflowConfig().customerId)
-    : undefined;
-
   const deps =
     opts.deps ??
     buildInMemoryDeps(
       opts.buildDeps ?? {
         sessionSecret: process.env.SESSION_JWT_SECRET ?? "dev-secret-do-not-use",
         customerId: loadVouchflowConfig().customerId,
-        ...(stubVerifier ? { vouchflowVerifier: stubVerifier as any } : {}),
       },
     );
 
@@ -130,10 +118,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     await auth.resolveAuth(req);
   });
 
-  await fastify.register(registerAccountsRoute, { deps });
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerOAuthRoute, { deps });
-  await fastify.register(registerMandatesRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerResendWebhookRoute, {
     deps: {
       resendHandler: deps.resendHandler,
@@ -178,12 +164,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
   });
-  await fastify.register(registerRunsRoute, {
-    deps,
-    requireAny: auth.requireAny,
-    ...(opts.approvalBaseUrl !== undefined ? { approvalBaseUrl: opts.approvalBaseUrl } : {}),
-  });
-  await fastify.register(registerApprovalsRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerCredentialsRoute, { deps, requireAgent: auth.requireAgent });
   await fastify.register(registerVaultRoute, {
     deps,
@@ -199,11 +179,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerMcpSessionsRoute, {
     deps,
-    requireWeb: auth.requireWeb,
-  });
-  await fastify.register(registerReadViewsRoute, {
-    deps,
-    requireAny: auth.requireAny,
     requireWeb: auth.requireWeb,
   });
   // G15: tiny noVNC-tunnel URL shortener. webBaseUrl is the host

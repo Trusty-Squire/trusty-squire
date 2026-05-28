@@ -32,7 +32,7 @@ const PostBodySchema = z.object({
   signup_url: z.string().max(2048).optional(),
   mcp_version: z.string().min(1).max(40),
   // T45 — correlation id linking this attempt to ExtractFailureSnapshot
-  // rows uploaded during the same provision_any_service call.
+  // rows uploaded during the same provision call.
   provision_id: z.string().min(1).max(120).optional(),
   // T45 — inline step trail (truncated server-side past 32KB) for
   // failures that bail before any ExtractFailureSnapshot rows

@@ -5,7 +5,6 @@ export interface RegistryPrismaClient {
   $disconnect(): Promise<void>;
   $transaction<T>(fn: (tx: RegistryPrismaTransaction) => Promise<T>): Promise<T>;
   $queryRawUnsafe<T = unknown>(query: string, ...args: unknown[]): Promise<T>;
-  adapterManifestRecord: AdapterManifestDelegate;
   skillRecord: SkillRecordDelegate;
   skillReplayRecord: SkillReplayDelegate;
   skillCaptureRecord: SkillCaptureDelegate;
@@ -20,16 +19,6 @@ export type RegistryPrismaTransaction = Omit<
   RegistryPrismaClient,
   "$connect" | "$disconnect" | "$transaction"
 >;
-
-interface AdapterManifestDelegate {
-  create(args: { data: Record<string, unknown> }): Promise<unknown>;
-  findUnique(args: { where: Record<string, unknown> }): Promise<unknown | null>;
-  findMany(args: {
-    where?: Record<string, unknown>;
-    orderBy?: Record<string, unknown> | Array<Record<string, unknown>>;
-  }): Promise<unknown[]>;
-  update(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<unknown>;
-}
 
 interface SkillRecordDelegate {
   create(args: { data: Record<string, unknown> }): Promise<unknown>;

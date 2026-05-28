@@ -1,5 +1,5 @@
 -- T45 — link ProvisionAttempt to ExtractFailureSnapshot via a
--- correlation id the MCP generates once per provision_any_service
+-- correlation id the MCP generates once per provision
 -- run. Used by the admin dashboard's "recent failed attempts" view
 -- to surface step trail + per-round thumbnails together.
 --

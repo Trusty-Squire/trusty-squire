@@ -518,7 +518,7 @@ export function clientFromEnv(accountId: string): SkillRegistryClient | null {
 }
 
 /**
- * Generate a fresh correlation ID for a single provision_any_service
+ * Generate a fresh correlation ID for a single provision
  * invocation. Encoded so log entries are easy to grep — short prefix
  * + monotonic timestamp + random tail.
  */

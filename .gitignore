@@ -38,6 +38,7 @@ debug-*.png
 
 # Personal Claude Code settings (per-developer, not shared)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Raw onboarding-round captures (curate into the eval corpus)
 .onboarding-corpus-raw/

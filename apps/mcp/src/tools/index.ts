@@ -10,16 +10,9 @@
 
 import { z, type ZodTypeAny } from "zod";
 import type { ApiClient } from "../api-client.js";
-import { provisionTool } from "./provision.js";
-import { waitForApprovalTool } from "./wait-for-approval.js";
 import { getCredentialTool } from "./get-credential.js";
 import { listCredentialsTool } from "./list-credentials.js";
-import { listServicesTool } from "./list-services.js";
-import { listSubscriptionsTool } from "./list-subscriptions.js";
-import { cancelTool } from "./cancel.js";
-import { getUsageTool } from "./get-usage.js";
-import { rotateCredentialTool } from "./rotate-credential.js";
-import { provisionAnyTool, checkProvisionStatusTool } from "./provision-any.js";
+import { provisionTool, checkProvisionStatusTool } from "./provision-any.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
@@ -44,17 +37,14 @@ export function assertApi(api: ApiClient | null): asserts api is ApiClient {
   }
 }
 
-// The agent-facing tool registry. Only tools with a live backend are
-// exposed: the universal signup bot + its status poll, and the vault
-// read path. The native-`provision` cluster — provisionTool,
-// waitForApprovalTool, listServicesTool, listSubscriptionsTool,
-// cancelTool, getUsageTool, rotateCredentialTool — is still defined and
-// re-exported below but deliberately NOT registered: that subsystem
-// (adapter registry + mandate engine + native adapters) is deferred, so
-// handing those tools to a coding agent only yields 403s / dead-registry
-// errors. Re-register them when the native-provision work lands.
+// The agent-facing tool registry. The native-`provision` cluster (mandate
+// evaluator + adapter manifests + approval flow) was sunset in 0.8 — the
+// universal browser-driven bot covers every service the team would have
+// hand-authored a native adapter for, faster than the manifest work paid
+// for itself. What survives: the universal provision tool, its status
+// poll, vault reads, and the extract-failure diagnostic pair.
 export const TOOLS: Tool[] = [
-  provisionAnyTool,
+  provisionTool,
   checkProvisionStatusTool,
   getCredentialTool,
   listCredentialsTool,
@@ -74,17 +64,10 @@ export { z };
 // Per-tool re-exports so callers (tests, custom integrations) can
 // import a single tool without going through the TOOLS array.
 export {
-  provisionAnyTool,
-  checkProvisionStatusTool,
   provisionTool,
-  waitForApprovalTool,
+  checkProvisionStatusTool,
   getCredentialTool,
   listCredentialsTool,
-  listServicesTool,
-  listSubscriptionsTool,
-  cancelTool,
-  getUsageTool,
-  rotateCredentialTool,
   listExtractFailuresTool,
   getExtractFailureTool,
 };

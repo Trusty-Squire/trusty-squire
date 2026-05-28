@@ -1,11 +1,12 @@
-export * from "./types.js";
-export { defineAdapter } from "./define-adapter.js";
+// Public surface of @trusty-squire/adapter-sdk.
+//
+// Post-0.8: the native-provision cluster (AdapterManifest +
+// defineAdapter) was sunset, so this package now exports only the
+// Tier-2 Learned Skill schema. The package name stays "adapter-sdk"
+// for the same reason `ADAPTER_SIGNING_PRIVATE_KEY` does — renaming
+// would force a fly-secrets dance on every consumer for zero
+// functional gain.
 
-// Tier-2 Learned Skill schema (0.7.0). See ./skill.ts for the data
-// model and docs/DESIGN-skill-promoter.md for rationale. Exported
-// alongside the hand-authored adapter manifest types because the
-// registry stores both in the same `Adapter` table (unified-schema
-// decision, Challenge 2 → option A).
 export {
   SKILL_SCHEMA_VERSION,
   SkillSchema,

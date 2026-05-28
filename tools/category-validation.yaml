@@ -1,0 +1,59 @@
+# Category-recommendation workflow validation set.
+#
+# 5 services from 2 categories (search, vector-db) — none currently
+# have an active skill in the registry. Goal: confirm that running the
+# housekeeper against this list auto-promotes a skill per service, so
+# the "if X fails, recommend Y in the same category" path has anything
+# to recommend.
+#
+# Schema mirrors tools/archived-harvester/services.yaml (flat list).
+
+- slug: meilisearch
+  name: Meilisearch Cloud
+  signup_url: https://cloud.meilisearch.com/login
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  category: search
+  notes: |
+    Search-as-a-service. Free tier, no card required. OAuth-first.
+
+- slug: typesense
+  name: Typesense Cloud
+  signup_url: https://cloud.typesense.org/signin
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  category: search
+  notes: |
+    Search-as-a-service. Free trial, OAuth-first.
+
+- slug: weaviate
+  name: Weaviate Cloud
+  signup_url: https://console.weaviate.cloud
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  category: vector-db
+  notes: |
+    Vector DB. 14d free sandbox, OAuth-first.
+
+- slug: qdrant
+  name: Qdrant Cloud
+  signup_url: https://cloud.qdrant.io/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  category: vector-db
+  notes: |
+    Vector DB. GitHub-first OAuth.
+
+- slug: chroma
+  name: Chroma Cloud
+  signup_url: https://trychroma.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  category: vector-db
+  notes: |
+    Vector DB.

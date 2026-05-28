@@ -1,4 +1,4 @@
-// Captcha-event ingest route. The MCP `provision_any_service` tool POSTs
+// Captcha-event ingest route. The MCP `provision` tool POSTs
 // here whenever a signup attempt encounters a captcha (whether the bot
 // escaped it or got blocked). The events feed the analytics that
 // decide whether residential-proxy work is worth doing.

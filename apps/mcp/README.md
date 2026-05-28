@@ -74,7 +74,7 @@ Once installed, ask your agent in plain English:
 ```
 
 ```
-🛠  provision_any_service { "service": "Postmark" }
+🛠  provision { "service": "Postmark" }
 ✔  Signup started — run_id=mcp-mp7f4k8a-1c4e3f8a
 
 🛠  check_provision_status { "run_id": "mcp-mp7f4k8a-1c4e3f8a" }
@@ -90,7 +90,7 @@ The agent uses the key immediately. You see the signup happen in your vault.
 
 | Tool | What it does |
 |---|---|
-| `provision_any_service` | Start a signup. Returns a `run_id`. Async — takes 1–5 minutes. |
+| `provision` | Start a signup. Returns a `run_id`. Async — takes 1–5 minutes. |
 | `check_provision_status` | Poll a run. Returns `running`, `success`, or one of the failure modes below. |
 | `list_credentials` | Browse what's already in your vault for this account. |
 | `get_credential` | Read a specific credential by service or id. |

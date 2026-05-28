@@ -10,7 +10,7 @@
 
 ## TL;DR
 
-Today every `provision_any_service` run is amnesiac: the universal bot rediscovers
+Today every `provision` run is amnesiac: the universal bot rediscovers
 the signup URL, the OAuth provider, the post-verify navigation path, and the
 credential selector from scratch every single time. We already capture each
 successful run's full state-stream into `apps/mcp/corpus/onboarding/` via
@@ -19,7 +19,7 @@ successful run's full state-stream into `apps/mcp/corpus/onboarding/` via
 This doc proposes the **Skill Promoter**: a one-way pipeline that ingests
 captures from successful runs, synthesizes a structured Skill record, validates
 it via a clean replay, and publishes it to `registry-api`. Subsequent
-`provision_any_service` calls check the registry first and replay the skill in
+`provision` calls check the registry first and replay the skill in
 ~30 seconds instead of cold-pathing through the LLM planner for ~6 minutes.
 
 The skill format is intentionally a strict subset of the adapter manifest, so
@@ -41,8 +41,8 @@ to learn from; and the registry is reachable.
 export TRUSTY_SQUIRE_ONBOARDING_CAPTURE=~/.trusty-squire/corpus/onboarding
 
 # 2. Run a signup (creates ~/.trusty-squire/corpus/onboarding/railway/<run-id>/)
-#    Either via your agent (provision_any_service) or directly:
-mcp call provision_any_service '{"service": "Railway"}'
+#    Either via your agent (provision) or directly:
+mcp call provision '{"service": "Railway"}'
 # … signup completes, credential lands in vault, capture lands in corpus
 
 # 3. Promote: synthesize → validate → dry-mode replay-test → publish
@@ -56,7 +56,7 @@ pnpm skill:show railway
 #     steps: [...], credential: {...}, replays: { succeeded: 0, failed: 0 } }
 
 # 5. Trigger another signup — this one uses the skill (~30s, not ~6min)
-mcp call provision_any_service '{"service": "Railway"}'
+mcp call provision '{"service": "Railway"}'
 # → router hits the registry, replay-skill walks the graph, credential extracted
 ```
 
@@ -914,7 +914,7 @@ Subagent flagged as **2× under**. Realistic: ~2200 LoC + ~2000 LoC tests.
 | 2. Setup | Get capture data | N/A | Need to have set `TRUSTY_SQUIRE_ONBOARDING_CAPTURE` during the original run — **trap, unimproved** |
 | 3. Promote | `pnpm skill:promote railway` | N/A | One command — good |
 | 4. Verify | Inspect what was published | N/A | `pnpm skill:show` missing from deliverables — **gap** |
-| 5. Replay | Trigger signup | `provision_any_service` | Same call → uses skill |
+| 5. Replay | Trigger signup | `provision` | Same call → uses skill |
 | 6. Debug | Trace what happened | Stare at steps[] | source_run_ids point to local files only — **gap (D1)** |
 | 7. Fix | Patch broken step | N/A | `pnpm skill:edit` missing — **gap (D3)** |
 | 8. Demote | Pull bad skill | N/A | `pnpm skill demote` (mentioned, undefined) |

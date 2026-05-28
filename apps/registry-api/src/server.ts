@@ -3,8 +3,6 @@
 // to keep this app's dep surface minimal).
 
 import Fastify from "fastify";
-import { ManifestCache } from "./cache.js";
-import { registerAdaptersRoute } from "./routes/adapters.js";
 import { registerSkillsRoute } from "./routes/skills.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAdminDashboardRoute } from "./routes/admin-dashboard.js";
@@ -12,7 +10,6 @@ import { registerExtractFailuresRoute } from "./routes/extract-failures.js";
 import { registerServicesHealthRoute } from "./routes/services-health.js";
 import { generateKeyPairSync } from "node:crypto";
 import { ManifestSigner } from "./signer.js";
-import { InMemoryManifestStore, type ManifestStore } from "./store.js";
 import { InMemorySkillStore } from "./skill-store-memory.js";
 import type { SkillStore } from "./skill-store.js";
 import {
@@ -36,7 +33,6 @@ function numEnv(name: string, fallback: number): number {
 }
 
 export interface BuildServerOpts {
-  store?: ManifestStore;
   skillStore?: SkillStore;
   extractFailureStore?: ExtractFailureStore;
   // Closed-loop Phase 5. In-memory by default; production wires a
@@ -45,7 +41,6 @@ export interface BuildServerOpts {
   // T44 — per-attempt outcome store. Drives the compat-score endpoint.
   // In-memory default; production wires a Prisma-backed store at boot.
   provisionAttemptStore?: ProvisionAttemptStore;
-  cache?: ManifestCache;
   signer?: ManifestSigner;
   // Public key (base64url SPKI DER) used to verify POST /skills
   // signatures. When undefined the route logs a warn per publish and
@@ -82,7 +77,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     logger,
     bodyLimit: MAX_HTML_BYTES + MAX_SCREENSHOT_BYTES + 512 * 1024,
   });
-  const store = opts.store ?? new InMemoryManifestStore();
   const skillStore = opts.skillStore ?? new InMemorySkillStore();
   const extractFailureStore =
     opts.extractFailureStore ?? new InMemoryExtractFailureStore();
@@ -90,12 +84,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     opts.botFailureStore ?? new InMemoryBotFailureStore();
   const provisionAttemptStore =
     opts.provisionAttemptStore ?? new InMemoryProvisionAttemptStore();
-  const cache = opts.cache ?? new ManifestCache();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
   // used both for skill provenance (`signed_by` field on stored
-  // skills) and — once Phase 6 lands — for full Ed25519 verification
-  // of incoming POST /skills payloads.
+  // skills) and full Ed25519 verification of incoming POST /skills
+  // payloads (when SKILL_VERIFY_PUBLIC_KEY is set).
   // Resolution order:
   //   1. Explicit opts.signer (tests inject one)
   //   2. ADAPTER_SIGNING_PRIVATE_KEY env (production — base64url PKCS8)
@@ -125,7 +118,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
       return "anonymous";
     });
 
-  await fastify.register(registerAdaptersRoute, { store, cache });
   const demotionWebhookUrl =
     opts.demotionWebhookUrl ?? process.env.TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL;
   const skillVerifyPublicKey =
@@ -204,13 +196,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.REGISTRY_API_PORT ?? 3001);
   let serverOpts: BuildServerOpts = {};
   if (process.env.REGISTRY_DATABASE_URL !== undefined && process.env.REGISTRY_DATABASE_URL.length > 0) {
-    const { PrismaManifestStore } = await import("./prisma-store.js");
     const { PrismaSkillStore } = await import("./prisma-skill-store.js");
     const { PrismaExtractFailureStore } = await import("./prisma-extract-failure-store.js");
     const { PrismaBotFailureStore } = await import("./prisma-bot-failure-store.js");
     const { PrismaProvisionAttemptStore } = await import("./prisma-provision-attempt-store.js");
     serverOpts = {
-      store: await PrismaManifestStore.fromEnv(),
       skillStore: await PrismaSkillStore.fromEnv(),
       extractFailureStore: await PrismaExtractFailureStore.fromEnv(),
       // Phase 5 — without this, every restart wipes the 14-day

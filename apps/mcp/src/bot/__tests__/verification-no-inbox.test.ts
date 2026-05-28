@@ -1,5 +1,5 @@
 // Covers the M2/S3 no-inbox fast-fail (TODOS.md M2). The SES inbound
-// pipeline is mothballed (M1), so provision_any_service runs the
+// pipeline is mothballed (M1), so provision runs the
 // form-fill bot with NO inbox. When a signup submits and the
 // post-submit page asks the user to confirm by email, signup() must
 // return `verification_not_sent` IMMEDIATELY — it must not blind-poll
@@ -132,7 +132,7 @@ async function runSignup(postSubmitText: string): ReturnType<SignupAgent["signup
     signupUrl: "https://acme.test/signup",
     email: "bot@inbox.test",
     generatePassword: () => "Pw-test-12345",
-    // No `inbox` — provision_any_service no longer passes one (M1).
+    // No `inbox` — provision no longer passes one (M1).
   });
 }
 

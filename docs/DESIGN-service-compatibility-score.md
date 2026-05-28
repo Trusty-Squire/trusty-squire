@@ -2,7 +2,7 @@
 
 **Status:** Draft → in implementation
 **Scope:** 0.8.x — additive to the Skill Promoter + closed-loop registry work
-**Premise:** When an agent calls `provision_any_service` for a SaaS we've repeatedly failed to sign up to, the MCP should advise an alternate service in the same category that's known to work — instead of silently launching the bot and reproducing the same failure.
+**Premise:** When an agent calls `provision` for a SaaS we've repeatedly failed to sign up to, the MCP should advise an alternate service in the same category that's known to work — instead of silently launching the bot and reproducing the same failure.
 
 ---
 
@@ -19,7 +19,7 @@ Today the bot has no memory across runs for the question "does this service work
    - `struggling` — score in `[-2, 0]`
    - `hard-block` — score < -2
 4. `GET /v1/services/:slug/health` returns the score, state, and category-peer alternates.
-5. MCP preflight in `provision_any_service` queries that endpoint. On `hard-block`, the tool response carries a `recommendation` field with category-peer alternates that have working skills. **Recommendation only — not a gate.** Agents that have a hard reason ("we deploy on Vercel") still proceed.
+5. MCP preflight in `provision` queries that endpoint. On `hard-block`, the tool response carries a `recommendation` field with category-peer alternates that have working skills. **Recommendation only — not a gate.** Agents that have a hard reason ("we deploy on Vercel") still proceed.
 
 **Key tradeoff:** continuous score handles recovery naturally (Render unblocked when SES landed → score climbed back). A binary blacklist would have stayed dead.
 
@@ -113,7 +113,7 @@ Thresholds tunable via `COMPAT_HARD_BLOCK_THRESHOLD` (default -2) and `COMPAT_ST
 
 Inserts one `ProvisionAttempt` row. Auth: bot's machine token. The bot calls this on every universal-bot completion regardless of outcome.
 
-### MCP: `provision_any_service` preflight
+### MCP: `provision` preflight
 
 Before launching the bot:
 
@@ -177,7 +177,7 @@ Lives in the MCP package (shipped with each install) — simpler than a registry
 1. Prisma migration for `ProvisionAttempt` — additive, no breaking changes.
 2. New registry routes (`GET /health`, `POST /attempts`).
 3. Bot-side hook in universal bot's completion path.
-4. MCP-side preflight in `provision_any_service`.
+4. MCP-side preflight in `provision`.
 5. Category yaml + loader.
 6. Tests at each layer.
 7. Live validation: trigger a couple of hard-block scenarios on services we know fail (Cloudflare, MailerSend phone-gate), verify the recommendation appears with valid alternates.

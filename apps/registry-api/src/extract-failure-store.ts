@@ -95,7 +95,7 @@ export interface ExtractFailureStore {
   list(account_id: string, limit?: number): Promise<ExtractFailureSummary[]>;
   get(account_id: string, id: string): Promise<ExtractFailureDetail | null>;
   // T45 — admin-side view: all snapshots tagged with one provision_id
-  // (i.e. one provision_any_service run), oldest-first. Used by the
+  // (i.e. one provision run), oldest-first. Used by the
   // /admin recent-failures gallery.
   listByProvisionId(provision_id: string): Promise<ExtractFailureSummary[]>;
   // Returns the number of rows pruned. Called by the server's cron or
@@ -243,7 +243,7 @@ export class InMemoryExtractFailureStore implements ExtractFailureStore {
   }
 
   // T45 — admin dashboard view: all snapshots from a single
-  // provision_any_service run, oldest-first (so the trail reads in
+  // provision run, oldest-first (so the trail reads in
   // chronological order). Crosses account boundaries because admin
   // routes already gate by REGISTRY_ADMIN_BEARER; no per-account
   // filter here.
