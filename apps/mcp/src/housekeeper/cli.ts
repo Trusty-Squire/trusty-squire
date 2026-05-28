@@ -26,7 +26,9 @@
 
 import { BrowserController } from "../bot/browser.js";
 import { replaySkill, type ReplayOutcome } from "../bot/replay-skill.js";
-import { pickLLMClient } from "../bot/llm-client.js";
+// pickLLMClient was used for an eager startup preflight that the
+// verifier path didn't actually need. 0.8.3 removed the preflight;
+// discovery's LLM init now happens lazily inside runDiscoveryBot.
 import { VerifierRegistryClient } from "./registry-client.js";
 import {
   runOneBatch,
@@ -249,11 +251,15 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     queue = new YamlSeedQueue({ path: args.seedPath });
   }
 
-  // Replay runner — always constructed so a misconfigured LLM env
-  // surfaces at startup rather than mid-batch. Only invoked for
-  // 'replay' tasks (verifier queue).
-  const llm = pickLLMClient();
-  void llm;
+  // Replay runner — invoked for 'replay' tasks (verifier queue).
+  // 0.8.3 — dropped eager pickLLMClient() preflight. The verifier
+  // path doesn't pass an LLM into replaySkill (the replay engine
+  // only calls LLM via llmFallback, which we don't wire here), so
+  // the preflight was forcing every verifier-only run to require
+  // a machine token / OPENROUTER_API_KEY / ANTHROPIC_API_KEY for
+  // no actual reason. The discovery branch below still calls
+  // pickLLMClient indirectly via runDiscoveryBot — that's where
+  // a missing LLM should fail loud.
   const replay = async (input: {
     skill: import("@trusty-squire/adapter-sdk").Skill;
     mode: "dry" | "full";
