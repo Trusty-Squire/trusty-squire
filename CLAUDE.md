@@ -318,7 +318,7 @@ bin symlink and would catch any regression of the above.
 | `RESEND_API_KEY` | Resend outbound (SES-replacement) |
 | `RESEND_INBOUND_SECRET` | Svix-style HMAC for `/v1/webhooks/resend-inbound` |
 | `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
-| `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Outbound Gmail forwarding |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` | IMAP credentials for the operator's gmail. Read-only — backs `gmail-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, other WorkOS-backed services). Not used for outbound. |
 | `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
 | `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
 
@@ -460,7 +460,7 @@ consumed via `mcp housekeeper --queue=seed --from=tools/housekeeper-services.yam
 | Env var | Default | Effect |
 |---|---|---|
 | `LLM_HOURLY_LIMIT` | `150` | Per-machine-token rolling rate cap for `/v1/llm/chat` |
-| `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required` (alias: `MACHINE_TOKEN_QUOTA`, the prior name) |
+| `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required`. |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
 | `LLM_PROXY_FREE_MODEL` | `google/gemini-2.0-flash-exp:free` | Free-tier primary (verifier worker). |

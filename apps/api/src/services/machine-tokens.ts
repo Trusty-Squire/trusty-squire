@@ -12,10 +12,8 @@
 import { randomBytes } from "node:crypto";
 
 const TOKEN_PREFIX = "tsm_";
-// ACCOUNT_FREE_QUOTA is the new env name; MACHINE_TOKEN_QUOTA stays as
-// a transitional fallback so existing deploys keep working.
 const DEFAULT_QUOTA = Number.parseInt(
-  process.env.ACCOUNT_FREE_QUOTA ?? process.env.MACHINE_TOKEN_QUOTA ?? "10",
+  process.env.ACCOUNT_FREE_QUOTA ?? "10",
   10,
 );
 
