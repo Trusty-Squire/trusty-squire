@@ -138,6 +138,61 @@ export class ApiClient {
     );
   }
 
+  // ── Vault management (agent-driven, on the user's behalf) ──
+
+  // Store a secret the user just shared. Returns the vault reference +
+  // the derived allowed_hosts; never echoes the value back.
+  async storeCredential(input: {
+    service: string;
+    value: string;
+    env_var_suggestion?: string;
+    type?: string;
+  }): Promise<{ reference: string; type: string; created_at?: string; allowed_hosts?: string[] }> {
+    return this.post("/v1/vault/credentials", input);
+  }
+
+  // Rotate the value of an existing credential (by reference). Cascades
+  // to revoke persistent grants — returns how many were revoked.
+  async rotateCredential(
+    reference: string,
+    newValue: string,
+  ): Promise<{ rotated_at: string; revoked_grant_count: number }> {
+    return this.post("/v1/vault/credentials/rotate", { reference, new_value: newValue });
+  }
+
+  // Permanently (soft-)delete a credential by reference.
+  async deleteCredential(reference: string): Promise<{ deleted_at: string }> {
+    return this.post("/v1/vault/credentials/delete", { reference });
+  }
+
+  // ── Agent-mediated access (request / poll / proxy) ─────────
+
+  async requestCredentialAccess(input: {
+    reference?: string;
+    service?: string;
+    purpose: string;
+    intent: "value" | "proxy";
+    proxy_target_host?: string;
+    reason_proxy_not_possible?: string;
+    mode_requested?: "once" | "session" | "persistent";
+    ttl_requested?: number;
+  }): Promise<{ request_id: string; status: string; expires_at: string | null; auto_approved: boolean }> {
+    return this.post("/v1/vault/access-requests", input);
+  }
+
+  async pollCredentialAccess(
+    requestId: string,
+  ): Promise<{ status: string; value?: string; denied_reason?: string }> {
+    return this.get(`/v1/vault/access-requests/${encodeURIComponent(requestId)}`);
+  }
+
+  async useCredentialProxy(
+    requestId: string,
+    http: { method: string; url: string; headers?: Record<string, string>; body?: string },
+  ): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
+    return this.post(`/v1/vault/access-requests/${encodeURIComponent(requestId)}/proxy`, { http });
+  }
+
   // ── Subscriptions ─────────────────────────────────────────
 
   async listSubscriptions(): Promise<{ subscriptions: unknown[] }> {

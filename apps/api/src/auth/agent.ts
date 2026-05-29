@@ -24,6 +24,11 @@ export interface AgentSessionRecord {
   use_count: number;
   revoked_at: Date | null;
   revocation_reason: string | null;
+  // Trusted-session opt-in (use_credential auto-approval). Set only via
+  // PATCH /v1/mcp/sessions/:id behind a ≤24h passkey step-up.
+  trusted: boolean;
+  trust_granted_at: Date | null;
+  trust_granted_via_passkey_id: string | null;
 }
 
 export interface AgentSessionStore {
@@ -33,6 +38,22 @@ export interface AgentSessionStore {
   revoke(id: string, reason: string): Promise<void>;
   // Connected-agents view (GET /v1/mcp/sessions) — newest first.
   listByAccount(accountId: string): Promise<AgentSessionRecord[]>;
+  // Account-scoped single lookup for the trust toggle + use_credential
+  // trust check — WHERE id AND account_id in one query.
+  findByIdForAccount(
+    id: string,
+    accountId: string,
+  ): Promise<AgentSessionRecord | null>;
+  // Set/clear the trusted flag. Account-scoped conditional update;
+  // returns rows affected (0 → no such session for this account).
+  // grantedAt + passkeyId are null when revoking trust.
+  setTrust(input: {
+    id: string;
+    accountId: string;
+    trusted: boolean;
+    grantedAt: Date | null;
+    passkeyId: string | null;
+  }): Promise<number>;
 }
 
 export function issueAgentSession(input: {
@@ -55,6 +76,9 @@ export function issueAgentSession(input: {
     use_count: 0,
     revoked_at: null,
     revocation_reason: null,
+    trusted: false,
+    trust_granted_at: null,
+    trust_granted_via_passkey_id: null,
   };
   return { raw_token: raw, record };
 }
@@ -112,5 +136,33 @@ export class InMemoryAgentSessionStore implements AgentSessionStore {
       .filter((r) => r.account_id === accountId)
       .sort((a, b) => b.issued_at.getTime() - a.issued_at.getTime())
       .map((r) => ({ ...r }));
+  }
+
+  async findByIdForAccount(
+    id: string,
+    accountId: string,
+  ): Promise<AgentSessionRecord | null> {
+    for (const r of this.byHash.values()) {
+      if (r.id === id && r.account_id === accountId) return { ...r };
+    }
+    return null;
+  }
+
+  async setTrust(input: {
+    id: string;
+    accountId: string;
+    trusted: boolean;
+    grantedAt: Date | null;
+    passkeyId: string | null;
+  }): Promise<number> {
+    for (const r of this.byHash.values()) {
+      if (r.id === input.id && r.account_id === input.accountId) {
+        r.trusted = input.trusted;
+        r.trust_granted_at = input.grantedAt;
+        r.trust_granted_via_passkey_id = input.passkeyId;
+        return 1;
+      }
+    }
+    return 0;
   }
 }

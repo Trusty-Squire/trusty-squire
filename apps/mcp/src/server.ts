@@ -26,10 +26,28 @@ const SERVER_NAME = "trusty-squire";
 
 const DEFAULT_REGISTRY_BASE = process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
 
+// Injected into the model's system prompt every turn (≤2KB). Teaches
+// the routing between store / use / request so the agent reaches for
+// the right credential tool without the user spelling it out.
+const SERVER_INSTRUCTIONS = `This is the Trusty Squire credential vault. The user's secrets (API keys,
+tokens, passwords) live here encrypted; they are NOT in the conversation
+context. Routing rules for THIS server's tools:
+
+- User pastes a secret-shaped value (sk-…, ghp_…, AKIA…, eyJ…) into chat
+  → call store_credential AUTOMATICALLY; don't ask permission.
+- User refers to a saved credential by name or service ('my OpenAI key',
+  'the Stripe token') → call list_credentials FIRST to resolve the
+  reference.
+- User wants to make an authenticated API call → call use_credential.
+  The secret stays server-side; the agent never sees the value.
+- User explicitly needs the raw secret value (writing .env, pasting into
+  a UI) → call request_credential, which triggers user approval.
+- NEVER echo a credential value back to the user in plain chat.`;
+
 export async function buildServer(api: ApiClient | null): Promise<Server> {
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -37,6 +55,8 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
       name: t.name,
       description: t.description,
       inputSchema: t.jsonInputSchema,
+      ...(t.annotations !== undefined ? { annotations: t.annotations } : {}),
+      ...(t.meta !== undefined ? { _meta: t.meta } : {}),
     })),
   }));
 

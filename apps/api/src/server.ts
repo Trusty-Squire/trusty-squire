@@ -18,6 +18,8 @@ import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerCredentialsRoute } from "./routes/credentials.js";
 import { registerVaultRoute } from "./routes/vault.js";
+import { registerVaultAccessRoute } from "./routes/vault-access.js";
+import type { HttpProxyExecutor } from "./services/http-proxy.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerShortRoute } from "./routes/short.js";
@@ -35,6 +37,10 @@ export interface BuildServerOpts {
   buildDeps?: BuildInMemoryDepsOpts;
   approvalBaseUrl?: string;
   installBaseUrl?: string;
+  // Test seam — injects a proxy executor with the SSRF guard relaxed /
+  // network dispatch faked, so use_credential tests don't fight the
+  // loopback block. Production leaves this undefined → real executor.
+  proxyExecutor?: HttpProxyExecutor;
   // Test seam — injects a stub EmailForwarder into the notify
   // route. Production builds leave this undefined and the route
   // builds its own forwarder from GMAIL_USER / GMAIL_APP_PASSWORD.
@@ -174,6 +180,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,
     requireAny: auth.requireAny,
+  });
+  await fastify.register(registerVaultAccessRoute, {
+    deps,
+    requireWeb: auth.requireWeb,
+    requireAgent: auth.requireAgent,
+    ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
   });
   const installBaseUrl = opts.installBaseUrl ?? `${defaultPwaBaseUrl()}/install`;
   await fastify.register(registerMcpInstallRoute, {

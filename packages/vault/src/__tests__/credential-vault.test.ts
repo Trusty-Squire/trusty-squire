@@ -213,6 +213,67 @@ describe("CredentialVault", () => {
     await vault.retrieve(entry.reference, "system:internal", makeAssertion());
     expect(audit.events.at(-1)!.payload.requester).toBe("system");
   });
+
+  it("store derives allowed_hosts from the service metadata", async () => {
+    const { vault, store } = makeVault();
+    const entry = await vault.store(
+      makeStoreInput({ metadata: { service: "OpenAI" } }),
+    );
+    expect(entry.allowed_hosts).toEqual(["api.openai.com"]);
+    const rec = await store.findActive(entry.reference);
+    expect(rec?.allowed_hosts).toEqual(["api.openai.com"]);
+  });
+
+  it("store leaves allowed_hosts empty for an unknown / missing service", async () => {
+    const { vault } = makeVault();
+    const unknown = await vault.store(
+      makeStoreInput({ metadata: { service: "some-random-saas" } }),
+    );
+    expect(unknown.allowed_hosts).toEqual([]);
+    const noService = await vault.store(makeStoreInput({ metadata: {} }));
+    expect(noService.allowed_hosts).toEqual([]);
+  });
+
+  it("rotate returns rotated_at + revoked_grant_count (0 with no grants)", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(makeStoreInput());
+    const result = await vault.rotate(entry.reference, "sk_rotated");
+    expect(result.rotated_at).toBe(NOW.toISOString());
+    expect(result.revoked_grant_count).toBe(0);
+  });
+
+  it("findByIdForAccount resolves only the owning account's credential", async () => {
+    const { vault, store } = makeVault();
+    const entry = await vault.store(makeStoreInput());
+    const rec = await store.findActive(entry.reference);
+    const id = rec!.id;
+
+    const found = await store.findByIdForAccount(id, ACCOUNT);
+    expect(found?.reference).toBe(entry.reference);
+
+    // Wrong account → null (no cross-account leak).
+    expect(await store.findByIdForAccount(id, "01HOTHERACCOUNTAAAAAAAAAAA")).toBeNull();
+    // Unknown id → null.
+    expect(await store.findByIdForAccount("01HNOPE", ACCOUNT)).toBeNull();
+  });
+
+  it("findByIdForAccount returns null for a soft-deleted credential", async () => {
+    const { vault, store } = makeVault();
+    const entry = await vault.store(makeStoreInput());
+    const id = (await store.findActive(entry.reference))!.id;
+    await vault.delete(entry.reference);
+    expect(await store.findByIdForAccount(id, ACCOUNT)).toBeNull();
+  });
+
+  it("setAllowedHosts replaces the credential's allowlist", async () => {
+    const { vault, store } = makeVault();
+    const entry = await vault.store(
+      makeStoreInput({ metadata: { service: "OpenAI" } }),
+    );
+    await store.setAllowedHosts(entry.reference, ["api.example.com"]);
+    const rec = await store.findActive(entry.reference);
+    expect(rec?.allowed_hosts).toEqual(["api.example.com"]);
+  });
 });
 
 describe("LocalKMS", () => {

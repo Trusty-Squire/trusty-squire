@@ -448,3 +448,102 @@ footer{border-top:1px solid var(--line);padding:34px 0}
 .spinner{width:15px;height:15px;border-radius:50%;flex:0 0 auto;
   border:2px solid var(--line2);border-top-color:var(--accent);
   animation:spin .7s linear infinite;display:inline-block}
+
+/* ===================== vault management ===================== */
+
+/* header-right action (e.g. "+ Add key") sitting beside the count */
+.app-head-actions{display:flex;align-items:center;gap:10px}
+.head-btn{font:inherit;font-size:13px;font-weight:500;cursor:pointer;
+  text-decoration:none;display:inline-flex;align-items:center;gap:6px;
+  padding:7px 13px;border-radius:8px;background:var(--accent-fill);color:#fff;
+  border:0;transition:background .12s}
+.head-btn:hover{background:var(--accent-fill-h)}
+
+/* form fields (vault/new + modals) */
+.form{display:flex;flex-direction:column;gap:16px;margin-top:8px}
+.field{display:flex;flex-direction:column;gap:7px}
+.field label{font-size:13px;font-weight:500;color:var(--fg)}
+.field .field-hint{font-size:12px;color:var(--muted);line-height:1.45}
+.field input,.field textarea,.field select{font:inherit;font-size:14px;
+  background:var(--surface);border:1px solid var(--line2);border-radius:9px;
+  padding:10px 12px;color:var(--fg);width:100%;
+  transition:border-color .12s}
+.field input:focus,.field textarea:focus,.field select:focus{outline:none;
+  border-color:var(--accent)}
+.field textarea{min-height:96px;resize:vertical;font-family:var(--mono);
+  font-size:12.5px}
+.field input.mono{font-family:var(--mono);font-size:12.5px}
+.form-actions{display:flex;gap:10px;margin-top:4px}
+.form-err{font-size:13px;color:#ff6b6b}
+
+/* overflow "⋯" menu on a row */
+.menu-wrap{position:relative}
+.menu-trigger{font:inherit;font-size:18px;line-height:1;cursor:pointer;
+  background:none;border:0;color:var(--muted);padding:4px 8px;border-radius:7px;
+  transition:color .12s,background .12s}
+.menu-trigger:hover{color:var(--fg);background:var(--surface)}
+.menu{position:absolute;right:0;top:calc(100% + 4px);z-index:30;min-width:168px;
+  background:var(--raised);border:1px solid var(--line2);border-radius:10px;
+  padding:5px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.menu button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;
+  color:var(--fg);background:none;border:0;cursor:pointer;padding:8px 10px;
+  border-radius:7px;transition:background .1s}
+.menu button:hover{background:var(--surface)}
+.menu button.danger{color:#ff6b6b}
+
+/* modal / dialog */
+.modal-backdrop{position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.55);
+  display:flex;align-items:center;justify-content:center;padding:22px;
+  backdrop-filter:blur(2px)}
+.modal{width:100%;max-width:440px;background:var(--surface);
+  border:1px solid var(--line2);border-radius:14px;padding:22px}
+.modal h2{font-size:18px;font-weight:600;letter-spacing:-.02em}
+.modal .modal-sub{margin-top:6px;font-size:13.5px;color:var(--muted);
+  line-height:1.5}
+.modal .form{margin-top:16px}
+
+/* trusted toggle pill on an agent row */
+.trust-pill{font:inherit;font-size:11px;font-weight:500;padding:3px 9px;
+  border-radius:999px;border:1px solid var(--line2);background:var(--surface);
+  color:var(--muted);letter-spacing:.02em}
+.trust-pill.on{color:#7dd181;border-color:rgba(125,209,129,.45);
+  background:rgba(125,209,129,.12)}
+
+/* nav badge (pending approvals count) */
+.nav-badge{display:inline-flex;align-items:center;justify-content:center;
+  min-width:17px;height:17px;padding:0 5px;margin-left:5px;border-radius:999px;
+  background:var(--accent-fill);color:#fff;font-size:10.5px;font-weight:600;
+  font-family:var(--mono);vertical-align:1px}
+
+/* approval cards (/vault/approvals) */
+.approval{border:1px solid var(--line2);border-radius:13px;padding:16px 17px;
+  margin-bottom:13px;background:var(--surface)}
+.approval-top{display:flex;align-items:flex-start;justify-content:space-between;
+  gap:12px}
+.approval-title{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.approval-intent{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;
+  letter-spacing:.05em;padding:2px 8px;border-radius:999px;flex:0 0 auto;
+  border:1px solid var(--line2);color:var(--muted)}
+.approval-intent.proxy{color:var(--accent);border-color:rgba(139,137,255,.4)}
+.approval-intent.value{color:#d6aa5a;border-color:rgba(214,170,90,.4)}
+.approval-meta{margin-top:9px;display:flex;flex-direction:column;gap:5px;
+  font-size:13px;color:var(--muted);line-height:1.5}
+.approval-meta .k{color:var(--faint);font-family:var(--mono);font-size:11.5px}
+.approval-meta code{font-family:var(--mono);font-size:12px;color:var(--fg);
+  word-break:break-all}
+.approval-ttl{margin-top:14px;display:flex;flex-wrap:wrap;gap:7px}
+.ttl-opt{font:inherit;font-size:12px;font-family:var(--mono);padding:5px 11px;
+  border-radius:7px;border:1px solid var(--line2);background:transparent;
+  color:var(--muted);cursor:pointer;transition:all .12s}
+.ttl-opt.on{color:var(--fg);border-color:var(--accent);
+  background:rgba(139,137,255,.1)}
+.approval-actions{margin-top:15px;display:flex;gap:9px}
+.btn-approve{flex:1;font:inherit;font-size:13.5px;font-weight:600;cursor:pointer;
+  padding:10px;border-radius:9px;border:0;background:var(--accent-fill);
+  color:#fff;transition:background .12s}
+.btn-approve:hover{background:var(--accent-fill-h)}
+.btn-approve:disabled{opacity:.55;cursor:default}
+.btn-deny{font:inherit;font-size:13.5px;font-weight:500;cursor:pointer;
+  padding:10px 16px;border-radius:9px;border:1px solid var(--line2);
+  background:transparent;color:var(--muted);transition:color .12s,border-color .12s}
+.btn-deny:hover{color:#ff6b6b;border-color:rgba(255,107,107,.45)}

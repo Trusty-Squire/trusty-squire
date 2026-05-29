@@ -29,6 +29,9 @@ export class PrismaAgentSessionStore implements AgentSessionStore {
         use_count: record.use_count,
         revoked_at: record.revoked_at,
         revocation_reason: record.revocation_reason,
+        trusted: record.trusted,
+        trust_granted_at: record.trust_granted_at,
+        trust_granted_via_passkey_id: record.trust_granted_via_passkey_id,
       },
     });
   }
@@ -71,6 +74,35 @@ export class PrismaAgentSessionStore implements AgentSessionStore {
     return rows.map((row) => this.toRecord(row));
   }
 
+  async findByIdForAccount(
+    id: string,
+    accountId: string,
+  ): Promise<AgentSessionRecord | null> {
+    const rows = await this.prisma.agentSession.findMany({
+      where: { id, account_id: accountId },
+    });
+    const row = rows[0];
+    return row === undefined ? null : this.toRecord(row);
+  }
+
+  async setTrust(input: {
+    id: string;
+    accountId: string;
+    trusted: boolean;
+    grantedAt: Date | null;
+    passkeyId: string | null;
+  }): Promise<number> {
+    const { count } = await this.prisma.agentSession.updateMany({
+      where: { id: input.id, account_id: input.accountId },
+      data: {
+        trusted: input.trusted,
+        trust_granted_at: input.grantedAt,
+        trust_granted_via_passkey_id: input.passkeyId,
+      },
+    });
+    return count;
+  }
+
   private toRecord(row: {
     id: string;
     account_id: string;
@@ -83,6 +115,9 @@ export class PrismaAgentSessionStore implements AgentSessionStore {
     use_count: number;
     revoked_at: Date | null;
     revocation_reason: string | null;
+    trusted: boolean;
+    trust_granted_at: Date | null;
+    trust_granted_via_passkey_id: string | null;
   }): AgentSessionRecord {
     return {
       id: row.id,
@@ -96,6 +131,9 @@ export class PrismaAgentSessionStore implements AgentSessionStore {
       use_count: row.use_count,
       revoked_at: row.revoked_at,
       revocation_reason: row.revocation_reason,
+      trusted: row.trusted,
+      trust_granted_at: row.trust_granted_at,
+      trust_granted_via_passkey_id: row.trust_granted_via_passkey_id,
     };
   }
 }

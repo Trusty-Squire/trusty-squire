@@ -24,14 +24,25 @@ import {
   generateKey,
 } from "./encryption.js";
 import type { KMSClient } from "./kms-client.js";
+import { deriveAllowedHosts } from "./service-hosts.js";
+import {
+  effectiveGrantStatus,
+  PENDING_TTL_SECONDS,
+  type AccessGrantRecord,
+  type AccessGrantStore,
+  type GrantIntent,
+  type GrantMode,
+} from "./access-grant.js";
 import type {
   CredentialRecord,
   CredentialStore,
   CredentialType,
   VaultAuditEventInput,
   VaultAuditStore,
+  VaultAuditType,
   VaultRequester,
 } from "./types.js";
+import { VAULT_AUDIT_TYPES } from "./types.js";
 
 // VaultClient surface — inlined here in 0.8 after the runtime
 // package was sunset. Same shape as the historic runtime-side
@@ -51,6 +62,19 @@ export interface VaultEntry {
   reference: string;
   type: CredentialType;
   created_at: string;
+  // The advisory host allowlist derived for this credential at store
+  // time (see service-hosts.ts). Surfaced so the manual-paste route can
+  // echo it straight back to the web UI.
+  allowed_hosts: string[];
+}
+
+// Result of a rotation. revoked_grant_count is the number of
+// outstanding persistent access-grants invalidated by the new value
+// (the rotation cascade lands with the AccessGrant store in a later
+// PR; today there are no grants, so it's always 0).
+export interface RotateResult {
+  rotated_at: string;
+  revoked_grant_count: number;
 }
 
 export interface DeviceAssertion {
@@ -68,13 +92,12 @@ export interface VaultClient {
   ): Promise<string>;
   retrieveForRuntime(reference: string, purpose: string): Promise<string>;
   delete(reference: string): Promise<void>;
-  rotate(reference: string, newValue: string): Promise<void>;
+  rotate(reference: string, newValue: string): Promise<RotateResult>;
 }
 
 const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000; // 1h
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1h
 const RATE_LIMIT_MAX = 100;
-const AUDIT_TYPE = "vault.credential_retrieved";
 
 export class VaultRateLimitError extends Error {
   constructor(accountId: string) {
@@ -97,12 +120,75 @@ export class CredentialNotFoundError extends Error {
   }
 }
 
+// Thrown when a grant doesn't exist for the calling agent session, or
+// isn't in a state that permits the requested operation (not approved,
+// expired, already consumed, wrong intent). The route maps it to 409.
+export class GrantNotUsableError extends Error {
+  constructor(
+    public readonly requestId: string,
+    public readonly reason: string,
+  ) {
+    super(`access grant ${requestId} not usable: ${reason}`);
+    this.name = "GrantNotUsableError";
+  }
+}
+
+export class AccessGrantsNotConfiguredError extends Error {
+  constructor() {
+    super("CredentialVault has no accessGrants store wired");
+    this.name = "AccessGrantsNotConfiguredError";
+  }
+}
+
 export interface CredentialVaultDeps {
   store: CredentialStore;
   audit: VaultAuditStore;
   kms: KMSClient;
+  // Agent-mediated access broker. Optional so the historic
+  // signup-write path (no grants) keeps working; the access routes
+  // require it and throw AccessGrantsNotConfiguredError when absent.
+  accessGrants?: AccessGrantStore;
   // Clock injection for tests; production reads system time.
   now?: () => Date;
+}
+
+// use_credential proxy plumbing. The executor itself (SSRF guards,
+// substitution, sockets) lives in the API layer — the vault stays
+// network-free and receives it as an injected function.
+export interface ProxyHttpTemplate {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+export interface ProxyResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  truncated: boolean;
+}
+export type ProxyExecutor = (input: {
+  accountId: string;
+  http: ProxyHttpTemplate;
+  secret: string;
+}) => Promise<ProxyResponse>;
+
+// Input to requestAccess — the agent's ask, plus the trust signal the
+// route resolved from the agent session (the vault doesn't know about
+// sessions, so trust is passed in).
+export interface RequestAccessInput {
+  account_id: string;
+  reference: string;
+  agent_session_id: string;
+  intent: GrantIntent;
+  mode: GrantMode;
+  ttl_seconds: number;
+  purpose: string;
+  reason_proxy_not_possible?: string | null;
+  requested_target_host?: string | null;
+  // True when the calling agent session is marked trusted (≤24h passkey
+  // step-up). Gates proxy auto-approval together with the host allowlist.
+  session_trusted: boolean;
 }
 
 export class CredentialVault implements VaultClient {
@@ -122,6 +208,13 @@ export class CredentialVault implements VaultClient {
     const encryptedDek = encryptAesGcm(kek, dek, aadDek);
     const kekBlob = await this.deps.kms.encrypt(kek);
 
+    // Seed the advisory host allowlist from the service name. The
+    // service lives in metadata (the universal-bot + manual-paste paths
+    // both set `metadata.service`); unknown services start empty.
+    const service =
+      typeof input.metadata.service === "string" ? input.metadata.service : null;
+    const allowedHosts = deriveAllowedHosts(service);
+
     const now = this.now();
     const record: CredentialRecord = {
       id: ulid(),
@@ -130,6 +223,7 @@ export class CredentialVault implements VaultClient {
       subscription_id: input.subscription_id,
       type: input.type,
       env_var_suggestion: input.env_var_suggestion,
+      allowed_hosts: allowedHosts,
       ciphertext,
       encrypted_dek: encryptedDek,
       account_kek_blob: kekBlob,
@@ -148,7 +242,18 @@ export class CredentialVault implements VaultClient {
     kek.fill(0);
     dek.fill(0);
 
-    return { reference, type: input.type, created_at: now.toISOString() };
+    await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
+      reference,
+      requester: "system",
+      credential_type: input.type,
+    });
+
+    return {
+      reference,
+      type: input.type,
+      created_at: now.toISOString(),
+      allowed_hosts: allowedHosts,
+    };
   }
 
   async retrieve(
@@ -176,10 +281,19 @@ export class CredentialVault implements VaultClient {
   }
 
   async delete(reference: string): Promise<void> {
+    // Load before deleting so the audit row carries the account_id.
+    // Soft-delete on a missing reference is a no-op (matches the store
+    // contract) — record the attempt with an empty account_id so the
+    // probe still leaves a trail.
+    const existing = await this.deps.store.findActive(reference);
     await this.deps.store.softDelete(reference, this.now());
+    await this.recordAudit(existing?.account_id ?? "", VAULT_AUDIT_TYPES.deleted, {
+      reference,
+      requester: "user",
+    });
   }
 
-  async rotate(reference: string, newValue: string): Promise<void> {
+  async rotate(reference: string, newValue: string): Promise<RotateResult> {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null) throw new CredentialNotFoundError(reference);
     // Reuse the same KEK/DEK envelope — only the ciphertext changes.
@@ -190,9 +304,253 @@ export class CredentialVault implements VaultClient {
     const dek = decryptAesGcm(kek, existing.encrypted_dek, aadDek);
     const aadValue = aadForValue(reference, existing.account_id);
     const newCiphertext = encryptAesGcm(dek, Buffer.from(newValue, "utf8"), aadValue);
-    await this.deps.store.rotate(reference, newCiphertext, this.now());
+    const rotatedAt = this.now();
+    await this.deps.store.rotate(reference, newCiphertext, rotatedAt);
     kek.fill(0);
     dek.fill(0);
+    await this.recordAudit(existing.account_id, VAULT_AUDIT_TYPES.rotated, {
+      reference,
+      requester: "user",
+    });
+    // Rotation cascade: the new value invalidates every outstanding
+    // persistent grant for this reference — the next use_credential gets
+    // a fresh approval. No-op when no grant store is wired.
+    const revokedGrantCount =
+      this.deps.accessGrants !== undefined
+        ? await this.deps.accessGrants.revokePersistentByReference(
+            reference,
+            existing.account_id,
+          )
+        : 0;
+    return {
+      rotated_at: rotatedAt.toISOString(),
+      revoked_grant_count: revokedGrantCount,
+    };
+  }
+
+  // ── Agent-mediated access ────────────────────────────────────
+
+  // Create a pending access request, or mint an auto-approved one-shot
+  // grant when the session is trusted, the intent is a proxy call, and
+  // the target host is on the credential's advisory allowlist.
+  async requestAccess(input: RequestAccessInput): Promise<AccessGrantRecord> {
+    const grants = this.requireGrants();
+    const credential = await this.deps.store.findActive(input.reference);
+    if (credential === null) throw new CredentialNotFoundError(input.reference);
+
+    const now = this.now();
+    const autoApprove =
+      input.session_trusted &&
+      input.intent === "proxy" &&
+      input.requested_target_host !== null &&
+      input.requested_target_host !== undefined &&
+      credential.allowed_hosts.includes(input.requested_target_host);
+
+    const base: AccessGrantRecord = {
+      id: ulid(),
+      account_id: input.account_id,
+      reference: input.reference,
+      agent_session_id: input.agent_session_id,
+      intent: input.intent,
+      mode: input.mode,
+      ttl_seconds: input.ttl_seconds,
+      purpose: input.purpose,
+      reason_proxy_not_possible: input.reason_proxy_not_possible ?? null,
+      requested_target_host: input.requested_target_host ?? null,
+      requested_at: now,
+      decided_at: null,
+      expires_at: new Date(now.getTime() + PENDING_TTL_SECONDS * 1000),
+      status: "pending",
+      auto_approved: false,
+    };
+
+    if (autoApprove) {
+      // One-shot grant minted approved; the proxy consumes it on use.
+      base.mode = "once";
+      base.status = "approved";
+      base.auto_approved = true;
+      base.decided_at = now;
+      base.expires_at = new Date(now.getTime() + input.ttl_seconds * 1000);
+    }
+
+    await grants.insert(base);
+    await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.accessRequested, {
+      reference: input.reference,
+      requester: "agent",
+      request_id: base.id,
+      agent_session_id: input.agent_session_id,
+      intent: input.intent,
+      mode: base.mode,
+      auto_approved: base.auto_approved,
+      ...(base.requested_target_host !== null
+        ? { target_host: base.requested_target_host }
+        : {}),
+    });
+    if (autoApprove) {
+      await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.accessApproved, {
+        reference: input.reference,
+        requester: "system",
+        request_id: base.id,
+        agent_session_id: input.agent_session_id,
+        intent: input.intent,
+        mode: base.mode,
+        auto_approved: true,
+      });
+    }
+    return base;
+  }
+
+  // Resolve an approved value-intent grant to the raw secret. Consumes
+  // single-use ("once") grants via a conditional UPDATE so a double-poll
+  // can't extract the value twice. Throws GrantNotUsableError (→409) on
+  // any non-approved / expired / wrong-intent / cross-session state.
+  async retrieveWithGrant(
+    requestId: string,
+    accountId: string,
+    agentSessionId: string,
+    purpose: string,
+  ): Promise<string> {
+    const grants = this.requireGrants();
+    const now = this.now();
+    const grant = await grants.findByIdForAgentSession(requestId, agentSessionId);
+    if (grant === null || grant.account_id !== accountId) {
+      throw new GrantNotUsableError(requestId, "not_found");
+    }
+    if (grant.intent !== "value") {
+      throw new GrantNotUsableError(requestId, "wrong_intent");
+    }
+    if (effectiveGrantStatus(grant, now) !== "approved") {
+      throw new GrantNotUsableError(requestId, "not_approved");
+    }
+    if (grant.mode === "once") {
+      const consumed = await grants.consume({ id: requestId, accountId });
+      if (consumed === 0) throw new GrantNotUsableError(requestId, "already_consumed");
+    }
+
+    const record = await this.deps.store.findActive(grant.reference);
+    if (record === null) throw new CredentialNotFoundError(grant.reference);
+    const plaintext = await this.decryptRecord(record);
+
+    await this.deps.store.markRetrieved(grant.reference, now);
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.accessConsumed, {
+      reference: grant.reference,
+      requester: "agent",
+      request_id: requestId,
+      agent_session_id: agentSessionId,
+      intent: "value",
+      mode: grant.mode,
+      purpose,
+    });
+    return plaintext;
+  }
+
+  // Execute an approved proxy-intent grant: validate + consume the
+  // grant, decrypt the secret server-side, hand both to the injected
+  // executor, and audit the call (outcome only — never the secret). The
+  // off-allowlist case is advisory: it's logged and proceeds (the
+  // untrusted-no-auto-approve gate already happened at requestAccess).
+  async proxyWithGrant(
+    requestId: string,
+    accountId: string,
+    agentSessionId: string,
+    http: ProxyHttpTemplate,
+    executor: ProxyExecutor,
+  ): Promise<ProxyResponse> {
+    const grants = this.requireGrants();
+    const now = this.now();
+    const grant = await grants.findByIdForAgentSession(requestId, agentSessionId);
+    if (grant === null || grant.account_id !== accountId) {
+      throw new GrantNotUsableError(requestId, "not_found");
+    }
+    if (grant.intent !== "proxy") {
+      throw new GrantNotUsableError(requestId, "wrong_intent");
+    }
+    if (effectiveGrantStatus(grant, now) !== "approved") {
+      throw new GrantNotUsableError(requestId, "not_approved");
+    }
+    if (grant.mode === "once") {
+      const consumed = await grants.consume({ id: requestId, accountId });
+      if (consumed === 0) throw new GrantNotUsableError(requestId, "already_consumed");
+    }
+
+    const record = await this.deps.store.findActive(grant.reference);
+    if (record === null) throw new CredentialNotFoundError(grant.reference);
+
+    const targetHost = safeHost(http.url);
+    if (targetHost !== null && !record.allowed_hosts.includes(targetHost)) {
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyOffAllowlist, {
+        reference: grant.reference,
+        requester: "agent",
+        request_id: requestId,
+        agent_session_id: agentSessionId,
+        intent: "proxy",
+        target_host: targetHost,
+      });
+    }
+
+    const secret = await this.decryptRecord(record);
+    const startedAt = this.now().getTime();
+    try {
+      const response = await executor({ accountId, http, secret });
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
+        reference: grant.reference,
+        requester: "agent",
+        request_id: requestId,
+        agent_session_id: agentSessionId,
+        intent: "proxy",
+        mode: grant.mode,
+        ...(targetHost !== null ? { target_host: targetHost } : {}),
+        response_status: response.status,
+        response_size: Buffer.byteLength(response.body, "utf8"),
+        upstream_duration_ms: this.now().getTime() - startedAt,
+      });
+      return response;
+    } catch (err) {
+      // Forensic row even on failure — the secret is never in it.
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
+        reference: grant.reference,
+        requester: "agent",
+        request_id: requestId,
+        agent_session_id: agentSessionId,
+        intent: "proxy",
+        mode: grant.mode,
+        ...(targetHost !== null ? { target_host: targetHost } : {}),
+        upstream_duration_ms: this.now().getTime() - startedAt,
+        proxy_error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  }
+
+  // Emit an access-lifecycle audit row from the API layer (the web
+  // approve/deny routes drive the state transition via the store, then
+  // record the audit through here so all vault audit goes one place).
+  async recordAccessAudit(
+    accountId: string,
+    type: VaultAuditType,
+    payload: VaultAuditEventInput["payload"],
+  ): Promise<void> {
+    await this.recordAudit(accountId, type, payload);
+  }
+
+  private requireGrants(): AccessGrantStore {
+    if (this.deps.accessGrants === undefined) {
+      throw new AccessGrantsNotConfiguredError();
+    }
+    return this.deps.accessGrants;
+  }
+
+  private async decryptRecord(record: CredentialRecord): Promise<string> {
+    const aadValue = aadForValue(record.reference, record.account_id);
+    const aadDek = aadForDek(record.reference, record.account_id);
+    const kek = await this.deps.kms.decrypt(record.account_kek_blob);
+    const dek = decryptAesGcm(kek, record.encrypted_dek, aadDek);
+    const plaintextBuf = decryptAesGcm(dek, record.ciphertext, aadValue);
+    const plaintext = plaintextBuf.toString("utf8");
+    kek.fill(0);
+    dek.fill(0);
+    plaintextBuf.fill(0);
+    return plaintext;
   }
 
   // ── Private ─────────────────────────────────────────────────
@@ -217,7 +575,7 @@ export class CredentialVault implements VaultClient {
       const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
       const count = await this.deps.audit.countRecentRetrievals(accountId, since);
       if (count >= RATE_LIMIT_MAX) {
-        await this.recordAudit(accountId, {
+        await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
           reference,
           purpose,
           requester,
@@ -231,7 +589,7 @@ export class CredentialVault implements VaultClient {
     if (assertion !== null) {
       const ageMs = this.now().getTime() - Date.parse(assertion.signed_at);
       if (Number.isNaN(ageMs) || ageMs > ASSERTION_MAX_AGE_MS || ageMs < 0) {
-        await this.recordAudit(accountId, {
+        await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
           reference,
           purpose,
           requester,
@@ -245,7 +603,7 @@ export class CredentialVault implements VaultClient {
     }
 
     if (record === null) {
-      await this.recordAudit(accountId, {
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
         reference,
         purpose,
         requester,
@@ -267,7 +625,7 @@ export class CredentialVault implements VaultClient {
     plaintextBuf.fill(0);
 
     await this.deps.store.markRetrieved(reference, this.now());
-    await this.recordAudit(record.account_id, {
+    await this.recordAudit(record.account_id, VAULT_AUDIT_TYPES.retrieved, {
       reference,
       purpose,
       requester,
@@ -280,11 +638,12 @@ export class CredentialVault implements VaultClient {
 
   private async recordAudit(
     accountId: string,
+    type: VaultAuditType,
     payload: VaultAuditEventInput["payload"],
   ): Promise<void> {
     await this.deps.audit.record({
       account_id: accountId,
-      type: AUDIT_TYPE,
+      type,
       payload,
     });
   }
@@ -302,4 +661,14 @@ function requesterFromPurpose(purpose: string, fallback: VaultRequester): VaultR
   if (purpose.startsWith("user:")) return "user";
   if (purpose.startsWith("system:")) return "system";
   return fallback;
+}
+
+// Parse the host out of a URL for the advisory allowlist check; returns
+// null on an unparseable URL (the executor surfaces the real error).
+function safeHost(rawUrl: string): string | null {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
 }

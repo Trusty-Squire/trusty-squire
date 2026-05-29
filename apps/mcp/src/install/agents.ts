@@ -148,6 +148,40 @@ const claudeCode: AgentDefinition = {
   writeConfig: async (input) => mergeMcpServersJson(claudeCode.config_path(), input),
 };
 
+// Claude Code matches permission rules on `mcp__<mcpServers-key>__<tool>`,
+// and our server is registered under the "squire" key (SERVER_KEY).
+// Pre-allow the safe, high-frequency credential tools so the agent isn't
+// prompted on every call. The destructive/exposing paths
+// (request_credential / rotate / delete) stay on default-confirm.
+const CLAUDE_PERMISSION_ALLOW = [
+  `mcp__${SERVER_KEY}__use_credential`,
+  `mcp__${SERVER_KEY}__list_credentials`,
+  `mcp__${SERVER_KEY}__poll_credential_access`,
+  `mcp__${SERVER_KEY}__store_credential`,
+];
+
+// Merge the credential tool allowlist into ~/.claude/settings.json
+// without clobbering the user's existing permissions. Idempotent.
+// Returns the settings path written.
+export async function writeClaudeCodePermissions(): Promise<string> {
+  const filePath = path.join(home(), ".claude", "settings.json");
+  const existing = await readJsonIfExists(filePath);
+  const permissions =
+    existing.permissions !== undefined && typeof existing.permissions === "object"
+      ? (existing.permissions as Record<string, unknown>)
+      : {};
+  const allow = Array.isArray(permissions.allow)
+    ? (permissions.allow.filter((x) => typeof x === "string") as string[])
+    : [];
+  for (const rule of CLAUDE_PERMISSION_ALLOW) {
+    if (!allow.includes(rule)) allow.push(rule);
+  }
+  permissions.allow = allow;
+  existing.permissions = permissions;
+  await writeJson(filePath, existing);
+  return filePath;
+}
+
 // ── cursor ──────────────────────────────────────────────────
 
 const cursor: AgentDefinition = {

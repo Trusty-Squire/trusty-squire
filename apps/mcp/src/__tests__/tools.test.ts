@@ -90,15 +90,22 @@ describe("list_credentials", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes the post-0.8 public surface — six tools, no native-provision cluster", () => {
-    expect(TOOLS).toHaveLength(6);
+  it("exposes the post-0.8 public surface incl. the credential lifecycle tools", () => {
+    // 6 surviving post-0.8 tools + 6 credential-lifecycle tools (PR-8).
+    expect(TOOLS).toHaveLength(12);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "check_provision_status",
+      "delete_credential",
       "get_credential",
       "get_extract_failure",
       "list_credentials",
       "list_extract_failures",
+      "poll_credential_access",
       "provision",
+      "request_credential",
+      "rotate_credential",
+      "store_credential",
+      "use_credential",
     ]);
   });
 
@@ -118,7 +125,10 @@ describe("TOOLS registry", () => {
 
   it("every tool has a non-trivial description (helps the coding agent decide when to call)", () => {
     for (const t of TOOLS) {
-      expect(t.description.length).toBeGreaterThan(100);
+      // >40 chars catches empty/one-word descriptions while allowing the
+      // intentionally-terse credential tools (delete_credential,
+      // poll_credential_access) whose verbatim copy is short by design.
+      expect(t.description.length).toBeGreaterThan(40);
     }
   });
 

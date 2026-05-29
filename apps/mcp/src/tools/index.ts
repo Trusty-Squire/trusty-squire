@@ -14,14 +14,31 @@ import { getCredentialTool } from "./get-credential.js";
 import { listCredentialsTool } from "./list-credentials.js";
 import { provisionTool, checkProvisionStatusTool } from "./provision-any.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
+import { storeCredentialTool } from "./store-credential.js";
+import { rotateCredentialTool } from "./rotate-credential.js";
+import { deleteCredentialTool } from "./delete-credential.js";
+import { requestCredentialTool } from "./request-credential.js";
+import { pollCredentialAccessTool } from "./poll-credential-access.js";
+import { useCredentialTool } from "./use-credential.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
   description: string;
   inputSchema: ZodTypeAny;
   jsonInputSchema: Record<string, unknown>;
+  // Standard MCP tool annotations (readOnlyHint / destructiveHint /
+  // idempotentHint). Client-only — they don't reach the model.
+  annotations?: Record<string, unknown>;
+  // Tool-level _meta. Carries `anthropic/alwaysLoad: true` for the
+  // credential tools so Claude Code keeps their schemas resident
+  // instead of deferring them behind Tool Search.
+  meta?: Record<string, unknown>;
   handler: (args: TArgs, api: ApiClient | null) => Promise<unknown>;
 }
+
+// Re-exported for convenience; defined in its own module to avoid a
+// circular import (tool files import it; index imports the tool files).
+export { ALWAYS_LOAD_META } from "./always-load.js";
 
 // All tools receive `api: ApiClient | null`. In the single-tier model
 // server.ts only invokes a handler after confirming a non-null api, but
@@ -48,6 +65,13 @@ export const TOOLS: Tool[] = [
   checkProvisionStatusTool,
   getCredentialTool,
   listCredentialsTool,
+  // Vault lifecycle + agent-mediated access (the credential surface).
+  storeCredentialTool,
+  rotateCredentialTool,
+  deleteCredentialTool,
+  requestCredentialTool,
+  pollCredentialAccessTool,
+  useCredentialTool,
   // Diagnostic tools: agent reads them after a failed extract so it
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
@@ -68,6 +92,12 @@ export {
   checkProvisionStatusTool,
   getCredentialTool,
   listCredentialsTool,
+  storeCredentialTool,
+  rotateCredentialTool,
+  deleteCredentialTool,
+  requestCredentialTool,
+  pollCredentialAccessTool,
+  useCredentialTool,
   listExtractFailuresTool,
   getExtractFailureTool,
 };

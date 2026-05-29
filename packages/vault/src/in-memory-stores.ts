@@ -56,6 +56,22 @@ export class InMemoryCredentialStore implements CredentialStore {
       .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
       .map((r) => clone(r));
   }
+
+  async findByIdForAccount(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null> {
+    const r = [...this.byReference.values()].find(
+      (c) => c.id === id && c.account_id === accountId && c.deleted_at === null,
+    );
+    return r === undefined ? null : clone(r);
+  }
+
+  async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
+    const r = this.byReference.get(reference);
+    if (r === undefined) return;
+    r.allowed_hosts = [...hosts];
+  }
 }
 
 export interface InMemoryAuditEvent extends VaultAuditEventInput {
@@ -96,6 +112,7 @@ function clone<T extends CredentialRecord>(r: T): T {
     ciphertext: Buffer.from(r.ciphertext),
     encrypted_dek: Buffer.from(r.encrypted_dek),
     account_kek_blob: Buffer.from(r.account_kek_blob),
+    allowed_hosts: [...r.allowed_hosts],
     metadata: { ...r.metadata },
   };
 }

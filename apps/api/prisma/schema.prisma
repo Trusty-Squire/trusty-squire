@@ -237,6 +237,13 @@ model AgentSession {
   use_count         Int       @default(0)
   revoked_at        DateTime?
   revocation_reason String?
+  // Trusted-session opt-in. When true, use_credential proxy calls to a
+  // host on the credential's allowlist auto-approve (no per-call modal).
+  // Set only via PATCH /v1/mcp/sessions/:id behind a ≤24h passkey
+  // step-up; trust_granted_via_passkey_id records which assertion.
+  trusted                     Boolean   @default(false)
+  trust_granted_at            DateTime?
+  trust_granted_via_passkey_id String?
 
   account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 
@@ -255,6 +262,11 @@ model Credential {
   subscription_id    String
   type               String
   env_var_suggestion String?
+  // Advisory host allowlist for the use_credential proxy. Seeded at
+  // store-time from the service name; user-editable from /vault. The
+  // proxy warns (not blocks) on off-allowlist hosts for trusted
+  // sessions. See packages/vault/src/service-hosts.ts.
+  allowed_hosts      String[]  @default([])
   ciphertext         Bytes
   encrypted_dek      Bytes
   account_kek_blob   Bytes
@@ -268,4 +280,75 @@ model Credential {
 
   @@index([account_id])
   @@index([subscription_id])
+}
+
+// Agent-mediated credential access grants. One row per
+// request_credential / use_credential ask. The state machine + every
+// conditional transition lives in @trusty-squire/vault's
+// AccessGrantStore; this table is the at-rest store on the auth DB.
+//
+// Indexes serve: the web approval dashboard ([account_id, status]),
+// the agent's poll path ([agent_session_id, status]), and a future
+// expiry sweep ([expires_at]).
+model AccessGrant {
+  id                        String    @id @db.VarChar(26)
+  account_id                String    @db.VarChar(26)
+  reference                 String
+  agent_session_id          String    @db.VarChar(26)
+  intent                    String    // "value" | "proxy"
+  mode                      String    // "once" | "session" | "persistent"
+  ttl_seconds               Int
+  purpose                   String
+  // Required when intent="value" (justifies why the proxy won't fit).
+  reason_proxy_not_possible String?
+  // intent="proxy" only — the host the proxy will call.
+  requested_target_host     String?
+  requested_at              DateTime  @default(now())
+  decided_at                DateTime?
+  expires_at                DateTime?
+  status                    String    // pending|approved|denied|revoked|consumed|expired
+  auto_approved             Boolean   @default(false)
+
+  @@index([account_id, status])
+  @@index([agent_session_id, status])
+  @@index([expires_at])
+  @@index([reference, mode, status])
+}
+
+// Passkey step-up assertions. Recorded when the user completes a
+// WebAuthn ceremony in the web UI; the trusted-session toggle requires
+// one within the last 24h. NOTE: v1 records the assertion's recency
+// (the gating signal the plan locks on); cryptographic verification
+// against a registered credential is deferred until a registration
+// ceremony exists — there's no public-key store to verify against yet.
+model PasskeyAssertion {
+  id             String   @id @db.VarChar(26)
+  account_id     String   @db.VarChar(26)
+  // The WebAuthn credential id the browser asserted with (opaque).
+  credential_id  String?
+  web_session_id String?  @db.VarChar(26)
+  asserted_at    DateTime @default(now())
+
+  @@index([account_id, asserted_at])
+}
+
+// Vault audit log. One row per vault state-change or retrieval attempt.
+// Used both for the in-vault rate limiter (counts recent retrievals)
+// and for the user-facing "who touched my credentials" timeline. The
+// payload is a free-form JSON object whose shape depends on `type`
+// (see VaultAuditPayload in packages/vault/src/types.ts).
+//
+// Retention: indefinite for v0 — this is the user's own forensic
+// trail. Add a sweep later if the table grows past a few million
+// rows per account.
+model VaultAuditEvent {
+  id          String   @id @db.VarChar(26)
+  account_id  String   @db.VarChar(26)
+  type        String
+  payload     Json
+  emitted_at  DateTime @default(now())
+
+  @@index([account_id, emitted_at])
+  @@index([type, emitted_at])
+  @@index([account_id, type, emitted_at])
 }

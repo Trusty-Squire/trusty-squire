@@ -1,11 +1,16 @@
 // Connected-agents API — the web side of CLI pairing.
 //
-//   GET  /v1/mcp/sessions            → list this account's paired CLIs.
-//   POST /v1/mcp/sessions/:id/revoke → kill one.
+//   GET   /v1/mcp/sessions            → list this account's paired CLIs.
+//   POST  /v1/mcp/sessions/:id/revoke → kill one.
+//   PATCH /v1/mcp/sessions/:id        → set/clear the trusted flag.
 //
-// Both require a web session: this is the account holder managing
-// their own agents, never the agent itself.
+// All require a web session: this is the account holder managing their
+// own agents, never the agent itself. Marking a session trusted is a
+// step-up action — it requires a passkey assertion within the last 24h
+// (PASSKEY_STEP_UP_MS); without one the PATCH returns 401
+// step_up_required so the web UI can prompt a WebAuthn ceremony.
 
+import { z } from "zod";
 import type {
   FastifyPluginAsync,
   FastifyReply,
@@ -16,6 +21,11 @@ import {
   type AgentSessionRecord,
 } from "../auth/agent.js";
 import type { ApiDeps } from "../services/deps.js";
+
+// Step-up freshness window (user-locked at 24h).
+const PASSKEY_STEP_UP_MS = 24 * 60 * 60 * 1000;
+
+const trustBody = z.object({ trusted: z.boolean() });
 
 function agentStatus(
   record: AgentSessionRecord,
@@ -49,7 +59,68 @@ export const registerMcpSessionsRoute: FastifyPluginAsync<{
           use_count: s.use_count,
           revoked_at: s.revoked_at?.toISOString() ?? null,
           status: agentStatus(s, now),
+          trusted: s.trusted,
+          trust_granted_at: s.trust_granted_at?.toISOString() ?? null,
         })),
+      });
+    },
+  );
+
+  // Set/clear the trusted flag. Granting trust is a step-up action:
+  // it requires a passkey assertion recorded in the last 24h. Revoking
+  // trust (trusted=false) is de-escalation and needs no step-up.
+  fastify.patch<{ Params: { id: string } }>(
+    "/v1/mcp/sessions/:id",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = trustBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply
+          .code(400)
+          .send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const now = opts.deps.now?.() ?? new Date();
+      const session = await opts.deps.agentSessionStore.findByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (session === null) {
+        reply.code(404).send({ error: "session_not_found" });
+        return;
+      }
+
+      let passkeyId: string | null = null;
+      let grantedAt: Date | null = null;
+      if (parsed.data.trusted) {
+        const since = new Date(now.getTime() - PASSKEY_STEP_UP_MS);
+        const recent = await opts.deps.passkeyAssertionStore.findRecent(
+          auth.account_id,
+          since,
+        );
+        if (recent === null) {
+          reply.code(401).send({
+            error: "step_up_required",
+            reason: "no_recent_passkey_assertion",
+          });
+          return;
+        }
+        passkeyId = recent.credential_id;
+        grantedAt = now;
+      }
+
+      await opts.deps.agentSessionStore.setTrust({
+        id: session.id,
+        accountId: auth.account_id,
+        trusted: parsed.data.trusted,
+        grantedAt,
+        passkeyId,
+      });
+      return reply.code(200).send({
+        trusted: parsed.data.trusted,
+        trust_granted_at: grantedAt?.toISOString() ?? null,
       });
     },
   );

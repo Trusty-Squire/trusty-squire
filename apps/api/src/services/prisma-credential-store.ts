@@ -22,6 +22,7 @@ interface CredentialRow {
   subscription_id: string;
   type: string;
   env_var_suggestion: string | null;
+  allowed_hosts: string[];
   ciphertext: Buffer;
   encrypted_dek: Buffer;
   account_kek_blob: Buffer;
@@ -46,6 +47,7 @@ export class PrismaCredentialStore implements CredentialStore {
         subscription_id: record.subscription_id,
         type: record.type,
         env_var_suggestion: record.env_var_suggestion,
+        allowed_hosts: record.allowed_hosts,
         ciphertext: record.ciphertext,
         encrypted_dek: record.encrypted_dek,
         account_kek_blob: record.account_kek_blob,
@@ -100,6 +102,25 @@ export class PrismaCredentialStore implements CredentialStore {
     return rows.map((row) => this.toRecord(row));
   }
 
+  async findByIdForAccount(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null> {
+    // Single account-scoped query — never load-then-check (defends
+    // against cross-account id guessing on the web CRUD routes).
+    const row = await this.prisma.credential.findFirst({
+      where: { id, account_id: accountId, deleted_at: null },
+    });
+    return row === null ? null : this.toRecord(row);
+  }
+
+  async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { allowed_hosts: hosts },
+    });
+  }
+
   private toRecord(row: CredentialRow): CredentialRecord {
     return {
       id: row.id,
@@ -110,6 +131,9 @@ export class PrismaCredentialStore implements CredentialStore {
       // the value was inserted from.
       type: row.type as CredentialType,
       env_var_suggestion: row.env_var_suggestion,
+      // Older rows predate the column; Postgres returns [] for the
+      // default but guard anyway for in-flight migration windows.
+      allowed_hosts: row.allowed_hosts ?? [],
       ciphertext: row.ciphertext,
       encrypted_dek: row.encrypted_dek,
       account_kek_blob: row.account_kek_blob,

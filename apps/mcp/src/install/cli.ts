@@ -46,7 +46,12 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
-import { AGENTS, detectInstalledAgents, type AgentTarget } from "./agents.js";
+import {
+  AGENTS,
+  detectInstalledAgents,
+  writeClaudeCodePermissions,
+  type AgentTarget,
+} from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
   detectActiveProviderSessions,
@@ -657,6 +662,16 @@ async function writeAgentConfig(
     env,
   });
   ui.success(`Wrote ${agent.display_name} MCP config at ${ui.code(agent.config_path())}`);
+  // Claude Code: also pre-allow the safe credential tools so the agent
+  // isn't prompted on every use_credential / list / poll / store call.
+  if (target === "claude-code") {
+    try {
+      const settingsPath = await writeClaudeCodePermissions();
+      ui.hint(`  Pre-allowed credential tools in ${ui.code(settingsPath)}`);
+    } catch {
+      ui.hint("  Couldn't write .claude/settings.json permissions (non-fatal)");
+    }
+  }
   if (args.proxyUrl !== undefined) {
     ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
