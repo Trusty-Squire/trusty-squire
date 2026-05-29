@@ -23,6 +23,7 @@ import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerShortRoute } from "./routes/short.js";
 import { registerNotifyRoute } from "./routes/notify.js";
 import { registerOperatorOtpRoute } from "./routes/operator-otp.js";
+import { registerWorkspaceInboxRoute } from "./routes/workspace-inbox.js";
 import {
   buildInMemoryDeps,
   type ApiDeps,
@@ -148,6 +149,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     },
   });
   await fastify.register(registerOperatorOtpRoute, {
+    deps: { machineTokenStore: deps.machineTokenStore },
+  });
+  await fastify.register(registerWorkspaceInboxRoute, {
     deps: { machineTokenStore: deps.machineTokenStore },
   });
   await fastify.register(registerInboxRoute, {

@@ -718,7 +718,7 @@
   signup_url: https://signup.sendgrid.com/
   oauth_provider: google
   scope_hint: null
-  status: needs-manual
+  status: pending
   notes: 'Transactional + marketing email (Twilio). Likely requires phone
 
     verification post-OAuth; flag needs-manual if so.

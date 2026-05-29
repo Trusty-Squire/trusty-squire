@@ -4958,21 +4958,55 @@ ${formatInventory(input.inventory)}`,
     this.heightenedAuthFired = true;
     const msg = digit !== null
       ? `Google challenge detected mid-post-verify: tap ${digit} on your phone — 2 minute window`
-      : `Google challenge detected mid-post-verify (number extractor missed it — read the planner reason): ${reason.slice(0, 200)}`;
+      : `Google challenge detected mid-post-verify (number extractor missed it — vision LLM will read the screen): ${reason.slice(0, 200)}`;
     console.error(`[universal-bot] ${msg}`);
     steps.push(`Post-verify: ${msg}`);
     void notifyHeightenedAuth({
       service,
       digit,
-      windowSeconds: 120,
+      windowSeconds: 240,
       machineToken: this.currentMachineToken,
       apiBase: this.currentApiBase,
     });
     void sendTelegramHeightenedAuth({
       service,
       digit,
-      windowSeconds: 120,
+      windowSeconds: 240,
     });
+    // 0.8.3-rc.1 — vision-LLM fallback for the mid-post-verify path.
+    // When the planner's reason names a challenge but no digit, take
+    // a screenshot, ask Claude vision what number is on screen, and
+    // fire a SECOND Telegram with the extracted number. The first
+    // notification went out immediately (so the operator knows to
+    // grab their phone); this follows up with the number as soon as
+    // vision returns (~2-5s).
+    if (digit === null) {
+      void (async () => {
+        try {
+          const visionDigit = await this.extractGoogleNumberViaVision();
+          if (visionDigit !== null) {
+            const followUp = `Google challenge mid-post-verify: vision LLM read "${visionDigit}" from the screen — tap that on your phone.`;
+            console.error(`[universal-bot] ${followUp}`);
+            steps.push(`Post-verify: ${followUp}`);
+            void sendTelegramHeightenedAuth({
+              service,
+              digit: visionDigit,
+              windowSeconds: 240,
+            });
+            void notifyHeightenedAuth({
+              service,
+              digit: visionDigit,
+              windowSeconds: 240,
+              machineToken: this.currentMachineToken,
+              apiBase: this.currentApiBase,
+            });
+          }
+        } catch {
+          // best-effort — the original alert already fired with no
+          // digit; vision is a nice-to-have follow-up.
+        }
+      })();
+    }
     return true;
   }
 
