@@ -12,7 +12,20 @@
 // planExecuteWithRetry is private — reflected here, the same
 // break-the-encapsulation pattern as captcha-short-circuit.test.ts.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Hermeticity: planExecuteWithRetry resolves OAuth candidates from the
+// bot's real Chrome-profile login marker (loggedInProviders reads
+// CHROME_PROFILE_DIR, frozen at module load). On an operator machine
+// that has run `mcp login`, that marker is non-empty and reroutes these
+// tests down the OAuth-first path — so the OAuth-only + two-stage-reveal
+// cases depend on the host's profile. Pin it to "no sessions" so the
+// suite is deterministic everywhere (matches a clean CI checkout).
+vi.mock("../login-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../login-state.js")>();
+  return { ...actual, loggedInProviders: () => [] };
+});
+
 import { SignupAgent } from "../agent.js";
 import type {
   BrowserController,

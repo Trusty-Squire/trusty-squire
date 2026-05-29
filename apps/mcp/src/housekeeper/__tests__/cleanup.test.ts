@@ -85,7 +85,7 @@ describe("runCleanup — skip cases", () => {
 
 describe("runCleanup — api_delete", () => {
   it("sends DELETE with Authorization: Bearer <token>", async () => {
-    const seen: { url?: string; init?: RequestInit } = {};
+    const seen: { url?: string; init?: RequestInit | undefined } = {};
     const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       seen.url = typeof url === "string" ? url : url.toString();
       seen.init = init;

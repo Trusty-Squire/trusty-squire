@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runDiscoveryBot } from "../discovery-bot.js";
-import type { SignupResult } from "../../bot/types.js";
+import type { SignupResult, UniversalSignupRequest } from "../../bot/index.js";
 import type { InboxClient } from "../../bot/inbox-client.js";
 
 // pickLLMPair reads TRUSTY_SQUIRE_MACHINE_TOKEN from env to route to
@@ -205,8 +205,8 @@ describe("runDiscoveryBot — outcome mapping", () => {
   it("forwards the YAML signupUrl to bot.signup (0.8.1-rc.3)", async () => {
     let capturedSignupUrl: string | undefined;
     const bot = {
-      signup: async (args: { signupUrl?: string }) => {
-        capturedSignupUrl = args.signupUrl;
+      signup: async (request: UniversalSignupRequest) => {
+        capturedSignupUrl = request.signupUrl;
         return {
           success: true,
           credentials: { api_key: "sk-test-yaml-url" },

@@ -112,9 +112,9 @@ describe("install --target=<agent> writes a valid config", () => {
         // browser instead. Irrelevant to "does install write a config
         // for this target," and keeps the test fast (no Chrome boot).
         skipBrowser: true,
-      skipSecondary: true,
         forceRelogin: false,
         noRegistry: false,
+        noInteractive: false,
       });
 
       const configPath = AGENTS[target].config_path();
@@ -146,9 +146,9 @@ describe("install --target=<agent> writes a valid config", () => {
       target: TARGETS[0]!,
       apiBase: "https://test.invalid",
       skipBrowser: true,
-      skipSecondary: true,
       forceRelogin: false,
       noRegistry: true,
+      noInteractive: false,
     });
     const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
     expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
@@ -160,9 +160,9 @@ describe("install --target=<agent> writes a valid config", () => {
       target: TARGETS[0]!,
       apiBase: "https://test.invalid",
       skipBrowser: true,
-      skipSecondary: true,
       forceRelogin: false,
       noRegistry: false,
+      noInteractive: false,
       registryUrl: "https://staging.registry.test",
     });
     const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
