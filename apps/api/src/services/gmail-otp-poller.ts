@@ -40,6 +40,10 @@ export interface OtpPollInput {
   // the dominant shape. Use a custom pattern for services that send
   // 8-digit / alphanumeric codes.
   otp_pattern?: string;
+  // 0.8.3-rc.1 — "url" returns the matched text verbatim (no digit-
+  // stripping); the GitHub challenge-clearing flow needs the full
+  // verification URL.
+  return_kind?: "code" | "url";
 }
 
 export interface OtpPollResult {
@@ -79,11 +83,20 @@ function isDateLikeNumeric(s: string): boolean {
 // Exported for unit testing — the extractor is the load-bearing
 // regression-risk piece of the poller. Tests pin the strict +
 // fallback + date-rejection paths.
-export function extractOtp(body: string, customRe: RegExp | null = null): string | null {
+export function extractOtp(
+  body: string,
+  customRe: RegExp | null = null,
+  returnKind: "code" | "url" = "code",
+): string | null {
   if (customRe !== null) {
     const m = customRe.exec(body);
     if (m === null) return null;
-    return (m[1] ?? m[0]).replace(/[^0-9]/g, "");
+    const matched = m[1] ?? m[0];
+    // 0.8.3-rc.1 — when the caller wants a URL (GitHub "verify it's
+    // you" device-confirmation links), return the match verbatim.
+    // The default `code` mode digit-strips for OTP polling.
+    if (returnKind === "url") return matched;
+    return matched.replace(/[^0-9]/g, "");
   }
   // Strict pass.
   const strict = STRICT_OTP_RE.exec(body);
@@ -182,7 +195,11 @@ export class GmailOtpPoller {
           // fall back to the full source.
           const headerEnd = raw.search(/\r?\n\r?\n/);
           const bodyOnly = headerEnd >= 0 ? raw.slice(headerEnd + 2) : raw;
-          const code = extractOtp(decodeMimeBody(bodyOnly), customRe);
+          const code = extractOtp(
+            decodeMimeBody(bodyOnly),
+            customRe,
+            input.return_kind ?? "code",
+          );
           if (code === null) continue;
           return { code, reason: "found", scanned };
         }
@@ -246,6 +263,18 @@ export function decodeMimeBody(body: string): string {
     } catch {
       // Not real base64 — ignore.
     }
+  }
+  // 0.8.3-rc.1 — extract href URLs BEFORE stripping HTML tags. A
+  // `<a href="https://github.com/...">` element has its URL inside
+  // the attribute; the tag-strip pass below replaces the whole tag
+  // (attributes and all) with a space, so the URL is lost. The
+  // GitHub-challenge auto-clear path needs to find the URL — append
+  // each extracted href to the body so it survives the strip.
+  const hrefMatches = Array.from(
+    out.matchAll(/\bhref\s*=\s*["']([^"']+)["']/gi),
+  );
+  for (const m of hrefMatches) {
+    out += "\n" + m[1];
   }
   // Strip HTML tags so HTML-only multipart parts contribute their
   // text to the scan. Replace with spaces so digits across tag

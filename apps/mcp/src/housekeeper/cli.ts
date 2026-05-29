@@ -286,23 +286,33 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       // synthesizer run with a fake "credential" that was actually
       // the bot's own input.
       //
-      // The fix: include DOTS in the synthesized values. The
-      // validator-blind tier in replay-skill.ts explicitly skips
-      // candidates containing `.` (`if (cand.includes("/") || cand.includes("."))`)
-      // because credential values almost never have dots, while docs
-      // snippets and route paths do. Dots in our verifier names mean
-      // the synthesizer's heuristics can never confuse them with
-      // credentials.
-      const verifierTag = input.skill.skill_id.slice(-6).toLowerCase();
-      const tsTag = Date.now().toString(36);
+      // 0.8.3-rc.1 — earlier sub-revision swapped dashes for DOTS to
+      // make the names un-credential-like (`if (cand.includes("."))
+      // continue` in the validator-blind tier). That worked for
+      // self-poisoning but broke services with strict name validators
+      // — Baseten's API-key form rejects dotted names and leaves the
+      // submit button disabled, so every replay step_failed at the
+      // submit click. Replacement uses dash-separated DIGIT-FREE
+      // names instead: the validator-blind tier requires a digit
+      // (`if (!/\d/.test(cand)) continue;`), so removing all digits
+      // from our synthesized values keeps self-poisoning protection
+      // intact while staying compatible with strict alphanumeric-
+      // plus-dash validators. Each base36 digit gets remapped to a
+      // letter (0→a, 1→b, …, 9→j) so uniqueness is preserved.
+      const digitFree = (s: string): string =>
+        s.replace(/[0-9]/g, (d) =>
+          String.fromCharCode(97 + parseInt(d, 10)),
+        );
+      const verifierTag = digitFree(input.skill.skill_id.slice(-6).toLowerCase());
+      const tsTag = digitFree(Date.now().toString(36));
       return await replaySkill({
         skill: input.skill,
         browser,
         mode: input.mode,
         templateValues: {
-          TOKEN_NAME: `verifier.${verifierTag}.${tsTag}`,
-          EMAIL_ALIAS: `verifier.${verifierTag}.${tsTag}@trustysquire.com`,
-          USER_DISPLAY_NAME: `Verifier.${verifierTag}`,
+          TOKEN_NAME: `verifier-${verifierTag}-${tsTag}`,
+          EMAIL_ALIAS: `verifier-${verifierTag}-${tsTag}@trustysquire.com`,
+          USER_DISPLAY_NAME: `Verifier-${verifierTag}`,
         },
         ...(input.bypassStatusGuard === true ? { bypassStatusGuard: true } : {}),
       });

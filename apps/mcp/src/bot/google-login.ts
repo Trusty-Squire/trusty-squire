@@ -822,6 +822,14 @@ export async function ensureOAuthSession(opts?: {
   profileDir?: string;
   timeoutMinutes?: number;
   apiBaseUrl?: string;
+  // 0.8.3-rc.1 — skip the preflight session-cookie check so the
+  // browser opens even when a valid session is already cached. Used
+  // by `login --force-relogin` to surface the noVNC URL on a
+  // headless box and let the operator interactively clear a provider
+  // security challenge (GitHub's "verify it's you" anti-abuse,
+  // Google's number-match drift) the cached cookie alone doesn't
+  // resolve.
+  forceOpen?: boolean;
 }): Promise<LoginResult> {
   const provider: OAuthProviderId = opts?.provider ?? "google";
   const target = LOGIN_TARGETS[provider];
@@ -835,7 +843,26 @@ export async function ensureOAuthSession(opts?: {
       url: target.loginUrl,
       deadline,
       bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
-      preflight: (ctx) => hasProviderSession(ctx, target),
+      // When forceOpen is true, the preflight ALSO clears the
+      // provider's session cookies before returning false. Without
+      // this the noVNC opens but pollUntilDone immediately sees the
+      // still-valid cached session and exits — the operator never
+      // gets a chance to interactively log in or clear a server-side
+      // challenge (GitHub "verify it's you"). Clearing the cookies
+      // forces the next page load to land on the provider's login
+      // page in a real, interactive session.
+      preflight: async (ctx) => {
+        if (opts?.forceOpen === true) {
+          try {
+            await ctx.clearCookies();
+          } catch {
+            // best-effort — if clear fails we still proceed and let
+            // the operator hit Sign Out manually in the noVNC.
+          }
+          return false;
+        }
+        return hasProviderSession(ctx, target);
+      },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });

@@ -246,10 +246,92 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(fillStep.value_template).toBe("${TOKEN_NAME}");
   });
 
-  it("keeps a non-generated fill value as a literal", () => {
+  // 0.8.3-rc.1 — even when the captured value doesn't match the
+  // rc.17 generated-name shape, an input whose context signals
+  // "this is a token / API-key name field" (placeholder/label
+  // mentions API key, token name, or "production-api-key" style
+  // example) MUST still templatize. The baseten regression: a
+  // planner-chosen literal "ts-random" (no digits) would have been
+  // kept verbatim, baking in a name already used on baseten, leaving
+  // every replay's submit button disabled.
+  // Baseten-class case from the verifier drain marathon. The
+  // planner used a name generator that produces strings the rc.17
+  // value-shape regex doesn't recognise ("ts-random" has no digits;
+  // "ts-agent-x9k2m" has two hyphens). The input's placeholder
+  // "e.g. production-api-key" should trigger templatization.
+  it("templatizes a Baseten-style 'e.g. production-api-key' input regardless of value shape", () => {
     const service = uniqueService();
-    // "my-api-token" — 3 hyphen-separated parts, doesn't match the
-    // generated-name shape regex (^[a-z]{3,15}-[a-z0-9]{4,12}$).
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            id: "name",
+            placeholder: "e.g. production-api-key",
+            selector: "input#name",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Create API key",
+            role: "button",
+            selector: "button.submit",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input#name",
+          value: "ts-random",
+          reason: "Fill API-key name",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html>Token: abc123def456ghi789</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy API key",
+            role: "button",
+            selector: "button.copy",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+
+    const fillStep = result.skill.steps.find((s) => s.kind === "fill");
+    if (fillStep === undefined || fillStep.kind !== "fill") {
+      throw new Error("expected fill");
+    }
+    expect(fillStep.value_template).toBe("${TOKEN_NAME}");
+  });
+
+  it("templatizes a context-signalled token-name input even when the value isn't shape-matched", () => {
+    const service = uniqueService();
+    // Railway's input already has labelText "Token name" — that's the
+    // context signal. "my-api-token" wouldn't match the value-shape
+    // regex (no digit in the tail), but the input's context wins.
     const { dir, runId } = setupCaptures(railwayRounds(service));
 
     const result = promoteToSkill({ dir, service, run_id: runId });
@@ -257,7 +339,79 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
 
     const fillStep = result.skill.steps[1]!;
     if (fillStep.kind !== "fill") throw new Error("expected fill");
-    expect(fillStep.value_template).toBe("my-api-token");
+    expect(fillStep.value_template).toBe("${TOKEN_NAME}");
+  });
+
+  it("keeps a non-generated fill value as a literal when the input ISN'T a token-name field", () => {
+    const service = uniqueService();
+    // Custom rounds where the input is a plain "Display name" — a
+    // human's name field, NOT a token name. No API/token/key vocab
+    // in placeholder/label/aria. The literal value must pass through.
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/profile",
+          title: "Profile",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            id: "display-name",
+            placeholder: "Your name",
+            selector: "input#display-name",
+            labelText: "Display name",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Save",
+            role: "button",
+            selector: "button.save",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input#display-name",
+          value: "my-display-name",
+          reason: "Fill display name",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://example.com/done",
+          title: "Done",
+          html: "<html>Token: re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            role: "button",
+            selector: "button.copy",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+
+    const fillStep = result.skill.steps.find((s) => s.kind === "fill");
+    if (fillStep === undefined || fillStep.kind !== "fill") {
+      throw new Error("expected fill");
+    }
+    expect(fillStep.value_template).toBe("my-display-name");
   });
 
   it("prefers Copy button extraction over regex when a Copy button is in inventory", () => {
@@ -399,6 +553,75 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     // (mis-tagged as uuid in some captures) also pass.
     expect(result.skill.credentials[0]!.post_extract_validator.min_length).toBe(32);
     expect(result.skill.credentials[0]!.post_extract_validator.max_length).toBe(80);
+  });
+
+  // 0.8.3-rc.1 — bug #5: when the dashboard HTML happens to contain
+  // a UUID-shaped string that ISN'T the credential (a session ID, a
+  // tracking ID, a workspace ID, …), the synthesizer used to lock the
+  // shape to "uuid" and the validator to UUID bounds — rejecting the
+  // real credential. The context-proximity check requires the UUID
+  // to sit near token/key/api/secret vocabulary; standalone session
+  // UUIDs no longer satisfy the check.
+  it("does NOT infer uuid when a stray UUID is far from any credential context (ipinfo-class)", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://ipinfo.io/dashboard",
+          title: "Dashboard",
+          html:
+            // Page chrome with an unrelated tracking UUID, far from
+            // any credential-context word.
+            "<html><head><script>window.__SESSION='019e4b8d-6b2b-0000-8d9a-5671913d8dfd'</script></head>" +
+            "<body>" +
+            // 800 chars of nav/footer noise to push the UUID outside the
+            // credential context's window.
+            "<nav>" + "x".repeat(800) + "</nav>" +
+            // The actual credential context sits much later in the
+            // document.
+            "<label>API Token</label>" +
+            "<code>f9a062f02fadf5</code>" +
+            "<button>Copy</button>" +
+            "</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            role: "button",
+            selector: "button.copy",
+          }),
+        ],
+        observed: {
+          kind: "extract",
+          reason: "The API token is now visible: f9a062f02fadf5",
+        },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // The stray UUID is in a <script> block far from the credential
+    // label; shape must NOT be uuid.
+    expect(result.skill.credentials[0]!.shape_hint).not.toBe("uuid");
+    // Validator bounds should accommodate the 14-char real key.
+    const v = result.skill.credentials[0]!.post_extract_validator;
+    expect(v.min_length).toBeLessThanOrEqual(14);
+    expect(v.max_length).toBeGreaterThanOrEqual(14);
+  });
+
+  it("still infers uuid when the UUID IS adjacent to credential context (Railway-class)", () => {
+    // Railway's "New Token <uuid>" pattern: UUID right after the
+    // credential context word. Must keep tagging as uuid.
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(railwayRounds(service));
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.skill.credentials[0]!.shape_hint).toBe("uuid");
   });
 
   it("derives env_var_suggestion from the service slug", () => {
@@ -776,6 +999,125 @@ describe("promoteToSkill — chain rejections", () => {
     expect(result.stage).toBe("synthesis");
     expect(result.error_kind).toBe("ambiguous_text_match");
     expect(result.offending_round).toBe(0);
+  });
+
+  it("emits near_text_hint for an ambiguous click when a unique nearby label disambiguates (baseten modal, 0.8.3-rc.1)", () => {
+    // Baseten's "Create API key" modal submit button shares its
+    // visible text with the listing page's "Create API key" trigger
+    // still rendered in the DOM behind the modal. Pre-0.8.3 the
+    // synthesizer soft-dropped the submit click and the resulting
+    // skill replayed past fill straight to extract — picking up only
+    // the token name, not the actual key. Now: the modal context
+    // (form labels, "Cancel" button) provides unique nearby text,
+    // so the synthesizer emits a near_text_hint and the submit click
+    // survives.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          // Sidebar / page chrome.
+          inventoryElement({
+            index: 0,
+            tag: "a",
+            visibleText: "API keys",
+            selector: "nav > a.api-keys",
+          }),
+          // Listing's open-form trigger — collides with modal submit.
+          inventoryElement({
+            index: 1,
+            tag: "button",
+            visibleText: "Create API key",
+            selector: "button.listing-create",
+            role: "button",
+          }),
+          // Modal form preceded by its distinctive labels.
+          inventoryElement({
+            index: 2,
+            tag: "label",
+            visibleText: "Name",
+            labelText: "Name",
+            selector: "form > label[for=name]",
+          }),
+          inventoryElement({
+            index: 3,
+            tag: "input",
+            type: "text",
+            id: "name",
+            placeholder: "e.g. production-api-key",
+            selector: "input#name",
+            labelText: "Name",
+          }),
+          inventoryElement({
+            index: 4,
+            tag: "button",
+            visibleText: "Cancel",
+            selector: "form > button.cancel",
+            role: "button",
+          }),
+          // The modal submit — same visibleText as the listing trigger.
+          inventoryElement({
+            index: 5,
+            tag: "button",
+            visibleText: "Create API key",
+            selector: "form > button.modal-submit",
+            role: "button",
+          }),
+        ],
+        observed: {
+          kind: "click",
+          selector: "form > button.modal-submit",
+          reason: "Submit the create-API-key form",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html>Token: 2fmMCMCB.YLfZheHsb2vw93EGFVHoDJgwb4B2h97s</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy API key",
+            selector: "button.copy-token",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const clickStep = result.skill.steps.find(
+      (s) => s.kind === "click" && s.text_match === "Create API key",
+    );
+    expect(clickStep).toBeDefined();
+    if (clickStep === undefined || clickStep.kind !== "click") return;
+    // The disambiguator must point at the modal's nearby text, not at
+    // the colliding "Create API key" itself.
+    expect(clickStep.near_text_hint).toBeDefined();
+    expect(clickStep.near_text_hint).not.toBe("Create API key");
+    // The replay-engine path will use filterByNearTextHint to pick
+    // the modal-submit button. The exact value depends on the
+    // disambiguator's preceding-window walk; "Cancel" (closest
+    // preceding unique text) is the expected pick here.
+    expect(clickStep.near_text_hint).toBe("Cancel");
   });
 
   it("soft-drops a click whose element has no visible text or aria-label (0.8.1)", () => {
@@ -1511,6 +1853,408 @@ describe("promoteToSkill — visibility detection", () => {
 });
 
 // ── Consecutive-duplicate step dedup (0.8.2-rc.21) ───────────────────
+
+describe("promoteToSkill — stable-attribute fallback (0.8.3-rc.1, bug #4)", () => {
+  // Mistral-class case: a Terms-of-Service checkbox renders with a
+  // runtime-generated `id="_R_75klubsnimdb_"` (react-aria-utils) AND a
+  // stable `name="terms"`. Pre-0.8.3 the synthesizer rejected the
+  // capture with missing_text_hint because there was no visibleText
+  // / ariaLabel. The fallback to the `name` attribute now lets the
+  // synthesizer produce a valid step.
+  it("synthesizes a click step using the element's `name` attribute when no text/aria-label exists", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://console.mistral.ai/signup",
+          title: "Signup",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "checkbox",
+            id: "_R_75klubsnimdb_",
+            name: "terms",
+            role: "checkbox",
+            selector: "input[name=\"terms\"]",
+          }),
+        ],
+        observed: {
+          kind: "check",
+          selector: "input[name=\"terms\"]",
+          reason: "Accept terms",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://console.mistral.ai/done",
+          title: "Done",
+          html: "<html>Token: sk-abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            role: "button",
+            selector: "button.copy",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const clickStep = result.skill.steps.find((s) => s.kind === "click");
+    expect(clickStep).toBeDefined();
+    if (clickStep === undefined || clickStep.kind !== "click") return;
+    expect(clickStep.text_match).toBe("terms");
+  });
+
+  it("rejects when the element has runtime-only id AND no stable name", () => {
+    // A pure react-aria-style runtime ID with no visible text and no
+    // stable name has no usable anchor. Synthesizer continues to
+    // reject — the fallback only fires when there's a stable attr to
+    // use.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/x",
+          title: "X",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            id: "react-aria3800282830-_r_69_",
+            selector: "#react-aria3800282830-_r_69_",
+          }),
+        ],
+        observed: {
+          kind: "click",
+          selector: "#react-aria3800282830-_r_69_",
+          reason: "Click something",
+        },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") return;
+    expect(result.error_kind).toBe("missing_text_hint");
+  });
+});
+
+describe("promoteToSkill — retry-sequence stripping (0.8.3-rc.1)", () => {
+  it("drops a capture-time fill+submit retry, keeping the successful trailing path", () => {
+    // Baseten-class case from the 2026-05-28 verifier drain marathon.
+    // The bot's planner emitted fill("ts-random") → click submit →
+    // fill("ts-agent-x9k2m") → click submit because the first name
+    // collided with an existing key on the capture-time account. At
+    // replay time each replay generates a fresh ${TOKEN_NAME}, so
+    // the first submit succeeds and the retry fill targets a now-
+    // closed form. Synthesizer must recognise the retry path and
+    // strip it.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            id: "name",
+            placeholder: "e.g. production-api-key",
+            selector: "input#name",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Cancel",
+            role: "button",
+            selector: "form > button.cancel",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Create API key",
+            role: "button",
+            selector: "form > button.submit",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input#name",
+          value: "ts-random",
+          reason: "Fill API-key name",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            id: "name",
+            placeholder: "e.g. production-api-key",
+            selector: "input#name",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Cancel",
+            role: "button",
+            selector: "form > button.cancel",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Create API key",
+            role: "button",
+            selector: "form > button.submit",
+          }),
+        ],
+        observed: {
+          kind: "click",
+          selector: "form > button.submit",
+          reason: "Submit (first try — name will conflict)",
+        },
+      },
+      {
+        service,
+        round: 2,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            id: "name",
+            placeholder: "e.g. production-api-key",
+            selector: "input#name",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Cancel",
+            role: "button",
+            selector: "form > button.cancel",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Create API key",
+            role: "button",
+            selector: "form > button.submit",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input#name",
+          value: "ts-agent-x9k2m",
+          reason: "Retry with a unique name",
+        },
+      },
+      {
+        service,
+        round: 3,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "text",
+            id: "name",
+            placeholder: "e.g. production-api-key",
+            selector: "input#name",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Cancel",
+            role: "button",
+            selector: "form > button.cancel",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Create API key",
+            role: "button",
+            selector: "form > button.submit",
+          }),
+        ],
+        observed: {
+          kind: "click",
+          selector: "form > button.submit",
+          reason: "Submit (second try — name unique now)",
+        },
+      },
+      {
+        service,
+        round: 4,
+        oauth: true,
+        state: {
+          url: "https://app.baseten.co/settings/api_keys",
+          title: "API Keys",
+          html: "<html>Token: abc123def456ghi789</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy API key",
+            role: "button",
+            selector: "button.copy",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const kinds = result.skill.steps.map((s) => s.kind);
+    // Expected after strip: navigate (synthesised), fill, click, extract.
+    // The retry pair (first fill + first click) is gone.
+    expect(kinds).toEqual(["navigate", "fill", "click", "extract_via_copy_button"]);
+    // The surviving fill must be the SECOND one — at round_index 2 in
+    // the capture, not round_index 0.
+    const fillStep = result.skill.steps.find((s) => s.kind === "fill");
+    expect(fillStep?.provenance.round_index).toBe(2);
+  });
+
+  it("does NOT strip two same-label fills that ARE NOT a retry (different label_hints)", () => {
+    // Sanity guard: when the same form asks for two different inputs
+    // that happen to share text near them (password / confirm
+    // password), the synthesizer must keep both. Different label_hint
+    // → different identity → no retry collapse.
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "password",
+            labelText: "Password",
+            selector: "input#password",
+          }),
+          inventoryElement({
+            tag: "input",
+            type: "password",
+            labelText: "Confirm password",
+            selector: "input#confirm",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input#password",
+          value: "secret",
+          reason: "fill password",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            type: "password",
+            labelText: "Password",
+            selector: "input#password",
+          }),
+          inventoryElement({
+            tag: "input",
+            type: "password",
+            labelText: "Confirm password",
+            selector: "input#confirm",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input#confirm",
+          value: "secret",
+          reason: "fill confirm password",
+        },
+      },
+      {
+        service,
+        round: 2,
+        oauth: true,
+        state: {
+          url: "https://example.com/done",
+          title: "Done",
+          html: "<html>Token: re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            role: "button",
+            selector: "button.copy",
+          }),
+        ],
+        observed: { kind: "extract", reason: "extract" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const fillCount = result.skill.steps.filter((s) => s.kind === "fill").length;
+    expect(fillCount).toBe(2);
+  });
+});
 
 describe("promoteToSkill — consecutive-duplicate dedup", () => {
   it("collapses two identical consecutive select steps to one", () => {

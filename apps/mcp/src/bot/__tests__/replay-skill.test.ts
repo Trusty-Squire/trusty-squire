@@ -827,6 +827,70 @@ describe("replaySkill — fill-label disambiguation (rc.24)", () => {
     expect(["ok", "step_failed", "extraction_failed"]).toContain(result.kind);
   });
 
+  it("near_text_hint narrows an ambiguous click to the modal-submit (baseten case, 0.8.3-rc.1)", async () => {
+    // Two "Create API key" buttons in the inventory — the listing
+    // page's open-form trigger AND the modal's submit (the modal
+    // body sits AFTER the listing in DOM order). near_text_hint =
+    // "Cancel" (the modal's secondary button, unique nearby text)
+    // must pin the modal submit. Without this disambiguator the
+    // synthesizer pre-0.8.3 dropped the click and the replay went
+    // straight from fill to extract — picking up the token NAME
+    // instead of the actual key.
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "button",
+        visibleText: "Create API key",
+        role: "button",
+        selector: "button.listing-create",
+      }),
+      inv({
+        tag: "label",
+        visibleText: "Name",
+        labelText: "Name",
+        selector: "form > label",
+      }),
+      inv({
+        tag: "input",
+        type: "text",
+        id: "name",
+        selector: "input#name",
+        labelText: "Name",
+      }),
+      inv({
+        tag: "button",
+        visibleText: "Cancel",
+        role: "button",
+        selector: "form > button.cancel",
+      }),
+      inv({
+        tag: "button",
+        visibleText: "Create API key",
+        role: "button",
+        selector: "form > button.modal-submit",
+      }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "click",
+          text_match: "Create API key",
+          role_hint: "button",
+          near_text_hint: "Cancel",
+          provenance,
+        },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    const clicks = b.history.filter((c) => c.method === "click");
+    expect(clicks).toHaveLength(1);
+    expect(clicks[0]!.args[0]).toBe("form > button.modal-submit");
+    expect(["ok", "step_failed", "extraction_failed"]).toContain(result.kind);
+  });
+
   it("falls back gracefully when no near_text_hint is provided (back-compat with schema v1 skills)", async () => {
     // Old skills with no near_text_hint still hit the heuristic
     // disambiguator. With two ambiguous selects and no disambiguator,

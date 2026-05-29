@@ -135,6 +135,24 @@ const ClickStepSchema = z
           "'Create Token' button vs. 'Create Token' help-text-link " +
           "ambiguity. Omitting it means accept any clickable element.",
       ),
+    // 0.8.3-rc.1 — same disambiguator as fill/select. Baseten-class
+    // case: the modal's "Create API key" submit button shares text
+    // with the listing's "Create API key" trigger (still in the DOM
+    // behind the modal). Synthesizer emits this when the original
+    // capture saw the same collision and a unique nearby visible
+    // text identifies the modal context.
+    near_text_hint: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional disambiguator when multiple elements share the same " +
+          "text_match on the page (e.g. modal submit button shares text " +
+          "with the listing's open-form trigger still rendered behind " +
+          "the modal). The replay engine narrows text_match matches by " +
+          "'has unique nearby visible text containing near_text_hint' " +
+          "before failing.",
+      ),
     provenance: ProvenanceSchema,
   })
   .strict();

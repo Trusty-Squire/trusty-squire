@@ -820,7 +820,18 @@ async function login(args: Argv): Promise<void> {
     args.providerArg === "github" ? "github" : "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
-  const result = await ensureOAuthSession({ provider, apiBaseUrl: args.apiBase });
+  const result = await ensureOAuthSession({
+    provider,
+    apiBaseUrl: args.apiBase,
+    // 0.8.3-rc.1 — --force-relogin now also applies to the bare
+    // `login` command. Without this, a valid cached session
+    // short-circuits the flow and the operator has no way to open
+    // the noVNC URL — even when the actual problem is a service-
+    // side challenge (GitHub's "verify it's you" / Google's device-
+    // prompt drift) that only an interactive browser session can
+    // clear.
+    ...(args.forceRelogin ? { forceOpen: true } : {}),
+  });
   switch (result.status) {
     case "already_valid":
       await recordConnectedProvider(provider);

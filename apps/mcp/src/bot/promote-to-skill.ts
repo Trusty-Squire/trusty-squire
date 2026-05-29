@@ -49,6 +49,7 @@ import {
   verifyCaptureChain,
   type OnboardingCaseFile,
 } from "./onboarding-capture.js";
+import { filterByNearTextHint } from "./near-text-hint.js";
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -397,7 +398,64 @@ function synthesizeSteps(
     };
   }
 
-  return { kind: "ok", steps };
+  // 0.8.3-rc.1 — strip capture-time retry sequences. When the bot's
+  // planner hit a service-side validation error (Baseten / Railway:
+  // "name already in use"), it filled the same input AGAIN with a
+  // different value and re-clicked submit. The capture chain shows
+  // the full trail; at replay time the FIRST submit succeeds because
+  // each replay generates a fresh ${TOKEN_NAME}, so the retry fill
+  // has no input to find (the form already closed) and the whole
+  // skill step-fails.
+  //
+  // Heuristic: when an input-action step (fill/select/check) at index
+  // N targets the same identifying field (label_hint + near_text_hint)
+  // as an earlier step at index M, the path M..N-1 is the failed
+  // retry path. Drop M..N-1; keep step N onward. Repeat until no
+  // retry remains.
+  //
+  // Why this is safe: a legitimate "fill the same input twice" flow
+  // doesn't exist in token-creation pages (the bot's planner never
+  // emits "fill name, click somewhere unrelated, fill name again"
+  // outside a retry). For confirmation-style flows that DO re-prompt
+  // (password confirmation), the two inputs have DIFFERENT
+  // label_hints ("Password" vs "Confirm password"), so this pass
+  // doesn't fire.
+  const trimmed = stripRetrySequences(steps);
+
+  return { kind: "ok", steps: trimmed };
+}
+
+function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
+  // Identity key for retry detection: kind + load-bearing target
+  // fields. Two steps with the same identity refer to the same input
+  // — the later one supersedes the earlier.
+  // `check` PostVerifyStep translates to `click` in the skill, so
+  // identity keys here only fire for `fill` and `select`. Click steps
+  // are intentionally NOT keyed — same-text-button clicks in a row
+  // are legitimate flow steps (e.g. consecutive "Next" buttons in a
+  // multi-page wizard would each have text_match="Next").
+  const identityKey = (s: SkillStep): string | null => {
+    if (s.kind === "fill" || s.kind === "select") {
+      return `${s.kind}|${s.label_hint}|${s.near_text_hint ?? ""}`;
+    }
+    return null;
+  };
+  const out = [...steps];
+  for (let i = 1; i < out.length; i++) {
+    const curKey = identityKey(out[i]!);
+    if (curKey === null) continue;
+    for (let j = i - 1; j >= 0; j--) {
+      if (identityKey(out[j]!) === curKey) {
+        // Drop out[j..i-1] (the failed branch INCLUDING the earlier
+        // input action and any intermediate steps that were undone
+        // by the retry — typically the failed submit click).
+        out.splice(j, i - j);
+        i = j; // re-scan from the new position
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 // 0.8.2-rc.21 — structural equality between two skill steps, ignoring
@@ -475,6 +533,9 @@ function translateStep(
           kind: "click",
           text_match: hintResult.hint,
           ...(hintResult.role_hint !== undefined ? { role_hint: hintResult.role_hint } : {}),
+          ...(hintResult.near_text_hint !== undefined
+            ? { near_text_hint: hintResult.near_text_hint }
+            : {}),
           provenance,
         },
       };
@@ -492,9 +553,23 @@ function translateStep(
       // at the credential-creating click because that name now
       // already exists on the service (Railway's silent duplicate-
       // name rejection was the canonical case).
+      //
+      // 0.8.3-rc.1 — also templatize when the INPUT CONTEXT signals
+      // a token/api-key name field, regardless of the captured
+      // value's shape. The rc.17 value-shape regex missed Baseten-
+      // class captures where a different planner used a name like
+      // "ts-random" (no digits in tail) or "ts-agent-x9k2m" (two
+      // hyphens) — the synth then baked the literal, and the form's
+      // duplicate-name validation kept submit disabled on every
+      // replay. Recognising the input by its label/placeholder
+      // ("API key name", "production-api-key") closes that gap.
       const literal = observed.value;
       const looksGenerated = /^[a-z]{3,15}-[a-z0-9]{4,12}$/.test(literal);
-      const valueTemplate = looksGenerated ? "${TOKEN_NAME}" : literal;
+      const matchedInput = inventory.find((e) => e.selector === observed.selector);
+      const inputLooksLikeTokenName =
+        matchedInput !== undefined && looksLikeTokenNameInput(matchedInput);
+      const valueTemplate =
+        looksGenerated || inputLooksLikeTokenName ? "${TOKEN_NAME}" : literal;
       return {
         kind: "ok",
         step: {
@@ -556,6 +631,10 @@ function translateStep(
         step: {
           kind: "click",
           text_match: hintResult.hint,
+          ...(hintResult.role_hint !== undefined ? { role_hint: hintResult.role_hint } : {}),
+          ...(hintResult.near_text_hint !== undefined
+            ? { near_text_hint: hintResult.near_text_hint }
+            : {}),
           provenance,
         },
       };
@@ -607,6 +686,10 @@ interface ClickHintOk {
   kind: "ok";
   hint: string;
   role_hint?: "button" | "link" | "tab" | "menuitem";
+  // 0.8.3-rc.1 — populated when the click selector's visibleText
+  // collides with another element in the same round (modal-submit-
+  // shares-text-with-listing-trigger; see resolveClickHint).
+  near_text_hint?: string;
 }
 
 function resolveClickHint(
@@ -644,31 +727,80 @@ function resolveClickHint(
   }
 
   // Ambiguity check: does this exact hint resolve to more than one
-  // element in this round? If yes, the replay engine will need a
-  // disambiguator we don't have. Reject so the operator can either
-  // re-capture with a better-scoped page or hand-edit the skill.
+  // element in this round? If yes, attempt the same near_text_hint
+  // disambiguation path that resolveLabelHint uses for fill/select.
+  // The baseten-modal case: the modal's "Create API key" submit
+  // button collides with the listing's "Create API key" trigger
+  // still rendered behind the modal. The modal's preceding inventory
+  // (form labels, "Cancel") provides a unique nearby text that pins
+  // the modal context — exactly the same shape pickRowDisambiguator
+  // already handles for fill/select.
   const duplicates = inventory.filter(
     (e) => pickClickText(e) === hint && e.selector !== selector,
   );
+  const role = inferRoleHint(match);
   if (duplicates.length > 0) {
-    return {
-      kind: "rejected",
-      stage: "synthesis",
-      error_kind: "ambiguous_text_match",
-      message:
-        `Text hint ${JSON.stringify(hint)} matches ${duplicates.length + 1} elements in this round's inventory. ` +
-        `Cannot uniquely identify the click target by text. Either the page genuinely has multiple ` +
-        `same-named controls (skill needs hand-editing with a role_hint or near_text_hint) or the ` +
-        `capture saw a transient state with duplicate labels.`,
-      offending_round: roundIndex,
-      synthesizer_version: SYNTHESIZER_VERSION,
-    };
+    const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
+    if (nearTextHint === null) {
+      return {
+        kind: "rejected",
+        stage: "synthesis",
+        error_kind: "ambiguous_text_match",
+        message:
+          `Text hint ${JSON.stringify(hint)} matches ${duplicates.length + 1} elements in this round's inventory ` +
+          `AND no unique nearby visible text could be found to disambiguate via near_text_hint. ` +
+          `Hand-edit the skill with a role_hint or re-capture with a tighter prompt.`,
+        offending_round: roundIndex,
+        synthesizer_version: SYNTHESIZER_VERSION,
+      };
+    }
+    const result: ClickHintOk = { kind: "ok", hint, near_text_hint: nearTextHint };
+    if (role !== undefined) result.role_hint = role;
+    return result;
   }
 
-  const role = inferRoleHint(match);
   const result: ClickHintOk = { kind: "ok", hint };
   if (role !== undefined) result.role_hint = role;
   return result;
+}
+
+// 0.8.3-rc.1 — does this fill target look like an API-key / token
+// NAME field? Used to templatize captured literals as ${TOKEN_NAME}
+// even when the value itself doesn't match the rc.17 shape regex.
+//
+// Conservative on purpose: a plain `<input name="name">` for a person
+// is NOT a token field. We require the placeholder, labelText,
+// ariaLabel, id or name attribute to mention API-key/token semantics
+// — "API key", "token name", "key name", "personal access token", or
+// a placeholder hinting at the format ("production-api-key",
+// "my-api-key"). This catches the canonical token-name inputs across
+// Railway, Baseten, Resend, Vercel, OpenAI, etc. without
+// false-positiving on signup forms' "Name" fields (which lack the
+// surrounding API/token vocabulary).
+function looksLikeTokenNameInput(el: InteractiveElement): boolean {
+  const hay = [
+    el.placeholder ?? "",
+    el.labelText ?? "",
+    el.ariaLabel ?? "",
+    el.name ?? "",
+    el.id ?? "",
+    el.title ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  // Pattern A: surrounding API-key / token vocabulary.
+  if (/api[\s_-]*(?:key|token)|access[\s_-]*token|personal[\s_-]*token/.test(hay)) {
+    return true;
+  }
+  // Pattern B: explicit "<thing> name" where <thing> is token/key/secret.
+  if (/\b(?:token|key|secret)[\s_-]*name\b/.test(hay)) {
+    return true;
+  }
+  // Pattern C: well-known placeholder examples that hint at the format.
+  if (/production[-_\s]*api[-_\s]*key|my[-_\s]*api[-_\s]*key/.test(hay)) {
+    return true;
+  }
+  return false;
 }
 
 function pickClickText(el: InteractiveElement): string | null {
@@ -684,12 +816,52 @@ function pickClickText(el: InteractiveElement): string | null {
     el.iconLabel ??
     ""
   ).trim();
-  if (text.length === 0) return null;
-  // Truncate exceptionally long text — a 500-char button label is
-  // almost certainly a paragraph picked up by the inventory scraper.
-  // Cap at 80 chars; the replay engine matches by substring so the
-  // first 80 chars are plenty for disambiguation.
-  return text.length > 80 ? text.slice(0, 80) : text;
+  if (text.length > 0) {
+    // Truncate exceptionally long text — a 500-char button label is
+    // almost certainly a paragraph picked up by the inventory scraper.
+    // Cap at 80 chars; the replay engine matches by substring so the
+    // first 80 chars are plenty for disambiguation.
+    return text.length > 80 ? text.slice(0, 80) : text;
+  }
+  // 0.8.3-rc.1 — last-resort fallback to stable form attributes when
+  // the element has no human-readable text. Targets like mistral's
+  // ToS checkbox (`<input name="terms">` with id="_R_75klubsnimdb_")
+  // are otherwise unmatchable but have a stable `name`. The replay
+  // engine's matchesClickHint / matchesLabelHint were extended to
+  // also check `name` and stable `id`, so the synthesized hint pins
+  // the right element at replay time.
+  const stableAttr = pickStableAttribute(el);
+  if (stableAttr !== null) return stableAttr;
+  return null;
+}
+
+// 0.8.3-rc.1 — pick a stable HTML attribute we can use as a fallback
+// match hint. `name` is preferred (developers set it for form fields
+// and rarely change it across redesigns). `id` is accepted only when
+// it doesn't match common React component-library runtime-ID patterns
+// (react-aria, radix, base-ui, react-aria-utils' `_R_…` / `_r_…`).
+function pickStableAttribute(el: InteractiveElement): string | null {
+  const name = (el.name ?? "").trim();
+  if (name.length > 0 && looksStableAttr(name)) return name;
+  const id = (el.id ?? "").trim();
+  if (id.length > 0 && looksStableAttr(id) && !looksLikeRuntimeId(id)) return id;
+  return null;
+}
+
+function looksStableAttr(s: string): boolean {
+  // Lower-case alpha-start, alnum+hyphen+underscore+dot, length 2-40.
+  // Wider than HTML's strict name rules — some apps put dots in names.
+  return /^[a-zA-Z][a-zA-Z0-9_\-.]{1,39}$/.test(s);
+}
+
+function looksLikeRuntimeId(s: string): boolean {
+  // Common library-generated unstable IDs.
+  if (/^react-aria\d+/.test(s)) return true;
+  if (/^radix-/.test(s)) return true;
+  if (/^base-ui-/.test(s)) return true;
+  if (/_R_[a-z0-9]+_?$/i.test(s)) return true;
+  if (/_r_[a-z0-9]+_?$/i.test(s)) return true;
+  return false;
 }
 
 function inferRoleHint(
@@ -744,20 +916,29 @@ function resolveLabelHint(
     match.role === "combobox" && match.tag === "button"
       ? match.visibleText ?? null
       : null;
-  const hint =
+  let hint =
     (match.labelText ?? match.placeholder ?? match.ariaLabel ?? comboboxButtonText ?? "")
       .trim();
   if (hint.length === 0) {
-    return {
-      kind: "rejected",
-      stage: "synthesis",
-      error_kind: "missing_text_hint",
-      message:
-        `Inventory element at ${JSON.stringify(selector)} has no labelText / placeholder / ariaLabel — ` +
-        `cannot synthesize a fill/select label hint.`,
-      offending_round: roundIndex,
-      synthesizer_version: SYNTHESIZER_VERSION,
-    };
+    // 0.8.3-rc.1 — same stable-attribute fallback as pickClickText:
+    // form fields routinely have a stable `name` attribute even when
+    // their visible labelText/placeholder/ariaLabel are absent
+    // (the label may live in a sibling element captured separately).
+    const stable = pickStableAttribute(match);
+    if (stable !== null) {
+      hint = stable;
+    } else {
+      return {
+        kind: "rejected",
+        stage: "synthesis",
+        error_kind: "missing_text_hint",
+        message:
+          `Inventory element at ${JSON.stringify(selector)} has no labelText / placeholder / ariaLabel ` +
+          `and no stable name/id attribute — cannot synthesize a fill/select label hint.`,
+        offending_round: roundIndex,
+        synthesizer_version: SYNTHESIZER_VERSION,
+      };
+    }
   }
 
   // Ambiguity check — same as click resolver. Mirror the replay
@@ -772,7 +953,12 @@ function resolveLabelHint(
       (e.tag === "input" || e.tag === "textarea" || e.tag === "select") &&
       (e.labelText?.trim() === hint ||
         e.placeholder?.trim() === hint ||
-        e.ariaLabel?.trim() === hint),
+        e.ariaLabel?.trim() === hint ||
+        // 0.8.3-rc.1 — stable-attribute fallback path: if our hint
+        // came from the target's `name`/`id`, a duplicate is any
+        // input/textarea/select sharing that attribute value.
+        e.name?.trim() === hint ||
+        e.id?.trim() === hint),
   );
   if (duplicates.length === 0) {
     return { kind: "ok", hint };
@@ -842,6 +1028,20 @@ function pickRowDisambiguator(
     }
   }
 
+  // Helper: a candidate hint qualifies only if filterByNearTextHint
+  // applied at the FULL inventory level uniquely picks the target.
+  // Local proximity isn't sufficient on its own — for the click case,
+  // a sibling button's own visibleText can land "near" the target
+  // within ±5 entries and still be the wrong hint at replay time
+  // (the replay engine scores the same way). Validating with the same
+  // function the replay engine uses makes the chosen hint correct
+  // by construction.
+  const candidates: InteractiveElement[] = [target, ...siblings];
+  const validates = (hint: string): boolean => {
+    const result = filterByNearTextHint(candidates, hint, inventory);
+    return result.length === 1 && result[0]!.selector === target.selector;
+  };
+
   // Walk backward from target picking the closest preceding visible-
   // text element whose text is unique vs. siblings' preceding texts.
   const start = Math.max(0, targetIdx - WINDOW);
@@ -850,6 +1050,7 @@ function pickRowDisambiguator(
     if (text.length === 0) continue;
     if (text.length > 40) continue;
     if (siblingPrecedingTexts.has(text.toLowerCase())) continue;
+    if (!validates(text)) continue;
     return text;
   }
 
@@ -872,6 +1073,7 @@ function pickRowDisambiguator(
     if (text.length === 0) continue;
     if (text.length > 40) continue;
     if (siblingFollowingTexts.has(text.toLowerCase())) continue;
+    if (!validates(text)) continue;
     return text;
   }
   return null;
@@ -1272,14 +1474,23 @@ function inferShapeHint(
       case "uuid_token": {
         // uuid_token is the synthesizer's fallback when no recognized
         // prefix was found in the HTML. Two sub-cases:
-        //   1. UUID actually present (Railway-class) → shape "uuid"
-        //   2. No UUID present (IPInfo-class opaque short token) →
-        //      shape "opaque" so the validator isn't forced to 36/36
-        //      and inferOpaqueValidatorFromHtml picks the observed
-        //      length range. The replay engine's rc.8 candidate
-        //      fallback then uses that validator to find the value.
+        //   1. UUID actually present near credential context (Railway-
+        //      class) → shape "uuid"
+        //   2. UUID present but it's an unrelated session/tracking ID
+        //      (IPInfo-class — the dashboard has a hidden analytics
+        //      UUID nowhere near the api-token field) → shape "opaque"
+        //      so the validator isn't forced to 36/36 and the rc.8
+        //      candidate fallback finds the real value.
+        //
+        // 0.8.3-rc.1 — context-scoped scan. The whole-HTML UUID test
+        // mis-tagged IPInfo (its real key is 14-char hex; an unrelated
+        // session UUID elsewhere on the dashboard triggered "uuid"
+        // shape, locking the validator out of the real value's length
+        // range). Require the UUID to appear near credential-context
+        // words (token/key/api/secret) within a small character window
+        // before promoting to the "uuid" shape.
         const html = rounds[rounds.length - 1]?.state.html ?? "";
-        if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(html)) {
+        if (uuidNearCredentialContext(html)) {
           return "uuid";
         }
         return "opaque";
@@ -1291,8 +1502,98 @@ function inferShapeHint(
   // prefix or a UUID. UUID detection is the dominant case for novel
   // services since they hit the copy-button path precisely because
   // they don't have a recognizable prefix.
+  //
+  // 0.8.3-rc.1 — when the extract step carries a near_text_hint,
+  // narrow the scan to a window around each occurrence of that hint.
+  // The hint points at the copy-button's neighborhood (e.g. "Copy API
+  // key" sits right next to the key value); shape patterns matching
+  // INSIDE that window are far more likely to be the actual
+  // credential than a coincidental match elsewhere on the page.
   const lastRound = rounds[rounds.length - 1]!;
-  const html = lastRound.state.html;
+  const fullHtml = lastRound.state.html;
+  const nearTextHint =
+    extractStep.kind === "extract_via_copy_button" ||
+    extractStep.kind === "extract_via_copy_button_named"
+      ? extractStep.near_text_hint
+      : undefined;
+  const scopedHtml =
+    nearTextHint !== undefined
+      ? scopeHtmlAround(fullHtml, nearTextHint)
+      : fullHtml;
+
+  // Prefer the scoped window: a prefix that hits inside the copy-
+  // button's neighborhood is far more likely correct than one that
+  // happens to appear in nav/footer markup elsewhere.
+  const prefixInScope = detectPrefixShape(scopedHtml);
+  if (prefixInScope !== null) return prefixInScope;
+  // Fall back to whole-HTML prefix detection only when the scoped
+  // window had no hit. This preserves the prior behavior for skills
+  // whose synthesizer-emitted near_text_hint doesn't perfectly land
+  // on the credential's wrapper.
+  if (nearTextHint !== undefined) {
+    const prefixWhole = detectPrefixShape(fullHtml);
+    if (prefixWhole !== null) return prefixWhole;
+  }
+  // UUID-as-shape requires credential-context proximity. A bare UUID
+  // somewhere on the page isn't enough — it must sit next to
+  // token/key/api/secret vocabulary.
+  if (uuidNearCredentialContext(scopedHtml) || uuidNearCredentialContext(fullHtml)) {
+    return "uuid";
+  }
+  return "opaque";
+}
+
+// 0.8.3-rc.1 — true iff a UUID appears within ±200 chars of any
+// credential-context word in the HTML. Tracking/session UUIDs that
+// live in script payloads or footers don't satisfy this; the
+// credential UUID that the dashboard renders next to its label does.
+function uuidNearCredentialContext(html: string): boolean {
+  const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+  const CONTEXT = /\b(?:token|api[\s_-]*key|secret|access[\s_-]*key|api[\s_-]*token|personal[\s_-]*access)\b/gi;
+  const WINDOW = 200;
+  // Collect all context offsets first (cheap) and check each UUID
+  // against them. log(n) join would be tighter; n is small enough
+  // for a linear scan to be invisible.
+  const contextOffsets: number[] = [];
+  for (const m of html.matchAll(CONTEXT)) {
+    contextOffsets.push(m.index ?? 0);
+  }
+  if (contextOffsets.length === 0) return false;
+  for (const m of html.matchAll(UUID)) {
+    const idx = m.index ?? 0;
+    for (const co of contextOffsets) {
+      if (Math.abs(co - idx) <= WINDOW) return true;
+    }
+  }
+  return false;
+}
+
+// 0.8.3-rc.1 — extract a window of HTML around each occurrence of
+// `anchor` so downstream shape-pattern checks only see the
+// credential's vicinity, not the whole page. Returns the
+// concatenated windows.
+function scopeHtmlAround(html: string, anchor: string): string {
+  if (anchor.length === 0) return html;
+  const WINDOW = 500;
+  const lowerHtml = html.toLowerCase();
+  const lowerAnchor = anchor.toLowerCase();
+  const parts: string[] = [];
+  let from = 0;
+  while (from < lowerHtml.length) {
+    const idx = lowerHtml.indexOf(lowerAnchor, from);
+    if (idx === -1) break;
+    const start = Math.max(0, idx - WINDOW);
+    const end = Math.min(html.length, idx + anchor.length + WINDOW);
+    parts.push(html.slice(start, end));
+    from = end;
+  }
+  // If we never matched the anchor (capture-time HTML differs in
+  // ways the resolver normalized over), return the original HTML so
+  // we don't lose the chance to detect a prefix at all.
+  return parts.length === 0 ? html : parts.join("\n");
+}
+
+function detectPrefixShape(html: string): SkillCredentialSpec["shape_hint"] | null {
   if (/\bre_[a-zA-Z0-9_]{20,}/.test(html)) return "prefix:re_";
   if (/\bsk_live_/.test(html)) return "prefix:sk_live";
   if (/\bsk_test_/.test(html)) return "prefix:sk_test";
@@ -1303,10 +1604,7 @@ function inferShapeHint(
   if (/\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}/.test(html)) return "prefix:SG.";
   if (/\brnd_[a-zA-Z0-9]{20,}/.test(html)) return "prefix:rnd_";
   if (/\bsntry[su]_/.test(html)) return "prefix:sntry";
-  if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(html)) {
-    return "uuid";
-  }
-  return "opaque";
+  return null;
 }
 
 // ── OAuth provider detection ─────────────────────────────────────────

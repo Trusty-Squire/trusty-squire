@@ -791,6 +791,22 @@ export class BrowserController {
   // a signup button (e.g. an OAuth-only page).
   async clickSubmit(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    // 0.8.3-rc.1 — wait for the submit selector to appear before
+    // querying count. Mixpanel-class SPAs (Next.js + heavy auth JS)
+    // race past the 10s `waitForSelector` in click() and bail with
+    // `locator.waitFor: Timeout 10000ms exceeded` even when the form
+    // is otherwise correct. Polling here gives the SPA time to
+    // mount the submit button BEFORE we check whether it's disabled.
+    // Best-effort: a genuine miss still surfaces as the click()'s
+    // own timeout downstream.
+    try {
+      await this.page.waitForSelector(selector, {
+        state: "attached",
+        timeout: 20000,
+      });
+    } catch {
+      // fall through — click() below will produce the canonical error
+    }
     const locator = this.page.locator(selector);
     const count = await locator.count();
     // A disabled submit means a required field or agreement checkbox
@@ -1472,7 +1488,13 @@ export class BrowserController {
   // a strict-mode locator would throw before we could disambiguate.
   private async humanClickLocator(locator: Locator): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await locator.waitFor({ state: "visible", timeout: 10000 });
+    // 0.8.3-rc.1 — widened from 10s to 20s for SPA-load races. The
+    // mixpanel-class signup page (Next.js + heavy auth JS, ~12-15s
+    // to first-paint the form) was timing out here even when the
+    // submit button DOES eventually mount. Bound stays low enough
+    // that a genuinely-missing target still surfaces a clear error
+    // within the bot's per-action budget.
+    await locator.waitFor({ state: "visible", timeout: 20000 });
     // rc.20 — wait for the target to be ENABLED before issuing the
     // click. humanClick uses page.mouse.click(x, y) which bypasses
     // Playwright's actionability check, so a disabled button receives
@@ -2914,6 +2936,21 @@ export class BrowserController {
       };
       walk(document);
 
+      // 0.8.3-rc.1 — also collect OAuth-affordance iframes. Modern
+      // signup pages (Mixpanel, many Next.js sites) render "Continue
+      // with Google" via Google's GIS iframe at
+      // `accounts.google.com/gsi/button` — cross-origin, so the
+      // button INSIDE the iframe isn't in our DOM. The iframe element
+      // ITSELF is clickable from the parent page though; clicking its
+      // bounding box dispatches the click event into the iframe, and
+      // Google's button-handler then opens the OAuth popup. We
+      // surface these iframes as synthetic OAuth buttons (with a
+      // visibleText that findOAuthButton matches) so the OAuth-first
+      // scan can pick them up.
+      document
+        .querySelectorAll<HTMLIFrameElement>('iframe[src*="accounts.google.com/gsi/button"]')
+        .forEach((n) => collected.push(n));
+
       const isVisible = (el: Element): boolean => {
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) return false;
@@ -3087,6 +3124,7 @@ export class BrowserController {
         title: string | null;
         landmark: string | null;
         value: string | null;
+        checked: boolean | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
@@ -3128,16 +3166,28 @@ export class BrowserController {
           height: r.height,
           clickable,
         });
+        // 0.8.3-rc.1 — Google Identity Services iframe special-case.
+        // The iframe is cross-origin so el.textContent is empty,
+        // but we know structurally it's a "Continue with Google"
+        // affordance. Surface synthetic text so findOAuthButton
+        // matches it and the OAuth-first scan picks it up.
+        const isGoogleGSIIframe =
+          el instanceof HTMLIFrameElement &&
+          (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
         out.push({
-          tag: el.tagName.toLowerCase(),
+          tag: isGoogleGSIIframe ? "button" : el.tagName.toLowerCase(),
           type: el.getAttribute("type"),
           id: el.getAttribute("id"),
           name: el.getAttribute("name"),
           placeholder: el.getAttribute("placeholder"),
-          ariaLabel: el.getAttribute("aria-label"),
-          role: el.getAttribute("role"),
+          ariaLabel: isGoogleGSIIframe
+            ? "Continue with Google"
+            : el.getAttribute("aria-label"),
+          role: isGoogleGSIIframe ? "button" : el.getAttribute("role"),
           labelText: labelFor(el),
-          visibleText: clean(el.textContent),
+          visibleText: isGoogleGSIIframe
+            ? "Continue with Google"
+            : clean(el.textContent),
           selector: selectorFor(el),
           visible: true,
           inViewport:
@@ -3164,6 +3214,17 @@ export class BrowserController {
               : el instanceof HTMLSelectElement
                 ? el.value
                 : null,
+          // 0.8.3-rc.1 — checkbox/radio runtime state. `value` for a
+          // checkbox is the static `value` attribute (defaults to
+          // "on") regardless of whether it's currently ticked, so any
+          // caller wanting to find UNCHECKED checkboxes needs `checked`
+          // explicitly. The submit-disabled re-plan hint uses this to
+          // surface concrete unticked candidates to the planner.
+          checked:
+            el instanceof HTMLInputElement &&
+            (el.type === "checkbox" || el.type === "radio")
+              ? el.checked
+              : null,
           // For <select>: the currently-selected option's visible text
           // and a short list of available option labels. The combination
           // is how the planner detects the "React-defaulted dropdown"
@@ -3598,6 +3659,10 @@ export interface InteractiveElement {
   // null means "not applicable (button/link) or not captured (test
   // fixture)".
   value?: string | null;
+  // 0.8.3-rc.1 — runtime `checked` state for checkbox/radio inputs.
+  // Null for everything else. Use this (not `value`) to identify
+  // unticked checkboxes — checkbox `value` is the static attribute.
+  checked?: boolean | null;
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the

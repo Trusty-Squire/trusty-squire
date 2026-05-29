@@ -84,5 +84,8 @@ function parseBody(req: FastifyRequest): OtpPollInput | null {
   if (typeof obj["otp_pattern"] === "string" && obj["otp_pattern"].length > 0) {
     out.otp_pattern = obj["otp_pattern"];
   }
+  if (obj["return_kind"] === "url" || obj["return_kind"] === "code") {
+    out.return_kind = obj["return_kind"];
+  }
   return out;
 }

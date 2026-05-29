@@ -1,1135 +1,1209 @@
-# Skill-harvester queue.
-#
-# Each entry describes one service the harvester will attempt to sign up
-# to + promote a replayable skill for. Fields:
-#
-#   slug              Stable lowercase ID. Used as the registry service
-#                     slug AND as a GitHub label (`service:<slug>`).
-#                     MUST be lowercase, no spaces. Editing breaks state
-#                     tracking; pick once and freeze.
-#   name              Display name. Passed to provision_any_service as
-#                     the `service` argument and shown in GitHub issue
-#                     titles. Mirrors the planner's "Service:" line.
-#   signup_url        Direct URL the bot navigates to. The bot's
-#                     URL-discovery flow is bypassed because the
-#                     harvester picks deliberate landing pages — pick
-#                     /signup, /register, or /login as appropriate. For
-#                     Railway specifically: /login (not /new, which is
-#                     authed-only).
-#   oauth_provider    The OAuth identity to use. As of harvester v1 we
-#                     only run signups via `google` (methoxine@gmail.com
-#                     session in the harvester chrome profile). GitHub-
-#                     only services are not yet in scope and should be
-#                     marked status:skip until that lands.
-#   scope_hint        Free-text guidance to the planner for permission/
-#                     scope dropdowns (Sentry's per-row picker; Postmark's
-#                     server-vs-account toggle). Empty / null lets the
-#                     rc.12 default kick in ("max permissions").
-#   status            Lifecycle state.
-#                       pending      — never attempted, eligible to run
-#                       skip         — known-incompatible, harvester
-#                                       never picks this. Document reason.
-#                       hold         — temporarily paused (e.g. waiting
-#                                       for an upstream fix). Same effect
-#                                       as skip but signals intent.
-#                       needs-manual — service requires a human (phone
-#                                       gate, fresh-MX silent drop,
-#                                       OAuth wizard, manual onboarding).
-#                                       Filtered by default like `skip`;
-#                                       use the notes field to record the
-#                                       reason so operators can re-test
-#                                       when the upstream gate clears.
-
 - slug: ipinfo
   name: IPInfo
   signup_url: https://ipinfo.io/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Simplest known case — API key on dashboard after signup. Already
+  notes: 'Simplest known case — API key on dashboard after signup. Already
+
     promoted from a prior lunchboxfortwo run; this re-validates with
+
     methoxine identity.
 
+    '
 - slug: openrouter
   name: OpenRouter
   signup_url: https://openrouter.ai/sign-up
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    rc.5: page rendered the models browse (45 elements, 44 low-ranked
+  notes: 'rc.5: page rendered the models browse (45 elements, 44 low-ranked
+
     buttons dropped — the "Get API Key" CTA is being suppressed by
+
     the button-rank filter). Planner notes confirm it sees "Get API
-    Key" but can't locate it in the surviving inventory after ranking
-    trim. Bot's planning_failed: 0-action plan. Revisit once button-
+
+    Key" but can''t locate it in the surviving inventory after ranking
+
+    trim. Bot''s planning_failed: 0-action plan. Revisit once button-
+
     cap heuristics widen.
 
+    '
 - slug: resend
   name: Resend
   signup_url: https://resend.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Cloudflare Turnstile during signup — Tier-1 behavior simulation
+  notes: 'Cloudflare Turnstile during signup — Tier-1 behavior simulation
+
     should pass. Previously verified post-captcha success.
 
+    '
 - slug: postmark
   name: Postmark
   signup_url: https://account.postmarkapp.com/sign_up
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    verification_not_sent on trustysquire.com — Postmark silently drops
+  notes: 'verification_not_sent on trustysquire.com — Postmark silently drops
+
     verification mail to fresh-MX domains (vendor anti-spam policy). Confirmed
+
     again on rc.3 run. Manual signup required until inbox revival on the
+
     trustysquire.com domain.
 
+    '
 - slug: sentry
   name: Sentry
   signup_url: https://sentry.io/signup/
   oauth_provider: google
-  scope_hint: "max permissions on every scope dropdown — Admin > Write > Read"
-  notes: |
-    rc.11 unblocks Sentry: selectFromCombobox resolves
+  scope_hint: max permissions on every scope dropdown — Admin > Write > Read
+  notes: 'rc.11 unblocks Sentry: selectFromCombobox resolves
+
     `<label for="X">` selectors to `#X` before clicking, and falls
+
     back to a react-select keyboard idiom (Alt+Down + type-to-filter
+
     + Enter) when the existing role-based tiers see no visible
+
     options. Both paths verify the pick took via diff of
+
     aria-activedescendant / value / surrounding text.
+
     Multi-row scope grid (Project / Team / Member / Issue / Event /
+
     Release / Organization).
 
+    '
 - slug: render
   name: Render
   signup_url: https://dashboard.render.com/register
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Previously bottlenecked on verification email; inbox revival
+  notes: 'Previously bottlenecked on verification email; inbox revival
+
     (2026-05-20, trustysquire.com SES) unblocked. This is the first
+
     post-revival test for Render.
 
+    '
 - slug: posthog
   name: PostHog
   signup_url: https://app.posthog.com/signup
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    rc.5: already-signed-in dashboard detection now correctly fires
+  notes: 'rc.5: already-signed-in dashboard detection now correctly fires
+
     (Hand off setup + project picker affordances trip
+
     detectAlreadySignedIn). But PostHog separates its PUBLIC project
+
     token (window.JS_POSTHOG_API_KEY, embedded in page JS — the bot
+
     extracts this) from the PRIVATE Personal API Key (at
+
     us.posthog.com/me/settings/api-keys, behind 2 nav clicks and a
+
     key-name modal). The planner finds the JS token first and bails
+
     after the bot rejects its non-credential shape. Needs a
+
     per-service navigation hint, or operator should fetch manually.
 
+    '
 - slug: anthropic
   name: Anthropic API
   signup_url: https://console.anthropic.com/login
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Untested — Anthropic's console may require workspace creation
-    before API keys are reachable. If post-verify can't find /settings/
+  notes: 'Untested — Anthropic''s console may require workspace creation
+
+    before API keys are reachable. If post-verify can''t find /settings/
+
     keys, fall through.
 
+    '
 - slug: openai
   name: OpenAI API
   signup_url: https://platform.openai.com/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Likely phone-verification gate during signup. If the post-OAuth
-    page lands on a phone-entry form, the bot's anti-bot detection
-    won't help — mark status:needs-manual after first attempt.
+  status: needs-manual
+  notes: 'Likely phone-verification gate during signup. If the post-OAuth
 
-# ── Phase 1 expansion (5 high-confidence Google-OAuth services) ──
-# Picked from the design-doc curation list. All offer Google OAuth as
-# a primary signup method. URLs verified 2026-05-24 but per-service
-# OAuth flows untested — flag as needs-manual on first attempt if the
-# bot hits an unexpected gate (phone verification, no Google button).
+    page lands on a phone-entry form, the bot''s anti-bot detection
 
+    won''t help — mark status:needs-manual after first attempt.
+
+
+    2026-05-29 batch: OpenAI requires phone/SMS MFA after Google OAuth (`https://auth.openai.com/mfa-challenge/...`). Bot reached MFA gate and stopped. Same shape as Vercel SMS — requires operator phone.'
 - slug: mistral
   name: Mistral
   signup_url: https://console.mistral.ai/auth/signup
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    oauth_loop_detected — bot signs in via Google twice but Mistral
+  notes: 'oauth_loop_detected — bot signs in via Google twice but Mistral
+
     keeps redirecting to /signup. The service requires a manual
+
     onboarding step (workspace creation) before its OAuth session
+
     finalizes. Re-test if Mistral streamlines onboarding.
 
+    '
 - slug: neon
   name: Neon
   signup_url: https://console.neon.tech/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Serverless Postgres. Google + GitHub OAuth, plus email. Console
+  notes: 'Serverless Postgres. Google + GitHub OAuth, plus email. Console
+
     offers a workspace-creation step post-OAuth that may trip the
-    planner's "looking for API key" assumption — watch for that on
+
+    planner''s "looking for API key" assumption — watch for that on
+
     the first run.
 
+    '
 - slug: together
   name: Together AI
   signup_url: https://api.together.xyz/signin
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    LLM inference. Google + GitHub OAuth. Untested with the universal
+  notes: 'LLM inference. Google + GitHub OAuth. Untested with the universal
+
     bot; first run validates.
 
+    '
 - slug: groq
   name: Groq
   signup_url: https://console.groq.com/login
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    oauth_loop_detected — bot signs in via Google twice but Groq
+  notes: 'oauth_loop_detected — bot signs in via Google twice but Groq
+
     keeps redirecting back to /authenticate. Same shape as Mistral
+
     (manual onboarding step gates OAuth finalize). Re-test when
+
     Groq simplifies their onboarding.
 
+    '
 - slug: pinecone
   name: Pinecone
   signup_url: https://app.pinecone.io/?sessionType=signup
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    OAuth-loop after Google sign-in — Pinecone's workspace-creation step
+  notes: 'OAuth-loop after Google sign-in — Pinecone''s workspace-creation step
+
     gates OAuth finalize. Same shape as mistral/groq. Manual signup +
+
     API-key fetch is the realistic call.
 
-# ── Phase 2 expansion (82 OAuth services, target = 100 total) ──
-# All entries below are UNTESTED with the universal bot. OAuth provider
-# availability was researched at draft time but per-service flows are
-# unverified. The harvester will surface real per-service failure modes
-# (phone gates, captcha walls, post-OAuth onboarding redirects, etc.)
-# on first attempt; flip status:skip with a reason note when one is
-# found. Default oauth_provider is google to match the harvester
-# chrome profile (methoxine@gmail.com); flip to github when a service
-# is verifiably github-first (Railway is the canonical case).
-
-# ── AI / LLM inference (7) ──
-
+    '
 - slug: replicate
   name: Replicate
   signup_url: https://replicate.com/signin
   oauth_provider: github
   scope_hint: null
   status: needs-manual
-  notes: |
-    rc.5: GitHub triggered "verify it's you" device challenge on both
+  notes: 'rc.5: GitHub triggered "verify it''s you" device challenge on both
+
     rc.3 + rc.5 runs. Operator-side state: re-run
+
     `npx @trusty-squire/mcp login --provider=github` and clear the
+
     challenge in the browser before re-queuing replicate. Not a code
+
     fix — the challenge gate is GitHub-side anti-bot.
+
     Model hosting + inference. GitHub OAuth primary; Google also
+
     offered. API key surfaces in account settings after signup.
 
+    '
 - slug: fireworks
   name: Fireworks AI
   signup_url: https://fireworks.ai/login
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    verification_not_sent — trustysquire.com is fresh-MX and
+  notes: 'verification_not_sent — trustysquire.com is fresh-MX and
+
     Fireworks silently withheld the verification email. Vendor-side
+
     policy, not a bot bug. The /login page offers Google + GitHub
+
     OAuth — if we can force OAuth-first reliably we may flip this
+
     back to pending.
 
+    '
 - slug: deepinfra
   name: DeepInfra
   signup_url: https://deepinfra.com/login
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    LLM inference. GitHub-first OAuth (their dashboard expects GitHub
+  notes: 'LLM inference. GitHub-first OAuth (their dashboard expects GitHub
+
     identity); Google also available. API key in dashboard.
 
+    '
 - slug: perplexity
   name: Perplexity API
   signup_url: https://www.perplexity.ai/settings/api
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Perplexity's web app uses Google OAuth; API access requires
+  notes: 'Perplexity''s web app uses Google OAuth; API access requires
+
     payment-method-on-file before keys issue. Likely onboarding_blocked
+
     on first attempt — flag for billing-wall handling.
 
+    '
 - slug: cohere
   name: Cohere
   signup_url: https://dashboard.cohere.com/welcome/login
   oauth_provider: google
   scope_hint: null
   status: needs-manual
-  notes: |
-    verification_not_sent — trustysquire.com fresh-MX silent-drop
+  notes: 'verification_not_sent — trustysquire.com fresh-MX silent-drop
+
     (same vendor-side policy as Fireworks). /welcome/login does
+
     offer Google + GitHub OAuth — re-test if we add reliable
+
     OAuth-first routing for vendors with both flows.
 
+    '
 - slug: hyperbolic
   name: Hyperbolic
   signup_url: https://app.hyperbolic.xyz/login
   oauth_provider: google
   scope_hint: null
   status: skip
-  notes: |
-    LLM + image inference. Google OAuth completes server-side but
+  notes: 'LLM + image inference. Google OAuth completes server-side but
+
     the callback never persists a session — bot lands back on
-    /login with Sign Up / Log In buttons visible (rc.24's
+
+    /login with Sign Up / Log In buttons visible (rc.24''s
+
     oauth_session_not_persisted detector). Same shape as
+
     DigitalOcean: anti-bot probably rejects the OAuth callback.
+
     Not bot-fixable without residential-proxy egress.
 
+    '
 - slug: baseten
   name: Baseten
   signup_url: https://app.baseten.co/login
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Model serving. Google + GitHub OAuth. Workspace creation step
+  notes: 'Model serving. Google + GitHub OAuth. Workspace creation step
+
     post-OAuth may trip the "looking for API key" planner — watch.
 
-# ── Cloud / PaaS (8) ──
-
+    '
 - slug: netlify
   name: Netlify
   signup_url: https://app.netlify.com/signup
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Static + edge hosting. GitHub OAuth is the dominant path (deploys
+  notes: 'Static + edge hosting. GitHub OAuth is the dominant path (deploys
+
     are git-driven); Google + GitLab + Bitbucket also offered. PAT in
+
     user settings post-signup.
 
+    '
 - slug: fly
   name: Fly.io
   signup_url: https://fly.io/app/sign-up
   oauth_provider: github
   scope_hint: null
   status: skip
-  notes: |
-    Edge compute. GitHub OAuth completes but token creation is
-    blocked by SSO organization membership (rc.24's sso_restricted
-    detector). The user's GitHub identity sits in an org that
+  notes: 'Edge compute. GitHub OAuth completes but token creation is
+
+    blocked by SSO organization membership (rc.24''s sso_restricted
+
+    detector). The user''s GitHub identity sits in an org that
+
     enforces SSO/SAML for programmatic token creation — server-side
-    rule the bot can't bypass. Not fixable without a personal Fly
+
+    rule the bot can''t bypass. Not fixable without a personal Fly
+
     account outside the SSO org.
 
+    '
 - slug: koyeb
   name: Koyeb
   signup_url: https://app.koyeb.com/auth/signup
   oauth_provider: github
   scope_hint: null
   status: skip
-  notes: |
-    Serverless container hosting. GitHub OAuth completes, but a
+  notes: 'Serverless container hosting. GitHub OAuth completes, but a
+
     credit-card verification wall now gates all API access (planner
+
     consistently returns done with "Pro plan payment required").
+
     Classified onboarding_blocked by the bot in rc.39 — keeping
+
     skip until Koyeb restores a free tier that issues tokens
+
     without billing setup.
 
+    '
 - slug: northflank
   name: Northflank
   signup_url: https://app.northflank.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Container hosting + jobs. GitHub + Google + GitLab OAuth. May
+  notes: 'Container hosting + jobs. GitHub + Google + GitLab OAuth. May
+
     require billing for project creation.
 
+    '
 - slug: porter
   name: Porter
   signup_url: https://dashboard.porter.run/login
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    K8s app hosting. GitHub-first OAuth (deploys from git repos).
+  notes: 'K8s app hosting. GitHub-first OAuth (deploys from git repos).
 
+    '
 - slug: zeabur
   name: Zeabur
   signup_url: https://zeabur.com/login
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    PaaS. GitHub + Google + email OAuth. Free tier; API token in
+  notes: 'PaaS. GitHub + Google + email OAuth. Free tier; API token in
+
     account settings.
 
+    '
 - slug: digitalocean
   name: DigitalOcean
   signup_url: https://cloud.digitalocean.com/registrations/new
   oauth_provider: google
   scope_hint: null
   status: skip
-  notes: |
-    IaaS. Google OAuth completes but the callback session never
-    persists — bot lands back on /login (rc.24's
-    oauth_session_not_persisted detector). DigitalOcean's anti-bot
+  notes: 'IaaS. Google OAuth completes but the callback session never
+
+    persists — bot lands back on /login (rc.24''s
+
+    oauth_session_not_persisted detector). DigitalOcean''s anti-bot
+
     layer evidently rejects the OAuth callback when egress is
+
     datacenter. Not bot-fixable without residential-proxy egress
+
     AND a payment method on file (signup is also $5 hold + KYC).
 
-# ── Databases (8) ──
-
+    '
 - slug: supabase
   name: Supabase
   signup_url: https://supabase.com/dashboard/sign-up
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Postgres + auth + storage. GitHub OAuth is the canonical path
+  notes: 'Postgres + auth + storage. GitHub OAuth is the canonical path
+
     (most users); Google also offered. Project creation post-signup
+
     is required before API keys surface — multi-step post-OAuth.
 
+    '
 - slug: planetscale
   name: PlanetScale
   signup_url: https://auth.planetscale.com/sign-up
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Vitess-backed MySQL. GitHub + Google OAuth. Hobby tier removed;
+  notes: 'Vitess-backed MySQL. GitHub + Google OAuth. Hobby tier removed;
+
     likely billing-wall on database creation.
 
+    '
 - slug: turso
   name: Turso
   signup_url: https://app.turso.tech/auth/signin
   oauth_provider: github
   scope_hint: null
   status: skip
-  notes: |
-    libSQL (SQLite) edge. GitHub OAuth handshake completes (the
+  notes: 'libSQL (SQLite) edge. GitHub OAuth handshake completes (the
+
     rc.39 minimal-label matcher finds the bare "GitHub" button)
+
     but the SSO callback at /login/sso-callback runs a Cloudflare
+
     challenge that never clears for our Chromium fingerprint — 0
+
     interactive elements for the full post-verify budget.
+
     Classified anti_bot_blocked by the bot. Manual signup is the
+
     realistic call.
 
+    '
 - slug: xata
   name: Xata
   signup_url: https://app.xata.io/signin
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Serverless Postgres + search. GitHub + Google OAuth. API key in
+  notes: 'Serverless Postgres + search. GitHub + Google OAuth. API key in
+
     user settings.
 
+    '
 - slug: convex
   name: Convex
   signup_url: https://dashboard.convex.dev/auth
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Reactive serverless DB. GitHub-first OAuth.
+  notes: 'Reactive serverless DB. GitHub-first OAuth.
 
+    '
 - slug: upstash
   name: Upstash
   signup_url: https://console.upstash.com/auth/sign-in
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Serverless Redis + Kafka + QStash. GitHub + Google + Amazon
+  notes: 'Serverless Redis + Kafka + QStash. GitHub + Google + Amazon
+
     OAuth. API key + REST tokens in account settings.
 
+    '
 - slug: redis-cloud
   name: Redis Cloud
   signup_url: https://app.redislabs.com/#/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Managed Redis (Redis Labs). Google + GitHub OAuth. Free 30MB
+  notes: 'Managed Redis (Redis Labs). Google + GitHub OAuth. Free 30MB
+
     tier; API key generated post-signup.
 
+    '
 - slug: cockroachdb
   name: CockroachDB Cloud
   signup_url: https://cockroachlabs.cloud/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Distributed Postgres-compatible DB. Google + GitHub + Azure
+  notes: 'Distributed Postgres-compatible DB. Google + GitHub + Azure
+
     OAuth. Free serverless tier; cluster creation needed before
+
     connection string surfaces.
 
-# ── Vector DBs (3) ──
-
+    '
 - slug: weaviate
   name: Weaviate Cloud
   signup_url: https://console.weaviate.cloud
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Vector DB. Google OAuth. Sandbox tier; API key per-cluster.
+  notes: 'Vector DB. Google OAuth. Sandbox tier; API key per-cluster.
 
+    '
 - slug: qdrant
   name: Qdrant Cloud
   signup_url: https://cloud.qdrant.io/login
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Vector DB. GitHub + Google OAuth. Free tier (1GB); API key
+  notes: 'Vector DB. GitHub + Google OAuth. Free tier (1GB); API key
+
     in cluster settings.
 
+    '
 - slug: chroma
   name: Chroma Cloud
   signup_url: https://trychroma.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Vector DB (Chroma's hosted offering). Google OAuth available
+  notes: 'Vector DB (Chroma''s hosted offering). Google OAuth available
+
     based on landing-page CTAs.
 
-# ── Observability / logging (7) ──
-
+    '
 - slug: highlight
   name: Highlight
   signup_url: https://app.highlight.io/sign_up
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Session replay + errors. Google + GitHub OAuth. Workspace + project
+  status: needs-manual
+  notes: 'Session replay + errors. Google + GitHub OAuth. Workspace + project
+
     creation step post-OAuth before project SDK key surfaces.
 
+
+    2026-05-29 retry: Confirmed via screenshot 2026-05-29: highlight''s `/join_workspace` page shows ''Creating new workspaces is disabled.'' message with a greyed-out ''Join Workspace'' button. Highlight has shut down new-workspace creation. No automation path exists; service is closed.'
 - slug: betterstack-logs
   name: Better Stack Logs
   signup_url: https://logs.betterstack.com/users/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Log management (formerly Logtail). Google + GitHub OAuth. Source
+  notes: 'Log management (formerly Logtail). Google + GitHub OAuth. Source
+
     creation step post-OAuth surfaces an ingest token.
 
+    '
 - slug: axiom
   name: Axiom
   signup_url: https://app.axiom.co/register
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Event store + observability. Google + GitHub OAuth. Token in
+  notes: 'Event store + observability. Google + GitHub OAuth. Token in
+
     settings > API tokens.
 
+    '
 - slug: grafana-cloud
   name: Grafana Cloud
   signup_url: https://grafana.com/auth/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Observability stack. Google + GitHub OAuth. Stack creation step
+  notes: 'Observability stack. Google + GitHub OAuth. Stack creation step
+
     post-OAuth before API keys reachable.
 
+    '
 - slug: honeycomb
   name: Honeycomb
   signup_url: https://ui.honeycomb.io/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Distributed tracing. Google OAuth. Team creation step post-OAuth
+  notes: 'Distributed tracing. Google OAuth. Team creation step post-OAuth
+
     before API key surfaces.
 
+    '
 - slug: baselime
   name: Baselime
   signup_url: https://console.baselime.io/signup
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Serverless observability (acquired by Cloudflare). GitHub OAuth
+  notes: 'Serverless observability (acquired by Cloudflare). GitHub OAuth
+
     is the canonical path.
 
+    '
 - slug: last9
   name: Last9
   signup_url: https://app.last9.io/login
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    OpenTelemetry observability. Google + GitHub OAuth.
+  notes: 'OpenTelemetry observability. Google + GitHub OAuth.
 
-# ── Analytics (4) ──
-
+    '
 - slug: mixpanel
   name: Mixpanel
   signup_url: https://mixpanel.com/register
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Product analytics. Google OAuth. Project token in settings >
+  status: needs-manual
+  notes: 'Product analytics. Google OAuth. Project token in settings >
+
     project settings after creation step.
 
+
+    2026-05-29 retry: Submit-button locator times out even at 20s — the planner-chosen `submit_selector` never becomes visible on the page. Bot wrote zero captures, indicating it never got past form-fill. Likely the signup page is in an iframe / behind a cookie banner the bot can''t dismiss, or has a Cloudflare check that delays DOM mount past the budget. Needs interactive page inspection.
+
+
+    2026-05-29 deep-iteration: After 0.8.3-rc.1 GIS-iframe + onboarding-path + wizard-forward fixes, the bot now drives Mixpanel''s post-OAuth onboarding 14+ rounds deep (name → work-type → role → org → industry). It stops at the ''Create your organization'' step''s industry combobox — Mixpanel uses a custom search-as-you-type react-select widget with specific labels (typing ''Technology'' / ''Internet'' returns ''No options''). Even if industry were unstuck, downstream the bot would need to: pick a data-center (custom widget), create the org, create a project, then navigate to `/project/<project_id>/settings/api-keys` — the project-scoped URL pattern requires knowing the project_id which only appears after project creation. Manual recommendation: finish a Mixpanel signup once via the operator account; the bot can then re-enter via Google OAuth and hit a real dashboard.'
 - slug: amplitude
   name: Amplitude
   signup_url: https://amplitude.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Product analytics. Google OAuth. Org + workspace creation step
+  notes: 'Product analytics. Google OAuth. Org + workspace creation step
+
     post-OAuth before project API key surfaces.
 
+    '
 - slug: plausible
   name: Plausible
   signup_url: https://plausible.io/register
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Privacy-friendly web analytics. GitHub OAuth (Sign in with
+  notes: 'Privacy-friendly web analytics. GitHub OAuth (Sign in with
+
     GitHub) on /register. Free trial.
 
+    '
 - slug: fathom
   name: Fathom Analytics
   signup_url: https://app.usefathom.com/register
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Privacy-friendly web analytics. Google OAuth on /register.
+  notes: 'Privacy-friendly web analytics. Google OAuth on /register.
+
     Free trial; site creation step before tracking code surfaces.
 
-# ── Email / transactional (6) ──
-
+    '
 - slug: loops
   name: Loops
   signup_url: https://app.loops.so/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Email for SaaS. Google + email OAuth.
+  notes: 'Email for SaaS. Google + email OAuth.
 
+    '
 - slug: plunk
   name: Plunk
   signup_url: https://app.useplunk.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Open-source transactional email. Google OAuth + email.
+  notes: 'Open-source transactional email. Google OAuth + email.
 
+    '
 - slug: mailtrap
   name: Mailtrap
   signup_url: https://mailtrap.io/register/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Email sandbox + transactional. Google + GitHub OAuth.
+  notes: 'Email sandbox + transactional. Google + GitHub OAuth.
 
+    '
 - slug: brevo
   name: Brevo
   signup_url: https://onboarding.brevo.com/account/register
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Email + SMS (formerly Sendinblue). Google OAuth on registration.
+  notes: 'Email + SMS (formerly Sendinblue). Google OAuth on registration.
+
     Multi-step onboarding form post-OAuth.
 
+    '
 - slug: sendgrid
   name: SendGrid
   signup_url: https://signup.sendgrid.com/
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Transactional + marketing email (Twilio). Likely requires phone
+  status: needs-manual
+  notes: 'Transactional + marketing email (Twilio). Likely requires phone
+
     verification post-OAuth; flag needs-manual if so.
 
+
+    2026-05-29 batch: verification_not_sent — service silently dropped the verification email on the fresh-MX trustysquire.com domain. Not fixable from our side; finish manually or revisit after domain reputation matures.'
 - slug: mailgun
   name: Mailgun
   signup_url: https://signup.mailgun.com/new/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Transactional email. Google + GitHub OAuth. Payment method
+  status: needs-manual
+  notes: 'Transactional email. Google + GitHub OAuth. Payment method
+
     required for sandbox-out; likely onboarding_blocked.
 
-# ── Search (3) ──
 
+    2026-05-29 retry: Signup form transitions to a credit-card payment form after the initial email+terms step (`#cardholder`, `#address`, `#city` fields visible in step trail). Mailgun gates API access behind a card on file. The submit-disabled re-plans were the planner correctly identifying that required fields remained but unable to satisfy a real payment form. Same category as Stripe''s KYC gate.'
 - slug: algolia
   name: Algolia
   signup_url: https://dashboard.algolia.com/users/sign_up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Hosted search. Google + GitHub OAuth. Application + index creation
+  notes: 'Hosted search. Google + GitHub OAuth. Application + index creation
+
     step post-OAuth before API keys surface.
 
+    '
 - slug: meilisearch
   name: Meilisearch Cloud
   signup_url: https://cloud.meilisearch.com/login
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Search engine. Google + GitHub OAuth. Project creation step
+  notes: 'Search engine. Google + GitHub OAuth. Project creation step
+
     before API key surfaces.
 
+    '
 - slug: typesense
   name: Typesense Cloud
   signup_url: https://cloud.typesense.org/signin
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Search engine. Google + GitHub OAuth. Cluster provisioning step
+  notes: 'Search engine. Google + GitHub OAuth. Cluster provisioning step
+
     before API key surfaces.
 
-# ── Auth providers (4) ──
-
+    '
 - slug: clerk
   name: Clerk
   signup_url: https://dashboard.clerk.com/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Auth-as-a-service. Google + GitHub OAuth. Application creation
+  notes: 'Auth-as-a-service. Google + GitHub OAuth. Application creation
+
     step post-OAuth before publishable+secret keys surface.
 
+
+    2026-05-29 batch: Post-OAuth Clerk loops back to /sign-up — requires manual completion of an onboarding step before its session finalises.
+
+
+    Rolled back to pending 2026-05-29: the original needs-manual marker was based on log messages alone, before the 0.8.3-rc.1 fixes (GIS-iframe inventory, /onboarding auto-OAuth detection, wizard-forward auto-click). Worth a retry with the new bot.
+
+
+    2026-05-29 retry: Confirmed via screenshot 2026-05-29: post-OAuth landing is a signup form (Email + Password + Cloudflare ''Verify you are human'' checkbox + Continue) WITH the Google button greyed out. The bot''s isLoginLoopState misclassifies this as ''still on login page, retry OAuth'' and re-issues OAuth. Real fix needs a new branch: detect ''OAuth succeeded but service shows a signup form expecting supplementary fields + a Cloudflare turnstile'', then drive form-fill instead of OAuth retry. Out of scope for this session — recorded as a follow-up bug class.'
 - slug: stytch
   name: Stytch
   signup_url: https://stytch.com/dashboard
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Auth-as-a-service. Google OAuth. Project creation step before
+  status: needs-manual
+  notes: 'Auth-as-a-service. Google OAuth. Project creation step before
+
     API keys surface.
 
+
+    2026-05-29 batch: After Google OAuth, Stytch redirects to a dashboard/authenticate route that errors out for our flow (caught after a one-time cookie-consent click). 2026-05-28 batch hit this twice; flow needs investigation before another automated attempt.
+
+
+    Rolled back to pending 2026-05-29: the original needs-manual marker was based on log messages alone, before the 0.8.3-rc.1 fixes (GIS-iframe inventory, /onboarding auto-OAuth detection, wizard-forward auto-click). Worth a retry with the new bot.
+
+
+    2026-05-29 retry-with-evidence: Confirmed via screenshot (2nd run, 2026-05-29): identical ''Looks like there was an error!'' page with NO interactive elements after Google OAuth. URL is dashboard/authenticate?route=%2Fstart-now&source=oauth. Stytch''s dashboard is broken for the methoxine@gmail.com identity — likely a stuck dashboard state Stytch-side. No code path can drive past zero interactive elements. Either wait for Stytch to fix, use a different identity, or contact Stytch support.'
 - slug: workos
   name: WorkOS
   signup_url: https://dashboard.workos.com/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Enterprise auth + SSO. Google + GitHub OAuth.
+  notes: 'Enterprise auth + SSO. Google + GitHub OAuth.
 
+    '
 - slug: kinde
   name: Kinde
   signup_url: https://app.kinde.com/register
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Auth-as-a-service. Google + Microsoft OAuth.
+  notes: 'Auth-as-a-service. Google + Microsoft OAuth.
 
-# ── Payments (3) ──
-
+    '
 - slug: stripe
   name: Stripe
   signup_url: https://dashboard.stripe.com/register
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Payments. Google OAuth on /register. Heavy KYC; test-mode keys
+  status: needs-manual
+  notes: 'Payments. Google OAuth on /register. Heavy KYC; test-mode keys
+
     issue immediately but bot may struggle with business-info form.
 
+
+    2026-05-29 batch: Stripe requires MFA on first dashboard sign-in (lands on `https://dashboard.stripe.com/login` asking for MFA code). Stripe additionally gates API keys behind business verification (KYC) — finish the signup manually.'
 - slug: paddle
   name: Paddle
   signup_url: https://login.paddle.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Merchant-of-record payments. Google OAuth. KYC heavy.
+  notes: 'Merchant-of-record payments. Google OAuth. KYC heavy.
 
-# ── Feature flags (4) ──
-
+    '
 - slug: launchdarkly
   name: LaunchDarkly
   signup_url: https://app.launchdarkly.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Feature flags. Google OAuth. SDK keys per environment surface
+  notes: 'Feature flags. Google OAuth. SDK keys per environment surface
+
     post project setup.
 
+    '
 - slug: statsig
   name: Statsig
   signup_url: https://console.statsig.com/sign_up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Feature flags + experimentation. Google + GitHub OAuth. SDK
+  notes: 'Feature flags + experimentation. Google + GitHub OAuth. SDK
+
     keys surface post project setup.
 
+    '
 - slug: growthbook
   name: GrowthBook Cloud
   signup_url: https://app.growthbook.io/auth/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Feature flags + experimentation. Google + GitHub OAuth.
+  notes: 'Feature flags + experimentation. Google + GitHub OAuth.
 
+    '
 - slug: flagsmith
   name: Flagsmith
   signup_url: https://app.flagsmith.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Feature flags. Google + GitHub OAuth.
+  notes: 'Feature flags. Google + GitHub OAuth.
 
-# ── Code sandboxes / dev environments (5) ──
-
+    '
 - slug: e2b
   name: E2B
   signup_url: https://e2b.dev/auth/sign-up
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Code-interpreter sandboxes for AI agents. GitHub OAuth primary.
+  notes: 'Code-interpreter sandboxes for AI agents. GitHub OAuth primary.
 
+    '
 - slug: daytona
   name: Daytona
   signup_url: https://app.daytona.io/signin
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Dev environment manager. GitHub OAuth.
+  notes: 'Dev environment manager. GitHub OAuth.
 
+    '
 - slug: replit
   name: Replit
   signup_url: https://replit.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Browser dev environment. Google + GitHub + Apple OAuth. API token
+  notes: 'Browser dev environment. Google + GitHub + Apple OAuth. API token
+
     in account settings.
 
+    '
 - slug: codesandbox
   name: CodeSandbox
   signup_url: https://codesandbox.io/signin
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Browser dev environment. GitHub + Google + Apple OAuth.
+  notes: 'Browser dev environment. GitHub + Google + Apple OAuth.
 
+    '
 - slug: stackblitz
   name: StackBlitz
   signup_url: https://stackblitz.com/login
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Browser dev environment (WebContainers). GitHub + Google OAuth.
+  notes: 'Browser dev environment (WebContainers). GitHub + Google OAuth.
 
-# ── CI / Build (1) ──
-
+    '
 - slug: circleci
   name: CircleCI
   signup_url: https://circleci.com/signup/
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    CI/CD. GitHub + Bitbucket OAuth (no Google — GitHub is the
+  notes: 'CI/CD. GitHub + Bitbucket OAuth (no Google — GitHub is the
+
     canonical identity).
 
-# ── Workflow / orchestration (4) ──
-
+    '
 - slug: trigger
   name: Trigger.dev
   signup_url: https://cloud.trigger.dev/login
   oauth_provider: github
   scope_hint: null
-  status: pending
-  notes: |
-    Background jobs + workflows. GitHub + Google OAuth.
+  status: needs-manual
+  notes: 'Background jobs + workflows. GitHub + Google OAuth.
 
+
+    2026-05-29 batch: Sign-in via GitHub blocked by a `verify it''s you` security challenge. Operator must run `npx @trusty-squire/mcp login --provider=github` and clear the challenge before any retry can succeed.'
 - slug: inngest
   name: Inngest
   signup_url: https://app.inngest.com/sign-up
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: |
-    Durable workflows. Google + GitHub OAuth.
+  status: needs-manual
+  notes: 'Durable workflows. Google + GitHub OAuth.
 
+
+    2026-05-29 batch: Same oauth_loop_detected pattern as Clerk: post-OAuth redirects back to /sign-up requesting a manual onboarding step.
+
+
+    Rolled back to pending 2026-05-29: the original needs-manual marker was based on log messages alone, before the 0.8.3-rc.1 fixes (GIS-iframe inventory, /onboarding auto-OAuth detection, wizard-forward auto-click). Worth a retry with the new bot.
+
+
+    2026-05-29 retry-with-evidence: Bot''s own safety guard fires (`oauth_consent_needs_review`) — the Google consent screen requested scopes the bot couldn''t parse from URL, and the safety policy is to pause rather than blind-approve. This is CORRECT behavior, not a bug. To unblock: either review the consent screen manually and approve, or update the bot''s consent parser if the scope format changed.'
 - slug: temporal
   name: Temporal Cloud
   signup_url: https://cloud.temporal.io/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Durable workflows (managed Temporal). Google OAuth. Namespace
+  notes: 'Durable workflows (managed Temporal). Google OAuth. Namespace
+
     provisioning before mTLS credentials surface — non-API-key
+
     extract shape, flag as failure mode.
 
+    '
 - slug: hatchet
   name: Hatchet
   signup_url: https://app.dev.hatchet-tools.com/auth/login
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Background task queue. GitHub + Google OAuth.
+  notes: 'Background task queue. GitHub + Google OAuth.
 
-# ── API tooling / webhooks (2) ──
-
+    '
 - slug: hookdeck
   name: Hookdeck
   signup_url: https://dashboard.hookdeck.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Event-driven infra. Google + GitHub OAuth. API key in workspace
+  notes: 'Event-driven infra. Google + GitHub OAuth. API key in workspace
+
     settings post-creation.
 
+    '
 - slug: svix
   name: Svix
   signup_url: https://dashboard.svix.com/login
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Webhook infrastructure. Google + GitHub OAuth. API key in
+  notes: 'Webhook infrastructure. Google + GitHub OAuth. API key in
+
     org settings.
 
-# ── Forms (2) ──
-
+    '
 - slug: tally
   name: Tally
   signup_url: https://tally.so/signin
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Forms. Google + Apple + email OAuth. API token in workspace
+  notes: 'Forms. Google + Apple + email OAuth. API token in workspace
+
     settings.
 
+    '
 - slug: typeform
   name: Typeform
   signup_url: https://www.typeform.com/signup/
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Forms. Google + Microsoft OAuth. Personal access token in
+  notes: 'Forms. Google + Microsoft OAuth. Personal access token in
+
     account settings.
 
-# ── Scraping / browser automation (4) ──
-
+    '
 - slug: apify
   name: Apify
   signup_url: https://console.apify.com/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Web scraping + automation platform. Google + GitHub OAuth.
+  notes: 'Web scraping + automation platform. Google + GitHub OAuth.
+
     API token in account integrations.
 
+    '
 - slug: firecrawl
   name: Firecrawl
   signup_url: https://www.firecrawl.dev/signin/signup
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    LLM-friendly web scraper. GitHub + Google OAuth.
+  notes: 'LLM-friendly web scraper. GitHub + Google OAuth.
 
+    '
 - slug: scrapingbee
   name: ScrapingBee
   signup_url: https://app.scrapingbee.com/account/register
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Headless-browser scraping API. Google OAuth. API key in account
+  notes: 'Headless-browser scraping API. Google OAuth. API key in account
+
     dashboard.
 
+    '
 - slug: browserbase
   name: Browserbase
   signup_url: https://www.browserbase.com/sign-in
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Headless browser-as-a-service for AI agents. Google + GitHub
+  notes: 'Headless browser-as-a-service for AI agents. Google + GitHub
+
     OAuth. API key in project settings.
 
-# ── Geo / IP (3) ──
-
+    '
 - slug: ipdata
   name: ipdata
   signup_url: https://dashboard.ipdata.co/sign-up.html
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    IP geolocation API. Google OAuth. Free 1.5k req/day; key
+  notes: 'IP geolocation API. Google OAuth. Free 1.5k req/day; key
+
     on dashboard.
 
-# ── Status / uptime (2) ──
-
+    '
 - slug: betterstack-uptime
   name: Better Stack Uptime
   signup_url: https://uptime.betterstack.com/users/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Uptime monitoring. Google + GitHub OAuth. Team token in account
+  notes: 'Uptime monitoring. Google + GitHub OAuth. Team token in account
+
     settings post-OAuth.
 
+    '
 - slug: cronitor
   name: Cronitor
   signup_url: https://cronitor.io/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Cron + heartbeat monitoring. Google OAuth.
+  notes: 'Cron + heartbeat monitoring. Google OAuth.
 
-# ── Media / asset hosting (3) ──
-
+    '
 - slug: cloudinary
   name: Cloudinary
   signup_url: https://cloudinary.com/users/register_free
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Image + video CDN. Google + GitHub OAuth. API credentials on
+  notes: 'Image + video CDN. Google + GitHub OAuth. API credentials on
+
     dashboard post-OAuth.
 
+    '
 - slug: uploadcare
   name: Uploadcare
   signup_url: https://app.uploadcare.com/accounts/signup/
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    File uploads + CDN. Google + GitHub OAuth.
+  notes: 'File uploads + CDN. Google + GitHub OAuth.
 
+    '
 - slug: imagekit
   name: ImageKit
   signup_url: https://imagekit.io/registration/
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Image + video CDN. Google + GitHub OAuth.
+  notes: 'Image + video CDN. Google + GitHub OAuth.
 
-# ── AI / specialty (3) ──
-
+    '
 - slug: elevenlabs
   name: ElevenLabs
   signup_url: https://elevenlabs.io/app/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    Voice synthesis API. Google OAuth. API key in profile settings.
+  notes: 'Voice synthesis API. Google OAuth. API key in profile settings.
 
+    '
 - slug: lambda-labs
   name: Lambda Labs API
   signup_url: https://cloud.lambdalabs.com/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: |
-    GPU cloud (Lambda Cloud + Inference API). Google OAuth. May
+  notes: 'GPU cloud (Lambda Cloud + Inference API). Google OAuth. May
+
     require payment for inference keys.
 
+    '
 - slug: modal
   name: Modal
   signup_url: https://modal.com/signup
   oauth_provider: github
   scope_hint: null
   status: pending
-  notes: |
-    Serverless GPU compute. GitHub + Google OAuth. Token generated
-    via CLI flow — may not surface in dashboard directly. Flag if
-    the bot can't extract a key from the web dashboard alone.
+  notes: 'Serverless GPU compute. GitHub + Google OAuth. Token generated
 
-# Known-incompatible services. Kept here for visibility — operator should
-# never see a `service:cloudflare` issue auto-created.
+    via CLI flow — may not surface in dashboard directly. Flag if
+
+    the bot can''t extract a key from the web dashboard alone.
+
+    '
 - slug: cloudflare
   name: Cloudflare
   signup_url: https://dash.cloudflare.com/sign-up
   oauth_provider: google
   scope_hint: null
   status: skip
-  reason: |
-    Cloudflare's own dashboard ships maximum-strength Turnstile + IP
+  reason: 'Cloudflare''s own dashboard ships maximum-strength Turnstile + IP
+
     risk-score gating that the universal bot cannot pass. CLAUDE.md
+
     notes: "manual signup is the realistic call".
 
+    '
 - slug: vercel
   name: Vercel
   signup_url: https://vercel.com/signup
   oauth_provider: google
   scope_hint: null
   status: skip
-  reason: |
-    SMS phone-verification gate (F12). The bot completes OAuth but
+  reason: 'SMS phone-verification gate (F12). The bot completes OAuth but
+
     halts at the phone-entry form. Will be revisited if a phone-
+
     relay path is added.
 
+    '
 - slug: mailersend
   name: MailerSend
   signup_url: https://app.mailersend.com/signup
   oauth_provider: google
   scope_hint: null
   status: skip
-  reason: |
-    Same shape as Vercel — phone-verification gate after the form
+  reason: 'Same shape as Vercel — phone-verification gate after the form
+
     completes. Skip until phone relay exists.
+
+    '

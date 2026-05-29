@@ -21,6 +21,10 @@ export interface ReadOtpInput {
   maxWaitSeconds?: number;
   // Optional regex override. Default is a 6-8 digit numeric code.
   otpPattern?: string;
+  // 0.8.3-rc.1 — "url" returns the matched text verbatim (no digit-
+  // stripping). Used by the GitHub challenge-clearing flow to fetch
+  // the full verification URL from the operator's gmail.
+  returnKind?: "code" | "url";
 }
 
 export interface ReadOtpResult {
@@ -66,6 +70,7 @@ export async function readOperatorOtp(
       ...(input.otpPattern !== undefined && input.otpPattern.length > 0
         ? { otp_pattern: input.otpPattern }
         : {}),
+      ...(input.returnKind === "url" ? { return_kind: "url" } : {}),
     };
     try {
       const res = await fetch(`${base}/v1/inbox/poll-operator-otp`, {
@@ -101,6 +106,33 @@ export async function readOperatorOtp(
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   return { code: null, reason: lastReason };
+}
+
+// 0.8.3-rc.1 — convenience wrapper: poll for a GitHub
+// "verify it's you" / device-confirmation email and return the
+// embedded verification URL. The bot navigates to that URL inside
+// its current Chrome context to clear the challenge, then continues
+// the OAuth flow. Pattern matches GitHub's typical
+// `https://github.com/sessions/...` device-trust links.
+export async function readGitHubChallengeLink(args: {
+  machineToken: string;
+  apiBase?: string;
+  maxWaitSeconds?: number;
+}): Promise<ReadOtpResult> {
+  return readOperatorOtp({
+    machineToken: args.machineToken,
+    ...(args.apiBase !== undefined ? { apiBase: args.apiBase } : {}),
+    maxWaitSeconds: args.maxWaitSeconds ?? 90,
+    fromDomain: "github.com",
+    // Match GitHub's verification-link patterns. The two production
+    // shapes we know about:
+    //   https://github.com/sessions/two-factor/.../verify?...
+    //   https://github.com/users/confirm_device?...
+    // Captures the full URL so the bot can navigate to it verbatim.
+    otpPattern:
+      "https?://github\\.com/(?:sessions|users)/[A-Za-z0-9_\\-/]*(?:confirm[_\\-]?device|verify[_\\-]?device|verify|authorize)[^\\s\"<>]*",
+    returnKind: "url",
+  });
 }
 
 // Best-effort extraction of a from-domain from a URL. Returns the

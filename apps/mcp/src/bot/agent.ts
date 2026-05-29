@@ -1229,7 +1229,7 @@ export function detectAlreadySignedIn(args: {
     // /apps?, /deployments?, /services? — all common product-name
     // routes that almost always indicate authenticated state.
     dashboardyPath =
-      /\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?)(?:\/|$)/i.test(
+      /\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
         parsed.pathname,
       ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname);
   } catch {
@@ -1302,6 +1302,33 @@ export function detectAlreadySignedIn(args: {
     });
     if (hasWorkspacePicker && !hasSignupOrOAuthAffordance) {
       return true;
+    }
+    // 0.8.3-rc.1 — onboarding-wizard step shape. When the URL clearly
+    // names an onboarding path (/onboarding, /welcome, /getting-started,
+    // /setup) AND the page has a Next/Continue/Skip/Submit button AND
+    // does NOT have any credential input (caught above) AND does NOT
+    // have a Sign-up/Continue-with affordance (i.e. it's not a CHOICE
+    // between login and signup), the page is mid-onboarding for an
+    // already-authenticated user. Mixpanel hits this when a previous
+    // run created the account but didn't finish the multi-step
+    // onboarding — the bot returns and lands directly on /onboarding.
+    let onboardingPath = false;
+    try {
+      onboardingPath =
+        /\/(?:onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
+          new URL(url).pathname,
+        );
+    } catch {
+      // Malformed URL — skip
+    }
+    if (onboardingPath && !hasSignupOrOAuthAffordance) {
+      const WIZARD_STEP_BTN =
+        /^\s*(?:next|continue|submit|skip(?:\s+for\s+now)?|finish|done)\s*$/i;
+      const hasWizardStepButton = inventory.some((e) => {
+        const t = (e.visibleText ?? e.ariaLabel ?? "").trim();
+        return WIZARD_STEP_BTN.test(t);
+      });
+      if (hasWizardStepButton) return true;
     }
   }
 
@@ -1486,8 +1513,34 @@ export function findOAuthButton(
     // ensured the provider name is present; the length cap MAX_OAUTH_
     // BUTTON_TEXT_CHARS (60) ensures it's still buttonish, not a
     // paragraph that happens to mention the provider.
+    //
+    // 0.8.3-rc.1 — reject minimal-label matches whose href points at
+    // a NON-AUTH path on the provider's domain (most often a project
+    // repo URL like github.com/plausible/analytics in a homepage
+    // footer). Without this gate, plausible's footer "GitHub" link
+    // matched, the bot clicked it, ended up on the analytics repo's
+    // page, and misclassified the README content as a security
+    // challenge — burning the entire OAuth budget on a false alarm.
     const stripped = visibleText.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     if (stripped === keyword || stripped === `with ${keyword}`) {
+      // When the element is an <a> with a provider-domain href, require
+      // it to look like an auth route. Repo / docs / marketing links
+      // on the provider's site never start an OAuth flow.
+      if (href.length > 0) {
+        const providerDomain =
+          provider === "github" ? "github.com" : "google.com";
+        if (href.includes(providerDomain)) {
+          // Accept only if href matches the auth pattern OR points
+          // at a login/signup/sessions/oauth path.
+          const looksLikeAuthPath =
+            hrefRe.test(href) ||
+            /github\.com\/(?:login|signin|sign-in|sessions|oauth\/authorize|apps\/[^/]+\/installations\/new|users\/sign_in)/i.test(
+              href,
+            ) ||
+            /accounts\.google\.com\/(?:o\/oauth2|signin)/i.test(href);
+          if (!looksLikeAuthPath) continue;
+        }
+      }
       return e;
     }
   }
@@ -1528,6 +1581,27 @@ export function isLoginLoopState(
   // returns false when ANY credential input is visible, but here we're
   // checking the inverse — markers despite the login path.
   if (detectAlreadySignedIn({ inventory, url })) return null;
+  // 0.8.3-rc.1 — Clerk-class post-OAuth supplementary-signup form.
+  // Some services (Clerk's dashboard, certain Auth0 templates) handle
+  // OAuth identity but ALSO require the user to fill an email +
+  // password form (plus often a Cloudflare turnstile) before the
+  // account is created. Post-OAuth lands on /sign-up with both the
+  // OAuth buttons still visible AND credential inputs. The legacy
+  // loop-detect path saw the Google button + the login-shaped URL
+  // and looped OAuth indefinitely.
+  //
+  // When BOTH (1) an email/password input is visible AND (2) an
+  // OAuth button for the provider we just used is visible, the page
+  // is a hybrid form, not a loop. Return null so the caller falls
+  // through to the post-verify flow — its planner can drive the
+  // form-fill, the captcha gate (Cloudflare turnstile shows up as a
+  // `check`-shaped checkbox in inventory), and the Continue click
+  // the same way the form-fill phase does for non-OAuth signups.
+  const hasCredentialInput = inventory.some(
+    (e) =>
+      e.tag === "input" && (e.type === "email" || e.type === "password"),
+  );
+  if (hasCredentialInput) return null;
   return findOAuthButton(inventory, provider);
 }
 
@@ -1955,6 +2029,25 @@ export function extractAllLabeledTokensFromReason(
     personal_api_key: "personal_api_key",
     app_key: "app_key",
     appkey: "app_key",
+    // 0.8.3-rc.1 — typeform's planner uses `personal_access_token`
+    // and `Personal access token` (the latter when transcribing the
+    // page heading verbatim). Both alias to api_key — typeform issues
+    // ONE token type, and downstream consumers expect `api_key`.
+    personal_access_token: "api_key",
+    personalaccesstoken: "api_key",
+    // Bearer / private / write key patterns surfaced across the
+    // 2026-05-29 retest. Each was quoted by the planner but not in
+    // the alias set, so the labeled extractor missed them.
+    bearer_token: "api_key",
+    bearertoken: "api_key",
+    private_key: "api_key",
+    privatekey: "api_key",
+    write_key: "api_key",
+    writekey: "api_key",
+    read_key: "api_key",
+    readkey: "api_key",
+    server_token: "api_key",
+    servertoken: "api_key",
   };
 
   const out: Record<string, string> = {};
@@ -1969,9 +2062,10 @@ export function extractAllLabeledTokensFromReason(
     (a, b) => b.length - a.length,
   );
   const labelAlt = labelKeys.map(escapeRegex).join("|");
-  // Hyphen variants — the LLM sometimes emits `cloud-name` instead of
-  // `cloud_name`. Replace _ with [-_] inside each alternative.
-  const labelAltLoose = labelAlt.replace(/_/g, "[-_]");
+  // Hyphen + space variants — the LLM sometimes emits `cloud-name`
+  // or `Cloud name` instead of `cloud_name`. Replace _ with
+  // [-_\s] inside each alternative so the regex matches all three.
+  const labelAltLoose = labelAlt.replace(/_/g, "[-_\\s]");
   // Two patterns:
   //
   // (A) Strict QUOTED form — `label='value'` / `label="value"` /
@@ -1992,7 +2086,7 @@ export function extractAllLabeledTokensFromReason(
     "gi",
   );
   for (const m of reason.matchAll(quotedRe)) {
-    const rawLabel = (m[1] ?? "").toLowerCase().replace(/-/g, "_");
+    const rawLabel = (m[1] ?? "").toLowerCase().replace(/[-\s]+/g, "_");
     const normalized = rawLabel.replace(/_+/g, "_");
     const canonical = LABEL_ALIASES[normalized];
     const value = m[2];
@@ -2028,7 +2122,7 @@ export function extractAllLabeledTokensFromReason(
     "gi",
   );
   for (const m of reason.matchAll(proseRe)) {
-    const rawLabel = (m[1] ?? "").toLowerCase().replace(/-/g, "_");
+    const rawLabel = (m[1] ?? "").toLowerCase().replace(/[-\s]+/g, "_");
     const normalized = rawLabel.replace(/_+/g, "_");
     const canonical = LABEL_ALIASES[normalized];
     const value = m[2];
@@ -2111,6 +2205,12 @@ export function extractApiKeyFromText(text: string): string | null {
     // being in the input field's `value` attribute. rc.14 — surfaced
     // during the harvester rc.13 pass on Neon.
     /\bnapi_[a-zA-Z0-9]{30,80}\b/, // Neon
+    // 0.8.3-rc.1 — typeform personal access tokens. Shape
+    // `tfp_<alnum-with-underscore>` length 40-80. Surfaced during the
+    // 2026-05-29 retest where the planner SAW the token (quoted in
+    // reason) but no regex matched, so extractCredentials returned
+    // null and the bot bailed `oauth_onboarding_failed`.
+    /\btfp_[A-Za-z0-9_]{40,80}\b/, // Typeform
     // Replicate API tokens. `r8_<40-char alnum>` per their docs. Shown
     // in the table row after Create. The post-verify loop iterates,
     // adds rows, but extractCredentials returned null every round
@@ -2432,7 +2532,13 @@ export class SignupAgent {
     steps: string[],
   ): Promise<PlanExecOutcome> {
     const MAX_ERROR_REPLANS = 2;
-    const MAX_PROGRESS_REPLANS = 4;
+    // 0.8.3-rc.1 — widened from 4 to 6 so submit_disabled re-plans
+    // get more attempts to identify the gating control. Mailgun's
+    // signup form has a non-standard required field whose label the
+    // planner missed on the first 5 plans; the 6th attempt typically
+    // surfaces the unchecked checkbox. Bounded by the 15-call LLM
+    // budget so genuinely-stuck signups still terminate.
+    const MAX_PROGRESS_REPLANS = 6;
     let errorReplans = 0;
     let progressReplans = 0;
     let emptyPlans = 0;
@@ -2795,10 +2901,65 @@ export class SignupAgent {
             return { kind: "submit_failed", reason };
           }
           steps.push(`⚠ ${reason} — re-planning to satisfy it`);
+          // 0.8.3-rc.1 — surface concrete unchecked-checkbox candidates
+          // from the current inventory so the planner picks one
+          // immediately rather than re-guessing. Best-effort: a snapshot
+          // failure falls back to the generic prompt that used to be
+          // here.
+          let uncheckedHint = "";
+          let emptyInputHint = "";
+          try {
+            const snapshotInv = await this.buildInventory(steps, undefined, 60);
+            const unchecked = snapshotInv.filter(
+              (e) =>
+                e.tag === "input" &&
+                (e.type === "checkbox" || e.role === "checkbox") &&
+                e.checked === false &&
+                e.visible === true,
+            );
+            if (unchecked.length > 0) {
+              const lines = unchecked
+                .slice(0, 6)
+                .map((e) => {
+                  const label =
+                    (e.labelText ?? e.ariaLabel ?? e.placeholder ?? e.name ?? "(no label)")
+                      .toString()
+                      .slice(0, 60);
+                  return `  - selector ${JSON.stringify(e.selector)} label=${JSON.stringify(label)}`;
+                });
+              uncheckedHint = `\nUnchecked checkboxes visible on the page:\n${lines.join("\n")}`;
+            }
+            const emptyInputs = snapshotInv.filter(
+              (e) =>
+                e.tag === "input" &&
+                e.type !== "checkbox" &&
+                e.type !== "radio" &&
+                e.type !== "hidden" &&
+                (e.value === null || e.value === "") &&
+                e.visible === true,
+            );
+            if (emptyInputs.length > 0) {
+              const lines = emptyInputs
+                .slice(0, 6)
+                .map((e) => {
+                  const label =
+                    (e.labelText ?? e.placeholder ?? e.ariaLabel ?? e.name ?? "(no label)")
+                      .toString()
+                      .slice(0, 60);
+                  return `  - selector ${JSON.stringify(e.selector)} label=${JSON.stringify(label)}`;
+                });
+              emptyInputHint = `\nEmpty visible inputs (any could be the unmet required field):\n${lines.join("\n")}`;
+            }
+          } catch {
+            // best-effort
+          }
           hint =
             "The submit button is disabled — a required field or an agreement " +
-            "was not satisfied. Find the agreement CHECKBOX (an input of " +
-            "type=checkbox, NOT a link to the terms page) and check it.";
+            "was not satisfied. Issue {\"kind\":\"check\"} on an unchecked " +
+            "agreement/terms checkbox, OR {\"kind\":\"fill\"} on an empty " +
+            "required input. Do NOT click a link." +
+            uncheckedHint +
+            emptyInputHint;
           continue;
         }
         steps.push(`⚠ submit click failed: ${reason}`);
@@ -3119,9 +3280,13 @@ export class SignupAgent {
     }
   }
 
-  // Default: 2 minutes — enough time for the human to unlock phone,
-  // open the Google app, and tap a verification number.
-  private googleChallengeTimeoutMs = 120_000;
+  // 0.8.3-rc.1 — widened from 2 → 4 minutes. The 2-min window forced
+  // the operator to drop everything immediately on a Telegram alert.
+  // For batch-harvest runs the operator is rarely staring at the
+  // phone; 4 minutes gives realistic time to switch devices, unlock,
+  // open the Google app, and tap. Matches the same wait window the
+  // GitHub challenge path now uses.
+  private googleChallengeTimeoutMs = 240_000;
 
   // Read-only view of how many calls landed on which backend. Exported
   // through SignupResult.llm_backends so tests and ops can verify the
@@ -3514,15 +3679,27 @@ export class SignupAgent {
           // Uses the same post-OAuth loop runOAuthFlow uses after a
           // successful handshake.
           let credentials = await this.extractCredentials();
+          const skippedPostVerify = credentials.api_key !== undefined;
           if (credentials.api_key === undefined) {
             credentials = await this.postVerifyLoop({
               service: task.service,
-              maxRounds: task.postVerifyMaxRounds ?? 12,
+              maxRounds: task.postVerifyMaxRounds ?? 24,
               steps,
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
             });
           }
           if (credentials.api_key !== undefined) {
+            // 0.8.3-rc.1 — when extractCredentials short-circuited
+            // before postVerifyLoop ran, no captures were written.
+            // Emit a synthetic extract round so auto-promote can
+            // build a "navigate + extract" skill from this run.
+            if (skippedPostVerify) {
+              await this.writeFastPathSyntheticCapture(
+                task.service,
+                0,
+                true,
+              );
+            }
             return {
               success: true,
               credentials,
@@ -3797,7 +3974,25 @@ export class SignupAgent {
         await saveDebugSnapshot(this.browser, "google-challenge");
 
         if (provider.id === "google") {
-          const matchNum = extractGoogleNumberMatch(body);
+          // Try text-based extractor first (zero LLM cost), then fall
+          // back to vision when phrasing drifts. The vision path uses
+          // the screenshot we just saved — if a human can read the
+          // number on screen, Claude vision can too.
+          let matchNum: string | number | null = extractGoogleNumberMatch(body);
+          if (matchNum === null) {
+            try {
+              matchNum = await this.extractGoogleNumberViaVision();
+              if (matchNum !== null) {
+                steps.push(
+                  `Google: number-match extractor missed phrasing but vision LLM read "${matchNum}" from the challenge screenshot.`,
+                );
+              }
+            } catch (err) {
+              steps.push(
+                `Google: vision-fallback for number extraction threw (${err instanceof Error ? err.message : String(err)})`,
+              );
+            }
+          }
           if (matchNum !== null) {
             // rc.26 — surface in real-time via stderr as well as the
             // step trail. The step trail only renders after the run
@@ -3813,7 +4008,7 @@ export class SignupAgent {
             void notifyHeightenedAuth({
               service: task.service,
               digit: String(matchNum),
-              windowSeconds: 120,
+              windowSeconds: 240,
               machineToken: task.machineToken,
               apiBase: task.apiBase,
             });
@@ -3823,7 +4018,7 @@ export class SignupAgent {
             void sendTelegramHeightenedAuth({
               service: task.service,
               digit: String(matchNum),
-              windowSeconds: 120,
+              windowSeconds: 240,
             });
           } else {
             // Extractor missed the number — Google phrasing has
@@ -3841,14 +4036,14 @@ export class SignupAgent {
             void notifyHeightenedAuth({
               service: task.service,
               digit: null,
-              windowSeconds: 120,
+              windowSeconds: 240,
               machineToken: task.machineToken,
               apiBase: task.apiBase,
             });
             void sendTelegramHeightenedAuth({
               service: task.service,
               digit: null,
-              windowSeconds: 120,
+              windowSeconds: 240,
             });
           }
           // Either way (number found or not), the user can still
@@ -3858,7 +4053,7 @@ export class SignupAgent {
           if (!cleared) {
             return this.oauthAbort(
               "needs_login",
-              `Google challenge timed out after 2 minutes. ` +
+              `Google challenge timed out after 4 minutes. ` +
                 `Re-run \`${loginCmd}\`, complete the challenge in the window, then retry.`,
               steps,
             );
@@ -3897,6 +4092,88 @@ export class SignupAgent {
           steps.push(
             "GitHub: skip-link click did not register — falling back to needs_login abort.",
           );
+        }
+        // 0.8.3-rc.1 — GitHub email-link challenge auto-clear. When
+        // GitHub fires "verify it's you" on a new device, the
+        // canonical clear path is to click a link in an email Github
+        // dispatches to lunchboxfortwo@gmail.com. If GMAIL_USER /
+        // GMAIL_APP_PASSWORD are wired on the API, we can poll for
+        // that email, extract the URL, navigate the bot's browser to
+        // it, and re-enter the OAuth flow. Best-effort: failure
+        // degrades to the phone-tap path below.
+        if (
+          provider.id === "github" &&
+          task.machineToken !== undefined &&
+          task.machineToken.length > 0
+        ) {
+          steps.push(
+            "GitHub: verify-it's-you challenge — polling operator gmail for a device-confirmation link (up to 60s)",
+          );
+          try {
+            const { readGitHubChallengeLink } = await import("./read-otp.js");
+            const linkResult = await readGitHubChallengeLink({
+              machineToken: task.machineToken,
+              ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+              maxWaitSeconds: 60,
+            });
+            if (linkResult.code !== null) {
+              steps.push(
+                `GitHub: device-confirmation link found in gmail (reason=${linkResult.reason}) — navigating to it`,
+              );
+              try {
+                await this.browser.goto(linkResult.code);
+                await this.browser.wait(3);
+                steps.push(
+                  "GitHub: device confirmation submitted — re-classifying for the consent flow",
+                );
+                i--;
+                continue;
+              } catch (err) {
+                steps.push(
+                  `GitHub: navigating to confirmation link failed (${err instanceof Error ? err.message : String(err)})`,
+                );
+              }
+            } else {
+              steps.push(
+                `GitHub: no confirmation email arrived within 60s (reason=${linkResult.reason}) — falling back to phone-tap wait`,
+              );
+            }
+          } catch (err) {
+            steps.push(
+              `GitHub: challenge-clearing import/call threw (${err instanceof Error ? err.message : String(err)})`,
+            );
+          }
+          // 0.8.3-rc.1 — fall back to the phone-tap path: fire
+          // Telegram + heightened-auth notifications and wait 4
+          // minutes for the operator to tap their phone. This is the
+          // same shape Google's challenge path already uses; without
+          // it the bot just times out silently with no operator
+          // surface.
+          console.error(
+            `[universal-bot] GITHUB CHALLENGE: tap your phone for ${task.service} — 4 minute window`,
+          );
+          steps.push(
+            `GitHub: phone-tap challenge for ${task.service} — operator has 4 minutes to approve on a registered device`,
+          );
+          void notifyHeightenedAuth({
+            service: task.service,
+            digit: null,
+            windowSeconds: 240,
+            machineToken: task.machineToken,
+            apiBase: task.apiBase,
+          });
+          void sendTelegramHeightenedAuth({
+            service: task.service,
+            digit: null,
+            windowSeconds: 240,
+          });
+          const cleared = await this.waitForGitHubChallenge(steps);
+          if (cleared) {
+            steps.push("GitHub: challenge cleared — re-classifying for the consent flow");
+            i--;
+            continue;
+          }
+          steps.push("GitHub: phone-tap window elapsed without clear — aborting with needs_login");
         }
         return this.oauthAbort(
           "needs_login",
@@ -4275,7 +4552,7 @@ export class SignupAgent {
     // nothing more to do, it returns on the first iteration.
     credentials = await this.postVerifyLoop({
       service: task.service,
-      maxRounds: task.postVerifyMaxRounds ?? 12,
+      maxRounds: task.postVerifyMaxRounds ?? 24,
       steps,
       ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
     });
@@ -4418,7 +4695,102 @@ export class SignupAgent {
       const state = provider.classifyAuthState(url, body);
       if (state !== "challenge") return true;
     }
-    steps.push("Google: challenge wait timed out after 2 minutes");
+    steps.push("Google: challenge wait timed out after 4 minutes");
+    return false;
+  }
+
+  // 0.8.3-rc.1 — Claude-vision fallback for Google number-match
+  // challenge extraction. Fires only when extractGoogleNumberMatch's
+  // text patterns miss the current Google phrasing. Sends the most
+  // recent page screenshot to the bot's LLM with a one-line prompt:
+  // "what is the 2-3 digit number to tap." If a human can read the
+  // screen, the vision model can too — the user's correction made
+  // this obvious. Returns null on any failure (no LLM client, parse
+  // error, no digits in reply).
+  private async extractGoogleNumberViaVision(): Promise<string | null> {
+    try {
+      const state = await this.browser.getState();
+      const screenshot = state.screenshot;
+      if (screenshot === undefined || screenshot.length === 0) return null;
+      const reply = await this.callLLM<string>({
+        system:
+          "You read numbers from Google authentication challenge screens. " +
+          "The screen shows a 2-3 digit number the user must tap on their phone " +
+          "to verify identity. Reply with ONLY that number. No words, no " +
+          "punctuation, no leading zero unless the number genuinely starts " +
+          "with 0. If the screen does not show a tap-this-number challenge, " +
+          'reply "NONE".',
+        userBlocks: [
+          {
+            kind: "image",
+            media_type: "image/jpeg",
+            data_base64: screenshot,
+          },
+          {
+            kind: "text",
+            text: "What number must the user tap on their phone?",
+          },
+        ],
+        maxTokens: 8,
+      });
+      const trimmed = reply.trim();
+      if (trimmed.length === 0 || /^none$/i.test(trimmed)) return null;
+      const digits = trimmed.match(/\d{1,4}/);
+      if (digits === null) return null;
+      const n = digits[0];
+      if (n.length < 1 || n.length > 4) return null;
+      return n;
+    } catch {
+      return null;
+    }
+  }
+
+  // 0.8.3-rc.1 — GitHub challenge clear-poll. Mirrors
+  // waitForGoogleChallenge: poll every 3s for the page to transition
+  // off the verify-it's-you state. When the URL leaves the GitHub
+  // session/device-verification routes AND the page text no longer
+  // matches the challenge phrasing, the operator's phone-tap has
+  // cleared the gate and we return true.
+  private async waitForGitHubChallenge(steps: string[]): Promise<boolean> {
+    // Match the broader CHALLENGE_PHRASING_RE the auth-state classifier
+    // uses, plus GitHub-specific URL paths. Keeping these regexes
+    // aligned with the outer classifier prevents the wait from
+    // returning "cleared" while the classifier still calls the state
+    // "challenge" (which would cause re-entry into this branch).
+    const CHALLENGE_PATH =
+      /\/(?:sessions\/(?:two-factor|verify-?device|device)|account_verifications|users\/verify_device)/i;
+    const CHALLENGE_BODY =
+      /\b(?:device verification|security challenge|2[- ]?step|2fa|number(?: match)?(?: on (?:your |the )?(?:phone|screen|device))?|tap \d+|tap the number|confirm.{0,15}sign[- ]?in|verify it'?s you)\b/i;
+    const deadlineMs = 4 * 60 * 1000;
+    const deadline = Date.now() + deadlineMs;
+    // Require N consecutive "not on challenge" samples before
+    // declaring cleared. Brief mid-redirect blanks aren't enough —
+    // the OAuth /authorize page transition is usually one second.
+    const CONSECUTIVE_CLEAR_TARGET = 3;
+    let consecutiveClear = 0;
+    while (Date.now() < deadline) {
+      await this.browser.wait(3);
+      if (this.browser.oauthPageClosed()) return true;
+      const url = this.browser.currentUrl();
+      let body: string;
+      try {
+        body = (await this.browser.extractText()).slice(0, 4000);
+      } catch {
+        consecutiveClear = 0;
+        continue;
+      }
+      const stillChallenged =
+        CHALLENGE_PATH.test(url) || CHALLENGE_BODY.test(body);
+      if (stillChallenged) {
+        consecutiveClear = 0;
+      } else {
+        consecutiveClear += 1;
+        if (consecutiveClear >= CONSECUTIVE_CLEAR_TARGET) {
+          return true;
+        }
+      }
+    }
+    steps.push("GitHub: phone-tap challenge wait timed out after 4 minutes");
     return false;
   }
 
@@ -4796,6 +5168,10 @@ ${formatInventory(input.inventory)}`,
     let stuckFiresAtUrl = 0;
     let lastStuckFireUrl: string | null = null;
     const triedFallbackUrls = new Set<string>();
+    // 0.8.3-rc.1 — per-URL set of wizard-forward escalations attempted.
+    // Used so we only force-click the visible Next/Submit once per page
+    // state; if it didn't unstick, fall through to URL fallbacks.
+    const triedWizardForward = new Set<string>();
     // 0.8.1 — capture chain index is independent of the planner loop
     // round. The loop has two early-`continue` paths (page mid-navigation
     // throw, planner-rejection re-plan) that increment `round` WITHOUT
@@ -4856,6 +5232,20 @@ ${formatInventory(input.inventory)}`,
         !haveOnlySeedCredentials
       ) {
         args.steps.push(`Post-verify: credentials found on round ${round}.`);
+        // 0.8.3-rc.1 — fast-path synthetic capture. When the bot lands
+        // on a page whose pre-loop extractCredentials() already found
+        // the credential (the "fast path" — perplexity-class), the
+        // loop returns here BEFORE any round was captured. Auto-
+        // promote then sees no captures and skips synthesis, so the
+        // next user has no replayable skill. Emit a single
+        // synthetic-extract round so the synthesizer can produce a
+        // minimal-but-correct "navigate + extract" skill. Best-effort
+        // — capture failure must not block returning the credential.
+        await this.writeFastPathSyntheticCapture(
+          args.service,
+          capturedRound,
+          oauth,
+        );
         return credentials;
       }
       if (
@@ -4868,6 +5258,11 @@ ${formatInventory(input.inventory)}`,
           .join(", ");
         args.steps.push(
           `Post-verify: multi-cred bundle stable for ${roundsSinceLastNewCredential} rounds — returning what we have (${summary}).`,
+        );
+        await this.writeFastPathSyntheticCapture(
+          args.service,
+          capturedRound,
+          oauth,
         );
         return credentials;
       }
@@ -5253,6 +5648,42 @@ ${formatInventory(input.inventory)}`,
             } catch {
               // best-effort — fall through to the regular fallback path
               // if the page-text read failed.
+            }
+            // 0.8.3-rc.1 — wizard-forward auto-escalation. Before
+            // jumping to URL fallbacks, check whether a Next/Continue/
+            // Submit/Done button is visible in the inventory. The
+            // planner sometimes keeps re-clicking the JUST-SELECTED
+            // option ("Individual Contributor" card on Mixpanel's role
+            // step) without realising it should now click Submit to
+            // advance. Force-click the wizard-forward button once; if
+            // it actually moves the page, the next iteration's
+            // inventory-change check resets the stuck counter and the
+            // bot continues normally.
+            const WIZARD_FORWARD =
+              /^\s*(?:next|continue|submit|finish|done|get\s+started)\s*$/i;
+            const wizardBtn = inventory.find(
+              (e) =>
+                (e.tag === "button" || e.role === "button") &&
+                WIZARD_FORWARD.test((e.visibleText ?? e.ariaLabel ?? "").trim()) &&
+                e.visible === true,
+            );
+            if (wizardBtn !== undefined && !triedWizardForward.has(state.url)) {
+              triedWizardForward.add(state.url);
+              args.steps.push(
+                `Post-verify: stuck-loop ${stuckFiresAtUrl}x at ${state.url} — wizard-forward escalation: clicking ${JSON.stringify(wizardBtn.visibleText ?? wizardBtn.ariaLabel)}.`,
+              );
+              try {
+                await this.browser.click(wizardBtn.selector);
+                await this.browser.wait(2);
+              } catch (err) {
+                args.steps.push(
+                  `Post-verify: wizard-forward click failed (${err instanceof Error ? err.message : String(err)}) — falling through to URL fallback.`,
+                );
+              }
+              prevSignature = null;
+              prevInventorySize = -1;
+              hint = undefined;
+              continue;
             }
             const fallback = pickStuckLoopFallbackUrl(state.url, triedFallbackUrls);
             if (fallback !== null) {
@@ -5856,6 +6287,48 @@ ${formatInventory(input.inventory)}`,
       }
     }
     return credentials;
+  }
+
+  // 0.8.3-rc.1 — write a single synthetic extract round when the
+  // post-verify loop is about to fast-path exit (pre-loop extraction
+  // already produced credentials, so no planner-driven round runs).
+  // Without this, auto-promote sees no captures from the run and
+  // skips publishing a skill — perplexity's "fast path" case.
+  //
+  // The synthesized capture pairs the CURRENT browser state (URL +
+  // inventory) with a synthetic `extract` observation. The
+  // synthesizer's stage-1 step builder will prepend a `navigate` to
+  // the current URL and translate the synthetic round into an
+  // `extract_via_*` step, giving the registry a minimal but correct
+  // replay skill ("navigate to the credential page, extract").
+  //
+  // Best-effort: a capture failure here must NEVER block returning
+  // the credential we already have.
+  private async writeFastPathSyntheticCapture(
+    service: string,
+    capturedRound: number,
+    oauth: boolean,
+  ): Promise<void> {
+    try {
+      const [state, inventory] = await Promise.all([
+        this.browser.getState(),
+        this.buildInventory([], undefined, 80),
+      ]);
+      captureOnboardingRound({
+        service,
+        round: capturedRound,
+        oauth,
+        state,
+        inventory,
+        observed: {
+          kind: "extract",
+          reason:
+            "fast-path synthetic extract — credentials were already on the page before any planner round ran",
+        },
+      });
+    } catch {
+      // best-effort
+    }
   }
 
   // Sign in with the credentials created during signup, so the
