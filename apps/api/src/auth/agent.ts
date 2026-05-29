@@ -10,7 +10,15 @@ import { ulid } from "ulid";
 
 const RAW_PREFIX = "mcp_session_";
 const TOKEN_RANDOM_BYTES = 32;
-const AGENT_ABSOLUTE_MS = 24 * 60 * 60 * 1000;
+// Effectively non-expiring (~100 years). A paired CLI is meant to stay
+// paired — the previous 24h absolute cap silently killed sessions a day
+// after pairing, stranding the MCP on a 401 with no signal. Revocation
+// (the connected-agents view / `agentSessionStore.revoke`) is the kill
+// switch now, consistent with the schema's "auth data stays indefinitely
+// until explicitly revoked." `expires_at` stays a real (far-future)
+// timestamp so the rejection-reason logic + DB column are unchanged — no
+// nullable migration. Revisit if we add token rotation.
+const AGENT_ABSOLUTE_MS = 100 * 365 * 24 * 60 * 60 * 1000;
 
 export interface AgentSessionRecord {
   id: string;
