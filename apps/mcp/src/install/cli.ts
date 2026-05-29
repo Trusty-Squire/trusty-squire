@@ -546,6 +546,31 @@ async function connect(args: Argv): Promise<void> {
 // install would establish. Returns the list of provider sessions
 // detected, or null when anything's missing. Best-effort: any read
 // error returns null and the caller proceeds with the normal flow.
+// Probe whether the stored agent token still authenticates. Agent
+// sessions have a 24h absolute cap, so a token can be PRESENT in the
+// session file but already dead on the server. Treating present as
+// provisioned makes `connect` rewrite the config, print "Already
+// provisioned", and return — after which every MCP call 401s with no
+// hint that a re-pair is needed (the bug that had connect short-circuit
+// on an expired token). Only an explicit auth rejection counts as
+// invalid; a transient network error is treated as "probably fine" so a
+// blip doesn't force the full browser re-claim.
+export async function agentTokenStillValid(
+  apiBaseUrl: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  try {
+    const res = await fetchImpl(`${apiBaseUrl}/v1/vault/credentials`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    });
+    return res.status !== 401 && res.status !== 403;
+  } catch {
+    return true;
+  }
+}
+
 async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[] } | null> {
   try {
     const storage = await openSessionStorage();
@@ -558,6 +583,12 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     ) {
       return null;
     }
+    // Don't short-circuit on a present-but-expired token — re-pair.
+    const stillValid = await agentTokenStillValid(
+      session.api_base_url,
+      session.agent_session_token,
+    );
+    if (!stillValid) return null;
     const providers = loggedInProviders();
     if (providers.length === 0) return null;
     return { providers };
@@ -682,6 +713,29 @@ async function writeAgentConfig(
   }
 }
 
+// A confirm-flow page URL that means the claim is finished and the
+// browser (and any headless noVNC tunnel) should be torn down. Matches
+// the explicit Finish target (/install/done) and the app landing pages
+// an already-provisioned account is redirected to (/vault, /agents) —
+// the latter is what left the noVNC hanging for returning users.
+export function isClaimTerminalUrl(url: string): boolean {
+  // Match on the PATH only — a login page like `/login?next=/vault`
+  // must NOT count as terminal just because the query mentions /vault.
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  return (
+    path === "/install/done" ||
+    path === "/vault" ||
+    path === "/agents" ||
+    path.startsWith("/vault/") ||
+    path.startsWith("/agents/")
+  );
+}
+
 async function runInstallClaim(
   apiBase: string,
   target: AgentTarget,
@@ -723,12 +777,18 @@ async function runInstallClaim(
         return true;
       }
     }
-    // Done when the wizard navigated to /install/done. We don't
-    // require ALL pages to be there — the user might have a stale
-    // tab open; the most recent navigation is what matters.
-    for (const page of context.pages()) {
-      const url = page.url();
-      if (/\/install\/done(\?|$|#)/.test(url)) return true;
+    // Tear down once the claim is in hand AND the confirm flow has
+    // reached a terminal page. /install/done is the explicit Finish
+    // target, but an already-provisioned account skips the wizard and
+    // redirects straight to /vault — without recognizing that too, the
+    // bot's Chrome (and the headless noVNC tunnel) never closes and the
+    // user is left staring at a live tunnel after the claim already
+    // succeeded. Gate on state.value so a stale /vault tab open BEFORE
+    // the claim can't trigger a premature teardown.
+    if (state.value !== null) {
+      for (const page of context.pages()) {
+        if (isClaimTerminalUrl(page.url())) return true;
+      }
     }
     return false;
   };
