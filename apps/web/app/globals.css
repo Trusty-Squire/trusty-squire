@@ -570,6 +570,27 @@ footer{border-top:1px solid var(--line);padding:34px 0}
 .head-btn:hover{border-color:rgba(255,255,255,.2)}
 .head-btn b{color:var(--accent);font-weight:600}
 
+/* Add key — the single focal CTA, so it takes the filled accent (the one
+   place DESIGN.md allows it). Icon-only "+", aria-labelled. Sized to match
+   the .head-btn height so the header row stays aligned. */
+.add-btn{display:inline-flex;align-items:center;justify-content:center;
+  width:36px;height:36px;border-radius:var(--r-md);text-decoration:none;
+  background:var(--accent-fill);color:#fff;font-size:22px;font-weight:400;
+  line-height:0;padding-bottom:2px;cursor:pointer;border:1px solid transparent;
+  transition:background .12s,transform .08s}
+.add-btn:hover{background:var(--accent-fill-h)}
+.add-btn:active{transform:translateY(1px)}
+.add-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* Settings gear — quiet outline icon button, same footprint as .add-btn
+   so the header row stays aligned. Secondary to the filled "+". */
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;
+  width:36px;height:36px;border-radius:var(--r-md);text-decoration:none;
+  background:transparent;color:var(--muted);border:1px solid var(--line2);
+  cursor:pointer;transition:color .12s,border-color .12s}
+.icon-btn:hover{color:var(--fg);border-color:rgba(255,255,255,.2)}
+.icon-btn svg{width:17px;height:17px}
+
 /* form fields (vault/new + modals) */
 .form{display:flex;flex-direction:column;gap:16px;margin-top:8px}
 .field{display:flex;flex-direction:column;gap:7px}
@@ -686,3 +707,29 @@ footer{border-top:1px solid var(--line);padding:34px 0}
   background:var(--surface);border:1px solid var(--line2);border-radius:9px;
   padding:10px 12px;color:var(--fg);width:100%;transition:border-color .12s}
 .dz-input:focus{outline:none;border-color:var(--err)}
+
+
+/* ===================== per-tile overflow menu ===================== */
+/* Collapses reveal / copy / verify / delete into one kebab per row. */
+.menu-wrap{position:relative;display:flex;align-items:center;justify-self:end}
+.kebab{font:inherit;font-size:18px;line-height:1;color:var(--muted);
+  background:transparent;border:1px solid transparent;border-radius:var(--r-sm);
+  width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:color .12s,background .12s,border-color .12s}
+.kebab:hover,.kebab[aria-expanded="true"]{color:var(--fg);background:var(--raised);
+  border-color:var(--line2)}
+.row-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:30;min-width:150px;
+  background:var(--raised);border:1px solid var(--line2);border-radius:var(--r-md);
+  padding:5px;display:flex;flex-direction:column;
+  box-shadow:0 10px 28px rgba(0,0,0,.45);
+  animation:menuPop .12s ease-out both}
+.row-menu button{font:inherit;font-size:13px;text-align:left;color:var(--fg);
+  background:transparent;border:0;border-radius:var(--r-sm);padding:7px 10px;
+  cursor:pointer;transition:background .1s}
+.row-menu button:hover{background:var(--surface)}
+.row-menu button.danger{color:var(--err)}
+.row-menu button.danger:hover{background:rgba(255,107,107,.12)}
+@keyframes menuPop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+/* Revealed value(s) — single inline, multi-field stacked under one line. */
+.vals{display:flex;flex-direction:column;gap:4px;min-width:0}
+.val-line{display:flex;align-items:baseline;gap:8px}

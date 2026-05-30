@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../components/AppShell";
@@ -105,8 +105,11 @@ export default function VaultPage() {
           <Link className="head-btn" href="/vault/activity">
             Activity
           </Link>
-          <Link className="head-btn" href="/vault/new">
-            + Add key
+          <Link className="icon-btn" href="/vault/settings" aria-label="Settings" title="Settings">
+            <GearIcon />
+          </Link>
+          <Link className="add-btn" href="/vault/new" aria-label="Add key" title="Add key">
+            +
           </Link>
         </div>
       </div>
@@ -161,7 +164,6 @@ export default function VaultPage() {
         </>
       )}
 
-      {creds !== null && <DangerZone />}
     </AppShell>
   );
 }
@@ -203,30 +205,58 @@ function VaultRow({
   onDeleted: (cred: Cred) => void;
 }) {
   // Revealed secret is a name→value map: a lone key is { value: "…" },
-  // AWS-style creds carry multiple named fields. null = still masked.
+  // AWS-style creds carry multiple named fields. null = not yet fetched.
   const [fields, setFields] = useState<Record<string, string> | null>(null);
+  const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [health, setHealth] = useState<Health>("idle");
+  const [copied, setCopied] = useState(false);
 
-  const reveal = useCallback(async () => {
+  // Fetch + cache the field map once; reveal and copy both need it.
+  const ensureFields = useCallback(async (): Promise<Record<string, string> | null> => {
+    if (fields !== null) return fields;
     setBusy(true);
     try {
-      // The reveal endpoint returns { fields }, not a bare value — read
-      // the map so single- and multi-field credentials both render.
       const res = await apiPost<{ fields: Record<string, string> }>(
         `/v1/vault/credentials/${cred.id}/reveal`,
       );
       setFields(res.fields);
+      return res.fields;
     } catch {
-      /* leave masked on failure */
+      return null;
     } finally {
       setBusy(false);
     }
-  }, [cred.id]);
+  }, [cred.id, fields]);
 
-  const check = useCallback(async () => {
+  const onReveal = useCallback(async () => {
+    if (shown) {
+      setShown(false);
+      return;
+    }
+    const f = await ensureFields();
+    if (f !== null) setShown(true);
+  }, [shown, ensureFields]);
+
+  const onCopy = useCallback(async () => {
+    const f = await ensureFields();
+    if (f === null) return;
+    // A lone key copies its value; a multi-field cred copies env-style
+    // `name=value` lines so nothing is silently dropped.
+    const keys = Object.keys(f);
+    const text =
+      keys.length === 1 ? f[keys[0]!]! : keys.map((k) => `${k}=${f[k]!}`).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* clipboard unavailable */
+    }
+  }, [ensureFields]);
+
+  const onVerify = useCallback(async () => {
     setHealth("checking");
     try {
       const res = await apiPost<{ healthy: boolean }>(
@@ -237,16 +267,6 @@ function VaultRow({
       setHealth("bad");
     }
   }, [cred.id]);
-
-  const copy = useCallback(async (key: string, val: string) => {
-    try {
-      await navigator.clipboard.writeText(val);
-      setCopiedKey(key);
-      setTimeout(() => setCopiedKey(null), 1400);
-    } catch {
-      /* clipboard unavailable */
-    }
-  }, []);
 
   const entries = fields === null ? [] : Object.entries(fields);
   const multiField = entries.length > 1;
@@ -283,48 +303,39 @@ function VaultRow({
           <span className="dot">·</span>
           <span>{ageLabel}</span>
         </div>
-        {fields === null ? (
-          <div className="secret">
-            <span className="mask">••••••••••••••••</span>
-            <button
-              className="linkbtn"
-              type="button"
-              onClick={reveal}
-              disabled={busy}
-            >
-              {busy ? "revealing…" : "reveal"}
-            </button>
-            <HealthChip health={health} onCheck={check} />
-          </div>
-        ) : (
-          <>
-            {entries.map(([name, val]) => (
-              <div className="secret" key={name}>
-                {multiField && <span className="field-name">{name}</span>}
-                <span className="val">{val}</span>
-                <button
-                  className="linkbtn"
-                  type="button"
-                  onClick={() => copy(name, val)}
-                >
-                  {copiedKey === name ? "copied" : "copy"}
-                </button>
-              </div>
-            ))}
-            <div className="secret">
-              <HealthChip health={health} onCheck={check} />
-            </div>
-          </>
-        )}
+        <div className="secret">
+          {shown && fields !== null ? (
+            <span className="vals">
+              {entries.map(([name, val]) => (
+                <span className="val-line" key={name}>
+                  {multiField && <span className="field-name">{name}</span>}
+                  <span className="val">{val}</span>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="mask">{busy ? "revealing…" : "••••••••••••••••"}</span>
+          )}
+          {health === "ok" && (
+            <span className="health-ok" title="Decrypts cleanly under the current master key.">✓ decrypts</span>
+          )}
+          {health === "bad" && (
+            <span className="health-bad" title="The stored envelope did not decrypt.">✗ decrypt failed</span>
+          )}
+          {health === "checking" && <span className="health-ok">checking…</span>}
+          {copied && <span className="health-ok">copied ✓</span>}
+        </div>
       </div>
 
-      <button
-        className="del"
-        type="button"
-        onClick={() => setConfirmDelete(true)}
-      >
-        Delete
-      </button>
+      <RowMenu
+        label={`Actions for ${cred.service ?? "credential"}`}
+        items={[
+          { key: "reveal", label: shown ? "Hide" : "Reveal", onClick: onReveal },
+          { key: "copy", label: "Copy", onClick: onCopy },
+          { key: "verify", label: "Verify", onClick: onVerify },
+          { key: "delete", label: "Delete", onClick: () => setConfirmDelete(true), danger: true },
+        ]}
+      />
 
       {confirmDelete && (
         <DeleteModal
@@ -340,16 +351,68 @@ function VaultRow({
   );
 }
 
-// Quiet "verify" link → ✓/✗ after probing the envelope. This checks the
-// credential still decrypts under the current master key, not whether the
-// upstream service still accepts it.
-function HealthChip({ health, onCheck }: { health: Health; onCheck: () => void }) {
-  if (health === "ok") return <span className="health-ok" title="Decrypts cleanly under the current master key.">✓ decrypts</span>;
-  if (health === "bad") return <span className="health-bad" title="The stored envelope did not decrypt.">✗ decrypt failed</span>;
+interface MenuItem {
+  key: string;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}
+
+// Per-tile overflow menu (kebab). Collapses reveal / copy / verify / delete
+// into one control. Closes on item click, outside click, or Escape.
+function RowMenu({ items, label }: { items: MenuItem[]; label: string }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent): void => {
+      if (wrapRef.current !== null && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <button className="linkbtn q" type="button" onClick={onCheck} disabled={health === "checking"}>
-      {health === "checking" ? "checking…" : "verify"}
-    </button>
+    <div className="menu-wrap" ref={wrapRef}>
+      <button
+        type="button"
+        className="kebab"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        ⋮
+      </button>
+      {open && (
+        <div className="row-menu" role="menu">
+          {items.map((it) => (
+            <button
+              key={it.key}
+              type="button"
+              role="menuitem"
+              className={it.danger === true ? "danger" : ""}
+              onClick={() => {
+                setOpen(false);
+                it.onClick();
+              }}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -398,138 +461,12 @@ function DeleteModal({
   );
 }
 
-// Account-level actions: data export + the two destructive operations.
-// Kept visually quiet at the bottom of the page (a hairline-ruled
-// "danger zone"), not a card — destructive paths gated behind a modal
-// that requires typed/clicked confirmation.
-function DangerZone() {
-  const router = useRouter();
-  const [modal, setModal] = useState<null | "revoke" | "erase">(null);
-
+// Settings gear — outline icon button in the header, next to the "+".
+function GearIcon() {
   return (
-    <section className="danger-zone">
-      <div className="dz-head">Account</div>
-      <div className="dz-row">
-        <div>
-          <div className="dz-title">Export my data</div>
-          <div className="dz-sub">All credential metadata + the full activity log. No secret values.</div>
-        </div>
-        {/* A plain link: the endpoint sets content-disposition: attachment,
-            so the browser downloads rather than navigates. */}
-        <a className="head-btn" href="/v1/vault/export" download>
-          Download
-        </a>
-      </div>
-      <div className="dz-row">
-        <div>
-          <div className="dz-title">Revoke every key</div>
-          <div className="dz-sub">Kill-switch if a key leaked. Soft — you can restore until purged.</div>
-        </div>
-        <button className="dz-btn" type="button" onClick={() => setModal("revoke")}>
-          Revoke all
-        </button>
-      </div>
-      <div className="dz-row">
-        <div>
-          <div className="dz-title">Delete all vault data</div>
-          <div className="dz-sub">Permanently erase every credential and the activity log. Cannot be undone.</div>
-        </div>
-        <button className="dz-btn danger" type="button" onClick={() => setModal("erase")}>
-          Erase
-        </button>
-      </div>
-
-      {modal === "revoke" && (
-        <ConfirmDangerModal
-          title="Revoke every credential?"
-          subtitle="Your squire and all agents lose access to every key immediately. This is recoverable — deleted keys can be restored until they're purged."
-          confirmWord="REVOKE"
-          actionLabel="Revoke all keys"
-          run={async () => {
-            await apiPost("/v1/vault/credentials/revoke-all", { confirm: true });
-            router.refresh();
-            window.location.assign("/vault");
-          }}
-          onClose={() => setModal(null)}
-        />
-      )}
-      {modal === "erase" && (
-        <ConfirmDangerModal
-          title="Permanently delete all vault data?"
-          subtitle="Every credential AND the entire activity log are erased for good. There is no undo. Export first if you want a copy."
-          confirmWord="DELETE"
-          actionLabel="Erase everything"
-          run={async () => {
-            await apiDelete("/v1/vault/account", { confirm: true });
-            window.location.assign("/vault");
-          }}
-          onClose={() => setModal(null)}
-        />
-      )}
-    </section>
-  );
-}
-
-// Destructive confirm: requires typing the confirm word, mirroring the
-// server's { confirm: true } guard with a human-side speed bump.
-function ConfirmDangerModal({
-  title,
-  subtitle,
-  confirmWord,
-  actionLabel,
-  run,
-  onClose,
-}: {
-  title: string;
-  subtitle: string;
-  confirmWord: string;
-  actionLabel: string;
-  run: () => Promise<void>;
-  onClose: () => void;
-}) {
-  const [typed, setTyped] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const armed = typed.trim().toUpperCase() === confirmWord;
-
-  const go = useCallback(async () => {
-    if (!armed) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await run();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed.");
-      setBusy(false);
-    }
-  }, [armed, run]);
-
-  return (
-    <Modal title={title} subtitle={subtitle} onClose={onClose}>
-      <div className="form">
-        {error !== null && <div className="form-err">{error}</div>}
-        <label className="dz-confirm">
-          <span>
-            Type <code>{confirmWord}</code> to confirm
-          </span>
-          <input
-            className="dz-input"
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-            autoFocus
-            spellCheck={false}
-            autoComplete="off"
-          />
-        </label>
-        <div className="form-actions">
-          <button className="btn-deny" type="button" onClick={go} disabled={!armed || busy}>
-            {busy ? "Working…" : actionLabel}
-          </button>
-          <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    </Modal>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
   );
 }
