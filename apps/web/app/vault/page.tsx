@@ -247,18 +247,18 @@ function DeleteModal({
 
   return (
     <Modal
-      title={`Delete ${cred.service ?? "credential"}?`}
-      subtitle="This permanently removes the credential from the vault. Irreversible."
+      title={`Delete the ${cred.service ?? "credential"} key?`}
+      subtitle="Your squire and any agents using it lose access right away. You can add it back later if you still have the key."
       onClose={onClose}
     >
       <div className="form">
         {error !== null && <div className="form-err">{error}</div>}
         <div className="form-actions">
           <button className="btn-deny" type="button" onClick={del} disabled={busy}>
-            {busy ? "Deleting…" : "Delete permanently"}
+            {busy ? "Deleting…" : "Delete key"}
           </button>
           <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
+            Keep it
           </button>
         </div>
       </div>
