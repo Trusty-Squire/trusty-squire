@@ -20,6 +20,7 @@ export {
   StaleAssertionError,
   VaultRateLimitError,
   AllowlistViolationError,
+  RestoreConflictError,
   DEFAULT_LABEL,
   type CredentialVaultDeps,
   type VaultEntry,

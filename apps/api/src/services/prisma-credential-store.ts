@@ -176,6 +176,30 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  async findByIdForAccountIncludingDeleted(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null> {
+    const row = await this.prisma.credential.findFirst({
+      where: { id, account_id: accountId },
+    });
+    return row === null ? null : this.toRecord(row);
+  }
+
+  async findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null> {
+    const row = await this.prisma.credential.findFirst({ where: { reference } });
+    return row === null ? null : this.toRecord(row);
+  }
+
+  // Undelete — clear deleted_at. The caller (vault) has already checked
+  // ownership + that no active (service,label) twin exists.
+  async restore(reference: string): Promise<void> {
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { deleted_at: null },
+    });
+  }
+
   // Re-wrap only the master-key envelope (account_kek_blob), for the KEK
   // key-rotation migration. Deliberately does NOT touch rotated_at — a
   // re-wrap re-encrypts the same KEK under a new master key; the secret

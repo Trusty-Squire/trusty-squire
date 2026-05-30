@@ -68,6 +68,14 @@ export interface CredentialStore {
     id: string,
     accountId: string,
   ): Promise<CredentialRecord | null>;
+  // Lookups that ignore deleted_at — for the undelete/restore path.
+  findByIdForAccountIncludingDeleted(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null>;
+  findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null>;
+  // Clear deleted_at, bringing a soft-deleted credential back to active.
+  restore(reference: string): Promise<void>;
   setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
   // Hard-delete every credential row (active + soft-deleted) for the
   // account — the irreversible offboarding purge. Returns rows removed.
@@ -105,6 +113,9 @@ export const VAULT_AUDIT_TYPES = {
   stored: "vault.credential_stored",
   rotated: "vault.credential_rotated",
   deleted: "vault.credential_deleted",
+  // A soft-deleted credential brought back to active (undelete). Distinct
+  // from `stored` so a recovery is queryable on its own.
+  restored: "vault.credential_restored",
   // A duplicate active row collapsed into a surviving one by the
   // one-time backlog-dedup migration. Distinct from `deleted` (a
   // user/agent revocation) so dedup soft-deletes are queryable on their own.

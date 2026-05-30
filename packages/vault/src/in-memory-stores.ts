@@ -105,6 +105,27 @@ export class InMemoryCredentialStore implements CredentialStore {
     return r === undefined ? null : clone(r);
   }
 
+  async findByIdForAccountIncludingDeleted(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null> {
+    const r = [...this.byReference.values()].find(
+      (c) => c.id === id && c.account_id === accountId,
+    );
+    return r === undefined ? null : clone(r);
+  }
+
+  async findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null> {
+    const r = this.byReference.get(reference);
+    return r === undefined ? null : clone(r);
+  }
+
+  async restore(reference: string): Promise<void> {
+    const r = this.byReference.get(reference);
+    if (r === undefined) return;
+    r.deleted_at = null;
+  }
+
   async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;

@@ -18,6 +18,7 @@ import { ulid } from "ulid";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import {
   CredentialNotFoundError,
+  RestoreConflictError,
   deriveAllowedHosts,
   VAULT_AUDIT_TYPES,
   type VaultAuditType,
@@ -334,6 +335,40 @@ export const registerVaultRoute: FastifyPluginAsync<{
       }
       const result = await opts.deps.vault.deleteAllForAccount(auth.account_id);
       return reply.code(200).send({ revoked: result.revoked });
+    },
+  );
+
+  // ── restore (web only): undelete a soft-deleted credential ───
+  // Soft-deletes are recoverable until a GDPR purge. Resurrects the row
+  // unless a live (service,label) twin now occupies the slot (409).
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/restore",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const target = await opts.deps.credentialStore.findByIdForAccountIncludingDeleted(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      try {
+        await opts.deps.vault.restore(target.reference, auth.account_id);
+        return reply.code(200).send({ id: target.id, restored: true });
+      } catch (err) {
+        if (err instanceof RestoreConflictError) {
+          reply.code(409).send({ error: "restore_conflict", message: err.message });
+          return;
+        }
+        if (err instanceof CredentialNotFoundError) {
+          reply.code(404).send({ error: "credential_not_found" });
+          return;
+        }
+        throw err;
+      }
     },
   );
 

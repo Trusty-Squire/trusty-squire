@@ -152,6 +152,20 @@ export class CredentialNotFoundError extends Error {
     this.name = "CredentialNotFoundError";
   }
 }
+// Restore refused: an active credential already occupies this entry's
+// (service, label) slot, so undeleting would create a duplicate active
+// twin and break the one-active-per-(account,service,label) invariant.
+// API maps to 409. The user must delete/rotate the live one first.
+export class RestoreConflictError extends Error {
+  constructor(
+    public readonly reference: string,
+    public readonly service: string,
+    public readonly label: string,
+  ) {
+    super(`cannot restore ${reference}: an active credential for ${service}/${label} already exists`);
+    this.name = "RestoreConflictError";
+  }
+}
 // use_credential asked to call a host not on the entry's allowlist —
 // hard-rejected before decrypt/dispatch. API maps to 403.
 export class AllowlistViolationError extends Error {
@@ -341,6 +355,30 @@ export class CredentialVault implements VaultClient {
     const existing = await this.deps.store.findActive(reference);
     await this.deps.store.softDelete(reference, this.now());
     await this.recordAudit(existing?.account_id ?? "", VAULT_AUDIT_TYPES.deleted, {
+      reference,
+      requester: "user",
+    });
+  }
+
+  // Undelete: bring a soft-deleted credential back to active, account-
+  // scoped + audited. Idempotent if it's already active. Refuses (409)
+  // if restoring would collide with a live (service,label) twin — the
+  // one-active-per-slot invariant the upsert path relies on.
+  async restore(reference: string, accountId: string): Promise<void> {
+    const rec = await this.deps.store.findByReferenceIncludingDeleted(reference);
+    if (rec === null || rec.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    if (rec.deleted_at === null) return; // already active — no-op
+    const service = typeof rec.metadata.service === "string" ? rec.metadata.service : "";
+    if (service.length > 0) {
+      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, rec.label);
+      if (live !== null) {
+        throw new RestoreConflictError(reference, service, rec.label);
+      }
+    }
+    await this.deps.store.restore(reference);
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.restored, {
       reference,
       requester: "user",
     });
