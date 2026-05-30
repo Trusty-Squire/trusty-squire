@@ -199,6 +199,23 @@ describe("retrieve guards", () => {
       VaultRateLimitError,
     );
   });
+
+  it("web reveal is subject to the same rate limit (no human bypass)", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(storeInput());
+    for (let i = 0; i < 100; i++) {
+      await audit.record({
+        account_id: ACCOUNT,
+        type: "vault.credential_retrieved",
+        payload: { reference: entry.reference, requester: "user", outcome: "success" },
+      });
+    }
+    await expect(vault.reveal(entry.reference, ACCOUNT)).rejects.toThrow(VaultRateLimitError);
+    // and the breach is itself audited as a rate_limited reveal
+    expect(
+      audit.events.some((e) => e.payload.outcome === "rate_limited" && e.payload.purpose === "user:vault_reveal"),
+    ).toBe(true);
+  });
 });
 
 describe("LocalKMS sanity", () => {

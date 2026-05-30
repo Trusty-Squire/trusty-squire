@@ -29,6 +29,7 @@ import type {
   CredentialStore,
   CredentialType,
   VaultAuditEventInput,
+  VaultAuditPayload,
   VaultAuditStore,
   VaultAuditType,
   VaultRequester,
@@ -287,11 +288,19 @@ export class CredentialVault implements VaultClient {
   }
 
   // Web-only reveal: account-scoped, returns the field map. Audited.
+  // Counts against the same per-account retrieval rate limit as the
+  // agent/runtime paths — a reveal IS a retrieval, so the human path
+  // can't be used to sidestep the 100/hr ceiling.
   async reveal(reference: string, accountId: string): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
+    await this.enforceRetrievalRateLimit(accountId, {
+      reference,
+      purpose: "user:vault_reveal",
+      requester: "user",
+    });
     const fields = await this.decryptFields(record);
     await this.deps.store.markRetrieved(reference, this.now());
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
@@ -410,15 +419,9 @@ export class CredentialVault implements VaultClient {
     const accountId = record?.account_id ?? "";
 
     if (record !== null) {
-      const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
-      const count = await this.deps.audit.countRecentRetrievals(accountId, since);
-      if (count >= RATE_LIMIT_MAX) {
-        await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-          reference, purpose, requester, signing_device_id: signingDeviceId,
-          outcome: "rate_limited",
-        });
-        throw new VaultRateLimitError(accountId);
-      }
+      await this.enforceRetrievalRateLimit(accountId, {
+        reference, purpose, requester, signing_device_id: signingDeviceId,
+      });
     }
     if (assertion !== null) {
       const ageMs = this.now().getTime() - Date.parse(assertion.signed_at);
@@ -447,6 +450,26 @@ export class CredentialVault implements VaultClient {
       outcome: "success",
     });
     return fields;
+  }
+
+  // Per-account retrieval rate limit, shared by every decrypt path
+  // (agent retrieve, runtime retrieve, web reveal). Counts `retrieved`
+  // audit rows in the trailing window; on breach it records a
+  // rate_limited event and throws. Keeping this in one place is what
+  // stops a new decrypt path from silently bypassing the ceiling.
+  private async enforceRetrievalRateLimit(
+    accountId: string,
+    auditOnLimit: Pick<VaultAuditPayload, "reference" | "purpose" | "requester" | "signing_device_id">,
+  ): Promise<void> {
+    const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
+    const count = await this.deps.audit.countRecentRetrievals(accountId, since);
+    if (count >= RATE_LIMIT_MAX) {
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
+        ...auditOnLimit,
+        outcome: "rate_limited",
+      });
+      throw new VaultRateLimitError(accountId);
+    }
   }
 
   private async recordAudit(

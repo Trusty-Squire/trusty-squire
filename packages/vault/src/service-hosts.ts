@@ -1,14 +1,15 @@
 // Per-service host allowlist seed.
 //
 // At store-time the vault derives a credential's `allowed_hosts` from
-// the `service` metadata so the `use_credential` proxy (a later PR) has
-// a sane default to advisory-check against. The list is intentionally
-// small and conservative — it's a starting point, not an exhaustive
-// directory. Unknown services start with an empty allowlist and the
-// user populates it from the `/vault` UI.
+// the `service` metadata so the `use_credential` proxy has a sane
+// default to enforce against. The list is intentionally small and
+// conservative — it's a starting point, not an exhaustive directory.
+// Unknown services start with an empty allowlist and the user populates
+// it from the `/vault` UI.
 //
-// Enforcement is advisory (the proxy warns + proceeds on off-allowlist
-// hosts for a trusted session). This table only seeds the default.
+// Enforcement is HARD: the proxy rejects any off-allowlist host with a
+// 403 (AllowlistViolationError) before decrypt/dispatch — it does not
+// "warn and proceed". This table only seeds the default the user edits.
 
 // Keyed by a normalised service slug (lowercase, alphanumerics only) so
 // "OpenAI", "open-ai", and "openai" all resolve to the same entry.
