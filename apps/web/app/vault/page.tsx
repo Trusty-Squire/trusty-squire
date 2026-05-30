@@ -460,7 +460,7 @@ function DangerZone() {
           confirmWord="DELETE"
           actionLabel="Erase everything"
           run={async () => {
-            await apiDelete("/v1/vault/account");
+            await apiDelete("/v1/vault/account", { confirm: true });
             window.location.assign("/vault");
           }}
           onClose={() => setModal(null)}
