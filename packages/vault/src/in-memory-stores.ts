@@ -7,9 +7,13 @@ import type {
   CredentialRecord,
   CredentialStore,
   VaultAuditEventInput,
+  VaultAuditListOptions,
   VaultAuditPayload,
+  VaultAuditRecord,
   VaultAuditStore,
 } from "./types.js";
+
+const AUDIT_LIST_MAX = 200;
 
 export class InMemoryCredentialStore implements CredentialStore {
   private readonly byReference = new Map<string, CredentialRecord>();
@@ -130,6 +134,27 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
         e.type === "vault.credential_retrieved" &&
         e.emitted_at >= since,
     ).length;
+  }
+
+  async list(accountId: string, opts: VaultAuditListOptions = {}): Promise<VaultAuditRecord[]> {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), AUDIT_LIST_MAX);
+    return this.events
+      .filter(
+        (e) =>
+          e.account_id === accountId &&
+          (opts.type === undefined || e.type === opts.type) &&
+          (opts.reference === undefined || e.payload.reference === opts.reference) &&
+          (opts.before === undefined || e.emitted_at < opts.before),
+      )
+      .sort((a, b) => b.emitted_at.getTime() - a.emitted_at.getTime())
+      .slice(0, limit)
+      .map((e) => ({
+        id: e.id,
+        account_id: e.account_id,
+        type: e.type,
+        payload: clonePayload(e.payload),
+        emitted_at: e.emitted_at,
+      }));
   }
 }
 

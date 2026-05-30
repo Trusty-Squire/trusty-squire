@@ -114,7 +114,32 @@ export interface VaultAuditEventInput {
   payload: VaultAuditPayload;
 }
 
+// A persisted audit row, as read back for the who-touched-my-keys
+// timeline. The payload carries NO secret values (by construction) —
+// only references, requesters, outcomes, and proxy forensics.
+export interface VaultAuditRecord {
+  id: string;
+  account_id: string;
+  type: VaultAuditType;
+  payload: VaultAuditPayload;
+  emitted_at: Date;
+}
+
+export interface VaultAuditListOptions {
+  // Page size; the store clamps to a sane maximum.
+  limit?: number;
+  // Keyset cursor — return only events strictly older than this
+  // (emitted_at < before). Pair with the last row's emitted_at to page.
+  before?: Date;
+  // Optional filters. `type` hits the indexed column; `reference`
+  // narrows to a single credential's history.
+  type?: VaultAuditType;
+  reference?: string;
+}
+
 export interface VaultAuditStore {
   record(event: VaultAuditEventInput): Promise<void>;
   countRecentRetrievals(accountId: string, since: Date): Promise<number>;
+  // Newest-first audit trail for an account, for the activity timeline.
+  list(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]>;
 }

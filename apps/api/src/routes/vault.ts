@@ -16,8 +16,23 @@
 import { z } from "zod";
 import { ulid } from "ulid";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import { CredentialNotFoundError, deriveAllowedHosts } from "@trusty-squire/vault";
+import {
+  CredentialNotFoundError,
+  deriveAllowedHosts,
+  VAULT_AUDIT_TYPES,
+  type VaultAuditType,
+} from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+
+const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
+
+// GET /v1/vault/audit query: keyset pagination + optional filters.
+const auditQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  before: z.string().datetime().optional(),
+  type: z.enum(AUDIT_TYPE_VALUES).optional(),
+  reference: z.string().min(1).max(256).optional(),
+});
 
 // Brand domain for the vault UI's favicon, independent of the proxy
 // allowlist. Existing credentials predate the allowed_hosts column (it
@@ -109,6 +124,46 @@ export const registerVaultRoute: FastifyPluginAsync<{
             retrieval_count: c.retrieval_count,
           };
         }),
+      });
+    },
+  );
+
+  // ── audit timeline (web only): who-touched-my-keys ───────────
+  // The full event trail for the account — stored/retrieved/rotated/
+  // deleted/proxy_executed/proxy_rejected — newest first, paginated by
+  // the `before` keyset cursor. Payloads carry NO secret values.
+  fastify.get(
+    "/v1/vault/audit",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = auditQuery.safeParse(req.query);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const q = parsed.data;
+      const events = await opts.deps.vault.listAudit(auth.account_id, {
+        ...(q.limit !== undefined ? { limit: q.limit } : {}),
+        ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
+        ...(q.type !== undefined ? { type: q.type } : {}),
+        ...(q.reference !== undefined ? { reference: q.reference } : {}),
+      });
+      const last = events.at(-1);
+      return reply.code(200).send({
+        events: events.map((e) => ({
+          id: e.id,
+          type: e.type,
+          emitted_at: e.emitted_at.toISOString(),
+          // Whole payload is non-secret by construction (references,
+          // requesters, outcomes, proxy forensics — never a key value).
+          ...e.payload,
+        })),
+        // Keyset cursor for the next page; null when this page wasn't full.
+        next_before: events.length === (q.limit ?? 50) && last !== undefined
+          ? last.emitted_at.toISOString()
+          : null,
       });
     },
   );

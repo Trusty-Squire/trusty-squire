@@ -29,7 +29,9 @@ import type {
   CredentialStore,
   CredentialType,
   VaultAuditEventInput,
+  VaultAuditListOptions,
   VaultAuditPayload,
+  VaultAuditRecord,
   VaultAuditStore,
   VaultAuditType,
   VaultRequester,
@@ -367,6 +369,12 @@ export class CredentialVault implements VaultClient {
       });
       throw err;
     }
+  }
+
+  // Web-only: the account's audit trail (who-touched-my-keys timeline).
+  // Read-through to the audit store; payloads never carry secret values.
+  async listAudit(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]> {
+    return this.deps.audit.list(accountId, opts);
   }
 
   // ── private ──────────────────────────────────────────────────
