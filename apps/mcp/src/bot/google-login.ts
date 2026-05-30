@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
-import { CHROME_PROFILE_DIR } from "./profile.js";
+import { CHROME_PROFILE_DIR, clearStaleSingletonLock } from "./profile.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
@@ -141,6 +141,7 @@ async function hasProviderSession(
 export async function detectActiveProviderSessions(
   profileDir: string = CHROME_PROFILE_DIR,
 ): Promise<OAuthProviderId[]> {
+  clearStaleSingletonLock(profileDir);
   const chromium = resolveChromium();
   const ctx = await chromium.launchPersistentContext(profileDir, {
     headless: true,
@@ -555,6 +556,16 @@ interface RunInBotChromeOpts {
 async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  // `mcp login` runs in a SEPARATE process from the MCP server, so the
+  // in-process OAuth mutex can't serialize it against an in-flight signup.
+  // If a prior bot Chrome was killed and left a stale SingletonLock, this
+  // self-heals it — without it, login dies on the lock BEFORE the noVNC
+  // rig starts (the "relogin prompted, no noVNC, still failed" bug). A
+  // lock held by a still-alive Chrome is left intact (clearStale… checks
+  // pid liveness), so a genuine concurrent run is never yanked.
+  if (clearStaleSingletonLock(opts.profileDir)) {
+    console.error("[login] cleared a stale Chrome SingletonLock on the bot profile");
+  }
   if (hasDisplay()) {
     return await runDisplayedChrome(opts);
   }

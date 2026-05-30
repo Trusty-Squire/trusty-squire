@@ -26,7 +26,7 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR } from "./profile.js";
+import { CHROME_PROFILE_DIR, clearStaleSingletonLock } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
@@ -364,6 +364,13 @@ export class BrowserController {
       );
       chromeHeadless = true;
       this.launchedMode = "headless";
+    }
+
+    // Self-heal a stale SingletonLock from a prior run that was killed
+    // mid-flight — otherwise launchPersistentContext aborts with
+    // "Failed to create a ProcessSingleton" and bricks the profile.
+    if (clearStaleSingletonLock(this.profileDir)) {
+      console.error("[universal-bot] cleared a stale Chrome SingletonLock on the bot profile");
     }
 
     // T3: a PERSISTENT context. The profile dir carries the user's
@@ -3453,14 +3460,19 @@ export class BrowserController {
   }
 
   async close(): Promise<void> {
-    if (this.page) await this.page.close();
+    // Each step is best-effort and independent: a throw closing the page
+    // or context must NOT skip the Xvfb teardown below, or the virtual
+    // display leaks (orphaned Xvfb procs pile up over a long-lived MCP
+    // server and, worse, the un-closed Chrome keeps the profile's
+    // SingletonLock held — bricking the next signup + `mcp login`).
+    if (this.page) await this.page.close().catch(() => undefined);
     // Closing the persistent context shuts the browser down too.
-    if (this.context) await this.context.close();
+    if (this.context) await this.context.close().catch(() => undefined);
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its
     // display until it exits, THEN kill Xvfb.
     if (this.xvfb !== null) {
-      this.xvfb.stop();
+      try { this.xvfb.stop(); } catch { /* best-effort */ }
       this.xvfb = null;
     }
   }
