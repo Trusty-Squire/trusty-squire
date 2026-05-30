@@ -1,28 +1,22 @@
-// Hardened server-side HTTP proxy for use_credential.
+// Hardened server-side HTTP proxy for use_credential (multi-field).
 //
-// The agent describes an outbound call with ${SECRET} / ${SECRET_JSON}
-// placeholders; the server injects the real secret and dispatches. The
-// secret never crosses back to the agent, and never appears in any
-// audit row or log line.
+// The agent describes an outbound call with ${SECRET} / ${SECRET.<field>}
+// / ${SECRET_JSON[.field]} placeholders; the server injects the
+// credential's decrypted fields and dispatches. The secret never crosses
+// back to the agent, and never appears in any audit row or log line.
 //
-// Threat model (from the adversarial review — see plan §"use_credential
-// proxy semantics — hardened"):
-//   - Secret exfiltration via reflection → substitution is restricted to
-//     header values + body; rejected in url/method/header-keys; CRLF/NUL
-//     in the secret is rejected; resulting header values are size-capped.
-//   - SSRF / metadata-endpoint access → https-only, hostname resolved
-//     once and the IP pinned for the socket (no rebinding), post-
-//     resolution IP checked against private/link-local/CGNAT/NAT64
-//     ranges.
-//   - Response-channel abuse → declared Content-Length > cap rejected
-//     pre-read, stream aborted past the cap, response MIME restricted,
-//     Set-Cookie stripped.
-//   - Resource exhaustion → per-request timeouts + per-account in-flight
-//     concurrency cap.
+// ${SECRET}            → the field named "value", or the sole field
+// ${SECRET.access_key} → that named field
+// ${SECRET_JSON[.f]}   → JSON-escaped variant
 //
-// Pure helpers (substituteSecret, isBlockedAddress) carry most of the
-// security surface and are unit-tested in isolation; the network
-// dispatch is injectable so route tests don't fight the SSRF guard.
+// Guards (unchanged from the single-secret version, applied per field):
+//   - placeholders rejected in url / method / header keys
+//   - resolved values rejected if they contain CR/LF/NUL
+//   - resulting header value capped at 8KB
+//   - https-only, hostname resolved once + IP pinned (no rebinding),
+//     post-resolution IP checked against private/link-local/CGNAT/NAT64
+//   - response Content-Length cap (pre-read + mid-stream), MIME allowlist,
+//     Set-Cookie stripped, per-account in-flight concurrency cap
 
 import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
@@ -48,6 +42,8 @@ export type ProxyErrorCode =
   | "secret_in_method"
   | "secret_in_header_key"
   | "secret_unsafe_chars"
+  | "secret_field_missing"
+  | "secret_ambiguous"
   | "header_too_large"
   | "not_https"
   | "invalid_url"
@@ -69,48 +65,70 @@ export class ProxyError extends Error {
   }
 }
 
-const SECRET_TOKEN = "${SECRET}";
-const SECRET_JSON_TOKEN = "${SECRET_JSON}";
+const TOKEN_SRC = "\\$\\{SECRET(_JSON)?(?:\\.([A-Za-z0-9_]+))?\\}";
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024;
 
 // ── Pure: secret substitution ──────────────────────────────────
 
-// JSON-escape a secret for embedding inside a JSON string the agent is
-// building (e.g. body `{"key":"${SECRET_JSON}"}`). Returns the escaped
-// inner WITHOUT the surrounding quotes — the agent supplies those.
 export function jsonEscapeSecret(secret: string): string {
   const quoted = JSON.stringify(secret);
   return quoted.slice(1, -1);
 }
 
-// Resolve placeholders into the request. Throws ProxyError on any
-// disallowed placement or unsafe secret. Single-pass: replacement text
-// is never re-scanned for further tokens.
+function hasToken(s: string): boolean {
+  return new RegExp(TOKEN_SRC).test(s);
+}
+
+// Resolve a single placeholder to its field value (throws on missing /
+// ambiguous). `name` undefined → ${SECRET}: the "value" field, or the
+// sole field if there's exactly one.
+function resolveField(fields: Record<string, string>, name: string | undefined): string {
+  if (name !== undefined) {
+    const v = fields[name];
+    if (v === undefined) {
+      throw new ProxyError("secret_field_missing", `credential has no field '${name}'`);
+    }
+    return v;
+  }
+  if (fields.value !== undefined) return fields.value;
+  const keys = Object.keys(fields);
+  if (keys.length === 1) return fields[keys[0]!]!;
+  throw new ProxyError(
+    "secret_ambiguous",
+    "credential has multiple fields — use ${SECRET.<field>}",
+  );
+}
+
+function substituteAll(s: string, fields: Record<string, string>): string {
+  return s.replace(new RegExp(TOKEN_SRC, "g"), (_m, json: string | undefined, name: string | undefined) => {
+    const value = resolveField(fields, name);
+    return json !== undefined ? jsonEscapeSecret(value) : value;
+  });
+}
+
 export function substituteSecret(
   http: ProxyHttpRequest,
-  secret: string,
+  fields: Record<string, string>,
 ): ProxyHttpRequest {
-  if (/[\r\n\0]/.test(secret)) {
-    throw new ProxyError("secret_unsafe_chars", "secret contains CR/LF/NUL");
+  for (const v of Object.values(fields)) {
+    if (/[\r\n\0]/.test(v)) {
+      throw new ProxyError("secret_unsafe_chars", "a credential field contains CR/LF/NUL");
+    }
   }
-  if (http.url.includes(SECRET_TOKEN) || http.url.includes(SECRET_JSON_TOKEN)) {
+  if (hasToken(http.url)) {
     throw new ProxyError("secret_in_url", "secret placeholder not allowed in url");
   }
-  if (http.method.includes(SECRET_TOKEN) || http.method.includes(SECRET_JSON_TOKEN)) {
+  if (hasToken(http.method)) {
     throw new ProxyError("secret_in_method", "secret placeholder not allowed in method");
   }
 
-  const jsonEscaped = jsonEscapeSecret(secret);
-  const subst = (s: string): string =>
-    s.split(SECRET_JSON_TOKEN).join(jsonEscaped).split(SECRET_TOKEN).join(secret);
-
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(http.headers ?? {})) {
-    if (key.includes(SECRET_TOKEN) || key.includes(SECRET_JSON_TOKEN)) {
+    if (hasToken(key)) {
       throw new ProxyError("secret_in_header_key", "secret placeholder not allowed in a header key");
     }
-    const resolved = subst(value);
+    const resolved = substituteAll(value, fields);
     if (Buffer.byteLength(resolved, "utf8") > MAX_HEADER_VALUE_BYTES) {
       throw new ProxyError("header_too_large", `header ${key} exceeds ${MAX_HEADER_VALUE_BYTES} bytes`);
     }
@@ -121,7 +139,7 @@ export function substituteSecret(
     method: http.method,
     url: http.url,
     headers,
-    ...(http.body !== undefined ? { body: subst(http.body) } : {}),
+    ...(http.body !== undefined ? { body: substituteAll(http.body, fields) } : {}),
   };
 }
 
@@ -137,37 +155,31 @@ function ipv4ToParts(ip: string): number[] | null {
 
 function isBlockedIpv4(ip: string): boolean {
   const p = ipv4ToParts(ip);
-  if (p === null) return true; // unparseable → treat as blocked
+  if (p === null) return true;
   const [a, b] = p as [number, number, number, number];
-  if (a === 0) return true; // 0.0.0.0/8
-  if (a === 127) return true; // loopback
-  if (a === 10) return true; // private
-  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
-  if (a === 192 && b === 168) return true; // 192.168/16
-  if (a === 169 && b === 254) return true; // link-local + metadata 169.254.169.254
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  if (a === 0) return true;
+  if (a === 127) return true;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
   return false;
 }
 
-// Reject loopback, private, link-local, CGNAT, and the IPv6 equivalents
-// (incl. IPv4-mapped ::ffff: and NAT64 64:ff9b::). Unparseable → blocked.
 export function isBlockedAddress(addr: string): boolean {
   const kind = isIP(addr);
   if (kind === 4) return isBlockedIpv4(addr);
-  if (kind !== 6) return true; // not an IP literal → block
-
+  if (kind !== 6) return true;
   const ip = addr.toLowerCase();
-  if (ip === "::1" || ip === "::") return true; // loopback + unspecified
-  // IPv4-mapped (::ffff:a.b.c.d or ::ffff:hhhh:hhhh) → apply v4 rules.
+  if (ip === "::1" || ip === "::") return true;
   if (ip.startsWith("::ffff:")) {
     const tail = ip.slice("::ffff:".length);
     if (isIP(tail) === 4) return isBlockedIpv4(tail);
-    return true; // hex-form mapped — block conservatively
+    return true;
   }
-  if (ip.startsWith("64:ff9b:")) return true; // NAT64
-  // fc00::/7 (unique-local): first byte fc or fd.
+  if (ip.startsWith("64:ff9b:")) return true;
   if (/^f[cd][0-9a-f]{0,2}:/.test(ip)) return true;
-  // fe80::/10 (link-local): fe8x..febx.
   if (/^fe[89ab][0-9a-f]?:/.test(ip)) return true;
   return false;
 }
@@ -179,7 +191,6 @@ export interface DispatchInput {
   url: URL;
   headers: Record<string, string>;
   body: string | undefined;
-  // The resolved + validated IP to connect to (rebinding pin).
   pinnedAddress: string;
   family: number;
   maxResponseBytes: number;
@@ -195,11 +206,8 @@ export interface DispatchResult {
 }
 
 export interface HttpProxyExecutorOptions {
-  // Injectable DNS — tests resolve a fake host to a known address.
   lookup?: (hostname: string) => Promise<{ address: string; family: number }>;
-  // Injectable network dispatch — tests echo without real sockets.
   dispatch?: (input: DispatchInput) => Promise<DispatchResult>;
-  // Test seams: allow loopback (default false) + http:// (default false).
   blockPrivate?: boolean;
   allowInsecureHttp?: boolean;
   maxResponseBytes?: number;
@@ -233,9 +241,9 @@ export class HttpProxyExecutor {
   async execute(input: {
     accountId: string;
     http: ProxyHttpRequest;
-    secret: string;
+    fields: Record<string, string>;
   }): Promise<ProxyResult> {
-    const resolved = substituteSecret(input.http, input.secret);
+    const resolved = substituteSecret(input.http, input.fields);
 
     let url: URL;
     try {
@@ -254,8 +262,6 @@ export class HttpProxyExecutor {
       const dispatched = await this.dispatch({
         method: resolved.method,
         url,
-        // Send the literal hostname as Host even though we connect to the
-        // pinned IP — preserves vhost routing + TLS SNI.
         headers: { ...resolved.headers, host: url.host },
         body: resolved.body,
         pinnedAddress: address,
@@ -273,7 +279,6 @@ export class HttpProxyExecutor {
   private async resolveAndPin(
     hostname: string,
   ): Promise<{ address: string; family: number }> {
-    // A bare IP literal as hostname still gets range-checked.
     if (isIP(hostname) !== 0) {
       if (this.blockPrivate && isBlockedAddress(hostname)) {
         throw new ProxyError("blocked_address", `target ${hostname} is in a blocked range`);
@@ -287,10 +292,7 @@ export class HttpProxyExecutor {
       throw new ProxyError("dns_failed", `could not resolve ${hostname}`);
     }
     if (this.blockPrivate && isBlockedAddress(resolved.address)) {
-      throw new ProxyError(
-        "blocked_address",
-        `${hostname} resolves to a blocked address`,
-      );
+      throw new ProxyError("blocked_address", `${hostname} resolves to a blocked address`);
     }
     return resolved;
   }
@@ -300,7 +302,7 @@ export class HttpProxyExecutor {
     let contentType = "";
     for (const [k, v] of Object.entries(d.headers)) {
       const key = k.toLowerCase();
-      if (key === "set-cookie") continue; // never leak upstream cookies
+      if (key === "set-cookie") continue;
       const value = Array.isArray(v) ? v.join(", ") : v;
       if (key === "content-type") contentType = value.toLowerCase();
       headers[key] = value;
@@ -347,9 +349,6 @@ function defaultLookup(
   });
 }
 
-// Real network path: connect to the pinned IP (lookup override defeats
-// rebinding), keep the original Host header + TLS SNI, enforce the
-// Content-Length precheck, byte cap, and timeouts.
 function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
   const requestFn = input.url.protocol === "http:" ? httpRequest : httpsRequest;
   return new Promise<DispatchResult>((resolve, reject) => {
@@ -361,7 +360,6 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
         port: input.url.port !== "" ? Number(input.url.port) : undefined,
         path: `${input.url.pathname}${input.url.search}`,
         headers: input.headers,
-        // Pin the socket to the already-resolved + vetted address.
         lookup: (_h, _o, cb) => cb(null, input.pinnedAddress, input.family),
       },
       (res) => {

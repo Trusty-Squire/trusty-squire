@@ -110,9 +110,9 @@ describe("E2E #1 — install → signup → vault data path", () => {
       },
     });
     expect(storeRes.statusCode).toBe(201);
-    const stored = storeRes.json() as { reference: string; type: string };
+    const stored = storeRes.json() as { reference: string; field_names: string[] };
     expect(stored.reference).toMatch(/^vault:\/\//);
-    expect(stored.type).toBe("api_key");
+    expect(stored.field_names).toEqual(["value"]);
 
     // ── The web user reads their vault and sees the new key ────
     const webList = await h.server.inject({

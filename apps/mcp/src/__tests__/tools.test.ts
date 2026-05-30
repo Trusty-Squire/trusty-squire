@@ -91,18 +91,16 @@ describe("list_credentials", () => {
 
 describe("TOOLS registry", () => {
   it("exposes the post-0.8 public surface incl. the credential lifecycle tools", () => {
-    // 6 surviving post-0.8 tools + 4 credential tools (store/rotate/
-    // delete/use_credential — write-only sink, no request/poll).
-    expect(TOOLS).toHaveLength(10);
+    // 6 surviving post-0.8 tools + 2 credential tools (store/use —
+    // write-only sink; rotation = re-store, delete is web-only).
+    expect(TOOLS).toHaveLength(8);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "check_provision_status",
-      "delete_credential",
       "get_credential",
       "get_extract_failure",
       "list_credentials",
       "list_extract_failures",
       "provision",
-      "rotate_credential",
       "store_credential",
       "use_credential",
     ]);

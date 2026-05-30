@@ -1,18 +1,12 @@
 // Postgres-backed CredentialStore for @trusty-squire/vault.
 //
-// The vault package deliberately keeps store implementations out of
-// its own dependency surface (see its in-memory-stores.ts) — this is
-// that production wiring, against the API's auth DB. The encryption
-// envelope is still done by CredentialVault; this only persists rows.
+// The vault package keeps store implementations out of its dependency
+// surface; this is the production wiring against the API's auth DB. The
+// encryption envelope is done by CredentialVault — this only persists
+// rows.
 
 import { Buffer } from "node:buffer";
 import type { CredentialRecord, CredentialStore } from "@trusty-squire/vault";
-
-// Free text on the DB side. The runtime package's CredentialType enum
-// used to be the source of truth before its 0.8 sunset; today the
-// universal-bot path writes whatever kind name it captured. Keep the
-// store typing loose and let callers narrow.
-type CredentialType = string;
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
 interface CredentialRow {
@@ -20,8 +14,10 @@ interface CredentialRow {
   reference: string;
   account_id: string;
   subscription_id: string;
-  type: string;
+  type: string | null;
   env_var_suggestion: string | null;
+  label: string;
+  field_names: string[];
   allowed_hosts: string[];
   ciphertext: Buffer;
   encrypted_dek: Buffer;
@@ -47,6 +43,8 @@ export class PrismaCredentialStore implements CredentialStore {
         subscription_id: record.subscription_id,
         type: record.type,
         env_var_suggestion: record.env_var_suggestion,
+        label: record.label,
+        field_names: record.field_names,
         allowed_hosts: record.allowed_hosts,
         ciphertext: record.ciphertext,
         encrypted_dek: record.encrypted_dek,
@@ -69,6 +67,26 @@ export class PrismaCredentialStore implements CredentialStore {
     return row === null ? null : this.toRecord(row);
   }
 
+  async findActiveByServiceLabel(
+    accountId: string,
+    service: string,
+    label: string,
+  ): Promise<CredentialRecord | null> {
+    // `service` lives in metadata JSON; filter the account's active
+    // rows in code (small set per account). Newest first.
+    const rows = await this.prisma.credential.findMany({
+      where: { account_id: accountId, deleted_at: null },
+      orderBy: { created_at: "desc" },
+    });
+    const want = service.toLowerCase();
+    const match = rows.find((r) => {
+      const rec = this.toRecord(r);
+      const svc = typeof rec.metadata.service === "string" ? rec.metadata.service : null;
+      return rec.label === label && svc !== null && svc.toLowerCase() === want;
+    });
+    return match === undefined ? null : this.toRecord(match);
+  }
+
   async markRetrieved(reference: string, retrievedAt: Date): Promise<void> {
     await this.prisma.credential.updateMany({
       where: { reference },
@@ -83,14 +101,25 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
-  async rotate(
+  async replaceSecret(
     reference: string,
-    ciphertext: Buffer,
-    rotatedAt: Date,
+    payload: {
+      ciphertext: Buffer;
+      encrypted_dek: Buffer;
+      account_kek_blob: Buffer;
+      field_names: string[];
+      rotatedAt: Date;
+    },
   ): Promise<void> {
     await this.prisma.credential.updateMany({
       where: { reference },
-      data: { ciphertext, rotated_at: rotatedAt },
+      data: {
+        ciphertext: payload.ciphertext,
+        encrypted_dek: payload.encrypted_dek,
+        account_kek_blob: payload.account_kek_blob,
+        field_names: payload.field_names,
+        rotated_at: payload.rotatedAt,
+      },
     });
   }
 
@@ -106,8 +135,6 @@ export class PrismaCredentialStore implements CredentialStore {
     id: string,
     accountId: string,
   ): Promise<CredentialRecord | null> {
-    // Single account-scoped query — never load-then-check (defends
-    // against cross-account id guessing on the web CRUD routes).
     const row = await this.prisma.credential.findFirst({
       where: { id, account_id: accountId, deleted_at: null },
     });
@@ -127,18 +154,15 @@ export class PrismaCredentialStore implements CredentialStore {
       reference: row.reference,
       account_id: row.account_id,
       subscription_id: row.subscription_id,
-      // The DB column is free text; CredentialType is the closed set
-      // the value was inserted from.
-      type: row.type as CredentialType,
+      type: row.type,
       env_var_suggestion: row.env_var_suggestion,
-      // Older rows predate the column; Postgres returns [] for the
-      // default but guard anyway for in-flight migration windows.
+      label: row.label ?? "default",
+      field_names: row.field_names ?? [],
       allowed_hosts: row.allowed_hosts ?? [],
       ciphertext: row.ciphertext,
       encrypted_dek: row.encrypted_dek,
       account_kek_blob: row.account_kek_blob,
       algorithm: row.algorithm,
-      // JSON column → object metadata.
       metadata: (row.metadata ?? {}) as Record<string, unknown>,
       rotated_at: row.rotated_at,
       retrieval_count: row.retrieval_count,

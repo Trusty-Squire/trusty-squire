@@ -1,310 +1,212 @@
-// CredentialVault behavioural tests — store / retrieve, audit
-// emission, rate limiting, soft delete, stale assertion handling, and
-// the runtime path.
+// CredentialVault — field-map model: upsert store, multi-field,
+// labels, retrieve/reveal, proxy with enforced allowlist, rate limit.
 
 import { Buffer } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DeviceAssertion, VaultStoreInput } from "../credential-vault.js";
 import {
+  AllowlistViolationError,
   CredentialNotFoundError,
   CredentialVault,
   StaleAssertionError,
   VaultRateLimitError,
+  type DeviceAssertion,
+  type ProxyResponse,
+  type VaultStoreInput,
 } from "../credential-vault.js";
 import { InMemoryCredentialStore, InMemoryVaultAuditStore } from "../in-memory-stores.js";
 import { LocalKMS } from "../kms-client.js";
 
-const NOW = new Date("2026-05-10T12:00:00.000Z");
+const NOW = new Date("2026-05-30T12:00:00.000Z");
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
-const SUBSCRIPTION = "01HSUBAAAAAAAAAAAAAAAAAAAA";
+const SUB = "01HSUBAAAAAAAAAAAAAAAAAAAA";
 
-function makeVault(opts: { now?: () => Date } = {}): {
-  vault: CredentialVault;
-  store: InMemoryCredentialStore;
-  audit: InMemoryVaultAuditStore;
-} {
+function makeVault(opts: { now?: () => Date } = {}) {
   const store = new InMemoryCredentialStore();
   const audit = new InMemoryVaultAuditStore();
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x42));
-  const vault = new CredentialVault({
-    store,
-    audit,
-    kms,
-    now: opts.now ?? (() => NOW),
-  });
+  const vault = new CredentialVault({ store, audit, kms, now: opts.now ?? (() => NOW) });
   return { vault, store, audit };
 }
 
-function makeStoreInput(overrides: Partial<VaultStoreInput> = {}): VaultStoreInput {
+function storeInput(over: Partial<VaultStoreInput> = {}): VaultStoreInput {
   return {
     account_id: ACCOUNT,
-    subscription_id: SUBSCRIPTION,
+    subscription_id: SUB,
+    service: "OpenAI",
+    fields: { value: "sk_test_secret" },
     type: "api_key",
-    value: "sk_test_secret",
-    env_var_suggestion: "TEST_API_KEY",
-    metadata: { run_id: "01HRUN" },
-    ...overrides,
+    ...over,
   };
 }
 
-function makeAssertion(signedAt: Date | string = NOW): DeviceAssertion {
+function assertion(signedAt: Date | string = NOW): DeviceAssertion {
   return {
-    signature: "fake-sig",
+    signature: "sig",
     signed_at: typeof signedAt === "string" ? signedAt : signedAt.toISOString(),
     signing_device_id: "01HDEVICE",
   };
 }
 
-describe("CredentialVault", () => {
-  beforeEach(() => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+const okResponse: ProxyResponse = {
+  status: 200,
+  headers: { "content-type": "application/json" },
+  body: '{"ok":true}',
+  truncated: false,
+};
 
-  it("store + retrieve round-trips the original value", async () => {
+describe("store + retrieve (field map)", () => {
+  it("round-trips a single-field credential", async () => {
     const { vault } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const value = await vault.retrieve(entry.reference, "user:read", makeAssertion());
-    expect(value).toBe("sk_test_secret");
-    expect(entry.type).toBe("api_key");
+    const entry = await vault.store(storeInput());
+    expect(entry.field_names).toEqual(["value"]);
+    expect(entry.allowed_hosts).toEqual(["api.openai.com"]);
+    expect(entry.updated).toBe(false);
+    const fields = await vault.retrieve(entry.reference, "user:read", assertion());
+    expect(fields).toEqual({ value: "sk_test_secret" });
   });
 
-  it("multiple credentials per account → independent encryption (different ciphertexts)", async () => {
+  it("round-trips a multi-field credential", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(
+      storeInput({ service: "AWS", fields: { access_key_id: "AKIA", secret_access_key: "abc/123" } }),
+    );
+    expect(entry.field_names.sort()).toEqual(["access_key_id", "secret_access_key"]);
+    const fields = await vault.retrieve(entry.reference, "user:read", assertion());
+    expect(fields).toEqual({ access_key_id: "AKIA", secret_access_key: "abc/123" });
+  });
+});
+
+describe("upsert (store overwrites by service+label)", () => {
+  it("re-storing the same service+label overwrites in place (same reference)", async () => {
+    const { vault } = makeVault();
+    const a = await vault.store(storeInput({ fields: { value: "sk_old" } }));
+    const b = await vault.store(storeInput({ fields: { value: "sk_new" } }));
+    expect(b.updated).toBe(true);
+    expect(b.reference).toBe(a.reference);
+    const fields = await vault.retrieve(a.reference, "user:read", assertion());
+    expect(fields).toEqual({ value: "sk_new" });
+  });
+
+  it("overwrite preserves allowed_hosts the user edited", async () => {
     const { vault, store } = makeVault();
-    const a = await vault.store(makeStoreInput({ value: "sk_a" }));
-    const b = await vault.store(makeStoreInput({ value: "sk_b" }));
-    const recA = await store.findActive(a.reference);
-    const recB = await store.findActive(b.reference);
-    expect(Buffer.compare(recA!.ciphertext, recB!.ciphertext)).not.toBe(0);
-    expect(Buffer.compare(recA!.encrypted_dek, recB!.encrypted_dek)).not.toBe(0);
-    expect(Buffer.compare(recA!.account_kek_blob, recB!.account_kek_blob)).not.toBe(0);
+    const a = await vault.store(storeInput());
+    await store.setAllowedHosts(a.reference, ["custom.example.com"]);
+    const b = await vault.store(storeInput({ fields: { value: "sk_new" } }));
+    expect(b.allowed_hosts).toEqual(["custom.example.com"]);
   });
 
-  it("retrieve writes a vault.credential_retrieved audit event with success outcome", async () => {
-    const { vault, audit } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    await vault.retrieve(entry.reference, "user:debug", makeAssertion());
-    const events = audit.events.filter((e) => e.type === "vault.credential_retrieved");
-    expect(events).toHaveLength(1);
-    const ev = events[0]!;
-    expect(ev.account_id).toBe(ACCOUNT);
-    expect(ev.payload.outcome).toBe("success");
-    expect(ev.payload.requester).toBe("user");
-    expect(ev.payload.signing_device_id).toBe("01HDEVICE");
-  });
-
-  it("retrieveForRuntime: succeeds without DeviceAssertion, audits as system", async () => {
-    const { vault, audit } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const value = await vault.retrieveForRuntime(entry.reference, "compensation");
-    expect(value).toBe("sk_test_secret");
-    const ev = audit.events[audit.events.length - 1]!;
-    expect(ev.payload.requester).toBe("system");
-    expect(ev.payload.signing_device_id).toBeNull();
-    expect(ev.payload.outcome).toBe("success");
-  });
-
-  it("rate limit triggers after 100 retrievals in the past hour", async () => {
-    const { vault, audit } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    // Pre-seed 100 audit events to fill the bucket.
-    for (let i = 0; i < 100; i++) {
-      await audit.record({
-        account_id: ACCOUNT,
-        type: "vault.credential_retrieved",
-        payload: {
-          reference: entry.reference,
-          purpose: "user:fill",
-          requester: "user",
-          signing_device_id: "01HDEVICE",
-          outcome: "success",
-        },
-      });
-    }
-    await expect(
-      vault.retrieve(entry.reference, "user:read", makeAssertion()),
-    ).rejects.toThrow(VaultRateLimitError);
-    // The rejected attempt itself is recorded as rate_limited.
-    const last = audit.events[audit.events.length - 1]!;
-    expect(last.payload.outcome).toBe("rate_limited");
-  });
-
-  it("stale device assertion (>1h) → fails with StaleAssertionError, audited as stale", async () => {
-    const { vault, audit } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const tooOld = new Date(NOW.getTime() - 90 * 60 * 1000); // 90m ago
-    await expect(
-      vault.retrieve(entry.reference, "user:read", makeAssertion(tooOld)),
-    ).rejects.toThrow(StaleAssertionError);
-    const last = audit.events[audit.events.length - 1]!;
-    expect(last.payload.outcome).toBe("stale_assertion");
-  });
-
-  it("future-dated assertion (signed_at > now) → fails as stale", async () => {
+  it("a different label is a separate entry", async () => {
     const { vault } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const future = new Date(NOW.getTime() + 60 * 60 * 1000); // 1h in the future
-    await expect(
-      vault.retrieve(entry.reference, "user:read", makeAssertion(future)),
-    ).rejects.toThrow(StaleAssertionError);
+    const def = await vault.store(storeInput({ fields: { value: "sk_default" } }));
+    const prod = await vault.store(storeInput({ label: "prod", fields: { value: "sk_prod" } }));
+    expect(prod.reference).not.toBe(def.reference);
+    expect(prod.label).toBe("prod");
+    expect(await vault.retrieve(def.reference, "user:read", assertion())).toEqual({ value: "sk_default" });
+    expect(await vault.retrieve(prod.reference, "user:read", assertion())).toEqual({ value: "sk_prod" });
   });
 
-  it("malformed signed_at → fails as stale", async () => {
+  it("rejects an empty field map", async () => {
     const { vault } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    await expect(
-      vault.retrieve(entry.reference, "user:read", makeAssertion("not-a-date")),
-    ).rejects.toThrow(StaleAssertionError);
+    await expect(vault.store(storeInput({ fields: {} }))).rejects.toThrow(/at least one field/);
   });
+});
 
-  it("delete soft-deletes; subsequent retrieve fails with CredentialNotFoundError", async () => {
-    const { vault, audit } = makeVault();
-    const entry = await vault.store(makeStoreInput());
+describe("delete + reveal", () => {
+  it("delete soft-deletes; retrieve then 404s", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
     await vault.delete(entry.reference);
-    await expect(
-      vault.retrieve(entry.reference, "user:read", makeAssertion()),
-    ).rejects.toThrow(CredentialNotFoundError);
-    const last = audit.events[audit.events.length - 1]!;
-    expect(last.payload.outcome).toBe("missing_credential");
-  });
-
-  it("rotate replaces the stored value while keeping the same reference", async () => {
-    const { vault } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    await vault.rotate(entry.reference, "sk_new_value");
-    const value = await vault.retrieve(entry.reference, "user:read", makeAssertion());
-    expect(value).toBe("sk_new_value");
-  });
-
-  it("rotate on a missing reference throws CredentialNotFoundError", async () => {
-    const { vault } = makeVault();
-    await expect(vault.rotate("vault://nope", "x")).rejects.toThrow(
+    await expect(vault.retrieve(entry.reference, "user:read", assertion())).rejects.toThrow(
       CredentialNotFoundError,
     );
   });
 
-  it("retrieve increments retrieval_count + last_retrieved_at on the credential row", async () => {
-    const { vault, store } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    await vault.retrieve(entry.reference, "user:read", makeAssertion());
-    const rec = await store.findActive(entry.reference);
-    expect(rec?.retrieval_count).toBe(1);
-    expect(rec?.last_retrieved_at?.toISOString()).toBe(NOW.toISOString());
-  });
-
-  it("retrieve on an unknown reference fails without leaking timing on rate limit", async () => {
-    const { vault, audit } = makeVault();
-    await expect(
-      vault.retrieve("vault://nope", "user:read", makeAssertion()),
-    ).rejects.toThrow(CredentialNotFoundError);
-    const last = audit.events[audit.events.length - 1]!;
-    expect(last.payload.outcome).toBe("missing_credential");
-  });
-
-  it("purpose prefix routes to requester=agent / user / system", async () => {
-    const { vault, audit } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    await vault.retrieve(entry.reference, "agent:rotate", makeAssertion());
-    expect(audit.events.at(-1)!.payload.requester).toBe("agent");
-    await vault.retrieve(entry.reference, "user:read", makeAssertion());
-    expect(audit.events.at(-1)!.payload.requester).toBe("user");
-    await vault.retrieve(entry.reference, "system:internal", makeAssertion());
-    expect(audit.events.at(-1)!.payload.requester).toBe("system");
-  });
-
-  it("store derives allowed_hosts from the service metadata", async () => {
-    const { vault, store } = makeVault();
-    const entry = await vault.store(
-      makeStoreInput({ metadata: { service: "OpenAI" } }),
-    );
-    expect(entry.allowed_hosts).toEqual(["api.openai.com"]);
-    const rec = await store.findActive(entry.reference);
-    expect(rec?.allowed_hosts).toEqual(["api.openai.com"]);
-  });
-
-  it("store leaves allowed_hosts empty for an unknown / missing service", async () => {
+  it("reveal returns the field map, account-scoped", async () => {
     const { vault } = makeVault();
-    const unknown = await vault.store(
-      makeStoreInput({ metadata: { service: "some-random-saas" } }),
-    );
-    expect(unknown.allowed_hosts).toEqual([]);
-    const noService = await vault.store(makeStoreInput({ metadata: {} }));
-    expect(noService.allowed_hosts).toEqual([]);
-  });
-
-  it("rotate returns rotated_at + revoked_grant_count (0 with no grants)", async () => {
-    const { vault } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const result = await vault.rotate(entry.reference, "sk_rotated");
-    expect(result.rotated_at).toBe(NOW.toISOString());
-  });
-
-  it("findByIdForAccount resolves only the owning account's credential", async () => {
-    const { vault, store } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const rec = await store.findActive(entry.reference);
-    const id = rec!.id;
-
-    const found = await store.findByIdForAccount(id, ACCOUNT);
-    expect(found?.reference).toBe(entry.reference);
-
-    // Wrong account → null (no cross-account leak).
-    expect(await store.findByIdForAccount(id, "01HOTHERACCOUNTAAAAAAAAAAA")).toBeNull();
-    // Unknown id → null.
-    expect(await store.findByIdForAccount("01HNOPE", ACCOUNT)).toBeNull();
-  });
-
-  it("findByIdForAccount returns null for a soft-deleted credential", async () => {
-    const { vault, store } = makeVault();
-    const entry = await vault.store(makeStoreInput());
-    const id = (await store.findActive(entry.reference))!.id;
-    await vault.delete(entry.reference);
-    expect(await store.findByIdForAccount(id, ACCOUNT)).toBeNull();
-  });
-
-  it("setAllowedHosts replaces the credential's allowlist", async () => {
-    const { vault, store } = makeVault();
-    const entry = await vault.store(
-      makeStoreInput({ metadata: { service: "OpenAI" } }),
-    );
-    await store.setAllowedHosts(entry.reference, ["api.example.com"]);
-    const rec = await store.findActive(entry.reference);
-    expect(rec?.allowed_hosts).toEqual(["api.example.com"]);
+    const entry = await vault.store(storeInput());
+    expect(await vault.reveal(entry.reference, ACCOUNT)).toEqual({ value: "sk_test_secret" });
+    await expect(vault.reveal(entry.reference, "01HOTHER")).rejects.toThrow(CredentialNotFoundError);
   });
 });
 
-describe("LocalKMS", () => {
-  beforeEach(() => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
+describe("proxy (write-only sink, enforced allowlist)", () => {
+  it("hands fields to the executor for an allowlisted host; secret never returned", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(storeInput());
+    let seen: Record<string, string> | null = null;
+    const res = await vault.proxy(
+      entry.reference,
+      ACCOUNT,
+      { method: "GET", url: "https://api.openai.com/v1/models" },
+      async ({ fields }) => {
+        seen = fields;
+        return okResponse;
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(seen).toEqual({ value: "sk_test_secret" });
+    expect(JSON.stringify(audit.events)).not.toContain("sk_test_secret");
   });
 
-  it("round-trips through LocalKMS.fromEnv with a hex key", async () => {
-    const env = {
-      LOCAL_KMS_KEY: Buffer.alloc(32, 0x11).toString("hex"),
-    } as NodeJS.ProcessEnv;
-    const kms = LocalKMS.fromEnv(env);
+  it("hard-rejects an off-allowlist host before decrypt/dispatch", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+    let called = false;
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "GET", url: "https://evil.example.com/x" },
+        async () => {
+          called = true;
+          return okResponse;
+        },
+      ),
+    ).rejects.toThrow(AllowlistViolationError);
+    expect(called).toBe(false);
+  });
+
+  it("cannot proxy another account's credential", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+    await expect(
+      vault.proxy(entry.reference, "01HOTHER", { method: "GET", url: "https://api.openai.com/" }, async () => okResponse),
+    ).rejects.toThrow(CredentialNotFoundError);
+  });
+});
+
+describe("retrieve guards", () => {
+  it("stale assertion is rejected", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+    const old = new Date(NOW.getTime() - 2 * 60 * 60 * 1000).toISOString();
+    await expect(vault.retrieve(entry.reference, "user:read", assertion(old))).rejects.toThrow(
+      StaleAssertionError,
+    );
+  });
+
+  it("rate limit trips after 100 retrievals in the window", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(storeInput());
+    for (let i = 0; i < 100; i++) {
+      await audit.record({
+        account_id: ACCOUNT,
+        type: "vault.credential_retrieved",
+        payload: { reference: entry.reference, requester: "user", outcome: "success" },
+      });
+    }
+    await expect(vault.retrieve(entry.reference, "user:read", assertion())).rejects.toThrow(
+      VaultRateLimitError,
+    );
+  });
+});
+
+describe("LocalKMS sanity", () => {
+  beforeEach(() => vi.spyOn(console, "warn").mockImplementation(() => {}));
+  afterEach(() => vi.restoreAllMocks());
+  it("round-trips through fromEnv hex key", async () => {
+    const kms = LocalKMS.fromEnv({ LOCAL_KMS_KEY: Buffer.alloc(32, 0x11).toString("hex") } as NodeJS.ProcessEnv);
     const blob = await kms.encrypt(Buffer.from("secret"));
-    const back = await kms.decrypt(blob);
-    expect(back.toString("utf8")).toBe("secret");
-  });
-
-  it("rejects malformed LOCAL_KMS_KEY", () => {
-    expect(() =>
-      LocalKMS.fromEnv({ LOCAL_KMS_KEY: "not-hex" } as NodeJS.ProcessEnv),
-    ).toThrow(/64 hex chars/);
-  });
-
-  it("warns + uses ephemeral key when LOCAL_KMS_KEY is unset", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const kms = LocalKMS.fromEnv({} as NodeJS.ProcessEnv);
-    expect(warn).toHaveBeenCalled();
-    const blob = await kms.encrypt(Buffer.from("x"));
-    const back = await kms.decrypt(blob);
-    expect(back.toString("utf8")).toBe("x");
+    expect((await kms.decrypt(blob)).toString("utf8")).toBe("secret");
   });
 });

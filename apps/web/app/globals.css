@@ -502,3 +502,23 @@ footer{border-top:1px solid var(--line);padding:34px 0}
   line-height:1.5}
 .modal .form{margin-top:16px}
 
+
+/* ===================== credential form v2 ===================== */
+.cred-form{max-width:440px}
+.field-row-actions{display:flex;gap:14px;margin-top:7px}
+.field-pair{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.field-pair .field-name{flex:0 0 38%}
+.field-pair input{flex:1;font:inherit;font-size:12.5px;font-family:var(--mono);
+  background:var(--surface);border:1px solid var(--line2);border-radius:9px;
+  padding:10px 12px;color:var(--fg)}
+.field-pair input:focus{outline:none;border-color:var(--accent)}
+.field-remove{flex:0 0 auto;font:inherit;font-size:13px;cursor:pointer;
+  background:none;border:0;color:var(--faint);padding:6px 8px;border-radius:7px}
+.field-remove:hover{color:#ff6b6b}
+.disclose{font:inherit;font-size:13px;color:var(--muted);background:none;border:0;
+  cursor:pointer;padding:4px 0;text-align:left;width:max-content}
+.disclose:hover{color:var(--fg)}
+.row-tag{margin-left:8px;font-family:var(--mono);font-size:10.5px;color:var(--accent);
+  border:1px solid rgba(139,137,255,.4);border-radius:6px;padding:1px 6px;
+  vertical-align:1px}
+.reveal-fields{margin-top:7px;display:flex;flex-direction:column;gap:5px}

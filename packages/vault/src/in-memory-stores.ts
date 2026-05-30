@@ -1,8 +1,5 @@
 // In-memory implementations of CredentialStore + VaultAuditStore.
-//
-// Used by tests + early dev. Production wires Prisma-backed
-// implementations (intentionally not in this package — that's a deploy
-// concern; this package keeps its dependency surface minimal).
+// Used by tests + early dev; production wires Prisma-backed equivalents.
 
 import { Buffer } from "node:buffer";
 import { ulid } from "ulid";
@@ -30,6 +27,24 @@ export class InMemoryCredentialStore implements CredentialStore {
     return clone(r);
   }
 
+  async findActiveByServiceLabel(
+    accountId: string,
+    service: string,
+    label: string,
+  ): Promise<CredentialRecord | null> {
+    const want = service.toLowerCase();
+    const matches = [...this.byReference.values()].filter(
+      (r) =>
+        r.account_id === accountId &&
+        r.deleted_at === null &&
+        r.label === label &&
+        typeof r.metadata.service === "string" &&
+        (r.metadata.service as string).toLowerCase() === want,
+    );
+    matches.sort((a, b) => b.created_at.getTime() - a.created_at.getTime());
+    return matches[0] === undefined ? null : clone(matches[0]);
+  }
+
   async markRetrieved(reference: string, retrievedAt: Date): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
@@ -43,11 +58,23 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.deleted_at = deletedAt;
   }
 
-  async rotate(reference: string, ciphertext: Buffer, rotatedAt: Date): Promise<void> {
+  async replaceSecret(
+    reference: string,
+    payload: {
+      ciphertext: Buffer;
+      encrypted_dek: Buffer;
+      account_kek_blob: Buffer;
+      field_names: string[];
+      rotatedAt: Date;
+    },
+  ): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) throw new Error(`credential not found: ${reference}`);
-    r.ciphertext = Buffer.from(ciphertext);
-    r.rotated_at = rotatedAt;
+    r.ciphertext = Buffer.from(payload.ciphertext);
+    r.encrypted_dek = Buffer.from(payload.encrypted_dek);
+    r.account_kek_blob = Buffer.from(payload.account_kek_blob);
+    r.field_names = [...payload.field_names];
+    r.rotated_at = payload.rotatedAt;
   }
 
   async listByAccount(accountId: string): Promise<CredentialRecord[]> {
@@ -109,10 +136,11 @@ function clonePayload(p: VaultAuditPayload): VaultAuditPayload {
 function clone<T extends CredentialRecord>(r: T): T {
   return {
     ...r,
+    field_names: [...r.field_names],
+    allowed_hosts: [...r.allowed_hosts],
     ciphertext: Buffer.from(r.ciphertext),
     encrypted_dek: Buffer.from(r.encrypted_dek),
     account_kek_blob: Buffer.from(r.account_kek_blob),
-    allowed_hosts: [...r.allowed_hosts],
     metadata: { ...r.metadata },
   };
 }

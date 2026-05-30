@@ -76,7 +76,7 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       method: "PATCH",
       url: `/v1/vault/credentials/${id}`,
       headers: { cookie, "content-type": "application/json" },
-      payload: { new_value: "sk-rotated-value" },
+      payload: { value: "sk-rotated-value" },
     });
     expect(rotate.statusCode).toBe(200);
     const body = rotate.json() as { rotated_at: string };
@@ -99,7 +99,7 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       method: "PATCH",
       url: `/v1/vault/credentials/${id}`,
       headers: { cookie, "content-type": "application/json" },
-      payload: { new_value: "" },
+      payload: { value: "" },
     });
     expect(res.statusCode).toBe(400);
   });
@@ -111,7 +111,7 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       method: "PATCH",
       url: `/v1/vault/credentials/01HNONEXISTENTAAAAAAAAAAAA`,
       headers: { cookie, "content-type": "application/json" },
-      payload: { new_value: "sk-x" },
+      payload: { value: "sk-x" },
     });
     expect(res.statusCode).toBe(404);
   });
@@ -127,7 +127,7 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       method: "PATCH",
       url: `/v1/vault/credentials/${idA}`,
       headers: { cookie: cookieB, "content-type": "application/json" },
-      payload: { new_value: "sk-hijack" },
+      payload: { value: "sk-hijack" },
     });
     expect(res.statusCode).toBe(404);
 

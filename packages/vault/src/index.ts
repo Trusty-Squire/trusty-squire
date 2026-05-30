@@ -17,6 +17,7 @@ export {
   StaleAssertionError,
   VaultRateLimitError,
   AllowlistViolationError,
+  DEFAULT_LABEL,
   type CredentialVaultDeps,
   type VaultEntry,
   type VaultStoreInput,

@@ -100,8 +100,10 @@ interface CredentialRow {
   reference: string;
   account_id: string;
   subscription_id: string;
-  type: string;
+  type: string | null;
   env_var_suggestion: string | null;
+  label: string;
+  field_names: string[];
   allowed_hosts: string[];
   ciphertext: Buffer;
   encrypted_dek: Buffer;

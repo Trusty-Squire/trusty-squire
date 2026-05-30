@@ -39,10 +39,13 @@ Routing rules for THIS server's tools:
 - User refers to a saved credential by name or service ('my OpenAI key',
   'the Stripe token') → call list_credentials to resolve the reference.
 - User wants an authenticated API call → call use_credential with the
-  service/reference + the HTTP request, using \${SECRET} / \${SECRET_JSON}
-  placeholders. The server injects the secret and returns only the
-  upstream response; you never see the value. The target host must be on
-  the credential's allowed_hosts (the user edits it in the web vault).
+  service/reference + the HTTP request, using \${SECRET} (single-field)
+  or \${SECRET.<field>} (multi-field) placeholders. The server injects
+  the secret and returns only the upstream response; you never see the
+  value. The target host must be on the credential's allowed_hosts.
+- Rotating a key = call store_credential again with the new value (it
+  overwrites). You cannot rotate or delete credentials directly — delete
+  is done by the user in the web vault.
 - There is NO way to extract a raw secret value to you — by design. If a
   user wants the plaintext (e.g. for a .env file), they read it from the
   Trusty Squire web vault themselves.`;

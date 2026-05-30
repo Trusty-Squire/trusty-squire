@@ -25,12 +25,15 @@ const inputSchema = z
 
 const DESCRIPTION = `Execute an authenticated HTTP request against an external API using a
 vaulted credential. The secret value NEVER crosses to this agent — the
-server injects it via \${SECRET} or \${SECRET_JSON} placeholders in your
-headers/body and returns only the upstream response. Pass \`service\` or
-\`reference\` plus the standard HTTP fields (method, url, headers, body).
-This is the ONLY way to use a stored secret: there is no raw-value
-extraction. The target host must be on the credential's allowed_hosts
-(editable in the Trusty Squire web vault) or the call is rejected.`;
+server injects it and returns only the upstream response. In your
+headers/body use \${SECRET} for a single-field credential, or
+\${SECRET.<field>} for a multi-field one (e.g. \${SECRET.access_key_id},
+\${SECRET.secret_access_key}); \${SECRET_JSON[.field]} JSON-escapes. Call
+list_credentials to see a credential's field names. Pass \`service\` or
+\`reference\` plus the HTTP fields (method, url, headers, body). This is
+the ONLY way to use a stored secret — there is no raw-value extraction.
+The target host must be on the credential's allowed_hosts (editable in
+the web vault) or the call is rejected.`;
 
 export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "use_credential",

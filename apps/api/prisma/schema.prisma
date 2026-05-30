@@ -252,12 +252,15 @@ model Credential {
   reference          String    @unique
   account_id         String    @db.VarChar(26)
   subscription_id    String
-  type               String
+  type               String?
   env_var_suggestion String?
-  // Advisory host allowlist for the use_credential proxy. Seeded at
-  // store-time from the service name; user-editable from /vault. The
-  // proxy warns (not blocks) on off-allowlist hosts for trusted
-  // sessions. See packages/vault/src/service-hosts.ts.
+  // One entry per (account, service, label); label defaults "default".
+  label              String    @default("default")
+  // Plaintext names of the secret fields (NOT secret). ciphertext
+  // encrypts a JSON object { [field]: value }. A lone key is ["value"].
+  field_names        String[]  @default([])
+  // ENFORCED host allowlist for the use_credential proxy — off-allowlist
+  // is hard-rejected. Seeded from service name; user-editable in /vault.
   allowed_hosts      String[]  @default([])
   ciphertext         Bytes
   encrypted_dek      Bytes

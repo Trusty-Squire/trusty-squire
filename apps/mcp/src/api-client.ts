@@ -83,8 +83,11 @@ export interface VaultCredentialSummary {
   id: string;
   reference: string;
   service: string | null;
+  label: string;
+  field_names: string[];
   key_name: string | null;
-  type: string;
+  type: string | null;
+  allowed_hosts: string[];
   created_at: string;
   last_retrieved_at: string | null;
   retrieval_count: number;

@@ -1,5 +1,6 @@
-// PR-8 — agent-driven vault management by reference (store_credential /
-// rotate_credential / delete_credential MCP tools' HTTP surface).
+// Agent vault writes: store is an upsert (create, then overwrite the
+// same service+label). Agents have no rotate/delete (those routes are
+// gone — rotation = re-store; delete is web-only).
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
@@ -32,17 +33,7 @@ async function agentToken(deps: ApiDeps, accountId: string): Promise<string> {
   return raw_token;
 }
 
-async function store(h: Harness, token: string): Promise<string> {
-  const res = await h.server.inject({
-    method: "POST",
-    url: "/v1/vault/credentials",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    payload: { service: "OpenAI", value: "sk-original", type: "api_key" },
-  });
-  return (res.json() as { reference: string }).reference;
-}
-
-describe("agent vault management by reference", () => {
+describe("agent store (upsert)", () => {
   let h: Harness;
   beforeEach(async () => {
     h = await setup();
@@ -51,7 +42,7 @@ describe("agent vault management by reference", () => {
     await h.server.close();
   });
 
-  it("store returns allowed_hosts + created_at", async () => {
+  it("first store creates (201) with field_names + allowed_hosts", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const token = await agentToken(h.deps, account.id);
     const res = await h.server.inject({
@@ -61,60 +52,65 @@ describe("agent vault management by reference", () => {
       payload: { service: "OpenAI", value: "sk-x", type: "api_key" },
     });
     expect(res.statusCode).toBe(201);
-    const body = res.json() as { reference: string; allowed_hosts: string[]; created_at: string };
+    const body = res.json() as { service: string; label: string; field_names: string[]; allowed_hosts: string[]; updated: boolean };
+    expect(body.service).toBe("OpenAI");
+    expect(body.label).toBe("default");
+    expect(body.field_names).toEqual(["value"]);
     expect(body.allowed_hosts).toEqual(["api.openai.com"]);
-    expect(typeof body.created_at).toBe("string");
+    expect(body.updated).toBe(false);
   });
 
-  it("rotate by reference returns rotated_at + revoked_grant_count", async () => {
+  it("re-store of the same service overwrites (200, updated:true), no duplicate row", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const token = await agentToken(h.deps, account.id);
-    const reference = await store(h, token);
-    const res = await h.server.inject({
-      method: "POST",
-      url: "/v1/vault/credentials/rotate",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: { reference, new_value: "sk-rotated" },
+    const post = (value: string) =>
+      h.server.inject({
+        method: "POST",
+        url: "/v1/vault/credentials",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        payload: { service: "OpenAI", value },
+      });
+    const first = await post("sk-old");
+    const second = await post("sk-new");
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(200);
+    expect((second.json() as { updated: boolean }).updated).toBe(true);
+
+    const list = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/credentials",
+      headers: { authorization: `Bearer ${token}` },
     });
-    expect(res.statusCode).toBe(200);
-    expect(typeof (res.json() as { rotated_at: string }).rotated_at).toBe("string");
+    expect((list.json() as { credentials: unknown[] }).credentials).toHaveLength(1);
   });
 
-  it("delete by reference returns deleted_at", async () => {
+  it("stores a multi-field credential", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const token = await agentToken(h.deps, account.id);
-    const reference = await store(h, token);
     const res = await h.server.inject({
       method: "POST",
-      url: "/v1/vault/credentials/delete",
+      url: "/v1/vault/credentials",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: { reference },
+      payload: { service: "AWS", fields: { access_key_id: "AKIA", secret_access_key: "shh" } },
     });
-    expect(res.statusCode).toBe(200);
-    expect(typeof (res.json() as { deleted_at: string }).deleted_at).toBe("string");
+    expect(res.statusCode).toBe(201);
+    expect((res.json() as { field_names: string[] }).field_names.sort()).toEqual([
+      "access_key_id",
+      "secret_access_key",
+    ]);
   });
 
-  it("cannot rotate/delete another account's credential (404)", async () => {
-    const a = await h.deps.accountStore.createAccount("a@example.test", "A");
-    const b = await h.deps.accountStore.createAccount("b@example.test", "B");
-    const tokenA = await agentToken(h.deps, a.id);
-    const tokenB = await agentToken(h.deps, b.id);
-    const refA = await store(h, tokenA);
-
-    const rot = await h.server.inject({
-      method: "POST",
-      url: "/v1/vault/credentials/rotate",
-      headers: { authorization: `Bearer ${tokenB}`, "content-type": "application/json" },
-      payload: { reference: refA, new_value: "sk-hijack" },
-    });
-    expect(rot.statusCode).toBe(404);
-
-    const del = await h.server.inject({
-      method: "POST",
-      url: "/v1/vault/credentials/delete",
-      headers: { authorization: `Bearer ${tokenB}`, "content-type": "application/json" },
-      payload: { reference: refA },
-    });
-    expect(del.statusCode).toBe(404);
+  it("the removed agent rotate/delete routes are gone (404)", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const token = await agentToken(h.deps, account.id);
+    for (const url of ["/v1/vault/credentials/rotate", "/v1/vault/credentials/delete"]) {
+      const res = await h.server.inject({
+        method: "POST",
+        url,
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        payload: { reference: "vault://x", new_value: "y" },
+      });
+      expect(res.statusCode).toBe(404);
+    }
   });
 });

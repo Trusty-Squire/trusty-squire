@@ -1,19 +1,17 @@
-// CredentialVault — the encrypted credential store, modelled as a
-// write-only secret sink.
+// CredentialVault — encrypted credential store, write-only sink, with
+// multi-field credentials.
 //
-// Trust model (0.8.4): a stored secret can be STORED, ROTATED, DELETED,
-// revealed to the authenticated HUMAN (web reveal), and USED server-side
-// via the use_credential proxy — but it is NEVER handed back to an agent.
-// The proxy injects the secret into an outbound HTTP call and returns
-// only the upstream response; the plaintext never enters the agent's
-// context. The proxy HARD-ENFORCES the credential's host allowlist, so a
-// secret can only ever reach destinations the user pre-authorised — the
-// same posture as GitHub/Fly secrets (ingest + use, never regurgitate,
-// never redirect). There is deliberately no "extract the raw value to an
-// agent" path, which removes the prompt-injection / exfiltration jackpot
-// and is why per-call approvals are unnecessary.
+// An entry is unique per (account, service, label) and holds a MAP of
+// named secret fields (AWS = {access_key_id, secret_access_key};
+// a lone key = {value}). The ciphertext encrypts JSON.stringify(fields);
+// field NAMES are stored plaintext (they aren't secret). `store` is an
+// UPSERT: re-storing the same (service,label) overwrites the fields —
+// that IS rotation, so there's no separate rotate verb.
 //
-// Encryption: AES-256-GCM throughout; per-credential KEK is KMS-encrypted.
+// The secret is NEVER returned to an agent. `use_credential` injects
+// fields server-side via ${SECRET} / ${SECRET.<field>} and returns only
+// the upstream response; the proxy hard-enforces the host allowlist.
+// Human-only paths (web): reveal, delete, allowlist edits, field edits.
 
 import { Buffer } from "node:buffer";
 import { ulid } from "ulid";
@@ -37,21 +35,29 @@ import type {
 } from "./types.js";
 import { VAULT_AUDIT_TYPES } from "./types.js";
 
+export const DEFAULT_LABEL = "default";
+
 export interface VaultStoreInput {
   account_id: string;
   subscription_id: string;
-  type: CredentialType;
-  value: string;
-  env_var_suggestion: string | null;
-  metadata: Record<string, unknown>;
+  service: string;
+  label?: string;
+  // The named secret fields. A lone API key is { value: "sk-…" }.
+  fields: Record<string, string>;
+  type?: CredentialType | null;
+  env_var_suggestion?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 export interface VaultEntry {
   reference: string;
-  type: CredentialType;
-  created_at: string;
-  // The host allowlist derived for this credential at store time.
+  service: string;
+  label: string;
+  field_names: string[];
   allowed_hosts: string[];
+  created_at: string;
+  // false on first create, true when an existing entry was overwritten.
+  updated: boolean;
 }
 
 export interface RotateResult {
@@ -64,9 +70,6 @@ export interface DeviceAssertion {
   signing_device_id: string;
 }
 
-// use_credential proxy plumbing. The executor itself (SSRF guards,
-// secret substitution, sockets) lives in the API layer — the vault
-// stays network-free and receives it as an injected function.
 export interface ProxyHttpTemplate {
   method: string;
   url: string;
@@ -79,10 +82,12 @@ export interface ProxyResponse {
   body: string;
   truncated: boolean;
 }
+// The executor receives the decrypted field MAP and does the
+// ${SECRET.<field>} substitution + network dispatch (API layer).
 export type ProxyExecutor = (input: {
   accountId: string;
   http: ProxyHttpTemplate;
-  secret: string;
+  fields: Record<string, string>;
 }) => Promise<ProxyResponse>;
 
 export interface VaultClient {
@@ -91,14 +96,16 @@ export interface VaultClient {
     reference: string,
     purpose: string,
     deviceAssertion: DeviceAssertion,
-  ): Promise<string>;
-  retrieveForRuntime(reference: string, purpose: string): Promise<string>;
+  ): Promise<Record<string, string>>;
+  retrieveForRuntime(
+    reference: string,
+    purpose: string,
+  ): Promise<Record<string, string>>;
   delete(reference: string): Promise<void>;
-  rotate(reference: string, newValue: string): Promise<RotateResult>;
 }
 
-const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000; // 1h
-const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1h
+const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000;
+const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const RATE_LIMIT_MAX = 100;
 
 export class VaultRateLimitError extends Error {
@@ -107,34 +114,26 @@ export class VaultRateLimitError extends Error {
     this.name = "VaultRateLimitError";
   }
 }
-
 export class StaleAssertionError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "StaleAssertionError";
   }
 }
-
 export class CredentialNotFoundError extends Error {
   constructor(reference: string) {
     super(`credential not found or deleted: ${reference}`);
     this.name = "CredentialNotFoundError";
   }
 }
-
-// The use_credential proxy was asked to call a host that isn't on the
-// credential's allowlist. Hard-rejected before any upstream dispatch —
-// this is what makes the vault a true write-only sink (the secret can't
-// be redirected to an attacker-chosen destination). The API maps it to
-// 403 with guidance to edit the allowlist in /vault.
+// use_credential asked to call a host not on the entry's allowlist —
+// hard-rejected before decrypt/dispatch. API maps to 403.
 export class AllowlistViolationError extends Error {
   constructor(
     public readonly reference: string,
     public readonly host: string | null,
   ) {
-    super(
-      `host ${host ?? "(unparseable)"} is not on the credential's allowed_hosts`,
-    );
+    super(`host ${host ?? "(unparseable)"} is not on the credential's allowed_hosts`);
     this.name = "AllowlistViolationError";
   }
 }
@@ -143,43 +142,70 @@ export interface CredentialVaultDeps {
   store: CredentialStore;
   audit: VaultAuditStore;
   kms: KMSClient;
-  // Clock injection for tests; production reads system time.
   now?: () => Date;
 }
 
 export class CredentialVault implements VaultClient {
   constructor(private readonly deps: CredentialVaultDeps) {}
 
+  // Upsert by (account, service, label). Creates on first write;
+  // overwrites the field set (= rotation) on subsequent writes, keeping
+  // the existing reference, allowed_hosts, and label.
   async store(input: VaultStoreInput): Promise<VaultEntry> {
-    const reference = `vault://${input.account_id}/${input.subscription_id}/${ulid()}`;
-    const aadValue = aadForValue(reference, input.account_id);
-    const aadDek = aadForDek(reference, input.account_id);
-
-    const kek = generateKey();
-    const dek = generateKey();
-    const ciphertext = encryptAesGcm(dek, Buffer.from(input.value, "utf8"), aadValue);
-    const encryptedDek = encryptAesGcm(kek, dek, aadDek);
-    const kekBlob = await this.deps.kms.encrypt(kek);
-
-    // Seed the enforced host allowlist from the service name.
-    const service =
-      typeof input.metadata.service === "string" ? input.metadata.service : null;
-    const allowedHosts = deriveAllowedHosts(service);
-
+    const label = input.label ?? DEFAULT_LABEL;
+    const fieldNames = Object.keys(input.fields);
+    if (fieldNames.length === 0) {
+      throw new Error("store requires at least one field");
+    }
     const now = this.now();
+    const existing = await this.deps.store.findActiveByServiceLabel(
+      input.account_id,
+      input.service,
+      label,
+    );
+
+    if (existing !== null) {
+      const env = await this.encryptFields(existing.reference, input.account_id, input.fields);
+      await this.deps.store.replaceSecret(existing.reference, {
+        ...env,
+        field_names: fieldNames,
+        rotatedAt: now,
+      });
+      await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
+        reference: existing.reference,
+        requester: "user",
+        service: input.service,
+        label,
+      });
+      return {
+        reference: existing.reference,
+        service: input.service,
+        label,
+        field_names: fieldNames,
+        allowed_hosts: existing.allowed_hosts,
+        created_at: existing.created_at.toISOString(),
+        updated: true,
+      };
+    }
+
+    const reference = `vault://${input.account_id}/${input.subscription_id}/${ulid()}`;
+    const env = await this.encryptFields(reference, input.account_id, input.fields);
+    const allowedHosts = deriveAllowedHosts(input.service);
     const record: CredentialRecord = {
       id: ulid(),
       reference,
       account_id: input.account_id,
       subscription_id: input.subscription_id,
-      type: input.type,
-      env_var_suggestion: input.env_var_suggestion,
+      label,
+      type: input.type ?? null,
+      env_var_suggestion: input.env_var_suggestion ?? null,
+      field_names: fieldNames,
       allowed_hosts: allowedHosts,
-      ciphertext,
-      encrypted_dek: encryptedDek,
-      account_kek_blob: kekBlob,
+      ciphertext: env.ciphertext,
+      encrypted_dek: env.encrypted_dek,
+      account_kek_blob: env.account_kek_blob,
       algorithm: "AES-256-GCM",
-      metadata: input.metadata,
+      metadata: { ...(input.metadata ?? {}), service: input.service },
       rotated_at: null,
       retrieval_count: 0,
       last_retrieved_at: null,
@@ -187,29 +213,57 @@ export class CredentialVault implements VaultClient {
       created_at: now,
     };
     await this.deps.store.insert(record);
-
-    kek.fill(0);
-    dek.fill(0);
-
     await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
       reference,
       requester: "system",
-      credential_type: input.type,
+      service: input.service,
+      label,
+      ...(input.type !== undefined && input.type !== null ? { credential_type: input.type } : {}),
     });
-
     return {
       reference,
-      type: input.type,
-      created_at: now.toISOString(),
+      service: input.service,
+      label,
+      field_names: fieldNames,
       allowed_hosts: allowedHosts,
+      created_at: now.toISOString(),
+      updated: false,
     };
+  }
+
+  // Web-only: replace an existing entry's fields, by reference,
+  // account-scoped (the field editor / single-value rotate).
+  async replaceFields(
+    reference: string,
+    accountId: string,
+    fields: Record<string, string>,
+  ): Promise<RotateResult> {
+    const existing = await this.deps.store.findActive(reference);
+    if (existing === null || existing.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    if (Object.keys(fields).length === 0) {
+      throw new Error("at least one field is required");
+    }
+    const now = this.now();
+    const env = await this.encryptFields(reference, accountId, fields);
+    await this.deps.store.replaceSecret(reference, {
+      ...env,
+      field_names: Object.keys(fields),
+      rotatedAt: now,
+    });
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.rotated, {
+      reference,
+      requester: "user",
+    });
+    return { rotated_at: now.toISOString() };
   }
 
   async retrieve(
     reference: string,
     purpose: string,
     deviceAssertion: DeviceAssertion,
-  ): Promise<string> {
+  ): Promise<Record<string, string>> {
     return this.retrieveInternal({
       reference,
       purpose,
@@ -219,7 +273,10 @@ export class CredentialVault implements VaultClient {
     });
   }
 
-  async retrieveForRuntime(reference: string, purpose: string): Promise<string> {
+  async retrieveForRuntime(
+    reference: string,
+    purpose: string,
+  ): Promise<Record<string, string>> {
     return this.retrieveInternal({
       reference,
       purpose,
@@ -227,6 +284,23 @@ export class CredentialVault implements VaultClient {
       signingDeviceId: null,
       assertion: null,
     });
+  }
+
+  // Web-only reveal: account-scoped, returns the field map. Audited.
+  async reveal(reference: string, accountId: string): Promise<Record<string, string>> {
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    const fields = await this.decryptFields(record);
+    await this.deps.store.markRetrieved(reference, this.now());
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
+      reference,
+      purpose: "user:vault_reveal",
+      requester: "user",
+      outcome: "success",
+    });
+    return fields;
   }
 
   async delete(reference: string): Promise<void> {
@@ -238,33 +312,9 @@ export class CredentialVault implements VaultClient {
     });
   }
 
-  async rotate(reference: string, newValue: string): Promise<RotateResult> {
-    const existing = await this.deps.store.findActive(reference);
-    if (existing === null) throw new CredentialNotFoundError(reference);
-    // Reuse the same KEK/DEK envelope — only the ciphertext changes.
-    const kek = await this.deps.kms.decrypt(existing.account_kek_blob);
-    const aadDek = aadForDek(reference, existing.account_id);
-    const dek = decryptAesGcm(kek, existing.encrypted_dek, aadDek);
-    const aadValue = aadForValue(reference, existing.account_id);
-    const newCiphertext = encryptAesGcm(dek, Buffer.from(newValue, "utf8"), aadValue);
-    const rotatedAt = this.now();
-    await this.deps.store.rotate(reference, newCiphertext, rotatedAt);
-    kek.fill(0);
-    dek.fill(0);
-    await this.recordAudit(existing.account_id, VAULT_AUDIT_TYPES.rotated, {
-      reference,
-      requester: "user",
-    });
-    return { rotated_at: rotatedAt.toISOString() };
-  }
-
-  // ── use_credential: server-side proxy (write-only sink) ──────
-  //
-  // Decrypt the secret, hand it + the request to the injected executor,
-  // return only the upstream response. The secret never returns to the
-  // caller. The target host is HARD-CHECKED against the credential's
-  // allowed_hosts before anything is decrypted or dispatched — an
-  // off-allowlist host is rejected (the secret can't be redirected).
+  // use_credential: decrypt fields, hand them + the request to the
+  // injected executor (which substitutes ${SECRET.<field>}), return only
+  // the upstream response. Host hard-checked against allowed_hosts first.
   async proxy(
     reference: string,
     accountId: string,
@@ -275,7 +325,6 @@ export class CredentialVault implements VaultClient {
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
-
     const targetHost = safeHost(http.url);
     if (targetHost === null || !record.allowed_hosts.includes(targetHost)) {
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
@@ -285,11 +334,10 @@ export class CredentialVault implements VaultClient {
       });
       throw new AllowlistViolationError(reference, targetHost);
     }
-
-    const secret = await this.decryptRecord(record);
+    const fields = await this.decryptFields(record);
     const startedAt = this.now().getTime();
     try {
-      const response = await executor({ accountId, http, secret });
+      const response = await executor({ accountId, http, fields });
       await this.deps.store.markRetrieved(reference, this.now());
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
@@ -301,7 +349,6 @@ export class CredentialVault implements VaultClient {
       });
       return response;
     } catch (err) {
-      // Forensic row even on failure — the secret is never in it.
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
@@ -313,7 +360,51 @@ export class CredentialVault implements VaultClient {
     }
   }
 
-  // ── Private ─────────────────────────────────────────────────
+  // ── private ──────────────────────────────────────────────────
+
+  private async encryptFields(
+    reference: string,
+    accountId: string,
+    fields: Record<string, string>,
+  ): Promise<{ ciphertext: Buffer; encrypted_dek: Buffer; account_kek_blob: Buffer }> {
+    const aadValue = aadForValue(reference, accountId);
+    const aadDek = aadForDek(reference, accountId);
+    const kek = generateKey();
+    const dek = generateKey();
+    const plaintext = Buffer.from(JSON.stringify(fields), "utf8");
+    const ciphertext = encryptAesGcm(dek, plaintext, aadValue);
+    const encryptedDek = encryptAesGcm(kek, dek, aadDek);
+    const accountKekBlob = await this.deps.kms.encrypt(kek);
+    kek.fill(0);
+    dek.fill(0);
+    plaintext.fill(0);
+    return { ciphertext, encrypted_dek: encryptedDek, account_kek_blob: accountKekBlob };
+  }
+
+  private now(): Date {
+    return this.deps.now?.() ?? new Date();
+  }
+
+  private async decryptFields(record: CredentialRecord): Promise<Record<string, string>> {
+    const aadValue = aadForValue(record.reference, record.account_id);
+    const aadDek = aadForDek(record.reference, record.account_id);
+    const kek = await this.deps.kms.decrypt(record.account_kek_blob);
+    const dek = decryptAesGcm(kek, record.encrypted_dek, aadDek);
+    const plaintextBuf = decryptAesGcm(dek, record.ciphertext, aadValue);
+    const text = plaintextBuf.toString("utf8");
+    kek.fill(0);
+    dek.fill(0);
+    plaintextBuf.fill(0);
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object") {
+      throw new Error("decrypted credential payload is not a field map");
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  }
 
   private async retrieveInternal(args: {
     reference: string;
@@ -321,9 +412,8 @@ export class CredentialVault implements VaultClient {
     requester: VaultRequester;
     signingDeviceId: string | null;
     assertion: DeviceAssertion | null;
-  }): Promise<string> {
+  }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
-
     const record = await this.deps.store.findActive(reference);
     const accountId = record?.account_id ?? "";
 
@@ -332,24 +422,17 @@ export class CredentialVault implements VaultClient {
       const count = await this.deps.audit.countRecentRetrievals(accountId, since);
       if (count >= RATE_LIMIT_MAX) {
         await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-          reference,
-          purpose,
-          requester,
-          signing_device_id: signingDeviceId,
+          reference, purpose, requester, signing_device_id: signingDeviceId,
           outcome: "rate_limited",
         });
         throw new VaultRateLimitError(accountId);
       }
     }
-
     if (assertion !== null) {
       const ageMs = this.now().getTime() - Date.parse(assertion.signed_at);
       if (Number.isNaN(ageMs) || ageMs > ASSERTION_MAX_AGE_MS || ageMs < 0) {
         await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-          reference,
-          purpose,
-          requester,
-          signing_device_id: signingDeviceId,
+          reference, purpose, requester, signing_device_id: signingDeviceId,
           outcome: "stale_assertion",
         });
         throw new StaleAssertionError(
@@ -357,43 +440,21 @@ export class CredentialVault implements VaultClient {
         );
       }
     }
-
     if (record === null) {
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-        reference,
-        purpose,
-        requester,
-        signing_device_id: signingDeviceId,
+        reference, purpose, requester, signing_device_id: signingDeviceId,
         outcome: "missing_credential",
       });
       throw new CredentialNotFoundError(reference);
     }
 
-    const plaintext = await this.decryptRecord(record);
-
+    const fields = await this.decryptFields(record);
     await this.deps.store.markRetrieved(reference, this.now());
     await this.recordAudit(record.account_id, VAULT_AUDIT_TYPES.retrieved, {
-      reference,
-      purpose,
-      requester,
-      signing_device_id: signingDeviceId,
+      reference, purpose, requester, signing_device_id: signingDeviceId,
       outcome: "success",
     });
-
-    return plaintext;
-  }
-
-  private async decryptRecord(record: CredentialRecord): Promise<string> {
-    const aadValue = aadForValue(record.reference, record.account_id);
-    const aadDek = aadForDek(record.reference, record.account_id);
-    const kek = await this.deps.kms.decrypt(record.account_kek_blob);
-    const dek = decryptAesGcm(kek, record.encrypted_dek, aadDek);
-    const plaintextBuf = decryptAesGcm(dek, record.ciphertext, aadValue);
-    const plaintext = plaintextBuf.toString("utf8");
-    kek.fill(0);
-    dek.fill(0);
-    plaintextBuf.fill(0);
-    return plaintext;
+    return fields;
   }
 
   private async recordAudit(
@@ -403,14 +464,8 @@ export class CredentialVault implements VaultClient {
   ): Promise<void> {
     await this.deps.audit.record({ account_id: accountId, type, payload });
   }
-
-  private now(): Date {
-    return this.deps.now?.() ?? new Date();
-  }
 }
 
-// Convention: purpose strings prefixed `agent:` / `user:` / `system:`
-// route the audit requester; default to the caller's hint.
 function requesterFromPurpose(purpose: string, fallback: VaultRequester): VaultRequester {
   if (purpose.startsWith("agent:")) return "agent";
   if (purpose.startsWith("user:")) return "user";
@@ -418,8 +473,6 @@ function requesterFromPurpose(purpose: string, fallback: VaultRequester): VaultR
   return fallback;
 }
 
-// Parse the host out of a URL for the allowlist check; null on an
-// unparseable URL (which the proxy then rejects).
 function safeHost(rawUrl: string): string | null {
   try {
     return new URL(rawUrl).hostname.toLowerCase();
