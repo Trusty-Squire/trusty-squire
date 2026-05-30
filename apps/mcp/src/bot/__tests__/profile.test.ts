@@ -13,7 +13,7 @@ import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { clearStaleSingletonLock } from "../profile.js";
+import { clearStaleSingletonLock, waitForProfileFree } from "../profile.js";
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
 // a label, not a real file — so it always reports "missing". Probe the
@@ -72,5 +72,42 @@ describe("clearStaleSingletonLock", () => {
     symlinkSync("garbage-no-pid-here", join(dir, "SingletonLock"));
     expect(clearStaleSingletonLock(dir)).toBe(false);
     expect(lockPresent(dir)).toBe(true);
+  });
+});
+
+describe("waitForProfileFree (cross-process gate)", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("returns free immediately when there is no lock", async () => {
+    expect(await waitForProfileFree(dir, { deadlineMs: 200, pollMs: 20 })).toBe(true);
+  });
+
+  it("reclaims a stale lock and returns free", async () => {
+    writeSingletons(dir, `${hostname()}-${deadPid()}`);
+    expect(await waitForProfileFree(dir, { deadlineMs: 200, pollMs: 20 })).toBe(true);
+    expect(lockPresent(dir)).toBe(false);
+  });
+
+  it("returns busy (false) when a live holder never releases", async () => {
+    writeSingletons(dir, `${hostname()}-${process.pid}`); // we stay alive
+    let waitedFor: number | null = null;
+    const ok = await waitForProfileFree(dir, {
+      deadlineMs: 150,
+      pollMs: 25,
+      onWait: (h) => { waitedFor = h.pid; },
+    });
+    expect(ok).toBe(false);
+    expect(waitedFor).toBe(process.pid); // onWait fired for the live holder
+    expect(lockPresent(dir)).toBe(true); // never yanked a live lock
+  });
+
+  it("proceeds once a live holder releases mid-wait", async () => {
+    writeSingletons(dir, `${hostname()}-${process.pid}`);
+    // Another process would release by exiting; simulate by removing the
+    // lock after a beat. waitForProfileFree should then see it free.
+    setTimeout(() => rmSync(join(dir, "SingletonLock"), { force: true }), 80);
+    expect(await waitForProfileFree(dir, { deadlineMs: 2_000, pollMs: 25 })).toBe(true);
   });
 });

@@ -17,6 +17,17 @@ export const CHROME_PROFILE_DIR =
 // is "<hostname>-<pid>"; the other two are sockets/cookies beside it.
 const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
 
+// Thrown when the bot profile is held by a live run on another process and
+// doesn't free up within the wait deadline. The CLI/MCP layers surface
+// this as a clear "busy, retry" instead of a raw Playwright SingletonLock
+// stack trace.
+export class ProfileBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProfileBusyError";
+  }
+}
+
 // process.kill(pid, 0) is a liveness probe — it sends no signal, it only
 // asks "does this pid exist and am I allowed to signal it". ESRCH = the
 // process is gone (stale lock). EPERM = it exists but isn't ours (still
@@ -31,40 +42,104 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+interface LockHolder {
+  host: string;
+  pid: number;
+  // True when the holder is a dead pid on THIS host — i.e. reclaimable.
+  // A live pid, or any pid on another machine (shared profile), is not.
+  stale: boolean;
+}
+
+// Read + parse Chrome's SingletonLock symlink ("<host>-<pid>"). null when
+// there is no lock (the profile is free) or the link is malformed.
+function readLockHolder(profileDir: string): LockHolder | null {
+  const lockPath = join(profileDir, "SingletonLock");
+  let target: string;
+  try {
+    if (!lstatSync(lockPath).isSymbolicLink()) return null;
+    target = readlinkSync(lockPath);
+  } catch {
+    return null;
+  }
+  // The host may itself contain hyphens, so split on the LAST one.
+  const dash = target.lastIndexOf("-");
+  if (dash < 0) return null;
+  const host = target.slice(0, dash);
+  const pid = Number(target.slice(dash + 1));
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const onThisHost = host === hostname();
+  return { host, pid, stale: onThisHost && !isPidAlive(pid) };
+}
+
+function removeSingletons(profileDir: string): void {
+  for (const f of SINGLETON_FILES) {
+    try { rmSync(join(profileDir, f), { force: true }); } catch { /* best-effort */ }
+  }
+}
+
 // Self-heal a stale Chrome SingletonLock on the bot profile.
 //
 // Chrome single-instances a userDataDir via SingletonLock. A run that was
 // SIGKILLed or a bot Chrome we tore down hard leaves the lock behind, and
 // Playwright's launchPersistentContext then aborts with "Failed to create
-// a ProcessSingleton ... File exists" — which bricks EVERY later signup
-// AND `mcp login` until someone clears it by hand. (This is exactly the
-// "relogin prompted, no noVNC, still failed" failure: login died on the
-// stale lock before the noVNC rig could start.)
-//
-// Removing the lock is safe ONLY when its holder is provably gone: the
-// lock names a pid on THIS host that is no longer alive. A lock held by a
-// LIVE pid is a genuine concurrent run and is left untouched. Returns
-// true iff a stale lock was cleared. Never throws.
+// a ProcessSingleton ... File exists". Removing it is safe ONLY when the
+// holder is provably gone (dead pid on this host). A lock held by a LIVE
+// pid is a genuine concurrent run and is left untouched. Returns true iff
+// a stale lock was cleared. Never throws.
 export function clearStaleSingletonLock(profileDir: string = CHROME_PROFILE_DIR): boolean {
-  const lockPath = join(profileDir, "SingletonLock");
-  let target: string;
-  try {
-    if (!lstatSync(lockPath).isSymbolicLink()) return false;
-    target = readlinkSync(lockPath);
-  } catch {
-    return false; // no lock present — nothing to heal
-  }
-  // "<host>-<pid>". The host may itself contain hyphens, so split on the
-  // LAST one to isolate the pid.
-  const dash = target.lastIndexOf("-");
-  const host = dash >= 0 ? target.slice(0, dash) : "";
-  const pid = Number(dash >= 0 ? target.slice(dash + 1) : "");
-  // Only reason about liveness for a lock minted on THIS host — a pid
-  // from another machine (shared profile) is meaningless here.
-  if (host !== hostname() || !Number.isInteger(pid) || pid <= 0) return false;
-  if (isPidAlive(pid)) return false; // live holder — concurrent run, leave it
-  for (const f of SINGLETON_FILES) {
-    try { rmSync(join(profileDir, f), { force: true }); } catch { /* best-effort */ }
-  }
+  const holder = readLockHolder(profileDir);
+  if (holder === null || !holder.stale) return false;
+  removeSingletons(profileDir);
   return true;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+export interface WaitForProfileOptions {
+  // Max time to wait for a LIVE cross-process holder to release.
+  deadlineMs?: number;
+  pollMs?: number;
+  // Fired once, the first time we actually have to wait on a live holder
+  // (so the caller can print "another run is using the browser — waiting…").
+  onWait?: (holder: LockHolder) => void;
+}
+
+// Cross-process serialization gate for the shared Chrome profile.
+//
+// The signup bot (in the MCP server) and a separate `mcp login` process
+// both open the one profile, and Chrome single-instances it. Rather than
+// run a parallel lock system, this waits on Chrome's OWN SingletonLock as
+// the semaphore:
+//   - no lock              → free, return immediately
+//   - lock, holder dead    → stale, reclaim it (clearStaleSingletonLock)
+//   - lock, holder alive   → a genuine concurrent run — poll until it
+//                            releases, up to deadlineMs
+//
+// Returns true once the profile is free to open, or false if a live
+// holder never released within the deadline (caller surfaces ProfileBusyError).
+// This is what turns "separate `mcp login` collides and crashes" into
+// "login waits its turn behind an in-flight signup, then proceeds".
+export async function waitForProfileFree(
+  profileDir: string = CHROME_PROFILE_DIR,
+  opts: WaitForProfileOptions = {},
+): Promise<boolean> {
+  const deadlineMs = opts.deadlineMs ?? 120_000;
+  const pollMs = opts.pollMs ?? 1_000;
+  const deadline = Date.now() + deadlineMs;
+  let warned = false;
+  for (;;) {
+    const holder = readLockHolder(profileDir);
+    if (holder === null) return true; // free
+    if (holder.stale) {
+      removeSingletons(profileDir);
+      return true; // reclaimed a dead holder
+    }
+    // Live holder (or a pid on another host we can't reclaim).
+    if (!warned) {
+      warned = true;
+      opts.onWait?.(holder);
+    }
+    if (Date.now() >= deadline) return false; // never freed → busy
+    await sleep(pollMs);
+  }
 }

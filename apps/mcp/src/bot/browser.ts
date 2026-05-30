@@ -26,7 +26,7 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR, clearStaleSingletonLock } from "./profile.js";
+import { CHROME_PROFILE_DIR, ProfileBusyError, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
@@ -366,11 +366,19 @@ export class BrowserController {
       this.launchedMode = "headless";
     }
 
-    // Self-heal a stale SingletonLock from a prior run that was killed
-    // mid-flight — otherwise launchPersistentContext aborts with
-    // "Failed to create a ProcessSingleton" and bricks the profile.
-    if (clearStaleSingletonLock(this.profileDir)) {
-      console.error("[universal-bot] cleared a stale Chrome SingletonLock on the bot profile");
+    // Cross-process gate on the shared Chrome profile: reclaim a stale
+    // SingletonLock from a killed run, or wait our turn behind a live
+    // `mcp login` / another signup. Without this, launchPersistentContext
+    // aborts with "Failed to create a ProcessSingleton" and bricks the run.
+    const free = await waitForProfileFree(this.profileDir, {
+      deadlineMs: 120_000,
+      onWait: () =>
+        console.error("[universal-bot] bot Chrome profile is busy with another run — waiting…"),
+    });
+    if (!free) {
+      throw new ProfileBusyError(
+        "bot Chrome profile is held by another run (a login or signup); retry shortly",
+      );
     }
 
     // T3: a PERSISTENT context. The profile dir carries the user's
