@@ -195,7 +195,10 @@ function ServiceIcon({ cred }: { cred: Cred }) {
   );
 }
 
-type Health = "idle" | "checking" | "ok" | "bad";
+// One transient status chip per tile. Verify and copy share it, so their
+// labels are mutually exclusive — copying clears a prior "decrypts", and
+// verifying clears a prior "copied".
+type Status = "idle" | "checking" | "ok" | "bad" | "copied";
 
 function VaultRow({
   cred,
@@ -210,8 +213,7 @@ function VaultRow({
   const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [health, setHealth] = useState<Health>("idle");
-  const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState<Status>("idle");
 
   // Fetch + cache the field map once; reveal and copy both need it.
   const ensureFields = useCallback(async (): Promise<Record<string, string> | null> => {
@@ -249,22 +251,24 @@ function VaultRow({
       keys.length === 1 ? f[keys[0]!]! : keys.map((k) => `${k}=${f[k]!}`).join("\n");
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
+      setStatus("copied");
+      // Clear only if still "copied" — don't clobber a verify that ran
+      // in the meantime.
+      setTimeout(() => setStatus((s) => (s === "copied" ? "idle" : s)), 1400);
     } catch {
       /* clipboard unavailable */
     }
   }, [ensureFields]);
 
   const onVerify = useCallback(async () => {
-    setHealth("checking");
+    setStatus("checking");
     try {
       const res = await apiPost<{ healthy: boolean }>(
         `/v1/vault/credentials/${cred.id}/health`,
       );
-      setHealth(res.healthy ? "ok" : "bad");
+      setStatus(res.healthy ? "ok" : "bad");
     } catch {
-      setHealth("bad");
+      setStatus("bad");
     }
   }, [cred.id]);
 
@@ -316,14 +320,14 @@ function VaultRow({
           ) : (
             <span className="mask">{busy ? "revealing…" : "••••••••••••••••"}</span>
           )}
-          {health === "ok" && (
+          {status === "ok" && (
             <span className="health-ok" title="Decrypts cleanly under the current master key.">✓ decrypts</span>
           )}
-          {health === "bad" && (
+          {status === "bad" && (
             <span className="health-bad" title="The stored envelope did not decrypt.">✗ decrypt failed</span>
           )}
-          {health === "checking" && <span className="health-ok">checking…</span>}
-          {copied && <span className="health-ok">copied ✓</span>}
+          {status === "checking" && <span className="health-ok">checking…</span>}
+          {status === "copied" && <span className="health-ok">copied ✓</span>}
         </div>
       </div>
 
