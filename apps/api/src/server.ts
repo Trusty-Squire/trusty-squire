@@ -16,7 +16,6 @@ import { registerLLMRoute } from "./routes/llm.js";
 import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
-import { registerCredentialsRoute } from "./routes/credentials.js";
 import { registerVaultRoute } from "./routes/vault.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import type { HttpProxyExecutor } from "./services/http-proxy.js";
@@ -174,7 +173,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
   });
-  await fastify.register(registerCredentialsRoute, { deps, requireAgent: auth.requireAgent });
   await fastify.register(registerVaultRoute, {
     deps,
     requireWeb: auth.requireWeb,

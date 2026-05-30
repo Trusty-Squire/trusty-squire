@@ -10,7 +10,6 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import {
   checkProvisionStatusTool,
-  getCredentialTool,
   listCredentialsTool,
   provisionTool,
   TOOLS,
@@ -18,43 +17,10 @@ import {
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
-    getCredential: vi.fn(),
     listCredentials: vi.fn(),
     ...overrides,
   } as unknown as ApiClient;
 }
-
-describe("get_credential", () => {
-  it("passes the purpose through to the API", async () => {
-    const getCredential = vi.fn().mockResolvedValue({
-      value: "secret",
-      reference: "vault://x",
-      retrieved_at: "now",
-    });
-    const api = makeMockApi({ getCredential } as unknown as ApiClient);
-    const parsed = getCredentialTool.inputSchema.parse({
-      reference: "vault://x",
-      purpose: "send-email",
-    });
-    const res = (await getCredentialTool.handler(parsed, api)) as { value: string };
-    expect(res.value).toBe("secret");
-    expect(getCredential).toHaveBeenCalledWith("vault://x", "send-email");
-  });
-
-  it("surfaces ApiCallError on 401", async () => {
-    const api = makeMockApi({
-      getCredential: vi.fn().mockRejectedValue(new ApiCallError(401, "unauth", "401")),
-    } as unknown as ApiClient);
-    const parsed = getCredentialTool.inputSchema.parse({
-      reference: "vault://x",
-      purpose: "p",
-    });
-    await expect(getCredentialTool.handler(parsed, api)).rejects.toMatchObject({
-      status: 401,
-      code: "unauth",
-    });
-  });
-});
 
 describe("list_credentials", () => {
   it("returns the vault credential metadata list", async () => {
@@ -91,12 +57,13 @@ describe("list_credentials", () => {
 
 describe("TOOLS registry", () => {
   it("exposes the post-0.8 public surface incl. the credential lifecycle tools", () => {
-    // 6 surviving post-0.8 tools + 2 credential tools (store/use —
-    // write-only sink; rotation = re-store, delete is web-only).
-    expect(TOOLS).toHaveLength(8);
+    // 5 surviving post-0.8 tools + 2 credential write tools (store/use —
+    // write-only sink; rotation = re-store, delete is web-only). The
+    // read-back get_credential tool was removed: in the sink model an
+    // agent never sees a raw secret value.
+    expect(TOOLS).toHaveLength(7);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "check_provision_status",
-      "get_credential",
       "get_extract_failure",
       "list_credentials",
       "list_extract_failures",

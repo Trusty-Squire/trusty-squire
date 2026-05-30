@@ -70,15 +70,9 @@ export interface CreateRunResponse {
   required_confidence?: "low" | "medium" | "high";
 }
 
-export interface CredentialResponse {
-  value: string;
-  reference: string;
-  retrieved_at: string;
-}
-
 // Metadata for one vault credential — no secret value. The agent lists
-// these to discover what keys exist, then passes `reference` to
-// getCredential() to retrieve the actual secret.
+// these to discover what keys exist; the raw value is never returned —
+// the agent spends a key via use_credential (server-side write-only sink).
 export interface VaultCredentialSummary {
   id: string;
   reference: string;
@@ -123,14 +117,6 @@ export class ApiClient {
 
   async getRun(runId: string): Promise<RunSummary> {
     return this.get<RunSummary>(`/v1/runs/${encodeURIComponent(runId)}`);
-  }
-
-  // ── Credentials ───────────────────────────────────────────
-
-  async getCredential(reference: string, purpose: string): Promise<CredentialResponse> {
-    return this.get<CredentialResponse>(
-      `/v1/credentials/${encodeURIComponent(reference)}?purpose=${encodeURIComponent(purpose)}`,
-    );
   }
 
   // Metadata list of every credential in the account's vault — no

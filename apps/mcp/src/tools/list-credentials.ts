@@ -15,8 +15,8 @@ WHEN TO CALL THIS TOOL:
 BEHAVIOR:
 - Returns metadata only — service, key name, type, age, and a vault
   \`reference\` — never the secret values themselves
-- To retrieve an actual secret, pass the \`reference\` of the row you
-  want to get_credential()
+- The raw secret is never returned to you; to *use* a key, call
+  use_credential with its \`reference\` (the server injects it)
 - Scoped to the user's account; only this account's credentials list`;
 
 export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {

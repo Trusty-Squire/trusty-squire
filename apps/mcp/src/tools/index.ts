@@ -10,7 +10,6 @@
 
 import { z, type ZodTypeAny } from "zod";
 import type { ApiClient } from "../api-client.js";
-import { getCredentialTool } from "./get-credential.js";
 import { listCredentialsTool } from "./list-credentials.js";
 import { provisionTool, checkProvisionStatusTool } from "./provision-any.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
@@ -59,7 +58,6 @@ export function assertApi(api: ApiClient | null): asserts api is ApiClient {
 export const TOOLS: Tool[] = [
   provisionTool,
   checkProvisionStatusTool,
-  getCredentialTool,
   listCredentialsTool,
   // Vault lifecycle + write-only-sink proxy (the credential surface).
   storeCredentialTool,
@@ -82,7 +80,6 @@ export { z };
 export {
   provisionTool,
   checkProvisionStatusTool,
-  getCredentialTool,
   listCredentialsTool,
   storeCredentialTool,
   useCredentialTool,
