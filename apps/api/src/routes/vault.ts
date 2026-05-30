@@ -77,6 +77,9 @@ const allowedHostsBody = z.object({
   hosts: z.array(z.string().min(1).max(253)).max(50),
 });
 
+// Kill-switch guard — an explicit confirm so a stray POST can't nuke a vault.
+const revokeAllBody = z.object({ confirm: z.literal(true) });
+
 function fieldsFrom(b: { value?: string | undefined; fields?: Record<string, string> | undefined }): Record<string, string> {
   if (b.fields !== undefined && Object.keys(b.fields).length > 0) return b.fields;
   return { value: b.value! };
@@ -272,6 +275,27 @@ export const registerVaultRoute: FastifyPluginAsync<{
       }
       await opts.deps.vault.delete(target.reference);
       return reply.code(204).send();
+    },
+  );
+
+  // ── revoke-all (web only): kill-switch ───────────────────────
+  // One-shot soft-delete of every active credential for the account —
+  // the "a key leaked, burn it all down" panic button. Requires an
+  // explicit confirm flag so a stray POST can't nuke a vault. Recoverable
+  // via restore until the retention sweep purges the soft-deleted rows.
+  fastify.post(
+    "/v1/vault/credentials/revoke-all",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = revokeAllBody.safeParse(req.body);
+      if (!parsed.success || parsed.data.confirm !== true) {
+        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to revoke all credentials" });
+        return;
+      }
+      const result = await opts.deps.vault.deleteAllForAccount(auth.account_id);
+      return reply.code(200).send({ revoked: result.revoked });
     },
   );
 
