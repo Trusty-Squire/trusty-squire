@@ -81,6 +81,28 @@ const allowedHostsBody = z.object({
 // Kill-switch guard — an explicit confirm so a stray POST can't nuke a vault.
 const revokeAllBody = z.object({ confirm: z.literal(true) });
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+// A credential is "stale" — due for rotation — once this many days have
+// passed since it was last changed (rotated_at, or created_at if never
+// rotated). Surfaced in the list so the web can nudge a rotation; not
+// enforced. Env-overridable.
+const ROTATION_STALE_DAYS = Number.parseInt(process.env.VAULT_ROTATION_STALE_DAYS ?? "90", 10);
+
+// Rotation-age signal for a credential, for the web's "rotate me" nudge.
+function rotationAge(
+  rotatedAt: Date | null,
+  createdAt: Date,
+  now: Date,
+): { last_changed_at: string; age_days: number; stale: boolean } {
+  const lastChanged = rotatedAt ?? createdAt;
+  const ageDays = Math.floor((now.getTime() - lastChanged.getTime()) / DAY_MS);
+  return {
+    last_changed_at: lastChanged.toISOString(),
+    age_days: ageDays,
+    stale: ageDays >= ROTATION_STALE_DAYS,
+  };
+}
+
 function fieldsFrom(b: { value?: string | undefined; fields?: Record<string, string> | undefined }): Record<string, string> {
   if (b.fields !== undefined && Object.keys(b.fields).length > 0) return b.fields;
   return { value: b.value! };
@@ -109,6 +131,7 @@ export const registerVaultRoute: FastifyPluginAsync<{
     { preHandler: opts.requireAny },
     async (req, reply) => {
       const auth = req.auth!;
+      const now = opts.deps.now?.() ?? new Date();
       const creds = await opts.deps.credentialStore.listByAccount(auth.account_id);
       return reply.code(200).send({
         credentials: creds.map((c) => {
@@ -124,8 +147,11 @@ export const registerVaultRoute: FastifyPluginAsync<{
             allowed_hosts: c.allowed_hosts,
             favicon_domain: faviconDomain(service, c.allowed_hosts),
             created_at: c.created_at.toISOString(),
+            rotated_at: c.rotated_at?.toISOString() ?? null,
             last_retrieved_at: c.last_retrieved_at?.toISOString() ?? null,
             retrieval_count: c.retrieval_count,
+            // Rotation-age nudge: age since last change + a stale flag.
+            ...rotationAge(c.rotated_at, c.created_at, now),
           };
         }),
       });
