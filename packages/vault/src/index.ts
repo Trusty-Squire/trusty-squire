@@ -13,6 +13,7 @@ export { VAULT_AUDIT_TYPES } from "./types.js";
 
 export {
   CredentialVault,
+  coerceFieldMap,
   CredentialNotFoundError,
   StaleAssertionError,
   VaultRateLimitError,
