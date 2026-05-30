@@ -1207,3 +1207,29 @@
     completes. Skip until phone relay exists.
 
     '
+- slug: falai
+  name: fal.ai
+  signup_url: https://fal.ai/dashboard/keys
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Added 2026-05-30 (user request). AI inference platform. Google or
+
+    GitHub OAuth signup; API key minted on the dashboard keys page. Key
+
+    is used as `Authorization: Key <id>:<secret>` against fal.run.
+
+    '
+- slug: ipdata
+  name: ipdata
+  signup_url: https://dashboard.ipdata.co/sign-up.html
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Corrected 2026-05-30: real signup is dashboard.ipdata.co/sign-up.html.
+
+    The slug-guess https://ipdata.com/signup 404s. Target for the
+
+    "no credentials found" extractor reproduction.
+
+    '

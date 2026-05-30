@@ -78,6 +78,28 @@ describe("scoreSignupButton", () => {
     expect(scoreSignupButton("Sign in")).toBeLessThan(0);
     expect(scoreSignupButton("Log in")).toBeLessThan(0);
   });
+
+  // Post-signup dashboards: the API key sits behind a generate/reveal CTA
+  // that scores 0 on signup vocabulary and gets capped out of a busy
+  // dashboard (the OpenRouter "Get API Key" + fal.ai "Add key" suppression).
+  it("scores key-generation / reveal CTAs positive", () => {
+    for (const label of [
+      "Add key",
+      "Create API Key",
+      "Generate key",
+      "Get API Key",
+      "New API key",
+      "Create new secret key",
+      "Reveal key",
+      "Copy API token",
+    ]) {
+      expect(scoreSignupButton(label)).toBeGreaterThan(0);
+    }
+    // No false positives on unrelated dashboard buttons.
+    expect(scoreSignupButton("Newsletter")).toBe(0);
+    expect(scoreSignupButton("Get started")).toBeGreaterThan(0); // signup vocab, separate path
+    expect(scoreSignupButton("Account")).toBe(0);
+  });
 });
 
 describe("rankAndCapInventory", () => {
@@ -109,6 +131,17 @@ describe("rankAndCapInventory", () => {
     expect(inventory.filter((e) => e.tag === "button")).toEqual([
       expect.objectContaining({ selector: "#go" }),
     ]);
+  });
+
+  it("keeps a key-generation CTA on a busy dashboard (fal.ai / OpenRouter)", () => {
+    // 40 nav/account buttons (score 0) + the one CTA that matters.
+    const noise = Array.from({ length: 40 }, (_, i) =>
+      mk({ tag: "button", visibleText: `nav ${i}`, selector: `#n${i}` }),
+    );
+    const cta = mk({ tag: "button", visibleText: "Add key", selector: "#addkey" });
+    const { inventory } = rankAndCapInventory([...noise, cta], 25);
+    // The CTA must survive the cap even though 16 buttons were dropped.
+    expect(inventory.some((e) => e.selector === "#addkey")).toBe(true);
   });
 
   it("re-indexes the kept set contiguously", () => {

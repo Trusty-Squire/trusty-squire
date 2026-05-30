@@ -3813,6 +3813,17 @@ export function scoreSignupButton(
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
   if (t.includes("continue")) score += 2;
+  // Post-signup dashboards reveal the key behind a "Create API Key" /
+  // "Add key" / "Generate key" / "Get API Key" CTA — the run's actual
+  // goal once the account exists. These score 0 on signup vocabulary, so
+  // on a busy dashboard (dozens of nav/account buttons) rankAndCapInventory
+  // caps them out: the OpenRouter "Get API Key" + fal.ai "Add key"
+  // suppression. Score them as a primary target so they survive ranking.
+  if (
+    /\b(?:add|create|generate|new|get|reveal|copy)\b[\s\w]{0,20}\b(?:api[\s-]?key|key|token|secret|credential)s?\b/.test(t)
+  ) {
+    score += 14;
+  }
   if (
     oauthProviders !== undefined &&
     oauthProviders.some((p) => new RegExp(`\\b${p}\\b`).test(t))

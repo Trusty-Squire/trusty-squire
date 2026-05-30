@@ -42,6 +42,10 @@ export const KNOWN_SERVICE_HOSTS: Readonly<Record<string, readonly string[]>> = 
   koyeb: ["app.koyeb.com"],
   groq: ["api.groq.com"],
   huggingface: ["huggingface.co"],
+  // fal.ai — AI inference. Keys auth `Authorization: Key <id>:<secret>`
+  // against the run/queue hosts. normaliseService("fal.ai") → "falai".
+  falai: ["fal.run", "rest.alpha.fal.ai", "queue.fal.run"],
+  fal: ["fal.run", "rest.alpha.fal.ai", "queue.fal.run"],
 };
 
 // Normalise a free-text service name to the slug the table is keyed on.
