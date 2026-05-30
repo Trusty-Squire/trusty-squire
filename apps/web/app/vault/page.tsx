@@ -280,11 +280,8 @@ function RotateModal({ cred, onClose }: { cred: Cred; onClose: () => void }) {
       setBusy(true);
       setError(null);
       try {
-        const res = await apiPatch<{ revoked_grant_count: number }>(
-          `/v1/vault/credentials/${cred.id}`,
-          { new_value: newValue },
-        );
-        setDone(res.revoked_grant_count);
+        await apiPatch(`/v1/vault/credentials/${cred.id}`, { new_value: newValue });
+        setDone(true);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Rotation failed.");
         setBusy(false);
