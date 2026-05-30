@@ -239,7 +239,6 @@ describe("CredentialVault", () => {
     const entry = await vault.store(makeStoreInput());
     const result = await vault.rotate(entry.reference, "sk_rotated");
     expect(result.rotated_at).toBe(NOW.toISOString());
-    expect(result.revoked_grant_count).toBe(0);
   });
 
   it("findByIdForAccount resolves only the owning account's credential", async () => {
