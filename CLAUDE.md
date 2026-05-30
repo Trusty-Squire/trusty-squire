@@ -133,11 +133,13 @@ OpenRouter for LLM, Resend for inbound + outbound mail.
 | MailerSend  | ⚠ phone gate | Signup completes, stops at phone verification (F12) |
 | PostHog     | ⚠ slow SPA | Form load races our planner; not captcha    |
 
-### In-memory (not persisted, restart-vulnerable)
-- `vaultAuditStore`. The vault audit log isn't backed by Postgres yet —
-  loses on restart. Everything else (`accountStore`, `sessionStore`,
-  `agentSessionStore`, `credentialStore`) is Prisma-backed once a DB
-  is wired.
+### Persistence
+- `vaultAuditStore` is Prisma-backed (`PrismaVaultAuditStore` →
+  `VaultAuditEvent`) when `AUTH_DATABASE_URL` is set, in-memory
+  otherwise. It is surfaced via `GET /v1/vault/audit` and swept by the
+  retention cron (`VAULT_AUDIT_RETENTION_DAYS`, default 365). All other
+  stores (`accountStore`, `sessionStore`, `agentSessionStore`,
+  `credentialStore`) are likewise Prisma-backed once a DB is wired.
 
 ## Active Sprint/Task
 
@@ -473,6 +475,25 @@ consumed via `mcp housekeeper --queue=seed --from=tools/housekeeper-services.yam
 | `INBOX_METADATA_RETENTION_DAYS` | `90` | ReceivedEmail rows deleted after this |
 | `PAIRING_TOKEN_RETENTION_HOURS` | `1` | PairingToken row sweep |
 | `LLM_EVENT_RETENTION_DAYS` | `30` | LLMUsageEvent row sweep |
+| `VAULT_AUDIT_RETENTION_DAYS` | `365` | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever. |
+| `VAULT_ROTATION_STALE_DAYS` | `90` | Age (since last change) past which a credential is flagged `stale` in the list response. Advisory nudge, not enforced. |
+
+### Vault security + lifecycle surface
+
+The credential vault's operational runbook lives at
+`docs/VAULT-OPERATIONS.md` — master-key custody + rotation
+(`LOCAL_KMS_KEY` keyring, `rewrap-kek` migration), the full endpoint
+table (audit timeline, kill-switch `revoke-all`, GDPR export +
+erasure, undelete `restore`, envelope `health`, rotation-age `stale`),
+retention, and backup/DR posture. Read it before touching the vault.
+
+Master-key secrets (set on `trusty-squire-api`, **also back up the key
+out-of-band** — a DB restore is useless without it):
+
+| Secret | Purpose |
+|---|---|
+| `LOCAL_KMS_KEY` | Current master key (64 hex / 32 bytes). Wraps every credential's KEK. Unset → ephemeral dev key (loud warning, unrecoverable). |
+| `LOCAL_KMS_LEGACY_KEYS` | Comma-separated old keys, tried on decrypt. Set only during a master-key rotation window; unset after `rewrap-kek --apply`. |
 
 ### Conventions in this repo
 - **Always read before editing.** Reach for `tree` + `cat` before
