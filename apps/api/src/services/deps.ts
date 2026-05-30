@@ -25,11 +25,9 @@ import {
 } from "@trusty-squire/inbox";
 import {
   CredentialVault,
-  InMemoryAccessGrantStore,
   InMemoryCredentialStore,
   InMemoryVaultAuditStore,
   LocalKMS,
-  type AccessGrantStore,
   type CredentialStore,
   type VaultAuditStore,
 } from "@trusty-squire/vault";
@@ -47,12 +45,6 @@ import { PrismaAgentSessionStore } from "../auth/prisma-agent-session-store.js";
 import { PrismaAccountStore } from "./prisma-account-store.js";
 import { PrismaCredentialStore } from "./prisma-credential-store.js";
 import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
-import { PrismaAccessGrantStore } from "./prisma-access-grant-store.js";
-import {
-  PrismaPasskeyAssertionStore,
-  InMemoryPasskeyAssertionStore,
-  type PasskeyAssertionStore,
-} from "./passkey-assertion-store.js";
 import {
   InMemoryOAuthIdentityStore,
   PrismaOAuthIdentityStore,
@@ -94,8 +86,6 @@ export interface ApiDeps {
 
   // Credentials + inbound mail
   credentialStore: CredentialStore;
-  accessGrantStore: AccessGrantStore;
-  passkeyAssertionStore: PasskeyAssertionStore;
   vault: CredentialVault;
   inbox: InboxService;
   mailgunHandler: MailgunHandler;
@@ -164,19 +154,10 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaVaultAuditStore(authPrisma)
       : new InMemoryVaultAuditStore();
-  const accessGrantStore: AccessGrantStore =
-    authPrisma !== null
-      ? new PrismaAccessGrantStore(authPrisma)
-      : new InMemoryAccessGrantStore();
-  const passkeyAssertionStore: PasskeyAssertionStore =
-    authPrisma !== null
-      ? new PrismaPasskeyAssertionStore(authPrisma)
-      : new InMemoryPasskeyAssertionStore();
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
   const vault = new CredentialVault({
     store: credentialStore,
     audit: vaultAuditStore,
-    accessGrants: accessGrantStore,
     kms,
   });
 
@@ -250,8 +231,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     pairingTokenStore,
     oauthIdentityStore,
     credentialStore,
-    accessGrantStore,
-    passkeyAssertionStore,
     vault,
     inbox,
     mailgunHandler,

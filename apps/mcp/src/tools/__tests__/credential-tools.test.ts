@@ -1,15 +1,11 @@
-// PR-8 — the six new credential tools, exercised against a mock
-// ApiClient. Each asserts the handler shapes its result correctly,
-// forwards the right call, and (where relevant) that schema validation
-// + the null-api gate fire.
+// The credential tools (write-only-sink surface): store / rotate /
+// delete / use_credential, exercised against a mock ApiClient.
 
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../../api-client.js";
 import { storeCredentialTool } from "../store-credential.js";
 import { rotateCredentialTool } from "../rotate-credential.js";
 import { deleteCredentialTool } from "../delete-credential.js";
-import { requestCredentialTool } from "../request-credential.js";
-import { pollCredentialAccessTool } from "../poll-credential-access.js";
 import { useCredentialTool } from "../use-credential.js";
 
 function mockApi(over: Partial<ApiClient>): ApiClient {
@@ -26,10 +22,7 @@ describe("store_credential", () => {
         allowed_hosts: ["api.openai.com"],
       }),
     });
-    const res = await storeCredentialTool.handler(
-      { service: "OpenAI", value: "sk-x" },
-      api,
-    );
+    const res = await storeCredentialTool.handler({ service: "OpenAI", value: "sk-x" }, api);
     expect(res).toEqual({
       reference: "vault://a/b/c",
       type: "api_key",
@@ -51,19 +44,19 @@ describe("store_credential", () => {
 });
 
 describe("rotate_credential", () => {
-  it("returns rotated_at + revoked_grant_count", async () => {
+  it("returns rotated_at", async () => {
     const api = mockApi({
       rotateCredential: async (ref: string, val: string) => {
         expect(ref).toBe("vault://a/b/c");
         expect(val).toBe("sk-new");
-        return { rotated_at: "2026-05-29T01:00:00Z", revoked_grant_count: 2 };
+        return { rotated_at: "2026-05-29T01:00:00Z" };
       },
     });
     const res = await rotateCredentialTool.handler(
       { reference: "vault://a/b/c", new_value: "sk-new" },
       api,
     );
-    expect(res).toEqual({ rotated_at: "2026-05-29T01:00:00Z", revoked_grant_count: 2 });
+    expect(res).toEqual({ rotated_at: "2026-05-29T01:00:00Z" });
   });
 
   it("is flagged destructive", () => {
@@ -81,73 +74,12 @@ describe("delete_credential", () => {
   });
 });
 
-describe("request_credential", () => {
-  it("forwards a value request and returns the broker reply", async () => {
-    const api = mockApi({
-      requestCredentialAccess: async (input) => {
-        expect(input.intent).toBe("value");
-        expect(input.reason_proxy_not_possible).toBe("writing .env");
-        return { request_id: "req1", status: "pending", expires_at: null, auto_approved: false };
-      },
-    });
-    const res = await requestCredentialTool.handler(
-      {
-        reference: "vault://a/b/c",
-        purpose: "write .env",
-        intent: "value",
-        reason_proxy_not_possible: "writing .env",
-      },
-      api,
-    );
-    expect(res).toMatchObject({ request_id: "req1", status: "pending", auto_approved: false });
-  });
-
-  it("schema rejects intent=value without reason_proxy_not_possible", () => {
-    const parsed = requestCredentialTool.inputSchema.safeParse({
-      reference: "vault://a/b/c",
-      purpose: "x",
-      intent: "value",
-    });
-    expect(parsed.success).toBe(false);
-  });
-
-  it("schema rejects missing reference AND service", () => {
-    const parsed = requestCredentialTool.inputSchema.safeParse({
-      purpose: "x",
-      intent: "proxy",
-    });
-    expect(parsed.success).toBe(false);
-  });
-});
-
-describe("poll_credential_access", () => {
-  it("returns status + value when present", async () => {
-    const api = mockApi({
-      pollCredentialAccess: async () => ({ status: "approved", value: "sk-secret" }),
-    });
-    const res = await pollCredentialAccessTool.handler({ request_id: "req1" }, api);
-    expect(res).toEqual({ status: "approved", value: "sk-secret" });
-  });
-
-  it("omits value when not returned", async () => {
-    const api = mockApi({
-      pollCredentialAccess: async () => ({ status: "pending" }),
-    });
-    const res = await pollCredentialAccessTool.handler({ request_id: "req1" }, api);
-    expect(res).toEqual({ status: "pending" });
-  });
-
-  it("is read-only", () => {
-    expect(pollCredentialAccessTool.annotations).toMatchObject({ readOnlyHint: true });
-  });
-});
-
 describe("use_credential", () => {
-  it("proxies and returns the upstream response", async () => {
+  it("proxies directly (no request_id) and returns the upstream response", async () => {
     const api = mockApi({
-      useCredentialProxy: async (requestId, http) => {
-        expect(requestId).toBe("req1");
-        expect(http.headers?.authorization).toBe("Bearer ${SECRET}");
+      useCredential: async (input) => {
+        expect(input.reference).toBe("vault://a/b/c");
+        expect(input.http.headers?.authorization).toBe("Bearer ${SECRET}");
         return {
           response: {
             status: 200,
@@ -160,7 +92,7 @@ describe("use_credential", () => {
     });
     const res = (await useCredentialTool.handler(
       {
-        request_id: "req1",
+        reference: "vault://a/b/c",
         http: {
           method: "GET",
           url: "https://api.openai.com/v1/models",
@@ -170,6 +102,13 @@ describe("use_credential", () => {
       api,
     )) as { response: { status: number } };
     expect(res.response.status).toBe(200);
+  });
+
+  it("schema requires reference or service", () => {
+    const parsed = useCredentialTool.inputSchema.safeParse({
+      http: { method: "GET", url: "https://api.openai.com/v1/models" },
+    });
+    expect(parsed.success).toBe(false);
   });
 
   it("is destructive + always-loaded", () => {

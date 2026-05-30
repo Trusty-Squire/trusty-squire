@@ -156,7 +156,6 @@ const claudeCode: AgentDefinition = {
 const CLAUDE_PERMISSION_ALLOW = [
   `mcp__${SERVER_KEY}__use_credential`,
   `mcp__${SERVER_KEY}__list_credentials`,
-  `mcp__${SERVER_KEY}__poll_credential_access`,
   `mcp__${SERVER_KEY}__store_credential`,
 ];
 

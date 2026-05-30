@@ -77,7 +77,7 @@ describe("agent vault management by reference", () => {
       payload: { reference, new_value: "sk-rotated" },
     });
     expect(res.statusCode).toBe(200);
-    expect((res.json() as { revoked_grant_count: number }).revoked_grant_count).toBe(0);
+    expect(typeof (res.json() as { rotated_at: string }).rotated_at).toBe("string");
   });
 
   it("delete by reference returns deleted_at", async () => {

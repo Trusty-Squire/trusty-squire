@@ -93,35 +93,6 @@ interface AgentSessionRow {
   use_count: number;
   revoked_at: Date | null;
   revocation_reason: string | null;
-  trusted: boolean;
-  trust_granted_at: Date | null;
-  trust_granted_via_passkey_id: string | null;
-}
-
-interface AccessGrantRow {
-  id: string;
-  account_id: string;
-  reference: string;
-  agent_session_id: string;
-  intent: string;
-  mode: string;
-  ttl_seconds: number;
-  purpose: string;
-  reason_proxy_not_possible: string | null;
-  requested_target_host: string | null;
-  requested_at: Date;
-  decided_at: Date | null;
-  expires_at: Date | null;
-  status: string;
-  auto_approved: boolean;
-}
-
-interface PasskeyAssertionRow {
-  id: string;
-  account_id: string;
-  credential_id: string | null;
-  web_session_id: string | null;
-  asserted_at: Date;
 }
 
 interface CredentialRow {
@@ -287,29 +258,6 @@ export interface ApiPrismaClient {
       orderBy?: Record<string, unknown>;
       take?: number;
     }): Promise<VaultAuditEventRow[]>;
-  };
-  accessGrant: {
-    create(args: { data: Record<string, unknown> }): Promise<AccessGrantRow>;
-    findFirst(args: {
-      where: Record<string, unknown>;
-    }): Promise<AccessGrantRow | null>;
-    findMany(args: {
-      where: Record<string, unknown>;
-      orderBy?: Record<string, unknown>;
-    }): Promise<AccessGrantRow[]>;
-    count(args: { where: Record<string, unknown> }): Promise<number>;
-    updateMany(args: {
-      where: Record<string, unknown>;
-      data: Record<string, unknown>;
-    }): Promise<{ count: number }>;
-  };
-  passkeyAssertion: {
-    create(args: { data: Record<string, unknown> }): Promise<PasskeyAssertionRow>;
-    count(args: { where: Record<string, unknown> }): Promise<number>;
-    findFirst(args: {
-      where: Record<string, unknown>;
-      orderBy?: Record<string, unknown>;
-    }): Promise<PasskeyAssertionRow | null>;
   };
 }
 

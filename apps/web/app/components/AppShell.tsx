@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
-import { apiGet, apiPost } from "../lib/api";
+import type { ReactNode } from "react";
+import { apiPost } from "../lib/api";
 
 function Shield() {
   return (
@@ -32,29 +32,6 @@ function Shield() {
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [pending, setPending] = useState(0);
-
-  // Poll the cheap pending-count for the nav badge (10s). The approvals
-  // page itself uses SSE for instant deltas; this is just the badge.
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async (): Promise<void> => {
-      try {
-        const res = await apiGet<{ count: number }>(
-          "/v1/vault/access-requests/pending-count",
-        );
-        if (!cancelled) setPending(res.count);
-      } catch {
-        /* not signed in yet / transient — leave the badge as-is */
-      }
-    };
-    void poll();
-    const interval = setInterval(() => void poll(), 10_000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
 
   async function signOut() {
     try {
@@ -78,13 +55,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Link>
           <Link className={pathname === "/agents" ? "on" : ""} href="/agents">
             Agents
-          </Link>
-          <Link
-            className={pathname === "/vault/approvals" ? "on" : ""}
-            href="/vault/approvals"
-          >
-            Approvals
-            {pending > 0 && <span className="nav-badge">{pending}</span>}
           </Link>
           <button type="button" onClick={signOut}>
             Sign out

@@ -79,9 +79,8 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       payload: { new_value: "sk-rotated-value" },
     });
     expect(rotate.statusCode).toBe(200);
-    const body = rotate.json() as { rotated_at: string; revoked_grant_count: number };
+    const body = rotate.json() as { rotated_at: string };
     expect(typeof body.rotated_at).toBe("string");
-    expect(body.revoked_grant_count).toBe(0);
 
     const reveal = await h.server.inject({
       method: "POST",

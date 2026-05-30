@@ -156,7 +156,7 @@ export class ApiClient {
   async rotateCredential(
     reference: string,
     newValue: string,
-  ): Promise<{ rotated_at: string; revoked_grant_count: number }> {
+  ): Promise<{ rotated_at: string }> {
     return this.post("/v1/vault/credentials/rotate", { reference, new_value: newValue });
   }
 
@@ -165,32 +165,14 @@ export class ApiClient {
     return this.post("/v1/vault/credentials/delete", { reference });
   }
 
-  // ── Agent-mediated access (request / poll / proxy) ─────────
+  // ── use_credential: write-only-sink proxy ─────────────────
 
-  async requestCredentialAccess(input: {
+  async useCredential(input: {
     reference?: string;
     service?: string;
-    purpose: string;
-    intent: "value" | "proxy";
-    proxy_target_host?: string;
-    reason_proxy_not_possible?: string;
-    mode_requested?: "once" | "session" | "persistent";
-    ttl_requested?: number;
-  }): Promise<{ request_id: string; status: string; expires_at: string | null; auto_approved: boolean }> {
-    return this.post("/v1/vault/access-requests", input);
-  }
-
-  async pollCredentialAccess(
-    requestId: string,
-  ): Promise<{ status: string; value?: string; denied_reason?: string }> {
-    return this.get(`/v1/vault/access-requests/${encodeURIComponent(requestId)}`);
-  }
-
-  async useCredentialProxy(
-    requestId: string,
-    http: { method: string; url: string; headers?: Record<string, string>; body?: string },
-  ): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
-    return this.post(`/v1/vault/access-requests/${encodeURIComponent(requestId)}/proxy`, { http });
+    http: { method: string; url: string; headers?: Record<string, string>; body?: string };
+  }): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
+    return this.post("/v1/vault/use", input);
   }
 
   // ── Subscriptions ─────────────────────────────────────────

@@ -6,9 +6,8 @@ const inputSchema = z.object({
   new_value: z.string().min(1).max(8192),
 });
 
-const DESCRIPTION = `Rotate a vaulted secret's value. Cascade: revokes all persistent grants
-bound to this credential — every previously-approved agent will need
-fresh user approval.`;
+const DESCRIPTION = `Rotate a vaulted secret's value in place (same reference, new value).
+Subsequent use_credential calls use the new value.`;
 
 export const rotateCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "rotate_credential",
@@ -26,6 +25,6 @@ export const rotateCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   async handler(args, api) {
     assertApi(api);
     const res = await api.rotateCredential(args.reference, args.new_value);
-    return { rotated_at: res.rotated_at, revoked_grant_count: res.revoked_grant_count };
+    return { rotated_at: res.rotated_at };
   },
 };

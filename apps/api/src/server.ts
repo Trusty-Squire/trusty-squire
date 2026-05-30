@@ -183,7 +183,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerVaultAccessRoute, {
     deps,
-    requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,
     ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
   });

@@ -1,6 +1,7 @@
 export type {
   CredentialRecord,
   CredentialStore,
+  CredentialType,
   VaultAuditEventInput,
   VaultAuditPayload,
   VaultAuditStore,
@@ -15,30 +16,16 @@ export {
   CredentialNotFoundError,
   StaleAssertionError,
   VaultRateLimitError,
-  GrantNotUsableError,
-  AccessGrantsNotConfiguredError,
+  AllowlistViolationError,
   type CredentialVaultDeps,
   type VaultEntry,
   type VaultStoreInput,
   type RotateResult,
-  type RequestAccessInput,
+  type DeviceAssertion,
   type ProxyHttpTemplate,
   type ProxyResponse,
   type ProxyExecutor,
 } from "./credential-vault.js";
-
-export {
-  InMemoryAccessGrantStore,
-  effectiveGrantStatus,
-  PENDING_TTL_SECONDS,
-  DEFAULT_PERSISTENT_TTL_SECONDS,
-  MAX_PERSISTENT_TTL_SECONDS,
-  type AccessGrantRecord,
-  type AccessGrantStore,
-  type GrantIntent,
-  type GrantMode,
-  type GrantStatus,
-} from "./access-grant.js";
 
 export {
   KNOWN_SERVICE_HOSTS,

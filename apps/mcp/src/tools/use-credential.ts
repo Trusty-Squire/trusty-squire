@@ -2,28 +2,35 @@ import { z } from "zod";
 import { assertApi, type Tool } from "./index.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
 
-// use_credential can target a freshly-minted request (request_id) OR
-// ask the broker to mint one inline from a service/reference. v1
-// requires an already-created request_id: the agent calls
-// request_credential(intent="proxy") first (auto-approved for trusted
-// sessions), then use_credential with the returned request_id.
-const inputSchema = z.object({
-  request_id: z.string().min(1),
-  http: z.object({
-    method: z.string().min(1).max(10),
-    url: z.string().min(1).max(2048),
-    headers: z.record(z.string()).optional(),
-    body: z.string().max(64 * 1024).optional(),
-  }),
-});
+// Direct, single-call proxy. The agent names a credential (by reference
+// or service) and the HTTP request; the server injects the secret and
+// returns only the upstream response. No request_id / approval dance —
+// the vault is a write-only sink (the secret never returns to the agent,
+// and the proxy hard-enforces the credential's host allowlist), which is
+// what makes per-call approval unnecessary.
+const inputSchema = z
+  .object({
+    reference: z.string().min(1).optional(),
+    service: z.string().min(1).optional(),
+    http: z.object({
+      method: z.string().min(1).max(10),
+      url: z.string().min(1).max(2048),
+      headers: z.record(z.string()).optional(),
+      body: z.string().max(64 * 1024).optional(),
+    }),
+  })
+  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+    message: "one of reference or service is required",
+  });
 
 const DESCRIPTION = `Execute an authenticated HTTP request against an external API using a
-vaulted credential. The secret value never crosses to this agent — the
-server injects it server-side via \${SECRET} or \${SECRET_JSON} placeholders
-in your headers/body. Pass \`service\` or \`reference\` plus the standard
-HTTP fields (method, url, headers, body). PREFER THIS over
-request_credential whenever the user wants an API call; only fall back
-if you need the raw secret to write into a local file.`;
+vaulted credential. The secret value NEVER crosses to this agent — the
+server injects it via \${SECRET} or \${SECRET_JSON} placeholders in your
+headers/body and returns only the upstream response. Pass \`service\` or
+\`reference\` plus the standard HTTP fields (method, url, headers, body).
+This is the ONLY way to use a stored secret: there is no raw-value
+extraction. The target host must be on the credential's allowed_hosts
+(editable in the Trusty Squire web vault) or the call is rejected.`;
 
 export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "use_credential",
@@ -31,9 +38,10 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   inputSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["request_id", "http"],
+    required: ["http"],
     properties: {
-      request_id: { type: "string" },
+      reference: { type: "string" },
+      service: { type: "string" },
       http: {
         type: "object",
         required: ["method", "url"],
@@ -50,14 +58,17 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   meta: ALWAYS_LOAD_META,
   async handler(args, api) {
     assertApi(api);
-    // Rebuild without undefined-valued optionals (exactOptionalPropertyTypes).
     const http = {
       method: args.http.method,
       url: args.http.url,
       ...(args.http.headers !== undefined ? { headers: args.http.headers } : {}),
       ...(args.http.body !== undefined ? { body: args.http.body } : {}),
     };
-    const res = await api.useCredentialProxy(args.request_id, http);
+    const res = await api.useCredential({
+      ...(args.reference !== undefined ? { reference: args.reference } : {}),
+      ...(args.service !== undefined ? { service: args.service } : {}),
+      http,
+    });
     return { response: res.response };
   },
 };

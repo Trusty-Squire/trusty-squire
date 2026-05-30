@@ -17,8 +17,6 @@ import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failur
 import { storeCredentialTool } from "./store-credential.js";
 import { rotateCredentialTool } from "./rotate-credential.js";
 import { deleteCredentialTool } from "./delete-credential.js";
-import { requestCredentialTool } from "./request-credential.js";
-import { pollCredentialAccessTool } from "./poll-credential-access.js";
 import { useCredentialTool } from "./use-credential.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
@@ -65,12 +63,10 @@ export const TOOLS: Tool[] = [
   checkProvisionStatusTool,
   getCredentialTool,
   listCredentialsTool,
-  // Vault lifecycle + agent-mediated access (the credential surface).
+  // Vault lifecycle + write-only-sink proxy (the credential surface).
   storeCredentialTool,
   rotateCredentialTool,
   deleteCredentialTool,
-  requestCredentialTool,
-  pollCredentialAccessTool,
   useCredentialTool,
   // Diagnostic tools: agent reads them after a failed extract so it
   // can write a targeted fix without the user fetching by curl.
@@ -95,8 +91,6 @@ export {
   storeCredentialTool,
   rotateCredentialTool,
   deleteCredentialTool,
-  requestCredentialTool,
-  pollCredentialAccessTool,
   useCredentialTool,
   listExtractFailuresTool,
   getExtractFailureTool,

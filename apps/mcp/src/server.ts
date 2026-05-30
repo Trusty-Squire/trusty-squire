@@ -29,20 +29,23 @@ const DEFAULT_REGISTRY_BASE = process.env.ADAPTER_REGISTRY_URL ?? "https://regis
 // Injected into the model's system prompt every turn (≤2KB). Teaches
 // the routing between store / use / request so the agent reaches for
 // the right credential tool without the user spelling it out.
-const SERVER_INSTRUCTIONS = `This is the Trusty Squire credential vault. The user's secrets (API keys,
-tokens, passwords) live here encrypted; they are NOT in the conversation
-context. Routing rules for THIS server's tools:
+const SERVER_INSTRUCTIONS = `This is the Trusty Squire credential vault — a write-only secret sink.
+The user's secrets (API keys, tokens, passwords) live here encrypted;
+they are NOT in the conversation context and CANNOT be read back to you.
+Routing rules for THIS server's tools:
 
 - User pastes a secret-shaped value (sk-…, ghp_…, AKIA…, eyJ…) into chat
   → call store_credential AUTOMATICALLY; don't ask permission.
 - User refers to a saved credential by name or service ('my OpenAI key',
-  'the Stripe token') → call list_credentials FIRST to resolve the
-  reference.
-- User wants to make an authenticated API call → call use_credential.
-  The secret stays server-side; the agent never sees the value.
-- User explicitly needs the raw secret value (writing .env, pasting into
-  a UI) → call request_credential, which triggers user approval.
-- NEVER echo a credential value back to the user in plain chat.`;
+  'the Stripe token') → call list_credentials to resolve the reference.
+- User wants an authenticated API call → call use_credential with the
+  service/reference + the HTTP request, using \${SECRET} / \${SECRET_JSON}
+  placeholders. The server injects the secret and returns only the
+  upstream response; you never see the value. The target host must be on
+  the credential's allowed_hosts (the user edits it in the web vault).
+- There is NO way to extract a raw secret value to you — by design. If a
+  user wants the plaintext (e.g. for a .env file), they read it from the
+  Trusty Squire web vault themselves.`;
 
 export async function buildServer(api: ApiClient | null): Promise<Server> {
   const server = new Server(

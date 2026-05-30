@@ -271,7 +271,7 @@ function RotateModal({ cred, onClose }: { cred: Cred; onClose: () => void }) {
   const [newValue, setNewValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<number | null>(null);
+  const [done, setDone] = useState(false);
 
   const submit = useCallback(
     async (e: React.FormEvent) => {
@@ -299,11 +299,9 @@ function RotateModal({ cred, onClose }: { cred: Cred; onClose: () => void }) {
       subtitle="The new value replaces the old one. Any persistent agent grants for this key are revoked — agents will need fresh approval."
       onClose={onClose}
     >
-      {done !== null ? (
+      {done ? (
         <div className="form">
-          <p className="modal-sub">
-            Rotated. {done} persistent grant{done === 1 ? "" : "s"} revoked.
-          </p>
+          <p className="modal-sub">Rotated. The new value is live.</p>
           <div className="form-actions">
             <button className="btn-primary" type="button" onClick={onClose}>
               Done
