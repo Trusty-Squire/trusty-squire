@@ -278,6 +278,44 @@ export const registerVaultRoute: FastifyPluginAsync<{
     },
   );
 
+  // ── GDPR export (web only): everything we hold ───────────────
+  // The complete, machine-readable record of the account's vault: every
+  // credential's non-secret metadata (active + deleted) plus the full
+  // audit trail. No secret values. Served as a download.
+  fastify.get(
+    "/v1/vault/export",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const data = await opts.deps.vault.exportAccount(auth.account_id);
+      return reply
+        .code(200)
+        .header("content-disposition", 'attachment; filename="trusty-squire-vault-export.json"')
+        .send({ exported_at: new Date().toISOString(), ...data });
+    },
+  );
+
+  // ── account erasure (web only): GDPR hard delete ─────────────
+  // Right-to-be-forgotten: irreversibly purge every credential row AND
+  // the entire audit trail for the account. Distinct from revoke-all
+  // (soft, recoverable) — this leaves nothing. Requires explicit confirm.
+  fastify.delete(
+    "/v1/vault/account",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = revokeAllBody.safeParse(req.body);
+      if (!parsed.success || parsed.data.confirm !== true) {
+        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to permanently erase all vault data" });
+        return;
+      }
+      const result = await opts.deps.vault.purgeAccount(auth.account_id);
+      return reply.code(200).send(result);
+    },
+  );
+
   // ── revoke-all (web only): kill-switch ───────────────────────
   // One-shot soft-delete of every active credential for the account —
   // the "a key leaked, burn it all down" panic button. Requires an

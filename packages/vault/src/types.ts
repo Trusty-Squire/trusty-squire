@@ -61,11 +61,17 @@ export interface CredentialStore {
     },
   ): Promise<void>;
   listByAccount(accountId: string): Promise<CredentialRecord[]>;
+  // Every credential the account ever held, soft-deleted included —
+  // the complete-history read for GDPR export. Newest first.
+  listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]>;
   findByIdForAccount(
     id: string,
     accountId: string,
   ): Promise<CredentialRecord | null>;
   setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
+  // Hard-delete every credential row (active + soft-deleted) for the
+  // account — the irreversible offboarding purge. Returns rows removed.
+  purgeAccount(accountId: string): Promise<number>;
 }
 
 export type VaultRequester = "agent" | "user" | "system";
@@ -142,4 +148,8 @@ export interface VaultAuditStore {
   countRecentRetrievals(accountId: string, since: Date): Promise<number>;
   // Newest-first audit trail for an account, for the activity timeline.
   list(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]>;
+  // The entire trail for an account, unpaginated — for GDPR export.
+  exportAll(accountId: string): Promise<VaultAuditRecord[]>;
+  // Hard-delete every audit row for the account — offboarding purge.
+  purgeAccount(accountId: string): Promise<number>;
 }

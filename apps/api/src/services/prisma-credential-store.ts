@@ -143,6 +143,22 @@ export class PrismaCredentialStore implements CredentialStore {
     return groups.map((g) => g.account_id);
   }
 
+  // Complete history (soft-deleted included) for GDPR export.
+  async listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]> {
+    const rows = await this.prisma.credential.findMany({
+      where: { account_id: accountId },
+      orderBy: { created_at: "desc" },
+    });
+    return rows.map((row) => this.toRecord(row));
+  }
+
+  // Irreversible offboarding purge — hard-delete every row (active +
+  // soft-deleted) for the account. Returns the count removed.
+  async purgeAccount(accountId: string): Promise<number> {
+    const r = await this.prisma.credential.deleteMany({ where: { account_id: accountId } });
+    return r.count;
+  }
+
   async findByIdForAccount(
     id: string,
     accountId: string,

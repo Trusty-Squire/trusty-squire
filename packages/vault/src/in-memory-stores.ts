@@ -88,6 +88,13 @@ export class InMemoryCredentialStore implements CredentialStore {
       .map((r) => clone(r));
   }
 
+  async listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]> {
+    return [...this.byReference.values()]
+      .filter((r) => r.account_id === accountId)
+      .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
+      .map((r) => clone(r));
+  }
+
   async findByIdForAccount(
     id: string,
     accountId: string,
@@ -102,6 +109,17 @@ export class InMemoryCredentialStore implements CredentialStore {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
     r.allowed_hosts = [...hosts];
+  }
+
+  async purgeAccount(accountId: string): Promise<number> {
+    let removed = 0;
+    for (const [ref, rec] of this.byReference) {
+      if (rec.account_id === accountId) {
+        this.byReference.delete(ref);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 }
 
@@ -155,6 +173,30 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
         payload: clonePayload(e.payload),
         emitted_at: e.emitted_at,
       }));
+  }
+
+  async exportAll(accountId: string): Promise<VaultAuditRecord[]> {
+    return this.events
+      .filter((e) => e.account_id === accountId)
+      .sort((a, b) => b.emitted_at.getTime() - a.emitted_at.getTime())
+      .map((e) => ({
+        id: e.id,
+        account_id: e.account_id,
+        type: e.type,
+        payload: clonePayload(e.payload),
+        emitted_at: e.emitted_at,
+      }));
+  }
+
+  async purgeAccount(accountId: string): Promise<number> {
+    let removed = 0;
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      if (this.events[i]!.account_id === accountId) {
+        this.events.splice(i, 1);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 }
 

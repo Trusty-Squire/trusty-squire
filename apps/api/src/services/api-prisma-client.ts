@@ -249,6 +249,7 @@ export interface ApiPrismaClient {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
     }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
     // Distinct enumeration for the one-time dedup migration: there is no
     // "list all accounts" credential helper, so the migration groups by
     // account_id at the DB and reads back the distinct keys.
@@ -267,6 +268,7 @@ export interface ApiPrismaClient {
       orderBy?: Record<string, unknown>;
       take?: number;
     }): Promise<VaultAuditEventRow[]>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
 }
 

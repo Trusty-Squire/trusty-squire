@@ -69,4 +69,23 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
       emitted_at: row.emitted_at,
     }));
   }
+
+  async exportAll(accountId: string): Promise<VaultAuditRecord[]> {
+    const rows = await this.prisma.vaultAuditEvent.findMany({
+      where: { account_id: accountId },
+      orderBy: { emitted_at: "desc" },
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      account_id: row.account_id,
+      type: row.type as VaultAuditType,
+      payload: (row.payload ?? {}) as unknown as VaultAuditPayload,
+      emitted_at: row.emitted_at,
+    }));
+  }
+
+  async purgeAccount(accountId: string): Promise<number> {
+    const r = await this.prisma.vaultAuditEvent.deleteMany({ where: { account_id: accountId } });
+    return r.count;
+  }
 }

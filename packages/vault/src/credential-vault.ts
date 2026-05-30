@@ -67,6 +67,29 @@ export interface RotateResult {
   rotated_at: string;
 }
 
+// GDPR export shape — non-secret metadata + the full audit trail. No
+// ciphertext, no secret values, ever.
+export interface VaultCredentialExport {
+  id: string;
+  reference: string;
+  service: string | null;
+  label: string;
+  type: string | null;
+  env_var_suggestion: string | null;
+  field_names: string[];
+  allowed_hosts: string[];
+  retrieval_count: number;
+  last_retrieved_at: Date | null;
+  rotated_at: Date | null;
+  created_at: Date;
+  deleted_at: Date | null;
+}
+export interface VaultAccountExport {
+  account_id: string;
+  credentials: VaultCredentialExport[];
+  audit_events: VaultAuditRecord[];
+}
+
 export interface DeviceAssertion {
   signature: string;
   signed_at: string;
@@ -393,6 +416,44 @@ export class CredentialVault implements VaultClient {
   // Read-through to the audit store; payloads never carry secret values.
   async listAudit(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]> {
     return this.deps.audit.list(accountId, opts);
+  }
+
+  // GDPR data export: the complete metadata + audit trail the vault holds
+  // for an account. NEVER includes secret values or the encrypted
+  // envelope — only the non-secret metadata (field NAMES, hosts, counts,
+  // timestamps) plus the full audit history.
+  async exportAccount(accountId: string): Promise<VaultAccountExport> {
+    const credentials = await this.deps.store.listByAccountIncludingDeleted(accountId);
+    const audit = await this.deps.audit.exportAll(accountId);
+    return {
+      account_id: accountId,
+      credentials: credentials.map((c) => ({
+        id: c.id,
+        reference: c.reference,
+        service: typeof c.metadata.service === "string" ? c.metadata.service : null,
+        label: c.label,
+        type: c.type,
+        env_var_suggestion: c.env_var_suggestion,
+        field_names: c.field_names,
+        allowed_hosts: c.allowed_hosts,
+        retrieval_count: c.retrieval_count,
+        last_retrieved_at: c.last_retrieved_at,
+        rotated_at: c.rotated_at,
+        created_at: c.created_at,
+        deleted_at: c.deleted_at,
+      })),
+      audit_events: audit,
+    };
+  }
+
+  // Irreversible account offboarding (GDPR erasure): hard-purge every
+  // credential row AND the entire audit trail for the account. Nothing
+  // is recoverable after this — the soft-delete + retention path is the
+  // forgiving one; this is the right-to-be-forgotten hard one.
+  async purgeAccount(accountId: string): Promise<{ credentials_purged: number; audit_purged: number }> {
+    const credentials_purged = await this.deps.store.purgeAccount(accountId);
+    const audit_purged = await this.deps.audit.purgeAccount(accountId);
+    return { credentials_purged, audit_purged };
   }
 
   // ── private ──────────────────────────────────────────────────

@@ -25,6 +25,8 @@ export {
   type VaultEntry,
   type VaultStoreInput,
   type RotateResult,
+  type VaultAccountExport,
+  type VaultCredentialExport,
   type DeviceAssertion,
   type ProxyHttpTemplate,
   type ProxyResponse,
