@@ -395,15 +395,7 @@ export class CredentialVault implements VaultClient {
     kek.fill(0);
     dek.fill(0);
     plaintextBuf.fill(0);
-    const parsed: unknown = JSON.parse(text);
-    if (parsed === null || typeof parsed !== "object") {
-      throw new Error("decrypted credential payload is not a field map");
-    }
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof v === "string") out[k] = v;
-    }
-    return out;
+    return coerceFieldMap(text);
   }
 
   private async retrieveInternal(args: {
@@ -464,6 +456,34 @@ export class CredentialVault implements VaultClient {
   ): Promise<void> {
     await this.deps.audit.record({ account_id: accountId, type, payload });
   }
+}
+
+// Decrypted-plaintext → field map, tolerant of the pre-v2 format.
+//
+// v2 stores ciphertext as JSON.stringify(fields). Credentials written
+// before v2 (the single-value era) hold the RAW secret string, which is
+// not a JSON object — running JSON.parse on it throws and 500s reveal +
+// use_credential. Coerce any non-object plaintext to a single { value }
+// field so legacy credentials keep working. A valid v2 payload is always
+// a JSON object with at least one string field, so it round-trips
+// unchanged; only legacy raw values take the fallback.
+export function coerceFieldMap(text: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { value: text }; // legacy raw secret — not JSON
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { value: text }; // legacy raw secret that parsed as a JSON scalar/array
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  // An object with no string fields isn't a usable field map — treat the
+  // whole plaintext as a raw value rather than reveal nothing.
+  return Object.keys(out).length > 0 ? out : { value: text };
 }
 
 function requesterFromPurpose(purpose: string, fallback: VaultRequester): VaultRequester {
