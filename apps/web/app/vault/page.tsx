@@ -9,7 +9,6 @@ import {
   ApiError,
   apiDelete,
   apiGet,
-  apiPatch,
   apiPost,
   timeAgo,
 } from "../lib/api";
@@ -58,14 +57,6 @@ export default function VaultPage() {
     setCreds((prev) => prev?.filter((c) => c.id !== id) ?? prev);
   }, []);
 
-  const onHostsChanged = useCallback((id: string, hosts: string[]) => {
-    setCreds(
-      (prev) =>
-        prev?.map((c) => (c.id === id ? { ...c, allowed_hosts: hosts } : c)) ??
-        prev,
-    );
-  }, []);
-
   return (
     <AppShell>
       <div className="app-head">
@@ -106,41 +97,35 @@ export default function VaultPage() {
 
       {creds !== null &&
         creds.map((cred) => (
-          <VaultRow
-            key={cred.id}
-            cred={cred}
-            onDeleted={onDeleted}
-            onHostsChanged={onHostsChanged}
-          />
+          <VaultRow key={cred.id} cred={cred} onDeleted={onDeleted} />
         ))}
     </AppShell>
   );
 }
 
-type RowModal = "rotate" | "delete" | "hosts" | null;
-
 function VaultRow({
   cred,
   onDeleted,
-  onHostsChanged,
 }: {
   cred: Cred;
   onDeleted: (id: string) => void;
-  onHostsChanged: (id: string, hosts: string[]) => void;
 }) {
-  const [value, setValue] = useState<string | null>(null);
+  // Revealed secret is a name→value map: a lone key is { value: "…" },
+  // AWS-style creds carry multiple named fields. null = still masked.
+  const [fields, setFields] = useState<Record<string, string> | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [modal, setModal] = useState<RowModal>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const reveal = useCallback(async () => {
     setBusy(true);
     try {
-      const res = await apiPost<{ value: string }>(
+      // The reveal endpoint returns { fields }, not a bare value — read
+      // the map so single- and multi-field credentials both render.
+      const res = await apiPost<{ fields: Record<string, string> }>(
         `/v1/vault/credentials/${cred.id}/reveal`,
       );
-      setValue(res.value);
+      setFields(res.fields);
     } catch {
       /* leave masked on failure */
     } finally {
@@ -148,21 +133,18 @@ function VaultRow({
     }
   }, [cred.id]);
 
-  const copy = useCallback(async () => {
-    if (value === null) return;
+  const copy = useCallback(async (key: string, val: string) => {
     try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
+      await navigator.clipboard.writeText(val);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1400);
     } catch {
       /* clipboard unavailable */
     }
-  }, [value]);
-
-  const openModal = useCallback((m: RowModal) => {
-    setMenuOpen(false);
-    setModal(m);
   }, []);
+
+  const entries = fields === null ? [] : Object.entries(fields);
+  const multiField = entries.length > 1;
 
   return (
     <div className="row">
@@ -186,151 +168,56 @@ function VaultRow({
             </>
           )}
         </div>
-        <div className="secret">
-          {value === null ? (
-            <>
-              <span className="mask">••••••••••••••••••</span>
+        {fields === null ? (
+          <div className="secret">
+            <span className="mask">••••••••••••••••••</span>
+            <button
+              className="linkbtn"
+              type="button"
+              onClick={reveal}
+              disabled={busy}
+            >
+              {busy ? "revealing…" : "reveal"}
+            </button>
+          </div>
+        ) : (
+          entries.map(([name, val]) => (
+            <div className="secret" key={name}>
+              {multiField && <span className="field-name">{name}</span>}
+              <span className="val">{val}</span>
               <button
                 className="linkbtn"
                 type="button"
-                onClick={reveal}
-                disabled={busy}
+                onClick={() => copy(name, val)}
               >
-                {busy ? "revealing…" : "reveal"}
+                {copiedKey === name ? "copied" : "copy"}
               </button>
-            </>
-          ) : (
-            <>
-              <span className="val">{value}</span>
-              <button className="linkbtn" type="button" onClick={copy}>
-                {copied ? "copied" : "copy"}
-              </button>
-            </>
-          )}
-        </div>
+            </div>
+          ))
+        )}
       </div>
 
       <div className="row-action">
-        <div className="menu-wrap">
-          <button
-            className="menu-trigger"
-            type="button"
-            aria-label="Credential actions"
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            ⋯
-          </button>
-          {menuOpen && (
-            <div className="menu">
-              <button type="button" onClick={() => openModal("rotate")}>
-                Rotate value
-              </button>
-              <button type="button" onClick={() => openModal("hosts")}>
-                Edit allowed hosts
-              </button>
-              <button
-                type="button"
-                className="danger"
-                onClick={() => openModal("delete")}
-              >
-                Delete
-              </button>
-            </div>
-          )}
-        </div>
+        <button
+          className="pill-btn danger"
+          type="button"
+          onClick={() => setConfirmDelete(true)}
+        >
+          Delete
+        </button>
       </div>
 
-      {modal === "rotate" && (
-        <RotateModal cred={cred} onClose={() => setModal(null)} />
-      )}
-      {modal === "delete" && (
+      {confirmDelete && (
         <DeleteModal
           cred={cred}
-          onClose={() => setModal(null)}
+          onClose={() => setConfirmDelete(false)}
           onDeleted={() => {
-            setModal(null);
+            setConfirmDelete(false);
             onDeleted(cred.id);
           }}
         />
       )}
-      {modal === "hosts" && (
-        <HostsModal
-          cred={cred}
-          onClose={() => setModal(null)}
-          onSaved={(hosts) => {
-            setModal(null);
-            onHostsChanged(cred.id, hosts);
-          }}
-        />
-      )}
     </div>
-  );
-}
-
-function RotateModal({ cred, onClose }: { cred: Cred; onClose: () => void }) {
-  const [newValue, setNewValue] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
-
-  const submit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (newValue.trim() === "") return;
-      setBusy(true);
-      setError(null);
-      try {
-        await apiPatch(`/v1/vault/credentials/${cred.id}`, { new_value: newValue });
-        setDone(true);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Rotation failed.");
-        setBusy(false);
-      }
-    },
-    [cred.id, newValue],
-  );
-
-  return (
-    <Modal
-      title={`Rotate ${cred.service ?? "credential"}`}
-      subtitle="The new value replaces the old one. Any persistent agent grants for this key are revoked — agents will need fresh approval."
-      onClose={onClose}
-    >
-      {done ? (
-        <div className="form">
-          <p className="modal-sub">Rotated. The new value is live.</p>
-          <div className="form-actions">
-            <button className="btn-primary" type="button" onClick={onClose}>
-              Done
-            </button>
-          </div>
-        </div>
-      ) : (
-        <form className="form" onSubmit={submit}>
-          <div className="field">
-            <label htmlFor="newval">New value</label>
-            <input
-              id="newval"
-              className="mono"
-              type="password"
-              value={newValue}
-              onChange={(e) => setNewValue(e.target.value)}
-              autoComplete="off"
-              required
-            />
-          </div>
-          {error !== null && <div className="form-err">{error}</div>}
-          <div className="form-actions">
-            <button className="btn-primary" type="submit" disabled={busy}>
-              {busy ? "Rotating…" : "Rotate"}
-            </button>
-            <button className="btn-secondary" type="button" onClick={onClose}>
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
-    </Modal>
   );
 }
 
@@ -375,72 +262,6 @@ function DeleteModal({
           </button>
         </div>
       </div>
-    </Modal>
-  );
-}
-
-function HostsModal({
-  cred,
-  onClose,
-  onSaved,
-}: {
-  cred: Cred;
-  onClose: () => void;
-  onSaved: (hosts: string[]) => void;
-}) {
-  const [text, setText] = useState(cred.allowed_hosts.join("\n"));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      setBusy(true);
-      setError(null);
-      const hosts = text
-        .split("\n")
-        .map((h) => h.trim())
-        .filter((h) => h !== "");
-      try {
-        const res = await apiPatch<{ allowed_hosts: string[] }>(
-          `/v1/vault/credentials/${cred.id}/allowed-hosts`,
-          { hosts },
-        );
-        onSaved(res.allowed_hosts);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Save failed.");
-        setBusy(false);
-      }
-    },
-    [cred.id, text, onSaved],
-  );
-
-  return (
-    <Modal
-      title="Allowed hosts"
-      subtitle="One host per line. The use_credential proxy warns when an agent calls a host that isn't listed (advisory — it still proceeds for trusted sessions)."
-      onClose={onClose}
-    >
-      <form className="form" onSubmit={submit}>
-        <div className="field">
-          <label htmlFor="hosts">Hosts</label>
-          <textarea
-            id="hosts"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="api.openai.com"
-          />
-        </div>
-        {error !== null && <div className="form-err">{error}</div>}
-        <div className="form-actions">
-          <button className="btn-primary" type="submit" disabled={busy}>
-            {busy ? "Saving…" : "Save hosts"}
-          </button>
-          <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-        </div>
-      </form>
     </Modal>
   );
 }
