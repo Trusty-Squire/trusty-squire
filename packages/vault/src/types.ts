@@ -87,6 +87,11 @@ export interface VaultAuditPayload {
   response_size?: number;
   upstream_duration_ms?: number;
   proxy_error?: string;
+  // Backlog-dedup forensics. `reference` is the row that was
+  // soft-deleted; `collapsed_into` is the surviving (kept) reference
+  // its duplicates were merged into. Set together by the one-time
+  // dedup-credentials migration so the collapse is auditable + reversible.
+  collapsed_into?: string;
 }
 
 export const VAULT_AUDIT_TYPES = {
@@ -94,6 +99,10 @@ export const VAULT_AUDIT_TYPES = {
   stored: "vault.credential_stored",
   rotated: "vault.credential_rotated",
   deleted: "vault.credential_deleted",
+  // A duplicate active row collapsed into a surviving one by the
+  // one-time backlog-dedup migration. Distinct from `deleted` (a
+  // user/agent revocation) so dedup soft-deletes are queryable on their own.
+  collapsed: "vault.credential_collapsed",
   proxyExecuted: "vault.proxy_executed",
   proxyRejected: "vault.proxy_rejected",
 } as const;
