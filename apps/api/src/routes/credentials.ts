@@ -41,7 +41,10 @@ export const registerCredentialsRoute: FastifyPluginAsync<{
 
       let value: string;
       try {
-        value = await opts.deps.vault.retrieveForRuntime(reference, purposeCheck.data);
+        // The vault now stores a field map; collapse to the sole/`value`
+        // field for this legacy single-value read. (Last raw-read path.)
+        const fields = await opts.deps.vault.retrieveForRuntime(reference, purposeCheck.data);
+        value = fields.value ?? Object.values(fields)[0] ?? "";
       } catch (err) {
         reply.code(404).send({
           error: "credential_not_found",

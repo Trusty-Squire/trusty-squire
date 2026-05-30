@@ -162,8 +162,8 @@ describe("E2E #1 — install → signup → vault data path", () => {
       headers: { cookie: webCookie },
     });
     expect(reveal2.statusCode).toBe(200);
-    const revealed = reveal2.json() as { value: string };
-    expect(revealed.value).toBe(captured);
+    const revealed = reveal2.json() as { fields: Record<string, string> };
+    expect(revealed.fields.value).toBe(captured);
 
     // Make TS happy about the unused first attempt — left in so the
     // log shows the id-vs-reference distinction load-bearing here.
@@ -273,6 +273,6 @@ describe("E2E #2 — vault persistence across web sessions", () => {
       headers: { cookie: secondCookie },
     });
     expect(reveal.statusCode).toBe(200);
-    expect((reveal.json() as { value: string }).value).toBe("re_pre_signout_value");
+    expect((reveal.json() as { fields: Record<string, string> }).fields.value).toBe("re_pre_signout_value");
   });
 });

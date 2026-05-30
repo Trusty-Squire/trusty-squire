@@ -22,7 +22,7 @@ const SUB = "01HSUBAAAAAAAAAAAAAAAAAAAA";
 
 function makeVault(opts: { now?: () => Date } = {}) {
   const store = new InMemoryCredentialStore();
-  const audit = new InMemoryVaultAuditStore();
+  const audit = new InMemoryVaultAuditStore(opts.now ?? (() => NOW));
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x42));
   const vault = new CredentialVault({ store, audit, kms, now: opts.now ?? (() => NOW) });
   return { vault, store, audit };
@@ -202,8 +202,8 @@ describe("retrieve guards", () => {
 });
 
 describe("LocalKMS sanity", () => {
-  beforeEach(() => vi.spyOn(console, "warn").mockImplementation(() => {}));
-  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => { vi.spyOn(console, "warn").mockImplementation(() => {}); });
+  afterEach(() => { vi.restoreAllMocks(); });
   it("round-trips through fromEnv hex key", async () => {
     const kms = LocalKMS.fromEnv({ LOCAL_KMS_KEY: Buffer.alloc(32, 0x11).toString("hex") } as NodeJS.ProcessEnv);
     const blob = await kms.encrypt(Buffer.from("secret"));

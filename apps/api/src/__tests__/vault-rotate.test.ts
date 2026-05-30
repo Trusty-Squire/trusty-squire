@@ -88,7 +88,7 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       headers: { cookie },
     });
     expect(reveal.statusCode).toBe(200);
-    expect((reveal.json() as { value: string }).value).toBe("sk-rotated-value");
+    expect((reveal.json() as { fields: Record<string, string> }).fields.value).toBe("sk-rotated-value");
   });
 
   it("rejects an empty new_value with 400", async () => {
@@ -137,6 +137,6 @@ describe("PATCH /v1/vault/credentials/:id", () => {
       url: `/v1/vault/credentials/${idA}/reveal`,
       headers: { cookie: cookieA },
     });
-    expect((reveal.json() as { value: string }).value).toBe("sk-account-a");
+    expect((reveal.json() as { fields: Record<string, string> }).fields.value).toBe("sk-account-a");
   });
 });

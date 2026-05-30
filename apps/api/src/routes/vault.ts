@@ -47,7 +47,7 @@ const allowedHostsBody = z.object({
   hosts: z.array(z.string().min(1).max(253)).max(50),
 });
 
-function fieldsFrom(b: { value?: string; fields?: Record<string, string> }): Record<string, string> {
+function fieldsFrom(b: { value?: string | undefined; fields?: Record<string, string> | undefined }): Record<string, string> {
   if (b.fields !== undefined && Object.keys(b.fields).length > 0) return b.fields;
   return { value: b.value! };
 }
@@ -264,6 +264,7 @@ async function storeUpsert(
     service: entry.service,
     label: entry.label,
     field_names: entry.field_names,
+    type: data.type ?? "api_key",
     allowed_hosts: entry.allowed_hosts,
     created_at: entry.created_at,
     updated: entry.updated,

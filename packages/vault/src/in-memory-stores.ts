@@ -109,10 +109,14 @@ export interface InMemoryAuditEvent extends VaultAuditEventInput {
 export class InMemoryVaultAuditStore implements VaultAuditStore {
   public readonly events: InMemoryAuditEvent[] = [];
 
+  // Clock injectable so tests that drive the vault with a fixed now()
+  // stamp audit events on the same timeline the rate-limit window reads.
+  constructor(private readonly now: () => Date = () => new Date()) {}
+
   async record(event: VaultAuditEventInput): Promise<void> {
     this.events.push({
       id: ulid(),
-      emitted_at: new Date(),
+      emitted_at: this.now(),
       account_id: event.account_id,
       type: event.type,
       payload: clonePayload(event.payload),

@@ -141,31 +141,25 @@ export class ApiClient {
     );
   }
 
-  // ── Vault management (agent-driven, on the user's behalf) ──
+  // ── store: upsert (create or overwrite by service+label) ──
 
-  // Store a secret the user just shared. Returns the vault reference +
-  // the derived allowed_hosts; never echoes the value back.
   async storeCredential(input: {
     service: string;
-    value: string;
+    label?: string;
+    value?: string;
+    fields?: Record<string, string>;
     env_var_suggestion?: string;
     type?: string;
-  }): Promise<{ reference: string; type: string; created_at?: string; allowed_hosts?: string[] }> {
+  }): Promise<{
+    reference: string;
+    service: string;
+    label: string;
+    field_names: string[];
+    allowed_hosts: string[];
+    created_at: string;
+    updated: boolean;
+  }> {
     return this.post("/v1/vault/credentials", input);
-  }
-
-  // Rotate the value of an existing credential (by reference). Cascades
-  // to revoke persistent grants — returns how many were revoked.
-  async rotateCredential(
-    reference: string,
-    newValue: string,
-  ): Promise<{ rotated_at: string }> {
-    return this.post("/v1/vault/credentials/rotate", { reference, new_value: newValue });
-  }
-
-  // Permanently (soft-)delete a credential by reference.
-  async deleteCredential(reference: string): Promise<{ deleted_at: string }> {
-    return this.post("/v1/vault/credentials/delete", { reference });
   }
 
   // ── use_credential: write-only-sink proxy ─────────────────
