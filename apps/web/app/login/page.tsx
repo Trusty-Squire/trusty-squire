@@ -18,37 +18,35 @@ export default function LoginPage() {
       : null;
 
   return (
-    <main className="auth-wrap">
-      <div className="auth-card">
+    <main className="login">
+      {/* left — anchored auth column with a border-right hairline */}
+      <section className="auth">
+        <div className="glow" />
+        {/* refined { } mark — hairline square, mono accent (replaces the
+            old shield+text SVG) */}
         <div className="mark">
-          <svg viewBox="0 0 100 100" fill="none" aria-hidden="true">
-            <path
-              d="M18 16 H82 V48 Q82 72 50 88 Q18 72 18 48 Z"
-              stroke="#f5f5f7"
-              strokeWidth="6"
-              strokeLinejoin="round"
-            />
-            <text
-              x="50"
-              y="60"
-              fontFamily="monospace"
-              fontSize="30"
-              fontWeight="700"
-              fill="#8b89ff"
-              textAnchor="middle"
-            >
-              {"{ }"}
-            </text>
-          </svg>
+          <span className="mono">{"{ }"}</span>
         </div>
-        <h1>
-          Sign in to{" "}
-          <span style={{ whiteSpace: "nowrap" }}>Trusty Squire</span>
-        </h1>
-        <p className="auth-sub">Your vault and connected agents, in one place.</p>
+        <h1>Sign in</h1>
+        <p className="subt">Your vault and connected agents, in one place.</p>
         <OAuthButtons next={next} />
         {error !== null && <p className="auth-err">{error}</p>}
-      </div>
+        <div className="foot">secured · oauth only · no passwords stored</div>
+      </section>
+
+      {/* right — quiet statement over a faint masked grid + glow */}
+      <section className="stage" aria-hidden="true">
+        <div className="grid" />
+        <div className="glow" />
+        <div className="statement">
+          <div className="lead">
+            Your keys, <em>collected by your squire,</em> handled like a tool.
+          </div>
+          <div className="tag">
+            encrypted · used only via the proxy · never shown to an agent
+          </div>
+        </div>
+      </section>
     </main>
   );
 }

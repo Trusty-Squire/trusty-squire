@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
+import { Geist, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({
+// Geist is the UI/body face (design system: replaces Inter, the
+// convergence trap). next/font/google ships Geist in this Next, so we
+// avoid the extra `geist` dependency. No `weight` → the variable font
+// loads, so the design's body weight 450 (a non-discrete value) and the
+// 600 headings both resolve from one file.
+const geist = Geist({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
@@ -45,7 +50,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
+    <html lang="en" className={`${geist.variable} ${jetbrainsMono.variable}`}>
       <body>{children}</body>
     </html>
   );

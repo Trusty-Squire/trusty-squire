@@ -95,11 +95,49 @@ export default function VaultPage() {
         </div>
       )}
 
-      {creds !== null &&
-        creds.map((cred) => (
-          <VaultRow key={cred.id} cred={cred} onDeleted={onDeleted} />
-        ))}
+      {creds !== null && creds.length > 0 && (
+        <>
+          <div className="vault-list">
+            {creds.map((cred) => (
+              <VaultRow key={cred.id} cred={cred} onDeleted={onDeleted} />
+            ))}
+          </div>
+          {/* keyboard rail — static "fast" signal (no handlers wired) */}
+          <div className="kbd" aria-hidden="true">
+            <span className="key">R</span> reveal
+            <span className="key">C</span> copy
+            <span className="key">⌘K</span> search
+          </div>
+        </>
+      )}
     </AppShell>
+  );
+}
+
+// The credential's first allowed host drives the favicon; the service
+// name's first letter is the lettermark fallback. The lettermark renders
+// behind the img and shows through when there's no host or the favicon
+// 404s (the img is hidden on error).
+function ServiceIcon({ cred }: { cred: Cred }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const host = cred.allowed_hosts[0];
+  const letter = (cred.service ?? cred.key_name ?? "?").charAt(0).toUpperCase();
+  const showImg = host !== undefined && !imgFailed;
+  return (
+    <div className="ic">
+      <span className="lm">{letter}</span>
+      {/* Third-party favicon service; next/image's loader/domains config
+          buys nothing for a 17px throwaway icon with a lettermark
+          fallback, so a plain <img> is the right tool here. */}
+      {showImg && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={`https://www.google.com/s2/favicons?domain=${host}&sz=64`}
+          alt=""
+          onError={() => setImgFailed(true)}
+        />
+      )}
+    </div>
   );
 }
 
@@ -146,31 +184,31 @@ function VaultRow({
   const entries = fields === null ? [] : Object.entries(fields);
   const multiField = entries.length > 1;
 
+  // mono meta: "{host} · used {ago}" / "{host} · never used", with the
+  // host omitted when the credential has no allowed hosts.
+  const host = cred.allowed_hosts[0];
+  const usage =
+    cred.last_retrieved_at !== null
+      ? `used ${timeAgo(cred.last_retrieved_at)}`
+      : "never used";
+
   return (
     <div className="row">
-      <div className="row-glyph">
-        <KeyGlyph />
-      </div>
-      <div className="row-main">
-        <div className="row-title">{cred.service ?? "Unknown service"}</div>
-        <div className="row-meta">
-          <span>{cred.key_name ?? cred.type}</span>
-          <span className="sep">·</span>
-          <span>
-            {cred.allowed_hosts.length === 0
-              ? "no allowed hosts"
-              : cred.allowed_hosts.join(", ")}
-          </span>
-          {cred.last_retrieved_at !== null && (
+      <ServiceIcon cred={cred} />
+      <div>
+        <div className="svc">{cred.service ?? "Unknown service"}</div>
+        <div className="meta">
+          {host !== undefined && (
             <>
-              <span className="sep">·</span>
-              <span>used {timeAgo(cred.last_retrieved_at)}</span>
+              <span>{host}</span>
+              <span className="dot">·</span>
             </>
           )}
+          <span>{usage}</span>
         </div>
         {fields === null ? (
           <div className="secret">
-            <span className="mask">••••••••••••••••••</span>
+            <span className="mask">••••••••••••••••</span>
             <button
               className="linkbtn"
               type="button"
@@ -197,15 +235,13 @@ function VaultRow({
         )}
       </div>
 
-      <div className="row-action">
-        <button
-          className="pill-btn danger"
-          type="button"
-          onClick={() => setConfirmDelete(true)}
-        >
-          Delete
-        </button>
-      </div>
+      <button
+        className="del"
+        type="button"
+        onClick={() => setConfirmDelete(true)}
+      >
+        Delete
+      </button>
 
       {confirmDelete && (
         <DeleteModal
@@ -263,22 +299,5 @@ function DeleteModal({
         </div>
       </div>
     </Modal>
-  );
-}
-
-function KeyGlyph() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="9" cy="9" r="5.5" />
-      <path d="M12.9 12.9L20 20M16.5 16.5l2.4-2.4" />
-    </svg>
   );
 }
