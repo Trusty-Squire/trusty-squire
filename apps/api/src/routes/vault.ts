@@ -24,6 +24,8 @@ import {
   type VaultAuditType,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+import type { EmailForwarder } from "../services/email-forwarder.js";
+import { buildEmailForwarder } from "../services/webhook-forwarder.js";
 
 const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
 
@@ -124,7 +126,11 @@ export const registerVaultRoute: FastifyPluginAsync<{
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  emailForwarder?: EmailForwarder;
 }> = async (fastify, opts) => {
+  // Defaults to an env-configured forwarder (no-op when RESEND_API_KEY is
+  // unset); tests inject a stub. Powers the "new key added" notification.
+  const forwarder = buildEmailForwarder(opts.emailForwarder);
   // ── list (web + agent): metadata only, no secret values ──────
   fastify.get(
     "/v1/vault/credentials",
@@ -233,7 +239,10 @@ export const registerVaultRoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "agent") return;
-      return storeUpsert(opts, auth.account_id, req, reply, "squire");
+      // Bot stores happen with no human watching, so a new key gets a
+      // "key added" notification. Re-stores (rotation) don't — they're
+      // expected churn, not a surprise the user needs flagged.
+      return storeUpsert(opts, auth.account_id, req, reply, "squire", forwarder, true);
     },
   );
 
@@ -244,7 +253,8 @@ export const registerVaultRoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "web") return;
-      return storeUpsert(opts, auth.account_id, req, reply, "manual");
+      // The user is in the UI doing this by hand — no notification.
+      return storeUpsert(opts, auth.account_id, req, reply, "manual", forwarder, false);
     },
   );
 
@@ -464,6 +474,8 @@ async function storeUpsert(
   req: FastifyRequest,
   reply: FastifyReply,
   source: string,
+  forwarder: EmailForwarder,
+  notifyOnCreate: boolean,
 ): Promise<void> {
   const parsed = storeBody.safeParse(req.body);
   if (!parsed.success) {
@@ -481,6 +493,12 @@ async function storeUpsert(
     ...(data.env_var_suggestion !== undefined ? { env_var_suggestion: data.env_var_suggestion } : {}),
     metadata: { source },
   });
+  // Notify the user that a key landed in their vault unattended. Only on
+  // a fresh create (not a rotation), and never fatal to the store —
+  // failures are swallowed so a misconfigured mailer can't break signups.
+  if (notifyOnCreate && !entry.updated) {
+    await notifyNewKey(opts.deps, forwarder, accountId, entry.service, entry.label);
+  }
   reply.code(entry.updated ? 200 : 201).send({
     reference: entry.reference,
     service: entry.service,
@@ -491,4 +509,37 @@ async function storeUpsert(
     created_at: entry.created_at,
     updated: entry.updated,
   });
+}
+
+// Best-effort "a new key was added to your vault" email. Resolves the
+// account's address, sends via the forwarder, and SWALLOWS every failure
+// (no account, no email, mailer down) — a notification must never break
+// the store that triggered it.
+async function notifyNewKey(
+  deps: ApiDeps,
+  forwarder: EmailForwarder,
+  accountId: string,
+  service: string,
+  label: string,
+): Promise<void> {
+  try {
+    const account = await deps.accountStore.findAccountById(accountId);
+    if (account === null || account.email.length === 0) return;
+    const labelSuffix = label && label !== "default" ? ` (${label})` : "";
+    await forwarder.sendDirect({
+      to: account.email,
+      subject: `Trusty Squire: new ${service} key added to your vault`,
+      text: [
+        `A new ${service}${labelSuffix} credential was just added to your Trusty Squire vault.`,
+        ``,
+        `If this was you (or your agent provisioning ${service}), no action is needed.`,
+        `If you didn't expect this, open your vault to review or revoke it — and use`,
+        `"revoke all" if anything looks wrong.`,
+        ``,
+        `— Trusty Squire`,
+      ].join("\n"),
+    });
+  } catch {
+    // Intentionally swallowed — see the doc comment.
+  }
 }
