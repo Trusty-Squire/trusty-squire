@@ -53,6 +53,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Link className={pathname === "/vault" ? "on" : ""} href="/vault">
             Vault
           </Link>
+          <Link className={pathname === "/vault/activity" ? "on" : ""} href="/vault/activity">
+            Activity
+          </Link>
           <Link className={pathname === "/agents" ? "on" : ""} href="/agents">
             Agents
           </Link>
