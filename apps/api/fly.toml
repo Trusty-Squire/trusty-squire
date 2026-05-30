@@ -4,6 +4,18 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile.fly"
 
+# Sync the auth-DB schema to the api Prisma model on every deploy. We use
+# `db push` (no migration files), and this used to be a manual step that
+# got forgotten — a v2 column add shipped in code but never reached the
+# DB, 500ing /v1/vault/credentials (see the 2026-05-29 vault-drift
+# investigation). release_command runs in the release image with secrets
+# available, so AUTH_DATABASE_URL resolves. Additive changes auto-apply;
+# a destructive change makes `db push` exit non-zero and aborts the
+# deploy rather than drifting silently. The inbox schema lives in a
+# separate DB and is managed with `prisma migrate deploy` out of band.
+[deploy]
+  release_command = "/app/packages/inbox/node_modules/.bin/prisma db push --schema=/app/apps/api/prisma/schema.prisma --skip-generate"
+
 [env]
   API_PORT = "8080"
   NODE_ENV = "production"
