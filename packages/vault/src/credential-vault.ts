@@ -67,6 +67,19 @@ export interface RotateResult {
   rotated_at: string;
 }
 
+// Envelope health probe result. `healthy` means the full
+// KMS→KEK→DEK→ciphertext chain decrypted cleanly — it does NOT mean the
+// upstream service still accepts the key (that needs a per-service live
+// call, out of this layer's scope). `field_count` is the number of
+// fields recovered; no value is ever exposed.
+export interface VaultHealthResult {
+  reference: string;
+  healthy: boolean;
+  field_count?: number;
+  algorithm?: string;
+  error?: string;
+}
+
 // GDPR export shape — non-secret metadata + the full audit trail. No
 // ciphertext, no secret values, ever.
 export interface VaultCredentialExport {
@@ -358,6 +371,34 @@ export class CredentialVault implements VaultClient {
       reference,
       requester: "user",
     });
+  }
+
+  // Web-only integrity check: confirm the credential's encrypted
+  // envelope still decrypts under the current KMS keyring + DEK chain,
+  // WITHOUT returning the secret or calling upstream. Catches silent rot
+  // — a credential orphaned by a botched master-key rotation, or a row
+  // whose envelope no longer authenticates. Does not mark a retrieval or
+  // count toward the rate limit: it's an integrity probe, not a use.
+  async checkHealth(reference: string, accountId: string): Promise<VaultHealthResult> {
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    try {
+      const fields = await this.decryptFields(record);
+      return {
+        reference,
+        healthy: true,
+        field_count: Object.keys(fields).length,
+        algorithm: record.algorithm,
+      };
+    } catch (err) {
+      return {
+        reference,
+        healthy: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   // Undelete: bring a soft-deleted credential back to active, account-

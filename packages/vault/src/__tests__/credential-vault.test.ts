@@ -218,6 +218,39 @@ describe("retrieve guards", () => {
   });
 });
 
+describe("envelope health check", () => {
+  it("reports healthy when the envelope decrypts, with field count, no secret", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput({ fields: { access_key_id: "AKIA", secret_access_key: "shh" } }));
+    const health = await vault.checkHealth(entry.reference, ACCOUNT);
+    expect(health.healthy).toBe(true);
+    expect(health.field_count).toBe(2);
+    expect(health.algorithm).toBe("AES-256-GCM");
+    expect(JSON.stringify(health)).not.toContain("shh");
+  });
+
+  it("reports unhealthy when the master key can't decrypt the KEK", async () => {
+    const store = new InMemoryCredentialStore();
+    const audit = new InMemoryVaultAuditStore(() => NOW);
+    const sealed = new CredentialVault({ store, audit, kms: LocalKMS.withFixedKey(Buffer.alloc(32, 0x42)), now: () => NOW });
+    const entry = await sealed.store(storeInput());
+    // a vault wired to a DIFFERENT master key sees the same row but the
+    // KEK blob no longer authenticates — exactly the post-bad-rotation rot
+    const wrongKey = new CredentialVault({ store, audit, kms: LocalKMS.withFixedKey(Buffer.alloc(32, 0x99)), now: () => NOW });
+    const health = await wrongKey.checkHealth(entry.reference, ACCOUNT);
+    expect(health.healthy).toBe(false);
+    expect(health.error).toBeDefined();
+    // the correctly-keyed vault still reports healthy
+    expect((await sealed.checkHealth(entry.reference, ACCOUNT)).healthy).toBe(true);
+  });
+
+  it("rejects a cross-account health probe", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+    await expect(vault.checkHealth(entry.reference, "01HOTHER")).rejects.toThrow(CredentialNotFoundError);
+  });
+});
+
 describe("LocalKMS sanity", () => {
   beforeEach(() => { vi.spyOn(console, "warn").mockImplementation(() => {}); });
   afterEach(() => { vi.restoreAllMocks(); });

@@ -338,6 +338,31 @@ export const registerVaultRoute: FastifyPluginAsync<{
     },
   );
 
+  // ── health (web only): envelope integrity probe ─────────────
+  // Confirms the credential still decrypts under the current KMS keyring
+  // (catches rot from a botched master-key rotation). No secret returned,
+  // no upstream call, no retrieval counted.
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/health",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const target = await opts.deps.credentialStore.findByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      const result = await opts.deps.vault.checkHealth(target.reference, auth.account_id);
+      // 200 with healthy:false — the probe ran successfully and found the
+      // envelope unhealthy; that's a valid result, not a request error.
+      return reply.code(200).send({ id: target.id, ...result, checked_at: new Date().toISOString() });
+    },
+  );
+
   // ── restore (web only): undelete a soft-deleted credential ───
   // Soft-deletes are recoverable until a GDPR purge. Resurrects the row
   // unless a live (service,label) twin now occupies the slot (409).

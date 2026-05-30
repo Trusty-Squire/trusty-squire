@@ -26,6 +26,7 @@ export {
   type VaultEntry,
   type VaultStoreInput,
   type RotateResult,
+  type VaultHealthResult,
   type VaultAccountExport,
   type VaultCredentialExport,
   type DeviceAssertion,
