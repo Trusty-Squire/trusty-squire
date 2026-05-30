@@ -26,7 +26,7 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR } from "./profile.js";
+import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
@@ -366,12 +366,28 @@ export class BrowserController {
       this.launchedMode = "headless";
     }
 
+    // Cross-process gate on the shared Chrome profile: reclaim a stale
+    // SingletonLock from a killed run, or wait our turn behind a live
+    // `mcp login` / another signup. Without this, launchPersistentContext
+    // aborts with "Failed to create a ProcessSingleton" and bricks the run.
+    const free = await waitForProfileFree(this.profileDir, {
+      deadlineMs: 120_000,
+      onWait: () =>
+        console.error("[universal-bot] bot Chrome profile is busy with another run — waiting…"),
+    });
+    if (!free) {
+      throw new ProfileBusyError(
+        "bot Chrome profile is held by another run (a login or signup); retry shortly",
+      );
+    }
+
     // T3: a PERSISTENT context. The profile dir carries the user's
     // Google session (established by `mcp login` — see google-login.ts),
     // so the OAuth-first signup path reuses it instead of starting
     // logged-out. launchPersistentContext takes launch + context
     // options in one call.
-    const context = await getChromium().launchPersistentContext(this.profileDir, {
+    const context = await launchWithProfileGate(this.profileDir, () =>
+      getChromium().launchPersistentContext(this.profileDir, {
       headless: chromeHeadless,
       ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
       // `channel:` selects a real installed browser over the bundled
@@ -409,7 +425,8 @@ export class BrowserController {
         "clipboard-write",
       ],
       ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-    });
+      }),
+    );
     this.context = context;
     // Patch the navigator.webdriver flag — most anti-bot heuristics look here.
     await context.addInitScript(() => {
@@ -3453,14 +3470,19 @@ export class BrowserController {
   }
 
   async close(): Promise<void> {
-    if (this.page) await this.page.close();
+    // Each step is best-effort and independent: a throw closing the page
+    // or context must NOT skip the Xvfb teardown below, or the virtual
+    // display leaks (orphaned Xvfb procs pile up over a long-lived MCP
+    // server and, worse, the un-closed Chrome keeps the profile's
+    // SingletonLock held — bricking the next signup + `mcp login`).
+    if (this.page) await this.page.close().catch(() => undefined);
     // Closing the persistent context shuts the browser down too.
-    if (this.context) await this.context.close();
+    if (this.context) await this.context.close().catch(() => undefined);
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its
     // display until it exits, THEN kill Xvfb.
     if (this.xvfb !== null) {
-      this.xvfb.stop();
+      try { this.xvfb.stop(); } catch { /* best-effort */ }
       this.xvfb = null;
     }
   }
