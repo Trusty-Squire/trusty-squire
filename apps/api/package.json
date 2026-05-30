@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
     "dev": "tsx watch src/server.ts",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "dedup-credentials": "node dist/scripts/dedup-credentials.bin.js",
+    "dedup-credentials:apply": "node dist/scripts/dedup-credentials.bin.js --apply"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",

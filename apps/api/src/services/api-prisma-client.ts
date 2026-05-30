@@ -249,6 +249,13 @@ export interface ApiPrismaClient {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
     }): Promise<{ count: number }>;
+    // Distinct enumeration for the one-time dedup migration: there is no
+    // "list all accounts" credential helper, so the migration groups by
+    // account_id at the DB and reads back the distinct keys.
+    groupBy(args: {
+      by: ["account_id"];
+      where?: Record<string, unknown>;
+    }): Promise<{ account_id: string }[]>;
   };
   vaultAuditEvent: {
     create(args: { data: Record<string, unknown> }): Promise<VaultAuditEventRow>;

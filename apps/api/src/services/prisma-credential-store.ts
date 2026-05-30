@@ -131,6 +131,18 @@ export class PrismaCredentialStore implements CredentialStore {
     return rows.map((row) => this.toRecord(row));
   }
 
+  // Every account that owns at least one active credential. The dedup
+  // migration enumerates these, then runs listByAccount per account —
+  // there's no all-accounts list helper, and a global scan would lose
+  // the per-account grouping the dedup key needs anyway.
+  async listAllAccountIds(): Promise<string[]> {
+    const groups = await this.prisma.credential.groupBy({
+      by: ["account_id"],
+      where: { deleted_at: null },
+    });
+    return groups.map((g) => g.account_id);
+  }
+
   async findByIdForAccount(
     id: string,
     accountId: string,
