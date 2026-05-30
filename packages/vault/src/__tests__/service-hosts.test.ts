@@ -15,6 +15,13 @@ describe("deriveAllowedHosts", () => {
     expect(deriveAllowedHosts("Open AI")).toEqual(["api.openai.com"]);
   });
 
+  it("resolves fal.ai (dotted name normalises to falai)", () => {
+    const hosts = ["fal.run", "rest.alpha.fal.ai", "queue.fal.run"];
+    expect(deriveAllowedHosts("fal.ai")).toEqual(hosts);
+    expect(deriveAllowedHosts("fal")).toEqual(hosts);
+    expect(deriveAllowedHosts("Fal.AI")).toEqual(hosts);
+  });
+
   it("returns an empty list for unknown / missing services", () => {
     expect(deriveAllowedHosts("some-random-saas")).toEqual([]);
     expect(deriveAllowedHosts("")).toEqual([]);

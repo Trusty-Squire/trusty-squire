@@ -1207,3 +1207,16 @@
     completes. Skip until phone relay exists.
 
     '
+- slug: falai
+  name: fal.ai
+  signup_url: https://fal.ai/dashboard/keys
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Added 2026-05-30 (user request). AI inference platform. Google or
+
+    GitHub OAuth signup; API key minted on the dashboard keys page. Key
+
+    is used as `Authorization: Key <id>:<secret>` against fal.run.
+
+    '
