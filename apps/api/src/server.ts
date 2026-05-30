@@ -178,6 +178,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,
     requireAny: auth.requireAny,
+    ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
   });
   await fastify.register(registerVaultAccessRoute, {
     deps,

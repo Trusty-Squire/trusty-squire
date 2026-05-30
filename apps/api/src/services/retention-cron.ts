@@ -6,6 +6,7 @@
 //     - Delete ReceivedEmail older than 90d (metadata + S3 pointer)
 //     - Delete PairingToken older than 1h
 //     - Delete LLMUsageEvent older than 30d
+//     - Delete VaultAuditEvent older than 365d
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
@@ -37,6 +38,7 @@ export interface RetentionCronDeps {
   metadataRetentionDays?: number;
   pairingTokenRetentionHours?: number;
   llmEventRetentionDays?: number;
+  vaultAuditRetentionDays?: number;
 }
 
 export interface RetentionCronStats {
@@ -44,6 +46,7 @@ export interface RetentionCronStats {
   emails_deleted: number;
   pairing_tokens_deleted: number;
   llm_events_deleted: number;
+  vault_audit_deleted: number;
   duration_ms: number;
   errors: string[];
 }
@@ -54,6 +57,7 @@ export class RetentionCron {
   private readonly metadataRetentionDays: number;
   private readonly pairingTokenRetentionHours: number;
   private readonly llmEventRetentionDays: number;
+  private readonly vaultAuditRetentionDays: number;
   private timer: NodeJS.Timeout | null = null;
   private lastRunAt: Date | null = null;
   private lastStats: RetentionCronStats | null = null;
@@ -68,6 +72,12 @@ export class RetentionCron {
       ?? Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
     this.llmEventRetentionDays = deps.llmEventRetentionDays
       ?? Number.parseInt(process.env.LLM_EVENT_RETENTION_DAYS ?? "30", 10);
+    // Vault audit is the security event trail (who-touched-my-keys), so
+    // it's kept far longer than ops telemetry — a year by default. Long
+    // enough to be useful for an after-the-fact compromise investigation,
+    // bounded so the table doesn't grow without limit.
+    this.vaultAuditRetentionDays = deps.vaultAuditRetentionDays
+      ?? Number.parseInt(process.env.VAULT_AUDIT_RETENTION_DAYS ?? "365", 10);
   }
 
   // Starts the hourly schedule. Idempotent; calling start() while
@@ -119,6 +129,7 @@ export class RetentionCron {
       emails_deleted: 0,
       pairing_tokens_deleted: 0,
       llm_events_deleted: 0,
+      vault_audit_deleted: 0,
       duration_ms: 0,
       errors: [],
     };
@@ -127,6 +138,7 @@ export class RetentionCron {
     const metaCutoff = new Date(startedAt.getTime() - this.metadataRetentionDays * DAY_MS);
     const pairingCutoff = new Date(startedAt.getTime() - this.pairingTokenRetentionHours * HOUR_MS);
     const llmCutoff = new Date(startedAt.getTime() - this.llmEventRetentionDays * DAY_MS);
+    const vaultAuditCutoff = new Date(startedAt.getTime() - this.vaultAuditRetentionDays * DAY_MS);
 
     if (this.deps.inboxPrisma !== undefined) {
       // Body purge: null out body_text/body_html, set body_purged_at.
@@ -176,6 +188,19 @@ export class RetentionCron {
         stats.llm_events_deleted = r.count;
       } catch (err) {
         stats.errors.push(`llm event delete: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      // Vault audit trail. Append-only security log; rows past the
+      // retention horizon are pure history and get trimmed so the table
+      // doesn't grow unbounded (it never had a sweep before). Uses
+      // emitted_at, which is indexed alongside (account_id, type).
+      try {
+        const r = await (this.deps.authPrisma.vaultAuditEvent as unknown as {
+          deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+        }).deleteMany({ where: { emitted_at: { lt: vaultAuditCutoff } } });
+        stats.vault_audit_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(`vault audit delete: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

@@ -1,11 +1,17 @@
-// KMSClient — abstraction over the master key.
+// KMSClient — abstraction over the master key that wraps each
+// credential's KEK (the only thing the master key ever encrypts).
 //
-// Production: AWS KMS (the production wrapper lives in a deploy-only
-// module so this package stays AWS-SDK-free in dev). LocalKMS uses a
-// static AES-256-GCM key from the LOCAL_KMS_KEY env var (32-byte hex,
-// 64 chars). When the env is unset we generate a random key on startup
-// and warn loudly — fine for local dev, would lose all stored
-// credentials on next startup.
+// Production today: LocalKMS keyed from the LOCAL_KMS_KEY env var (a Fly
+// secret), NOT hardcoded. A managed cloud KMS can drop in behind this
+// same interface later (it's the right seam — encrypt/decrypt over opaque
+// blobs).
+//
+// LocalKMS is a small KEYRING: one CURRENT key used for encrypt, and an
+// ordered list of decrypt keys (current + any legacy). Because the wrap is
+// AES-256-GCM (authenticated), decrypt tries each key and accepts the one
+// that authenticates — this is what makes zero-downtime master-key
+// rotation possible: add the new key as current, keep the old as legacy,
+// re-wrap every blob, then drop the legacy key. See LOCAL_KMS_LEGACY_KEYS.
 
 import { Buffer } from "node:buffer";
 import { decryptAesGcm, encryptAesGcm } from "./encryption.js";
@@ -27,56 +33,98 @@ export class LocalKMSConfigError extends Error {
   }
 }
 
+function parseHexKey(raw: string, label: string): Buffer {
+  if (raw.length !== HEX_KEY_LEN || !/^[0-9a-fA-F]+$/.test(raw)) {
+    throw new LocalKMSConfigError(
+      `${label} must be ${HEX_KEY_LEN} hex chars (32 bytes); generate one with ` +
+        `\`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"\``,
+    );
+  }
+  return Buffer.from(raw, "hex");
+}
+
 export class LocalKMS implements KMSClient {
-  private readonly key: Buffer;
+  // encryptKey is always decryptKeys[0]; the rest are legacy keys kept
+  // only so existing blobs still decrypt during a rotation window.
+  private readonly encryptKey: Buffer;
+  private readonly decryptKeys: readonly Buffer[];
   private readonly source: "env" | "ephemeral";
 
   // Private — use LocalKMS.fromEnv() so the side-effects (warnings,
   // env parsing) happen in one documented place.
-  private constructor(key: Buffer, source: "env" | "ephemeral") {
-    this.key = key;
+  private constructor(decryptKeys: Buffer[], source: "env" | "ephemeral") {
+    if (decryptKeys.length === 0) {
+      throw new LocalKMSConfigError("LocalKMS requires at least one key");
+    }
+    this.encryptKey = decryptKeys[0]!;
+    this.decryptKeys = decryptKeys;
     this.source = source;
     this.warn();
   }
 
   static fromEnv(env: NodeJS.ProcessEnv = process.env): LocalKMS {
     const raw = env.LOCAL_KMS_KEY;
+    // Legacy keys: comma-separated 64-hex entries, tried after the current
+    // key on decrypt. Transient — set during a master-key rotation, unset
+    // once every blob has been re-wrapped onto the current key.
+    const legacy = (env.LOCAL_KMS_LEGACY_KEYS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .map((s, i) => parseHexKey(s, `LOCAL_KMS_LEGACY_KEYS[${i}]`));
+
     if (raw !== undefined && raw.length > 0) {
-      if (raw.length !== HEX_KEY_LEN || !/^[0-9a-fA-F]+$/.test(raw)) {
-        throw new LocalKMSConfigError(
-          `LOCAL_KMS_KEY must be ${HEX_KEY_LEN} hex chars (32 bytes); generate one with ` +
-            `\`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"\``,
-        );
-      }
-      return new LocalKMS(Buffer.from(raw, "hex"), "env");
+      return new LocalKMS([parseHexKey(raw, "LOCAL_KMS_KEY"), ...legacy], "env");
     }
-    return new LocalKMS(crypto.getRandomValues(Buffer.alloc(32)), "ephemeral");
+    // No key configured: generate an ephemeral one so dev/CI works, but
+    // warn loudly — these credentials are unrecoverable on next restart.
+    return new LocalKMS([Buffer.from(crypto.getRandomValues(new Uint8Array(32)))], "ephemeral");
   }
 
-  // Used by tests that want a stable key without round-tripping through
-  // the env. Not exported via the public package barrel.
+  // Test-only: a deterministic single-key keyring without env round-trip.
+  // Not exported via the public package barrel; never use in production.
   static withFixedKey(key: Buffer): LocalKMS {
     if (key.length !== 32) {
       throw new LocalKMSConfigError(`fixed key must be 32 bytes, got ${key.length}`);
     }
-    return new LocalKMS(key, "env");
+    return new LocalKMS([key], "env");
   }
 
   async encrypt(plaintext: Buffer): Promise<Buffer> {
-    return encryptAesGcm(this.key, plaintext);
+    return encryptAesGcm(this.encryptKey, plaintext);
   }
 
+  // Try each key; GCM authentication makes a wrong key throw, so the first
+  // that succeeds is the right one. This is the rotation seam: a blob
+  // wrapped under a now-legacy key still decrypts until it's re-wrapped.
   async decrypt(ciphertext: Buffer): Promise<Buffer> {
-    return decryptAesGcm(this.key, ciphertext);
+    let lastErr: unknown;
+    for (const key of this.decryptKeys) {
+      try {
+        return decryptAesGcm(key, ciphertext);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw new LocalKMSConfigError(
+      `KEK blob did not authenticate under any of ${this.decryptKeys.length} configured key(s) — ` +
+        `wrong LOCAL_KMS_KEY / missing LOCAL_KMS_LEGACY_KEYS? (${lastErr instanceof Error ? lastErr.message : String(lastErr)})`,
+    );
   }
 
   private warn(): void {
-    const banner =
-      this.source === "ephemeral"
-        ? "[vault] Using LocalKMS with EPHEMERAL key (LOCAL_KMS_KEY unset). " +
-          "Stored credentials will be unrecoverable on next process start. " +
-          "DO NOT USE IN PRODUCTION."
-        : "[vault] Using LocalKMS with key from LOCAL_KMS_KEY. DO NOT USE IN PRODUCTION.";
-    console.warn(banner);
+    if (this.source === "ephemeral") {
+      console.warn(
+        "[vault] LocalKMS using an EPHEMERAL key (LOCAL_KMS_KEY unset). " +
+          "Stored credentials will be UNRECOVERABLE on next process start. " +
+          "DO NOT USE IN PRODUCTION.",
+      );
+      return;
+    }
+    const legacyCount = this.decryptKeys.length - 1;
+    console.warn(
+      `[vault] LocalKMS keyed from LOCAL_KMS_KEY` +
+        (legacyCount > 0 ? ` (+${legacyCount} legacy key(s) for rotation)` : ""),
+    );
   }
 }

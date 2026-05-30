@@ -618,3 +618,71 @@ footer{border-top:1px solid var(--line);padding:34px 0}
   border:1px solid rgba(139,137,255,.4);border-radius:6px;padding:1px 6px;
   vertical-align:1px}
 .reveal-fields{margin-top:7px;display:flex;flex-direction:column;gap:5px}
+
+
+/* ===================== vault hardening surfaces ===================== */
+/* Stale-rotation badge in the service title. Quiet amber-ish warn, not
+   alarming — it's a nudge, not an error. */
+.badge-stale{margin-left:8px;font-family:var(--mono);font-size:10px;
+  letter-spacing:.04em;text-transform:lowercase;color:#e0b15a;
+  border:1px solid rgba(224,177,90,.4);border-radius:999px;padding:1px 7px;
+  vertical-align:1px;cursor:help}
+
+/* Inline envelope-health result, sits in the secret line next to reveal. */
+.health-ok{font-family:var(--mono);font-size:11.5px;color:var(--ok)}
+.health-bad{font-family:var(--mono);font-size:11.5px;color:var(--err)}
+
+/* Undo banner after an optimistic delete — thin, hairline-ruled, mono. */
+.undo-bar{display:flex;align-items:center;gap:12px;margin-top:14px;
+  padding:9px 13px;background:var(--surface);border:1px solid var(--line2);
+  border-radius:var(--r-md);font-size:13px;color:var(--muted);
+  animation:riseIn .2s cubic-bezier(.2,.7,.2,1) both}
+.undo-bar b{color:var(--fg);font-weight:550}
+.undo-bar .linkbtn{margin-left:auto}
+
+/* Activity timeline — list, not cards; status dot + label + mono detail. */
+.timeline{margin-top:6px;display:flex;flex-direction:column}
+.tl-row{display:grid;grid-template-columns:10px 1fr auto;gap:13px;
+  align-items:start;padding:13px 2px;border-bottom:1px solid var(--line)}
+.tl-row:last-child{border-bottom:0}
+.tl-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;
+  background:var(--faint)}
+.tl-dot.ok{background:var(--ok)}
+.tl-dot.warn{background:#e0b15a}
+.tl-dot.err{background:var(--err)}
+.tl-dot.neutral{background:var(--accent)}
+.tl-line{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.tl-label{font-size:14px;font-weight:550;letter-spacing:-.01em;color:var(--fg)}
+.tl-detail{font-family:var(--mono);font-size:12px;color:var(--muted);
+  word-break:break-all}
+.tl-meta{margin-top:3px;font-family:var(--mono);font-size:11px;color:var(--faint);
+  display:flex;align-items:center;gap:6px}
+.tl-time{font-family:var(--mono);font-size:11.5px;color:var(--faint);
+  white-space:nowrap;padding-top:1px}
+.load-more{margin-top:18px}
+
+/* Danger zone — account-level actions at the foot of the vault. Hairline
+   top rule sets it apart without a card. */
+.danger-zone{margin-top:44px;padding-top:20px;border-top:1px solid var(--line)}
+.dz-head{font-size:12px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--faint);font-weight:600;margin-bottom:6px}
+.dz-row{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:14px 0;border-bottom:1px solid var(--line)}
+.dz-row:last-child{border-bottom:0}
+.dz-title{font-size:14px;font-weight:500;color:var(--fg)}
+.dz-sub{margin-top:3px;font-size:12.5px;color:var(--muted);line-height:1.45;
+  max-width:46ch}
+.dz-btn{font:inherit;font-size:12.5px;color:var(--muted);background:transparent;
+  border:1px solid var(--line2);border-radius:var(--r-sm);padding:7px 14px;
+  cursor:pointer;white-space:nowrap;transition:border-color .12s,color .12s}
+.dz-btn:hover{color:var(--fg);border-color:rgba(255,255,255,.2)}
+.dz-btn.danger:hover{color:var(--err);border-color:rgba(255,107,107,.45)}
+/* Typed-confirm field inside the destructive modal. */
+.dz-confirm{display:flex;flex-direction:column;gap:7px;font-size:13px;
+  color:var(--muted)}
+.dz-confirm code{font-family:var(--mono);font-size:12.5px;color:var(--err);
+  background:rgba(255,107,107,.08);border-radius:4px;padding:1px 6px}
+.dz-input{font:inherit;font-family:var(--mono);font-size:13px;
+  background:var(--surface);border:1px solid var(--line2);border-radius:9px;
+  padding:10px 12px;color:var(--fg);width:100%;transition:border-color .12s}
+.dz-input:focus{outline:none;border-color:var(--err)}

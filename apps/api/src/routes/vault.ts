@@ -16,8 +16,26 @@
 import { z } from "zod";
 import { ulid } from "ulid";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import { CredentialNotFoundError, deriveAllowedHosts } from "@trusty-squire/vault";
+import {
+  CredentialNotFoundError,
+  RestoreConflictError,
+  deriveAllowedHosts,
+  VAULT_AUDIT_TYPES,
+  type VaultAuditType,
+} from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+import type { EmailForwarder } from "../services/email-forwarder.js";
+import { buildEmailForwarder } from "../services/webhook-forwarder.js";
+
+const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
+
+// GET /v1/vault/audit query: keyset pagination + optional filters.
+const auditQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  before: z.string().datetime().optional(),
+  type: z.enum(AUDIT_TYPE_VALUES).optional(),
+  reference: z.string().min(1).max(256).optional(),
+});
 
 // Brand domain for the vault UI's favicon, independent of the proxy
 // allowlist. Existing credentials predate the allowed_hosts column (it
@@ -62,6 +80,31 @@ const allowedHostsBody = z.object({
   hosts: z.array(z.string().min(1).max(253)).max(50),
 });
 
+// Kill-switch guard — an explicit confirm so a stray POST can't nuke a vault.
+const revokeAllBody = z.object({ confirm: z.literal(true) });
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+// A credential is "stale" — due for rotation — once this many days have
+// passed since it was last changed (rotated_at, or created_at if never
+// rotated). Surfaced in the list so the web can nudge a rotation; not
+// enforced. Env-overridable.
+const ROTATION_STALE_DAYS = Number.parseInt(process.env.VAULT_ROTATION_STALE_DAYS ?? "90", 10);
+
+// Rotation-age signal for a credential, for the web's "rotate me" nudge.
+function rotationAge(
+  rotatedAt: Date | null,
+  createdAt: Date,
+  now: Date,
+): { last_changed_at: string; age_days: number; stale: boolean } {
+  const lastChanged = rotatedAt ?? createdAt;
+  const ageDays = Math.floor((now.getTime() - lastChanged.getTime()) / DAY_MS);
+  return {
+    last_changed_at: lastChanged.toISOString(),
+    age_days: ageDays,
+    stale: ageDays >= ROTATION_STALE_DAYS,
+  };
+}
+
 function fieldsFrom(b: { value?: string | undefined; fields?: Record<string, string> | undefined }): Record<string, string> {
   if (b.fields !== undefined && Object.keys(b.fields).length > 0) return b.fields;
   return { value: b.value! };
@@ -83,13 +126,18 @@ export const registerVaultRoute: FastifyPluginAsync<{
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  emailForwarder?: EmailForwarder;
 }> = async (fastify, opts) => {
+  // Defaults to an env-configured forwarder (no-op when RESEND_API_KEY is
+  // unset); tests inject a stub. Powers the "new key added" notification.
+  const forwarder = buildEmailForwarder(opts.emailForwarder);
   // ── list (web + agent): metadata only, no secret values ──────
   fastify.get(
     "/v1/vault/credentials",
     { preHandler: opts.requireAny },
     async (req, reply) => {
       const auth = req.auth!;
+      const now = opts.deps.now?.() ?? new Date();
       const creds = await opts.deps.credentialStore.listByAccount(auth.account_id);
       return reply.code(200).send({
         credentials: creds.map((c) => {
@@ -105,10 +153,53 @@ export const registerVaultRoute: FastifyPluginAsync<{
             allowed_hosts: c.allowed_hosts,
             favicon_domain: faviconDomain(service, c.allowed_hosts),
             created_at: c.created_at.toISOString(),
+            rotated_at: c.rotated_at?.toISOString() ?? null,
             last_retrieved_at: c.last_retrieved_at?.toISOString() ?? null,
             retrieval_count: c.retrieval_count,
+            // Rotation-age nudge: age since last change + a stale flag.
+            ...rotationAge(c.rotated_at, c.created_at, now),
           };
         }),
+      });
+    },
+  );
+
+  // ── audit timeline (web only): who-touched-my-keys ───────────
+  // The full event trail for the account — stored/retrieved/rotated/
+  // deleted/proxy_executed/proxy_rejected — newest first, paginated by
+  // the `before` keyset cursor. Payloads carry NO secret values.
+  fastify.get(
+    "/v1/vault/audit",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = auditQuery.safeParse(req.query);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const q = parsed.data;
+      const events = await opts.deps.vault.listAudit(auth.account_id, {
+        ...(q.limit !== undefined ? { limit: q.limit } : {}),
+        ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
+        ...(q.type !== undefined ? { type: q.type } : {}),
+        ...(q.reference !== undefined ? { reference: q.reference } : {}),
+      });
+      const last = events.at(-1);
+      return reply.code(200).send({
+        events: events.map((e) => ({
+          id: e.id,
+          type: e.type,
+          emitted_at: e.emitted_at.toISOString(),
+          // Whole payload is non-secret by construction (references,
+          // requesters, outcomes, proxy forensics — never a key value).
+          ...e.payload,
+        })),
+        // Keyset cursor for the next page; null when this page wasn't full.
+        next_before: events.length === (q.limit ?? 50) && last !== undefined
+          ? last.emitted_at.toISOString()
+          : null,
       });
     },
   );
@@ -148,7 +239,10 @@ export const registerVaultRoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "agent") return;
-      return storeUpsert(opts, auth.account_id, req, reply, "squire");
+      // Bot stores happen with no human watching, so a new key gets a
+      // "key added" notification. Re-stores (rotation) don't — they're
+      // expected churn, not a surprise the user needs flagged.
+      return storeUpsert(opts, auth.account_id, req, reply, "squire", forwarder, true);
     },
   );
 
@@ -159,7 +253,8 @@ export const registerVaultRoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "web") return;
-      return storeUpsert(opts, auth.account_id, req, reply, "manual");
+      // The user is in the UI doing this by hand — no notification.
+      return storeUpsert(opts, auth.account_id, req, reply, "manual", forwarder, false);
     },
   );
 
@@ -220,6 +315,124 @@ export const registerVaultRoute: FastifyPluginAsync<{
     },
   );
 
+  // ── GDPR export (web only): everything we hold ───────────────
+  // The complete, machine-readable record of the account's vault: every
+  // credential's non-secret metadata (active + deleted) plus the full
+  // audit trail. No secret values. Served as a download.
+  fastify.get(
+    "/v1/vault/export",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const data = await opts.deps.vault.exportAccount(auth.account_id);
+      return reply
+        .code(200)
+        .header("content-disposition", 'attachment; filename="trusty-squire-vault-export.json"')
+        .send({ exported_at: new Date().toISOString(), ...data });
+    },
+  );
+
+  // ── account erasure (web only): GDPR hard delete ─────────────
+  // Right-to-be-forgotten: irreversibly purge every credential row AND
+  // the entire audit trail for the account. Distinct from revoke-all
+  // (soft, recoverable) — this leaves nothing. Requires explicit confirm.
+  fastify.delete(
+    "/v1/vault/account",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = revokeAllBody.safeParse(req.body);
+      if (!parsed.success || parsed.data.confirm !== true) {
+        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to permanently erase all vault data" });
+        return;
+      }
+      const result = await opts.deps.vault.purgeAccount(auth.account_id);
+      return reply.code(200).send(result);
+    },
+  );
+
+  // ── revoke-all (web only): kill-switch ───────────────────────
+  // One-shot soft-delete of every active credential for the account —
+  // the "a key leaked, burn it all down" panic button. Requires an
+  // explicit confirm flag so a stray POST can't nuke a vault. Recoverable
+  // via restore until the retention sweep purges the soft-deleted rows.
+  fastify.post(
+    "/v1/vault/credentials/revoke-all",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = revokeAllBody.safeParse(req.body);
+      if (!parsed.success || parsed.data.confirm !== true) {
+        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to revoke all credentials" });
+        return;
+      }
+      const result = await opts.deps.vault.deleteAllForAccount(auth.account_id);
+      return reply.code(200).send({ revoked: result.revoked });
+    },
+  );
+
+  // ── health (web only): envelope integrity probe ─────────────
+  // Confirms the credential still decrypts under the current KMS keyring
+  // (catches rot from a botched master-key rotation). No secret returned,
+  // no upstream call, no retrieval counted.
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/health",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const target = await opts.deps.credentialStore.findByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      const result = await opts.deps.vault.checkHealth(target.reference, auth.account_id);
+      // 200 with healthy:false — the probe ran successfully and found the
+      // envelope unhealthy; that's a valid result, not a request error.
+      return reply.code(200).send({ id: target.id, ...result, checked_at: new Date().toISOString() });
+    },
+  );
+
+  // ── restore (web only): undelete a soft-deleted credential ───
+  // Soft-deletes are recoverable until a GDPR purge. Resurrects the row
+  // unless a live (service,label) twin now occupies the slot (409).
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/restore",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const target = await opts.deps.credentialStore.findByIdForAccountIncludingDeleted(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      try {
+        await opts.deps.vault.restore(target.reference, auth.account_id);
+        return reply.code(200).send({ id: target.id, restored: true });
+      } catch (err) {
+        if (err instanceof RestoreConflictError) {
+          reply.code(409).send({ error: "restore_conflict", message: err.message });
+          return;
+        }
+        if (err instanceof CredentialNotFoundError) {
+          reply.code(404).send({ error: "credential_not_found" });
+          return;
+        }
+        throw err;
+      }
+    },
+  );
+
   // ── edit allowed hosts (web) ─────────────────────────────────
   fastify.patch<{ Params: { id: string } }>(
     "/v1/vault/credentials/:id/allowed-hosts",
@@ -261,6 +474,8 @@ async function storeUpsert(
   req: FastifyRequest,
   reply: FastifyReply,
   source: string,
+  forwarder: EmailForwarder,
+  notifyOnCreate: boolean,
 ): Promise<void> {
   const parsed = storeBody.safeParse(req.body);
   if (!parsed.success) {
@@ -278,6 +493,12 @@ async function storeUpsert(
     ...(data.env_var_suggestion !== undefined ? { env_var_suggestion: data.env_var_suggestion } : {}),
     metadata: { source },
   });
+  // Notify the user that a key landed in their vault unattended. Only on
+  // a fresh create (not a rotation), and never fatal to the store —
+  // failures are swallowed so a misconfigured mailer can't break signups.
+  if (notifyOnCreate && !entry.updated) {
+    await notifyNewKey(opts.deps, forwarder, accountId, entry.service, entry.label);
+  }
   reply.code(entry.updated ? 200 : 201).send({
     reference: entry.reference,
     service: entry.service,
@@ -288,4 +509,37 @@ async function storeUpsert(
     created_at: entry.created_at,
     updated: entry.updated,
   });
+}
+
+// Best-effort "a new key was added to your vault" email. Resolves the
+// account's address, sends via the forwarder, and SWALLOWS every failure
+// (no account, no email, mailer down) — a notification must never break
+// the store that triggered it.
+async function notifyNewKey(
+  deps: ApiDeps,
+  forwarder: EmailForwarder,
+  accountId: string,
+  service: string,
+  label: string,
+): Promise<void> {
+  try {
+    const account = await deps.accountStore.findAccountById(accountId);
+    if (account === null || account.email.length === 0) return;
+    const labelSuffix = label && label !== "default" ? ` (${label})` : "";
+    await forwarder.sendDirect({
+      to: account.email,
+      subject: `Trusty Squire: new ${service} key added to your vault`,
+      text: [
+        `A new ${service}${labelSuffix} credential was just added to your Trusty Squire vault.`,
+        ``,
+        `If this was you (or your agent provisioning ${service}), no action is needed.`,
+        `If you didn't expect this, open your vault to review or revoke it — and use`,
+        `"revoke all" if anything looks wrong.`,
+        ``,
+        `— Trusty Squire`,
+      ].join("\n"),
+    });
+  } catch {
+    // Intentionally swallowed — see the doc comment.
+  }
 }

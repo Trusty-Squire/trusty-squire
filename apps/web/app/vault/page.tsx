@@ -25,21 +25,30 @@ interface Cred {
   created_at: string;
   last_retrieved_at: string | null;
   retrieval_count: number;
+  // Rotation-age signal (server-computed). `stale` past
+  // VAULT_ROTATION_STALE_DAYS; last_changed_at = rotated_at ?? created_at.
+  rotated_at: string | null;
+  last_changed_at: string;
+  age_days: number;
+  stale: boolean;
 }
 
 export default function VaultPage() {
   const router = useRouter();
   const [creds, setCreds] = useState<Cred[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [undo, setUndo] = useState<Cred | null>(null);
+
+  const load = useCallback(async (): Promise<void> => {
+    const res = await apiGet<{ credentials: Cred[] }>("/v1/vault/credentials");
+    setCreds(res.credentials);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiGet<{ credentials: Cred[] }>(
-          "/v1/vault/credentials",
-        );
-        if (!cancelled) setCreds(res.credentials);
+        await load();
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiError && err.status === 401) {
@@ -54,11 +63,35 @@ export default function VaultPage() {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [router, load]);
 
-  const onDeleted = useCallback((id: string) => {
-    setCreds((prev) => prev?.filter((c) => c.id !== id) ?? prev);
+  // Optimistic delete: drop the row immediately, surface a time-boxed
+  // Undo that calls restore. The deleted credential is recoverable on the
+  // server until a GDPR purge, so Undo is honest even past the banner.
+  const onDeleted = useCallback((cred: Cred) => {
+    setCreds((prev) => prev?.filter((c) => c.id !== cred.id) ?? prev);
+    setUndo(cred);
   }, []);
+
+  const restore = useCallback(async () => {
+    if (undo === null) return;
+    const target = undo;
+    setUndo(null);
+    try {
+      await apiPost(`/v1/vault/credentials/${target.id}/restore`);
+      await load();
+    } catch {
+      // restore conflict / already gone — reload to reflect truth
+      await load().catch(() => undefined);
+    }
+  }, [undo, load]);
+
+  // Auto-dismiss the Undo banner after a short window.
+  useEffect(() => {
+    if (undo === null) return;
+    const t = setTimeout(() => setUndo(null), 8000);
+    return () => clearTimeout(t);
+  }, [undo]);
 
   return (
     <AppShell>
@@ -69,11 +102,25 @@ export default function VaultPage() {
         </div>
         <div className="app-head-actions">
           {creds !== null && <span className="app-count">{creds.length}</span>}
+          <Link className="head-btn" href="/vault/activity">
+            Activity
+          </Link>
           <Link className="head-btn" href="/vault/new">
             + Add key
           </Link>
         </div>
       </div>
+
+      {undo !== null && (
+        <div className="undo-bar" role="status">
+          <span>
+            Deleted <b>{undo.service ?? "credential"}</b>.
+          </span>
+          <button type="button" className="linkbtn" onClick={restore}>
+            Undo
+          </button>
+        </div>
+      )}
 
       {error !== null && (
         <div className="app-state">
@@ -113,6 +160,8 @@ export default function VaultPage() {
           </div>
         </>
       )}
+
+      {creds !== null && <DangerZone />}
     </AppShell>
   );
 }
@@ -144,12 +193,14 @@ function ServiceIcon({ cred }: { cred: Cred }) {
   );
 }
 
+type Health = "idle" | "checking" | "ok" | "bad";
+
 function VaultRow({
   cred,
   onDeleted,
 }: {
   cred: Cred;
-  onDeleted: (id: string) => void;
+  onDeleted: (cred: Cred) => void;
 }) {
   // Revealed secret is a name→value map: a lone key is { value: "…" },
   // AWS-style creds carry multiple named fields. null = still masked.
@@ -157,6 +208,7 @@ function VaultRow({
   const [busy, setBusy] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [health, setHealth] = useState<Health>("idle");
 
   const reveal = useCallback(async () => {
     setBusy(true);
@@ -174,6 +226,18 @@ function VaultRow({
     }
   }, [cred.id]);
 
+  const check = useCallback(async () => {
+    setHealth("checking");
+    try {
+      const res = await apiPost<{ healthy: boolean }>(
+        `/v1/vault/credentials/${cred.id}/health`,
+      );
+      setHealth(res.healthy ? "ok" : "bad");
+    } catch {
+      setHealth("bad");
+    }
+  }, [cred.id]);
+
   const copy = useCallback(async (key: string, val: string) => {
     try {
       await navigator.clipboard.writeText(val);
@@ -187,19 +251,27 @@ function VaultRow({
   const entries = fields === null ? [] : Object.entries(fields);
   const multiField = entries.length > 1;
 
-  // mono meta: "{host} · used {ago}" / "{host} · never used", with the
-  // host omitted when the credential has no allowed hosts.
+  // mono meta: "{host} · used {ago} · added/rotated {age}d ago", host
+  // omitted when the credential has no allowed hosts.
   const host = cred.allowed_hosts[0];
   const usage =
     cred.last_retrieved_at !== null
       ? `used ${timeAgo(cred.last_retrieved_at)}`
       : "never used";
+  const ageLabel = `${cred.rotated_at !== null ? "rotated" : "added"} ${cred.age_days}d ago`;
 
   return (
     <div className="row">
       <ServiceIcon cred={cred} />
       <div>
-        <div className="svc">{cred.service ?? "Unknown service"}</div>
+        <div className="svc">
+          {cred.service ?? "Unknown service"}
+          {cred.stale && (
+            <span className="badge-stale" title="Older than the rotation window — consider re-storing this key.">
+              rotate
+            </span>
+          )}
+        </div>
         <div className="meta">
           {host !== undefined && (
             <>
@@ -208,6 +280,8 @@ function VaultRow({
             </>
           )}
           <span>{usage}</span>
+          <span className="dot">·</span>
+          <span>{ageLabel}</span>
         </div>
         {fields === null ? (
           <div className="secret">
@@ -220,21 +294,27 @@ function VaultRow({
             >
               {busy ? "revealing…" : "reveal"}
             </button>
+            <HealthChip health={health} onCheck={check} />
           </div>
         ) : (
-          entries.map(([name, val]) => (
-            <div className="secret" key={name}>
-              {multiField && <span className="field-name">{name}</span>}
-              <span className="val">{val}</span>
-              <button
-                className="linkbtn"
-                type="button"
-                onClick={() => copy(name, val)}
-              >
-                {copiedKey === name ? "copied" : "copy"}
-              </button>
+          <>
+            {entries.map(([name, val]) => (
+              <div className="secret" key={name}>
+                {multiField && <span className="field-name">{name}</span>}
+                <span className="val">{val}</span>
+                <button
+                  className="linkbtn"
+                  type="button"
+                  onClick={() => copy(name, val)}
+                >
+                  {copiedKey === name ? "copied" : "copy"}
+                </button>
+              </div>
+            ))}
+            <div className="secret">
+              <HealthChip health={health} onCheck={check} />
             </div>
-          ))
+          </>
         )}
       </div>
 
@@ -252,11 +332,24 @@ function VaultRow({
           onClose={() => setConfirmDelete(false)}
           onDeleted={() => {
             setConfirmDelete(false);
-            onDeleted(cred.id);
+            onDeleted(cred);
           }}
         />
       )}
     </div>
+  );
+}
+
+// Quiet "verify" link → ✓/✗ after probing the envelope. This checks the
+// credential still decrypts under the current master key, not whether the
+// upstream service still accepts it.
+function HealthChip({ health, onCheck }: { health: Health; onCheck: () => void }) {
+  if (health === "ok") return <span className="health-ok" title="Decrypts cleanly under the current master key.">✓ decrypts</span>;
+  if (health === "bad") return <span className="health-bad" title="The stored envelope did not decrypt.">✗ decrypt failed</span>;
+  return (
+    <button className="linkbtn q" type="button" onClick={onCheck} disabled={health === "checking"}>
+      {health === "checking" ? "checking…" : "verify"}
+    </button>
   );
 }
 
@@ -287,7 +380,7 @@ function DeleteModal({
   return (
     <Modal
       title={`Delete the ${cred.service ?? "credential"} key?`}
-      subtitle="Your squire and any agents using it lose access right away. You can add it back later if you still have the key."
+      subtitle="Your squire and any agents using it lose access right away. You can undo this, or add it back later if you still have the key."
       onClose={onClose}
     >
       <div className="form">
@@ -298,6 +391,142 @@ function DeleteModal({
           </button>
           <button className="btn-secondary" type="button" onClick={onClose}>
             Keep it
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Account-level actions: data export + the two destructive operations.
+// Kept visually quiet at the bottom of the page (a hairline-ruled
+// "danger zone"), not a card — destructive paths gated behind a modal
+// that requires typed/clicked confirmation.
+function DangerZone() {
+  const router = useRouter();
+  const [modal, setModal] = useState<null | "revoke" | "erase">(null);
+
+  return (
+    <section className="danger-zone">
+      <div className="dz-head">Account</div>
+      <div className="dz-row">
+        <div>
+          <div className="dz-title">Export my data</div>
+          <div className="dz-sub">All credential metadata + the full activity log. No secret values.</div>
+        </div>
+        {/* A plain link: the endpoint sets content-disposition: attachment,
+            so the browser downloads rather than navigates. */}
+        <a className="head-btn" href="/v1/vault/export" download>
+          Download
+        </a>
+      </div>
+      <div className="dz-row">
+        <div>
+          <div className="dz-title">Revoke every key</div>
+          <div className="dz-sub">Kill-switch if a key leaked. Soft — you can restore until purged.</div>
+        </div>
+        <button className="dz-btn" type="button" onClick={() => setModal("revoke")}>
+          Revoke all
+        </button>
+      </div>
+      <div className="dz-row">
+        <div>
+          <div className="dz-title">Delete all vault data</div>
+          <div className="dz-sub">Permanently erase every credential and the activity log. Cannot be undone.</div>
+        </div>
+        <button className="dz-btn danger" type="button" onClick={() => setModal("erase")}>
+          Erase
+        </button>
+      </div>
+
+      {modal === "revoke" && (
+        <ConfirmDangerModal
+          title="Revoke every credential?"
+          subtitle="Your squire and all agents lose access to every key immediately. This is recoverable — deleted keys can be restored until they're purged."
+          confirmWord="REVOKE"
+          actionLabel="Revoke all keys"
+          run={async () => {
+            await apiPost("/v1/vault/credentials/revoke-all", { confirm: true });
+            router.refresh();
+            window.location.assign("/vault");
+          }}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal === "erase" && (
+        <ConfirmDangerModal
+          title="Permanently delete all vault data?"
+          subtitle="Every credential AND the entire activity log are erased for good. There is no undo. Export first if you want a copy."
+          confirmWord="DELETE"
+          actionLabel="Erase everything"
+          run={async () => {
+            await apiDelete("/v1/vault/account", { confirm: true });
+            window.location.assign("/vault");
+          }}
+          onClose={() => setModal(null)}
+        />
+      )}
+    </section>
+  );
+}
+
+// Destructive confirm: requires typing the confirm word, mirroring the
+// server's { confirm: true } guard with a human-side speed bump.
+function ConfirmDangerModal({
+  title,
+  subtitle,
+  confirmWord,
+  actionLabel,
+  run,
+  onClose,
+}: {
+  title: string;
+  subtitle: string;
+  confirmWord: string;
+  actionLabel: string;
+  run: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const armed = typed.trim().toUpperCase() === confirmWord;
+
+  const go = useCallback(async () => {
+    if (!armed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed.");
+      setBusy(false);
+    }
+  }, [armed, run]);
+
+  return (
+    <Modal title={title} subtitle={subtitle} onClose={onClose}>
+      <div className="form">
+        {error !== null && <div className="form-err">{error}</div>}
+        <label className="dz-confirm">
+          <span>
+            Type <code>{confirmWord}</code> to confirm
+          </span>
+          <input
+            className="dz-input"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            autoFocus
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+        <div className="form-actions">
+          <button className="btn-deny" type="button" onClick={go} disabled={!armed || busy}>
+            {busy ? "Working…" : actionLabel}
+          </button>
+          <button className="btn-secondary" type="button" onClick={onClose}>
+            Cancel
           </button>
         </div>
       </div>

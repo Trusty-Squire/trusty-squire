@@ -143,6 +143,22 @@ export class PrismaCredentialStore implements CredentialStore {
     return groups.map((g) => g.account_id);
   }
 
+  // Complete history (soft-deleted included) for GDPR export.
+  async listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]> {
+    const rows = await this.prisma.credential.findMany({
+      where: { account_id: accountId },
+      orderBy: { created_at: "desc" },
+    });
+    return rows.map((row) => this.toRecord(row));
+  }
+
+  // Irreversible offboarding purge — hard-delete every row (active +
+  // soft-deleted) for the account. Returns the count removed.
+  async purgeAccount(accountId: string): Promise<number> {
+    const r = await this.prisma.credential.deleteMany({ where: { account_id: accountId } });
+    return r.count;
+  }
+
   async findByIdForAccount(
     id: string,
     accountId: string,
@@ -157,6 +173,41 @@ export class PrismaCredentialStore implements CredentialStore {
     await this.prisma.credential.updateMany({
       where: { reference },
       data: { allowed_hosts: hosts },
+    });
+  }
+
+  async findByIdForAccountIncludingDeleted(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null> {
+    const row = await this.prisma.credential.findFirst({
+      where: { id, account_id: accountId },
+    });
+    return row === null ? null : this.toRecord(row);
+  }
+
+  async findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null> {
+    const row = await this.prisma.credential.findFirst({ where: { reference } });
+    return row === null ? null : this.toRecord(row);
+  }
+
+  // Undelete — clear deleted_at. The caller (vault) has already checked
+  // ownership + that no active (service,label) twin exists.
+  async restore(reference: string): Promise<void> {
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { deleted_at: null },
+    });
+  }
+
+  // Re-wrap only the master-key envelope (account_kek_blob), for the KEK
+  // key-rotation migration. Deliberately does NOT touch rotated_at — a
+  // re-wrap re-encrypts the same KEK under a new master key; the secret
+  // itself is unchanged, so this is not a rotation event.
+  async rewrapAccountKek(reference: string, accountKekBlob: Buffer): Promise<void> {
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { account_kek_blob: accountKekBlob },
     });
   }
 

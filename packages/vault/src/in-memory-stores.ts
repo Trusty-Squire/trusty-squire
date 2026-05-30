@@ -7,9 +7,13 @@ import type {
   CredentialRecord,
   CredentialStore,
   VaultAuditEventInput,
+  VaultAuditListOptions,
   VaultAuditPayload,
+  VaultAuditRecord,
   VaultAuditStore,
 } from "./types.js";
+
+const AUDIT_LIST_MAX = 200;
 
 export class InMemoryCredentialStore implements CredentialStore {
   private readonly byReference = new Map<string, CredentialRecord>();
@@ -84,6 +88,13 @@ export class InMemoryCredentialStore implements CredentialStore {
       .map((r) => clone(r));
   }
 
+  async listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]> {
+    return [...this.byReference.values()]
+      .filter((r) => r.account_id === accountId)
+      .sort((a, b) => b.created_at.getTime() - a.created_at.getTime())
+      .map((r) => clone(r));
+  }
+
   async findByIdForAccount(
     id: string,
     accountId: string,
@@ -94,10 +105,42 @@ export class InMemoryCredentialStore implements CredentialStore {
     return r === undefined ? null : clone(r);
   }
 
+  async findByIdForAccountIncludingDeleted(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null> {
+    const r = [...this.byReference.values()].find(
+      (c) => c.id === id && c.account_id === accountId,
+    );
+    return r === undefined ? null : clone(r);
+  }
+
+  async findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null> {
+    const r = this.byReference.get(reference);
+    return r === undefined ? null : clone(r);
+  }
+
+  async restore(reference: string): Promise<void> {
+    const r = this.byReference.get(reference);
+    if (r === undefined) return;
+    r.deleted_at = null;
+  }
+
   async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
     r.allowed_hosts = [...hosts];
+  }
+
+  async purgeAccount(accountId: string): Promise<number> {
+    let removed = 0;
+    for (const [ref, rec] of this.byReference) {
+      if (rec.account_id === accountId) {
+        this.byReference.delete(ref);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 }
 
@@ -130,6 +173,51 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
         e.type === "vault.credential_retrieved" &&
         e.emitted_at >= since,
     ).length;
+  }
+
+  async list(accountId: string, opts: VaultAuditListOptions = {}): Promise<VaultAuditRecord[]> {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), AUDIT_LIST_MAX);
+    return this.events
+      .filter(
+        (e) =>
+          e.account_id === accountId &&
+          (opts.type === undefined || e.type === opts.type) &&
+          (opts.reference === undefined || e.payload.reference === opts.reference) &&
+          (opts.before === undefined || e.emitted_at < opts.before),
+      )
+      .sort((a, b) => b.emitted_at.getTime() - a.emitted_at.getTime())
+      .slice(0, limit)
+      .map((e) => ({
+        id: e.id,
+        account_id: e.account_id,
+        type: e.type,
+        payload: clonePayload(e.payload),
+        emitted_at: e.emitted_at,
+      }));
+  }
+
+  async exportAll(accountId: string): Promise<VaultAuditRecord[]> {
+    return this.events
+      .filter((e) => e.account_id === accountId)
+      .sort((a, b) => b.emitted_at.getTime() - a.emitted_at.getTime())
+      .map((e) => ({
+        id: e.id,
+        account_id: e.account_id,
+        type: e.type,
+        payload: clonePayload(e.payload),
+        emitted_at: e.emitted_at,
+      }));
+  }
+
+  async purgeAccount(accountId: string): Promise<number> {
+    let removed = 0;
+    for (let i = this.events.length - 1; i >= 0; i--) {
+      if (this.events[i]!.account_id === accountId) {
+        this.events.splice(i, 1);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 }
 

@@ -61,11 +61,25 @@ export interface CredentialStore {
     },
   ): Promise<void>;
   listByAccount(accountId: string): Promise<CredentialRecord[]>;
+  // Every credential the account ever held, soft-deleted included —
+  // the complete-history read for GDPR export. Newest first.
+  listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]>;
   findByIdForAccount(
     id: string,
     accountId: string,
   ): Promise<CredentialRecord | null>;
+  // Lookups that ignore deleted_at — for the undelete/restore path.
+  findByIdForAccountIncludingDeleted(
+    id: string,
+    accountId: string,
+  ): Promise<CredentialRecord | null>;
+  findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null>;
+  // Clear deleted_at, bringing a soft-deleted credential back to active.
+  restore(reference: string): Promise<void>;
   setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
+  // Hard-delete every credential row (active + soft-deleted) for the
+  // account — the irreversible offboarding purge. Returns rows removed.
+  purgeAccount(accountId: string): Promise<number>;
 }
 
 export type VaultRequester = "agent" | "user" | "system";
@@ -99,6 +113,9 @@ export const VAULT_AUDIT_TYPES = {
   stored: "vault.credential_stored",
   rotated: "vault.credential_rotated",
   deleted: "vault.credential_deleted",
+  // A soft-deleted credential brought back to active (undelete). Distinct
+  // from `stored` so a recovery is queryable on its own.
+  restored: "vault.credential_restored",
   // A duplicate active row collapsed into a surviving one by the
   // one-time backlog-dedup migration. Distinct from `deleted` (a
   // user/agent revocation) so dedup soft-deletes are queryable on their own.
@@ -114,7 +131,36 @@ export interface VaultAuditEventInput {
   payload: VaultAuditPayload;
 }
 
+// A persisted audit row, as read back for the who-touched-my-keys
+// timeline. The payload carries NO secret values (by construction) —
+// only references, requesters, outcomes, and proxy forensics.
+export interface VaultAuditRecord {
+  id: string;
+  account_id: string;
+  type: VaultAuditType;
+  payload: VaultAuditPayload;
+  emitted_at: Date;
+}
+
+export interface VaultAuditListOptions {
+  // Page size; the store clamps to a sane maximum.
+  limit?: number;
+  // Keyset cursor — return only events strictly older than this
+  // (emitted_at < before). Pair with the last row's emitted_at to page.
+  before?: Date;
+  // Optional filters. `type` hits the indexed column; `reference`
+  // narrows to a single credential's history.
+  type?: VaultAuditType;
+  reference?: string;
+}
+
 export interface VaultAuditStore {
   record(event: VaultAuditEventInput): Promise<void>;
   countRecentRetrievals(accountId: string, since: Date): Promise<number>;
+  // Newest-first audit trail for an account, for the activity timeline.
+  list(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]>;
+  // The entire trail for an account, unpaginated — for GDPR export.
+  exportAll(accountId: string): Promise<VaultAuditRecord[]>;
+  // Hard-delete every audit row for the account — offboarding purge.
+  purgeAccount(accountId: string): Promise<number>;
 }

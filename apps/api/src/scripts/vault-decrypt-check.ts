@@ -13,7 +13,6 @@
 // AUTH_DATABASE_URL must point at the API auth DB.
 
 import process from "node:process";
-import { Buffer } from "node:buffer";
 import {
   aadForDek,
   aadForValue,
@@ -25,10 +24,8 @@ import {
 import { getApiPrismaClient } from "../services/api-prisma-client.js";
 import { PrismaCredentialStore } from "../services/prisma-credential-store.js";
 
-// Must match the fixed key the API wires in deps.ts — the LocalKMS blob
-// is only decryptable with the same key it was sealed under.
-const KMS = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
-
+// Keyring from env (LOCAL_KMS_KEY + LOCAL_KMS_LEGACY_KEYS) — same path the
+// API server uses, so this checks decryptability under the real keyring.
 type Status = "ok" | "fail";
 type Format = "v2-json" | "legacy-raw" | "unknown";
 
@@ -55,9 +52,9 @@ function classify(text: string): Format {
   }
 }
 
-async function checkOne(rec: CredentialRecord): Promise<CheckResult> {
+async function checkOne(kms: LocalKMS, rec: CredentialRecord): Promise<CheckResult> {
   try {
-    const kek = await KMS.decrypt(rec.account_kek_blob);
+    const kek = await kms.decrypt(rec.account_kek_blob);
     const dek = decryptAesGcm(kek, rec.encrypted_dek, aadForDek(rec.reference, rec.account_id));
     const plaintext = decryptAesGcm(dek, rec.ciphertext, aadForValue(rec.reference, rec.account_id));
     const text = plaintext.toString("utf8");
@@ -91,6 +88,7 @@ export async function main(): Promise<void> {
     console.error("[decrypt-check] AUTH_DATABASE_URL is not set; refusing to run.");
     process.exit(2);
   }
+  const kms = LocalKMS.fromEnv();
   const store = new PrismaCredentialStore(getApiPrismaClient(databaseUrl));
   const accountIds = await store.listAllAccountIds();
 
@@ -100,7 +98,7 @@ export async function main(): Promise<void> {
   for (const accountId of accountIds) {
     const records = await store.listByAccount(accountId);
     for (const rec of records) {
-      const r = await checkOne(rec);
+      const r = await checkOne(kms, rec);
       if (r.status === "ok") {
         ok += 1;
         if (r.format === "legacy-raw") legacy += 1;

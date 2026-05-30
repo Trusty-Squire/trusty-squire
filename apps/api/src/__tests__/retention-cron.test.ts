@@ -47,6 +47,12 @@ function makeFakes(): {
           return { count: 2 };
         },
       } as never,
+      vaultAuditEvent: {
+        deleteMany: async (args: { where: Record<string, unknown> }) => {
+          calls.push({ table: "VaultAuditEvent", op: "deleteMany", where: args.where });
+          return { count: 5 };
+        },
+      } as unknown as never,
     } as never,
   };
 }
@@ -63,6 +69,7 @@ describe("RetentionCron", () => {
       metadataRetentionDays: 90,
       pairingTokenRetentionHours: 1,
       llmEventRetentionDays: 30,
+      vaultAuditRetentionDays: 365,
     });
 
     const stats = await cron.runOnce();
@@ -71,7 +78,14 @@ describe("RetentionCron", () => {
     expect(stats.emails_deleted).toBe(1);
     expect(stats.pairing_tokens_deleted).toBe(2);
     expect(stats.llm_events_deleted).toBe(4);
+    expect(stats.vault_audit_deleted).toBe(5);
     expect(stats.errors).toEqual([]);
+
+    // Vault audit cutoff: now - 365 days
+    const vaultAuditDelete = calls.find((c) => c.table === "VaultAuditEvent" && c.op === "deleteMany");
+    expect(vaultAuditDelete).toBeDefined();
+    const vaultWhere = vaultAuditDelete!.where["emitted_at"] as { lt: Date };
+    expect(vaultWhere.lt).toEqual(new Date("2025-01-15T12:00:00Z"));
 
     // Body purge cutoff: now - 7 days
     const bodyPurge = calls.find((c) => c.table === "ReceivedEmail" && c.op === "updateMany");

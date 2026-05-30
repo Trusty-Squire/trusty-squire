@@ -29,6 +29,9 @@ import type {
   CredentialStore,
   CredentialType,
   VaultAuditEventInput,
+  VaultAuditListOptions,
+  VaultAuditPayload,
+  VaultAuditRecord,
   VaultAuditStore,
   VaultAuditType,
   VaultRequester,
@@ -62,6 +65,42 @@ export interface VaultEntry {
 
 export interface RotateResult {
   rotated_at: string;
+}
+
+// Envelope health probe result. `healthy` means the full
+// KMS→KEK→DEK→ciphertext chain decrypted cleanly — it does NOT mean the
+// upstream service still accepts the key (that needs a per-service live
+// call, out of this layer's scope). `field_count` is the number of
+// fields recovered; no value is ever exposed.
+export interface VaultHealthResult {
+  reference: string;
+  healthy: boolean;
+  field_count?: number;
+  algorithm?: string;
+  error?: string;
+}
+
+// GDPR export shape — non-secret metadata + the full audit trail. No
+// ciphertext, no secret values, ever.
+export interface VaultCredentialExport {
+  id: string;
+  reference: string;
+  service: string | null;
+  label: string;
+  type: string | null;
+  env_var_suggestion: string | null;
+  field_names: string[];
+  allowed_hosts: string[];
+  retrieval_count: number;
+  last_retrieved_at: Date | null;
+  rotated_at: Date | null;
+  created_at: Date;
+  deleted_at: Date | null;
+}
+export interface VaultAccountExport {
+  account_id: string;
+  credentials: VaultCredentialExport[];
+  audit_events: VaultAuditRecord[];
 }
 
 export interface DeviceAssertion {
@@ -124,6 +163,20 @@ export class CredentialNotFoundError extends Error {
   constructor(reference: string) {
     super(`credential not found or deleted: ${reference}`);
     this.name = "CredentialNotFoundError";
+  }
+}
+// Restore refused: an active credential already occupies this entry's
+// (service, label) slot, so undeleting would create a duplicate active
+// twin and break the one-active-per-(account,service,label) invariant.
+// API maps to 409. The user must delete/rotate the live one first.
+export class RestoreConflictError extends Error {
+  constructor(
+    public readonly reference: string,
+    public readonly service: string,
+    public readonly label: string,
+  ) {
+    super(`cannot restore ${reference}: an active credential for ${service}/${label} already exists`);
+    this.name = "RestoreConflictError";
   }
 }
 // use_credential asked to call a host not on the entry's allowlist —
@@ -287,11 +340,19 @@ export class CredentialVault implements VaultClient {
   }
 
   // Web-only reveal: account-scoped, returns the field map. Audited.
+  // Counts against the same per-account retrieval rate limit as the
+  // agent/runtime paths — a reveal IS a retrieval, so the human path
+  // can't be used to sidestep the 100/hr ceiling.
   async reveal(reference: string, accountId: string): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
+    await this.enforceRetrievalRateLimit(accountId, {
+      reference,
+      purpose: "user:vault_reveal",
+      requester: "user",
+    });
     const fields = await this.decryptFields(record);
     await this.deps.store.markRetrieved(reference, this.now());
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
@@ -310,6 +371,76 @@ export class CredentialVault implements VaultClient {
       reference,
       requester: "user",
     });
+  }
+
+  // Web-only integrity check: confirm the credential's encrypted
+  // envelope still decrypts under the current KMS keyring + DEK chain,
+  // WITHOUT returning the secret or calling upstream. Catches silent rot
+  // — a credential orphaned by a botched master-key rotation, or a row
+  // whose envelope no longer authenticates. Does not mark a retrieval or
+  // count toward the rate limit: it's an integrity probe, not a use.
+  async checkHealth(reference: string, accountId: string): Promise<VaultHealthResult> {
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    try {
+      const fields = await this.decryptFields(record);
+      return {
+        reference,
+        healthy: true,
+        field_count: Object.keys(fields).length,
+        algorithm: record.algorithm,
+      };
+    } catch (err) {
+      return {
+        reference,
+        healthy: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // Undelete: bring a soft-deleted credential back to active, account-
+  // scoped + audited. Idempotent if it's already active. Refuses (409)
+  // if restoring would collide with a live (service,label) twin — the
+  // one-active-per-slot invariant the upsert path relies on.
+  async restore(reference: string, accountId: string): Promise<void> {
+    const rec = await this.deps.store.findByReferenceIncludingDeleted(reference);
+    if (rec === null || rec.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    if (rec.deleted_at === null) return; // already active — no-op
+    const service = typeof rec.metadata.service === "string" ? rec.metadata.service : "";
+    if (service.length > 0) {
+      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, rec.label);
+      if (live !== null) {
+        throw new RestoreConflictError(reference, service, rec.label);
+      }
+    }
+    await this.deps.store.restore(reference);
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.restored, {
+      reference,
+      requester: "user",
+    });
+  }
+
+  // Kill-switch: soft-delete every active credential for the account in
+  // one shot, auditing each as a user-initiated revocation. Returns the
+  // count revoked. Soft-delete (not purge) so an accidental panic-button
+  // press is recoverable via restore until retention sweeps it.
+  async deleteAllForAccount(accountId: string): Promise<{ revoked: number; references: string[] }> {
+    const active = await this.deps.store.listByAccount(accountId);
+    const now = this.now();
+    for (const rec of active) {
+      await this.deps.store.softDelete(rec.reference, now);
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
+        reference: rec.reference,
+        requester: "user",
+        purpose: "user:revoke_all",
+      });
+    }
+    return { revoked: active.length, references: active.map((r) => r.reference) };
   }
 
   // use_credential: decrypt fields, hand them + the request to the
@@ -358,6 +489,50 @@ export class CredentialVault implements VaultClient {
       });
       throw err;
     }
+  }
+
+  // Web-only: the account's audit trail (who-touched-my-keys timeline).
+  // Read-through to the audit store; payloads never carry secret values.
+  async listAudit(accountId: string, opts?: VaultAuditListOptions): Promise<VaultAuditRecord[]> {
+    return this.deps.audit.list(accountId, opts);
+  }
+
+  // GDPR data export: the complete metadata + audit trail the vault holds
+  // for an account. NEVER includes secret values or the encrypted
+  // envelope — only the non-secret metadata (field NAMES, hosts, counts,
+  // timestamps) plus the full audit history.
+  async exportAccount(accountId: string): Promise<VaultAccountExport> {
+    const credentials = await this.deps.store.listByAccountIncludingDeleted(accountId);
+    const audit = await this.deps.audit.exportAll(accountId);
+    return {
+      account_id: accountId,
+      credentials: credentials.map((c) => ({
+        id: c.id,
+        reference: c.reference,
+        service: typeof c.metadata.service === "string" ? c.metadata.service : null,
+        label: c.label,
+        type: c.type,
+        env_var_suggestion: c.env_var_suggestion,
+        field_names: c.field_names,
+        allowed_hosts: c.allowed_hosts,
+        retrieval_count: c.retrieval_count,
+        last_retrieved_at: c.last_retrieved_at,
+        rotated_at: c.rotated_at,
+        created_at: c.created_at,
+        deleted_at: c.deleted_at,
+      })),
+      audit_events: audit,
+    };
+  }
+
+  // Irreversible account offboarding (GDPR erasure): hard-purge every
+  // credential row AND the entire audit trail for the account. Nothing
+  // is recoverable after this — the soft-delete + retention path is the
+  // forgiving one; this is the right-to-be-forgotten hard one.
+  async purgeAccount(accountId: string): Promise<{ credentials_purged: number; audit_purged: number }> {
+    const credentials_purged = await this.deps.store.purgeAccount(accountId);
+    const audit_purged = await this.deps.audit.purgeAccount(accountId);
+    return { credentials_purged, audit_purged };
   }
 
   // ── private ──────────────────────────────────────────────────
@@ -410,15 +585,9 @@ export class CredentialVault implements VaultClient {
     const accountId = record?.account_id ?? "";
 
     if (record !== null) {
-      const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
-      const count = await this.deps.audit.countRecentRetrievals(accountId, since);
-      if (count >= RATE_LIMIT_MAX) {
-        await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-          reference, purpose, requester, signing_device_id: signingDeviceId,
-          outcome: "rate_limited",
-        });
-        throw new VaultRateLimitError(accountId);
-      }
+      await this.enforceRetrievalRateLimit(accountId, {
+        reference, purpose, requester, signing_device_id: signingDeviceId,
+      });
     }
     if (assertion !== null) {
       const ageMs = this.now().getTime() - Date.parse(assertion.signed_at);
@@ -447,6 +616,26 @@ export class CredentialVault implements VaultClient {
       outcome: "success",
     });
     return fields;
+  }
+
+  // Per-account retrieval rate limit, shared by every decrypt path
+  // (agent retrieve, runtime retrieve, web reveal). Counts `retrieved`
+  // audit rows in the trailing window; on breach it records a
+  // rate_limited event and throws. Keeping this in one place is what
+  // stops a new decrypt path from silently bypassing the ceiling.
+  private async enforceRetrievalRateLimit(
+    accountId: string,
+    auditOnLimit: Pick<VaultAuditPayload, "reference" | "purpose" | "requester" | "signing_device_id">,
+  ): Promise<void> {
+    const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
+    const count = await this.deps.audit.countRecentRetrievals(accountId, since);
+    if (count >= RATE_LIMIT_MAX) {
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
+        ...auditOnLimit,
+        outcome: "rate_limited",
+      });
+      throw new VaultRateLimitError(accountId);
+    }
   }
 
   private async recordAudit(
