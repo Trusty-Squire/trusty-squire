@@ -16,8 +16,20 @@
 import { z } from "zod";
 import { ulid } from "ulid";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import { CredentialNotFoundError } from "@trusty-squire/vault";
+import { CredentialNotFoundError, deriveAllowedHosts } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+
+// Brand domain for the vault UI's favicon, independent of the proxy
+// allowlist. Existing credentials predate the allowed_hosts column (it
+// backfilled to []), so we fall back to the canonical service→host map.
+// Strip a leading api./www./dashboard. label so the favicon resolves to
+// the brand site (api.anthropic.com → anthropic.com) rather than a bare
+// API subdomain that often serves no icon.
+function faviconDomain(service: string | null, allowedHosts: string[]): string | null {
+  const host = allowedHosts[0] ?? (service !== null ? deriveAllowedHosts(service)[0] : undefined);
+  if (host === undefined) return null;
+  return host.replace(/^(api|www|dashboard)\./, "");
+}
 
 // A credential is either a single `value` or a named-field map. The bot
 // + "paste a key" path send `value`; AWS-style creds send `fields`.
@@ -77,19 +89,23 @@ export const registerVaultRoute: FastifyPluginAsync<{
       const auth = req.auth!;
       const creds = await opts.deps.credentialStore.listByAccount(auth.account_id);
       return reply.code(200).send({
-        credentials: creds.map((c) => ({
-          id: c.id,
-          reference: c.reference,
-          service: typeof c.metadata.service === "string" ? c.metadata.service : null,
-          label: c.label,
-          field_names: c.field_names,
-          key_name: c.env_var_suggestion,
-          type: c.type,
-          allowed_hosts: c.allowed_hosts,
-          created_at: c.created_at.toISOString(),
-          last_retrieved_at: c.last_retrieved_at?.toISOString() ?? null,
-          retrieval_count: c.retrieval_count,
-        })),
+        credentials: creds.map((c) => {
+          const service = typeof c.metadata.service === "string" ? c.metadata.service : null;
+          return {
+            id: c.id,
+            reference: c.reference,
+            service,
+            label: c.label,
+            field_names: c.field_names,
+            key_name: c.env_var_suggestion,
+            type: c.type,
+            allowed_hosts: c.allowed_hosts,
+            favicon_domain: faviconDomain(service, c.allowed_hosts),
+            created_at: c.created_at.toISOString(),
+            last_retrieved_at: c.last_retrieved_at?.toISOString() ?? null,
+            retrieval_count: c.retrieval_count,
+          };
+        }),
       });
     },
   );

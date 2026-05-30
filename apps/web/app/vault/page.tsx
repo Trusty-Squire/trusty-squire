@@ -19,6 +19,9 @@ interface Cred {
   key_name: string | null;
   type: string;
   allowed_hosts: string[];
+  // Brand domain for the favicon, derived server-side from the service
+  // when allowed_hosts is empty (most existing creds). null = no icon.
+  favicon_domain: string | null;
   created_at: string;
   last_retrieved_at: string | null;
   retrieval_count: number;
@@ -120,9 +123,9 @@ export default function VaultPage() {
 // 404s (the img is hidden on error).
 function ServiceIcon({ cred }: { cred: Cred }) {
   const [imgFailed, setImgFailed] = useState(false);
-  const host = cred.allowed_hosts[0];
+  const domain = cred.favicon_domain;
   const letter = (cred.service ?? cred.key_name ?? "?").charAt(0).toUpperCase();
-  const showImg = host !== undefined && !imgFailed;
+  const showImg = domain !== null && !imgFailed;
   return (
     <div className="ic">
       <span className="lm">{letter}</span>
@@ -132,7 +135,7 @@ function ServiceIcon({ cred }: { cred: Cred }) {
       {showImg && (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={`https://www.google.com/s2/favicons?domain=${host}&sz=64`}
+          src={`https://www.google.com/s2/favicons?domain=${domain}&sz=64`}
           alt=""
           onError={() => setImgFailed(true)}
         />
