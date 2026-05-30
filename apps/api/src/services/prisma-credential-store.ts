@@ -160,6 +160,17 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  // Re-wrap only the master-key envelope (account_kek_blob), for the KEK
+  // key-rotation migration. Deliberately does NOT touch rotated_at — a
+  // re-wrap re-encrypts the same KEK under a new master key; the secret
+  // itself is unchanged, so this is not a rotation event.
+  async rewrapAccountKek(reference: string, accountKekBlob: Buffer): Promise<void> {
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { account_kek_blob: accountKekBlob },
+    });
+  }
+
   private toRecord(row: CredentialRow): CredentialRecord {
     return {
       id: row.id,
