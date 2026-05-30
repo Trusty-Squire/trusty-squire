@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
 import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
-import { CHROME_PROFILE_DIR, ProfileBusyError, waitForProfileFree } from "./profile.js";
+import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
@@ -145,9 +145,11 @@ export async function detectActiveProviderSessions(
   // wait is fine: reclaim a stale lock, or briefly yield to a live run.
   await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
   const chromium = resolveChromium();
-  const ctx = await chromium.launchPersistentContext(profileDir, {
-    headless: true,
-  });
+  const ctx = await launchWithProfileGate(profileDir, () =>
+    chromium.launchPersistentContext(profileDir, {
+      headless: true,
+    }),
+  );
   try {
     const present: OAuthProviderId[] = [];
     for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
@@ -585,12 +587,14 @@ async function runDisplayedChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   const chromium = resolveChromium();
-  const context = await chromium.launchPersistentContext(opts.profileDir, {
-    channel: "chrome",
-    headless: false,
-    viewport: { width: 1280, height: 800 },
-    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
-  });
+  const context = await launchWithProfileGate(opts.profileDir, () =>
+    chromium.launchPersistentContext(opts.profileDir, {
+      channel: "chrome",
+      headless: false,
+      viewport: { width: 1280, height: 800 },
+      args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
+    }),
+  );
   try {
     if (opts.preflight !== undefined && await opts.preflight(context)) {
       return { status: "preflight_satisfied" };
@@ -690,7 +694,8 @@ async function runHeadlessChrome(
 
     // 2. Chrome on that display, persistent profile, window filling the display.
     const chromium = resolveChromium();
-    const context = await chromium.launchPersistentContext(opts.profileDir, {
+    const context = await launchWithProfileGate(opts.profileDir, () =>
+      chromium.launchPersistentContext(opts.profileDir, {
       channel: "chrome",
       headless: false,
       viewport: null, // use the real window size
@@ -712,7 +717,8 @@ async function runHeadlessChrome(
         "--no-sandbox",
         "--disable-dev-shm-usage",
       ],
-    });
+      }),
+    );
     activeContext = context;
 
     try {

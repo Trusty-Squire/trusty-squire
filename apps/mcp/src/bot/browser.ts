@@ -26,7 +26,7 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR, ProfileBusyError, waitForProfileFree } from "./profile.js";
+import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
@@ -386,7 +386,8 @@ export class BrowserController {
     // so the OAuth-first signup path reuses it instead of starting
     // logged-out. launchPersistentContext takes launch + context
     // options in one call.
-    const context = await getChromium().launchPersistentContext(this.profileDir, {
+    const context = await launchWithProfileGate(this.profileDir, () =>
+      getChromium().launchPersistentContext(this.profileDir, {
       headless: chromeHeadless,
       ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
       // `channel:` selects a real installed browser over the bundled
@@ -424,7 +425,8 @@ export class BrowserController {
         "clipboard-write",
       ],
       ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-    });
+      }),
+    );
     this.context = context;
     // Patch the navigator.webdriver flag — most anti-bot heuristics look here.
     await context.addInitScript(() => {

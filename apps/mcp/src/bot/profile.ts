@@ -143,3 +143,44 @@ export async function waitForProfileFree(
     await sleep(pollMs);
   }
 }
+
+// True when the error is Chrome/Playwright refusing to open the profile
+// because the single-instance lock already exists.
+function isSingletonCollision(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /ProcessSingleton|SingletonLock/i.test(msg);
+}
+
+// Open the profile, retrying on the free→launch race.
+//
+// waitForProfileFree closes the long window, but there is still a
+// sub-second gap between "lock is absent" and Chrome creating it where a
+// second process can win — launchPersistentContext then throws
+// "Failed to create a ProcessSingleton". This wraps the launch: on that
+// specific collision it re-waits for the new holder (reclaiming it if it
+// died) and relaunches, up to `retries` times. Any other error, or a
+// holder that never releases, propagates. This is what makes the
+// cross-process gate race-free in practice.
+export async function launchWithProfileGate<T>(
+  profileDir: string,
+  launch: () => Promise<T>,
+  opts: { retries?: number; reWaitMs?: number } = {},
+): Promise<T> {
+  const retries = opts.retries ?? 3;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await launch();
+    } catch (err) {
+      if (attempt >= retries || !isSingletonCollision(err)) throw err;
+      const free = await waitForProfileFree(profileDir, {
+        deadlineMs: opts.reWaitMs ?? 30_000,
+        pollMs: 500,
+      });
+      if (!free) {
+        throw new ProfileBusyError(
+          "bot Chrome profile stayed locked across launch retries — another run isn't releasing it",
+        );
+      }
+    }
+  }
+}

@@ -13,7 +13,7 @@ import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { clearStaleSingletonLock, waitForProfileFree } from "../profile.js";
+import { clearStaleSingletonLock, launchWithProfileGate, waitForProfileFree } from "../profile.js";
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
 // a label, not a real file — so it always reports "missing". Probe the
@@ -109,5 +109,55 @@ describe("waitForProfileFree (cross-process gate)", () => {
     // lock after a beat. waitForProfileFree should then see it free.
     setTimeout(() => rmSync(join(dir, "SingletonLock"), { force: true }), 80);
     expect(await waitForProfileFree(dir, { deadlineMs: 2_000, pollMs: 25 })).toBe(true);
+  });
+});
+
+describe("launchWithProfileGate (race retry)", () => {
+  let dir: string; // empty → re-waits return free instantly
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("returns the launch result on first success", async () => {
+    let calls = 0;
+    const r = await launchWithProfileGate(dir, async () => { calls++; return "ctx"; });
+    expect(r).toBe("ctx");
+    expect(calls).toBe(1);
+  });
+
+  it("retries once on a ProcessSingleton collision, then succeeds", async () => {
+    let calls = 0;
+    const r = await launchWithProfileGate(
+      dir,
+      async () => {
+        calls++;
+        if (calls === 1) {
+          throw new Error("Failed to create a ProcessSingleton for your profile directory");
+        }
+        return "ctx";
+      },
+      { reWaitMs: 200 },
+    );
+    expect(r).toBe("ctx");
+    expect(calls).toBe(2); // lost the race once, won the retry
+  });
+
+  it("propagates a non-collision error without retrying", async () => {
+    let calls = 0;
+    await expect(
+      launchWithProfileGate(dir, async () => { calls++; throw new Error("unrelated boom"); }),
+    ).rejects.toThrow("unrelated boom");
+    expect(calls).toBe(1);
+  });
+
+  it("gives up after exhausting retries on persistent collisions", async () => {
+    let calls = 0;
+    await expect(
+      launchWithProfileGate(
+        dir,
+        async () => { calls++; throw new Error("SingletonLock: File exists (17)"); },
+        { retries: 2, reWaitMs: 100 },
+      ),
+    ).rejects.toThrow(/SingletonLock/);
+    expect(calls).toBe(3); // initial attempt + 2 retries
   });
 });
