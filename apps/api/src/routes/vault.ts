@@ -22,13 +22,16 @@ import type { ApiDeps } from "../services/deps.js";
 // Brand domain for the vault UI's favicon, independent of the proxy
 // allowlist. Existing credentials predate the allowed_hosts column (it
 // backfilled to []), so we fall back to the canonical service→host map.
-// Strip a leading api./www./dashboard. label so the favicon resolves to
-// the brand site (api.anthropic.com → anthropic.com) rather than a bare
-// API subdomain that often serves no icon.
+// Reduce to the registrable domain (last two labels) so the favicon
+// resolves to the brand site — api.anthropic.com → anthropic.com,
+// app.posthog.com → posthog.com — rather than an API/app subdomain that
+// often serves no icon. (Doesn't handle multi-part TLDs like .co.uk, but
+// none of the known services use one.)
 function faviconDomain(service: string | null, allowedHosts: string[]): string | null {
   const host = allowedHosts[0] ?? (service !== null ? deriveAllowedHosts(service)[0] : undefined);
   if (host === undefined) return null;
-  return host.replace(/^(api|www|dashboard)\./, "");
+  const parts = host.split(".");
+  return parts.length <= 2 ? host : parts.slice(-2).join(".");
 }
 
 // A credential is either a single `value` or a named-field map. The bot
