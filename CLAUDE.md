@@ -505,3 +505,11 @@ Key routing rules:
 - Ship/deploy/PR → invoke /ship or /land-and-deploy
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
+
+## Design System
+
+Read `DESIGN.md` (repo root) before any visual or UI change to `apps/web`.
+Fonts (Geist + JetBrains Mono), the color ramp, spacing/type/radius scales,
+component patterns, and motion are defined there. Don't deviate without
+explicit approval; flag any code that diverges. The vault is mono-forward
+(machine values in `--font-mono`); the app is Linear-leaning polished dark.
