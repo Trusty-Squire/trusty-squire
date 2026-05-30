@@ -12,18 +12,33 @@ on a code change. Notes below say exactly what each needs to unblock.
   the dashboard keys page) + host allowlist seed in
   `packages/vault/src/service-hosts.ts` (`falai`/`fal` → `fal.run`,
   `rest.alpha.fal.ai`, `queue.fal.run`) with a `service-hosts.test.ts`
-  case. Ready for a housekeeper run to attempt the signup.
+  case.
+
+- **Key-generation CTA suppression FIXED (2026-05-30).** A live fal.ai
+  run (bot already Google-authed → landed on the dashboard) returned
+  `planning_failed` because the "Add key" CTA scored 0 in
+  `scoreSignupButton` and got capped out by `rankAndCapInventory` —
+  the SAME bug as OpenRouter's "Get API Key" suppression (see the
+  openrouter yaml note). Fix: key/token/secret generate/reveal CTAs now
+  score +14 so they survive ranking on busy dashboards. Unit-tested
+  (`f3-inventory.test.ts`). Should unblock fal.ai AND OpenRouter; re-run
+  both to confirm full key extraction. Captures: `fal-ai-mpsq8vvz-r*`.
+
+- **ipdata signup URL corrected (2026-05-30).** Was guessed as
+  `ipdata.com/signup` (404). Real signup is
+  `dashboard.ipdata.co/sign-up.html` — added as a curated yaml entry.
 
 ## Bot/synthesizer — BLOCKED on artifacts / live runs
 
-- **ipdata: "no credentials found"** — BLOCKED: no ipdata capture exists
-  in `~/.trusty-squire/corpus/onboarding/` on this box, so the
-  success-page DOM that would show ipdata's key shape isn't available.
-  The extractor (`extractAllLabeledTokensFromReason`, agent.ts:1980) and
-  `pickStableAttribute` (promote-to-skill.ts:843) can't be fixed blind.
-  UNBLOCK: re-run the housekeeper against ipdata (now that capture is
-  default-on) to regenerate the success-DOM, then add the ipdata key
-  shape to the extractor against that fixture.
+- **ipdata: "no credentials found"** — STILL BLOCKED, blocker moved. A
+  live run with the corrected URL (above) now REACHES the real ipdata
+  email/password signup form and submits it — but ipdata gates on email
+  verification and the verification mail never arrives in 180s
+  (`verification_not_sent`), the fresh-MX withholding caveat. So the bot
+  can't reach the dashboard where the extractor runs; #1 can't be
+  reproduced until the verification email lands. UNBLOCK: a maildomain
+  ipdata will actually deliver to (or manual verification), THEN inspect
+  the success-page extraction.
 
 - **"Try another method" SMS-gate reclassification** — BLOCKED + premise
   stale: there is NO `sms_required` outcome in the agent's union (it's
