@@ -79,13 +79,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # apps/api + apps/inbox-api tests import @trusty-squire/runtime and
       # @trusty-squire/adapter-resend, whose package.json points at dist/.
-      # Prisma-backed packages need their client generated before tests
-      # (their stores lazy-load the generated client).
-      - name: Prisma generate (inbox, registry, vault)
+      # Prisma-backed packages need their client generated before tests.
+      # NOT vault: its prisma client is consumed by apps/api (which has its
+      # own isolated client), the vault package's own src/tests don't import
+      # it, and vault's schema has no custom `output` — so generating it here
+      # would clobber inbox's default-location client and break inbox's build.
+      - name: Prisma generate (inbox, registry)
         run: |
           pnpm --filter '@trusty-squire/inbox' prisma:generate
           pnpm --filter '@trusty-squire/registry' prisma:generate
-          pnpm --filter '@trusty-squire/vault' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package test over every package whose suite passes locally.
