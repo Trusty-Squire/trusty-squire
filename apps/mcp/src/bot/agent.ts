@@ -3702,6 +3702,8 @@ export class SignupAgent {
               maxRounds: task.postVerifyMaxRounds ?? 24,
               steps,
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+              ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
+              ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
             });
           }
           if (credentials.api_key !== undefined) {
@@ -3845,6 +3847,8 @@ export class SignupAgent {
                     maxRounds,
                     steps,
                     ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+                    ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
+                    ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
                   });
                 }
               } else {
@@ -4598,6 +4602,8 @@ export class SignupAgent {
       maxRounds: task.postVerifyMaxRounds ?? 24,
       steps,
       ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+      ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
+      ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
     });
     if (credentials.api_key !== undefined) {
       return {
@@ -5135,6 +5141,12 @@ ${formatInventory(input.inventory)}`,
     maxRounds: number;
     steps: string[];
     scopeHint?: string | undefined;
+    // For an email-OTP gate that appears AFTER OAuth (e.g. Convex's
+    // radar-challenge → 6-digit code to the operator's Google address).
+    // Lets the loop poll the operator's gmail the same way the pre-OAuth
+    // signup gate does.
+    machineToken?: string | undefined;
+    apiBase?: string | undefined;
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     // 0.8.2-rc.15 — also seed DOM-proximity at loop entry. If the
@@ -5283,6 +5295,9 @@ ${formatInventory(input.inventory)}`,
     const seedHadCredential =
       credentials.api_key !== undefined || credentials.username !== undefined;
     let plannerExtractEmitted = false;
+    // Gate URLs we've already polled the operator's gmail for, so a
+    // multi-round wait on the same email-OTP page doesn't re-poll.
+    const otpPolledUrls = new Set<string>();
     for (let round = 0; round < args.maxRounds; round++) {
       const currentCredentialKeyCount = Object.keys(credentials).filter(
         (k) => !NON_CREDENTIAL_KEYS.has(k),
@@ -5369,6 +5384,49 @@ ${formatInventory(input.inventory)}`,
         );
         await this.browser.wait(2);
         continue;
+      }
+      // Email-OTP gate that surfaced AFTER OAuth (the pre-OAuth signup
+      // gate never saw it, so pendingOtpCode is unset). Convex's
+      // radar-challenge sends a 6-digit code to the operator's Google
+      // address; without this the planner emits a value-less `fill` and
+      // then gives up ("on a code challenge wall" → oauth_onboarding_failed).
+      // Detect it in-loop, poll the operator's gmail once via the same
+      // reader the signup gate uses, and hand the code to the planner as
+      // the next-round fill hint. Polled at most once per gate URL.
+      if (
+        hint === undefined &&
+        args.machineToken !== undefined &&
+        args.machineToken.length > 0 &&
+        !otpPolledUrls.has(state.url) &&
+        detectEmailOtpGate(state.url, state.title, await this.browser.extractText().catch(() => ""))
+      ) {
+        otpPolledUrls.add(state.url);
+        const domain = fromDomainFromUrl(state.url);
+        args.steps.push(
+          `Post-verify round ${round}: post-OAuth email-OTP gate (${pathOf(state.url)}) — polling operator gmail for the code` +
+            (domain !== null ? ` (from_domain=${domain})` : ""),
+        );
+        const otp = await readOperatorOtp({
+          machineToken: args.machineToken,
+          ...(args.apiBase !== undefined ? { apiBase: args.apiBase } : {}),
+          ...(domain !== null ? { fromDomain: domain } : {}),
+          maxWaitSeconds: 90,
+        });
+        if (otp.code !== null) {
+          args.steps.push(
+            `Post-verify round ${round}: email-OTP retrieved (${otp.code.length} digits, ending …${otp.code.slice(-2)}) — handing it to the planner to fill.`,
+          );
+          hint =
+            `Operator email-OTP retrieved from gmail: code is "${otp.code}". The current page is an ` +
+            `email-verification gate. Find the SINGLE visible OTP/code input (placeholder like "Code" / ` +
+            `"Verification code", or 6 individual digit inputs — fill the FIRST and the browser ` +
+            `auto-distributes). Issue {"kind":"fill","selector":"…","value":"${otp.code}"} on it. ` +
+            `NEXT round, click the Verify / Continue / Submit button.`;
+        } else {
+          args.steps.push(
+            `Post-verify round ${round}: email-OTP poll found no code (reason=${otp.reason}) — letting the planner proceed.`,
+          );
+        }
       }
       let nextStep: PostVerifyStep;
       try {
