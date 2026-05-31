@@ -1739,6 +1739,30 @@ export function findFirstOAuthButton(
   return null;
 }
 
+// Order the OAuth providers the bot may use for a signup, given the
+// service's yaml pin (if any) and the providers the persistent profile
+// actually has a session for. `findFirstOAuthButton` walks this list in
+// order and uses the first provider the PAGE offers, so order = preference.
+//
+// KEY RULE: Google goes first whenever the profile has a Google session —
+// even over a non-Google pin. Empirically Google's OAuth blocks far less
+// hard than GitHub's: GitHub forces a "Verify your 2FA settings" wall on
+// the /authorize flow that the bot cannot clear, while a warm Google
+// session usually consents in one click (worst case a number-match the
+// operator taps). The pin (or the other session'd provider) stays in the
+// list as the FALLBACK for services that don't render a Google affordance,
+// so nothing regresses — a GitHub-only service still gets GitHub.
+export function orderOAuthCandidates(
+  pinned: OAuthProviderId | undefined,
+  loggedIn: readonly OAuthProviderId[],
+): OAuthProviderId[] {
+  if (pinned !== undefined) {
+    if (pinned !== "google" && loggedIn.includes("google")) return ["google", pinned];
+    return [pinned];
+  }
+  return [...loggedIn].sort((a, b) => (a === "google" ? -1 : b === "google" ? 1 : 0));
+}
+
 // Parse a post-verify step. When `allowedSelectors` is supplied, a
 // `click`/`fill` selector that is not in the page inventory is a
 // parse-time rejection — the same DOM-grounding F3 gave the signup
@@ -3130,25 +3154,16 @@ export class SignupAgent {
     task: SignupTask,
     steps: string[],
   ): Promise<OAuthProviderId[]> {
-    if (task.oauthProvider !== undefined) {
-      return [task.oauthProvider];
-    }
-    const loggedIn = loggedInProviders();
-    if (loggedIn.length === 0) return [];
-    // Stable tiebreak when both providers have a session: Google
-    // first. Google's OAuth flow is one-click in the common case
-    // (consent + redirect); GitHub's typically requires the explicit
-    // authorize-then-grant double step. Lower friction, fewer
-    // number-match challenges on warm sessions.
-    const ordered = [...loggedIn].sort((a, b) => {
-      if (a === b) return 0;
-      if (a === "google") return -1;
-      if (b === "google") return 1;
-      return 0;
-    });
+    const ordered = orderOAuthCandidates(task.oauthProvider, loggedInProviders());
+    if (ordered.length === 0) return [];
+    const pinNote =
+      task.oauthProvider !== undefined &&
+      task.oauthProvider !== "google" &&
+      ordered[0] === "google"
+        ? ` (pinned ${task.oauthProvider}, but Google session present — Google blocks less hard, so it leads; ${task.oauthProvider} is the fallback)`
+        : "";
     steps.push(
-      `Auto-OAuth: profile has a session for ${ordered.join(", ")} — ` +
-        "preferring OAuth if the page offers it",
+      `Auto-OAuth: candidates [${ordered.join(", ")}]${pinNote} — using whichever the page offers`,
     );
     return ordered;
   }
