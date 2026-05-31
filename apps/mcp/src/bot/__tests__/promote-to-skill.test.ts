@@ -1689,8 +1689,12 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     expect(envVars.has(`${upperService}_BEARER_TOKEN`)).toBe(true);
   });
 
-  it("rejects when two extract rounds derive the same produces", () => {
-    // Two rounds with the same label → same produces → duplicate.
+  it("collapses a re-extraction that derives the same produces (0.8.11)", () => {
+    // Two rounds deriving the same `produces` are NOT a multi-cred
+    // conflict — they're the post-verify loop re-extracting one
+    // credential. collapseRedundantExtracts merges them, so the round-1
+    // duplicate drops and the surviving extracts (api_key + bearer_token)
+    // form a valid 2-credential skill instead of rejecting the whole run.
     const service = uniqueService();
     const rounds = twitterMultiCredRounds(service);
     // Force a duplicate by re-using "API Key" reason for round 1.
@@ -1701,9 +1705,17 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     const { dir, runId } = setupCaptures(rounds);
 
     const result = promoteToSkill({ dir, service, run_id: runId });
-    expect(result.kind).toBe("rejected");
-    if (result.kind !== "rejected") return;
-    expect(result.error_kind).toBe("duplicate_credential_produces");
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    // The duplicate api_key collapsed; api_key + bearer_token remain.
+    const names = result.skill.credentials.map((c) => c.name).sort();
+    expect(names).toEqual(["api_key", "bearer_token"]);
+    const namedExtracts = result.skill.steps.filter(
+      (s) =>
+        s.kind === "extract_via_copy_button_named" ||
+        s.kind === "extract_via_regex_named",
+    );
+    expect(namedExtracts).toHaveLength(2);
   });
 
   it("single-credential captures still produce a credentials[0].name = undefined skill", () => {
@@ -2348,12 +2360,15 @@ describe("promoteToSkill — consecutive-duplicate dedup", () => {
     expect(selectSteps).toHaveLength(1);
   });
 
-  it("does NOT dedup consecutive extract steps (multi-cred safety net)", () => {
-    // The multi-cred bundle invariant requires the duplicate-produces
-    // rejection downstream to see both extract rounds. If dedup
-    // collapsed identical-looking extracts, two-extract captures that
-    // happen to derive the same `produces` would silently become
-    // successful single-cred skills.
+  it("collapses a re-extracted single credential into one single-cred skill (0.8.11, Convex-class)", () => {
+    // The post-verify loop re-runs the extractor every round, so a
+    // single-credential dashboard (Convex's "Copy" auth token) is
+    // routinely captured as two extract rounds against the same page,
+    // both deriving the same `produces`. Pre-0.8.11 the >1-extract
+    // multi-cred dispatch hit duplicate_credential_produces and rejected
+    // the whole skill. Now collapseRedundantExtracts merges them, so the
+    // capture stays on the single-cred path: ok, ONE credential, ONE
+    // (legacy, un-named) extract step.
     const service = uniqueService();
     const rounds: OnboardingRoundCapture[] = [
       {
@@ -2403,21 +2418,25 @@ describe("promoteToSkill — consecutive-duplicate dedup", () => {
 
     const { dir, runId } = setupCaptures(rounds);
     const result = promoteToSkill({ dir, service, run_id: runId });
-    // Either rejects with duplicate_credential_produces (correct multi-
-    // cred behavior) or accepts a single-cred skill — either way, dedup
-    // must not have silently swallowed the second extract. Assertion:
-    // at most ONE extract step OR a rejection — but if 'ok', the second
-    // extract was NOT silently collapsed by dedup (it was either
-    // intentionally merged by single-cred logic or rejected for duplicate).
-    if (result.kind === "rejected") {
-      // Expected multi-cred path — duplicate_credential_produces is the
-      // exact error the dedup-by-mistake would have suppressed.
-      expect(result.error_kind).toBe("duplicate_credential_produces");
-      return;
-    }
-    // Single-cred fallback path: the synthesizer can legitimately merge
-    // two identical extracts into one credential (legacy behavior). The
-    // dedup-equivalence check shouldn't have been the mechanism.
     expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    // Exactly one credential, and it keeps the single-cred (un-named)
+    // shape — the multi-cred dispatch must NOT have fired.
+    expect(result.skill.credentials).toHaveLength(1);
+    expect(result.skill.credentials[0]!.name).toBeUndefined();
+
+    // The redundant second extract collapsed: one legacy extract step,
+    // zero named extract steps.
+    const legacyExtracts = result.skill.steps.filter(
+      (s) => s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
+    );
+    expect(legacyExtracts).toHaveLength(1);
+    const namedExtracts = result.skill.steps.filter(
+      (s) =>
+        s.kind === "extract_via_copy_button_named" ||
+        s.kind === "extract_via_regex_named",
+    );
+    expect(namedExtracts).toHaveLength(0);
   });
 });

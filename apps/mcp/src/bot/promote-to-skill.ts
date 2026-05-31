@@ -421,8 +421,61 @@ function synthesizeSteps(
   // label_hints ("Password" vs "Confirm password"), so this pass
   // doesn't fire.
   const trimmed = stripRetrySequences(steps);
+  const collapsed = collapseRedundantExtracts(trimmed);
 
-  return { kind: "ok", steps: trimmed };
+  return { kind: "ok", steps: collapsed };
+}
+
+// 0.8.11 — collapse redundant extract steps that name the same
+// credential. The post-verify loop re-runs the extractor each round, so
+// a single-credential dashboard (Convex's "Copy" auth token, Railway's
+// bare-UUID key) is frequently captured as TWO `extract` rounds against
+// the same page — both resolving to the same Copy button, both deriving
+// the same `produces` name.
+//
+// Pre-0.8.11 these survived into the multi-cred dispatch (>1 extract
+// step ⇒ multi-cred), which then hit `duplicate_credential_produces`
+// and rejected the whole skill — so a single-cred service that happened
+// to extract twice never closed the loop.
+//
+// Two extract steps that derive the SAME credential name ARE the same
+// credential: a skill keys credentials by name, so two same-named
+// values cannot coexist as distinct credentials. The synthesizer can't
+// tell them apart (findCopyButton returns the first Copy button for
+// both), so a valid 2-credential skill is impossible here regardless;
+// collapsing to one yields a working single-cred skill instead of a
+// reject. Genuinely-distinct credentials (Phase E multi-cred) get
+// distinct near-text hints from the planner ⇒ distinct `produces` ⇒
+// this pass leaves them untouched and the multi-cred path proceeds.
+//
+// Keying by derived name (not step structure) catches NON-consecutive
+// duplicates too — an extract, a nav, then a re-extract — which the
+// consecutive-only stepsEquivalent dedup cannot.
+function collapseRedundantExtracts(steps: SkillStep[]): SkillStep[] {
+  // The credential name an extract step would produce, or null for
+  // non-extract steps / unparseable copy-button hints (which we leave
+  // in place so the downstream unparseable_credential_label guard can
+  // surface them if the capture is genuinely multi-cred).
+  const producesKey = (s: SkillStep): string | null => {
+    if (s.kind === "extract_via_copy_button") {
+      return deriveProducesFromHint(s.near_text_hint);
+    }
+    if (s.kind === "extract_via_regex") {
+      return s.pattern_name.toLowerCase();
+    }
+    return null;
+  };
+  const seen = new Set<string>();
+  const out: SkillStep[] = [];
+  for (const step of steps) {
+    const key = producesKey(step);
+    if (key !== null) {
+      if (seen.has(key)) continue; // redundant re-extraction of the same credential
+      seen.add(key);
+    }
+    out.push(step);
+  }
+  return out;
 }
 
 function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
@@ -463,10 +516,13 @@ function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
 // Used to dedup consecutive duplicates emitted by the synthesizer when
 // the planner re-records an unchanged action.
 //
-// extract_* kinds NEVER dedup — the multi-cred bundle invariant
-// requires the duplicate-produces rejection downstream to see both
-// extract steps. Collapsing two extracts that produce the same value
-// would silently turn a duplicate into a successful single-cred skill.
+// extract_* kinds NEVER dedup HERE — this is the structural
+// consecutive-dedup, and collapsing redundant extracts is the dedicated
+// job of collapseRedundantExtracts (which keys on derived credential
+// name, not step structure, so it also catches non-consecutive
+// re-extractions). Keeping extracts out of this pass means a true
+// multi-cred capture with distinct hints still reaches the multi-cred
+// dispatch with all its extract steps intact.
 function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind.startsWith("extract")) return false;

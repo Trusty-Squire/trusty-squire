@@ -46,6 +46,23 @@ on a code change. Notes below say exactly what each needs to unblock.
 
 ## Bot/synthesizer — BLOCKED on artifacts / live runs
 
+- **Synthesizer `duplicate_credential_produces` false-reject — FIXED
+  (0.8.11, 2026-05-30).** Convex's live run extracted 1 credential (one
+  "Copy" auth token) but auto-promote rejected with
+  `duplicate_credential_produces`: the post-verify loop re-extracts each
+  round, so the single token was captured as TWO `extract_via_copy_button`
+  rounds, both deriving `produces="copy"`. The `>1 extract step ⇒
+  multi-cred` dispatch then hit the duplicate-name guard and rejected the
+  whole skill. Fix: `collapseRedundantExtracts()` (promote-to-skill.ts)
+  merges extract steps that derive the same credential name BEFORE the
+  multi-cred dispatch — keying on the derived name so it catches
+  non-consecutive re-extractions too, and keeping single-cred captures on
+  the byte-equivalent single-cred path. Genuinely-distinct creds (Phase E
+  multi-cred) get distinct planner hints ⇒ distinct names ⇒ untouched.
+  Unit-tested (Convex-class single-cred collapse + Twitter multi-cred
+  duplicate collapse-to-2). UNBLOCK: re-run Convex → expect a promoted
+  `convex v1` skill.
+
 - **Convex post-OAuth email-code gate — FIXED (0.8.10, 2026-05-30).** The
   post-verify loop now re-runs `detectEmailOtpGate` each round; on a
   post-OAuth "Enter the code sent to <email>" wall (Convex's
