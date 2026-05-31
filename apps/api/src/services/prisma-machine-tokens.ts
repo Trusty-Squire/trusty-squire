@@ -65,6 +65,13 @@ export class PrismaMachineTokenStore implements MachineTokenStore {
     });
   }
 
+  async deleteByAccount(accountId: string): Promise<number> {
+    const r = await this.prisma.machineToken.deleteMany({
+      where: { paired_account_id: accountId },
+    });
+    return r.count;
+  }
+
   private toRecord(row: {
     token: string;
     created_at: Date;

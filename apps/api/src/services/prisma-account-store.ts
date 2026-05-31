@@ -86,6 +86,22 @@ export class PrismaAccountStore implements AccountStore {
     });
   }
 
+  async deleteAccount(accountId: string): Promise<void> {
+    // The schema declares onDelete: Cascade from Account on OAuthIdentity,
+    // Device, ActiveMandate, WebSession, and AgentSession — deleting the
+    // row tears those down with it. Credentials + vault audit are not FK-
+    // linked and are purged separately by the caller.
+    try {
+      await this.prisma.account.delete({ where: { id: accountId } });
+    } catch (err) {
+      // P2025 = record not found. Idempotent, same as the in-memory store.
+      if (typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2025") {
+        return;
+      }
+      throw err;
+    }
+  }
+
   private toAccount(row: {
     id: string;
     email: string;

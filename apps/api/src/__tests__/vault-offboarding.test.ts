@@ -1,5 +1,6 @@
 // Vault GDPR surfaces — export (everything we hold, no secrets) and the
-// irreversible account erasure (hard-purge credentials + audit trail).
+// irreversible account deletion (purge credentials + audit trail, delete
+// the account identity, revoke the session).
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
@@ -68,7 +69,7 @@ describe("GDPR export + erasure", () => {
     expect(JSON.stringify(data)).not.toContain("secret"); // no sk-*-secret values
   });
 
-  it("erasure requires confirm, then irreversibly purges everything", async () => {
+  it("deletion requires confirm, then purges data + removes the account + kills the session", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const cookie = await makeWebSession(h.deps, account.id);
     await createCred(h.server, cookie, "OpenAI");
@@ -78,15 +79,17 @@ describe("GDPR export + erasure", () => {
 
     const purge = await h.server.inject({ method: "DELETE", url: "/v1/vault/account", headers: { cookie, "content-type": "application/json" }, payload: { confirm: true } });
     expect(purge.statusCode).toBe(200);
-    const body = purge.json() as { credentials_purged: number; audit_purged: number };
+    const body = purge.json() as { credentials_purged: number; audit_purged: number; account_deleted: boolean };
     expect(body.credentials_purged).toBe(1);
     expect(body.audit_purged).toBeGreaterThan(0);
+    expect(body.account_deleted).toBe(true);
 
-    // nothing left
+    // account identity is gone
+    expect(await h.deps.accountStore.findAccountById(account.id)).toBeNull();
+
+    // session is dead — the cookie no longer authenticates
     const exp = await h.server.inject({ method: "GET", url: "/v1/vault/export", headers: { cookie } });
-    const data = exp.json() as Export;
-    expect(data.credentials).toHaveLength(0);
-    expect(data.audit_events).toHaveLength(0);
+    expect(exp.statusCode).toBe(401);
   });
 
   it("erasure is account-scoped", async () => {

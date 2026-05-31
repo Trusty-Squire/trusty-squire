@@ -425,24 +425,6 @@ export class CredentialVault implements VaultClient {
     });
   }
 
-  // Kill-switch: soft-delete every active credential for the account in
-  // one shot, auditing each as a user-initiated revocation. Returns the
-  // count revoked. Soft-delete (not purge) so an accidental panic-button
-  // press is recoverable via restore until retention sweeps it.
-  async deleteAllForAccount(accountId: string): Promise<{ revoked: number; references: string[] }> {
-    const active = await this.deps.store.listByAccount(accountId);
-    const now = this.now();
-    for (const rec of active) {
-      await this.deps.store.softDelete(rec.reference, now);
-      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
-        reference: rec.reference,
-        requester: "user",
-        purpose: "user:revoke_all",
-      });
-    }
-    return { revoked: active.length, references: active.map((r) => r.reference) };
-  }
-
   // use_credential: decrypt fields, hand them + the request to the
   // injected executor (which substitutes ${SECRET.<field>}), return only
   // the upstream response. Host hard-checked against allowed_hosts first.

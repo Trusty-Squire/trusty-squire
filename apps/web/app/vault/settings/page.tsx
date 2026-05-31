@@ -2,10 +2,9 @@
 
 import { useCallback, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
 import { Modal } from "../../components/Modal";
-import { apiDelete, apiPost } from "../../lib/api";
+import { apiDelete } from "../../lib/api";
 
 export default function SettingsPage() {
   return (
@@ -13,7 +12,7 @@ export default function SettingsPage() {
       <div className="app-head">
         <div>
           <h1 className="app-title">Settings</h1>
-          <p className="app-sub">Export your data, or wipe the vault.</p>
+          <p className="app-sub">Export your data, or delete your account.</p>
         </div>
         <div className="app-head-actions">
           <Link className="head-btn" href="/vault">
@@ -30,8 +29,7 @@ export default function SettingsPage() {
 // Hairline-ruled rows, not cards — destructive paths gated behind a modal
 // that requires typing the confirm word.
 function DangerZone() {
-  const router = useRouter();
-  const [modal, setModal] = useState<null | "revoke" | "erase">(null);
+  const [modal, setModal] = useState<null | "delete">(null);
 
   return (
     <section className="danger-zone">
@@ -49,46 +47,23 @@ function DangerZone() {
       </div>
       <div className="dz-row">
         <div>
-          <div className="dz-title">Revoke every key</div>
-          <div className="dz-sub">Kill-switch if a key leaked. Soft — you can restore until purged.</div>
+          <div className="dz-title">Delete my account</div>
+          <div className="dz-sub">Permanently delete your account, every credential, and the activity log, and sign you out. Cannot be undone.</div>
         </div>
-        <button className="dz-btn" type="button" onClick={() => setModal("revoke")}>
-          Revoke all
-        </button>
-      </div>
-      <div className="dz-row">
-        <div>
-          <div className="dz-title">Delete all vault data</div>
-          <div className="dz-sub">Permanently erase every credential and the activity log. Cannot be undone.</div>
-        </div>
-        <button className="dz-btn danger" type="button" onClick={() => setModal("erase")}>
-          Erase
+        <button className="dz-btn danger" type="button" onClick={() => setModal("delete")}>
+          Delete account
         </button>
       </div>
 
-      {modal === "revoke" && (
+      {modal === "delete" && (
         <ConfirmDangerModal
-          title="Revoke every credential?"
-          subtitle="Your squire and all agents lose access to every key immediately. This is recoverable — deleted keys can be restored until they're purged."
-          confirmWord="REVOKE"
-          actionLabel="Revoke all keys"
-          run={async () => {
-            await apiPost("/v1/vault/credentials/revoke-all", { confirm: true });
-            router.refresh();
-            window.location.assign("/vault");
-          }}
-          onClose={() => setModal(null)}
-        />
-      )}
-      {modal === "erase" && (
-        <ConfirmDangerModal
-          title="Permanently delete all vault data?"
-          subtitle="Every credential AND the entire activity log are erased for good. There is no undo. Export first if you want a copy."
+          title="Permanently delete your account?"
+          subtitle="Your account, every credential, and the entire activity log are erased for good, and you'll be signed out. There is no undo. Export first if you want a copy."
           confirmWord="DELETE"
-          actionLabel="Erase everything"
+          actionLabel="Delete my account"
           run={async () => {
             await apiDelete("/v1/vault/account", { confirm: true });
-            window.location.assign("/vault");
+            window.location.assign("/");
           }}
           onClose={() => setModal(null)}
         />

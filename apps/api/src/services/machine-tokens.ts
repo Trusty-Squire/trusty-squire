@@ -50,6 +50,10 @@ export interface MachineTokenStore {
   find(token: string): Promise<MachineTokenRecord | null>;
   incrementUsage(token: string, now: Date): Promise<MachineTokenRecord | null>;
   markPaired(token: string, accountId: string): Promise<void>;
+  // Hard-delete every machine token paired to an account. Used by account
+  // erasure — the account is gone, so its machine credentials must go too.
+  // Returns the number deleted.
+  deleteByAccount(accountId: string): Promise<number>;
 }
 
 export class InMemoryMachineTokenStore implements MachineTokenStore {
@@ -87,6 +91,17 @@ export class InMemoryMachineTokenStore implements MachineTokenStore {
     const record = this.byToken.get(token);
     if (record === undefined) return;
     record.paired_account_id = accountId;
+  }
+
+  async deleteByAccount(accountId: string): Promise<number> {
+    let deleted = 0;
+    for (const [token, record] of this.byToken) {
+      if (record.paired_account_id === accountId) {
+        this.byToken.delete(token);
+        deleted += 1;
+      }
+    }
+    return deleted;
   }
 }
 
