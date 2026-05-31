@@ -1,5 +1,5 @@
-// Housekeeper orchestrator — the merged verifier + discoverer +
-// harvester run loop. Mode-agnostic.
+// Housekeeper orchestrator — the run loop that merges the former
+// verifier + discoverer + harvester tools. Mode-agnostic.
 //
 // One queue-agnostic loop. Pulls a batch of HousekeeperTasks from
 // the configured QueueProvider, dispatches each on `task.kind` to the
@@ -39,7 +39,7 @@ export interface HousekeeperOpts {
   // Optional — runs without a replay handler just won't process
   // 'replay' tasks (they're skipped with a log).
   replay?: ReplayRunner;
-  // Wired by the CLI to runDiscoveryBot. Same shape; required for
+  // Wired by the CLI to runDiscover. Same shape; required for
   // 'discover' tasks.
   discover?: DiscoveryBotRunner;
   // Replay mode for the verifier path. Defaults to 'full'.

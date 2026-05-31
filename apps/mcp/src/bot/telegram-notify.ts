@@ -2,7 +2,7 @@
 //
 // The API's /v1/notify/heightened-auth fires an email via Gmail SMTP
 // authed as the operator's gmail. When GMAIL_USER == account.email
-// (the harvester case where the operator and the only paired user
+// (the housekeeper case where the operator and the only paired user
 // are the same gmail account), Gmail collapses the self-send to the
 // Sent folder and it never reaches the Inbox. The user never sees
 // the digit.
@@ -10,16 +10,16 @@
 // This module sends the digit to a Telegram bot/chat directly from
 // the bot, bypassing email entirely. Opt-in via TELEGRAM_BOT_TOKEN
 // in the bot's env — when unset, this module is a no-op and the
-// email path is the only delivery channel. The harvester's
-// harvester.env already sets the token, so the harvester run is
+// email path is the only delivery channel. The housekeeper's
+// env already sets the token, so the housekeeper run is
 // covered automatically.
 //
 // chat_id resolution mirrors the harvester's tools/archived-harvester/
 // telegram.mjs: read ~/.trusty-squire/telegram-chat-id.txt (cached
 // from the first /start), fall back to getUpdates if absent, persist
-// the discovered id. Sharing the cache file with the harvester means
+// the discovered id. Sharing the cache file with the housekeeper means
 // no extra one-time setup for the bot-side path on machines where
-// the harvester already runs.
+// the housekeeper already runs.
 
 import { homedir } from "node:os";
 import { join } from "node:path";

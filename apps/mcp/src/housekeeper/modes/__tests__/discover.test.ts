@@ -1,10 +1,10 @@
-// runDiscoveryBot — tests cover env validation, alias creation,
+// runDiscover — tests cover env validation, alias creation,
 // bot result mapping, and the auto-promote toggle. The actual
 // universal bot (UniversalSignupBot.signup) is mocked because it
 // drives Playwright + the LLM proxy.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runDiscoveryBot } from "../discover.js";
+import { runDiscover } from "../discover.js";
 import type { SignupResult, UniversalSignupRequest } from "../../../bot/index.js";
 import type { InboxClient } from "../../../bot/inbox-client.js";
 
@@ -37,9 +37,9 @@ function stubBot(result: SignupResult) {
   };
 }
 
-describe("runDiscoveryBot — env validation", () => {
+describe("runDiscover — env validation", () => {
   it("returns failed when machine token is missing", async () => {
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "test" },
       {
         machineToken: "",
@@ -51,7 +51,7 @@ describe("runDiscoveryBot — env validation", () => {
   });
 
   it("returns failed when account id is missing", async () => {
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "test" },
       {
         machineToken: "tok-1",
@@ -63,7 +63,7 @@ describe("runDiscoveryBot — env validation", () => {
   });
 });
 
-describe("runDiscoveryBot — outcome mapping", () => {
+describe("runDiscover — outcome mapping", () => {
   it("returns ok when the bot succeeds with credentials", async () => {
     const bot = stubBot({
       success: true,
@@ -71,7 +71,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       steps: ["did the thing"],
       via: "bot",
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "newservice" },
       {
         machineToken: "tok",
@@ -91,7 +91,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       error: "onboarding_blocked: billing wall",
       steps: [],
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "koyeb" },
       {
         machineToken: "tok",
@@ -111,7 +111,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       error: "anti_bot_blocked: Cloudflare on SSO callback",
       steps: [],
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "turso" },
       {
         machineToken: "tok",
@@ -130,7 +130,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       error: "captcha_blocked: Turnstile checkbox",
       steps: [],
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "svc" },
       {
         machineToken: "tok",
@@ -149,7 +149,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       error: "email_otp_required: sent a code but the bot couldn't fetch it (reason=timeout)",
       steps: [],
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "svc" },
       {
         machineToken: "tok",
@@ -168,7 +168,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       error: "oauth_required: no OAuth button found on page",
       steps: [],
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "svc" },
       {
         machineToken: "tok",
@@ -187,7 +187,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
       error: "no_credentials: post-OAuth navigation didn't surface a key",
       steps: [],
     } as SignupResult);
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "svc" },
       {
         machineToken: "tok",
@@ -207,7 +207,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
         throw new Error("playwright launch failed");
       },
     };
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "svc" },
       {
         machineToken: "tok",
@@ -227,7 +227,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
         throw new Error("inbox 503");
       },
     };
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "svc" },
       {
         machineToken: "tok",
@@ -253,7 +253,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
         } as SignupResult;
       },
     };
-    const result = await runDiscoveryBot(
+    const result = await runDiscover(
       { service: "ipinfo", signupUrl: "https://ipinfo.io/signup" },
       {
         machineToken: "tok",
@@ -273,7 +273,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
 // saw `promoted=0` in batch summaries with no diagnostic surface for
 // why every successful capture failed to publish. Fix: a dedicated
 // second flush of just the auto-promote-prefixed entries.
-describe("runDiscoveryBot — auto-promote logging", () => {
+describe("runDiscover — auto-promote logging", () => {
   let savedRegistryUrl: string | undefined;
   let savedAccountId: string | undefined;
   let savedAutoPromote: string | undefined;
@@ -315,7 +315,7 @@ describe("runDiscoveryBot — auto-promote logging", () => {
         return true;
       }) as never;
     try {
-      const result = await runDiscoveryBot(
+      const result = await runDiscover(
         { service: "flush-test" },
         {
           machineToken: "tok",
