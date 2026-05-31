@@ -60,8 +60,11 @@ on a code change. Notes below say exactly what each needs to unblock.
   the byte-equivalent single-cred path. Genuinely-distinct creds (Phase E
   multi-cred) get distinct planner hints ⇒ distinct names ⇒ untouched.
   Unit-tested (Convex-class single-cred collapse + Twitter multi-cred
-  duplicate collapse-to-2). UNBLOCK: re-run Convex → expect a promoted
-  `convex v1` skill.
+  duplicate collapse-to-2). VALIDATED LIVE (2026-05-30): re-ran Convex
+  against 0.8.11 → `[auto-promote] published convex v1`
+  (skill_id=5HH3ZZBQE2Q8V47B3BDSV87JC7, pending-review). No rejection.
+  Next: the verifier worker validates + promotes to active, after which
+  a subsequent Convex signup should replay the skill in ~30s.
 
 - **Convex post-OAuth email-code gate — FIXED (0.8.10, 2026-05-30).** The
   post-verify loop now re-runs `detectEmailOtpGate` each round; on a
