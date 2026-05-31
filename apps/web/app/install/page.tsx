@@ -18,6 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, apiGet, apiPost } from "../lib/api";
 import { useQueryParam } from "../lib/use-query-param";
+import { Shield } from "../components/Shield";
 
 type Provider = "google" | "github";
 
@@ -306,7 +307,7 @@ const loadingStyle = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: "9px",
+  gap: "var(--s-2)",
 } as const;
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -314,7 +315,7 @@ function Shell({ children }: { children: React.ReactNode }) {
     <main className="auth-wrap">
       <div className="auth-card">
         <div className="mark">
-          <ShieldMark />
+          <Shield glyph />
         </div>
         {children}
       </div>
@@ -359,29 +360,5 @@ function WizardStep({
       </div>
       {children !== undefined && <div className="wizard-step-actions">{children}</div>}
     </li>
-  );
-}
-
-function ShieldMark() {
-  return (
-    <svg viewBox="0 0 100 100" fill="none" aria-hidden="true">
-      <path
-        d="M18 16 H82 V48 Q82 72 50 88 Q18 72 18 48 Z"
-        stroke="#f5f5f7"
-        strokeWidth="6"
-        strokeLinejoin="round"
-      />
-      <text
-        x="50"
-        y="60"
-        fontFamily="monospace"
-        fontSize="30"
-        fontWeight="700"
-        fill="#8b89ff"
-        textAnchor="middle"
-      >
-        {"{ }"}
-      </text>
-    </svg>
   );
 }

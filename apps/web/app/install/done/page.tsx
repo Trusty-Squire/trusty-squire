@@ -9,13 +9,14 @@
 // + a link to the vault.
 
 import Link from "next/link";
+import { Shield } from "../../components/Shield";
 
 export default function InstallDonePage() {
   return (
     <main className="auth-wrap">
       <div className="auth-card">
         <div className="mark">
-          <ShieldMark />
+          <Shield glyph />
         </div>
         <h1>
           <span className="pair-ok">✓</span> Connected
@@ -31,29 +32,5 @@ export default function InstallDonePage() {
         </div>
       </div>
     </main>
-  );
-}
-
-function ShieldMark() {
-  return (
-    <svg viewBox="0 0 100 100" fill="none" aria-hidden="true">
-      <path
-        d="M18 16 H82 V48 Q82 72 50 88 Q18 72 18 48 Z"
-        stroke="#f5f5f7"
-        strokeWidth="6"
-        strokeLinejoin="round"
-      />
-      <text
-        x="50"
-        y="60"
-        fontFamily="monospace"
-        fontSize="30"
-        fontWeight="700"
-        fill="#8b89ff"
-        textAnchor="middle"
-      >
-        {"{ }"}
-      </text>
-    </svg>
   );
 }

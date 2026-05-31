@@ -4,30 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { apiPost } from "../lib/api";
-
-function Shield() {
-  return (
-    <svg viewBox="0 0 100 100" fill="none" aria-hidden="true">
-      <path
-        d="M18 16 H82 V48 Q82 72 50 88 Q18 72 18 48 Z"
-        stroke="#f5f5f7"
-        strokeWidth="6"
-        strokeLinejoin="round"
-      />
-      <text
-        x="50"
-        y="60"
-        fontFamily="monospace"
-        fontSize="30"
-        fontWeight="700"
-        fill="#8b89ff"
-        textAnchor="middle"
-      >
-        {"{ }"}
-      </text>
-    </svg>
-  );
-}
+import { Shield } from "./Shield";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -46,7 +23,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <header className="app-nav">
         <Link className="brand" href="/vault">
-          <Shield />
+          <Shield glyph />
           Trusty Squire
         </Link>
         <div className="nav-r">
