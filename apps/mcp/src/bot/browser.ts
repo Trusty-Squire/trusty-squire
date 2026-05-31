@@ -1507,7 +1507,7 @@ export class BrowserController {
     // matching what clickSubmit/clickLinkByText already do.
     const locator = this.page.locator(selector);
     const count = await locator.count().catch(() => 1);
-    await this.humanClickLocator(count > 1 ? locator.first() : locator);
+    await this.humanClickLocator(pickClickLocator(locator, count));
   }
 
   // Locator-based core of humanClick. Taking a Locator (not a selector
@@ -3524,6 +3524,47 @@ function rand(min: number, max: number): number {
 // Same shape and rationale as agent.ts's pickVerificationLink: a positive
 // score gate so an OAuth-only page (every candidate negative) returns
 // null rather than mis-clicking "Continue with Google".
+// Click disambiguation (regression: #61 weaviate). A bare id selector can
+// resolve to >1 element — Descope's <descope-button> stamps the same
+// generated id on the web component AND its inner text node — which trips
+// Playwright strict mode before the click. When the selector isn't unique,
+// narrow to the first match (Playwright's documented click disambiguation).
+// Exported so the decision is unit-tested without a live page.
+export function pickClickLocator<L extends { first(): L }>(locator: L, count: number): L {
+  return count > 1 ? locator.first() : locator;
+}
+
+// Reference implementation of the shadow-piercing inventory walk that runs
+// inside extractInteractiveElements' page.evaluate. Kept BYTE-FOR-BYTE in
+// lockstep with that inline walk's guard + traversal. Exported only so the
+// defensive guard (regression: #59 redis-cloud — a detached/closed root with
+// no querySelectorAll crashed the whole inventory) is unit-testable in plain
+// Node with fake roots. The production copy stays inline because a
+// page.evaluate body can't call module code, and injecting source via
+// new Function() would trip strict CSPs. If you change the inline walk's
+// guard or traversal, change this too.
+interface ShadowWalkRoot {
+  querySelectorAll(selectors: string): ArrayLike<ShadowWalkEl>;
+}
+interface ShadowWalkEl {
+  readonly shadowRoot: ShadowWalkRoot | null;
+}
+export function collectAcrossShadowRoots(
+  root: ShadowWalkRoot | null,
+  selector: string,
+): ShadowWalkEl[] {
+  const collected: ShadowWalkEl[] = [];
+  const walk = (r: ShadowWalkRoot | null): void => {
+    if (r === null || typeof r.querySelectorAll !== "function") return;
+    Array.from(r.querySelectorAll(selector)).forEach((n) => collected.push(n));
+    Array.from(r.querySelectorAll("*")).forEach((el) => {
+      if (el.shadowRoot !== null) walk(el.shadowRoot);
+    });
+  };
+  walk(root);
+  return collected;
+}
+
 //
 // Exported for unit testing — the scoring is the load-bearing logic.
 export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
