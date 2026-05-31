@@ -531,6 +531,18 @@ describe("detectEmailOtpGate (rc.24)", () => {
       detectEmailOtpGate("https://x.com/dashboard", "Dashboard", "Your email is configured."),
     ).toBe(false);
   });
+
+  it("fires on Convex's post-OAuth radar-challenge 'Enter the code sent to' wall (0.8.10)", () => {
+    // Exact shape captured 2026-05-30: generic URL/title, the gate lives
+    // in the body text. This is what the post-verify loop now polls gmail for.
+    expect(
+      detectEmailOtpGate(
+        "https://auth.convex.dev/radar-challenge?state=%2Fauth&redirect_uri=https%3A%2F%2Fdashboard.convex.dev",
+        "Complete the code challenge",
+        "Complete the code challenge Enter the code sent to lunchboxfortwo@gmail.com Back to sign-in",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("detectSsoRestriction (rc.24)", () => {

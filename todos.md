@@ -46,18 +46,16 @@ on a code change. Notes below say exactly what each needs to unblock.
 
 ## Bot/synthesizer — BLOCKED on artifacts / live runs
 
-- **Convex post-OAuth email-code gate (NEW, 2026-05-30)** — found via the
-  via-Google Convex run: after the Google number-tap, Convex signs in but
-  then shows "Complete the code challenge — Enter the code sent to
-  lunchboxfortwo@gmail.com" (`auth.convex.dev/radar-challenge`). The
-  POST-VERIFY onboarding loop detects a "code challenge wall" and returns
-  `oauth_onboarding_failed` instead of routing to the email-OTP path. The
-  gmail-OTP reader (`read-otp.ts`, polls via the API which holds
-  GMAIL_USER/GMAIL_APP_PASSWORD) already exists for the signup
-  `email_otp_required` gate — the fix is to wire the post-verify loop's
-  "code sent to <email>" detection into that same poll + fill the 6-digit
-  inputs. Deliberately NOT shipped untested: needs a live Convex run
-  (Google number-tap) to validate end-to-end.
+- **Convex post-OAuth email-code gate — FIXED (0.8.10, 2026-05-30).** The
+  post-verify loop now re-runs `detectEmailOtpGate` each round; on a
+  post-OAuth "Enter the code sent to <email>" wall (Convex's
+  radar-challenge) it polls the operator's gmail via the same
+  `readOperatorOtp` the signup gate uses and hands the code to the planner
+  to fill (guarded to poll a given gate URL once). Wired machineToken +
+  apiBase through `postVerifyLoop`. Unit-tested that the Convex text
+  triggers detection; API has GMAIL_USER/GMAIL_APP_PASSWORD deployed. Full
+  end-to-end still wants a live Convex run (one Google number-tap) to
+  confirm the fill+submit, but every piece is in place + tested.
 
 - **ipdata: "no credentials found"** — STILL BLOCKED, blocker moved. A
   live run with the corrected URL (above) now REACHES the real ipdata
