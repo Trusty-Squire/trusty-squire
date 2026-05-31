@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Adapter manifest registry. Serves signed manifests over HTTP; CLI for publishing.",
+  "description": "Skill registry — serves signed learned-skill recipes over HTTP; housekeeper backplane + publish CLI.",
   "main": "./src/server.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
