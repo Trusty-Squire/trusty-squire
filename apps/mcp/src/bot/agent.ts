@@ -386,6 +386,81 @@ export function isKnownDomainFullUrlMatch(service: string, url: string): boolean
   return entry !== undefined && /^https?:\/\//i.test(entry) && entry === url;
 }
 
+// Pull the first well-formed http(s) URL out of arbitrary model text.
+// Exported for unit testing.
+export function firstHttpsUrl(text: string): string | null {
+  const m = text.match(/https?:\/\/[^\s"'<>)\]]+/i);
+  if (m === null) return null;
+  // Trim trailing sentence punctuation the greedy match swallows when the
+  // URL ends a sentence ("…/sign-up." → "…/sign-up").
+  const raw = m[0].replace(/[.,;:!?]+$/, "");
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+// Resolve a service's signup URL.
+//
+// The old path was guessSignupUrl() alone: it templated `<slug>.com/signup`
+// and kept a hand-maintained KNOWN_DOMAINS override. Every product whose
+// real domain isn't `.com` (xata.io, fly.io, hyperbolic.xyz, …) and wasn't
+// in the table died at the FIRST navigation — before the vision planner,
+// the smartest part of the bot, ever loaded a page. The intelligence was in
+// the wrong place: a vision-grade form-filler bolted onto a dumb string
+// template for the front door.
+//
+// Now KNOWN_DOMAINS is just a deterministic fast-path cache. On a miss we
+// ASK the model — which actually knows where these products live — for the
+// canonical sign-up URL. The answer is self-verifying: the navigation that
+// follows surfaces a wrong URL as a 404 / cert / DNS failure, so a
+// hallucinated URL is no worse than the old blind `.com` guess. With no LLM
+// wired (BYOK-less, tests) it degrades to exactly the old behavior.
+//
+// Exported for unit testing.
+export async function resolveSignupUrl(
+  service: string,
+  llm: LLMClient | null | undefined,
+  opts: { log?: (line: string) => void } = {},
+): Promise<string> {
+  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Fast path: curated cache hit — deterministic, zero LLM cost.
+  if (KNOWN_DOMAINS[slug] !== undefined) return guessSignupUrl(service);
+  // No model available → preserve the old deterministic behavior exactly.
+  if (llm === null || llm === undefined) return guessSignupUrl(service);
+  try {
+    const resp = await llm.createMessage({
+      system:
+        "You map a developer-tool / SaaS product name to its canonical " +
+        "account SIGN-UP (registration) URL — the page with the email or " +
+        "OAuth signup form, not the marketing homepage and not the docs. " +
+        "Use the product's REAL domain, which is frequently .io / .dev / " +
+        ".ai / .xyz / .co and NOT .com. If signup lives on a dashboard / " +
+        "app / console subdomain (dash.*, app.*, console.*), return that " +
+        "exact URL. Respond with ONLY the URL on a single line, no prose. " +
+        "If you are not confident, respond with exactly UNKNOWN.",
+      user: [{ kind: "text", text: `Account sign-up URL for the product "${service}"?` }],
+      max_tokens: 80,
+    });
+    const url = firstHttpsUrl(resp.text);
+    if (url !== null) {
+      opts.log?.(`Resolved signup URL for "${service}" via ${resp.backend}: ${url}`);
+      return url;
+    }
+    opts.log?.(
+      `Model gave no usable signup URL for "${service}" (said ${JSON.stringify(resp.text.trim().slice(0, 40))}) — using guess`,
+    );
+  } catch (err) {
+    opts.log?.(
+      `signup-URL model resolve failed for "${service}" (${err instanceof Error ? err.message : String(err)}) — using guess`,
+    );
+  }
+  return guessSignupUrl(service);
+}
+
 // True when the URL is a Google search results page — used to gate
 // the prewarm + the post-load "did we land somewhere useful?" check.
 export function isGoogleSearchUrl(url: string): boolean {
@@ -3508,7 +3583,14 @@ export class SignupAgent {
       // than the signup page, and the bot would bail with
       // oauth_required when it landed on a page that didn't show the
       // OAuth buttons until you clicked "Sign up" first.
-      const guessed = task.signupUrl ?? guessSignupUrl(task.service);
+      // A curated signupUrl (from the YAML queue) always wins. Otherwise
+      // resolve via the model (KNOWN_DOMAINS fast-path → LLM → .com guess)
+      // so non-.com products (xata.io, fly.io, …) don't die at navigation.
+      const guessed =
+        task.signupUrl ??
+        (await resolveSignupUrl(task.service, this.llmPair.primary, {
+          log: (m) => steps.push(m),
+        }));
       let signupUrl = guessed;
 
       // Prewarm the target origin before hitting the (often-strict) signup

@@ -8,10 +8,28 @@ import { describe, expect, it } from "vitest";
 import {
   detectAlreadySignedIn,
   detectAntiBotBlock,
+  firstHttpsUrl,
   guessSignupUrl,
   isGoogleSearchUrl,
+  resolveSignupUrl,
 } from "../agent.js";
 import type { InteractiveElement } from "../browser.js";
+import type { LLMClient, LLMResponse } from "../llm-client.js";
+
+// Stub LLMClient that returns a canned text (or throws), counting calls.
+function stubLLM(
+  reply: string | (() => Promise<LLMResponse>),
+  calls: { n: number } = { n: 0 },
+): LLMClient {
+  return {
+    name: "stub",
+    async createMessage() {
+      calls.n += 1;
+      if (typeof reply === "function") return reply();
+      return { text: reply, backend: "stub" };
+    },
+  };
+}
 
 function mkEl(over: Partial<InteractiveElement>): InteractiveElement {
   return {
@@ -72,6 +90,74 @@ describe("guessSignupUrl", () => {
     // Railway's /signup is a 404 on both .app and .com; the real
     // signup-or-login entry point is /login.
     expect(guessSignupUrl("Railway")).toBe("https://railway.com/login");
+  });
+});
+
+describe("firstHttpsUrl", () => {
+  it("extracts a bare URL", () => {
+    expect(firstHttpsUrl("https://xata.io/signup")).toBe("https://xata.io/signup");
+  });
+  it("extracts a URL embedded in prose, trimming trailing punctuation", () => {
+    expect(firstHttpsUrl("The signup page is https://fly.io/app/sign-up.")).toBe(
+      "https://fly.io/app/sign-up",
+    );
+  });
+  it("returns null when there's no URL", () => {
+    expect(firstHttpsUrl("UNKNOWN")).toBeNull();
+    expect(firstHttpsUrl("I'm not sure")).toBeNull();
+  });
+});
+
+describe("resolveSignupUrl", () => {
+  it("fast-path: KNOWN_DOMAINS hit returns the cached URL WITHOUT calling the model", async () => {
+    const calls = { n: 0 };
+    const llm = stubLLM("https://evil.example/should-not-be-used", calls);
+    expect(await resolveSignupUrl("Sentry", llm)).toBe("https://sentry.io/signup");
+    expect(await resolveSignupUrl("Railway", llm)).toBe("https://railway.com/login");
+    expect(calls.n).toBe(0); // cache hits never spend an LLM call
+  });
+
+  it("on a cache miss, uses the model's resolved URL (the .io/.xyz fix)", async () => {
+    expect(await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"))).toBe(
+      "https://xata.io/signup",
+    );
+    expect(await resolveSignupUrl("hyperbolic", stubLLM("https://app.hyperbolic.xyz/signup"))).toBe(
+      "https://app.hyperbolic.xyz/signup",
+    );
+  });
+
+  it("extracts the URL when the model wraps it in prose", async () => {
+    expect(
+      await resolveSignupUrl("xata", stubLLM("Sure — it's https://xata.io/signup")),
+    ).toBe("https://xata.io/signup");
+  });
+
+  it("falls back to the .com guess when the model says UNKNOWN", async () => {
+    expect(await resolveSignupUrl("obscurething", stubLLM("UNKNOWN"))).toBe(
+      "https://obscurething.com/signup",
+    );
+  });
+
+  it("falls back to the .com guess when the model call throws", async () => {
+    const llm = stubLLM(() => Promise.reject(new Error("rate limited")));
+    expect(await resolveSignupUrl("obscurething", llm)).toBe(
+      "https://obscurething.com/signup",
+    );
+  });
+
+  it("with no LLM wired, degrades to exactly the old guessSignupUrl behavior", async () => {
+    expect(await resolveSignupUrl("obscurething", null)).toBe(
+      "https://obscurething.com/signup",
+    );
+    expect(await resolveSignupUrl("Sentry", undefined)).toBe("https://sentry.io/signup");
+  });
+
+  it("logs the resolved URL via the optional logger", async () => {
+    const lines: string[] = [];
+    await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
+      log: (m) => lines.push(m),
+    });
+    expect(lines.some((l) => l.includes("xata.io/signup"))).toBe(true);
   });
 });
 
