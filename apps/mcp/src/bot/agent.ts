@@ -3901,10 +3901,18 @@ export class SignupAgent {
     steps: string[],
   ): Promise<SignupResult> {
     const provider = OAUTH_PROVIDERS[providerId];
+    // `loginCmd` is only ever surfaced from a CHALLENGE / needs_login
+    // abort — i.e. the bot HAS a session cookie but the provider is
+    // gating it (GitHub "verify it's you" / forced-2FA, Google device
+    // drift). In exactly that state a bare `login` short-circuits with
+    // "Already signed in" and never opens the browser, so the operator
+    // can't clear the challenge. `--force-relogin` forces the browser
+    // (noVNC) open regardless of the cached session — so every message
+    // that points at loginCmd must include it.
     const loginCmd =
       provider.id === "github"
-        ? "npx @trusty-squire/mcp login --provider=github"
-        : "npx @trusty-squire/mcp login";
+        ? "npx @trusty-squire/mcp login --provider=github --force-relogin"
+        : "npx @trusty-squire/mcp login --force-relogin";
     // rc.22 — OpenRouter (Clerk) renders a visible Cloudflare Turnstile
     // checkbox at the bottom of the same form as the OAuth buttons.
     // Clerk's Google button stops at a loading spinner if Turnstile
