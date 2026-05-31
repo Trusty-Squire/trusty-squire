@@ -2,7 +2,7 @@
 // uses these to pull the queue and report outcomes; the discovery
 // worker (Phase 6) will use a different set on the same client shape.
 
-import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
+import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
 
 // Phase 3 follow-up — thrown by fetchSkill when the stored payload
 // doesn't pass the current SkillSchema (registry was written under

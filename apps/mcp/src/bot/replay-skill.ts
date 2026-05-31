@@ -49,7 +49,7 @@ import type {
   Skill,
   SkillStep,
   SkillCredentialSpec,
-} from "@trusty-squire/adapter-sdk";
+} from "@trusty-squire/skill-schema";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { loggedInProviders } from "./login-state.js";
 import { isTruncatedCapture, extractApiKeyFromText, findOAuthButton } from "./agent.js";

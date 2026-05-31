@@ -26,7 +26,7 @@
 // replay so the next attempt re-fetches in case a remediation was
 // just published.
 
-import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
+import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
 
 // ── Public API ───────────────────────────────────────────────────────
 

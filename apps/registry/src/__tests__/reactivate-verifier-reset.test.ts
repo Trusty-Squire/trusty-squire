@@ -4,8 +4,8 @@
 
 import { describe, expect, it } from "vitest";
 import { InMemorySkillStore } from "../skill-store-memory.js";
-import type { Skill } from "@trusty-squire/adapter-sdk";
-import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 
 function activeSkill(): Skill {
   return {

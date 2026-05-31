@@ -18,7 +18,7 @@
 // cleanup entirely. Operators accept the accumulating-tokens cost
 // for those services.
 
-import type { Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
 
 export type CleanupOutcome =
   | { kind: "skipped"; reason: "no_strategy" | "no_credential" }

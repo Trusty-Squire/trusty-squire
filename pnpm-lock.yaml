@@ -44,12 +44,12 @@ importers:
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
-      '@trusty-squire/adapter-sdk':
-        specifier: workspace:*
-        version: link:../../packages/adapter-sdk
       '@trusty-squire/inbox':
         specifier: workspace:*
         version: link:../../packages/inbox
+      '@trusty-squire/skill-schema':
+        specifier: workspace:*
+        version: link:../../packages/skill-schema
       '@trusty-squire/vault':
         specifier: workspace:*
         version: link:../../packages/vault
@@ -105,9 +105,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
-      '@trusty-squire/adapter-sdk':
+      '@trusty-squire/skill-schema':
         specifier: workspace:*
-        version: link:../../packages/adapter-sdk
+        version: link:../../packages/skill-schema
       boxen:
         specifier: ^8.0.1
         version: 8.0.1
@@ -173,9 +173,9 @@ importers:
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
-      '@trusty-squire/adapter-sdk':
+      '@trusty-squire/skill-schema':
         specifier: workspace:*
-        version: link:../../packages/adapter-sdk
+        version: link:../../packages/skill-schema
       canonicalize:
         specifier: ^2.0.0
         version: 2.1.0
@@ -248,19 +248,6 @@ importers:
         specifier: ^5
         version: 5.9.3
 
-  packages/adapter-sdk:
-    dependencies:
-      zod:
-        specifier: ^3.23.8
-        version: 3.25.76
-    devDependencies:
-      typescript:
-        specifier: ^5.3.3
-        version: 5.9.3
-      vitest:
-        specifier: ^1.2.0
-        version: 1.6.1(@types/node@20.19.40)
-
   packages/inbox:
     dependencies:
       '@prisma/client':
@@ -282,6 +269,19 @@ importers:
       prisma:
         specifier: ^5.22.0
         version: 5.22.0
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.2.0
+        version: 1.6.1(@types/node@20.19.40)
+
+  packages/skill-schema:
+    dependencies:
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
       typescript:
         specifier: ^5.3.3
         version: 5.9.3

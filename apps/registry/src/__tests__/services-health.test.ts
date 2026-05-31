@@ -15,8 +15,8 @@ import {
   buildCompatHealth,
 } from "../compat-score.js";
 import type { ProvisionAttemptRecord } from "../provision-attempt-store.js";
-import type { Skill } from "@trusty-squire/adapter-sdk";
-import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 
 // ---------- helpers ----------------------------------------------------
 

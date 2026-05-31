@@ -176,7 +176,7 @@ If you see this in `fly logs` right after a deploy:
 
 ```
 Failed to load /node_modules/zod/lib/index.mjs (imported by
-/node_modules/@trusty-squire/adapter-sdk/dist/skill.js): ENOENT
+/node_modules/@trusty-squire/skill-schema/dist/skill.js): ENOENT
 ```
 
 …the Dockerfile is missing `--shamefully-hoist` on the

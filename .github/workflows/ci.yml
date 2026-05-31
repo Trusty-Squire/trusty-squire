@@ -35,7 +35,7 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Workspace deps (adapter-sdk, inbox, runtime, etc.) ship as TS sources
+      # Workspace deps (skill-schema, inbox, runtime, etc.) ship as TS sources
       # whose package.json points at dist/. tsc can't resolve them otherwise.
       # Inbox needs prisma generate first or its build fails.
       - name: Prisma generate (inbox)
@@ -53,7 +53,7 @@ jobs:
             "@trusty-squire/inbox-api"
             "@trusty-squire/web"
             "@trusty-squire/pwa"
-            "@trusty-squire/adapter-sdk"
+            "@trusty-squire/skill-schema"
             "@trusty-squire/adapter-resend"
             "@trusty-squire/runtime"
             "@trusty-squire/inbox"
@@ -96,7 +96,7 @@ jobs:
             "@trusty-squire/api"
             "@trusty-squire/inbox-api"
             "@trusty-squire/pwa"
-            "@trusty-squire/adapter-sdk"
+            "@trusty-squire/skill-schema"
             "@trusty-squire/adapter-resend"
             "@trusty-squire/runtime"
             "@trusty-squire/inbox"

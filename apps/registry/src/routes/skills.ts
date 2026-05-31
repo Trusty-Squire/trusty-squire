@@ -24,7 +24,7 @@ import {
   SkillStatusSchema,
   type Skill,
   type SkillStatus,
-} from "@trusty-squire/adapter-sdk";
+} from "@trusty-squire/skill-schema";
 import type { ManifestSigner } from "../signer.js";
 import { verifySkillSignature } from "../signer.js";
 import type { SkillStore, SkillStoreRecord } from "../skill-store.js";

@@ -267,7 +267,7 @@ Lives in `apps/mcp/src/bot/promote-to-skill.ts` (host-side, ships with the
 
 ### Stage 2 — Validate
 
-Schema validation only. Zod schema in `packages/adapter-sdk` (alongside
+Schema validation only. Zod schema in `packages/skill-schema` (alongside
 existing manifest schemas — they share the validator infrastructure already).
 Rejects obviously-broken outputs: missing credential spec, no steps, illegal
 step kinds, validators that would never match anything plausible. This is
@@ -660,7 +660,7 @@ missing / `2` no review pending for that skill_id.
 
 In rough dependency order:
 
-1. **Skill schema + Zod validator** — `packages/adapter-sdk/src/skill.ts`.
+1. **Skill schema + Zod validator** — `packages/skill-schema/src/skill.ts`.
    Mirrors the existing manifest schema patterns. (~150 LoC)
 2. **Synthesizer** — `apps/mcp/src/bot/promote-to-skill.ts`. Pure function:
    captures in, skill out. Unit-tested against synthetic capture fixtures.
@@ -855,7 +855,7 @@ Subagent flagged as **2× under**. Realistic: ~2200 LoC + ~2000 LoC tests.
 - Replay engine on `BrowserController` → stable, low risk.
 - Router on registry availability → must fail-open. C6 cache covers
   transient failures.
-- Shared schema (`packages/adapter-sdk`) → pin a major version; both
+- Shared schema (`packages/skill-schema`) → pin a major version; both
   sides reject unknown minor versions.
 
 #### Eng Dual Voices Consensus
@@ -876,7 +876,7 @@ Subagent flagged as **2× under**. Realistic: ~2200 LoC + ~2000 LoC tests.
 | ID | Severity | Finding | Fix |
 |---|---|---|---|
 | **E1** | CRITICAL | Trust boundary inversion — local captures unsigned; hand-edits propagate to signed output | Capture-format integrity hash chain in `onboarding-capture.ts`; promoter verifies before synthesis |
-| **E2** | HIGH | Shared schema in `packages/adapter-sdk` between MCP and registry; drift = client-side pass, server-side reject | Version Zod schema; both sides pin major version; registry rejects unknown minor with clear message |
+| **E2** | HIGH | Shared schema in `packages/skill-schema` between MCP and registry; drift = client-side pass, server-side reject | Version Zod schema; both sides pin major version; registry rejects unknown minor with clear message |
 | **E3** | MEDIUM | `consecutive_failures` race condition under concurrent replays | Atomic increment in store layer (Postgres `UPDATE … SET consecutive_failures = consecutive_failures + 1`) |
 | **E4** | HIGH | Replay-test session reuse (Open Q2) unresolved — structural blocker | Dry-mode default, `--full` opt-in; codify in design before implementation |
 | **E5** | MEDIUM | Replay engine estimate ~250 LoC is 2-3× under given per-step LLM-fallback integration | Re-estimate to ~600 LoC |
@@ -1053,7 +1053,7 @@ future migration.
 
 **Phase 1 — Schema + capture integrity** (~400 LoC):
 
-- [ ] **T5 (P1)** — `packages/adapter-sdk/src/skill.ts` with `.describe()` on every field (D4)
+- [ ] **T5 (P1)** — `packages/skill-schema/src/skill.ts` with `.describe()` on every field (D4)
 - [ ] **T6 (P1)** — Capture format integrity hash chain in `onboarding-capture.ts` (E1)
 - [ ] **T7 (P1)** — Versioned capture format
 

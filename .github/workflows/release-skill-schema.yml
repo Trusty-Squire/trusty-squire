@@ -1,27 +1,27 @@
-name: Release adapter-sdk
+name: Release skill-schema
 
-# Publishes @trusty-squire/adapter-sdk to npm whenever the version in
-# packages/adapter-sdk/package.json is bumped on `main` (stable) or `staging` (rc).
+# Publishes @trusty-squire/skill-schema to npm whenever the version in
+# packages/skill-schema/package.json is bumped on `main` (stable) or `staging` (rc).
 #
-# Source of truth: packages/adapter-sdk/package.json `version` field.
+# Source of truth: packages/skill-schema/package.json `version` field.
 #   - main:    must be a stable semver. Publishes `latest` tag.
 #   - staging: must be a prerelease. Publishes `next` tag.
 #
-# Tag scheme: `adapter-sdk@<version>` (avoids collision with mcp's `v<version>` tags).
+# Tag scheme: `skill-schema@<version>` (avoids collision with mcp's `v<version>` tags).
 # If the tag already exists OR npm already has that version, the job is a no-op.
 #
-# This workflow ONLY triggers when packages/adapter-sdk/** or this file changes
+# This workflow ONLY triggers when packages/skill-schema/** or this file changes
 # — pushes that only touch unrelated parts of the monorepo skip it entirely.
 
 on:
   push:
     branches: [main, staging]
     paths:
-      - "packages/adapter-sdk/**"
-      - ".github/workflows/release-adapter-sdk.yml"
+      - "packages/skill-schema/**"
+      - ".github/workflows/release-skill-schema.yml"
 
 concurrency:
-  group: release-adapter-sdk-${{ github.ref }}
+  group: release-skill-schema-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -51,16 +51,16 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install
-        run: pnpm install --frozen-lockfile --filter '@trusty-squire/adapter-sdk'
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/skill-schema'
 
-      - name: Test adapter-sdk
-        run: pnpm --filter '@trusty-squire/adapter-sdk' test
+      - name: Test skill-schema
+        run: pnpm --filter '@trusty-squire/skill-schema' test
 
       - name: Read package version + decide
         id: read
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./packages/adapter-sdk/package.json').version")
+          VERSION=$(node -p "require('./packages/skill-schema/package.json').version")
           BRANCH="${GITHUB_REF_NAME}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Branch:  $BRANCH"
@@ -77,7 +77,7 @@ jobs:
             exit 1
           fi
 
-          TAG="adapter-sdk@$VERSION"
+          TAG="skill-schema@$VERSION"
           if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null; then
             TAG_EXISTS=true
           else
@@ -93,7 +93,7 @@ jobs:
             echo "gh_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if npm view "@trusty-squire/adapter-sdk@$VERSION" version >/dev/null 2>&1; then
+          if npm view "@trusty-squire/skill-schema@$VERSION" version >/dev/null 2>&1; then
             NPM_HAS=true
           else
             NPM_HAS=false
@@ -128,10 +128,10 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install
-        run: pnpm install --frozen-lockfile --filter '@trusty-squire/adapter-sdk'
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/skill-schema'
 
-      - name: Clean + build adapter-sdk
-        working-directory: packages/adapter-sdk
+      - name: Clean + build skill-schema
+        working-directory: packages/skill-schema
         run: |
           rm -rf dist
           pnpm build
@@ -143,17 +143,17 @@ jobs:
 
       # pnpm publish (not npm publish) — pnpm rewrites `workspace:` specifiers
       # to real semver before tarball assembly. Critical for monorepo packages
-      # whose own deps use `workspace:` (none today for adapter-sdk, but cheap
+      # whose own deps use `workspace:` (none today for skill-schema, but cheap
       # insurance against future drift).
       - name: Publish to npm
-        working-directory: packages/adapter-sdk
+        working-directory: packages/skill-schema
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
           TAG="${{ needs.verify.outputs.npm_dist_tag }}"
-          echo "Publishing @trusty-squire/adapter-sdk@$V with dist-tag $TAG"
+          echo "Publishing @trusty-squire/skill-schema@$V with dist-tag $TAG"
           pnpm publish \
             --access=public \
             --tag="$TAG" \
@@ -166,9 +166,9 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
-          echo "Polling: npm view @trusty-squire/adapter-sdk@$V version (up to 5min) ..."
+          echo "Polling: npm view @trusty-squire/skill-schema@$V version (up to 5min) ..."
           for i in $(seq 1 30); do
-            FOUND=$(npm view "@trusty-squire/adapter-sdk@$V" version 2>/dev/null || echo "")
+            FOUND=$(npm view "@trusty-squire/skill-schema@$V" version 2>/dev/null || echo "")
             echo "  attempt $i → '$FOUND'"
             if [[ "$FOUND" == "$V" ]]; then
               echo "✓ Version $V is live on registry."
@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
-          URL="https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-$V.tgz"
+          URL="https://registry.npmjs.org/@trusty-squire/skill-schema/-/skill-schema-$V.tgz"
           echo "Waiting for tarball CDN (up to 5min) ..."
           for i in $(seq 1 30); do
             CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I "$URL")
@@ -218,7 +218,7 @@ jobs:
           TAG="${{ needs.verify.outputs.npm_dist_tag }}"
           echo "Asserting dist-tag '$TAG' → $V"
           for i in $(seq 1 18); do
-            CURRENT=$(npm view "@trusty-squire/adapter-sdk" dist-tags --json 2>/dev/null \
+            CURRENT=$(npm view "@trusty-squire/skill-schema" dist-tags --json 2>/dev/null \
               | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
             echo "  attempt $i — npm view says $TAG = '$CURRENT'"
             if [[ "$CURRENT" == "$V" ]]; then
@@ -226,7 +226,7 @@ jobs:
               # Cross-check: the full package doc must agree. If it disagrees with
               # npm view, something is wrong at the registry level (do not declare
               # success — fail loud, surface the inconsistency).
-              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/adapter-sdk" \
+              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/skill-schema" \
                 | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
               if [[ "$DOC_TAG" != "$V" ]]; then
                 echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
@@ -238,9 +238,9 @@ jobs:
             sleep 10
           done
           echo "::warning::dist-tag $TAG = '$CURRENT', expected '$V'. Forcing it via npm dist-tag add."
-          npm dist-tag add "@trusty-squire/adapter-sdk@$V" "$TAG"
+          npm dist-tag add "@trusty-squire/skill-schema@$V" "$TAG"
           for i in $(seq 1 12); do
-            CURRENT=$(npm view "@trusty-squire/adapter-sdk" dist-tags --json 2>/dev/null \
+            CURRENT=$(npm view "@trusty-squire/skill-schema" dist-tags --json 2>/dev/null \
               | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
             echo "  post-fix attempt $i — $TAG = '$CURRENT'"
             if [[ "$CURRENT" == "$V" ]]; then
@@ -248,7 +248,7 @@ jobs:
               # Cross-check: the full package doc must agree. If it disagrees with
               # npm view, something is wrong at the registry level (do not declare
               # success — fail loud, surface the inconsistency).
-              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/adapter-sdk" \
+              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/skill-schema" \
                 | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
               if [[ "$DOC_TAG" != "$V" ]]; then
                 echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
@@ -268,7 +268,7 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
-          TAG="adapter-sdk@$V"
+          TAG="skill-schema@$V"
           PRERELEASE_FLAG=""
           if [[ "${{ needs.verify.outputs.gh_prerelease }}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
@@ -282,8 +282,8 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## Released @trusty-squire/adapter-sdk@${{ needs.verify.outputs.version }}"
+            echo "## Released @trusty-squire/skill-schema@${{ needs.verify.outputs.version }}"
             echo ""
             echo "- npm dist-tag: \`${{ needs.verify.outputs.npm_dist_tag }}\`"
-            echo "- Tarball: https://registry.npmjs.org/@trusty-squire/adapter-sdk/-/adapter-sdk-${{ needs.verify.outputs.version }}.tgz"
+            echo "- Tarball: https://registry.npmjs.org/@trusty-squire/skill-schema/-/skill-schema-${{ needs.verify.outputs.version }}.tgz"
           } >> "$GITHUB_STEP_SUMMARY"

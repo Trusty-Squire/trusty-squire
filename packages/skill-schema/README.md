@@ -1,11 +1,11 @@
-# @trusty-squire/adapter-sdk
+# @trusty-squire/skill-schema
 
 Type-checked SDK for authoring [Trusty Squire](https://github.com/Trusty-Squire/trusty-squire) adapter manifests and consuming the Tier-2 Learned Skill schema.
 
 ## Install
 
 ```bash
-npm install @trusty-squire/adapter-sdk
+npm install @trusty-squire/skill-schema
 ```
 
 ## What's in here
@@ -17,7 +17,7 @@ Two parallel surfaces, both used by the Trusty Squire registry:
 Hand-authored Tier-3 manifests describing how to talk to a SaaS API — auth, plans, capabilities, request shapes. Validated at registry publish time.
 
 ```ts
-import { defineAdapter } from "@trusty-squire/adapter-sdk";
+import { defineAdapter } from "@trusty-squire/skill-schema";
 
 export default defineAdapter({
   // … manifest body
@@ -29,7 +29,7 @@ export default defineAdapter({
 Zod schema for Tier-2 Learned Skills — structured replay graphs the universal bot promotes from successful onboarding runs.
 
 ```ts
-import { parseSkill, type Skill, SkillSchema } from "@trusty-squire/adapter-sdk";
+import { parseSkill, type Skill, SkillSchema } from "@trusty-squire/skill-schema";
 
 const skill: Skill = parseSkill(raw);
 ```

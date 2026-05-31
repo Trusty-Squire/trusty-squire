@@ -5,7 +5,7 @@
 // up Playwright.
 
 import { describe, expect, it, vi } from "vitest";
-import type { Skill, SkillStep } from "@trusty-squire/adapter-sdk";
+import type { Skill, SkillStep } from "@trusty-squire/skill-schema";
 import type { BrowserController, InteractiveElement } from "../browser.js";
 import { replaySkill, type LLMFallbackInput } from "../replay-skill.js";
 

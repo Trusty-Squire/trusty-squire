@@ -18,7 +18,7 @@
 import { Buffer } from "node:buffer";
 import { createPrivateKey, sign as nodeSign, type KeyObject } from "node:crypto";
 import canonicalize from "canonicalize";
-import type { Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
 import { CliExit, ExitCode } from "./errors.js";
 
 export interface SignedSkillEnvelope {

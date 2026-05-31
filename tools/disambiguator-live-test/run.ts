@@ -31,7 +31,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
 // Import from BUILT dist/, not src/. tsx wraps source-imported TS in
 // a helper-injecting transformer; that's fine for top-level code but
 // breaks when the same module's functions get serialized into

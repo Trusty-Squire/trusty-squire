@@ -22,8 +22,8 @@ import { Buffer } from "node:buffer";
 import canonicalize from "canonicalize";
 import { sign as nodeSign } from "node:crypto";
 import { ManifestSigner } from "../signer.js";
-import type { Skill } from "@trusty-squire/adapter-sdk";
-import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 import { buildServer } from "../server.js";
 import { InMemorySkillStore } from "../skill-store-memory.js";
 

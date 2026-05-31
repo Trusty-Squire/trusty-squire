@@ -6,7 +6,7 @@
 // actually returns from apps/registry/src/routes/skills.ts.
 
 import { describe, expect, it } from "vitest";
-import type { Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
 import {
   SkillRegistryClient,
   clientFromEnv,

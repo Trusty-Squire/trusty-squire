@@ -7,7 +7,7 @@
 //
 // Tests use the in-memory store; production wires up Prisma.
 
-import type { Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
 
 // What the store hands back. The payload IS the full Skill (parsed),
 // not the raw JSON — callers always want it parsed and signature

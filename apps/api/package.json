@@ -19,7 +19,7 @@
     "@fastify/cookie": "^9.4.0",
     "@fastify/rate-limit": "^9.1.0",
     "@prisma/client": "^5.22.0",
-    "@trusty-squire/adapter-sdk": "workspace:*",
+    "@trusty-squire/skill-schema": "workspace:*",
     "@trusty-squire/inbox": "workspace:*",
     "@trusty-squire/vault": "workspace:*",
     "bullmq": "^5.21.1",
