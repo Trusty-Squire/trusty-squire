@@ -235,6 +235,11 @@ export async function runDiscoveryBot(
     /^sso_restricted/,
     /^needs_oauth_provider_session/,
     /^oauth_consent_needs_review/,
+    // A terminal email-OTP gate means the inbox poller couldn't fetch the
+    // code — an unattended bot can't pass it, so it's a wall (human relay),
+    // not a bot failure. (oauth_required is deliberately NOT here: it's
+    // usually a wrong-URL navigation, which is a fixable bot bug.)
+    /^email_otp_required/,
   ];
   if (BLOCKED_PATTERNS.some((re) => re.test(error))) {
     return { kind: "blocked", reason: error };

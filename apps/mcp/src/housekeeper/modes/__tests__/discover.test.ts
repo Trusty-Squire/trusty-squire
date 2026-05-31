@@ -143,6 +143,44 @@ describe("runDiscoveryBot — outcome mapping", () => {
     expect(result.kind).toBe("blocked");
   });
 
+  it("returns blocked on email_otp_required (terminal OTP gate = wall)", async () => {
+    const bot = stubBot({
+      success: false,
+      error: "email_otp_required: inbox poller exhausted",
+      steps: [],
+    } as SignupResult);
+    const result = await runDiscoveryBot(
+      { service: "svc" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        skipAutoPromote: true,
+      },
+    );
+    expect(result.kind).toBe("blocked");
+  });
+
+  it("returns failed (not blocked) on oauth_required (usually a wrong-URL nav bug)", async () => {
+    const bot = stubBot({
+      success: false,
+      error: "oauth_required: no OAuth button found on page",
+      steps: [],
+    } as SignupResult);
+    const result = await runDiscoveryBot(
+      { service: "svc" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        skipAutoPromote: true,
+      },
+    );
+    expect(result.kind).toBe("failed");
+  });
+
   it("returns failed (not blocked) on generic errors", async () => {
     const bot = stubBot({
       success: false,
