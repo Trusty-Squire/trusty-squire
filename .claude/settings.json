@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flyctl logs *)",
+      "Bash(flyctl status *)",
+      "Bash(npm view *)",
+      "Bash(pnpm typecheck)",
+      "mcp__squire__check_provision_status",
+      "mcp__squire__list_credentials",
+      "mcp__squire__list_services"
+    ]
+  }
+}
