@@ -166,7 +166,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // stale cache.
   //
   // The verifier loop bypasses this guard via bypassStatusGuard=true
-  // (set by housekeeper-loop on the verifier queue) so it can gather
+  // (set by the housekeeper verify mode on the verifier queue) so it can gather
   // replay outcomes that drive promote/demote transitions. Even with
   // bypass, `superseded` stays gated — a newer version is canonical
   // and replaying the older one is wasted effort.

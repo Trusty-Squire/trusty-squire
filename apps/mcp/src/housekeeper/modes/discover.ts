@@ -18,13 +18,15 @@
 // will later promote on the first verifier success.
 
 import { randomBytes } from "node:crypto";
-import { UniversalSignupBot } from "../bot/index.js";
-import { pickLLMPair } from "../bot/llm-client.js";
-import { InboxClient } from "../bot/inbox-client.js";
+import { UniversalSignupBot } from "../../bot/index.js";
+import { pickLLMPair } from "../../bot/llm-client.js";
+import { InboxClient } from "../../bot/inbox-client.js";
 import {
   isAutoPromoteEnabled,
   runAutoPromote,
-} from "../tools/provision-any.js";
+} from "../../tools/provision-any.js";
+import type { HousekeeperTask } from "../queues/index.js";
+import type { HousekeeperOpts } from "../orchestrator.js";
 
 export interface DiscoveryBotConfig {
   // Override env-read defaults — used by tests.
@@ -45,11 +47,11 @@ export type DiscoveryBotOutcome =
       reason: string;
       credential_kind?: string;
       // 0.8.2-rc.4 — surface the auto-promote outcome to the
-      // housekeeper-loop's summary counter. Undefined means
+      // orchestrator's summary counter. Undefined means
       // auto-promote didn't run (env disabled). Otherwise carries
       // the discriminated result from runAutoPromote so the
       // batch summary can credit promoted=N accurately.
-      auto_promote?: import("../tools/provision-any.js").AutoPromoteResult;
+      auto_promote?: import("../../tools/provision-any.js").AutoPromoteResult;
     }
   | { kind: "blocked"; reason: string }
   | { kind: "failed"; reason: string };
@@ -174,7 +176,7 @@ export async function runDiscoveryBot(
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).
   let promoteOutcome:
-    | import("../tools/provision-any.js").AutoPromoteResult
+    | import("../../tools/provision-any.js").AutoPromoteResult
     | undefined;
   if (result.success && cfg.skipAutoPromote !== true && isAutoPromoteEnabled(process.env)) {
     // Snapshot the sink length so we can flush ONLY the auto-promote
@@ -238,4 +240,38 @@ export async function runDiscoveryBot(
     return { kind: "blocked", reason: error };
   }
   return { kind: "failed", reason: error };
+}
+
+export type DiscoveryBotRunner = (input: {
+  service: string;
+  oauthProvider?: "google" | "github";
+  signupUrl?: string;
+}) => Promise<DiscoveryBotOutcome>;
+
+// Per-task dispatcher the orchestrator invokes for 'discover' tasks.
+export async function handleDiscover(
+  task: Extract<HousekeeperTask, { kind: "discover" }>,
+  opts: HousekeeperOpts,
+  log: (line: string) => void,
+): Promise<DiscoveryBotOutcome> {
+  if (opts.discover === undefined) {
+    log(`skip discover: ${task.service} — no discover runner wired`);
+    return { kind: "failed", reason: "no_discover_runner_wired" };
+  }
+  log(
+    `discover start: ${task.service}${
+      task.meta?.distinct_failures !== undefined
+        ? ` (${task.meta.distinct_failures} user failures, top=${task.meta.top_error_kind})`
+        : ""
+    }`,
+  );
+  const outcome = await opts.discover({
+    service: task.service,
+    ...(task.oauthProvider !== undefined
+      ? { oauthProvider: task.oauthProvider }
+      : {}),
+    ...(task.signupUrl !== undefined ? { signupUrl: task.signupUrl } : {}),
+  });
+  log(`discover end:   ${task.service} → ${outcome.kind} (${outcome.reason.slice(0, 120)})`);
+  return outcome;
 }

@@ -4,9 +4,9 @@
 // drives Playwright + the LLM proxy.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runDiscoveryBot } from "../discovery-bot.js";
-import type { SignupResult, UniversalSignupRequest } from "../../bot/index.js";
-import type { InboxClient } from "../../bot/inbox-client.js";
+import { runDiscoveryBot } from "../discover.js";
+import type { SignupResult, UniversalSignupRequest } from "../../../bot/index.js";
+import type { InboxClient } from "../../../bot/inbox-client.js";
 
 // pickLLMPair reads TRUSTY_SQUIRE_MACHINE_TOKEN from env to route to
 // the ProxyLLMClient. The tests don't care which LLM is chosen (the

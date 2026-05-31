@@ -1372,8 +1372,8 @@ export function isAutoPromoteEnabled(env: NodeJS.ProcessEnv): boolean {
 // stepsSink: ctx.stepsSink, accountId: ctx.accountId}; tests inject
 // a `fetchFn` to assert on the registry POST without a real network.
 //
-// Returns a discriminated result so callers (housekeeper-loop's
-// batch summary) can credit `promoted=N` accurately instead of
+// Returns a discriminated result so callers (the housekeeper
+// orchestrator's batch summary) can credit `promoted=N` accurately instead of
 // rolling every discover task into `none`. stepsSink keeps the
 // per-step narrative for the operator log; the return value is
 // for counters.

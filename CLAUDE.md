@@ -433,7 +433,7 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID. Required when running `mcp verifier-worker --mode=discovery` (inbox-alias scoping + auto-promote attribution). End-user installs read this from session.json. |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID. Required when running `mcp housekeeper --mode=discover` (inbox-alias scoping + auto-promote attribution). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
@@ -445,21 +445,26 @@ npm tarball (`apps/mcp/package.json`'s `files` array excludes
 `dist/housekeeper`). Run from a source checkout:
 `node apps/mcp/dist/bin.js housekeeper [opts]`.
 
-Three queue modes share one CLI; each requires different auth.
+Two modes share one CLI — `--mode=verify` (skill replay; the default)
+and `--mode=discover` (universal bot). Discover sources from telemetry
+candidates by default, or from a curated YAML when `--from=<path>` is
+set (the former "harvest" case). `--service=<slug>` is an ad-hoc
+single-service shortcut that implies discover. Each requires different
+auth.
 
 | Env var | Required by | Effect |
 |---|---|---|
-| `REGISTRY_ADMIN_BEARER` | verifier, discovery | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
+| `REGISTRY_ADMIN_BEARER` | verify, discover (telemetry) | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
 | `TRUSTY_SQUIRE_REGISTRY_URL` | all modes | Registry base URL. Default `https://registry.trustysquire.ai`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discovery, seed, --service | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the housekeeper host). |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | discovery, seed, --service | Inbox-alias scope + auto-promote attribution. |
-| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discovery, seed, --service | Default-on. Set `0`/`off` to capture without publishing. |
+| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discover, --service | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the housekeeper host). |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | discover, --service | Inbox-alias scope + auto-promote attribution. |
+| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discover, --service | Default-on. Set `0`/`off` to capture without publishing. |
 | `UNIVERSAL_BOT_LLM_TIER=free` | all modes (recommended) | Routes through the free OpenRouter chain. |
 | `TELEGRAM_BOT_TOKEN` | `--telegram` notifier | Bot token from @BotFather. Chat id auto-resolved from getUpdates on first run, cached to `~/.trusty-squire/telegram-chat-id.txt`. |
 | `GH_REPO` | `--github-issues` notifier | `<owner>/<repo>` for issue posting. Default `Trusty-Squire/trusty-squire`. Requires `gh auth status` to succeed on the host. |
 
 The curated services queue lives at `tools/housekeeper-services.yaml`,
-consumed via `mcp housekeeper --queue=seed --from=tools/housekeeper-services.yaml`.
+consumed via `mcp housekeeper --mode=discover --from=tools/housekeeper-services.yaml`.
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |

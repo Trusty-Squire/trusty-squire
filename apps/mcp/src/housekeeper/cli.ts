@@ -9,12 +9,12 @@
 //   # autonomous discovery against telemetry (the old discoverer)
 //   REGISTRY_ADMIN_BEARER=… TRUSTY_SQUIRE_MACHINE_TOKEN=… \
 //   TRUSTY_SQUIRE_ACCOUNT_ID=… UNIVERSAL_BOT_LLM_TIER=free \
-//   mcp housekeeper --queue=discovery --once
+//   mcp housekeeper --mode=discover --once
 //
-//   # curated harvester run (the old harvester)
+//   # curated harvester run (the old harvester) — discover from a YAML
 //   REGISTRY_ADMIN_BEARER=… TRUSTY_SQUIRE_MACHINE_TOKEN=… \
 //   TRUSTY_SQUIRE_ACCOUNT_ID=… mcp housekeeper \
-//   --queue=seed --from=tools/housekeeper-services.yaml --once
+//   --mode=discover --from=tools/housekeeper-services.yaml --once
 //
 //   # ad-hoc single service
 //   mcp housekeeper --service=openrouter
@@ -24,18 +24,17 @@
 //
 // Operator-only tool; not shipped in the npm tarball.
 
-import { BrowserController } from "../bot/browser.js";
-import { replaySkill, type ReplayOutcome } from "../bot/replay-skill.js";
 // pickLLMClient was used for an eager startup preflight that the
 // verifier path didn't actually need. 0.8.3 removed the preflight;
-// discovery's LLM init now happens lazily inside runDiscoveryBot.
+// discover's LLM init now happens lazily inside runDiscoveryBot.
 import { VerifierRegistryClient } from "./registry-client.js";
 import {
   runOneBatch,
   runHousekeeperLoop,
   type HousekeeperOpts,
   type ReplayMode,
-} from "./housekeeper-loop.js";
+} from "./orchestrator.js";
+import { createReplayRunner } from "./modes/verify.js";
 import {
   RegistryVerifierQueue,
   RegistryDiscoveryQueue,
@@ -43,19 +42,22 @@ import {
   AdHocServiceQueue,
   lookupServiceInYaml,
   type QueueProvider,
-} from "./queue.js";
+} from "./queues/index.js";
 import { LogNotifier, type Notifier } from "./notifier.js";
 
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 
-type QueueMode = "verifier" | "discovery" | "seed";
+// Two runners: verify (skill replay) and discover (universal bot).
+// 'discover' is fed by either telemetry candidates or a curated YAML
+// (--from); the YAML feed is the former "harvest" path.
+type Mode = "verify" | "discover";
 
 interface ParsedArgs {
   once: boolean;
   limit: number | undefined;
   intervalSeconds: number | undefined;
   replayMode: ReplayMode;
-  queueMode: QueueMode;
+  mode: Mode;
   service: string | undefined;
   oauthProvider: "google" | "github" | undefined;
   seedPath: string | undefined;
@@ -71,7 +73,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     limit: undefined,
     intervalSeconds: undefined,
     replayMode: "full",
-    queueMode: "verifier",
+    mode: "verify",
     service: undefined,
     oauthProvider: undefined,
     seedPath: undefined,
@@ -85,9 +87,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     if (arg === "--once") args.once = true;
     else if (arg === "--dry") args.replayMode = "dry";
     else if (arg === "--full") args.replayMode = "full";
-    else if (arg === "--queue=verifier") args.queueMode = "verifier";
-    else if (arg === "--queue=discovery") args.queueMode = "discovery";
-    else if (arg === "--queue=seed") args.queueMode = "seed";
+    else if (arg === "--mode=verify") args.mode = "verify";
+    else if (arg === "--mode=discover") args.mode = "discover";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
@@ -127,21 +128,23 @@ function printHelp(): void {
   console.log(`Usage: mcp housekeeper [options]
 
 The merged verifier + discoverer + harvester. Pulls a queue of
-tasks, drives them through the universal bot (or skill replay for
-the verifier queue), posts outcomes to the registry + any wired
-notifiers.
+tasks, drives them through skill replay (verify mode) or the
+universal bot (discover mode), posts outcomes to the registry +
+any wired notifiers.
 
-Queue modes (pick one — default: verifier):
-  --queue=verifier          Registry's pending-review + freshness
+Modes (pick one — default: verify):
+  --mode=verify             Registry's pending-review + freshness
                             queue. Skills replayed; outcomes drive
                             promote/retire/demote transitions.
-  --queue=discovery         Telemetry-driven candidates (services
-                            with ≥3 distinct user failures, no
-                            skill yet).
-  --queue=seed --from=PATH  Curated YAML list (former harvester
-                            services.yaml). Status:skip excluded.
-  --service=SLUG            Ad-hoc single-service mode. Overrides
-                            --queue. Bot runs once against SLUG.
+  --mode=discover           Drive the universal bot at a service
+                            slug. Source defaults to telemetry
+                            candidates (services with ≥3 distinct
+                            user failures, no skill yet); pass
+                            --from=PATH to source from a curated
+                            YAML list instead (former harvester
+                            services.yaml — status:skip excluded).
+  --service=SLUG            Ad-hoc single-service mode. Implies
+                            discover. Bot runs once against SLUG.
   --oauth-provider=google|github
                             Force the bot's OAuth-first scan to look
                             for THIS provider on the signup page.
@@ -159,18 +162,18 @@ Pacing:
   --once                    Single batch then exit. Default loops.
   --limit=N                 Tasks per batch (1..100, default 20).
   --interval-seconds=N      Sleep between batches (default 43200 = 12h).
-  --dry / --full            Replay mode for verifier queue (default --full).
+  --dry / --full            Replay mode for verify mode (default --full).
 
 Auth:
   --registry-url=URL        Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=TOKEN      Override REGISTRY_ADMIN_BEARER.
 
 Required env per mode:
-  verifier:    REGISTRY_ADMIN_BEARER
-  discovery:   REGISTRY_ADMIN_BEARER + TRUSTY_SQUIRE_MACHINE_TOKEN
-               + TRUSTY_SQUIRE_ACCOUNT_ID
-  seed:        TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID
-  --service:   same as discovery
+  verify:              REGISTRY_ADMIN_BEARER
+  discover (telemetry): REGISTRY_ADMIN_BEARER + TRUSTY_SQUIRE_MACHINE_TOKEN
+                        + TRUSTY_SQUIRE_ACCOUNT_ID
+  discover --from=:    TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID
+  --service:           same as discover --from=
 `);
 }
 
@@ -190,14 +193,18 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
 
   // Registry client always constructed; queues that don't need it
   // (YAML seed, ad-hoc) just don't call it. Verifier replay POST
-  // does require it — fail fast if missing for verifier mode.
+  // does require it — fail fast if missing for verify mode and for
+  // telemetry-sourced discover (the discovery candidates endpoint is
+  // admin-gated). --from-sourced discover + --service don't hit the
+  // admin API.
   if (
-    (args.queueMode === "verifier" || args.queueMode === "discovery") &&
+    (args.mode === "verify" ||
+      (args.mode === "discover" && args.seedPath === undefined)) &&
     args.service === undefined &&
     (args.adminBearer === undefined || args.adminBearer.length === 0)
   ) {
     console.error(
-      `housekeeper: REGISTRY_ADMIN_BEARER (or --admin-bearer=) is required for --queue=${args.queueMode}`,
+      `housekeeper: REGISTRY_ADMIN_BEARER (or --admin-bearer=) is required for --mode=${args.mode}`,
     );
     return 2;
   }
@@ -206,7 +213,9 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     adminBearer: args.adminBearer ?? "missing-admin-bearer-unused-by-this-queue",
   });
 
-  // Pick queue provider. --service overrides --queue.
+  // Pick queue provider. --service overrides --mode. --mode=verify →
+  // verifier queue; --mode=discover → telemetry candidates, or the
+  // curated YAML when --from= is set.
   let queue: QueueProvider;
   if (args.service !== undefined && args.service.length > 0) {
     // When --from=<yaml> is also set, try to enrich the ad-hoc task
@@ -237,100 +246,27 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       }
     }
     queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl);
-  } else if (args.queueMode === "verifier") {
+  } else if (args.mode === "verify") {
     queue = new RegistryVerifierQueue(client);
-  } else if (args.queueMode === "discovery") {
+  } else if (args.seedPath === undefined || args.seedPath.length === 0) {
+    // --mode=discover, no --from → telemetry candidates.
     queue = new RegistryDiscoveryQueue(client);
   } else {
-    if (args.seedPath === undefined || args.seedPath.length === 0) {
-      console.error(
-        "housekeeper: --queue=seed requires --from=<path-to-services.yaml>",
-      );
-      return 2;
-    }
+    // --mode=discover --from=PATH → curated YAML (former harvest).
     queue = new YamlSeedQueue({ path: args.seedPath });
   }
 
   // Replay runner — invoked for 'replay' tasks (verifier queue).
-  // 0.8.3 — dropped eager pickLLMClient() preflight. The verifier
-  // path doesn't pass an LLM into replaySkill (the replay engine
-  // only calls LLM via llmFallback, which we don't wire here), so
-  // the preflight was forcing every verifier-only run to require
-  // a machine token / OPENROUTER_API_KEY / ANTHROPIC_API_KEY for
-  // no actual reason. The discovery branch below still calls
-  // pickLLMClient indirectly via runDiscoveryBot — that's where
-  // a missing LLM should fail loud.
-  const replay = async (input: {
-    skill: import("@trusty-squire/skill-schema").Skill;
-    mode: "dry" | "full";
-    bypassStatusGuard?: boolean;
-  }): Promise<ReplayOutcome> => {
-    const browser = new BrowserController({});
-    try {
-      await browser.start();
-      // 0.8.2-rc.22 — synthesize template values for verifier replays.
-      // The provision path supplies these (TOKEN_NAME, EMAIL_ALIAS)
-      // from the live signup context; the verifier has no such
-      // context — without defaults, substituteTemplate leaves
-      // `${TOKEN_NAME}` literal and services like Railway reject the
-      // invalid name silently, leaving the post-Create form unchanged
-      // and the credential-extract step thinking "no Copy button on
-      // page."
-      //
-      // 0.8.3 — the previous `verifier-${tag}-${ts}` pattern produced
-      // 24-char alphanumeric+dash strings that LOOK credential-shaped
-      // to the post-Create extract step. On services that render the
-      // token name in the listing alongside a masked key, the
-      // validator-blind extract tier picked up the NAME instead of
-      // the key, and the resulting capture poisoned the next
-      // synthesizer run with a fake "credential" that was actually
-      // the bot's own input.
-      //
-      // 0.8.3-rc.1 — earlier sub-revision swapped dashes for DOTS to
-      // make the names un-credential-like (`if (cand.includes("."))
-      // continue` in the validator-blind tier). That worked for
-      // self-poisoning but broke services with strict name validators
-      // — Baseten's API-key form rejects dotted names and leaves the
-      // submit button disabled, so every replay step_failed at the
-      // submit click. Replacement uses dash-separated DIGIT-FREE
-      // names instead: the validator-blind tier requires a digit
-      // (`if (!/\d/.test(cand)) continue;`), so removing all digits
-      // from our synthesized values keeps self-poisoning protection
-      // intact while staying compatible with strict alphanumeric-
-      // plus-dash validators. Each base36 digit gets remapped to a
-      // letter (0→a, 1→b, …, 9→j) so uniqueness is preserved.
-      const digitFree = (s: string): string =>
-        s.replace(/[0-9]/g, (d) =>
-          String.fromCharCode(97 + parseInt(d, 10)),
-        );
-      const verifierTag = digitFree(input.skill.skill_id.slice(-6).toLowerCase());
-      const tsTag = digitFree(Date.now().toString(36));
-      return await replaySkill({
-        skill: input.skill,
-        browser,
-        mode: input.mode,
-        templateValues: {
-          TOKEN_NAME: `verifier-${verifierTag}-${tsTag}`,
-          EMAIL_ALIAS: `verifier-${verifierTag}-${tsTag}@trustysquire.com`,
-          USER_DISPLAY_NAME: `Verifier-${verifierTag}`,
-        },
-        ...(input.bypassStatusGuard === true ? { bypassStatusGuard: true } : {}),
-      });
-    } finally {
-      try {
-        await browser.close();
-      } catch {
-        // shutdown noise — replay outcome is already captured
-      }
-    }
-  };
+  // The verifier-only template-value synthesis + BrowserController
+  // lifecycle lives in modes/verify.ts; this just wires it.
+  const replay = createReplayRunner();
 
-  // Discovery runner: only required when the queue can produce
+  // Discover runner: only required when the queue can produce
   // 'discover' tasks. Lazy-imported so the verifier-only path
   // doesn't pull in the bot session machinery.
   let discover: HousekeeperOpts["discover"];
   if (queue.name !== "verifier") {
-    const { runDiscoveryBot } = await import("./discovery-bot.js");
+    const { runDiscoveryBot } = await import("./modes/discover.js");
     // The lambda has to mirror DiscoveryBotRunner's full shape — the
     // previous version dropped signupUrl on the floor (rc.3 plumbed
     // the YAML field through the task queue, but the cli's discover

@@ -6,7 +6,7 @@
 //   - GitHubIssueNotifier — opt-in via --github-issues, posts/edits/closes issues per service
 //
 // Failures from individual notifiers don't break the loop — the
-// fan-out wrapper in housekeeper-loop.ts catches + logs them.
+// fan-out wrapper in orchestrator.ts catches + logs them.
 
 export type NotifierEvent =
   | {
