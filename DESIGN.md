@@ -8,7 +8,7 @@
 - **What this is:** A credential broker / vault. AI coding agents provision SaaS on a user's behalf; the keys land here, encrypted.
 - **Who it's for:** Developers who live in the terminal (Claude Code, Cursor, Codex, Goose).
 - **Space:** Developer infrastructure / secrets management.
-- **Surfaces:** marketing landing (`/`), auth (`/login`), the app (`/vault`, `/vault/new`, `/agents`, `/install`).
+- **Surfaces:** marketing landing (`/`), public getting-started (`/start`), auth (`/login`), the app (`/vault`, `/vault/new`, `/agents`). `/install` is the token-gated OAuth-binding wizard the CLI opens (centered auth-card), distinct from `/start`.
 
 ## Memorable Thing
 **"Serious infrastructure for people who live in the terminal — calm, fast, exact."**
@@ -16,7 +16,7 @@ What someone remembers is the quiet precision: keys handled like a pro tool, not
 
 ## Aesthetic Direction
 - **Lane:** Linear-leaning polished dark, industrial-utilitarian. Brutal simplicity + efficiency.
-- **Decoration:** minimal. One indigo accent. A single soft radial glow behind the login mark and the vault header *only* — everywhere else flat.
+- **Decoration:** minimal. One indigo accent. A single soft radial glow behind the login mark, the vault header, and the marketing-landing hero *only* — everywhere else flat. The landing glow is **static** (no drift/loop animation); the rest of the landing (product surface, capabilities, CTA) is flat.
 - **Mono-forward:** anything machine (API keys, hostnames, references, counts, timestamps) renders in mono. Sans is for chrome and labels only. This is the identity.
 - **Anti-slop (never):** purple gradients, centered card in a void, rounded consumer bubbles, Inter as the UI font, 3-column icon grids, decorative blobs, generic repeated glyphs.
 
@@ -44,17 +44,21 @@ Layered near-blacks, hairline borders, one indigo accent used sparingly (focus r
 --accent-fill #5D5AF0   filled primary action
 --err       #FF6B6B   destructive / error
 --ok        #54D88B   success
+--warn      #E0B15A   amber — advisory (stale rotation, pending), never alarming
 ```
-**No gradient accents.** The accent is a flat color. Error/success used only for state.
+**No gradient accents.** The accent is a flat color. Error/success/warn used only for state — and only ever as flat tokens (`--ok`/`--err`/`--warn`), no off-token shades.
 
 ## Spacing
 - **Base:** 4px. Strict rhythm — no magic numbers (kill the old 7/9/62).
 - **Scale:** `--s-1 4` `--s-2 8` `--s-3 12` `--s-4 16` `--s-6 24` `--s-8 32` `--s-12 48`.
+- **Section rhythm** (marketing / getting-started only, above `--s-12`): `--s-16 64` `--s-20 80` `--s-24 96`. Section padding composes from these — no magic numbers.
 - **Density:** compact. It's a tool.
 
 ## Layout
 - **App:** left-anchored within `max-width: 760px`. Header on a hairline baseline; content in strict-rhythm lists, not cards.
 - **Login:** two-column. Left = anchored auth column with a `border-right` hairline; right = a stage carrying a quiet statement + faint masked grid + glow. Never a centered card in a void.
+- **Marketing landing:** editorial, not a SaaS template. Logo hero (the brand mark front-and-centre) → pulled-back headline → a single *static* product surface (one mono terminal still, no animated demo widgets) → a dense **hairline-ruled, numbered capabilities list** (`01 / automate` …, no illustration cards) → flat CTA → footer. Wide-but-disciplined (`max-width: 1080px`), one static hero glow, motion limited to a one-shot rise/reveal.
+- **Getting-started (`/start`):** the public install page (landing nav + a narrow `max-width: 640px` column): logo, the `connect` command in a copy chip, a ruled supported-agents list, numbered next-steps. Flat. The landing "Install" CTA points here, not at npm.
 - **Border radius:** `--r-sm 6` `--r-md 8` `--r-lg 10`, `999` for pills/avatars. Tighter than consumer.
 
 ## Components
@@ -77,3 +81,4 @@ Layered near-blacks, hairline borders, one indigo accent used sparingly (focus r
 | Date | Decision | Rationale |
 |------|----------|-----------|
 | 2026-05-30 | Initial system created | /design-consultation. Linear-leaning polished dark; Geist + JetBrains Mono; mono-forward vault; favicon service icons; left-anchored ruled login. Approved against rendered mockups. |
+| 2026-05-31 | Landing + marketing overhaul | Editorial rebuild of `/` (retired the zig-zag feature cards + animated demo widgets → numbered hairline-ruled capabilities list + one static product surface + logo hero); one static hero glow (decoration exception); new public `/start` install page (landing "Install" repointed off npm); added `--warn` token + `--s-16/20/24` section rhythm; unified all off-token greens→`--ok`/ambers→`--warn`; shared `Shield` component (currentColor) replaces per-file inline SVGs. |
