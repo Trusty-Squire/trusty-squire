@@ -143,10 +143,10 @@ describe("runDiscoveryBot — outcome mapping", () => {
     expect(result.kind).toBe("blocked");
   });
 
-  it("returns blocked on email_otp_required (terminal OTP gate = wall)", async () => {
+  it("returns failed (not blocked) on email_otp_required — inbox-poll pipeline failure is fixable, not a wall", async () => {
     const bot = stubBot({
       success: false,
-      error: "email_otp_required: inbox poller exhausted",
+      error: "email_otp_required: sent a code but the bot couldn't fetch it (reason=timeout)",
       steps: [],
     } as SignupResult);
     const result = await runDiscoveryBot(
@@ -159,7 +159,7 @@ describe("runDiscoveryBot — outcome mapping", () => {
         skipAutoPromote: true,
       },
     );
-    expect(result.kind).toBe("blocked");
+    expect(result.kind).toBe("failed");
   });
 
   it("returns failed (not blocked) on oauth_required (usually a wrong-URL nav bug)", async () => {

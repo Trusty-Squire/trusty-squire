@@ -235,12 +235,15 @@ export async function runDiscoveryBot(
     /^sso_restricted/,
     /^needs_oauth_provider_session/,
     /^oauth_consent_needs_review/,
-    // A terminal email-OTP gate means the inbox poller couldn't fetch the
-    // code — an unattended bot can't pass it, so it's a wall (human relay),
-    // not a bot failure. (oauth_required is deliberately NOT here: it's
-    // usually a wrong-URL navigation, which is a fixable bot bug.)
-    /^email_otp_required/,
   ];
+  // Deliberately NOT blocked — these stay `failed` (= fixable, not walls):
+  //   - email_otp_required: the bot already polls the operator inbox/gmail
+  //     for the code (readOperatorOtp → /v1/inbox/poll-operator-otp). A
+  //     terminal email_otp_required means that pipeline FAILED to deliver
+  //     (no machine token, poller timeout, parse miss) — a bug to fix, not
+  //     a human-side wall. Classifying it blocked would mask the real fault.
+  //   - oauth_required: usually a wrong-URL navigation to a parked page with
+  //     no OAuth button — a fixable bot nav bug, not a wall.
   if (BLOCKED_PATTERNS.some((re) => re.test(error))) {
     return { kind: "blocked", reason: error };
   }
