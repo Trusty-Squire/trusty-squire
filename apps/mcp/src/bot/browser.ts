@@ -1496,7 +1496,18 @@ export class BrowserController {
   // remembered so successive clicks form a continuous path.
   private async humanClick(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.humanClickLocator(this.page.locator(selector));
+    // A bare selector through a strict-mode locator throws "strict mode
+    // violation" before humanClickLocator can even waitFor — and several
+    // OAuth widgets (Descope's <descope-button>, seen on Weaviate + Redis
+    // Cloud) stamp the SAME generated id on both the wrapping web component
+    // and its inner text node, so a single id selector resolves to 2
+    // elements. For a click that's harmless: every match is the same visual
+    // affordance. Narrow to the first match (Playwright's documented
+    // disambiguation for clicks) when the selector isn't already unique,
+    // matching what clickSubmit/clickLinkByText already do.
+    const locator = this.page.locator(selector);
+    const count = await locator.count().catch(() => 1);
+    await this.humanClickLocator(count > 1 ? locator.first() : locator);
   }
 
   // Locator-based core of humanClick. Taking a Locator (not a selector
@@ -2946,6 +2957,13 @@ export class BrowserController {
       // root. Closed shadow roots are unreachable — accepted.
       const collected: Element[] = [];
       const walk = (root: Document | ShadowRoot): void => {
+        // Defensive: a root with no querySelectorAll (a detached/closed
+        // node surfaced mid-render by Descope-style web components on
+        // app.redislabs.com / console.weaviate.cloud) used to crash the
+        // whole inventory with "Cannot read properties of undefined
+        // (reading 'querySelectorAll')", failing the run before the
+        // planner ever saw the page. Skip such a node instead.
+        if (root === null || typeof root.querySelectorAll !== "function") return;
         root.querySelectorAll(SELECTOR).forEach((n) => collected.push(n));
         root.querySelectorAll("*").forEach((el) => {
           if (el.shadowRoot !== null) walk(el.shadowRoot);

@@ -131,6 +131,7 @@ export interface ApiPrismaClient {
     findUnique(args: { where: { token: string } }): Promise<MachineTokenRow | null>;
     update(args: { where: { token: string }; data: Record<string, unknown> }): Promise<MachineTokenRow>;
     updateMany(args: { where: { token: string }; data: Record<string, unknown> }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   lLMUsageEvent: {
     create(args: { data: Record<string, unknown> }): Promise<unknown>;
@@ -182,6 +183,9 @@ export interface ApiPrismaClient {
     findUnique(args: {
       where: { id: string } | { email: string };
     }): Promise<AccountRow | null>;
+    // Hard delete — cascades OAuthIdentity, Device, ActiveMandate,
+    // WebSession, AgentSession via FK onDelete: Cascade.
+    delete(args: { where: { id: string } }): Promise<AccountRow>;
   };
   oAuthIdentity: {
     create(args: { data: Record<string, unknown> }): Promise<OAuthIdentityRow>;

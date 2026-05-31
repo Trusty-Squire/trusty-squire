@@ -30,6 +30,10 @@ export interface AccountStore {
   createAccount(email: string, displayName: string): Promise<AccountRecord>;
   findAccountByEmail(email: string): Promise<AccountRecord | null>;
   findAccountById(id: string): Promise<AccountRecord | null>;
+  // Irreversibly delete the account identity. In Postgres this cascades to
+  // OAuth identities, devices, mandate, and web/agent sessions (FK
+  // onDelete: Cascade). Idempotent — deleting a missing account is a no-op.
+  deleteAccount(accountId: string): Promise<void>;
 
   touchDevice(input: {
     account_id: string;
@@ -107,5 +111,16 @@ export class InMemoryAccountStore implements AccountStore {
     const d = this.devices.get(signingDeviceId);
     if (d === undefined) return;
     d.revoked_at = now;
+  }
+
+  async deleteAccount(accountId: string): Promise<void> {
+    const acc = this.accounts.get(accountId);
+    if (acc !== undefined) {
+      this.accountsByEmail.delete(acc.email.toLowerCase());
+      this.accounts.delete(accountId);
+    }
+    for (const [id, d] of this.devices) {
+      if (d.account_id === accountId) this.devices.delete(id);
+    }
   }
 }

@@ -26,6 +26,7 @@ import {
 import type { ApiDeps } from "../services/deps.js";
 import type { EmailForwarder } from "../services/email-forwarder.js";
 import { buildEmailForwarder } from "../services/webhook-forwarder.js";
+import { clearSessionCookie } from "../auth/middleware.js";
 
 const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
 
@@ -80,8 +81,9 @@ const allowedHostsBody = z.object({
   hosts: z.array(z.string().min(1).max(253)).max(50),
 });
 
-// Kill-switch guard — an explicit confirm so a stray POST can't nuke a vault.
-const revokeAllBody = z.object({ confirm: z.literal(true) });
+// Destructive-action guard — an explicit confirm so a stray request can't
+// delete an account.
+const confirmDeleteBody = z.object({ confirm: z.literal(true) });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // A credential is "stale" — due for rotation — once this many days have
@@ -333,44 +335,34 @@ export const registerVaultRoute: FastifyPluginAsync<{
     },
   );
 
-  // ── account erasure (web only): GDPR hard delete ─────────────
-  // Right-to-be-forgotten: irreversibly purge every credential row AND
-  // the entire audit trail for the account. Distinct from revoke-all
-  // (soft, recoverable) — this leaves nothing. Requires explicit confirm.
+  // ── account deletion (web only): GDPR hard delete ────────────
+  // Right-to-be-forgotten: irreversibly delete the whole account.
+  //   1. purge every credential row + the entire vault audit trail
+  //   2. delete machine tokens paired to the account
+  //   3. delete the account identity — cascades OAuth identities,
+  //      devices, mandate, and web/agent sessions (FK onDelete: Cascade)
+  //   4. clear the session cookie so the caller is signed out
+  // Leaves nothing. Requires explicit confirm.
   fastify.delete(
     "/v1/vault/account",
     { preHandler: opts.requireWeb },
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "web") return;
-      const parsed = revokeAllBody.safeParse(req.body);
+      const parsed = confirmDeleteBody.safeParse(req.body);
       if (!parsed.success || parsed.data.confirm !== true) {
-        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to permanently erase all vault data" });
+        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to permanently delete your account" });
         return;
       }
-      const result = await opts.deps.vault.purgeAccount(auth.account_id);
-      return reply.code(200).send(result);
-    },
-  );
-
-  // ── revoke-all (web only): kill-switch ───────────────────────
-  // One-shot soft-delete of every active credential for the account —
-  // the "a key leaked, burn it all down" panic button. Requires an
-  // explicit confirm flag so a stray POST can't nuke a vault. Recoverable
-  // via restore until the retention sweep purges the soft-deleted rows.
-  fastify.post(
-    "/v1/vault/credentials/revoke-all",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = revokeAllBody.safeParse(req.body);
-      if (!parsed.success || parsed.data.confirm !== true) {
-        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to revoke all credentials" });
-        return;
-      }
-      const result = await opts.deps.vault.deleteAllForAccount(auth.account_id);
-      return reply.code(200).send({ revoked: result.revoked });
+      const purged = await opts.deps.vault.purgeAccount(auth.account_id);
+      const machine_tokens_deleted = await opts.deps.machineTokenStore.deleteByAccount(auth.account_id);
+      // Revoke the acting session explicitly so the kill is immediate in any
+      // store; deleting the account row then cascade-removes all remaining
+      // web/agent sessions (FK onDelete: Cascade) in Postgres.
+      await opts.deps.sessionStore.revoke(auth.jwt_id, "account_deleted");
+      await opts.deps.accountStore.deleteAccount(auth.account_id);
+      clearSessionCookie(reply);
+      return reply.code(200).send({ ...purged, machine_tokens_deleted, account_deleted: true });
     },
   );
 
