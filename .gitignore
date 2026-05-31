@@ -52,3 +52,4 @@ package-lock.json
 # CodeGraph local index — per-developer, regenerated from source.
 .codegraph/
 tools/bin/
+.claude/settings.json
