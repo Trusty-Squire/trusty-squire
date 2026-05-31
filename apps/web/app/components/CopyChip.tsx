@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-const INSTALL_CMD = "npx @trusty-squire/mcp install";
+const INSTALL_CMD = "npx @trusty-squire/mcp connect";
 
 export function CopyChip() {
   const [copied, setCopied] = useState(false);
