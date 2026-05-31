@@ -28,21 +28,26 @@ Reset data:    `docker compose -f docker-compose.dev.yml down -v`
 ```
 trusty-squire/
 ├── packages/
-│   ├── adapter-sdk/        # Adapter manifest types (chunk 2)
-│   ├── runtime/            # Orchestration runtime (chunks 2–3, completed in 4–7)
-│   ├── mandate-validator/  # Mandate verification (chunk 4)
-│   ├── vault/              # HSM-backed credential storage (chunk 6)
-│   ├── inbox/              # Email reception and parsing (chunk 7)
+│   ├── adapter-sdk/        # Learned-skill schema SDK — the wire contract every
+│   │                       #   registry-stored skill is validated against. (Named
+│   │                       #   "adapter-sdk" for compat; the original adapter-manifest
+│   │                       #   types were sunset in 0.8 along with the native-provision path.)
+│   ├── vault/              # Encrypted credential vault (envelope encryption, per-credential KEK, audit log)
+│   ├── inbox/              # Inbound email: alias allocation, MIME parsing, OTP/link extraction
+│   ├── runtime/            # Shared orchestration runtime
+│   ├── mandate-validator/  # Spending-mandate verification
 │   └── adapters/
-│       └── resend/         # Reference adapter (chunk 3)
+│       └── resend/         # Resend adapter (legacy native-provision path; retained)
 └── apps/
-    ├── registry/       # Adapter manifest registry (chunk 9)
-    ├── api/                # Main backend gateway (chunk 10)
-    ├── mcp/                # MCP server for coding agents (chunk 11)
-    └── pwa/                # User-facing web app (chunk 12)
+    ├── api/                # Backend API gateway — accounts, OAuth, machine tokens, LLM proxy, inbox, vault
+    ├── inbox-api/          # Inbound-mail webhook + parsing service
+    ├── registry/           # Skill registry — signed learned-skill recipes + housekeeper backplane
+    ├── mcp/                # MCP server coding agents install; bundles the universal signup bot
+    ├── web/                # Public site: marketing landing + vault UI (trustysquire.ai)
+    └── pwa/                # User-facing web app (Next.js)
 ```
 
-The skeleton is built incrementally, one chunk at a time. See `b5357a45-trustysquirebuildspec.md` for the chunk-by-chunk build plan.
+See `CLAUDE.md` (repo root) for the current architecture, deploy, and npm-distribution details.
 
 ## Adding a new package
 
