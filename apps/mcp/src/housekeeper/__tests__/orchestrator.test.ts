@@ -1,12 +1,12 @@
-// Housekeeper loop tests — the unified loop that dispatches on
-// task.kind to either the replay or discover path. Both paths are
+// Housekeeper orchestrator tests — the unified loop that dispatches
+// on task.kind to either the replay or discover path. Both paths are
 // covered: success, failure, schema drift, blocked, notifier
 // fan-out, and the cross-kind interleaving (a queue can in principle
 // mix kinds even though current providers don't).
 
 import { describe, expect, it } from "vitest";
-import { runOneBatch } from "../housekeeper-loop.js";
-import type { QueueProvider, HousekeeperTask } from "../queue.js";
+import { runOneBatch } from "../orchestrator.js";
+import type { QueueProvider, HousekeeperTask } from "../queues/index.js";
 import type { Notifier, NotifierEvent } from "../notifier.js";
 import type { VerifierQueueItem } from "../registry-client.js";
 import type { Skill } from "@trusty-squire/skill-schema";

@@ -9,8 +9,8 @@ import {
   YamlSeedQueue,
   AdHocServiceQueue,
   lookupServiceInYaml,
-} from "../queue.js";
-import type { VerifierQueueItem } from "../registry-client.js";
+} from "../index.js";
+import type { VerifierQueueItem } from "../../registry-client.js";
 
 function stubClient(opts: {
   queueItems?: VerifierQueueItem[];

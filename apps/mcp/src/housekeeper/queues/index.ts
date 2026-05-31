@@ -19,7 +19,7 @@ import { parse as parseYaml } from "yaml";
 import {
   VerifierRegistryClient,
   type VerifierQueueItem,
-} from "./registry-client.js";
+} from "../registry-client.js";
 
 // The two action kinds the loop dispatches on. A `replay` task carries
 // a skill the housekeeper already-fetches the body of (via the
