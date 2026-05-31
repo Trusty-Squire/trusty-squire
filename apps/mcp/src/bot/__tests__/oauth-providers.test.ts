@@ -7,6 +7,7 @@ import {
   classifyGitHubAuthState,
   githubScopesAreBasic,
   isGitHubDismissible2faSetup,
+  isGitHubForced2faVerification,
   isOAuthProviderId,
 } from "../oauth-providers.js";
 
@@ -149,5 +150,38 @@ describe("isGitHubDismissible2faSetup (rc.34)", () => {
   it("does NOT match a non-2FA page that happens to mention 'skip'", () => {
     const body = "skip this tutorial";
     expect(isGitHubDismissible2faSetup(body)).toBe(false);
+  });
+});
+
+describe("isGitHubForced2faVerification (0.8.6)", () => {
+  // The exact page captured 2026-05-30 on a Convex→GitHub run: no skip
+  // link, "you can no longer delay", "Verify 2FA now".
+  it("detects the forced 'can no longer delay / Verify 2FA now' wall", () => {
+    const body =
+      "Verify your two-factor authentication (2FA) settings\n" +
+      "This is a one-time verification of your recently configured 2FA credentials.\n" +
+      "You can no longer delay 2FA verification, please verify to continue.\n" +
+      "Verify 2FA now";
+    expect(isGitHubForced2faVerification(body)).toBe(true);
+  });
+
+  it("stays distinct from the DISMISSIBLE nag (skip link present → not forced)", () => {
+    // Same body the dismissible test uses — it has the skip link, so the
+    // forced detector must yield to the skip path.
+    const body =
+      "Verify your two-factor authentication (2FA) settings\n" +
+      "This is a one-time verification of your recently configured 2FA credentials.\n" +
+      "Verify 2FA now\n" +
+      "You can choose to skip 2FA verification at this moment, we'll remind you tomorrow.";
+    expect(isGitHubForced2faVerification(body)).toBe(false);
+    expect(isGitHubDismissible2faSetup(body)).toBe(true); // the skip path owns it
+  });
+
+  it("does NOT fire on a real authenticator-code 2FA challenge or unrelated pages", () => {
+    expect(
+      isGitHubForced2faVerification("Two-factor authentication\nEnter the code from your app."),
+    ).toBe(false);
+    expect(isGitHubForced2faVerification("Verify your device — we sent a code.")).toBe(false);
+    expect(isGitHubForced2faVerification("")).toBe(false);
   });
 });

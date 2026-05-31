@@ -28,7 +28,36 @@ on a code change. Notes below say exactly what each needs to unblock.
   `ipdata.com/signup` (404). Real signup is
   `dashboard.ipdata.co/sign-up.html` — added as a curated yaml entry.
 
+- **fal.ai key-CTA fix shipped in 0.8.5 + live-validated (2026-05-30).**
+  Re-ran fal.ai with the fix → `ok`: signed up, extracted 1 credential,
+  auto-promoted `falai v1` skill (pending-review).
+
+- **GitHub forced-2FA wall — fast-abort FIXED (0.8.6, 2026-05-30).** A
+  Convex→GitHub run hit GitHub's NON-skippable "Verify your two-factor
+  authentication (2FA) settings / Verify 2FA now / you can no longer
+  delay" wall. The bot mis-handled it as a phone-tap challenge and burned
+  the 60s gmail poll + 4-min phone-tap wait before aborting — neither can
+  clear it. New `isGitHubForced2faVerification()` (oauth-providers.ts,
+  excludes the dismissible "skip 2FA verification" nag) makes the agent
+  abort immediately with the right instruction ("run `mcp login
+  --provider=github`, click Verify 2FA now"). Unit-tested. NOTE: the
+  operator must still clear the wall once on the GitHub account — until
+  then ALL GitHub-OAuth signups fail.
+
 ## Bot/synthesizer — BLOCKED on artifacts / live runs
+
+- **Convex post-OAuth email-code gate (NEW, 2026-05-30)** — found via the
+  via-Google Convex run: after the Google number-tap, Convex signs in but
+  then shows "Complete the code challenge — Enter the code sent to
+  lunchboxfortwo@gmail.com" (`auth.convex.dev/radar-challenge`). The
+  POST-VERIFY onboarding loop detects a "code challenge wall" and returns
+  `oauth_onboarding_failed` instead of routing to the email-OTP path. The
+  gmail-OTP reader (`read-otp.ts`, polls via the API which holds
+  GMAIL_USER/GMAIL_APP_PASSWORD) already exists for the signup
+  `email_otp_required` gate — the fix is to wire the post-verify loop's
+  "code sent to <email>" detection into that same poll + fill the 6-digit
+  inputs. Deliberately NOT shipped untested: needs a live Convex run
+  (Google number-tap) to validate end-to-end.
 
 - **ipdata: "no credentials found"** — STILL BLOCKED, blocker moved. A
   live run with the corrected URL (above) now REACHES the real ipdata
@@ -59,13 +88,14 @@ on a code change. Notes below say exactly what each needs to unblock.
   live Cloudflare-class signup where Tier 2 times out, to confirm the
   token actually clears the challenge. Not unit-testable.
 
-- **Convex Google number-challenge unreadable** — BLOCKED: the Convex
-  captures on this box (`convex-mpmjcbbr-r*`) are a *different*,
-  already-resolved case (a JWT/OIDC `eyJ…` token extract; round 10 =
-  done). There is no Convex number-challenge screenshot here, so
-  `extractGoogleNumberViaVision` (agent.ts:4710) crop widening can't be
-  assessed. UNBLOCK: capture a Convex run that actually hits the Google
-  number challenge, then inspect the screenshot crop.
+- **Convex Google number-challenge unreadable** — RESOLVED, does NOT
+  reproduce (2026-05-30 live run, screenshot
+  `.debug/1780186239758-google-challenge.png`). The "Verify it's you"
+  number ("11") rendered large, sharp, centre-right, fully in-frame, and
+  the bot read it correctly. There is no crop problem; the original
+  "couldn't read the number" was an intermittent vision miss on some
+  other render, not a systematic issue. No `extractGoogleNumberViaVision`
+  crop change warranted.
 
 ## Synthesizer follow-ups (all fixed 2026-05-28)
 

@@ -126,6 +126,36 @@ export function isGitHubDismissible2faSetup(bodyText: string): boolean {
 // so Playwright's text-locator needs the button's own label only.
 export const GITHUB_DISMISSIBLE_2FA_SKIP_TEXT = "skip 2FA verification";
 
+// The NON-dismissible escalation of the 2FA-settings wall. Once GitHub
+// decides the user "can no longer delay" it drops the skip link and shows
+// a "Verify 2FA now" button: heading "Verify your two-factor
+// authentication (2FA) settings", body "one-time verification of your
+// recently configured 2FA credentials ... you can no longer delay".
+//
+// Critically, NONE of the bot's clear-paths apply: there is no skip link,
+// the device-confirmation email is never sent (auth is already complete —
+// this is an account-settings nag), and a phone-tap does nothing. Only the
+// operator clicking "Verify 2FA now" in a real browser and completing the
+// 2FA flow clears it. The agent uses this to abort the OAuth attempt
+// IMMEDIATELY with that instruction, instead of burning the 60s gmail poll
+// + 4-min phone-tap wait on a page neither can clear. Conservative: must
+// match the heading AND a forced-escalation phrase, so it never fires on
+// the dismissible "skip 2FA verification" variant.
+export function isGitHubForced2faVerification(bodyText: string): boolean {
+  const text = bodyText.toLowerCase().replace(/\s+/g, " ");
+  if (!text.includes("verify your two-factor authentication")) return false;
+  // If the deferrable skip link is present it's the dismissible nag, NOT
+  // the forced wall — let isGitHubDismissible2faSetup's path skip it. The
+  // dismissible page also carries "Verify 2FA now" + "one-time
+  // verification…", so this exclusion is what keeps the two apart.
+  if (text.includes("skip 2fa verification")) return false;
+  return (
+    text.includes("can no longer delay") ||
+    text.includes("verify 2fa now") ||
+    text.includes("one-time verification of your recently configured")
+  );
+}
+
 // --- GitHub consent scope gate ---------------------------------------
 // GitHub's scope vocabulary is its own. Basic identity is `read:user`
 // and `user:email` (D7). Anything broader — repo, admin:*, write:*,
