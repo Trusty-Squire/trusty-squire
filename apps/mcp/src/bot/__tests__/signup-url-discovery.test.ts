@@ -68,28 +68,14 @@ describe("guessSignupUrl", () => {
     expect(guessSignupUrl("resend")).toBe("https://resend.com/signup");
   });
 
-  // F9.1 — known-domains map. .com isn't universal; these services
-  // live on .io / .ai / .dev / etc. The .com guess would either 404
-  // or redirect to the right TLD weirdly (Sentry's sentry.com → sentry.io
-  // redirect drops the /signup path), which broke the post-navigate
-  // looksLikeSignupPage check and dumped the bot into Google search.
-  it("looks up known services on their non-.com TLDs", () => {
-    expect(guessSignupUrl("Sentry")).toBe("https://sentry.io/signup");
-    expect(guessSignupUrl("OpenRouter")).toBe("https://openrouter.ai/signup");
-    expect(guessSignupUrl("Mistral")).toBe("https://mistral.ai/signup");
-    expect(guessSignupUrl("Mailtrap")).toBe("https://mailtrap.io/signup");
-    expect(guessSignupUrl("E2B")).toBe("https://e2b.dev/signup");
-    // (Railway moved to a full-URL override — see the next describe block.)
-  });
-
-  // Full-URL overrides for services whose signup lives on a subdomain
-  // or uses a non-standard path. Cloudflare's marketing site has no
-  // signup form — it CTAs into the dashboard.
-  it("honors full-URL entries verbatim", () => {
-    expect(guessSignupUrl("Cloudflare")).toBe("https://dash.cloudflare.com/sign-up");
-    // Railway's /signup is a 404 on both .app and .com; the real
-    // signup-or-login entry point is /login.
-    expect(guessSignupUrl("Railway")).toBe("https://railway.com/login");
+  // guessSignupUrl is now the LAST-resort fallback only — the KNOWN_DOMAINS
+  // table was retired. Non-.com TLDs and non-obvious entry points are
+  // resolved upstream by resolveSignupUrl (promoted-skill URL → model), so
+  // even a service that lives on .io returns the .com guess from THIS
+  // function; a wrong guess is recovered by the Google-search fallback.
+  it("returns the .com guess even for non-.com products (resolved upstream now)", () => {
+    expect(guessSignupUrl("Sentry")).toBe("https://sentry.com/signup");
+    expect(guessSignupUrl("Railway")).toBe("https://railway.com/signup");
   });
 });
 
@@ -109,15 +95,7 @@ describe("firstHttpsUrl", () => {
 });
 
 describe("resolveSignupUrl", () => {
-  it("fast-path: KNOWN_DOMAINS hit returns the cached URL WITHOUT calling the model", async () => {
-    const calls = { n: 0 };
-    const llm = stubLLM("https://evil.example/should-not-be-used", calls);
-    expect(await resolveSignupUrl("Sentry", llm)).toBe("https://sentry.io/signup");
-    expect(await resolveSignupUrl("Railway", llm)).toBe("https://railway.com/login");
-    expect(calls.n).toBe(0); // cache hits never spend an LLM call
-  });
-
-  it("on a cache miss, uses the model's resolved URL (the .io/.xyz fix)", async () => {
+  it("uses the model's resolved URL (the .io/.xyz fix)", async () => {
     expect(await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"))).toBe(
       "https://xata.io/signup",
     );
@@ -145,11 +123,11 @@ describe("resolveSignupUrl", () => {
     );
   });
 
-  it("with no LLM wired, degrades to exactly the old guessSignupUrl behavior", async () => {
+  it("with no LLM wired, degrades to the .com guess", async () => {
     expect(await resolveSignupUrl("obscurething", null)).toBe(
       "https://obscurething.com/signup",
     );
-    expect(await resolveSignupUrl("Sentry", undefined)).toBe("https://sentry.io/signup");
+    expect(await resolveSignupUrl("Sentry", undefined)).toBe("https://sentry.com/signup");
   });
 
   it("logs the resolved URL via the optional logger", async () => {
@@ -186,17 +164,6 @@ describe("resolveSignupUrl", () => {
     expect(url).toBe("https://xata.io/signup");
   });
 
-  it("a KNOWN_DOMAINS hit skips the skill lookup entirely", async () => {
-    let looked = false;
-    const url = await resolveSignupUrl("Sentry", stubLLM("x"), {
-      lookupSkillUrl: async () => {
-        looked = true;
-        return "https://wrong.example";
-      },
-    });
-    expect(url).toBe("https://sentry.io/signup");
-    expect(looked).toBe(false); // cache hit wins before any lookup
-  });
 });
 
 describe("detectAntiBotBlock", () => {
