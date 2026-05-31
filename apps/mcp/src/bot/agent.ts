@@ -20,6 +20,7 @@ import {
   OAUTH_PROVIDERS,
   extractOAuthScopes,
   isGitHubDismissible2faSetup,
+  isGitHubForced2faVerification,
   GITHUB_DISMISSIBLE_2FA_SKIP_TEXT,
   type OAuthProviderId,
 } from "./oauth-providers.js";
@@ -4073,6 +4074,25 @@ export class SignupAgent {
         // non-blocking nag, not a real challenge — clicking skip
         // returns the user to the OAuth handshake. Detect + auto-
         // click before aborting.
+        // The NON-skippable escalation: GitHub dropped the skip link and
+        // now shows "Verify 2FA now" / "you can no longer delay". No
+        // clear-path the bot has (skip link, device email, phone-tap)
+        // works — only the operator clicking "Verify 2FA now" in a browser
+        // does. Abort immediately with that instruction instead of burning
+        // the 60s gmail poll + 4-min phone-tap wait below.
+        if (provider.id === "github" && isGitHubForced2faVerification(body)) {
+          steps.push(
+            "GitHub: forced 2FA re-verification wall ('Verify 2FA now', no skip link) — " +
+              "neither the device email nor a phone-tap can clear this; aborting fast.",
+          );
+          return this.oauthAbort(
+            "needs_login",
+            `GitHub is forcing a one-time two-factor (2FA) re-verification on the account, ` +
+              `which the bot cannot clear. Run \`${loginCmd}\`, click "Verify 2FA now" in the ` +
+              `browser window and complete the 2FA flow, then retry.`,
+            steps,
+          );
+        }
         if (provider.id === "github" && isGitHubDismissible2faSetup(body)) {
           steps.push(
             "GitHub: 2FA sanity-check overlay detected (post-setup nag, not a real challenge). " +
