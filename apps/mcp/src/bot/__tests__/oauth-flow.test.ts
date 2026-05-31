@@ -18,6 +18,7 @@ import {
   detectStuckOnGoogleOAuth,
   findOAuthButton,
   findFirstOAuthButton,
+  orderOAuthCandidates,
   isLoginLoopState,
   parsePostVerifyStep,
   type AgentInbox,
@@ -365,6 +366,33 @@ describe("findFirstOAuthButton", () => {
   it("returns null when no candidate's affordance is on the page", () => {
     const email = mk({ tag: "input", type: "email", selector: "#email" });
     expect(findFirstOAuthButton([email], ["google", "github"])).toBeNull();
+  });
+});
+
+// ───────────────────── orderOAuthCandidates ─────────────────────
+
+describe("orderOAuthCandidates", () => {
+  it("prefers Google over a non-Google PIN when a Google session exists", () => {
+    // Convex pins github, but the profile has a Google session — Google
+    // leads (blocks less hard), github is the fallback for pages that
+    // only offer github.
+    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["google", "github"]);
+    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["google", "github"]);
+  });
+
+  it("honours a non-Google pin when there's NO Google session (no regression)", () => {
+    expect(orderOAuthCandidates("github", ["github"])).toEqual(["github"]);
+    expect(orderOAuthCandidates("github", [])).toEqual(["github"]);
+  });
+
+  it("returns just Google when Google is pinned", () => {
+    expect(orderOAuthCandidates("google", ["google", "github"])).toEqual(["google"]);
+  });
+
+  it("with no pin, sorts logged-in providers Google-first", () => {
+    expect(orderOAuthCandidates(undefined, ["github", "google"])).toEqual(["google", "github"]);
+    expect(orderOAuthCandidates(undefined, ["github"])).toEqual(["github"]);
+    expect(orderOAuthCandidates(undefined, [])).toEqual([]);
   });
 });
 
