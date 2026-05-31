@@ -328,62 +328,110 @@ export function pickStuckLoopFallbackUrl(
   return null;
 }
 
-// Best-effort canonical signup URL for a service when the caller
-// didn't pass one. Most dev-SaaS targets (Resend, Postmark, Mailgun,
-// MailerSend, IPInfo, Stripe, PostHog) live at <name>.com/signup —
-// the .com default catches them. The exceptions — services on .io,
-// .ai, .dev — live in KNOWN_DOMAINS so a Sentry signup doesn't waste
-// the long Google-search fallback path looking for sentry.com (which
-// redirects weirdly to sentry.io and breaks looksLikeSignupPage).
-// Anything still wrong falls through to the search-and-find path.
-// Exported for unit testing.
-// Either a hostname (default path: /signup) or a full URL (when the
-// service's signup lives on a subdomain or uses a non-standard path —
-// e.g. Cloudflare's dash.cloudflare.com/sign-up).
-const KNOWN_DOMAINS: Record<string, string> = {
-  sentry: "sentry.io",
-  openrouter: "openrouter.ai",
-  mistral: "mistral.ai",
-  anthropic: "anthropic.com",
-  mailtrap: "mailtrap.io",
-  axiom: "axiom.co",
-  loops: "loops.so",
-  e2b: "e2b.dev",
-  // railway.app + railway.com both 404 on /signup; the real entry
-  // point is /login (which handles both signup and sign-in via an
-  // OAuth chooser). railway.app permanent-redirects to railway.com.
-  railway: "https://railway.com/login",
-  supabase: "supabase.com",
-  replicate: "replicate.com",
-  modal: "modal.com",
-  // PostHog uses posthog.com but the dashboard lives at us.posthog.com /
-  // eu.posthog.com — signup is on the marketing site, .com is right.
-  posthog: "posthog.com",
-  // Cloudflare's marketing site has no signup form — it CTAs into the
-  // dashboard. Skip the redirect chase and land on the real form.
-  cloudflare: "https://dash.cloudflare.com/sign-up",
-  // Vercel: marketing /signup redirects through OAuth provider tiles
-  // but the actual email form sits on the dashboard.
-  vercel: "https://vercel.com/signup",
-};
+// Last-resort canonical signup URL when the caller passed none and no
+// promoted skill / model resolution applies: <name>.com/signup, which
+// catches the common dev-SaaS case (Resend, Postmark, IPInfo, …). Non-.com
+// products and non-obvious entry points are handled upstream by
+// resolveSignupUrl (promoted-skill signup_url → model); a wrong .com guess
+// is recovered by the looksLikeSignupPage → Google-search fallback. The old
+// hand-maintained KNOWN_DOMAINS table was retired once the model + the
+// verified skill cache covered it. Exported for unit testing.
 export function guessSignupUrl(service: string): string {
   const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const entry = KNOWN_DOMAINS[slug];
-  if (entry !== undefined && /^https?:\/\//i.test(entry)) return entry;
-  const host = entry ?? `${slug}.com`;
-  return `https://${host}/signup`;
+  return `https://${slug}.com/signup`;
 }
 
-// BUG-2 GUARD — did `url` come from KNOWN_DOMAINS as a hardcoded full
-// URL (vs the default /signup convention)? These were explicitly
-// chosen because the default 404s and the real entry is non-obvious
-// — e.g. Railway's /login, Cloudflare's dash.cloudflare.com/sign-up.
-// Trust the mapping rather than falling back to a Google search.
+// Pull the first well-formed http(s) URL out of arbitrary model text.
 // Exported for unit testing.
-export function isKnownDomainFullUrlMatch(service: string, url: string): boolean {
-  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const entry = KNOWN_DOMAINS[slug];
-  return entry !== undefined && /^https?:\/\//i.test(entry) && entry === url;
+export function firstHttpsUrl(text: string): string | null {
+  const m = text.match(/https?:\/\/[^\s"'<>)\]]+/i);
+  if (m === null) return null;
+  // Trim trailing sentence punctuation the greedy match swallows when the
+  // URL ends a sentence ("…/sign-up." → "…/sign-up").
+  const raw = m[0].replace(/[.,;:!?]+$/, "");
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+// Resolve a service's signup URL.
+//
+// The old path was guessSignupUrl() alone: it templated `<slug>.com/signup`
+// + a hand-maintained domain table. Every product whose real domain isn't
+// `.com` (xata.io, fly.io, hyperbolic.xyz, …) died at the FIRST navigation —
+// before the vision planner, the smartest part of the bot, ever loaded a
+// page. The intelligence was in the wrong place: a vision-grade form-filler
+// bolted onto a dumb string template for the front door.
+//
+// Resolution order now: a promoted skill's verified `signup_url` (injected
+// lookupSkillUrl) → ASK the model (which knows where products live) → the
+// `.com` guess. The model's answer is self-verifying: the navigation that
+// follows surfaces a wrong URL as a 404 / cert / DNS failure (recovered by
+// the looksLikeSignupPage → Google-search fallback), so a hallucinated URL
+// is no worse than the old guess. With no LLM wired it degrades to the guess.
+//
+// Exported for unit testing.
+export async function resolveSignupUrl(
+  service: string,
+  llm: LLMClient | null | undefined,
+  opts: {
+    log?: (line: string) => void;
+    // Injected by the caller (router / housekeeper) — looks up the entry
+    // URL of a promoted skill for this service. Verified-by-construction:
+    // a skill only exists because a signup succeeded, so its recorded URL
+    // is known-good. Kept as injection so the bot stays registry-decoupled.
+    lookupSkillUrl?: () => Promise<string | null>;
+  } = {},
+): Promise<string> {
+  // A promoted skill's entry URL beats the model — it's verified by a real
+  // prior signup, not asserted. Consult it before spending an LLM call.
+  if (opts.lookupSkillUrl !== undefined) {
+    try {
+      const fromSkill = await opts.lookupSkillUrl();
+      if (fromSkill !== null) {
+        opts.log?.(`Resolved signup URL for "${service}" from a promoted skill: ${fromSkill}`);
+        return fromSkill;
+      }
+    } catch (err) {
+      opts.log?.(
+        `skill-URL lookup failed for "${service}" (${err instanceof Error ? err.message : String(err)}) — trying the model`,
+      );
+    }
+  }
+  // No model available → preserve the old deterministic behavior exactly.
+  if (llm === null || llm === undefined) return guessSignupUrl(service);
+  try {
+    const resp = await llm.createMessage({
+      system:
+        "You map a developer-tool / SaaS product name to its canonical " +
+        "account SIGN-UP (registration) URL — the page with the email or " +
+        "OAuth signup form, not the marketing homepage and not the docs. " +
+        "Use the product's REAL domain, which is frequently .io / .dev / " +
+        ".ai / .xyz / .co and NOT .com. If signup lives on a dashboard / " +
+        "app / console subdomain (dash.*, app.*, console.*), return that " +
+        "exact URL. Respond with ONLY the URL on a single line, no prose. " +
+        "If you are not confident, respond with exactly UNKNOWN.",
+      user: [{ kind: "text", text: `Account sign-up URL for the product "${service}"?` }],
+      max_tokens: 80,
+    });
+    const url = firstHttpsUrl(resp.text);
+    if (url !== null) {
+      opts.log?.(`Resolved signup URL for "${service}" via ${resp.backend}: ${url}`);
+      return url;
+    }
+    opts.log?.(
+      `Model gave no usable signup URL for "${service}" (said ${JSON.stringify(resp.text.trim().slice(0, 40))}) — using guess`,
+    );
+  } catch (err) {
+    opts.log?.(
+      `signup-URL model resolve failed for "${service}" (${err instanceof Error ? err.message : String(err)}) — using guess`,
+    );
+  }
+  return guessSignupUrl(service);
 }
 
 // True when the URL is a Google search results page — used to gate
@@ -403,6 +451,10 @@ export function isGoogleSearchUrl(url: string): boolean {
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
+  // Looks up the entry URL of a promoted skill for this service (registry-
+  // backed). When no curated signupUrl is given, resolveSignupUrl consults
+  // this before the LLM. Injected so the bot stays registry-decoupled.
+  lookupSkillUrl?: ((service: string) => Promise<string | null>) | undefined;
   email: string;
   generatePassword: () => string;
   inbox?: AgentInbox | undefined;
@@ -3508,7 +3560,17 @@ export class SignupAgent {
       // than the signup page, and the bot would bail with
       // oauth_required when it landed on a page that didn't show the
       // OAuth buttons until you clicked "Sign up" first.
-      const guessed = task.signupUrl ?? guessSignupUrl(task.service);
+      // A curated signupUrl (from the YAML queue) always wins. Otherwise
+      // resolve via the model (promoted-skill signup_url → LLM → .com guess)
+      // so non-.com products (xata.io, fly.io, …) don't die at navigation.
+      const guessed =
+        task.signupUrl ??
+        (await resolveSignupUrl(task.service, this.llmPair.primary, {
+          log: (m) => steps.push(m),
+          ...(task.lookupSkillUrl !== undefined
+            ? { lookupSkillUrl: () => task.lookupSkillUrl!(task.service) }
+            : {}),
+        }));
       let signupUrl = guessed;
 
       // Prewarm the target origin before hitting the (often-strict) signup
@@ -3542,19 +3604,13 @@ export class SignupAgent {
       // the bot recover from a wrong canonical guess (e.g. a service
       // that uses /register or a non-`.com` TLD).
       //
-      // BUG-2 GUARD: when the guessed URL came from KNOWN_DOMAINS as a
-      // full hardcoded URL (e.g. Railway → https://railway.com/login,
-      // Cloudflare → https://dash.cloudflare.com/sign-up), trust the
-      // mapping. These were explicitly chosen because the default
-      // /signup path 404s and the real entry is non-obvious — falling
-      // back to a Google search has produced cross-domain bugs (the
-      // Railway run that ended up on storysite-production.up.railway.app).
-      const usedKnownFullUrl = isKnownDomainFullUrlMatch(task.service, guessed);
-      if (
-        task.signupUrl === undefined &&
-        !usedKnownFullUrl &&
-        !(await this.looksLikeSignupPage())
-      ) {
+      // A curated task.signupUrl is trusted as-is (no fallback). Otherwise
+      // — whether the URL came from a promoted skill, the model, or the
+      // .com guess — verify it looks like a signup page and fall back to
+      // the search-and-find path if not. (A promoted-skill URL is replay-
+      // verified, so it passes; an LLM/.com guess that's wrong is recovered
+      // here.)
+      if (task.signupUrl === undefined && !(await this.looksLikeSignupPage())) {
         steps.push(
           `${guessed} didn't look like a signup page — searching for the real one`,
         );

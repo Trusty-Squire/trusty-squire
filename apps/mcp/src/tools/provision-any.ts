@@ -34,6 +34,7 @@ import { VERSION } from "../version.js";
 import {
   clientFromEnv,
   generateProvisionId,
+  makeSkillUrlLookup,
   type ServiceHealthResponse,
   type SkillRegistryClient,
 } from "../skill-registry-client.js";
@@ -734,6 +735,11 @@ async function runSignupTask(
     const result = await bot.signup({
       service: input.service,
       ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
+      // No curated URL → let resolveSignupUrl reuse a promoted skill's
+      // verified entry URL (registry-backed) before falling to the model.
+      ...(registry !== null
+        ? { lookupSkillUrl: makeSkillUrlLookup(registry, ctx.provisionId) }
+        : {}),
       email: ctx.alias,
       // SES inbound pipeline revived on trustysquire.com 2026-05-20
       // (TODOS M1). Pass the inbox client so signup() can poll for the

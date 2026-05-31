@@ -77,6 +77,23 @@ export type SkillFetchOutcome =
   | { kind: "not_found" }
   | { kind: "unavailable"; reason: string };
 
+// Adapt a registry client into the `lookupSkillUrl` the universal bot's
+// resolveSignupUrl injects: a service's promoted-skill `signup_url`, or null
+// when there's no active skill / the registry is unavailable. signup_url is a
+// required, replay-verified field ("the URL must produce a recognizable
+// page"), so it's the verified-by-construction cache — the bot reads it before
+// asking the LLM, and a service that's succeeded once reuses its known-good
+// URL instead of re-resolving it.
+export function makeSkillUrlLookup(
+  client: Pick<SkillRegistryClient, "fetchActiveSkill">,
+  provisionId: string,
+): (service: string) => Promise<string | null> {
+  return async (service) => {
+    const outcome = await client.fetchActiveSkill(service, provisionId);
+    return outcome.kind === "found" ? outcome.result.skill.signup_url : null;
+  };
+}
+
 export interface PostReplayOutcomeInput {
   skill_id: string;
   outcome:

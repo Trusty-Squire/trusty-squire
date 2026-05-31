@@ -14,7 +14,6 @@ import { describe, expect, it } from "vitest";
 import {
   hostMatchesServiceDomain,
   isAntiBotInterstitialText,
-  isKnownDomainFullUrlMatch,
 } from "../agent.js";
 
 describe("hostMatchesServiceDomain — BUG 1 (off-domain searcher)", () => {
@@ -65,39 +64,6 @@ describe("hostMatchesServiceDomain — BUG 1 (off-domain searcher)", () => {
 
   it("rejects malformed hostnames", () => {
     expect(hostMatchesServiceDomain("not a host", "railway")).toBe(false);
-  });
-});
-
-describe("isKnownDomainFullUrlMatch — BUG 2 (KNOWN_DOMAINS hardcoded URL)", () => {
-  it("recognizes Railway's hardcoded /login as a KNOWN_DOMAINS full URL", () => {
-    expect(
-      isKnownDomainFullUrlMatch("Railway", "https://railway.com/login"),
-    ).toBe(true);
-  });
-
-  it("recognizes Cloudflare's hardcoded /sign-up", () => {
-    expect(
-      isKnownDomainFullUrlMatch(
-        "Cloudflare",
-        "https://dash.cloudflare.com/sign-up",
-      ),
-    ).toBe(true);
-  });
-
-  it("does NOT match a service whose KNOWN_DOMAINS entry is a bare host", () => {
-    // sentry maps to "sentry.io" (bare host) — guessSignupUrl will
-    // synthesize https://sentry.io/signup, which is the *result* of
-    // guessing, not a hardcoded full URL. Falling back to Google
-    // search remains correct for Sentry-class entries.
-    expect(
-      isKnownDomainFullUrlMatch("Sentry", "https://sentry.io/signup"),
-    ).toBe(false);
-  });
-
-  it("does NOT match an unknown service", () => {
-    expect(
-      isKnownDomainFullUrlMatch("PostmarkApp", "https://postmarkapp.com/signup"),
-    ).toBe(false);
   });
 });
 

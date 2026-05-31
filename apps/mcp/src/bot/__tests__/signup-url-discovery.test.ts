@@ -8,10 +8,28 @@ import { describe, expect, it } from "vitest";
 import {
   detectAlreadySignedIn,
   detectAntiBotBlock,
+  firstHttpsUrl,
   guessSignupUrl,
   isGoogleSearchUrl,
+  resolveSignupUrl,
 } from "../agent.js";
 import type { InteractiveElement } from "../browser.js";
+import type { LLMClient, LLMResponse } from "../llm-client.js";
+
+// Stub LLMClient that returns a canned text (or throws), counting calls.
+function stubLLM(
+  reply: string | (() => Promise<LLMResponse>),
+  calls: { n: number } = { n: 0 },
+): LLMClient {
+  return {
+    name: "stub",
+    async createMessage() {
+      calls.n += 1;
+      if (typeof reply === "function") return reply();
+      return { text: reply, backend: "stub" };
+    },
+  };
+}
 
 function mkEl(over: Partial<InteractiveElement>): InteractiveElement {
   return {
@@ -50,29 +68,102 @@ describe("guessSignupUrl", () => {
     expect(guessSignupUrl("resend")).toBe("https://resend.com/signup");
   });
 
-  // F9.1 — known-domains map. .com isn't universal; these services
-  // live on .io / .ai / .dev / etc. The .com guess would either 404
-  // or redirect to the right TLD weirdly (Sentry's sentry.com → sentry.io
-  // redirect drops the /signup path), which broke the post-navigate
-  // looksLikeSignupPage check and dumped the bot into Google search.
-  it("looks up known services on their non-.com TLDs", () => {
-    expect(guessSignupUrl("Sentry")).toBe("https://sentry.io/signup");
-    expect(guessSignupUrl("OpenRouter")).toBe("https://openrouter.ai/signup");
-    expect(guessSignupUrl("Mistral")).toBe("https://mistral.ai/signup");
-    expect(guessSignupUrl("Mailtrap")).toBe("https://mailtrap.io/signup");
-    expect(guessSignupUrl("E2B")).toBe("https://e2b.dev/signup");
-    // (Railway moved to a full-URL override — see the next describe block.)
+  // guessSignupUrl is now the LAST-resort fallback only — the KNOWN_DOMAINS
+  // table was retired. Non-.com TLDs and non-obvious entry points are
+  // resolved upstream by resolveSignupUrl (promoted-skill URL → model), so
+  // even a service that lives on .io returns the .com guess from THIS
+  // function; a wrong guess is recovered by the Google-search fallback.
+  it("returns the .com guess even for non-.com products (resolved upstream now)", () => {
+    expect(guessSignupUrl("Sentry")).toBe("https://sentry.com/signup");
+    expect(guessSignupUrl("Railway")).toBe("https://railway.com/signup");
+  });
+});
+
+describe("firstHttpsUrl", () => {
+  it("extracts a bare URL", () => {
+    expect(firstHttpsUrl("https://xata.io/signup")).toBe("https://xata.io/signup");
+  });
+  it("extracts a URL embedded in prose, trimming trailing punctuation", () => {
+    expect(firstHttpsUrl("The signup page is https://fly.io/app/sign-up.")).toBe(
+      "https://fly.io/app/sign-up",
+    );
+  });
+  it("returns null when there's no URL", () => {
+    expect(firstHttpsUrl("UNKNOWN")).toBeNull();
+    expect(firstHttpsUrl("I'm not sure")).toBeNull();
+  });
+});
+
+describe("resolveSignupUrl", () => {
+  it("uses the model's resolved URL (the .io/.xyz fix)", async () => {
+    expect(await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"))).toBe(
+      "https://xata.io/signup",
+    );
+    expect(await resolveSignupUrl("hyperbolic", stubLLM("https://app.hyperbolic.xyz/signup"))).toBe(
+      "https://app.hyperbolic.xyz/signup",
+    );
   });
 
-  // Full-URL overrides for services whose signup lives on a subdomain
-  // or uses a non-standard path. Cloudflare's marketing site has no
-  // signup form — it CTAs into the dashboard.
-  it("honors full-URL entries verbatim", () => {
-    expect(guessSignupUrl("Cloudflare")).toBe("https://dash.cloudflare.com/sign-up");
-    // Railway's /signup is a 404 on both .app and .com; the real
-    // signup-or-login entry point is /login.
-    expect(guessSignupUrl("Railway")).toBe("https://railway.com/login");
+  it("extracts the URL when the model wraps it in prose", async () => {
+    expect(
+      await resolveSignupUrl("xata", stubLLM("Sure — it's https://xata.io/signup")),
+    ).toBe("https://xata.io/signup");
   });
+
+  it("falls back to the .com guess when the model says UNKNOWN", async () => {
+    expect(await resolveSignupUrl("obscurething", stubLLM("UNKNOWN"))).toBe(
+      "https://obscurething.com/signup",
+    );
+  });
+
+  it("falls back to the .com guess when the model call throws", async () => {
+    const llm = stubLLM(() => Promise.reject(new Error("rate limited")));
+    expect(await resolveSignupUrl("obscurething", llm)).toBe(
+      "https://obscurething.com/signup",
+    );
+  });
+
+  it("with no LLM wired, degrades to the .com guess", async () => {
+    expect(await resolveSignupUrl("obscurething", null)).toBe(
+      "https://obscurething.com/signup",
+    );
+    expect(await resolveSignupUrl("Sentry", undefined)).toBe("https://sentry.com/signup");
+  });
+
+  it("logs the resolved URL via the optional logger", async () => {
+    const lines: string[] = [];
+    await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
+      log: (m) => lines.push(m),
+    });
+    expect(lines.some((l) => l.includes("xata.io/signup"))).toBe(true);
+  });
+
+  it("prefers a promoted skill's URL over the model (registry beats LLM)", async () => {
+    const calls = { n: 0 };
+    const llm = stubLLM("https://wrong.example/signup", calls);
+    const url = await resolveSignupUrl("xata", llm, {
+      lookupSkillUrl: async () => "https://xata.io/app/signup",
+    });
+    expect(url).toBe("https://xata.io/app/signup");
+    expect(calls.n).toBe(0); // a verified skill URL never spends an LLM call
+  });
+
+  it("falls through to the model when the skill lookup returns null", async () => {
+    const url = await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
+      lookupSkillUrl: async () => null,
+    });
+    expect(url).toBe("https://xata.io/signup");
+  });
+
+  it("falls through to the model when the skill lookup throws", async () => {
+    const url = await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
+      lookupSkillUrl: async () => {
+        throw new Error("registry unavailable");
+      },
+    });
+    expect(url).toBe("https://xata.io/signup");
+  });
+
 });
 
 describe("detectAntiBotBlock", () => {
