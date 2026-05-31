@@ -28,10 +28,9 @@ Reset data:    `docker compose -f docker-compose.dev.yml down -v`
 ```
 trusty-squire/
 ├── packages/
-│   ├── adapter-sdk/        # Learned-skill schema SDK — the wire contract every
-│   │                       #   registry-stored skill is validated against. (Named
-│   │                       #   "adapter-sdk" for compat; the original adapter-manifest
-│   │                       #   types were sunset in 0.8 along with the native-provision path.)
+│   ├── skill-schema/       # Learned-skill wire contract (Zod) — shared by the mcp
+│   │                       #   client and the registry server. (Was adapter-sdk; the
+│   │                       #   adapter-manifest types were sunset in 0.8, leaving only this.)
 │   ├── vault/              # Encrypted credential vault (envelope encryption, per-credential KEK, audit log)
 │   ├── inbox/              # Inbound email: alias allocation, MIME parsing, OTP/link extraction
 │   ├── runtime/            # Shared orchestration runtime

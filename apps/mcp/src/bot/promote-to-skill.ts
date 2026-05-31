@@ -42,7 +42,7 @@ import {
   type SkillCredentialSpec,
   type SkillStep,
   type SkillStepProvenance,
-} from "@trusty-squire/adapter-sdk";
+} from "@trusty-squire/skill-schema";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep } from "./agent.js";
 import {

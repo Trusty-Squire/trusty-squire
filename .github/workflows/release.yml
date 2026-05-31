@@ -11,7 +11,7 @@ name: Release mcp
 # This means re-pushing main without bumping the version does NOT republish.
 #
 # Path filter: only fires on changes that could affect the mcp tarball
-# (apps/mcp, packages/inbox, packages/adapter-sdk, root lockfile, this file).
+# (apps/mcp, packages/inbox, packages/skill-schema, root lockfile, this file).
 # Unrelated commits to other parts of the monorepo skip CI entirely.
 
 on:
@@ -20,7 +20,7 @@ on:
     paths:
       - "apps/mcp/**"
       - "packages/inbox/**"
-      - "packages/adapter-sdk/**"
+      - "packages/skill-schema/**"
       - "pnpm-lock.yaml"
       - ".github/workflows/release.yml"
 
@@ -81,21 +81,21 @@ jobs:
       - name: Install (mcp dep tree only)
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
 
-      # Workspace deps (e.g. @trusty-squire/adapter-sdk) ship as TypeScript
+      # Workspace deps (e.g. @trusty-squire/skill-schema) ship as TypeScript
       # sources with `main: ./dist/index.js`. Vitest's vite resolver follows
       # that pointer, so without a prior workspace build the MCP tests fail
-      # with "Failed to resolve entry for package @trusty-squire/adapter-sdk".
+      # with "Failed to resolve entry for package @trusty-squire/skill-schema".
       # We exclude the MCP package itself — its own dist gets built fresh
       # in the publish job right before npm publish.
       - name: Build mcp's workspace deps (for test resolution)
-        # Vitest follows the `main` of @trusty-squire/{adapter-sdk,inbox} to
+        # Vitest follows the `main` of @trusty-squire/{skill-schema,inbox} to
         # their dist/ — those must exist before mcp tests can import them.
         # `inbox` requires `prisma generate` first; without the generated client
         # tsc fails with "Property 'emailAlias' does not exist on type 'PrismaClient'".
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
         run: |
           pnpm --filter '@trusty-squire/inbox' prisma:generate
-          pnpm --filter '@trusty-squire/adapter-sdk' --filter '@trusty-squire/inbox' build
+          pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/inbox' build
 
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
       # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
@@ -115,42 +115,42 @@ jobs:
         run: pnpm --filter @trusty-squire/mcp test
 
       # Preflight: refuse to publish mcp if its runtime workspace dep
-      # (@trusty-squire/adapter-sdk) isn't on the npm registry at a version
+      # (@trusty-squire/skill-schema) isn't on the npm registry at a version
       # the published mcp tarball will resolve to. Without this, mcp can
       # ship "successfully" but `npm install` fails for end users with
-      # ETARGET. Skip the check if mcp's adapter-sdk dep is still a
+      # ETARGET. Skip the check if mcp's skill-schema dep is still a
       # `workspace:` spec — that means we're in a state where mcp isn't
       # being bumped right now (path filter probably tripped accidentally).
-      - name: Preflight — adapter-sdk dep resolvable on npm
+      - name: Preflight — skill-schema dep resolvable on npm
         run: |
           set -euo pipefail
-          DEP_SPEC=$(node -p "require('./apps/mcp/package.json').dependencies['@trusty-squire/adapter-sdk'] || ''")
-          echo "mcp depends on adapter-sdk: $DEP_SPEC"
+          DEP_SPEC=$(node -p "require('./apps/mcp/package.json').dependencies['@trusty-squire/skill-schema'] || ''")
+          echo "mcp depends on skill-schema: $DEP_SPEC"
           if [[ -z "$DEP_SPEC" ]]; then
-            echo "mcp no longer depends on adapter-sdk — skipping preflight."
+            echo "mcp no longer depends on skill-schema — skipping preflight."
             exit 0
           fi
           if [[ "$DEP_SPEC" == workspace:* ]]; then
             # pnpm will rewrite workspace:^ → ^<local-version> at publish.
-            LOCAL_V=$(node -p "require('./packages/adapter-sdk/package.json').version")
+            LOCAL_V=$(node -p "require('./packages/skill-schema/package.json').version")
             echo "workspace spec — will be rewritten to ^$LOCAL_V at publish."
             DEP_SPEC="^$LOCAL_V"
           fi
           echo "Checking npm has a version satisfying: $DEP_SPEC"
-          # If adapter-sdk's release workflow is running in parallel (same push
+          # If skill-schema's release workflow is running in parallel (same push
           # bumped both versions), poll for up to 5min so we don't race-fail.
           MATCH=""
           for i in $(seq 1 30); do
-            MATCH=$(npm view "@trusty-squire/adapter-sdk@$DEP_SPEC" version 2>/dev/null | tail -1 || true)
+            MATCH=$(npm view "@trusty-squire/skill-schema@$DEP_SPEC" version 2>/dev/null | tail -1 || true)
             if [[ -n "$MATCH" ]]; then break; fi
             echo "  attempt $i — no match yet for $DEP_SPEC, sleeping 10s"
             sleep 10
           done
           if [[ -z "$MATCH" ]]; then
-            echo "::error::No published @trusty-squire/adapter-sdk satisfies '$DEP_SPEC' after 5min. Publish adapter-sdk first."
+            echo "::error::No published @trusty-squire/skill-schema satisfies '$DEP_SPEC' after 5min. Publish skill-schema first."
             exit 1
           fi
-          echo "✓ adapter-sdk $MATCH satisfies $DEP_SPEC on the registry."
+          echo "✓ skill-schema $MATCH satisfies $DEP_SPEC on the registry."
 
       - name: Read package version + decide
         id: read
@@ -267,7 +267,7 @@ jobs:
         # apps/web + apps/pwa (Next.js) which rebuild @prisma/client in
         # parallel and race with inbox's tsc, breaking the inbox build.
         # Keep in sync with apps/mcp/package.json workspace deps.
-        run: pnpm --filter '@trusty-squire/adapter-sdk' --filter '@trusty-squire/inbox' build
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/inbox' build
 
       # Force a clean rebuild of the MCP package right before publish.
       # Without this, TypeScript's incremental build can reuse stale dist
@@ -289,7 +289,7 @@ jobs:
 
       # ---- npm publish -----------------------------------------------------
       # Use `pnpm publish`, NOT `npm publish`. pnpm rewrites `workspace:`
-      # specifiers (e.g. `"@trusty-squire/adapter-sdk": "workspace:^"`) to
+      # specifiers (e.g. `"@trusty-squire/skill-schema": "workspace:^"`) to
       # real semver (`^0.1.0`) before tarball assembly. `npm publish`
       # ships them through literally, producing an unusable package.
       # `--no-git-checks` because the working tree may differ from the

@@ -29,7 +29,7 @@ COPY . .
 # --shamefully-hoist flattens transitive deps to the workspace root
 # the way npm/yarn would. Required because workspace packages built
 # to `dist/` import third-party modules (e.g. `import { z } from
-# "zod"` from packages/adapter-sdk/dist/skill.js) and Node's
+# "zod"` from packages/skill-schema/dist/skill.js) and Node's
 # resolution from a workspace-package symlink does NOT find that
 # transitive dep in pnpm's default isolated layout. Vitest works
 # around this in dev; `node dist/server.js` in production does not.
@@ -40,7 +40,7 @@ RUN pnpm install --frozen-lockfile --shamefully-hoist
 # not collide with other workspace Prisma schemas.
 RUN pnpm -F @trusty-squire/registry exec prisma generate --schema=/app/apps/registry/prisma/schema.prisma
 
-# Build the adapter-sdk first (registry depends on its compiled
+# Build the skill-schema first (registry depends on its compiled
 # output for schema validation), then registry itself. The
 # `...` filter syntax includes dependencies.
 RUN pnpm --filter @trusty-squire/registry... build
@@ -58,11 +58,11 @@ EXPOSE 8080
 #
 # --preserve-symlinks + --preserve-symlinks-main make Node walk up
 # the node_modules tree from the SYMLINK location instead of the
-# target. That matters for pnpm workspaces: @trusty-squire/adapter-sdk
-# is a symlink to packages/adapter-sdk. When dist/skill.js does
+# target. That matters for pnpm workspaces: @trusty-squire/skill-schema
+# is a symlink to packages/skill-schema. When dist/skill.js does
 # `import { z } from "zod"`, ESM resolution from the symlink target
-# walks `packages/adapter-sdk → packages → /` and misses
+# walks `packages/skill-schema → packages → /` and misses
 # /app/node_modules/zod. With --preserve-symlinks, resolution walks
-# `node_modules/@trusty-squire/adapter-sdk → node_modules → /app` and
+# `node_modules/@trusty-squire/skill-schema → node_modules → /app` and
 # finds /app/node_modules/zod (hoisted by --shamefully-hoist above).
 CMD ["node", "--preserve-symlinks", "--preserve-symlinks-main", "apps/registry/dist/server.js"]

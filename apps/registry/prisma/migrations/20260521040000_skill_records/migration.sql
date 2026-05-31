@@ -1,5 +1,5 @@
 -- Tier-2 Learned Skills (0.7.0): SkillRecord + SkillReplayRecord.
--- See packages/adapter-sdk/src/skill.ts for the payload_json schema
+-- See packages/skill-schema/src/skill.ts for the payload_json schema
 -- and docs/DESIGN-skill-promoter.md for the design rationale.
 
 -- CreateTable

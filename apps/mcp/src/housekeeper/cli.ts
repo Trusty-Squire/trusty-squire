@@ -261,7 +261,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // pickLLMClient indirectly via runDiscoveryBot — that's where
   // a missing LLM should fail loud.
   const replay = async (input: {
-    skill: import("@trusty-squire/adapter-sdk").Skill;
+    skill: import("@trusty-squire/skill-schema").Skill;
     mode: "dry" | "full";
     bypassStatusGuard?: boolean;
   }): Promise<ReplayOutcome> => {

@@ -311,7 +311,7 @@ The second example is you guessing. Guessing burns version numbers, confuses use
 
 This repo has TWO release workflows:
 - `.github/workflows/release.yml` — publishes the main MCP package (`@trusty-squire/mcp`)
-- `.github/workflows/release-adapter-sdk.yml` — publishes the adapter SDK (`@trusty-squire/adapter-sdk`)
+- `.github/workflows/release-skill-schema.yml` — publishes the adapter SDK (`@trusty-squire/skill-schema`)
 
 **The rule:** When releasing, check which workflow corresponds to the package you're publishing. Do not assume `release.yml` handles everything.
 

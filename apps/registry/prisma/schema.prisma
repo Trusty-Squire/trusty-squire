@@ -41,7 +41,7 @@ model SkillRecord {
   signed_at            DateTime
   signed_by            String
 
-  // Lifecycle status. Mirrors SkillStatus in @trusty-squire/adapter-sdk.
+  // Lifecycle status. Mirrors SkillStatus in @trusty-squire/skill-schema.
   // Stored as TEXT (not Prisma enum) so adding new variants doesn't
   // require a migration — the schema-package Zod enum is the source
   // of truth.

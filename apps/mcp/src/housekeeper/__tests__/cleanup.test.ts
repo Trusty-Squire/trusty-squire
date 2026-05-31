@@ -7,8 +7,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { runCleanup } from "../cleanup.js";
-import type { Skill } from "@trusty-squire/adapter-sdk";
-import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 
 function baseSkill(extra: Partial<Skill> = {}): Skill {
   return {

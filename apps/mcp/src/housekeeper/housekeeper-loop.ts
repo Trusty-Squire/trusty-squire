@@ -14,7 +14,7 @@
 // github-issues) so the operator gets the same surfaces the harvester
 // produced before the merge.
 
-import type { Skill } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
 import {
   SkillSchemaDriftError,
   type VerifierRegistryClient,

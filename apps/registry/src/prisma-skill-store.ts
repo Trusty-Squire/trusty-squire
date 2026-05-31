@@ -2,7 +2,7 @@
 // use InMemorySkillStore. Mirrors prisma-store.ts (the manifest
 // equivalent).
 
-import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
+import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
 import {
   createRegistryPrismaClient,
   type RegistryPrismaClient,

@@ -28,7 +28,7 @@ import { signSkillForPublish } from "./signing.js";
 import { promoteToSkill, deriveSkillId } from "../bot/promote-to-skill.js";
 import { replaySkill } from "../bot/replay-skill.js";
 import { BrowserController } from "../bot/browser.js";
-import { parseSkill, type Skill } from "@trusty-squire/adapter-sdk";
+import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
 
 // ── Public entry point ──────────────────────────────────────────────
 

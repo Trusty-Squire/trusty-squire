@@ -9,8 +9,8 @@ import { runOneBatch } from "../housekeeper-loop.js";
 import type { QueueProvider, HousekeeperTask } from "../queue.js";
 import type { Notifier, NotifierEvent } from "../notifier.js";
 import type { VerifierQueueItem } from "../registry-client.js";
-import type { Skill } from "@trusty-squire/adapter-sdk";
-import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 
 function makeQueueItem(skill_id: string): VerifierQueueItem {
   return {

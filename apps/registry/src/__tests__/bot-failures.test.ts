@@ -15,8 +15,8 @@ import { buildServer } from "../server.js";
 import { InMemorySkillStore } from "../skill-store-memory.js";
 import { InMemoryBotFailureStore } from "../bot-failure-store-memory.js";
 import { ManifestSigner } from "../signer.js";
-import type { Skill } from "@trusty-squire/adapter-sdk";
-import { SKILL_SCHEMA_VERSION } from "@trusty-squire/adapter-sdk";
+import type { Skill } from "@trusty-squire/skill-schema";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 
 const ADMIN_BEARER = "test-admin-bearer-9f8e7d6c";
 
