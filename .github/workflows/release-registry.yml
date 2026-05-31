@@ -67,6 +67,13 @@ jobs:
         working-directory: apps/registry
         run: pnpm exec prisma generate
 
+      # Registry's tsc resolves @trusty-squire/skill-schema via its
+      # `types` → dist/index.d.ts, so the shared schema package must be
+      # built first. The filtered install above only brings in registry +
+      # skill-schema, so a blanket packages/** build isn't safe here.
+      - name: Build workspace dep (skill-schema dist)
+        run: pnpm --filter '@trusty-squire/skill-schema' build
+
       - name: Build
         run: pnpm --filter '@trusty-squire/registry' build
 
