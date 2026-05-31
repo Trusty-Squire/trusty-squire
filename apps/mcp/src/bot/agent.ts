@@ -424,11 +424,33 @@ export function firstHttpsUrl(text: string): string | null {
 export async function resolveSignupUrl(
   service: string,
   llm: LLMClient | null | undefined,
-  opts: { log?: (line: string) => void } = {},
+  opts: {
+    log?: (line: string) => void;
+    // Injected by the caller (router / housekeeper) — looks up the entry
+    // URL of a promoted skill for this service. Verified-by-construction:
+    // a skill only exists because a signup succeeded, so its recorded URL
+    // is known-good. Kept as injection so the bot stays registry-decoupled.
+    lookupSkillUrl?: () => Promise<string | null>;
+  } = {},
 ): Promise<string> {
   const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
   // Fast path: curated cache hit — deterministic, zero LLM cost.
   if (KNOWN_DOMAINS[slug] !== undefined) return guessSignupUrl(service);
+  // A promoted skill's entry URL beats the model — it's verified by a real
+  // prior signup, not asserted. Consult it before spending an LLM call.
+  if (opts.lookupSkillUrl !== undefined) {
+    try {
+      const fromSkill = await opts.lookupSkillUrl();
+      if (fromSkill !== null) {
+        opts.log?.(`Resolved signup URL for "${service}" from a promoted skill: ${fromSkill}`);
+        return fromSkill;
+      }
+    } catch (err) {
+      opts.log?.(
+        `skill-URL lookup failed for "${service}" (${err instanceof Error ? err.message : String(err)}) — trying the model`,
+      );
+    }
+  }
   // No model available → preserve the old deterministic behavior exactly.
   if (llm === null || llm === undefined) return guessSignupUrl(service);
   try {
@@ -478,6 +500,10 @@ export function isGoogleSearchUrl(url: string): boolean {
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
+  // Looks up the entry URL of a promoted skill for this service (registry-
+  // backed). When no curated signupUrl is given, resolveSignupUrl consults
+  // this before the LLM. Injected so the bot stays registry-decoupled.
+  lookupSkillUrl?: ((service: string) => Promise<string | null>) | undefined;
   email: string;
   generatePassword: () => string;
   inbox?: AgentInbox | undefined;
@@ -3590,6 +3616,9 @@ export class SignupAgent {
         task.signupUrl ??
         (await resolveSignupUrl(task.service, this.llmPair.primary, {
           log: (m) => steps.push(m),
+          ...(task.lookupSkillUrl !== undefined
+            ? { lookupSkillUrl: () => task.lookupSkillUrl!(task.service) }
+            : {}),
         }));
       let signupUrl = guessed;
 

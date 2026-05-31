@@ -11,6 +11,8 @@ import {
   SkillRegistryClient,
   clientFromEnv,
   generateProvisionId,
+  makeSkillUrlLookup,
+  type SkillFetchOutcome,
 } from "../skill-registry-client.js";
 
 // ── Test fixtures ────────────────────────────────────────────────────
@@ -623,6 +625,40 @@ describe("clientFromEnv", () => {
       if (prev !== undefined) process.env.TRUSTY_SQUIRE_REGISTRY_URL = prev;
       else delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
     }
+  });
+});
+
+describe("makeSkillUrlLookup", () => {
+  function stubClient(outcome: SkillFetchOutcome): Pick<SkillRegistryClient, "fetchActiveSkill"> {
+    return { fetchActiveSkill: async () => outcome };
+  }
+
+  it("returns the active skill's signup_url when one is found", async () => {
+    const lookup = makeSkillUrlLookup(
+      stubClient({
+        kind: "found",
+        result: {
+          skill: makeSkill({ service: "xata", signup_url: "https://xata.io/app/signup" }),
+          signed_by: "test",
+          counters: { replays_succeeded: 1, replays_failed: 0, consecutive_failures: 0 },
+        },
+      }),
+      "prov_test",
+    );
+    expect(await lookup("xata")).toBe("https://xata.io/app/signup");
+  });
+
+  it("returns null when there's no active skill", async () => {
+    const lookup = makeSkillUrlLookup(stubClient({ kind: "not_found" }), "prov_test");
+    expect(await lookup("xata")).toBeNull();
+  });
+
+  it("returns null when the registry is unavailable (fail-open)", async () => {
+    const lookup = makeSkillUrlLookup(
+      stubClient({ kind: "unavailable", reason: "timeout" }),
+      "prov_test",
+    );
+    expect(await lookup("xata")).toBeNull();
   });
 });
 

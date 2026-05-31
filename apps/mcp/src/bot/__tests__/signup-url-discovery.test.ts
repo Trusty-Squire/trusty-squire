@@ -159,6 +159,44 @@ describe("resolveSignupUrl", () => {
     });
     expect(lines.some((l) => l.includes("xata.io/signup"))).toBe(true);
   });
+
+  it("prefers a promoted skill's URL over the model (registry beats LLM)", async () => {
+    const calls = { n: 0 };
+    const llm = stubLLM("https://wrong.example/signup", calls);
+    const url = await resolveSignupUrl("xata", llm, {
+      lookupSkillUrl: async () => "https://xata.io/app/signup",
+    });
+    expect(url).toBe("https://xata.io/app/signup");
+    expect(calls.n).toBe(0); // a verified skill URL never spends an LLM call
+  });
+
+  it("falls through to the model when the skill lookup returns null", async () => {
+    const url = await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
+      lookupSkillUrl: async () => null,
+    });
+    expect(url).toBe("https://xata.io/signup");
+  });
+
+  it("falls through to the model when the skill lookup throws", async () => {
+    const url = await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
+      lookupSkillUrl: async () => {
+        throw new Error("registry unavailable");
+      },
+    });
+    expect(url).toBe("https://xata.io/signup");
+  });
+
+  it("a KNOWN_DOMAINS hit skips the skill lookup entirely", async () => {
+    let looked = false;
+    const url = await resolveSignupUrl("Sentry", stubLLM("x"), {
+      lookupSkillUrl: async () => {
+        looked = true;
+        return "https://wrong.example";
+      },
+    });
+    expect(url).toBe("https://sentry.io/signup");
+    expect(looked).toBe(false); // cache hit wins before any lookup
+  });
 });
 
 describe("detectAntiBotBlock", () => {
