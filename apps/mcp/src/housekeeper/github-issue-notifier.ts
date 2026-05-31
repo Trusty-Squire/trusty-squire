@@ -1,7 +1,7 @@
 // GitHub Issue notifier — ported from tools/archived-harvester/run.mjs.
 //
 // Maintains one issue per service slug. On each NotifierEvent:
-//   - Finds an existing issue via `label:service:<slug>` AND `label:skill-harvester`.
+//   - Finds an existing issue via `label:service:<slug>` AND `label:housekeeper`.
 //   - Creates one if none exists.
 //   - Rewrites the issue body with the latest outcome summary.
 //   - Sets the issue's status:* label per outcome class.
@@ -114,7 +114,7 @@ export class GithubIssueNotifier implements Notifier {
         "--label",
         `service:${slug}`,
         "--label",
-        "skill-harvester",
+        "housekeeper",
         "--state",
         "all",
         "--limit",
@@ -137,7 +137,7 @@ export class GithubIssueNotifier implements Notifier {
     body: string,
     statusLabel: string,
   ): number {
-    this.ensureLabels(["skill-harvester", `service:${slug}`, statusLabel]);
+    this.ensureLabels(["housekeeper", `service:${slug}`, statusLabel]);
     const tmp = join(mkdtempSync(join(tmpdir(), "housekeeper-")), "body.md");
     writeFileSync(tmp, body);
     try {
@@ -149,7 +149,7 @@ export class GithubIssueNotifier implements Notifier {
         "--body-file",
         tmp,
         "--label",
-        `skill-harvester,service:${slug},${statusLabel}`,
+        `housekeeper,service:${slug},${statusLabel}`,
       ]) as string;
       const m = out.match(/\/issues\/(\d+)\s*$/);
       if (m === null) {
