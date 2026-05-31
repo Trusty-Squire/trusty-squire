@@ -5257,6 +5257,15 @@ ${formatInventory(input.inventory)}`,
     let stuckFiresAtUrl = 0;
     let lastStuckFireUrl: string | null = null;
     const triedFallbackUrls = new Set<string>();
+    // Dead-URL memory. The planner guesses credential-page URLs
+    // (e.g. /user/personal_access_tokens/new) that 404; without memory it
+    // re-guesses the same dead URL round after round — xata and fly each
+    // burned all their post-verify rounds this way. Record any URL that
+    // lands on a 404 and refuse to re-navigate to it, forcing a click-based
+    // re-plan instead. (Separate from triedFallbackUrls, which is the bot's
+    // OWN escalation guesses; this tracks the PLANNER's dead navigates.)
+    const deadUrls = new Set<string>();
+    let lastNavigatedTo: string | null = null;
     // 0.8.3-rc.1 — per-URL set of wizard-forward escalations attempted.
     // Used so we only force-click the visible Next/Submit once per page
     // state; if it didn't unstick, fall through to URL fallbacks.
@@ -5549,6 +5558,32 @@ ${formatInventory(input.inventory)}`,
         })();
       }
 
+      // Dead-URL memory. If the previous step navigated somewhere and we
+      // landed on a 404, remember the target so we never go back.
+      if (lastNavigatedTo !== null) {
+        const t404 = (state.title ?? "").toLowerCase();
+        if (t404.includes("404") || t404.includes("not found")) {
+          deadUrls.add(lastNavigatedTo);
+          args.steps.push(
+            `Post-verify: navigate to ${lastNavigatedTo} hit a 404 — added to the do-not-revisit list (${deadUrls.size} dead URL(s)).`,
+          );
+        }
+        lastNavigatedTo = null;
+      }
+      // Refuse to re-navigate to a URL already known to 404 — force a
+      // click-based re-plan instead of letting the planner re-guess it.
+      if (nextStep.kind === "navigate" && deadUrls.has(nextStep.url)) {
+        args.steps.push(
+          `Post-verify: planner re-picked a known-dead URL (${nextStep.url}) — re-planning.`,
+        );
+        hint =
+          `The URL ${nextStep.url} returns a 404 — do NOT navigate there again. ` +
+          `Dead URLs (404, avoid all): ${[...deadUrls].join(", ")}. ` +
+          `Reach the credentials/API-keys page by CLICKING a link in the current ` +
+          `inventory (e.g. "API Keys", "Tokens", "Settings"), not by guessing a URL.`;
+        continue;
+      }
+
       // rc.39 — navigate-loop detector. Perplexity/Koyeb/Porter spun
       // 5+ rounds of `navigate` because each navigate landed back at
       // the same URL — the service redirected past the requested URL.
@@ -5589,6 +5624,9 @@ ${formatInventory(input.inventory)}`,
       }
       if (nextStep.kind === "navigate") {
         prevNavigateFromUrl = state.url;
+        // Remember where we're going so the next round can blocklist it
+        // if it 404s.
+        lastNavigatedTo = nextStep.url;
       } else {
         prevNavigateFromUrl = null;
       }

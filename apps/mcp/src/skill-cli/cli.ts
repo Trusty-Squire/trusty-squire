@@ -2,7 +2,7 @@
 // Tier-2 Learned Skill registry.
 //
 // Subcommands:
-//   list     [--service=X] [--status=S] [--limit=N] [--json]
+//   list     [--service=X] [--status=S] [--limit=N] [--json] [--health]
 //   show     <skill_id> [--json]
 //   replays  <skill_id> [--limit=N] [--json]
 //   captures <skill_id> [--json]
@@ -222,7 +222,7 @@ async function cmdList(
   out: (line: string) => void,
 ): Promise<number> {
   const parsed = parseFlags(argv);
-  rejectUnknownFlags(parsed, new Set(["service", "status", "limit", "json"]));
+  rejectUnknownFlags(parsed, new Set(["service", "status", "limit", "json", "health"]));
 
   const qs = new URLSearchParams();
   if (parsed.flags.service !== undefined) qs.set("service", parsed.flags.service);
@@ -235,6 +235,15 @@ async function cmdList(
   if (parsed.booleans.has("json")) {
     out(JSON.stringify(data, null, 2));
     return ExitCode.OK;
+  }
+
+  // --health: the closed-loop's north-star view. First-time signup rate
+  // is the wrong metric to chase (it's dragged by services the bot can
+  // never complete unattended); what the architecture actually optimises
+  // is "distinct services that have succeeded once" (= a promoted skill)
+  // and the replay success rate on those. Surface exactly that.
+  if (parsed.booleans.has("health")) {
+    return renderHealth(data, out);
   }
 
   if (data.skills.length === 0) {
@@ -277,6 +286,46 @@ async function cmdList(
         r.created,
       ].join("  "),
     );
+  }
+  return ExitCode.OK;
+}
+
+// Aggregate health view — the metric that should actually climb as the
+// closed loop matures, in place of aggregate first-time signup rate.
+function renderHealth(data: ListResponse, out: (line: string) => void): number {
+  const skills = data.skills;
+  if (skills.length === 0) {
+    out("(no skills — 0 services have succeeded once yet)");
+    return ExitCode.OK;
+  }
+  const distinctServices = new Set(skills.map((s) => s.service)).size;
+  const active = skills.filter((s) => s.status === "active").length;
+  const demoted = skills.filter((s) => s.status === "demoted").length;
+  const totalSucc = skills.reduce((n, s) => n + s.replays_succeeded, 0);
+  const totalFail = skills.reduce((n, s) => n + s.replays_failed, 0);
+  const total = totalSucc + totalFail;
+  const rate = total > 0 ? `${Math.round((100 * totalSucc) / total)}%` : "—";
+
+  out(`Skill health`);
+  out(`  services succeeded once (have a skill): ${distinctServices}`);
+  out(`  skills: ${skills.length}  (active ${active}, demoted ${demoted}, other ${skills.length - active - demoted})`);
+  out(`  replay success: ${totalSucc}/${total} (${rate})`);
+
+  // Skills that have failed at least one replay, worst failure rate first —
+  // the re-promotion / re-capture worklist before auto-demotion bites.
+  const attention = skills
+    .filter((s) => s.replays_failed > 0)
+    .map((s) => {
+      const t = s.replays_succeeded + s.replays_failed;
+      return { s, t, failRate: t > 0 ? s.replays_failed / t : 1 };
+    })
+    .sort((a, b) => b.failRate - a.failRate || b.s.replays_failed - a.s.replays_failed);
+  if (attention.length > 0) {
+    out("");
+    out("Needs attention (by replay failure rate):");
+    for (const { s, t, failRate } of attention) {
+      out(`  ${s.service}  ${s.replays_succeeded}/${t} ok (${Math.round((1 - failRate) * 100)}%)  [${s.status}]  ${s.skill_id}`);
+    }
   }
   return ExitCode.OK;
 }
@@ -1171,7 +1220,8 @@ Subcommands:
               Lands as pending-review (verifier-worker gated) by default;
               --skip-verifier publishes directly as active (operator vouching).
 
-  list        [--service=X] [--status=S] [--limit=N] [--json]
+  list        [--service=X] [--status=S] [--limit=N] [--json] [--health]
+              --health: aggregate view — services succeeded once + replay success rate
               List skills with optional filters.
 
   show        <skill_id> [--json]
