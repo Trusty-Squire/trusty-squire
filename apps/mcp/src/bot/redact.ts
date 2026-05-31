@@ -3,13 +3,13 @@
 // SignupResult or uploads to the registry.
 //
 // Background: 2026-05-26 — a Supabase + PlanetScale signup attempt
-// dumped the actual extracted API tokens into the harvester's
+// dumped the actual extracted API tokens into the housekeeper's
 // GitHub issue comment via the planner's `reason` field, which the
 // step trail printed verbatim. Same bug also leaked a Neon token
-// to issue #35. The harvester now redacts at the public-surface
+// to issue #35. The housekeeper now redacts at the public-surface
 // boundary; this module is the bot-side equivalent so step trails
 // are clean BEFORE they ever leave SignupAgent.signup() — covers
-// the registry-upload + roundUploader paths the harvester doesn't
+// the registry-upload + roundUploader paths the housekeeper doesn't
 // sit in front of.
 //
 // Conservative: only strips substrings matching service-specific

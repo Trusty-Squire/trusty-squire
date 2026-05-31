@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   RegistryVerifierQueue,
-  RegistryDiscoveryQueue,
+  RegistryDiscoverQueue,
   YamlSeedQueue,
   AdHocServiceQueue,
   lookupServiceInYaml,
@@ -48,7 +48,7 @@ describe("RegistryVerifierQueue", () => {
   });
 });
 
-describe("RegistryDiscoveryQueue", () => {
+describe("RegistryDiscoverQueue", () => {
   it("returns 'discover' tasks with meta from candidates", async () => {
     const candidates = [
       {
@@ -58,7 +58,7 @@ describe("RegistryDiscoveryQueue", () => {
         most_recent_at: "2026-05-26T00:00:00Z",
       },
     ];
-    const queue = new RegistryDiscoveryQueue(
+    const queue = new RegistryDiscoverQueue(
       stubClient({ discoveryItems: candidates }) as never,
     );
     const tasks = await queue.fetch(10);
@@ -82,7 +82,7 @@ describe("RegistryDiscoveryQueue", () => {
         return [];
       },
     };
-    const queue = new RegistryDiscoveryQueue(client as never, {
+    const queue = new RegistryDiscoverQueue(client as never, {
       sinceDays: 7,
       minDistinct: 5,
     });

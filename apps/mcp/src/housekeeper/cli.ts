@@ -26,7 +26,7 @@
 
 // pickLLMClient was used for an eager startup preflight that the
 // verifier path didn't actually need. 0.8.3 removed the preflight;
-// discover's LLM init now happens lazily inside runDiscoveryBot.
+// discover's LLM init now happens lazily inside runDiscover.
 import { VerifierRegistryClient } from "./registry-client.js";
 import {
   runOneBatch,
@@ -37,7 +37,7 @@ import {
 import { createReplayRunner } from "./modes/verify.js";
 import {
   RegistryVerifierQueue,
-  RegistryDiscoveryQueue,
+  RegistryDiscoverQueue,
   YamlSeedQueue,
   AdHocServiceQueue,
   lookupServiceInYaml,
@@ -250,7 +250,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     queue = new RegistryVerifierQueue(client);
   } else if (args.seedPath === undefined || args.seedPath.length === 0) {
     // --mode=discover, no --from → telemetry candidates.
-    queue = new RegistryDiscoveryQueue(client);
+    queue = new RegistryDiscoverQueue(client);
   } else {
     // --mode=discover --from=PATH → curated YAML (former harvest).
     queue = new YamlSeedQueue({ path: args.seedPath });
@@ -266,7 +266,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // doesn't pull in the bot session machinery.
   let discover: HousekeeperOpts["discover"];
   if (queue.name !== "verifier") {
-    const { runDiscoveryBot } = await import("./modes/discover.js");
+    const { runDiscover } = await import("./modes/discover.js");
     // The lambda has to mirror DiscoveryBotRunner's full shape — the
     // previous version dropped signupUrl on the floor (rc.3 plumbed
     // the YAML field through the task queue, but the cli's discover
@@ -275,7 +275,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       service: string;
       oauthProvider?: "google" | "github";
       signupUrl?: string;
-    }) => runDiscoveryBot(input);
+    }) => runDiscover(input);
   }
 
   const opts: HousekeeperOpts = {

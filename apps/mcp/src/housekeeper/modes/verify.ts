@@ -57,7 +57,7 @@ export type ReplayResult =
 // which we don't wire here), so the preflight was forcing every
 // verifier-only run to require a machine token / OPENROUTER_API_KEY /
 // ANTHROPIC_API_KEY for no actual reason. The discover path still
-// calls pickLLMClient indirectly via runDiscoveryBot — that's where a
+// calls pickLLMClient indirectly via runDiscover — that's where a
 // missing LLM should fail loud.
 export function createReplayRunner(): ReplayRunner {
   return async (input: {

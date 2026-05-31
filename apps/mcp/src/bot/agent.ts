@@ -230,7 +230,7 @@ const STUCK_LOOP_FALLBACK_PATHS: readonly string[] = [
 // shows only the NAMES of existing keys (the values were revealed
 // once at create-time and aren't recoverable). Without this
 // classifier those runs fall through to a generic
-// oauth_onboarding_failed and the harvester treats them like a
+// oauth_onboarding_failed and the housekeeper treats them like a
 // repairable bug.
 //
 // Conservative rules: must be on a URL that names an API-key page
@@ -4024,7 +4024,7 @@ export class SignupAgent {
           if (matchNum !== null) {
             // rc.26 — surface in real-time via stderr as well as the
             // step trail. The step trail only renders after the run
-            // ends; stderr lands in the harvester output immediately,
+            // ends; stderr lands in the housekeeper output immediately,
             // inside the 2-minute window the user has to react.
             console.error(
               `[universal-bot] GOOGLE NUMBER-MATCH: tap "${matchNum}" on your phone — 2 minute window`,
@@ -4640,7 +4640,7 @@ export class SignupAgent {
     // that never clears for our Chromium fingerprint; the planner's
     // done reason / wait reasons name the vendor explicitly. Classify
     // as anti_bot_blocked so the operator sees an accurate status
-    // (and the harvester routes it the same way as the form-fill-
+    // (and the housekeeper routes it the same way as the form-fill-
     // phase anti-bot detector does).
     const ANTI_BOT_REASON =
       /\b(?:cloudflare\b.*?(?:verification|challenge|check)|just\s+a\s+moment|verifying\s+you\s+are\s+human|0\s+interactive\s+elements)/i;
@@ -4681,7 +4681,7 @@ export class SignupAgent {
     // (detectExistingAccountNoExtract) classifies a run that lands on
     // an authenticated dashboard whose API-keys page surfaces only
     // masked existing keys + no path to a fresh value. Surfacing this
-    // distinctly so the harvester can flag it (e.g. periodically wipe
+    // distinctly so the housekeeper can flag it (e.g. periodically wipe
     // the chrome profile for the test identity) rather than treat it
     // as a real bot failure.
     if (
@@ -5509,7 +5509,7 @@ ${formatInventory(input.inventory)}`,
       // rc.22 — redact tokens before pushing to the step trail.
       // The planner's reason field sometimes quotes the actual API
       // value it just observed ("The full API token 'sbp_xxx' is
-      // visible…"); the harvester then posts step trails to a public
+      // visible…"); the housekeeper then posts step trails to a public
       // GitHub issue, leaking the credential. Redactor patterns mirror
       // tools/archived-harvester/redact.mjs — defense in depth.
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${redactCredentials(nextStep.reason)}`);

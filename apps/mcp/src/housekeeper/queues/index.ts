@@ -2,7 +2,7 @@
 //
 //   - RegistryVerifierQueue   — pending-review + freshness-due skills
 //                               (autonomous closed-loop validation)
-//   - RegistryDiscoveryQueue  — services with ≥3 distinct user failures,
+//   - RegistryDiscoverQueue  — services with ≥3 distinct user failures,
 //                               no skill yet (autonomous discovery)
 //   - YamlSeedQueue           — curated services.yaml list, with
 //                               `status: skip` annotations honored
@@ -81,7 +81,7 @@ export class RegistryVerifierQueue implements QueueProvider {
   }
 }
 
-export class RegistryDiscoveryQueue implements QueueProvider {
+export class RegistryDiscoverQueue implements QueueProvider {
   readonly name = "discovery";
   constructor(
     private readonly client: VerifierRegistryClient,
@@ -105,7 +105,7 @@ export class RegistryDiscoveryQueue implements QueueProvider {
   }
 }
 
-// ── YAML seed provider (the harvester's curated path) ─────────────
+// ── YAML seed provider (the curated services.yaml path) ─────────────
 
 interface YamlServiceEntry {
   slug: string;
@@ -118,7 +118,7 @@ interface YamlServiceEntry {
 
 interface YamlSeedFile {
   // Tolerate both `services: [...]` and a top-level list, matching
-  // the harvester's existing format.
+  // the legacy services.yaml format carried over from the harvester.
   services?: YamlServiceEntry[];
 }
 

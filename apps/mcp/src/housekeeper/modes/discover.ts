@@ -73,7 +73,7 @@ function flushStepTrail(steps: readonly string[], service: string): void {
   }
 }
 
-export async function runDiscoveryBot(
+export async function runDiscover(
   input: {
     service: string;
     oauthProvider?: "google" | "github";

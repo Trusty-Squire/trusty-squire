@@ -43,7 +43,7 @@ describe("sendTelegramHeightenedAuth", () => {
   beforeEach(() => {
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    // Pin chat-id via env so the test doesn't read the harvester's
+    // Pin chat-id via env so the test doesn't read the housekeeper's
     // real ~/.trusty-squire/telegram-chat-id.txt cache file. Each
     // test can still override.
     process.env.TELEGRAM_CHAT_ID = "999";
@@ -95,7 +95,7 @@ describe("sendTelegramHeightenedAuth", () => {
     });
     // Either cache hit (POST sendMessage with mocked ok=true → true)
     // OR no cache + empty getUpdates → false. Tolerate both so the
-    // test runs cleanly on machines with and without the harvester
+    // test runs cleanly on machines with and without the housekeeper
     // cache file.
     expect(typeof ok).toBe("boolean");
   });
