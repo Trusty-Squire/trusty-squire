@@ -341,6 +341,37 @@ jobs:
             sleep 10
           done
 
+      # ---- Publish to the official MCP registry (github.com/mcp) -----------
+      # github.com/mcp mirrors registry.modelcontextprotocol.io. We keep
+      # io.github.Trusty-Squire/mcp current there by republishing on every npm
+      # release, so the catalog never drifts (it was stuck at 0.7.1 while npm
+      # was 0.8.x). Auth is GitHub Actions OIDC (the `id-token: write`
+      # permission above) — the registry verifies the token's repo owner
+      # (Trusty-Squire) against the io.github.Trusty-Squire namespace, so no
+      # stored secret. server.json is synced to the just-published npm version
+      # first (the registry rejects a server.json npm version npm doesn't
+      # serve — hence this runs only after the live-on-registry check passes).
+      # Non-fatal: a registry hiccup must not fail an otherwise-good npm release.
+      - name: Publish to MCP registry (github.com/mcp)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          V="${{ needs.verify.outputs.version }}"
+          cd apps/mcp
+          node -e '
+            const fs=require("fs"); const v=process.argv[1];
+            const s=JSON.parse(fs.readFileSync("server.json","utf8"));
+            s.version=v;
+            for (const p of (s.packages||[])) if (p.identifier==="@trusty-squire/mcp") p.version=v;
+            fs.writeFileSync("server.json", JSON.stringify(s,null,2)+"\n");
+          ' "$V"
+          echo "server.json synced to $V; downloading mcp-publisher ..."
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
+          echo "✓ Published $V to the MCP registry."
+
       - name: Verify tarball contents (case "connect" sentinel)
         run: |
           set -euo pipefail
