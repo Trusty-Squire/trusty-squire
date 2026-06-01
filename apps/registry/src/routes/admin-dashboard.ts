@@ -305,6 +305,7 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
 function renderDenied(email: string, domain: string): string {
   return [
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\" />",
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
     "<title>Access denied</title>",
     "<style>body{font:450 14px/1.55 system-ui,sans-serif;background:#08080A;color:#F4F4F6;max-width:560px;margin:80px auto;padding:0 16px}a{color:#8B89FF}code{font-family:ui-monospace,monospace;color:#9A9AA4}</style>",
     "</head><body>",
@@ -384,8 +385,9 @@ function renderDashboard(args: {
     "<html lang=\"en\">",
     "<head>",
     "  <meta charset=\"utf-8\" />",
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
     "  <title>Trusty Squire — Registry Admin</title>",
-    `  <style>${css}${RECENT_FAILURES_CSS}${FUNNEL_CSS}</style>`,
+    `  <style>${css}${RECENT_FAILURES_CSS}${FUNNEL_CSS}${MOBILE_CSS}</style>`,
     "</head>",
     "<body>",
     `  <h1>Registry Admin</h1>`,
@@ -429,6 +431,33 @@ const FUNNEL_CSS = `
   .fbar { height: 100%; background: var(--accent); }
   .fbar.funavail { background: var(--raised); }
   .fval { width: 96px; text-align: right; }
+`;
+
+// Responsive layer for phone-width viewports. Paired with the
+// width=device-width viewport meta (without which phones render the
+// fixed 1080px layout zoomed out). Wide data tables become individually
+// horizontal-scrollable rather than widening the whole page; stat
+// strips + funnel columns tighten.
+const MOBILE_CSS = `
+  @media (max-width: 640px) {
+    body { margin: 16px auto; padding: 0 12px; }
+    h1 { font-size: 22px; }
+    section { margin: 20px 0; }
+    section h2 { font-size: 17px; }
+    .northstar { padding: 14px; }
+    .stats { gap: 16px 24px; }
+    .stat .v { font-size: 22px; }
+    .legend { gap: 12px 16px; }
+    nav a { font-size: 11px; padding: 3px 8px; }
+    /* Each wide table scrolls horizontally inside itself instead of
+       forcing the page wider than the viewport. */
+    table { display: block; max-width: 100%; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+    .ruled { overflow-x: auto; }
+    /* Keep the funnel bar visible by shrinking the fixed columns. */
+    .frow { gap: 8px; }
+    .flabel { width: 96px; font-size: 12px; }
+    .fval { width: 64px; }
+  }
 `;
 
 // Panel 1 — acquisition funnel: new-in-window counts, top to bottom.
