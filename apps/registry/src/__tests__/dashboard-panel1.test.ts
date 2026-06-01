@@ -110,3 +110,13 @@ describe("ProvisionEvent distinct-account stage methods", () => {
     expect(await store.succeededAccounts(30 * DAY)).toBe(2);
   });
 });
+
+describe("dashboard — mobile friendly", () => {
+  it("emits the viewport meta + a responsive media query", async () => {
+    const { build: b } = build(apiUp);
+    const res = await getAdmin(await b());
+    expect(res.body).toContain('name="viewport"');
+    expect(res.body).toContain("width=device-width");
+    expect(res.body).toContain("@media (max-width: 640px)");
+  });
+});
