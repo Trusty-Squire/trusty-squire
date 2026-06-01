@@ -287,15 +287,28 @@ model ExtractFailureSnapshot {
 // FAILURES — the score needs to weigh recent successes against recent
 // failures, with time decay so a service that used to fail but
 // recently succeeded recovers.
-model ProvisionAttempt {
+// ProvisionEvent — one row per provision request across ALL dispatch
+// paths (replay-served, replay-fell-back, no-skill-bot). Renamed from
+// ProvisionAttempt (bot-only) when the model widened; see
+// docs/DESIGN-provision-event-dashboard.md. `status` is preserved so
+// the compat-score derivation stays untouched.
+model ProvisionEvent {
   id           String   @id @default(cuid())
   // Canonical service slug (registry style: anthropic-api, together-ai).
   // The bot's poster MUST normalize harvester-style slugs (anthropic,
   // together) before insert.
   service      String
   // "success" | "failed". Score derivation is sign-only; no partial-
-  // success tracking for v1.
+  // success tracking for v1. Retained from ProvisionAttempt — derivable
+  // from final_outcome but kept as the canonical compat-score input.
   status       String
+  // Dispatch model (strategy + outcome subfields, per design Decision 10).
+  // Nullable: old MCP clients (pre-event) post none, and the sink
+  // blind-defaults them to bot (Decision 12).
+  initial_strategy String? // "replay" | "bot" — what the router tried first
+  final_strategy   String? // "replay" | "bot" — what actually served it
+  replay_outcome   String? // "ok" | "miss" | "na" — why replay did/didn't serve
+  final_outcome    String? // "ok" | "failed" | "blocked"
   // Optional failure classification — same vocabulary as
   // UniversalBotFailureRecord.error_kind. Populated when status="failed".
   failure_kind String?
@@ -321,14 +334,26 @@ model ProvisionAttempt {
   // and therefore upload no round-snapshots. Capped to ~32KB by the
   // store layer; a much larger trail truncates with a marker.
   step_trail   String?
-  // Whose account ran this attempt. Used by the score derivation in
+  // Cost telemetry (per design Decision 3). Nullable = not measured;
+  // replay rows carry 0 (known-zero, replay is LLM/captcha-free except
+  // the fallback planner). asn_class and is_first_for_account were
+  // dropped from v1 (no clean source / funnel concern).
+  llm_cost     Float?
+  captcha_cost Float?
+  duration_ms  Int?
+  // Whose account ran this event. Used by the score derivation in
   // case we want per-account scoring later (today: global score).
   account_id   String
   mcp_version  String
   occurred_at  DateTime @default(now())
 
-  // Hot paths: list-by-service (score derivation) and list-recent
-  // (admin dashboard).
+  // Idempotency (Decision 11): a retried fire-and-forget emit upserts
+  // on provision_id rather than double-counting. NULL provision_ids
+  // (legacy/no-id posts) are treated as distinct by Postgres, so they
+  // never collide.
+  @@unique([provision_id])
+  // Hot paths: list-by-service (score derivation + demand) and
+  // list-recent (admin dashboard).
   @@index([service, occurred_at(sort: Desc)])
   @@index([occurred_at(sort: Desc)])
 }

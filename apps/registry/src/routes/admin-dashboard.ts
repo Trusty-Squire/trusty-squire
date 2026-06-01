@@ -23,9 +23,11 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 import type { SkillStore } from "../skill-store.js";
 import type { BotFailureStore } from "../bot-failure-store.js";
 import type {
-  ProvisionAttemptRecord,
-  ProvisionAttemptStore,
-} from "../provision-attempt-store.js";
+  CacheHitBreakdown,
+  DemandRow,
+  ProvisionEventRecord,
+  ProvisionEventStore,
+} from "../provision-event-store.js";
 import type {
   ExtractFailureStore,
   ExtractFailureSummary,
@@ -38,7 +40,7 @@ export interface AdminDashboardDeps {
   // T45 — additional stores feeding the "Recent failed attempts"
   // section. Optional so test bootstraps that don't exercise this
   // path can omit them.
-  provisionAttemptStore?: ProvisionAttemptStore;
+  provisionEventStore?: ProvisionEventStore;
   extractFailureStore?: ExtractFailureStore;
   adminBearer?: string;
 }
@@ -94,9 +96,9 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
     // screenshots each) only when both stores are wired. Older
     // bootstraps that don't pass these get the original 5-section
     // dashboard verbatim.
-    const recentFailures: ProvisionAttemptRecord[] =
-      opts.provisionAttemptStore !== undefined
-        ? await opts.provisionAttemptStore.listRecentFailures(20)
+    const recentFailures: ProvisionEventRecord[] =
+      opts.provisionEventStore !== undefined
+        ? await opts.provisionEventStore.listRecentFailures(20)
         : [];
     const failureArtifacts = new Map<string, ExtractFailureSummary[]>();
     if (
@@ -113,6 +115,19 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       }
     }
 
+    // Panel 2 — cache-hit + demand over a 30-day window. Both null/empty
+    // when the event store isn't wired (older bootstraps).
+    const WINDOW_MS = 30 * 86_400_000;
+    const cacheHit =
+      opts.provisionEventStore !== undefined
+        ? await opts.provisionEventStore.cacheHitBreakdown(WINDOW_MS)
+        : null;
+    const demandRows =
+      opts.provisionEventStore !== undefined
+        ? await opts.provisionEventStore.demandByService(WINDOW_MS, 12)
+        : [];
+    const activeServiceSet = new Set(activeSkills.map((s) => s.service));
+
     const html = renderDashboard({
       activeSkills,
       demotedSkills,
@@ -120,6 +135,9 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       discoveryCandidates,
       recentFailures,
       failureArtifacts,
+      cacheHit,
+      demandRows,
+      activeServiceSet,
     });
     reply.code(200).type("text/html; charset=utf-8").send(html);
   });
@@ -130,29 +148,64 @@ function renderDashboard(args: {
   demotedSkills: Awaited<ReturnType<SkillStore["listSkills"]>>;
   verifierQueue: Awaited<ReturnType<SkillStore["listVerifierQueue"]>>;
   discoveryCandidates: Awaited<ReturnType<NonNullable<BotFailureStore>["listDiscoveryCandidates"]>>;
-  recentFailures: ProvisionAttemptRecord[];
+  recentFailures: ProvisionEventRecord[];
   failureArtifacts: Map<string, ExtractFailureSummary[]>;
+  cacheHit: CacheHitBreakdown | null;
+  demandRows: DemandRow[];
+  activeServiceSet: Set<string>;
 }): string {
+  // Tokens from DESIGN.md (the operator dashboard now follows the
+  // product design system: Linear-leaning dark, mono-forward).
   const css = `
-    body { font: 14px/1.45 -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #1d1d1f; }
-    h1 { font-size: 22px; margin-bottom: 8px; }
-    nav { margin: 16px 0 24px; }
-    nav a { display: inline-block; margin-right: 12px; padding: 4px 10px; border: 1px solid #d2d2d7; border-radius: 6px; text-decoration: none; color: #1d1d1f; font-size: 13px; }
-    nav a:hover { background: #f5f5f7; }
-    section { margin: 28px 0; padding: 16px; background: #fafafc; border: 1px solid #e5e5ea; border-radius: 8px; }
-    section h2 { margin: 0 0 6px; font-size: 16px; }
-    section .desc { color: #6e6e73; font-size: 13px; margin-bottom: 12px; }
+    :root {
+      --bg:#08080A; --surface:#0E0E11; --raised:#15151A;
+      --line:rgba(255,255,255,.06); --line2:rgba(255,255,255,.12);
+      --fg:#F4F4F6; --muted:#9A9AA4; --faint:#5A5A63;
+      --accent:#8B89FF; --ok:#54D88B; --err:#FF6B6B; --warn:#E0B15A;
+      --mono:ui-monospace,"JetBrains Mono","SF Mono",Menlo,monospace;
+    }
+    body { font: 450 14px/1.55 "Geist",ui-sans-serif,system-ui,sans-serif; max-width: 1080px; margin: 32px auto; padding: 0 16px; color: var(--fg); background: var(--bg); letter-spacing: -0.006em; -webkit-font-smoothing: antialiased; }
+    h1 { font-size: 28px; letter-spacing: -0.025em; font-weight: 600; margin-bottom: 4px; }
+    .pagesub { color: var(--faint); font-size: 12px; font-family: var(--mono); letter-spacing: .02em; margin-bottom: 28px; }
+    .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    nav { margin: 16px 0 28px; display: flex; gap: 8px; flex-wrap: wrap; }
+    nav a { font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; text-decoration: none; color: var(--muted); }
+    nav a:hover { border-color: var(--line2); color: var(--fg); }
+    section { margin: 28px 0; }
+    section h2 { margin: 0 0 4px; font-size: 20px; font-weight: 550; letter-spacing: -0.02em; }
+    section .desc { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .ruled { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #e5e5ea; vertical-align: top; }
-    th { font-weight: 600; color: #6e6e73; }
-    .num { text-align: right; font-variant-numeric: tabular-nums; }
-    .status-active { color: #1f7a3d; font-weight: 600; }
-    .status-pending-review { color: #b45f06; font-weight: 600; }
-    .status-demoted { color: #b3261e; font-weight: 600; }
-    .status-superseded { color: #6e6e73; }
-    .empty { color: #6e6e73; font-style: italic; padding: 16px 10px; }
-    code { font-family: ui-monospace, monospace; font-size: 12px; background: #f0f0f3; padding: 1px 4px; border-radius: 3px; }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    th { font-weight: 500; color: var(--faint); font-size: 12px; text-transform: lowercase; letter-spacing: .02em; }
+    tr:hover td { background: var(--surface); }
+    .num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .status-active { color: var(--ok); font-weight: 600; }
+    .status-pending-review { color: var(--warn); font-weight: 600; }
+    .status-demoted { color: var(--err); font-weight: 600; }
+    .status-superseded { color: var(--faint); }
+    .empty { color: var(--faint); font-style: italic; padding: 16px 12px; }
+    code { font-family: var(--mono); font-size: 12px; background: var(--raised); padding: 1px 4px; border-radius: 3px; color: var(--muted); }
+    .northstar { border: 1px solid var(--line); border-radius: 10px; padding: 20px; background: var(--surface); }
+    .stats { display: flex; gap: 48px; margin-bottom: 20px; flex-wrap: wrap; }
+    .stat .k { font-size: 12px; color: var(--faint); }
+    .stat .v { font-size: 28px; letter-spacing: -0.02em; font-family: var(--mono); }
+    .bar-label { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    .bar { display: flex; height: 14px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); }
+    .bar .s-replay { background: var(--accent); }
+    .bar .s-fell { background: var(--muted); }
+    .bar .s-bot { background: var(--raised); }
+    .legend { display: flex; gap: 24px; margin-top: 12px; font-size: 12px; flex-wrap: wrap; color: var(--muted); }
+    .legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+    .legend .l-replay { background: var(--accent); } .legend .l-fell { background: var(--muted); } .legend .l-bot { background: var(--raised); border: 1px solid var(--line2); }
+    .lowN { color: var(--warn); font-family: var(--mono); font-size: 12px; margin-top: 10px; }
+    .svc { display: flex; align-items: center; gap: 12px; }
+    .tile { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); color: var(--muted); font-size: 13px; background: var(--surface); }
+    .slug { font-family: var(--mono); }
+    .dot-ok { display: inline-block; width: 7px; height: 7px; border-radius: 999px; background: var(--ok); margin-right: 6px; vertical-align: middle; }
+    .tag-harvest { font-family: var(--mono); font-size: 11px; color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: 999px; padding: 1px 8px; }
   `;
+  const cacheCount = args.cacheHit?.total ?? 0;
   return [
     "<!doctype html>",
     "<html lang=\"en\">",
@@ -162,8 +215,11 @@ function renderDashboard(args: {
     `  <style>${css}${RECENT_FAILURES_CSS}</style>`,
     "</head>",
     "<body>",
-    `  <h1>Trusty Squire — Registry Admin</h1>`,
+    `  <h1>Registry Admin</h1>`,
+    `  <div class="pagesub">trusty-squire-registry · operator view · read-only</div>`,
     `  <nav>`,
+    `    <a href="#cachehit">Cache hit</a>`,
+    `    <a href="#demand">Demand</a>`,
     `    <a href="#active">Active (${args.activeSkills.length})</a>`,
     `    <a href="#pending">Pending review (${args.verifierQueue.filter((s) => s.status === "pending-review").length})</a>`,
     `    <a href="#freshness">Freshness due (${args.verifierQueue.filter((s) => s.status === "active").length})</a>`,
@@ -171,6 +227,8 @@ function renderDashboard(args: {
     `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
     `    <a href="#failures">Recent failures (${args.recentFailures.length})</a>`,
     `  </nav>`,
+    renderCacheHitSection(args.cacheHit),
+    renderDemandSection(args.demandRows, args.activeServiceSet),
     renderActiveSection(args.activeSkills),
     renderPendingSection(args.verifierQueue),
     renderFreshnessSection(args.verifierQueue),
@@ -179,7 +237,96 @@ function renderDashboard(args: {
     renderRecentFailuresSection(args.recentFailures, args.failureArtifacts),
     "</body>",
     "</html>",
+    `<!-- cacheHit total=${cacheCount} -->`,
   ].join("\n");
+}
+
+// Minimum events in the window before cache-hit percentages are
+// trustworthy. Below this, the bar is rendered greyed with a caveat.
+const CACHE_HIT_MIN_SAMPLE = 50;
+
+function pct(n: number, total: number): string {
+  if (total === 0) return "0.0%";
+  return `${((100 * n) / total).toFixed(1)}%`;
+}
+
+function renderCacheHitSection(cacheHit: CacheHitBreakdown | null): string {
+  const desc =
+    "How often a provision is served from a learned-skill replay vs. the universal bot.";
+  if (cacheHit === null || cacheHit.total === 0) {
+    return section(
+      "cachehit",
+      "Cache hit",
+      desc,
+      `<div class="empty">No provisions recorded yet — the bar appears once events arrive.</div>`,
+    );
+  }
+  const { replay_served, fell_back, no_skill_bot, total } = cacheHit;
+  const lowN = total < CACHE_HIT_MIN_SAMPLE;
+  const dim = lowN ? ` style="opacity:.5"` : "";
+  const body = `<div class="northstar">
+      <div class="stats">
+        <div class="stat"><div class="k">provisions · 30d</div><div class="v">${total}</div></div>
+        <div class="stat"><div class="k">replay-served</div><div class="v" style="color:var(--accent)">${pct(replay_served, total)}</div></div>
+        <div class="stat"><div class="k">fell back to bot</div><div class="v">${pct(fell_back, total)}</div></div>
+        <div class="stat"><div class="k">no-skill bot</div><div class="v">${pct(no_skill_bot, total)}</div></div>
+      </div>
+      <div class="bar-label">Dispatch split <span class="mono" style="color:var(--faint)">· N=${total} · last 30d</span></div>
+      <div class="bar"${dim}>
+        <div class="s-replay" style="width:${(100 * replay_served) / total}%"></div>
+        <div class="s-fell" style="width:${(100 * fell_back) / total}%"></div>
+        <div class="s-bot" style="width:${(100 * no_skill_bot) / total}%"></div>
+      </div>
+      <div class="legend">
+        <span><span class="dot l-replay"></span>replay-served <span class="mono">${pct(replay_served, total)}</span></span>
+        <span><span class="dot l-fell"></span>fell back <span class="mono">${pct(fell_back, total)}</span></span>
+        <span><span class="dot l-bot"></span>no-skill bot <span class="mono">${pct(no_skill_bot, total)}</span></span>
+      </div>
+      ${lowN ? `<div class="lowN">low sample (N=${total}) — percentages are noisy until N ≥ ${CACHE_HIT_MIN_SAMPLE}</div>` : ""}
+    </div>`;
+  return section("cachehit", "Cache hit", desc, body);
+}
+
+function renderDemandSection(demandRows: DemandRow[], activeServiceSet: Set<string>): string {
+  const desc =
+    "Top services by total provision volume (30d). Amber = high demand, no active skill, not wall-blocked → harvest candidate.";
+  if (demandRows.length === 0) {
+    return section(
+      "demand",
+      "Demand distribution",
+      desc,
+      `<div class="empty">No provision volume recorded yet.</div>`,
+    );
+  }
+  const totalVolume = demandRows.reduce((acc, d) => acc + d.volume, 0);
+  const rows = demandRows
+    .map((d) => {
+      const hasSkill = activeServiceSet.has(d.service);
+      const wallRatio = d.failed > 0 ? d.wall_failed / d.failed : 0;
+      const harvest = !hasSkill && wallRatio <= 0.5 && d.volume > 0;
+      const tile = `<span class="tile">${esc((d.service[0] ?? "?").toUpperCase())}</span>`;
+      const skillCell = hasSkill
+        ? `<span class="dot-ok"></span><span class="mono" style="color:var(--faint)">active</span>`
+        : harvest
+          ? `<span class="tag-harvest">harvest candidate</span>`
+          : `<span class="mono" style="color:var(--faint)">—</span>`;
+      return `<tr>
+        <td><div class="svc">${tile}<span class="slug">${esc(d.service)}</span></div></td>
+        <td class="num">${d.volume}</td>
+        <td class="num">${totalVolume > 0 ? pct(d.volume, totalVolume) : "—"}</td>
+        <td>${skillCell}</td>
+      </tr>`;
+    })
+    .join("");
+  return section(
+    "demand",
+    "Demand distribution",
+    desc,
+    `<div class="ruled"><table>
+      <thead><tr><th>service</th><th class="num">provisions</th><th class="num">share</th><th>skill</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`,
+  );
 }
 
 function renderActiveSection(
@@ -363,7 +510,7 @@ const RECENT_FAILURES_CSS = `
 `;
 
 function renderRecentFailuresSection(
-  failures: readonly ProvisionAttemptRecord[],
+  failures: readonly ProvisionEventRecord[],
   artifacts: ReadonlyMap<string, ExtractFailureSummary[]>,
 ): string {
   if (failures.length === 0) {

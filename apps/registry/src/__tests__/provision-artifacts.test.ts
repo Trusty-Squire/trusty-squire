@@ -9,9 +9,9 @@ import { generateKeyPairSync } from "node:crypto";
 import { buildServer } from "../server.js";
 import { InMemorySkillStore } from "../skill-store-memory.js";
 import {
-  InMemoryProvisionAttemptStore,
+  InMemoryProvisionEventStore,
   STEP_TRAIL_MAX_BYTES,
-} from "../provision-attempt-store.js";
+} from "../provision-event-store.js";
 import { InMemoryExtractFailureStore } from "../extract-failure-store.js";
 import { ManifestSigner } from "../signer.js";
 
@@ -21,7 +21,7 @@ function build() {
   const { privateKey } = generateKeyPairSync("ed25519");
   const signer = ManifestSigner.fromKeyObject(privateKey, "test-signer");
   const skillStore = new InMemorySkillStore();
-  const attemptStore = new InMemoryProvisionAttemptStore();
+  const attemptStore = new InMemoryProvisionEventStore();
   const extractFailureStore = new InMemoryExtractFailureStore();
   return {
     skillStore,
@@ -31,7 +31,7 @@ function build() {
       buildServer({
         skillStore,
         signer,
-        provisionAttemptStore: attemptStore,
+        provisionEventStore: attemptStore,
         extractFailureStore,
         adminBearer: ADMIN_BEARER,
       }),
@@ -286,5 +286,44 @@ describe("admin dashboard — Recent failures section", () => {
       url: `/admin?bearer=${ADMIN_BEARER}`,
     });
     expect(res.body).toContain("No screenshot snapshots tagged with this attempt");
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// ProvisionEvent — idempotency (Decision 11): upsert on provision_id
+// ──────────────────────────────────────────────────────────────
+
+describe("ProvisionEvent — provision_id idempotency", () => {
+  it("upserts on a repeated provision_id (same id, payload overwritten)", async () => {
+    const { attemptStore } = build();
+    const first = await attemptStore.record({
+      service: "railway",
+      status: "failed",
+      failure_kind: "captcha_blocked",
+      provision_id: "prov_dup_1",
+      account_id: "x",
+      mcp_version: "0.9.0",
+    });
+    const second = await attemptStore.record({
+      service: "railway",
+      status: "success", // a retry that resolved differently
+      provision_id: "prov_dup_1",
+      account_id: "x",
+      mcp_version: "0.9.0",
+    });
+    // Same row id — no double count.
+    expect(second.id).toBe(first.id);
+    const rows = await attemptStore.listByService("railway", 60 * 86_400_000);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("success");
+    expect(rows[0]!.failure_kind).toBeNull(); // overwritten by the retry
+  });
+
+  it("does NOT dedupe rows with no provision_id (null is distinct)", async () => {
+    const { attemptStore } = build();
+    await attemptStore.record({ service: "fly", status: "failed", account_id: "x", mcp_version: "0.9.0" });
+    await attemptStore.record({ service: "fly", status: "failed", account_id: "x", mcp_version: "0.9.0" });
+    const rows = await attemptStore.listByService("fly", 60 * 86_400_000);
+    expect(rows).toHaveLength(2);
   });
 });

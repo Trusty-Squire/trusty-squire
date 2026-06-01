@@ -21,9 +21,9 @@ import {
 import { InMemoryBotFailureStore } from "./bot-failure-store-memory.js";
 import type { BotFailureStore } from "./bot-failure-store.js";
 import {
-  InMemoryProvisionAttemptStore,
-  type ProvisionAttemptStore,
-} from "./provision-attempt-store.js";
+  InMemoryProvisionEventStore,
+  type ProvisionEventStore,
+} from "./provision-event-store.js";
 
 function numEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -38,9 +38,10 @@ export interface BuildServerOpts {
   // Closed-loop Phase 5. In-memory by default; production wires a
   // Prisma-backed store at boot.
   botFailureStore?: BotFailureStore;
-  // T44 — per-attempt outcome store. Drives the compat-score endpoint.
-  // In-memory default; production wires a Prisma-backed store at boot.
-  provisionAttemptStore?: ProvisionAttemptStore;
+  // Per-provision event store. Drives the compat-score endpoint +
+  // dashboard cache-hit/demand views. In-memory default; production
+  // wires a Prisma-backed store at boot.
+  provisionEventStore?: ProvisionEventStore;
   signer?: ManifestSigner;
   // Public key (base64url SPKI DER) used to verify POST /skills
   // signatures. When undefined the route logs a warn per publish and
@@ -82,8 +83,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     opts.extractFailureStore ?? new InMemoryExtractFailureStore();
   const botFailureStore =
     opts.botFailureStore ?? new InMemoryBotFailureStore();
-  const provisionAttemptStore =
-    opts.provisionAttemptStore ?? new InMemoryProvisionAttemptStore();
+  const provisionEventStore =
+    opts.provisionEventStore ?? new InMemoryProvisionEventStore();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
   // used both for skill provenance (`signed_by` field on stored
@@ -141,7 +142,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   // T44 — compat-score endpoints. Env tunables here surface through
   // routes/services-health.ts → compat-score.ts.
   await fastify.register(registerServicesHealthRoute, {
-    attemptStore: provisionAttemptStore,
+    eventStore: provisionEventStore,
     skillStore,
     resolveAccountId,
     scoreOptions: {
@@ -155,6 +156,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   await fastify.register(registerAdminRoutes, {
     store: skillStore,
     botFailureStore,
+    // Demand signal for the merged harvest queue (Decision 4).
+    provisionEventStore,
     resolveAccountId,
     ...(adminBearer !== undefined && adminBearer.length > 0
       ? { adminBearer }
@@ -165,8 +168,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   await fastify.register(registerAdminDashboardRoute, {
     store: skillStore,
     botFailureStore,
-    // T45 — surface the "Recent failures" gallery.
-    provisionAttemptStore,
+    // Surface the "Recent failures" gallery.
+    provisionEventStore,
     extractFailureStore,
     ...(adminBearer !== undefined && adminBearer.length > 0
       ? { adminBearer }
@@ -199,7 +202,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const { PrismaSkillStore } = await import("./prisma-skill-store.js");
     const { PrismaExtractFailureStore } = await import("./prisma-extract-failure-store.js");
     const { PrismaBotFailureStore } = await import("./prisma-bot-failure-store.js");
-    const { PrismaProvisionAttemptStore } = await import("./prisma-provision-attempt-store.js");
+    const { PrismaProvisionEventStore } = await import("./prisma-provision-event-store.js");
     serverOpts = {
       skillStore: await PrismaSkillStore.fromEnv(),
       extractFailureStore: await PrismaExtractFailureStore.fromEnv(),
@@ -207,8 +210,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       // discovery aggregation window because buildServer falls
       // back to the in-memory variant.
       botFailureStore: await PrismaBotFailureStore.fromEnv(),
-      // T44 — production-mode persistence for the compat-score endpoint.
-      provisionAttemptStore: await PrismaProvisionAttemptStore.fromEnv(),
+      // Production-mode persistence for the compat-score endpoint +
+      // dashboard cache-hit/demand views.
+      provisionEventStore: await PrismaProvisionEventStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);

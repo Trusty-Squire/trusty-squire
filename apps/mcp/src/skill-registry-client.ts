@@ -365,22 +365,36 @@ export class SkillRegistryClient {
   }
 
   /**
-   * T44 — record a universal-bot signup outcome. Fire-and-forget;
-   * a 4xx/5xx here only means the score won't reflect this attempt.
+   * Record one provision event (any dispatch path). Fire-and-forget;
+   * a 4xx/5xx here only means the dashboard/score won't reflect it.
+   * Posts to the historical /attempts route (URL unchanged so already-
+   * installed clients keep working); the server upserts on provision_id.
    */
-  async recordProvisionAttempt(input: {
+  async recordProvisionEvent(input: {
     service: string;
     status: "success" | "failed";
+    // Dispatch model (Decision 10). Omitted by older clients; the sink
+    // blind-defaults the strategy legs to bot.
+    initialStrategy?: "replay" | "bot";
+    finalStrategy?: "replay" | "bot";
+    replayOutcome?: "ok" | "miss" | "na";
+    finalOutcome?: "ok" | "failed" | "blocked";
     failureKind?: string;
     signupUrl?: string;
     mcpVersion: string;
-    // T45 — correlation id linking this attempt to the
-    // ExtractFailureSnapshot rows uploaded during the same run.
+    // T45 — correlation id linking this event to the
+    // ExtractFailureSnapshot rows uploaded during the same run. Also the
+    // idempotency key (the server upserts on it).
     provisionId?: string;
     // T45 — serialized step trail (newline-joined ctx.stepsSink) for
     // failures that bail before the post-verify loop and therefore
     // upload no per-round snapshots. Truncated server-side past 32KB.
     stepTrail?: string;
+    // Cost telemetry (Decision 3). Replay rows send 0; the bot path
+    // leaves these unset (USD cost is tracked server-side, not here).
+    llmCost?: number;
+    captchaCost?: number;
+    durationMs?: number;
   }): Promise<{ kind: "ok" } | { kind: "unavailable"; reason: string }> {
     const url = `${this.baseUrl}/v1/services/${encodeURIComponent(input.service)}/attempts`;
     const attempt = await this.fetchPostWithRetry(
@@ -391,10 +405,17 @@ export class SkillRegistryClient {
       },
       JSON.stringify({
         status: input.status,
+        ...(input.initialStrategy !== undefined ? { initial_strategy: input.initialStrategy } : {}),
+        ...(input.finalStrategy !== undefined ? { final_strategy: input.finalStrategy } : {}),
+        ...(input.replayOutcome !== undefined ? { replay_outcome: input.replayOutcome } : {}),
+        ...(input.finalOutcome !== undefined ? { final_outcome: input.finalOutcome } : {}),
         ...(input.failureKind !== undefined ? { failure_kind: input.failureKind } : {}),
         ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
         ...(input.provisionId !== undefined ? { provision_id: input.provisionId } : {}),
         ...(input.stepTrail !== undefined ? { step_trail: input.stepTrail } : {}),
+        ...(input.llmCost !== undefined ? { llm_cost: input.llmCost } : {}),
+        ...(input.captchaCost !== undefined ? { captcha_cost: input.captchaCost } : {}),
+        ...(input.durationMs !== undefined ? { duration_ms: input.durationMs } : {}),
         mcp_version: input.mcpVersion,
       }),
     );

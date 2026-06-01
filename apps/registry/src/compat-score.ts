@@ -1,10 +1,10 @@
 // T44 — compatibility score derivation. Pure math, unit-tested.
-// Inputs: a recent slice of ProvisionAttempt rows for one service.
+// Inputs: a recent slice of ProvisionEvent rows for one service.
 // Output: a single signed score (positive = healthy, negative =
 // struggling/blocked) and the four-state classification used by the
 // MCP recommendation engine.
 
-import type { ProvisionAttemptRecord } from "./provision-attempt-store.js";
+import type { ProvisionEventRecord } from "./provision-event-store.js";
 
 export interface CompatScoreOptions {
   /** Half-life of an attempt's weight. A failure 14d ago contributes
@@ -36,7 +36,7 @@ export interface CompatHealth {
 }
 
 export function deriveCompatScore(
-  attempts: readonly ProvisionAttemptRecord[],
+  attempts: readonly ProvisionEventRecord[],
   opts: CompatScoreOptions = {},
 ): number {
   const halfLife = (opts.halfLifeDays ?? DEFAULTS.halfLifeDays) * 86_400_000;
@@ -65,7 +65,7 @@ export function classifyCompat(
 }
 
 export function buildCompatHealth(
-  attempts: readonly ProvisionAttemptRecord[],
+  attempts: readonly ProvisionEventRecord[],
   hasActiveSkill: boolean,
   opts: CompatScoreOptions = {},
 ): CompatHealth {
