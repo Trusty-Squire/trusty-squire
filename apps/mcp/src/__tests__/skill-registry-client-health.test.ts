@@ -1,4 +1,4 @@
-// T44 — SkillRegistryClient.fetchServiceHealth + recordProvisionAttempt
+// T44 — SkillRegistryClient.fetchServiceHealth + recordProvisionEvent
 // tests. Use a mock fetch to assert request shape + response handling.
 
 import { describe, expect, it, vi } from "vitest";
@@ -98,7 +98,7 @@ describe("fetchServiceHealth", () => {
   });
 });
 
-describe("recordProvisionAttempt", () => {
+describe("recordProvisionEvent", () => {
   it("POSTs the outcome with the expected body shape", async () => {
     let captured: { url: string; body: unknown } | null = null;
     const fetch = mockFetch(async ({ url, init }) => {
@@ -106,7 +106,7 @@ describe("recordProvisionAttempt", () => {
       return new Response(JSON.stringify({ id: "att-123" }), { status: 201 });
     });
     const client = makeClient(fetch);
-    const out = await client.recordProvisionAttempt({
+    const out = await client.recordProvisionEvent({
       service: "vercel",
       status: "failed",
       failureKind: "verification_not_sent",
@@ -131,7 +131,7 @@ describe("recordProvisionAttempt", () => {
       return new Response(JSON.stringify({ id: "att-1" }), { status: 201 });
     });
     const client = makeClient(fetch);
-    await client.recordProvisionAttempt({
+    await client.recordProvisionEvent({
       service: "vercel",
       status: "success",
       mcpVersion: "0.7.18",
@@ -139,10 +139,44 @@ describe("recordProvisionAttempt", () => {
     expect(body).toEqual({ status: "success", mcp_version: "0.7.18" });
   });
 
+  it("serializes dispatch + cost fields when provided", async () => {
+    let body: Record<string, unknown> | null = null;
+    const fetch = mockFetch(async ({ init }) => {
+      body = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ id: "att-2" }), { status: 201 });
+    });
+    const client = makeClient(fetch);
+    await client.recordProvisionEvent({
+      service: "resend",
+      status: "success",
+      initialStrategy: "replay",
+      finalStrategy: "replay",
+      replayOutcome: "ok",
+      finalOutcome: "ok",
+      llmCost: 0,
+      captchaCost: 0,
+      durationMs: 31000,
+      provisionId: "prov_x1",
+      mcpVersion: "0.9.0",
+    });
+    expect(body).toEqual({
+      status: "success",
+      initial_strategy: "replay",
+      final_strategy: "replay",
+      replay_outcome: "ok",
+      final_outcome: "ok",
+      provision_id: "prov_x1",
+      llm_cost: 0,
+      captcha_cost: 0,
+      duration_ms: 31000,
+      mcp_version: "0.9.0",
+    });
+  });
+
   it("returns unavailable when the registry returns 4xx/5xx", async () => {
     const fetch = mockFetch(async () => new Response("bad", { status: 500 }));
     const client = makeClient(fetch);
-    const out = await client.recordProvisionAttempt({
+    const out = await client.recordProvisionEvent({
       service: "vercel",
       status: "success",
       mcpVersion: "0.7.18",

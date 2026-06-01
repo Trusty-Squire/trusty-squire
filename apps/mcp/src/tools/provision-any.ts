@@ -415,6 +415,12 @@ interface RunContext {
   // The account_id the session is bound to; passed to the registry
   // client so replay-outcome writes are attributable.
   accountId: string;
+  // Set true by tryReplayLearnedSkill when an active skill exists and a
+  // replay was attempted. Read by the single ProvisionEvent emit to
+  // distinguish "replay fell back to bot" (initial=replay, replay=miss)
+  // from "no skill, bot direct" (initial=bot, replay=na). Optional so
+  // existing RunContext construction sites need no change.
+  replayAttempted?: boolean;
 }
 
 // Translate a ReplayOutcome (camelCase, from the replay engine) into
@@ -453,6 +459,87 @@ function toReplayOutcomeBody(
   };
 }
 
+// Wall failure kinds the bot emits — a terminal "blocked" wall rather
+// than a fixable "failed". Used to set final_outcome on the event.
+// (The registry's demand-harvest damper keeps its own copy in a
+// different package; the failure_kind taxonomy is deferred — see
+// docs/DESIGN-provision-event-dashboard.md.)
+const WALL_FAILURE_KINDS = new Set(["captcha_blocked", "anti_bot_blocked", "captcha"]);
+
+export function finalOutcomeOf(result: { success: boolean; error?: string }): "ok" | "failed" | "blocked" {
+  if (result.success) return "ok";
+  return result.error !== undefined && WALL_FAILURE_KINDS.has(result.error)
+    ? "blocked"
+    : "failed";
+}
+
+// Resolve the dispatch strategy/outcome for the ProvisionEvent from two
+// facts the router knows: did a replay serve the request, and was a
+// replay even attempted (a skill existed). Exported + pure so the three
+// cases — including the tricky "replay fell back to bot" — are unit
+// tested directly without standing up the whole router.
+export function resolveDispatch(
+  replayServed: boolean,
+  replayAttempted: boolean,
+): {
+  initialStrategy: "replay" | "bot";
+  finalStrategy: "replay" | "bot";
+  replayOutcome: "ok" | "miss" | "na";
+} {
+  if (replayServed) {
+    return { initialStrategy: "replay", finalStrategy: "replay", replayOutcome: "ok" };
+  }
+  if (replayAttempted) {
+    // A skill existed and we tried it, but it didn't serve → bot took over.
+    return { initialStrategy: "replay", finalStrategy: "bot", replayOutcome: "miss" };
+  }
+  // No skill for this service → bot direct.
+  return { initialStrategy: "bot", finalStrategy: "bot", replayOutcome: "na" };
+}
+
+// Single ProvisionEvent emit (design Decision 1). Both terminal paths —
+// replay-served and bot — funnel through this one mapper so the event
+// shape can't drift across call sites. Fire-and-forget + fail-open: it
+// never blocks or fails a provision. This is observation only;
+// auto-demote still rides on postReplayOutcome (the source-of-truth
+// rule in the design doc).
+function emitProvisionEvent(
+  registry: SkillRegistryClient,
+  args: {
+    service: string;
+    provisionId: string;
+    startedAt: number;
+    initialStrategy: "replay" | "bot";
+    finalStrategy: "replay" | "bot";
+    replayOutcome: "ok" | "miss" | "na";
+    result: { success: boolean; error?: string };
+    signupUrl?: string;
+    stepTrail?: string;
+    replayServed: boolean;
+  },
+): void {
+  void registry.recordProvisionEvent({
+    service: args.service,
+    status: args.result.success ? "success" : "failed",
+    initialStrategy: args.initialStrategy,
+    finalStrategy: args.finalStrategy,
+    replayOutcome: args.replayOutcome,
+    finalOutcome: finalOutcomeOf(args.result),
+    ...(args.result.success === false && args.result.error !== undefined
+      ? { failureKind: args.result.error }
+      : {}),
+    ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
+    provisionId: args.provisionId,
+    ...(args.stepTrail !== undefined ? { stepTrail: args.stepTrail } : {}),
+    // Replay is LLM/captcha-free → known-zero cost. The bot path leaves
+    // these unset; USD cost is tracked server-side (LLMUsageEvent), not
+    // known here.
+    ...(args.replayServed ? { llmCost: 0, captchaCost: 0 } : {}),
+    mcpVersion: VERSION,
+    durationMs: Date.now() - args.startedAt,
+  });
+}
+
 // Skill promoter — Tier 2 router (0.7.0).
 //
 // Before falling through to the universal bot (Tier 1), try the
@@ -485,6 +572,10 @@ async function tryReplayLearnedSkill(
   }
 
   const { skill } = fetched.result;
+  // A skill exists → we're about to attempt a replay. Records this on
+  // the run context so the ProvisionEvent emit can tell "replay fell
+  // back to bot" apart from "no skill, bot direct".
+  ctx.replayAttempted = true;
   // Surface that the router engaged so check_provision_status's
   // recent_steps log shows the skill attempt before any bot output.
   ctx.stepsSink.push(`[skill-promoter] fetched skill ${skill.skill_id} v${skill.version} for ${serviceSlug}`);
@@ -676,6 +767,8 @@ async function runSignupTask(
   // round/extract upload AND the final attempt-recording so the
   // admin dashboard can JOIN per-attempt screenshots + step trail.
   const provisionId = generateProvisionId();
+  // Wall-clock start, for the event's duration_ms.
+  const startedAt = Date.now();
   try {
     // ── Skill promoter Tier-2 router ────────────────────────────────
     // Before launching the universal bot, check the registry for an
@@ -687,6 +780,16 @@ async function runSignupTask(
       const replayed = await tryReplayLearnedSkill(registry, input, ctx);
       if (replayed !== null) {
         response = buildSignupResponse(input, replayed);
+        // Replay served it — emit the unified event (replay/replay/ok).
+        emitProvisionEvent(registry, {
+          service: input.service,
+          provisionId,
+          startedAt,
+          ...resolveDispatch(true, true),
+          result: replayed,
+          ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
+          replayServed: true,
+        });
         // Persist to vault same as the bot path — credentials are real.
         if (replayed.success && replayed.credentials !== undefined) {
           void postCredentialsToVault(
@@ -838,33 +941,26 @@ async function runSignupTask(
       };
     }
 
-    // T44 — record the attempt outcome regardless of state. Best-
-    // effort; failures here only mean the next provision's score
-    // won't see this data point.
-    // T45 — also include provisionId (links to ExtractFailureSnapshot
-    // rows from the same run) and the serialized step trail (for
-    // failures that bail BEFORE the post-verify loop and therefore
-    // upload no round snapshots).
+    // The single ProvisionEvent emit for the bot path (design Decision
+    // 1). Best-effort; a failure here only means the dashboard/score
+    // won't see this data point. dispatch resolves from whether a skill
+    // replay was attempted first: skill present but fell through here =
+    // replay/bot/miss; no skill = bot/bot/na.
     if (registry !== null) {
-      const status: "success" | "failed" = result.success ? "success" : "failed";
-      const attemptArgs: Parameters<typeof registry.recordProvisionAttempt>[0] = {
+      emitProvisionEvent(registry, {
         service: input.service,
-        status,
-        mcpVersion: VERSION,
         provisionId,
-      };
-      if (!result.success && result.error !== undefined) {
-        attemptArgs.failureKind = result.error;
-      }
-      if (input.signup_url !== undefined) {
-        attemptArgs.signupUrl = input.signup_url;
-      }
-      // Only attach the trail on failure — successful runs already
-      // have richer artifacts on the corpus/skill path.
-      if (!result.success && ctx.stepsSink.length > 0) {
-        attemptArgs.stepTrail = ctx.stepsSink.join("\n");
-      }
-      void registry.recordProvisionAttempt(attemptArgs);
+        startedAt,
+        ...resolveDispatch(false, ctx.replayAttempted === true),
+        result,
+        ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
+        // Only attach the trail on failure — successful runs already
+        // have richer artifacts on the corpus/skill path.
+        ...(!result.success && ctx.stepsSink.length > 0
+          ? { stepTrail: ctx.stepsSink.join("\n") }
+          : {}),
+        replayServed: false,
+      });
     }
 
     // Persist the collected keys into the account's vault. Fire-and-
