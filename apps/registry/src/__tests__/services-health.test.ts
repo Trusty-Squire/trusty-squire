@@ -7,14 +7,14 @@ import { describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { buildServer } from "../server.js";
 import { InMemorySkillStore } from "../skill-store-memory.js";
-import { InMemoryProvisionAttemptStore } from "../provision-attempt-store.js";
+import { InMemoryProvisionEventStore } from "../provision-event-store.js";
 import { ManifestSigner } from "../signer.js";
 import {
   classifyCompat,
   deriveCompatScore,
   buildCompatHealth,
 } from "../compat-score.js";
-import type { ProvisionAttemptRecord } from "../provision-attempt-store.js";
+import type { ProvisionEventRecord } from "../provision-event-store.js";
 import type { Skill } from "@trusty-squire/skill-schema";
 import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 
@@ -26,16 +26,23 @@ function mkAttempt(
   status: "success" | "failed",
   ageDays: number,
   service = "test",
-): ProvisionAttemptRecord {
+): ProvisionEventRecord {
   return {
     id: `id-${ageDays}-${status}`,
     service,
     status,
+    initial_strategy: null,
+    final_strategy: null,
+    replay_outcome: null,
+    final_outcome: null,
     failure_kind: null,
     signup_url: null,
     artifacts_uri: null,
     provision_id: null,
     step_trail: null,
+    llm_cost: null,
+    captcha_cost: null,
+    duration_ms: null,
     account_id: "test-acct",
     mcp_version: "0.7.x",
     occurred_at: new Date(Date.now() - ageDays * DAY),
@@ -84,7 +91,7 @@ function build() {
   const { privateKey } = generateKeyPairSync("ed25519");
   const signer = ManifestSigner.fromKeyObject(privateKey, "test-signer");
   const skillStore = new InMemorySkillStore();
-  const attemptStore = new InMemoryProvisionAttemptStore();
+  const attemptStore = new InMemoryProvisionEventStore();
   return {
     skillStore,
     attemptStore,
@@ -92,7 +99,7 @@ function build() {
       buildServer({
         skillStore,
         signer,
-        provisionAttemptStore: attemptStore,
+        provisionEventStore: attemptStore,
       }),
   };
 }

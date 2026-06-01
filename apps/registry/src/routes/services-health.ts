@@ -15,11 +15,11 @@ import {
   type CompatHealth,
   type CompatScoreOptions,
 } from "../compat-score.js";
-import type { ProvisionAttemptStore } from "../provision-attempt-store.js";
+import type { ProvisionEventStore } from "../provision-event-store.js";
 import type { SkillStore } from "../skill-store.js";
 
 export interface ServicesHealthRouteDeps {
-  attemptStore: ProvisionAttemptStore;
+  eventStore: ProvisionEventStore;
   skillStore: SkillStore;
   resolveAccountId: (req: { headers: Record<string, unknown> }) => string;
   /** Override score config — surfaced for env-tunables on bootstrap. */
@@ -59,7 +59,7 @@ const LOOKBACK_MS = 60 * 86_400_000;
 export const registerServicesHealthRoute: FastifyPluginAsync<
   ServicesHealthRouteDeps
 > = async (fastify: FastifyInstance, opts) => {
-  const { attemptStore, skillStore, resolveAccountId } = opts;
+  const { eventStore, skillStore, resolveAccountId } = opts;
   const scoreOpts = opts.scoreOptions ?? {};
 
   const isValidSlug = (s: string): boolean =>
@@ -67,7 +67,7 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
 
   async function buildHealth(service: string): Promise<CompatHealth> {
     const [attempts, activeSkill] = await Promise.all([
-      attemptStore.listByService(service, LOOKBACK_MS),
+      eventStore.listByService(service, LOOKBACK_MS),
       skillStore.findActiveByService(service),
     ]);
     return buildCompatHealth(attempts, activeSkill !== null, scoreOpts);
@@ -88,7 +88,7 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
           .send({ error: "invalid_body", details: parsed.error.format() });
       }
       const account_id = resolveAccountId(request);
-      const { id } = await attemptStore.record({
+      const { id } = await eventStore.record({
         service: slug,
         status: parsed.data.status,
         ...(parsed.data.failure_kind !== undefined

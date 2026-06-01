@@ -11,8 +11,9 @@ export interface RegistryPrismaClient {
   extractFailureSnapshot: ExtractFailureSnapshotDelegate;
   // Closed-loop Phase 5: telemetry for the discovery worker.
   universalBotFailureRecord: UniversalBotFailureRecordDelegate;
-  // T44: per-attempt outcome rows for the compat-score endpoint.
-  provisionAttempt: ProvisionAttemptDelegate;
+  // Per-provision event rows: compat-score endpoint + dashboard
+  // cache-hit/demand views. Renamed from provisionAttempt.
+  provisionEvent: ProvisionEventDelegate;
 }
 
 export type RegistryPrismaTransaction = Omit<
@@ -76,9 +77,15 @@ interface UniversalBotFailureRecordDelegate {
   deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
-interface ProvisionAttemptDelegate {
+interface ProvisionEventDelegate {
   create(args: {
     data: Record<string, unknown>;
+    select?: Record<string, boolean>;
+  }): Promise<{ id: string }>;
+  upsert(args: {
+    where: Record<string, unknown>;
+    create: Record<string, unknown>;
+    update: Record<string, unknown>;
     select?: Record<string, boolean>;
   }): Promise<{ id: string }>;
   findMany(args: {
@@ -93,10 +100,17 @@ interface ProvisionAttemptDelegate {
       failure_kind: string | null;
       signup_url: string | null;
       artifacts_uri: string | null;
-      // T45 fields. Optional in the runtime type so older rows
-      // (pre-migration) don't crash the mapper.
+      // Optional in the runtime type so older rows (pre-migration)
+      // don't crash the mapper.
       provision_id?: string | null;
       step_trail?: string | null;
+      initial_strategy?: string | null;
+      final_strategy?: string | null;
+      replay_outcome?: string | null;
+      final_outcome?: string | null;
+      llm_cost?: number | null;
+      captcha_cost?: number | null;
+      duration_ms?: number | null;
       account_id: string;
       mcp_version: string;
       occurred_at: Date;

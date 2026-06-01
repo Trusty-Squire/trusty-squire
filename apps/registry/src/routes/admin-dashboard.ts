@@ -23,9 +23,9 @@ import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 import type { SkillStore } from "../skill-store.js";
 import type { BotFailureStore } from "../bot-failure-store.js";
 import type {
-  ProvisionAttemptRecord,
-  ProvisionAttemptStore,
-} from "../provision-attempt-store.js";
+  ProvisionEventRecord,
+  ProvisionEventStore,
+} from "../provision-event-store.js";
 import type {
   ExtractFailureStore,
   ExtractFailureSummary,
@@ -38,7 +38,7 @@ export interface AdminDashboardDeps {
   // T45 — additional stores feeding the "Recent failed attempts"
   // section. Optional so test bootstraps that don't exercise this
   // path can omit them.
-  provisionAttemptStore?: ProvisionAttemptStore;
+  provisionEventStore?: ProvisionEventStore;
   extractFailureStore?: ExtractFailureStore;
   adminBearer?: string;
 }
@@ -94,9 +94,9 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
     // screenshots each) only when both stores are wired. Older
     // bootstraps that don't pass these get the original 5-section
     // dashboard verbatim.
-    const recentFailures: ProvisionAttemptRecord[] =
-      opts.provisionAttemptStore !== undefined
-        ? await opts.provisionAttemptStore.listRecentFailures(20)
+    const recentFailures: ProvisionEventRecord[] =
+      opts.provisionEventStore !== undefined
+        ? await opts.provisionEventStore.listRecentFailures(20)
         : [];
     const failureArtifacts = new Map<string, ExtractFailureSummary[]>();
     if (
@@ -130,7 +130,7 @@ function renderDashboard(args: {
   demotedSkills: Awaited<ReturnType<SkillStore["listSkills"]>>;
   verifierQueue: Awaited<ReturnType<SkillStore["listVerifierQueue"]>>;
   discoveryCandidates: Awaited<ReturnType<NonNullable<BotFailureStore>["listDiscoveryCandidates"]>>;
-  recentFailures: ProvisionAttemptRecord[];
+  recentFailures: ProvisionEventRecord[];
   failureArtifacts: Map<string, ExtractFailureSummary[]>;
 }): string {
   const css = `
@@ -363,7 +363,7 @@ const RECENT_FAILURES_CSS = `
 `;
 
 function renderRecentFailuresSection(
-  failures: readonly ProvisionAttemptRecord[],
+  failures: readonly ProvisionEventRecord[],
   artifacts: ReadonlyMap<string, ExtractFailureSummary[]>,
 ): string {
   if (failures.length === 0) {
