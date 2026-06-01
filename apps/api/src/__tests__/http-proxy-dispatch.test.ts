@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "vitest";
 import { createServer, type IncomingMessage } from "node:http";
-import { HttpProxyExecutor } from "../services/http-proxy.js";
+import { HttpProxyExecutor, substituteSecret } from "../services/http-proxy.js";
 
 interface Captured {
   authorization: string;
@@ -69,5 +69,32 @@ describe("HttpProxyExecutor — real defaultDispatch", () => {
       });
       expect(captured.authorization).toBe("Bearer s3cr3t-value");
     });
+  });
+});
+
+describe("substituteSecret — field names with spaces / hyphens", () => {
+  it("resolves a spaced field name (e.g. 'Api key')", () => {
+    const out = substituteSecret(
+      { method: "GET", url: "https://x/y", headers: { authorization: "Bearer ${SECRET.Api key}" } },
+      { "Api key": "tok-123", Client_id: "cid" },
+    );
+    expect(out.headers?.authorization).toBe("Bearer tok-123");
+  });
+
+  it("resolves a hyphenated field name and stops at the closing brace", () => {
+    const out = substituteSecret(
+      { method: "GET", url: "https://x/y", headers: { "x-key": "${SECRET.access-key}/${SECRET.Api key}" } },
+      { "access-key": "abc", "Api key": "def" },
+    );
+    expect(out.headers?.["x-key"]).toBe("abc/def");
+  });
+
+  it("still errors on a genuinely missing field", () => {
+    expect(() =>
+      substituteSecret(
+        { method: "GET", url: "https://x/y", headers: { a: "${SECRET.nope}" } },
+        { "Api key": "x" },
+      ),
+    ).toThrow();
   });
 });

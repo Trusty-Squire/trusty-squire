@@ -65,7 +65,14 @@ export class ProxyError extends Error {
   }
 }
 
-const TOKEN_SRC = "\\$\\{SECRET(_JSON)?(?:\\.([A-Za-z0-9_]+))?\\}";
+// Field name is everything up to the closing brace, so credentials
+// whose field labels contain spaces / hyphens / dots (the vault UI
+// allows them, e.g. "Api key") can still be referenced as
+// ${SECRET.Api key}. The `}` terminator bounds the match (it can't span
+// a real brace), and the resolved VALUE is still CR/LF/NUL-checked, so
+// widening the NAME class is safe. Previously [A-Za-z0-9_]+ silently
+// failed to match such names → the literal placeholder shipped upstream.
+const TOKEN_SRC = "\\$\\{SECRET(_JSON)?(?:\\.([^}]+))?\\}";
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024;
 
