@@ -255,6 +255,72 @@ describe("HTTP — POST /v1/services/:slug/attempts", () => {
     expect(rows[0]?.signup_url).toBe("https://vercel.com/signup");
   });
 
+  it("blind-defaults strategy to bot when the post omits it (legacy client)", async () => {
+    const { attemptStore, build: b } = build();
+    const server = await b();
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/services/ipinfo/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: { status: "success", mcp_version: "0.7.18" },
+    });
+    expect(res.statusCode).toBe(201);
+    const rows = await attemptStore.listByService("ipinfo", 60 * DAY);
+    expect(rows[0]?.initial_strategy).toBe("bot");
+    expect(rows[0]?.final_strategy).toBe("bot");
+  });
+
+  it("stores explicit dispatch + cost fields from a modern client", async () => {
+    const { attemptStore, build: b } = build();
+    const server = await b();
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/services/resend/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: {
+        status: "success",
+        initial_strategy: "replay",
+        final_strategy: "replay",
+        replay_outcome: "ok",
+        final_outcome: "ok",
+        llm_cost: 0,
+        captcha_cost: 0,
+        duration_ms: 31000,
+        provision_id: "prov_modern_1",
+        mcp_version: "0.9.0",
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const rows = await attemptStore.listByService("resend", 60 * DAY);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.initial_strategy).toBe("replay");
+    expect(rows[0]?.final_strategy).toBe("replay");
+    expect(rows[0]?.replay_outcome).toBe("ok");
+    expect(rows[0]?.duration_ms).toBe(31000);
+  });
+
+  it("upserts a repeated provision_id via the route (no double count)", async () => {
+    const { attemptStore, build: b } = build();
+    const server = await b();
+    const post = (status: "success" | "failed") =>
+      server.inject({
+        method: "POST",
+        url: "/v1/services/railway/attempts",
+        headers: { "x-account-id": "acct-a" },
+        payload: {
+          status,
+          final_strategy: "bot",
+          provision_id: "prov_route_dup",
+          mcp_version: "0.9.0",
+        },
+      });
+    await post("failed");
+    await post("success");
+    const rows = await attemptStore.listByService("railway", 60 * DAY);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("success");
+  });
+
   it("400s on a bad slug", async () => {
     const { build: b } = build();
     const server = await b();

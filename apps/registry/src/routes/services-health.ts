@@ -28,16 +28,29 @@ export interface ServicesHealthRouteDeps {
 
 const PostBodySchema = z.object({
   status: z.enum(["success", "failed"]),
+  // Dispatch model (Decision 10). All optional: old MCP clients
+  // (pre-event) send none, and the handler blind-defaults the
+  // strategy fields to "bot" (Decision 5 + 12) — historically true,
+  // since only the bot path ever posted attempts.
+  initial_strategy: z.enum(["replay", "bot"]).optional(),
+  final_strategy: z.enum(["replay", "bot"]).optional(),
+  replay_outcome: z.enum(["ok", "miss", "na"]).optional(),
+  final_outcome: z.enum(["ok", "failed", "blocked"]).optional(),
   failure_kind: z.string().min(1).max(120).optional(),
   signup_url: z.string().max(2048).optional(),
   mcp_version: z.string().min(1).max(40),
   // T45 — correlation id linking this attempt to ExtractFailureSnapshot
-  // rows uploaded during the same provision call.
+  // rows uploaded during the same provision call. Also the idempotency
+  // key: a repeat post with the same provision_id upserts (Decision 11).
   provision_id: z.string().min(1).max(120).optional(),
   // T45 — inline step trail (truncated server-side past 32KB) for
   // failures that bail before any ExtractFailureSnapshot rows
   // exist for this run.
   step_trail: z.string().max(64 * 1024).optional(),
+  // Cost telemetry (Decision 3). Non-negative; replay rows send 0.
+  llm_cost: z.number().nonnegative().optional(),
+  captcha_cost: z.number().nonnegative().optional(),
+  duration_ms: z.number().int().nonnegative().optional(),
 });
 
 const PeerSlugList = z
@@ -88,23 +101,27 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
           .send({ error: "invalid_body", details: parsed.error.format() });
       }
       const account_id = resolveAccountId(request);
+      const d = parsed.data;
       const { id } = await eventStore.record({
         service: slug,
-        status: parsed.data.status,
-        ...(parsed.data.failure_kind !== undefined
-          ? { failure_kind: parsed.data.failure_kind }
-          : {}),
-        ...(parsed.data.signup_url !== undefined
-          ? { signup_url: parsed.data.signup_url }
-          : {}),
-        ...(parsed.data.provision_id !== undefined
-          ? { provision_id: parsed.data.provision_id }
-          : {}),
-        ...(parsed.data.step_trail !== undefined
-          ? { step_trail: parsed.data.step_trail }
-          : {}),
+        status: d.status,
+        // Decision 12: a post with no strategy fields is a legacy
+        // (pre-event) client, which only ever ran the bot — default
+        // both legs to "bot". Version-gated provenance is a deferred
+        // TODO (see docs/DESIGN-provision-event-dashboard.md).
+        initial_strategy: d.initial_strategy ?? "bot",
+        final_strategy: d.final_strategy ?? "bot",
+        ...(d.replay_outcome !== undefined ? { replay_outcome: d.replay_outcome } : {}),
+        ...(d.final_outcome !== undefined ? { final_outcome: d.final_outcome } : {}),
+        ...(d.failure_kind !== undefined ? { failure_kind: d.failure_kind } : {}),
+        ...(d.signup_url !== undefined ? { signup_url: d.signup_url } : {}),
+        ...(d.provision_id !== undefined ? { provision_id: d.provision_id } : {}),
+        ...(d.step_trail !== undefined ? { step_trail: d.step_trail } : {}),
+        ...(d.llm_cost !== undefined ? { llm_cost: d.llm_cost } : {}),
+        ...(d.captcha_cost !== undefined ? { captcha_cost: d.captcha_cost } : {}),
+        ...(d.duration_ms !== undefined ? { duration_ms: d.duration_ms } : {}),
         account_id,
-        mcp_version: parsed.data.mcp_version,
+        mcp_version: d.mcp_version,
       });
       return reply.code(201).send({ id });
     },
