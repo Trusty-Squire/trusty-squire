@@ -11,6 +11,7 @@ import { loadVouchflowConfig, isStubMode } from "./config/vouchflow.js";
 import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
+import { registerAdminFunnelRoute } from "./routes/admin-funnel.js";
 import { registerInboxRoute } from "./routes/inbox.js";
 import { registerLLMRoute } from "./routes/llm.js";
 import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
@@ -122,6 +123,18 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   // req.auth optimistically. Guards (preHandler) reject when needed.
   fastify.addHook("preHandler", async (req) => {
     await auth.resolveAuth(req);
+  });
+
+  // Panel 1 funnel — operator-only, dedicated FUNNEL_METRICS_TOKEN.
+  await fastify.register(registerAdminFunnelRoute, {
+    deps: {
+      funnelStatsStore: deps.funnelStatsStore,
+      excludeAccountIds: (process.env.FUNNEL_EXCLUDE_ACCOUNT_IDS ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+      ...(deps.now !== undefined ? { now: deps.now } : {}),
+    },
   });
 
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });

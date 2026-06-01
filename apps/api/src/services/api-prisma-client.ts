@@ -132,6 +132,8 @@ export interface ApiPrismaClient {
     update(args: { where: { token: string }; data: Record<string, unknown> }): Promise<MachineTokenRow>;
     updateMany(args: { where: { token: string }; data: Record<string, unknown> }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+    // Funnel: tokens issued in a window (Panel 1, GET /v1/admin/funnel).
+    count(args: { where: Record<string, unknown> }): Promise<number>;
   };
   lLMUsageEvent: {
     create(args: { data: Record<string, unknown> }): Promise<unknown>;
@@ -186,6 +188,14 @@ export interface ApiPrismaClient {
     // Hard delete — cascades OAuthIdentity, Device, ActiveMandate,
     // WebSession, AgentSession via FK onDelete: Cascade.
     delete(args: { where: { id: string } }): Promise<AccountRow>;
+    // Funnel (Panel 1): accounts created in a window + rows for the
+    // daily new-accounts series. `where` carries created_at range and an
+    // optional id notIn (test/demo exclusion).
+    count(args: { where: Record<string, unknown> }): Promise<number>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<AccountRow[]>;
   };
   oAuthIdentity: {
     create(args: { data: Record<string, unknown> }): Promise<OAuthIdentityRow>;

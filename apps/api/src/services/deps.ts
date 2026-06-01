@@ -51,6 +51,11 @@ import {
   type OAuthIdentityStore,
 } from "./oauth-identity-store.js";
 import { getApiPrismaClient } from "./api-prisma-client.js";
+import {
+  PrismaFunnelStatsStore,
+  ZeroFunnelStatsStore,
+  type FunnelStatsStore,
+} from "./funnel-stats.js";
 import { PrismaMachineTokenStore } from "./prisma-machine-tokens.js";
 import { PrismaLLMUsageTracker } from "./prisma-llm-usage-tracker.js";
 import {
@@ -83,6 +88,9 @@ export interface ApiDeps {
   agentSessionStore: AgentSessionStore;
   pairingTokenStore: PairingTokenStore;
   oauthIdentityStore: OAuthIdentityStore;
+
+  // Panel 1 acquisition-funnel: API-side counts (accounts + tokens).
+  funnelStatsStore: FunnelStatsStore;
 
   // Credentials + inbound mail
   credentialStore: CredentialStore;
@@ -154,6 +162,13 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaVaultAuditStore(authPrisma)
       : new InMemoryVaultAuditStore();
+  // Panel 1 funnel: Prisma-backed when the auth DB is wired, else a
+  // zero store (the funnel is a prod operator feature).
+  const funnelStatsStore: FunnelStatsStore =
+    authPrisma !== null
+      ? new PrismaFunnelStatsStore(authPrisma)
+      : new ZeroFunnelStatsStore();
+
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
   const vault = new CredentialVault({
     store: credentialStore,
@@ -228,6 +243,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     accountStore,
     sessionStore,
     agentSessionStore,
+    funnelStatsStore,
     pairingTokenStore,
     oauthIdentityStore,
     credentialStore,
