@@ -33,6 +33,7 @@ import type {
   ExtractFailureSummary,
 } from "../extract-failure-store.js";
 import { bearerEquals } from "./admin.js";
+import { fetchApiFunnel, type ApiFunnelData } from "../funnel-api-client.js";
 import {
   type AdminAuthConfig,
   ADMIN_SESSION_TTL_MS,
@@ -63,6 +64,24 @@ export interface AdminDashboardDeps {
   adminAuth?: AdminAuthConfig | null;
   // Injectable fetch for the OAuth code exchange (tests stub it).
   fetchFn?: typeof globalThis.fetch;
+  // Panel 1 funnel: the trusty-squire-api base + the dedicated
+  // read-only metrics token. When unset, Panel 1 renders only the
+  // registry-side stages with API metrics marked unavailable.
+  apiBase?: string;
+  funnelMetricsToken?: string;
+  // Injectable fetch for the registry→API funnel call (tests stub it).
+  funnelFetchFn?: typeof globalThis.fetch;
+}
+
+// Panel 1 data: API-side counts (null when the API call fails / isn't
+// configured) + registry-side distinct-account stages.
+interface FunnelPanelData {
+  apiData: ApiFunnelData | null;
+  activated: number;
+  succeeded: number;
+  wau: number;
+  mau: number;
+  hasRegistryData: boolean;
 }
 
 export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps> = async (
@@ -161,6 +180,43 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
         : [];
     const activeServiceSet = new Set(activeSkills.map((s) => s.service));
 
+    // Panel 1 — acquisition funnel (new-in-window) + engagement tile.
+    // Registry-side stages from ProvisionEvent; API-side counts fetched
+    // fail-soft from trusty-squire-api. Funnel window = 30d ending now;
+    // the same bounds go to the API so both align.
+    const WAU_MS = 7 * 86_400_000;
+    const pe = opts.provisionEventStore;
+    const funnelEnd = new Date();
+    const funnelStart = new Date(funnelEnd.getTime() - WINDOW_MS);
+    const [activated, succeeded, wau] =
+      pe !== undefined
+        ? await Promise.all([
+            pe.activeAccounts(WINDOW_MS),
+            pe.succeededAccounts(WINDOW_MS),
+            pe.activeAccounts(WAU_MS),
+          ])
+        : [0, 0, 0];
+    const apiFunnel =
+      opts.funnelMetricsToken !== undefined &&
+      opts.funnelMetricsToken.length > 0 &&
+      opts.apiBase !== undefined
+        ? await fetchApiFunnel({
+            apiBase: opts.apiBase,
+            token: opts.funnelMetricsToken,
+            start: funnelStart,
+            end: funnelEnd,
+            ...(opts.funnelFetchFn !== undefined ? { fetchFn: opts.funnelFetchFn } : {}),
+          })
+        : null;
+    const funnel: FunnelPanelData = {
+      apiData: apiFunnel,
+      activated,
+      succeeded,
+      wau,
+      mau: activated, // distinct-active over the 30d window == activated
+      hasRegistryData: pe !== undefined,
+    };
+
     const html = renderDashboard({
       activeSkills,
       demotedSkills,
@@ -171,6 +227,7 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       cacheHit,
       demandRows,
       activeServiceSet,
+      funnel,
     });
     reply.code(200).type("text/html; charset=utf-8").send(html);
   });
@@ -268,6 +325,7 @@ function renderDashboard(args: {
   cacheHit: CacheHitBreakdown | null;
   demandRows: DemandRow[];
   activeServiceSet: Set<string>;
+  funnel: FunnelPanelData;
 }): string {
   // Tokens from DESIGN.md (the operator dashboard now follows the
   // product design system: Linear-leaning dark, mono-forward).
@@ -327,12 +385,13 @@ function renderDashboard(args: {
     "<head>",
     "  <meta charset=\"utf-8\" />",
     "  <title>Trusty Squire — Registry Admin</title>",
-    `  <style>${css}${RECENT_FAILURES_CSS}</style>`,
+    `  <style>${css}${RECENT_FAILURES_CSS}${FUNNEL_CSS}</style>`,
     "</head>",
     "<body>",
     `  <h1>Registry Admin</h1>`,
     `  <div class="pagesub">trusty-squire-registry · operator view · read-only</div>`,
     `  <nav>`,
+    `    <a href="#funnel">Funnel</a>`,
     `    <a href="#cachehit">Cache hit</a>`,
     `    <a href="#demand">Demand</a>`,
     `    <a href="#active">Active (${args.activeSkills.length})</a>`,
@@ -342,6 +401,8 @@ function renderDashboard(args: {
     `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
     `    <a href="#failures">Recent failures (${args.recentFailures.length})</a>`,
     `  </nav>`,
+    renderAcquisitionFunnelSection(args.funnel),
+    renderEngagementSection(args.funnel),
     renderCacheHitSection(args.cacheHit),
     renderDemandSection(args.demandRows, args.activeServiceSet),
     renderActiveSection(args.activeSkills),
@@ -359,6 +420,70 @@ function renderDashboard(args: {
 // Minimum events in the window before cache-hit percentages are
 // trustworthy. Below this, the bar is rendered greyed with a caveat.
 const CACHE_HIT_MIN_SAMPLE = 50;
+
+// Panel 1 funnel CSS (appended to the dashboard's dark token sheet).
+const FUNNEL_CSS = `
+  .frow { display: flex; align-items: center; gap: 12px; padding: 5px 0; }
+  .flabel { width: 150px; font-size: 13px; color: var(--muted); }
+  .fbarwrap { flex: 1; height: 18px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .fbar { height: 100%; background: var(--accent); }
+  .fbar.funavail { background: var(--raised); }
+  .fval { width: 96px; text-align: right; }
+`;
+
+// Panel 1 — acquisition funnel: new-in-window counts, top to bottom.
+// API-sourced rows (downloads/tokens/accounts) render "unavailable" when
+// the metrics API is unreachable; registry-sourced rows (activated/
+// succeeded) come from ProvisionEvent.
+function renderAcquisitionFunnelSection(f: FunnelPanelData): string {
+  const desc =
+    "New users in the window (30d), top to bottom. Downloads are anonymous (npm, ~1d delayed). API-sourced rows show 'unavailable' if the metrics API is unreachable.";
+  const api = f.apiData;
+  const rows: Array<{ label: string; sub?: string; value: number | null }> = [
+    { label: "downloads", sub: "npm", value: api !== null ? api.npm_downloads : null },
+    { label: "tokens issued", value: api !== null ? api.tokens_issued : null },
+    { label: "accounts created", value: api !== null ? api.accounts_created : null },
+    { label: "activated", value: f.hasRegistryData ? f.activated : null },
+    { label: "succeeded", value: f.hasRegistryData ? f.succeeded : null },
+  ];
+  const known = rows.map((r) => r.value).filter((v): v is number => v !== null);
+  if (known.length === 0) {
+    return section("funnel", "Acquisition funnel", desc, `<div class="empty">No funnel data yet.</div>`);
+  }
+  const max = Math.max(...known, 1);
+  const bars = rows
+    .map((r) => {
+      if (r.value === null) {
+        return `<div class="frow"><div class="flabel">${esc(r.label)}</div><div class="fbarwrap"><div class="fbar funavail" style="width:6%"></div></div><div class="fval mono" style="color:var(--faint)">unavailable</div></div>`;
+      }
+      const w = ((100 * r.value) / max).toFixed(1);
+      const sub = r.sub !== undefined ? ` <span style="color:var(--faint)">${esc(r.sub)}</span>` : "";
+      return `<div class="frow"><div class="flabel">${esc(r.label)}${sub}</div><div class="fbarwrap"><div class="fbar" style="width:${w}%"></div></div><div class="fval mono">${r.value.toLocaleString("en-US")}</div></div>`;
+    })
+    .join("");
+  const note =
+    api === null
+      ? `<div class="lowN">API metrics unavailable — showing registry-side stages only.</div>`
+      : "";
+  return section("funnel", "Acquisition funnel", desc, `<div class="northstar">${bars}${note}</div>`);
+}
+
+// Engagement tile — WAU/MAU. Deliberately NOT a funnel rung (active
+// counts returning users too, so it isn't a conversion stage).
+function renderEngagementSection(f: FunnelPanelData): string {
+  if (!f.hasRegistryData) {
+    return section("engagement", "Engagement", "Active users (provisioned in window).", `<div class="empty">No provision data yet.</div>`);
+  }
+  return section(
+    "engagement",
+    "Engagement",
+    "Distinct accounts that ran a provision in the window — counts returning users, so it's a tile, not a funnel stage.",
+    `<div class="northstar"><div class="stats">
+      <div class="stat"><div class="k">WAU · 7d</div><div class="v mono">${f.wau}</div></div>
+      <div class="stat"><div class="k">MAU · 30d</div><div class="v mono">${f.mau}</div></div>
+    </div></div>`,
+  );
+}
 
 function pct(n: number, total: number): string {
   if (total === 0) return "0.0%";

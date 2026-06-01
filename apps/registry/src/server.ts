@@ -46,6 +46,11 @@ export interface BuildServerOpts {
   // Google SSO config for the dashboard. Defaults to adminAuthFromEnv()
   // when omitted; tests inject a config (or null for bearer-only).
   adminAuth?: AdminAuthConfig | null;
+  // Panel 1 funnel: trusty-squire-api base + dedicated metrics token +
+  // an injectable fetch for the registry→API call (tests stub it).
+  apiBase?: string;
+  funnelMetricsToken?: string;
+  funnelFetchFn?: typeof globalThis.fetch;
   signer?: ManifestSigner;
   // Public key (base64url SPKI DER) used to verify POST /skills
   // signatures. When undefined the route logs a warn per publish and
@@ -157,6 +162,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   });
 
   const adminBearer = opts.adminBearer ?? process.env.REGISTRY_ADMIN_BEARER;
+  const funnelMetricsToken = opts.funnelMetricsToken ?? process.env.FUNNEL_METRICS_TOKEN;
   await fastify.register(registerAdminRoutes, {
     store: skillStore,
     botFailureStore,
@@ -183,6 +189,13 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
       ? { adminBearer }
       : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
+    // Panel 1 funnel: the API base + dedicated read-only metrics token.
+    // When the token is unset, Panel 1 renders registry-side stages only.
+    apiBase: opts.apiBase ?? process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev",
+    ...(funnelMetricsToken !== undefined && funnelMetricsToken.length > 0
+      ? { funnelMetricsToken }
+      : {}),
+    ...(opts.funnelFetchFn !== undefined ? { funnelFetchFn: opts.funnelFetchFn } : {}),
   });
 
   // Hourly background pruner. Best-effort — server doesn't crash if

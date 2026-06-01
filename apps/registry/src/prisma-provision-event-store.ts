@@ -147,6 +147,30 @@ export class PrismaProvisionEventStore implements ProvisionEventStore {
       wall_failed: Number(r.wall_failed),
     }));
   }
+
+  async activeAccounts(sinceMs: number): Promise<number> {
+    return this.distinctAccounts(sinceMs, false);
+  }
+
+  async succeededAccounts(sinceMs: number): Promise<number> {
+    return this.distinctAccounts(sinceMs, true);
+  }
+
+  // COUNT(DISTINCT account_id) over the trailing window; the existing
+  // (occurred_at) index bounds the scan. `successOnly` adds the success
+  // filter for the "succeeded" funnel stage.
+  private async distinctAccounts(sinceMs: number, successOnly: boolean): Promise<number> {
+    const cutoff = new Date(Date.now() - sinceMs);
+    const rows = (await this.client.$queryRawUnsafe(
+      `
+      SELECT COUNT(DISTINCT account_id) AS n
+      FROM "ProvisionEvent"
+      WHERE occurred_at >= $1${successOnly ? " AND status = 'success'" : ""}
+      `,
+      cutoff,
+    )) as Array<{ n: number | bigint }>;
+    return Number(rows[0]?.n ?? 0);
+  }
 }
 
 // Maps a raw Prisma row to ProvisionEventRecord. New dispatch/cost

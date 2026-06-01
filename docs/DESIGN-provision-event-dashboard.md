@@ -269,19 +269,114 @@ only). Approved direction (mockup at
 |---|---|---|---|
 | Registry `/admin` (full page + Panel 2) | `~/.gstack/projects/Trusty-Squire-trusty-squire/designs/registry-admin-dashboard-20260531/admin-dashboard-mockup.html` | Dark, mono-forward, hairline-ruled, DESIGN.md tokens | Built from real tokens (image-gen was org-gated); openable in browser; doubles as T5 reference |
 
+## Panel 1 — Acquisition funnel + active users (eng-review locked)
+
+Two distinct things, presented separately (the key review outcome — they
+are NOT one funnel):
+
+1. **Acquisition funnel** — counts of things that are NEW in the window,
+   so conversion % is honest:
+   `downloads → tokens issued → accounts created → activated → succeeded`.
+2. **Engagement** — `WAU (7d)` / `MAU (30d)` as a SEPARATE tile, not a
+   funnel rung (active counts old + new accounts, so it isn't a
+   conversion stage and could exceed "accounts").
+
+### Stages + sources (honest labels)
+| Metric | Definition (windowed) | Source | DB |
+|---|---|---|---|
+| Downloads | npm package downloads in window (anon, ~1d delayed) | `api.npmjs.org/downloads/...@trusty-squire/mcp` | external |
+| Tokens issued | `MachineToken.created_at` in window (NOT "installs" — tokens overcount: rotation/multi-device/CI) | API | `trustysquire` |
+| Accounts created | `Account.created_at` in window (unique users) | API | API |
+| Activated | distinct `account_id` with ≥1 `ProvisionEvent` in window | registry | registry |
+| Succeeded | distinct `account_id` with ≥1 `final_outcome=ok` in window | registry | registry |
+| WAU / MAU (engagement tile) | distinct `account_id` with a `ProvisionEvent` in 7d / 30d | registry | registry |
+
+Join key = `account_id` (same ULID across `Account.id` and
+`ProvisionEvent.account_id`). Downloads are anonymous → top-of-funnel
+volume, labeled as such, not a per-user conversion. "Succeeded" counts
+distinct accounts with ≥1 success in-window (NOT true-first-ever, which
+would need all-time history — out of scope for a counts funnel).
+
+### Architecture
+```
+registry /admin Panel 1 render (server-side, fail-soft, ~1.5s timeout)
+  ├── ProvisionEvent (local registry DB) ──> activated / succeeded / WAU / MAU
+  │     (windowed COUNT(DISTINCT account_id); existing (occurred_at) index)
+  └── GET /v1/admin/funnel?window_start&window_end&as_of  ──┐
+        │  Authorization: Bearer <FUNNEL_METRICS_TOKEN>      │ ONE call
+        ▼  (dedicated read-only token, NOT UNIVERSAL_BOT_API_KEY)
+      trusty-squire-api  (verifyBearer — shared timing-safe helper)
+        ├── Account + MachineToken counts in [window_start,window_end] (+ daily series)
+        └── npm downloads (server-side fetch, ~1h cache, stale-if-error)
+      → counts ONLY, no account_ids/emails (no PII crosses the boundary)
+```
+The caller passes explicit window bounds so both DBs use identical
+boundaries (no drift). On API/npm failure each metric renders
+"unavailable"/stale individually (per-metric honesty), and the rest of
+`/admin` is unaffected.
+
+### Locked decisions (eng-review)
+1. **Dedicated `FUNNEL_METRICS_TOKEN`** (read-only) for the cross-service
+   call — least-privilege vs reusing the broad `UNIVERSAL_BOT_API_KEY`.
+2. **Synchronous fail-soft** fetch (~1.5s timeout); npm fetched + cached
+   server-side on the API; per-metric unavailable/stale UI.
+3. **Shared timing-safe `verifyBearer(req, expected)`** (factored from
+   `authorize-machine-or-admin.ts`) — no third hand-rolled compare.
+4. **Shared JSON fixture contract test** across the two packages (they
+   can't share a type) — drift breaks a test, not prod.
+5. **Windowed `COUNT(DISTINCT account_id)`** on the existing
+   `(occurred_at)` index; daily-rollup table deferred until measured slow.
+6. **Acquisition funnel + separate engagement (WAU/MAU) tile** — not one
+   6-rung funnel (active isn't a conversion stage).
+
+### Build slice
+- **T-F1 (api):** `GET /v1/admin/funnel` — windowed `Account` /
+  `MachineToken` counts + daily new-accounts series + cached npm fetch
+  (stale-if-error). Auth via the shared `verifyBearer(FUNNEL_METRICS_TOKEN)`
+  (401 wrong/absent, 503 unconfigured fail-closed). Counts only, no PII.
+  Excludes test/demo/seed accounts.
+- **T-F2 (registry):** new `ProvisionEventStore` funnel methods
+  (windowed distinct-account: activated / succeeded / active) + Panel 1
+  render — acquisition funnel bars + separate WAU/MAU tile, DESIGN.md
+  dark style, per-metric fail-soft.
+- **T-F3 (registry):** registry→API funnel client (sends window bounds,
+  timeout, returns null on failure) + the `FUNNEL_METRICS_TOKEN` +
+  API-base env wiring.
+- Tests: API auth (401/503) + counts + series + npm-fail→null; client
+  success/500/timeout→null; store distinct-account stages (in-mem +
+  prisma); render full / API-null degraded / empty; shared contract
+  fixture. Regression: Panel 2 + existing `/admin` sections stay green.
+
+### NOT in scope (v1)
+- True per-account cohort retention curves (the endpoint is shaped so
+  cohort data can be added without reshaping).
+- True first-ever-success (needs all-time history; "succeeded ≥1 in
+  window" instead).
+- Per-download attribution (npm is anonymous); geo / referrer breakdowns.
+- Daily account-activity rollup table (deferred; windowed query suffices).
+- Cross-DB snapshot consistency (counts read at slightly different
+  instants — acceptable flicker for an operator page).
+
+### TODO inputs
+- A test/demo/seed account exclusion list (or an `is_internal` flag) so
+  internal usage doesn't inflate the funnel.
+- Verify the exact npm downloads endpoint + rate-limit/cache headers at
+  build time; `FUNNEL_METRICS_TOKEN` rotation treated like other
+  operator secrets.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
-| Codex Review | `/codex review` | Independent 2nd opinion | 1 | issues_found | 20 raised; 3 adopted as tensions, rest baked/TODO |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 8 issues, 0 critical gaps |
+| Codex Review | `/codex review` | Independent 2nd opinion | 2 | issues_found | Panel 2: 20 raised/3 adopted. Panel 1: ~24 raised; 1 structural tension adopted (funnel semantics), ~8 baked, rest TODO/oos |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | issues_open | Panel 2: 8 issues. Panel 1: 6 issues, 0 critical gaps |
 | Design Review | `/plan-design-review` | UI/UX gaps | 1 | issues_open | 4/10 → 9/10; 5 decisions, restyle to DESIGN.md, mockup approved |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
 
-- **CODEX:** independent review adopted 3 ways (strategy+outcome subfields, upsert idempotency, surfaced legacy-fill); corrected `asn_class` (dropped from v1); rest baked or deferred to TODO.
-- **CROSS-MODEL:** Eng review + Codex agree the architecture is sound; the only structural change Codex forced was the event model (Decision 10) — accepted.
-- **DESIGN:** `/admin` promoted into the design system; whole page restyled dark/mono-forward; cache-hit segmented bar + demand table with amber harvest-candidate cue; empty + low-N states specified. Mockup approved.
-- **UNRESOLVED:** 0 unresolved decisions (12 eng + 5 design locked). 2 accepted deferred risks: ProvisionEvent retention (Decision 9), and cache-hit-over-time sparkline (design, deferred).
-- **VERDICT:** ENG + DESIGN reviews complete, scope reduced to one slice. Plan ready to implement. No critical gaps.
+- **CODEX (Panel 1):** forced one structural reframe — `active` isn't a funnel stage (counts old accounts), so the panel split into an acquisition funnel (new-in-window) + a separate WAU/MAU engagement tile. Baked: honest labels (tokens-issued, succeeded≥1), explicit window bounds caller→API, test/demo exclusion, ~1.5s timeout, per-metric stale/unavailable UI, npm-delay annotation.
+- **CROSS-MODEL:** both reviewers agree the registry→API cross-service read (dedicated read-only token, sync fail-soft) is the right shape for a counts funnel; event-mirroring is only needed for the deferred true-cohort funnel.
+- **DESIGN:** (Panel 2) `/admin` restyled dark/mono-forward; cache-hit bar + demand table; mockup approved. Panel 1 reuses the same dark style (no separate design review needed; funnel bars + tiles).
+- **UNRESOLVED:** 0 (12 eng + 5 design + 6 Panel-1 decisions locked). Accepted deferred risks: ProvisionEvent retention; cache-hit sparkline; true-cohort funnel; account-activity rollup.
+- **VERDICT:** ENG + DESIGN cleared for Panel 2 (shipped #101/#102/#103) AND Panel 1 (planned, ready to implement). No critical gaps.
 

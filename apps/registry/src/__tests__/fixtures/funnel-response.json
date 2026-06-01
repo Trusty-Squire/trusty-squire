@@ -1,0 +1,12 @@
+{
+  "window_start": "2026-05-02T00:00:00.000Z",
+  "window_end": "2026-06-01T00:00:00.000Z",
+  "as_of": "2026-06-01T00:00:00.000Z",
+  "tokens_issued": 2310,
+  "accounts_created": 1540,
+  "new_accounts_series": [
+    { "date": "2026-05-29", "count": 160 },
+    { "date": "2026-05-30", "count": 180 }
+  ],
+  "npm_downloads": 18400
+}
