@@ -65,7 +65,14 @@ export class ProxyError extends Error {
   }
 }
 
-const TOKEN_SRC = "\\$\\{SECRET(_JSON)?(?:\\.([A-Za-z0-9_]+))?\\}";
+// Field name is everything up to the closing brace, so credentials
+// whose field labels contain spaces / hyphens / dots (the vault UI
+// allows them, e.g. "Api key") can still be referenced as
+// ${SECRET.Api key}. The `}` terminator bounds the match (it can't span
+// a real brace), and the resolved VALUE is still CR/LF/NUL-checked, so
+// widening the NAME class is safe. Previously [A-Za-z0-9_]+ silently
+// failed to match such names → the literal placeholder shipped upstream.
+const TOKEN_SRC = "\\$\\{SECRET(_JSON)?(?:\\.([^}]+))?\\}";
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024;
 
@@ -360,7 +367,21 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
         port: input.url.port !== "" ? Number(input.url.port) : undefined,
         path: `${input.url.pathname}${input.url.search}`,
         headers: input.headers,
-        lookup: (_h, _o, cb) => cb(null, input.pinnedAddress, input.family),
+        // We resolve + SSRF-validate ONE address and pin it here. Happy
+        // Eyeballs (autoSelectFamily, default true since Node 20) calls
+        // a custom lookup with { all: true } and expects an ARRAY of
+        // {address, family} back. The legacy single-address callback
+        // form then trips ERR_INVALID_IP_ADDRESS ("Invalid IP address:
+        // undefined"), which surfaced as upstream_error on EVERY proxied
+        // call. Honor both callback contracts so it works regardless of
+        // the autoSelectFamily default.
+        lookup: (_h, opts, cb) => {
+          if (opts.all === true) {
+            cb(null, [{ address: input.pinnedAddress, family: input.family }]);
+          } else {
+            cb(null, input.pinnedAddress, input.family);
+          }
+        },
       },
       (res) => {
         const declared = Number(res.headers["content-length"] ?? "0");
