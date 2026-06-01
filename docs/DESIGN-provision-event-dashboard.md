@@ -210,6 +210,13 @@ loop actuates).
   strategy is absent, tag `legacy_unknown` + warn (catches modern
   client bugs Decision 12's blind-default would hide).
 - Demand value-weighting beyond raw volume.
+- Full injected-router integration test (T3): `runSignupTask` builds the
+  bot + registry internally, so an end-to-end "fake registry + fake bot,
+  assert exactly one event per dispatch outcome + fail-open" test needs
+  a small DI refactor (inject the bot + a registry factory). The
+  dispatch *decision* logic is already covered by the `resolveDispatch`
+  / `finalOutcomeOf` pure-fn unit tests; this TODO is the wiring-level
+  integration test.
 - (pre-existing flag) `bot-failure-store.pruneOlderThan` appears
   defined but not called from `server.ts:178` — verify it's wired.
 
