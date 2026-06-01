@@ -33,6 +33,20 @@ import type {
   ExtractFailureSummary,
 } from "../extract-failure-store.js";
 import { bearerEquals } from "./admin.js";
+import {
+  type AdminAuthConfig,
+  ADMIN_SESSION_TTL_MS,
+  buildGoogleAuthorizeUrl,
+  buildSetCookie,
+  clearCookie,
+  exchangeAndIdentify,
+  isEmailAllowed,
+  mintSession,
+  mintState,
+  readCookie,
+  verifySession,
+  verifyState,
+} from "../admin-auth.js";
 
 export interface AdminDashboardDeps {
   store: SkillStore;
@@ -43,6 +57,12 @@ export interface AdminDashboardDeps {
   provisionEventStore?: ProvisionEventStore;
   extractFailureStore?: ExtractFailureStore;
   adminBearer?: string;
+  // Workspace-restricted Google SSO. When set, browsers without a valid
+  // session cookie are redirected to /admin/login; the bearer still
+  // works for programmatic access. When null, bearer-only (pre-SSO).
+  adminAuth?: AdminAuthConfig | null;
+  // Injectable fetch for the OAuth code exchange (tests stub it).
+  fetchFn?: typeof globalThis.fetch;
 }
 
 export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps> = async (
@@ -50,27 +70,40 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
   opts,
 ) => {
   fastify.get<{ Querystring: { bearer?: string } }>("/admin", async (req, reply) => {
-    if (opts.adminBearer === undefined || opts.adminBearer.length === 0) {
-      reply.code(503).type("text/plain").send("admin_not_configured");
-      return;
-    }
-    // Bearer in either the Authorization header or the ?bearer query
-    // string. The query-string path is for browser bookmarks (browsers
-    // can't easily attach Authorization without JS).
+    // Two doors: a bearer (programmatic/CLI) OR a valid Google SSO
+    // session cookie (browser). Bearer in the Authorization header or
+    // the ?bearer query string (browsers can't set headers without JS).
     const authHeader = req.headers["authorization"];
     const headerToken =
       typeof authHeader === "string" && authHeader.startsWith("Bearer ")
         ? authHeader.slice("Bearer ".length)
         : undefined;
-    const presented = req.query.bearer ?? headerToken ?? "";
-    if (!bearerEquals(presented, opts.adminBearer)) {
-      reply
-        .code(401)
-        .type("text/plain")
-        .send(
-          "unauthorized — pass the admin bearer via ?bearer=… or Authorization: Bearer …",
-        );
-      return;
+    const configuredBearer = opts.adminBearer ?? "";
+    const bearerConfigured = configuredBearer.length > 0;
+    const bearerOk =
+      bearerConfigured && bearerEquals(req.query.bearer ?? headerToken ?? "", configuredBearer);
+
+    if (!bearerOk) {
+      if (opts.adminAuth != null) {
+        // Browser path: require a valid SSO session, else send to login.
+        const session = verifySession(readCookie(req.headers["cookie"]), opts.adminAuth);
+        if (session === null) {
+          reply.code(302).header("location", "/admin/login").send();
+          return;
+        }
+        // Valid session → fall through and render.
+      } else if (!bearerConfigured) {
+        reply.code(503).type("text/plain").send("admin_not_configured");
+        return;
+      } else {
+        reply
+          .code(401)
+          .type("text/plain")
+          .send(
+            "unauthorized — pass the admin bearer via ?bearer=… or Authorization: Bearer …",
+          );
+        return;
+      }
     }
 
     // Pull everything serial — these are admin-scale queries on small
@@ -141,7 +174,89 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
     });
     reply.code(200).type("text/html; charset=utf-8").send(html);
   });
+
+  // ── Google SSO routes (active only when adminAuth is configured) ────
+
+  fastify.get("/admin/login", async (_req, reply) => {
+    if (opts.adminAuth == null) {
+      reply.code(503).type("text/plain").send("sso_not_configured");
+      return;
+    }
+    const state = mintState(opts.adminAuth);
+    reply.code(302).header("location", buildGoogleAuthorizeUrl(opts.adminAuth, state)).send();
+  });
+
+  fastify.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
+    "/admin/oauth/callback",
+    async (req, reply) => {
+      const auth = opts.adminAuth;
+      if (auth == null) {
+        reply.code(503).type("text/plain").send("sso_not_configured");
+        return;
+      }
+      if (typeof req.query.error === "string" && req.query.error.length > 0) {
+        reply.code(401).type("text/plain").send(`google_oauth_error: ${req.query.error}`);
+        return;
+      }
+      if (!verifyState(req.query.state, auth)) {
+        reply.code(400).type("text/plain").send("invalid_or_expired_state");
+        return;
+      }
+      if (typeof req.query.code !== "string" || req.query.code.length === 0) {
+        reply.code(400).type("text/plain").send("missing_code");
+        return;
+      }
+      let identity: { email: string; emailVerified: boolean };
+      try {
+        identity = await exchangeAndIdentify(auth, req.query.code, opts.fetchFn ?? fetch);
+      } catch {
+        reply.code(502).type("text/plain").send("oauth_exchange_failed");
+        return;
+      }
+      if (!identity.emailVerified || !isEmailAllowed(identity.email, auth)) {
+        reply
+          .code(403)
+          .type("text/html; charset=utf-8")
+          .send(renderDenied(identity.email, auth.allowedDomain));
+        return;
+      }
+      reply
+        .code(302)
+        .header("set-cookie", buildSetCookie(mintSession(identity.email, auth), ADMIN_SESSION_TTL_MS))
+        .header("location", "/admin")
+        .send();
+    },
+  );
+
+  fastify.get("/admin/logout", async (_req, reply) => {
+    reply.code(302).header("set-cookie", clearCookie()).header("location", "/admin/login").send();
+  });
+
+  // Convenience: on the dedicated admin host, send the bare root to the
+  // dashboard. Host-gated so registry.trustysquire.ai/ keeps 404-ing
+  // (the registry API has no root route). Only active under SSO.
+  fastify.get("/", async (req, reply) => {
+    const host = String(req.headers["host"] ?? "");
+    if (opts.adminAuth != null && host.startsWith("admin.")) {
+      reply.code(302).header("location", "/admin").send();
+      return;
+    }
+    reply.code(404).type("text/plain").send("not_found");
+  });
 };
+
+function renderDenied(email: string, domain: string): string {
+  return [
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\" />",
+    "<title>Access denied</title>",
+    "<style>body{font:450 14px/1.55 system-ui,sans-serif;background:#08080A;color:#F4F4F6;max-width:560px;margin:80px auto;padding:0 16px}a{color:#8B89FF}code{font-family:ui-monospace,monospace;color:#9A9AA4}</style>",
+    "</head><body>",
+    `<h1>Access denied</h1>`,
+    `<p><code>${esc(email)}</code> is not authorized. Sign in with a <code>@${esc(domain)}</code> Google Workspace account.</p>`,
+    `<p><a href="/admin/login">Try a different account</a></p>`,
+    "</body></html>",
+  ].join("\n");
+}
 
 function renderDashboard(args: {
   activeSkills: Awaited<ReturnType<SkillStore["listSkills"]>>;
