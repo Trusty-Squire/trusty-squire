@@ -360,7 +360,21 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
         port: input.url.port !== "" ? Number(input.url.port) : undefined,
         path: `${input.url.pathname}${input.url.search}`,
         headers: input.headers,
-        lookup: (_h, _o, cb) => cb(null, input.pinnedAddress, input.family),
+        // We resolve + SSRF-validate ONE address and pin it here. Happy
+        // Eyeballs (autoSelectFamily, default true since Node 20) calls
+        // a custom lookup with { all: true } and expects an ARRAY of
+        // {address, family} back. The legacy single-address callback
+        // form then trips ERR_INVALID_IP_ADDRESS ("Invalid IP address:
+        // undefined"), which surfaced as upstream_error on EVERY proxied
+        // call. Honor both callback contracts so it works regardless of
+        // the autoSelectFamily default.
+        lookup: (_h, opts, cb) => {
+          if (opts.all === true) {
+            cb(null, [{ address: input.pinnedAddress, family: input.family }]);
+          } else {
+            cb(null, input.pinnedAddress, input.family);
+          }
+        },
       },
       (res) => {
         const declared = Number(res.headers["content-length"] ?? "0");
