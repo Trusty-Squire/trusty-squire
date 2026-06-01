@@ -18,6 +18,8 @@ import type {
   RecordVerifierOutcomeResult,
 } from "../skill-store.js";
 import type { BotFailureStore } from "../bot-failure-store.js";
+import type { ProvisionEventStore } from "../provision-event-store.js";
+import { mergeHarvestCandidates } from "../harvest-candidates.js";
 
 // Constant-time bearer compare. Length mismatch returns false without
 // invoking timingSafeEqual (which requires equal-length inputs).
@@ -35,6 +37,11 @@ export interface AdminRouteDeps {
   // serves discovery-candidate aggregations. When unset the bot-
   // telemetry routes return 503 (same shape as missing adminBearer).
   botFailureStore?: BotFailureStore;
+  // Demand signal for the harvest queue (design Decision 4). When wired,
+  // GET /admin/discovery-candidates merges per-service provision volume
+  // with the failure-driven candidates. Optional — falls back to
+  // failure-only candidates when unset.
+  provisionEventStore?: ProvisionEventStore;
   // The expected bearer value. When undefined the route refuses every
   // request — production must wire this from env. Tests inject directly.
   adminBearer?: string;
@@ -266,17 +273,52 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       });
       const excludeServices = new Set(activeSkills.map((s) => s.service));
 
-      const candidates = await opts.botFailureStore.listDiscoveryCandidates({
+      const failureCandidates = await opts.botFailureStore.listDiscoveryCandidates({
         sinceDays,
         minDistinct,
         excludeServices,
-        limit,
+        // Pull a wider failure set than `limit` so the demand merge has
+        // room to re-rank before the final cap.
+        limit: Math.min(100, limit * 3),
       });
+
+      // Decision 4: when the demand signal is wired, merge per-service
+      // provision volume with the failure candidates, dedupe, apply the
+      // wall damper, and rank demand-first. Falls back to failure-only
+      // candidates when the event store isn't configured.
+      if (opts.provisionEventStore !== undefined) {
+        const sinceMs = sinceDays * 86_400_000;
+        const demandRows = await opts.provisionEventStore.demandByService(sinceMs, 100);
+        const merged = mergeHarvestCandidates({
+          demandRows,
+          failureCandidates,
+          activeServices: excludeServices,
+          limit,
+        });
+        reply.send({
+          ok: true,
+          since_days: sinceDays,
+          min_distinct: minDistinct,
+          items: merged.map((c) => ({
+            service: c.service,
+            // Kept for backward-compat with the housekeeper queue mapper.
+            distinct_failures: c.distinct_failures,
+            top_error_kind: c.top_error_kind,
+            most_recent_at: c.most_recent_at?.toISOString() ?? null,
+            // New demand-signal fields.
+            volume: c.volume,
+            source: c.source,
+            wall_ratio: c.wall_ratio,
+          })),
+        });
+        return;
+      }
+
       reply.send({
         ok: true,
         since_days: sinceDays,
         min_distinct: minDistinct,
-        items: candidates.map((c) => ({
+        items: failureCandidates.map((c) => ({
           service: c.service,
           distinct_failures: c.distinct_failures,
           top_error_kind: c.top_error_kind,

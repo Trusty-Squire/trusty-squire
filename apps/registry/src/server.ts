@@ -156,6 +156,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   await fastify.register(registerAdminRoutes, {
     store: skillStore,
     botFailureStore,
+    // Demand signal for the merged harvest queue (Decision 4).
+    provisionEventStore,
     resolveAccountId,
     ...(adminBearer !== undefined && adminBearer.length > 0
       ? { adminBearer }

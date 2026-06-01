@@ -4,6 +4,8 @@ import {
 } from "./registry-prisma-client.js";
 import {
   STEP_TRAIL_MAX_BYTES,
+  type CacheHitBreakdown,
+  type DemandRow,
   type ProvisionEventInput,
   type ProvisionEventRecord,
   type ProvisionEventStore,
@@ -84,6 +86,66 @@ export class PrismaProvisionEventStore implements ProvisionEventStore {
       orderBy: { occurred_at: "desc" },
     });
     return rows.map(mapRow);
+  }
+
+  async cacheHitBreakdown(sinceMs: number): Promise<CacheHitBreakdown> {
+    const cutoff = new Date(Date.now() - sinceMs);
+    // no_skill_bot is derived as total - replay_served - fell_back so the
+    // three buckets always partition the total (legacy rows with a NULL
+    // strategy fall into no_skill_bot without a special FILTER).
+    const rows = (await this.client.$queryRawUnsafe(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE final_strategy = 'replay') AS replay_served,
+        COUNT(*) FILTER (WHERE final_strategy = 'bot' AND initial_strategy = 'replay') AS fell_back,
+        COUNT(*) AS total
+      FROM "ProvisionEvent"
+      WHERE occurred_at >= $1
+      `,
+      cutoff,
+    )) as Array<{ replay_served: number | bigint; fell_back: number | bigint; total: number | bigint }>;
+    const r = rows[0] ?? { replay_served: 0, fell_back: 0, total: 0 };
+    const replay_served = Number(r.replay_served);
+    const fell_back = Number(r.fell_back);
+    const total = Number(r.total);
+    return { replay_served, fell_back, no_skill_bot: total - replay_served - fell_back, total };
+  }
+
+  async demandByService(sinceMs: number, limit: number): Promise<DemandRow[]> {
+    const cutoff = new Date(Date.now() - sinceMs);
+    // Wall-kind list is inlined as a literal (a fixed constant, not user
+    // input → injection-safe) to avoid Postgres array-param binding.
+    // MUST stay in sync with isWallFailure() in provision-event-store.ts.
+    const rows = (await this.client.$queryRawUnsafe(
+      `
+      SELECT
+        service,
+        COUNT(*) AS volume,
+        COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+        COUNT(*) FILTER (
+          WHERE status = 'failed'
+            AND failure_kind IN ('captcha_blocked', 'anti_bot_blocked', 'captcha')
+        ) AS wall_failed
+      FROM "ProvisionEvent"
+      WHERE occurred_at >= $1
+      GROUP BY service
+      ORDER BY volume DESC
+      LIMIT $2
+      `,
+      cutoff,
+      Math.max(1, limit),
+    )) as Array<{
+      service: string;
+      volume: number | bigint;
+      failed: number | bigint;
+      wall_failed: number | bigint;
+    }>;
+    return rows.map((r) => ({
+      service: r.service,
+      volume: Number(r.volume),
+      failed: Number(r.failed),
+      wall_failed: Number(r.wall_failed),
+    }));
   }
 }
 

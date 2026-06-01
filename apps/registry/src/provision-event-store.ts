@@ -46,6 +46,34 @@ export interface ProvisionEventInput {
   duration_ms?: number | null;
 }
 
+// Wall failure kinds — a terminal captcha/anti-bot wall rather than a
+// fixable failure. The demand-harvest damper down-weights services whose
+// failures are dominated by these. Registry-local copy (the MCP keeps
+// its own); the failure_kind taxonomy is deferred — see
+// docs/DESIGN-provision-event-dashboard.md. Unknown kinds are NOT walls
+// (Decision 6: fail toward harvesting).
+const WALL_FAILURE_KINDS = new Set(["captcha_blocked", "anti_bot_blocked", "captcha"]);
+
+export function isWallFailure(kind: string): boolean {
+  return WALL_FAILURE_KINDS.has(kind);
+}
+
+// Cache-hit 3-way breakdown over a window (design Decision 10 partition).
+export interface CacheHitBreakdown {
+  replay_served: number; // final_strategy=replay (implies outcome ok)
+  fell_back: number; // initial=replay, final=bot
+  no_skill_bot: number; // final=bot, initial=bot (incl. legacy rows)
+  total: number;
+}
+
+// Per-service demand + wall signal for the harvest loop + dashboard.
+export interface DemandRow {
+  service: string;
+  volume: number; // total provisions in the window
+  failed: number; // of which failed
+  wall_failed: number; // of the failures, how many were wall kinds
+}
+
 // Inline step-trail cap. A typical full trail is a few hundred bytes;
 // a maximally chatty trail caps out around 8KB. 32KB is comfortably
 // above the worst case without burdening Postgres rows.
@@ -84,6 +112,11 @@ export interface ProvisionEventStore {
   /** Admin dashboard view: recent FAILED events across all services,
    *  newest first. Capped to `limit` (default 50). */
   listRecentFailures(limit?: number): Promise<ProvisionEventRecord[]>;
+  /** Cache-hit 3-way breakdown over the window (dashboard Panel 2). */
+  cacheHitBreakdown(sinceMs: number): Promise<CacheHitBreakdown>;
+  /** Top services by total provision volume in the window, desc.
+   *  Caller applies active-skill exclusion + wall damper. */
+  demandByService(sinceMs: number, limit: number): Promise<DemandRow[]>;
 }
 
 function capTrail(trailRaw: string | null): string | null {
@@ -145,5 +178,40 @@ export class InMemoryProvisionEventStore implements ProvisionEventStore {
       .filter((r) => r.status === "failed")
       .sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime())
       .slice(0, Math.min(limit, 200));
+  }
+
+  async cacheHitBreakdown(sinceMs: number): Promise<CacheHitBreakdown> {
+    const cutoff = Date.now() - sinceMs;
+    let replay_served = 0;
+    let fell_back = 0;
+    let no_skill_bot = 0;
+    let total = 0;
+    for (const r of this.rows) {
+      if (r.occurred_at.getTime() < cutoff) continue;
+      total++;
+      if (r.final_strategy === "replay") replay_served++;
+      else if (r.initial_strategy === "replay") fell_back++;
+      else no_skill_bot++; // final=bot & initial=bot (or legacy nulls)
+    }
+    return { replay_served, fell_back, no_skill_bot, total };
+  }
+
+  async demandByService(sinceMs: number, limit: number): Promise<DemandRow[]> {
+    const cutoff = Date.now() - sinceMs;
+    const buckets = new Map<string, { volume: number; failed: number; wall_failed: number }>();
+    for (const r of this.rows) {
+      if (r.occurred_at.getTime() < cutoff) continue;
+      const b = buckets.get(r.service) ?? { volume: 0, failed: 0, wall_failed: 0 };
+      b.volume++;
+      if (r.status === "failed") {
+        b.failed++;
+        if (r.failure_kind !== null && isWallFailure(r.failure_kind)) b.wall_failed++;
+      }
+      buckets.set(r.service, b);
+    }
+    return [...buckets.entries()]
+      .map(([service, b]) => ({ service, ...b }))
+      .sort((a, b) => b.volume - a.volume)
+      .slice(0, Math.max(1, limit));
   }
 }
