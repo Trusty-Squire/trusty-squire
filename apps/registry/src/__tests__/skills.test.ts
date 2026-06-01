@@ -1650,3 +1650,36 @@ describe("GET /skills/by-id/:skill_id/replays", () => {
     await server.close();
   });
 });
+
+describe("one active skill per service (duplicate-publish supersede)", () => {
+  it("publishing a 2nd active skill for a service supersedes the 1st", async () => {
+    const store = new InMemorySkillStore();
+    const ins = (skill: Skill) =>
+      store.insert({ skill, signature: "sig", signed_at: new Date(), signed_by: "test" });
+
+    // Same service + same signup_url/oauth_provider → no human-review gate.
+    await ins(validSkill({ skill_id: testSkillIdAt(0), created_at: "2026-05-21T04:00:00.000Z" }));
+    await ins(validSkill({ skill_id: testSkillIdAt(1), created_at: "2026-05-22T04:00:00.000Z" }));
+
+    const active = await store.listSkills({ status: "active" });
+    expect(active).toHaveLength(1);
+    expect(active[0]?.skill_id).toBe(testSkillIdAt(1)); // the newer one
+
+    const found = await store.findActiveByService("railway");
+    expect(found?.skill_id).toBe(testSkillIdAt(1));
+
+    const first = await store.findById(testSkillIdAt(0));
+    expect(first?.status).toBe("superseded");
+    expect(first?.superseded_at).not.toBeNull();
+  });
+
+  it("does not touch active skills of OTHER services", async () => {
+    const store = new InMemorySkillStore();
+    const ins = (skill: Skill) =>
+      store.insert({ skill, signature: "sig", signed_at: new Date(), signed_by: "test" });
+    await ins(validSkill({ skill_id: testSkillIdAt(0), service: "railway" }));
+    await ins(validSkill({ skill_id: testSkillIdAt(1), service: "ipinfo", signup_url: "https://ipinfo.io/account/token" }));
+    const active = await store.listSkills({ status: "active" });
+    expect(active.map((s) => s.service).sort()).toEqual(["ipinfo", "railway"]);
+  });
+});

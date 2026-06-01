@@ -66,6 +66,20 @@ export class InMemorySkillStore implements SkillStore {
       }
     }
 
+    // One active skill per service: supersede any existing active row(s)
+    // for this service before inserting a new active one (mirrors the
+    // Prisma store + its partial unique index). Without this, re-publish
+    // accumulated duplicate active rows.
+    if (effectiveStatus === "active") {
+      for (const rec of this.skills.values()) {
+        if (rec.service === skill.service && rec.status === "active" && rec.deleted_at === null) {
+          rec.status = "superseded";
+          rec.superseded_at = new Date();
+          rec.payload.status = "superseded";
+        }
+      }
+    }
+
     // Deep-clone the payload so subsequent mutations to the stored
     // record's counters don't bleed back into the caller's Skill
     // object — Zod-parsed objects share references for nested

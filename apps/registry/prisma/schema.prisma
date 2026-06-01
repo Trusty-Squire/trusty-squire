@@ -87,6 +87,11 @@ model SkillRecord {
   @@index([service])
   @@index([status])
   @@index([deleted_at])
+  // NOTE: a PARTIAL UNIQUE INDEX "SkillRecord_one_active_per_service" on
+  // (service) WHERE status='active' AND deleted_at IS NULL is added by
+  // migration 20260601120000_one_active_skill_per_service. Prisma's
+  // schema can't express a filtered unique index, so it lives in raw
+  // SQL — enforces one active skill per service.
   // Freshness sweep: verifier worker selects skills whose freshness
   // window has elapsed in due-date order.
   @@index([next_freshness_due_at])
