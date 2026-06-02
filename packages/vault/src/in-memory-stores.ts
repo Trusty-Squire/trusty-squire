@@ -132,6 +132,12 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.allowed_hosts = [...hosts];
   }
 
+  async setLabel(reference: string, label: string): Promise<void> {
+    const r = this.byReference.get(reference);
+    if (r === undefined) return;
+    r.label = label;
+  }
+
   async purgeAccount(accountId: string): Promise<number> {
     let removed = 0;
     for (const [ref, rec] of this.byReference) {
