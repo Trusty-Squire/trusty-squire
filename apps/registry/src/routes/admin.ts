@@ -133,6 +133,9 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
           skill_id: req.params.skill_id,
           kind: req.body.kind,
           reason,
+          ...(req.body.failure_kind !== undefined
+            ? { failure_kind: req.body.failure_kind }
+            : {}),
           ...(req.body.duration_ms !== undefined
             ? { duration_ms: req.body.duration_ms }
             : {}),
@@ -149,7 +152,9 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       // Only fires on terminal verifier transitions to keep noise low.
       if (
         opts.demotionWebhookUrl !== undefined &&
-        (result.transition === "demoted" || result.transition === "retired")
+        (result.transition === "demoted" ||
+          result.transition === "retired" ||
+          result.transition === "quarantined")
       ) {
         const fetchFn = opts.fetchFn ?? globalThis.fetch;
         void fetchFn(opts.demotionWebhookUrl, {
@@ -344,6 +349,11 @@ function numFromQuery(
 interface VerifierOutcomeBody {
   kind: "success" | "failure";
   reason: string;
+  // Structured failure kind (step_failed / validator_failed /
+  // extraction_failed / fetch_error / …) → drives the T4 demotion
+  // classifier. Optional: legacy workers omit it; a failure with no kind
+  // classifies as transient and never demotes.
+  failure_kind?: string;
   duration_ms?: number;
 }
 
@@ -369,6 +379,7 @@ function isVerifierOutcomeBody(body: unknown): body is VerifierOutcomeBody {
   const b = body as Record<string, unknown>;
   if (b["kind"] !== "success" && b["kind"] !== "failure") return false;
   if (typeof b["reason"] !== "string") return false;
+  if (b["failure_kind"] !== undefined && typeof b["failure_kind"] !== "string") return false;
   if (b["duration_ms"] !== undefined && typeof b["duration_ms"] !== "number") return false;
   return true;
 }

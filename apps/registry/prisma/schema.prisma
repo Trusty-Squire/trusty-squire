@@ -47,6 +47,13 @@ model SkillRecord {
   // of truth.
   status               String
 
+  // Why this skill left `active`. Set when the verifier demotes
+  // (rot:<failure_kind>) or quarantines (wall:<failure_kind>), or an
+  // operator manually demotes. NULL while active/pending/superseded.
+  // Read by the /admin/needs-human worklist so a sole operator can
+  // target what actually broke without crawling per-skill panels.
+  demotion_reason      String?
+
   // Health counters. Updated via atomic SQL on each replay outcome.
   replays_succeeded    Int      @default(0)
   replays_failed       Int      @default(0)

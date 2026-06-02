@@ -4,6 +4,7 @@
 // store.ts ships.
 
 import { randomUUID } from "node:crypto";
+import { classifyFailure } from "@trusty-squire/skill-schema";
 import type {
   InsertCaptureInput,
   InsertSkillInput,
@@ -96,6 +97,7 @@ export class InMemorySkillStore implements SkillStore {
       signed_at,
       signed_by,
       status: effectiveStatus,
+      demotion_reason: null,
       replays_succeeded: skill.replays_succeeded,
       replays_failed: skill.replays_failed,
       consecutive_failures: skill.consecutive_failures,
@@ -342,22 +344,43 @@ export class InMemorySkillStore implements SkillStore {
       }
     } else {
       skill.verifier_failed += 1;
-      skill.consecutive_verifier_failures += 1;
+      // T4 — anchor demotion on FIXABLE ROT only (mirrors
+      // PrismaSkillStore + failure-taxonomy). verifier_failed is a stat
+      // and always bumps; the demote counter advances only on rot, so a
+      // wall / inbox / transient blip can't thrash a working skill.
+      const fclass = classifyFailure(input.failure_kind);
+      const failureKind = (input.failure_kind ?? "unknown").slice(0, 80);
+      if (fclass === "rot") skill.consecutive_verifier_failures += 1;
+
       if (
+        fclass === "wall" &&
+        (skill.status === "active" || skill.status === "pending-review")
+      ) {
+        // Terminal anti-bot wall — quarantine on the FIRST hit (no
+        // 3-strike). Non-destructive: keep the row + capture for a manual
+        // signup. Stop re-testing.
+        skill.status = "quarantined";
+        skill.payload.status = "quarantined";
+        skill.demotion_reason = `wall:${failureKind}`;
+        skill.next_freshness_due_at = null;
+        transition = "quarantined";
+      } else if (
         skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
       ) {
+        // 3 consecutive ROT failures (the counter only advanced on rot).
         if (skill.status === "pending-review") {
           // Never validated — soft-retire by deleting. The capture
           // is preserved in SkillCaptureRecord for forensics.
           skill.deleted_at = now;
           skill.payload.deleted_at = now.toISOString();
+          skill.demotion_reason = `rot:${failureKind}`;
           transition = "retired";
         } else if (skill.status === "active") {
-          // Regressed — demote. Same outcome as 3 user-replay
-          // failures, just via the verifier path.
+          // Regressed — demote (eligible for auto-rediscovery, T5).
           skill.status = "demoted";
           skill.payload.status = "demoted";
-          // Stop re-testing — operator action is needed.
+          skill.demotion_reason = `rot:${failureKind}`;
+          // Stop re-testing — rediscovery or operator action is needed.
           skill.next_freshness_due_at = null;
           transition = "demoted";
         }
@@ -383,11 +406,9 @@ export class InMemorySkillStore implements SkillStore {
     const skill = this.skills.get(skill_id);
     if (!skill) return null;
     skill.status = "demoted";
-    // We don't have a "demotion_reason" column today; the operator's
-    // reason gets folded into the next replay record so the trail
-    // is preserved. Phase 4 follow-up could add a column for this
-    // if operator triage shows it matters.
-    void reason;
+    // T4 — persist the operator's reason so the needs-human worklist
+    // shows WHY (replaces the old `void reason` TODO).
+    skill.demotion_reason = `manual:${reason}`.slice(0, 2000);
     return skill;
   }
 

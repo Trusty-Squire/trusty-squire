@@ -162,6 +162,9 @@ export async function handleReplay(
         skill_id: item.skill_id,
         kind: "failure",
         reason,
+        // A registry/network error is NOT the skill's fault — classifies
+        // as transient, so it must not advance the demote counter (T4).
+        failure_kind: "fetch_error",
         duration_ms: Date.now() - startMs,
       });
       transition = res.transition;
@@ -174,6 +177,11 @@ export async function handleReplay(
 
   let outcomeKind: "success" | "failure" = "failure";
   let outcomeReason = "uncaught";
+  // Structured failure kind for the demotion classifier (T4). The replay
+  // outcome's discriminant (step_failed / validator_failed /
+  // extraction_failed / needs_login / …) IS the kind; only step/validator/
+  // extraction classify as rot and count toward demotion.
+  let failureKind: string | undefined = "uncaught";
   try {
     const replay = await opts.replay({
       skill,
@@ -187,6 +195,7 @@ export async function handleReplay(
     const isOk =
       replay.kind === "ok" || replay.kind === "ok_multi" || replay.kind === "dry_pass";
     outcomeKind = isOk ? "success" : "failure";
+    failureKind = isOk ? undefined : replay.kind;
     outcomeReason = describeReplayOutcome(replay);
 
     if (isOk && replay.kind === "ok") {
@@ -211,6 +220,7 @@ export async function handleReplay(
     }
   } catch (err) {
     outcomeKind = "failure";
+    failureKind = "verifier_error";
     outcomeReason = `verifier_error: ${err instanceof Error ? err.message : String(err)}`;
   }
   const duration_ms = Date.now() - startMs;
@@ -220,6 +230,7 @@ export async function handleReplay(
       skill_id: item.skill_id,
       kind: outcomeKind,
       reason: outcomeReason,
+      ...(failureKind !== undefined ? { failure_kind: failureKind } : {}),
       duration_ms,
     });
     transition = res.transition;

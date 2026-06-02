@@ -68,19 +68,24 @@ describe("reactivate() resets verifier flow state", () => {
     // sets verifier_succeeded=0, so the failures-branch only demotes
     // when status==='active'. Two failures with status=active is enough
     // to reach cvf=3 and demote. Let's drive that.
+    // T4: only ROT failures advance the demote counter, so these verifier
+    // failures carry a rot failure_kind (step_failed) to drive demotion.
     await store.recordVerifierOutcome({
       skill_id: "01REACT00000000000000000XX",
       kind: "failure",
+      failure_kind: "step_failed",
       reason: "f1",
     });
     await store.recordVerifierOutcome({
       skill_id: "01REACT00000000000000000XX",
       kind: "failure",
+      failure_kind: "step_failed",
       reason: "f2",
     });
     const demoteResult = await store.recordVerifierOutcome({
       skill_id: "01REACT00000000000000000XX",
       kind: "failure",
+      failure_kind: "step_failed",
       reason: "f3 — demotes",
     });
     expect(demoteResult.transition).toBe("demoted");
@@ -112,6 +117,7 @@ describe("reactivate() resets verifier flow state", () => {
       await store.recordVerifierOutcome({
         skill_id: "01REACT00000000000000000XX",
         kind: "failure",
+        failure_kind: "step_failed",
         reason: `f${i + 1}`,
       });
     }
@@ -119,6 +125,7 @@ describe("reactivate() resets verifier flow state", () => {
     const oneFailure = await store.recordVerifierOutcome({
       skill_id: "01REACT00000000000000000XX",
       kind: "failure",
+      failure_kind: "step_failed",
       reason: "first failure after reactivate",
     });
     // Without the fix: cvf=4 → already past threshold from the prior

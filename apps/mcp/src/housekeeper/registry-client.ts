@@ -145,6 +145,8 @@ export class VerifierRegistryClient {
     skill_id: string;
     kind: "success" | "failure";
     reason: string;
+    // Structured failure kind for the demotion classifier (T4).
+    failure_kind?: string;
     duration_ms?: number;
   }): Promise<VerifierOutcomeResponse> {
     const url = `${this.baseUrl}/admin/skills/${encodeURIComponent(input.skill_id)}/verifier-outcome`;
@@ -157,6 +159,7 @@ export class VerifierRegistryClient {
       body: JSON.stringify({
         kind: input.kind,
         reason: input.reason,
+        ...(input.failure_kind !== undefined ? { failure_kind: input.failure_kind } : {}),
         ...(input.duration_ms !== undefined ? { duration_ms: input.duration_ms } : {}),
       }),
     });

@@ -555,11 +555,16 @@ export type SkillCredentialSpec = z.infer<typeof SkillCredentialSpecSchema>;
 // ── Lifecycle ───────────────────────────────────────────────────────
 
 export const SkillStatusSchema = z
-  .enum(["active", "demoted", "superseded", "pending-review"])
+  .enum(["active", "demoted", "quarantined", "superseded", "pending-review"])
   .describe(
     "active   = router uses this skill; default state on publish.\n" +
       "demoted  = router skips; reached >=3 consecutive replay failures " +
-      "or operator manually demoted.\n" +
+      "that classified as genuine skill ROT (step/validator/extraction), " +
+      "or operator manually demoted. Eligible for auto-rediscovery.\n" +
+      "quarantined = router skips; the verifier hit a terminal WALL " +
+      "(captcha/anti-bot) or gave up after bounded rediscovery. Needs a " +
+      "human (manual signup / harder anti-bot work) — NOT auto-rediscovered. " +
+      "Non-destructive: the skill body + capture sidecar are kept.\n" +
       "superseded = a newer version is now active; this version is " +
       "kept around for diff/rollback during the 90-day grace " +
       "(per Decision 6, delete-on-successor-publish).\n" +

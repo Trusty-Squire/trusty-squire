@@ -2,7 +2,7 @@
 // use InMemorySkillStore. Mirrors prisma-store.ts (the manifest
 // equivalent).
 
-import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
+import { classifyFailure, parseSkill, type Skill } from "@trusty-squire/skill-schema";
 import {
   createRegistryPrismaClient,
   type RegistryPrismaClient,
@@ -254,6 +254,13 @@ export class PrismaSkillStore implements SkillStore {
     void input.reason;
     void input.duration_ms;
     const oneWeek = 7 * 24 * 60 * 60 * 1000;
+    // T4 — anchor the demote counter on FIXABLE ROT only. A failure that
+    // classifies as a wall (captcha/anti-bot), infra (inbox/delivery) or
+    // transient (oauth/session/timeout) records the stat but must NOT
+    // advance consecutive_verifier_failures, or a working skill thrashes
+    // toward demotion on a blip. Unknown kinds default to transient.
+    const fclass = input.kind === "failure" ? classifyFailure(input.failure_kind) : null;
+    const failureKind = (input.failure_kind ?? "unknown").slice(0, 80);
     return this.client.$transaction(async (tx) => {
       let skill: PrismaSkillRow;
       if (input.kind === "success") {
@@ -270,7 +277,10 @@ export class PrismaSkillStore implements SkillStore {
           where: { skill_id: input.skill_id },
           data: {
             verifier_failed: { increment: 1 },
-            consecutive_verifier_failures: { increment: 1 },
+            // Only genuine rot advances the demote counter.
+            ...(fclass === "rot"
+              ? { consecutive_verifier_failures: { increment: 1 } }
+              : {}),
           },
         })) as unknown as PrismaSkillRow;
       }
@@ -337,21 +347,46 @@ export class PrismaSkillStore implements SkillStore {
         })) as unknown as PrismaSkillRow;
       } else if (
         input.kind === "failure" &&
+        fclass === "wall" &&
+        (skill.status === "active" || skill.status === "pending-review")
+      ) {
+        // Terminal anti-bot wall — the bot can't pass it, so re-verifying
+        // just burns replays. Quarantine on the FIRST hit (no 3-strike):
+        // route to the human pile. Non-destructive — keep the row + the
+        // capture sidecar so the operator can finish the signup manually.
+        skill = (await tx.skillRecord.update({
+          where: { skill_id: input.skill_id },
+          data: {
+            status: "quarantined",
+            next_freshness_due_at: null,
+            demotion_reason: `wall:${failureKind}`,
+          },
+        })) as unknown as PrismaSkillRow;
+        transition = "quarantined";
+      } else if (
+        input.kind === "failure" &&
         skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
       ) {
+        // Reaching the threshold here means 3 consecutive ROT failures —
+        // the counter only advanced on rot above.
         if (skill.status === "pending-review") {
           // Never validated — retire. Capture sidecars survive for
           // forensic value.
           skill = (await tx.skillRecord.update({
             where: { skill_id: input.skill_id },
-            data: { deleted_at: now },
+            data: { deleted_at: now, demotion_reason: `rot:${failureKind}` },
           })) as unknown as PrismaSkillRow;
           transition = "retired";
         } else if (skill.status === "active") {
-          // Regressed — demote and stop re-testing.
+          // Regressed — demote and stop re-testing. demoted (not
+          // quarantined) → eligible for auto-rediscovery (T5).
           skill = (await tx.skillRecord.update({
             where: { skill_id: input.skill_id },
-            data: { status: "demoted", next_freshness_due_at: null },
+            data: {
+              status: "demoted",
+              next_freshness_due_at: null,
+              demotion_reason: `rot:${failureKind}`,
+            },
           })) as unknown as PrismaSkillRow;
           transition = "demoted";
         }
@@ -371,11 +406,15 @@ export class PrismaSkillStore implements SkillStore {
   }
 
   async manuallyDemote(skill_id: string, reason: string): Promise<SkillStoreRecord | null> {
-    void reason; // see InMemorySkillStore — no demotion_reason column yet
     try {
       const row = await this.client.skillRecord.update({
         where: { skill_id },
-        data: { status: "demoted" },
+        // T4 — persist the operator's reason so the needs-human worklist
+        // shows WHY (replaces the old `void reason` TODO).
+        data: {
+          status: "demoted",
+          demotion_reason: `manual:${reason}`.slice(0, 2000),
+        },
       });
       return toSkillStoreRecord(row as PrismaSkillRow);
     } catch (err) {
@@ -570,6 +609,7 @@ type PrismaSkillRow = {
   signed_at: Date;
   signed_by: string;
   status: string;
+  demotion_reason: string | null;
   replays_succeeded: number;
   replays_failed: number;
   consecutive_failures: number;
@@ -600,6 +640,7 @@ function toSkillStoreRecord(row: PrismaSkillRow): SkillStoreRecord {
     signed_at: row.signed_at,
     signed_by: row.signed_by,
     status: row.status,
+    demotion_reason: row.demotion_reason,
     replays_succeeded: row.replays_succeeded,
     replays_failed: row.replays_failed,
     consecutive_failures: row.consecutive_failures,
