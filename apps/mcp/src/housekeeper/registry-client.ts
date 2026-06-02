@@ -110,7 +110,7 @@ export class VerifierRegistryClient {
       service: string;
       distinct_failures: number;
       top_error_kind: string;
-      most_recent_at: string;
+      most_recent_at: string | null;
     }>
   > {
     const url = new URL("/admin/discovery-candidates", this.baseUrl);
@@ -132,7 +132,7 @@ export class VerifierRegistryClient {
         service: string;
         distinct_failures: number;
         top_error_kind: string;
-        most_recent_at: string;
+        most_recent_at: string | null;
       }>;
     };
     if (body.ok !== true || !Array.isArray(body.items)) {

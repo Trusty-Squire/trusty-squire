@@ -272,11 +272,24 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       // The excludeServices set is "services with an active skill".
       // We pull active skills once and pass the slug-set down — the
       // store can't see across into SkillStore.
-      const activeSkills = await opts.store.listSkills({
-        status: "active",
-        limit: 500,
-      });
+      const [activeSkills, demotedSkills, quarantinedSkills] = await Promise.all([
+        opts.store.listSkills({ status: "active", limit: 500 }),
+        opts.store.listSkills({ status: "demoted", limit: 500 }),
+        opts.store.listSkills({ status: "quarantined", limit: 500 }),
+      ]);
       const excludeServices = new Set(activeSkills.map((s) => s.service));
+      // T5 — closed loop: a quarantined (wall) service is routed to the
+      // human pile, NEVER auto-rediscovered, so exclude it from candidates.
+      for (const s of quarantinedSkills) excludeServices.add(s.service);
+      // A freshly-demoted (rot) skill's service should be re-skilled
+      // REGARDLESS of demand — that's the demotion→rediscovery handoff.
+      // Prepended below so a known-broken skill gets re-captured ahead of
+      // demand-only candidates.
+      const demotedServices = [
+        ...new Set(
+          demotedSkills.map((s) => s.service).filter((svc) => !excludeServices.has(svc)),
+        ),
+      ];
 
       const failureCandidates = await opts.botFailureStore.listDiscoveryCandidates({
         sinceDays,
@@ -300,35 +313,60 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
           activeServices: excludeServices,
           limit,
         });
+        const demandItems = merged.map((c) => ({
+          service: c.service,
+          // Kept for backward-compat with the housekeeper queue mapper.
+          distinct_failures: c.distinct_failures,
+          top_error_kind: c.top_error_kind,
+          most_recent_at: c.most_recent_at?.toISOString() ?? null,
+          // New demand-signal fields.
+          volume: c.volume,
+          source: c.source,
+          wall_ratio: c.wall_ratio,
+        }));
+        const seen = new Set(demandItems.map((i) => i.service));
+        const demotedItems = demotedServices
+          .filter((svc) => !seen.has(svc))
+          .map((svc) => ({
+            service: svc,
+            distinct_failures: 0,
+            top_error_kind: "demoted",
+            most_recent_at: null,
+            volume: 0,
+            source: "demoted",
+            wall_ratio: 0,
+          }));
         reply.send({
           ok: true,
           since_days: sinceDays,
           min_distinct: minDistinct,
-          items: merged.map((c) => ({
-            service: c.service,
-            // Kept for backward-compat with the housekeeper queue mapper.
-            distinct_failures: c.distinct_failures,
-            top_error_kind: c.top_error_kind,
-            most_recent_at: c.most_recent_at?.toISOString() ?? null,
-            // New demand-signal fields.
-            volume: c.volume,
-            source: c.source,
-            wall_ratio: c.wall_ratio,
-          })),
+          // Demoted (rot) services first — re-skill known-broken skills
+          // ahead of demand-only discoveries — then the demand merge.
+          items: [...demotedItems, ...demandItems].slice(0, limit),
         });
         return;
       }
 
+      const failureItems = failureCandidates.map((c) => ({
+        service: c.service,
+        distinct_failures: c.distinct_failures,
+        top_error_kind: c.top_error_kind,
+        most_recent_at: c.most_recent_at.toISOString() as string | null,
+      }));
+      const seenF = new Set(failureItems.map((i) => i.service));
+      const demotedItemsF = demotedServices
+        .filter((svc) => !seenF.has(svc))
+        .map((svc) => ({
+          service: svc,
+          distinct_failures: 0,
+          top_error_kind: "demoted",
+          most_recent_at: null,
+        }));
       reply.send({
         ok: true,
         since_days: sinceDays,
         min_distinct: minDistinct,
-        items: failureCandidates.map((c) => ({
-          service: c.service,
-          distinct_failures: c.distinct_failures,
-          top_error_kind: c.top_error_kind,
-          most_recent_at: c.most_recent_at.toISOString(),
-        })),
+        items: [...demotedItemsF, ...failureItems].slice(0, limit),
       });
     },
   );

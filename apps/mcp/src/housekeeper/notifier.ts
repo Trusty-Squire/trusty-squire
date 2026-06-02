@@ -27,7 +27,7 @@ export type NotifierEvent =
       meta?: {
         distinct_failures?: number;
         top_error_kind?: string;
-        most_recent_at?: string;
+        most_recent_at?: string | null;
       };
     };
 
