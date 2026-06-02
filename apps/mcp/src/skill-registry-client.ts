@@ -409,7 +409,15 @@ export class SkillRegistryClient {
         ...(input.finalStrategy !== undefined ? { final_strategy: input.finalStrategy } : {}),
         ...(input.replayOutcome !== undefined ? { replay_outcome: input.replayOutcome } : {}),
         ...(input.finalOutcome !== undefined ? { final_outcome: input.finalOutcome } : {}),
-        ...(input.failureKind !== undefined ? { failure_kind: input.failureKind } : {}),
+        // The registry's /attempts schema caps failure_kind at 120 chars
+        // and REJECTS (zod 400) anything longer — and the bot's verbose
+        // error strings (e.g. the full verification_not_sent message) blow
+        // past that, which silently dropped almost every ProvisionEvent
+        // (a non-2xx returns {kind:"unavailable"}, no throw, no row). Cap
+        // it client-side so failed-run events actually land.
+        ...(input.failureKind !== undefined
+          ? { failure_kind: input.failureKind.slice(0, 120) }
+          : {}),
         ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
         ...(input.provisionId !== undefined ? { provision_id: input.provisionId } : {}),
         ...(input.stepTrail !== undefined ? { step_trail: input.stepTrail } : {}),
