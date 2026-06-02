@@ -62,6 +62,7 @@ import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
   clearAllProviderMarkers,
   clearProviderCookies,
+  clearProviderLoggedIn,
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
@@ -895,6 +896,14 @@ async function login(args: Argv): Promise<void> {
     args.providerArg === "github" ? "github" : "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
+  // --force-relogin wipes this provider's cookies (via forceOpen below),
+  // so drop its marker up front too. Otherwise a stale marker from a
+  // prior successful login survives a re-login that the user abandons or
+  // that times out (e.g. GitHub's 2FA "verify it's you" never finished) —
+  // leaving logged-in-providers.json claiming a session whose auth cookie
+  // (user_session) no longer exists. ensureOAuthSession re-adds the marker
+  // only when it confirms a live cookie, so success still records it.
+  if (args.forceRelogin) clearProviderLoggedIn(provider);
   const result = await ensureOAuthSession({
     provider,
     apiBaseUrl: args.apiBase,
