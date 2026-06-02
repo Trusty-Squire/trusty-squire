@@ -473,6 +473,12 @@ export interface SignupTask {
   // Absent (or no affordance found) → the form-fill path. T13 added
   // GitHub alongside Google.
   oauthProvider?: OAuthProviderId | undefined;
+  // Force the email/password FORM path even when the page (and the bot's
+  // profile) would otherwise prefer OAuth. Used to exercise a service's
+  // form-side captcha (e.g. Turnstile/reCAPTCHA-v3 on the signup form)
+  // that OAuth would bypass — the A/B harness for the CDP-hardening work
+  // needs the form path to actually hit the challenge.
+  forceForm?: boolean | undefined;
   // Free-text guidance the post-verify planner uses when filling
   // permission/scope dropdowns on token-creation forms (Sentry et al).
   // Default (undefined) → planner is told to pick MAX permissions
@@ -2444,6 +2450,21 @@ export class SignupAgent {
   // "solved" one and we always want the failure mode in the result.
   private captchaEncounter: SignupResult["captcha"] = undefined;
 
+  // Invisible-captcha presence for the current run. Cloudflare Turnstile
+  // and reCAPTCHA-v3 are score-based: a HIGH score passes silently with no
+  // visible widget to "solve", so the visible-gate path above records
+  // nothing — leaving the telemetry blind to exactly the challenge class
+  // the CDP-hardening targets. We detect the widget's PRESENCE (its iframe/
+  // badge is in the DOM even when invisible) and, at result-build time,
+  // synthesize a `challenge_rendered:false` encounter so silent passes
+  // show up in the CaptchaEvent A/B alongside the visible blocks. A low
+  // score escalates to a VISIBLE widget, which the gate above records with
+  // blocked=true and which wins over this (captchaEncounter takes
+  // precedence in resultTail).
+  private invisibleCaptcha:
+    | { kind: "turnstile" | "recaptcha"; variant: CaptchaVariant }
+    | undefined = undefined;
+
   // Helper: build the common trailing fields every SignupResult needs.
   // This used to be inlined at each return site (6 of them); a one-line
   // helper keeps the captcha field from being forgotten on a future
@@ -2457,14 +2478,33 @@ export class SignupAgent {
     | "captcha"
     | "stealth_profile"
   > {
+    const captcha = this.resolveCaptchaEncounter();
     return {
       llm_calls: this.llmCallCount,
       llm_backends: [...this.backendsUsed],
       browser_channel: this.browser.channel,
       proxied: this.browser.proxied !== null,
       stealth_profile: this.browser.stealthProfile,
-      ...(this.captchaEncounter !== undefined ? { captcha: this.captchaEncounter } : {}),
+      ...(captcha !== undefined ? { captcha } : {}),
     };
+  }
+
+  // The captcha encounter to report: a recorded VISIBLE encounter wins
+  // (it carries the real solved/blocked outcome); otherwise, if an
+  // invisible Turnstile/v3 was detected, synthesize a silent-pass
+  // encounter (challenge_rendered=false, blocked=false). null when no
+  // captcha of any kind was seen.
+  private resolveCaptchaEncounter(): SignupResult["captcha"] {
+    if (this.captchaEncounter !== undefined) return this.captchaEncounter;
+    if (this.invisibleCaptcha !== undefined) {
+      return {
+        kind: this.invisibleCaptcha.kind,
+        variant: this.invisibleCaptcha.variant,
+        challenge_rendered: false,
+        blocked: false,
+      };
+    }
+    return undefined;
   }
 
   // Run one Tier-2 visible-captcha gate. There are three gates in a
@@ -2488,6 +2528,20 @@ export class SignupAgent {
     }
     let result = await this.browser.solveVisibleCaptcha();
     if (!result.found) {
+      // No VISIBLE widget — but an invisible Turnstile / reCAPTCHA-v3 may
+      // be present and scoring silently. Record its presence once (a
+      // visible escalation later would overwrite via captchaEncounter) so
+      // the A/B sees silent passes, not just blocks. Cheap DOM read.
+      if (this.invisibleCaptcha === undefined && this.captchaEncounter === undefined) {
+        const detected = await this.browser.detectCaptchaVariant();
+        if (detected.variant === "turnstile" && !detected.challengeRendered) {
+          this.invisibleCaptcha = { kind: "turnstile", variant: "turnstile" };
+          steps.push(`${label} captcha: invisible Turnstile present, no visible challenge — recording silent encounter`);
+        } else if (detected.variant === "recaptcha_v3") {
+          this.invisibleCaptcha = { kind: "recaptcha", variant: "recaptcha_v3" };
+          steps.push(`${label} captcha: invisible reCAPTCHA v3 badge present — recording silent encounter`);
+        }
+      }
       return { found: false, solved: false, blocked: false, kind: "turnstile" };
     }
     steps.push(
@@ -3219,6 +3273,10 @@ export class SignupAgent {
     task: SignupTask,
     steps: string[],
   ): Promise<OAuthProviderId[]> {
+    if (task.forceForm === true) {
+      steps.push("Force-form: OAuth-first scan suppressed — taking the email/password path");
+      return [];
+    }
     const ordered = orderOAuthCandidates(task.oauthProvider, loggedInProviders());
     if (ordered.length === 0) return [];
     const pinNote =

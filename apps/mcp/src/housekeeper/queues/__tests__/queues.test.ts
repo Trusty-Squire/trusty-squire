@@ -241,6 +241,25 @@ ${Array.from({ length: 30 }, (_, i) => `  - { slug: svc${i} }`).join("\n")}
     expect("signupUrl" in tasks[2]!).toBe(false);
   });
 
+  it("propagates force_form from YAML to the task (CDP-hardening A/B)", async () => {
+    const yamlText = `services:
+  - { slug: resend, signup_url: 'https://resend.com/signup', force_form: true }
+  - { slug: ipinfo }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+    });
+    const tasks = await queue.fetch(10);
+    expect(tasks[0]).toMatchObject({
+      kind: "discover",
+      service: "resend",
+      forceForm: true,
+    });
+    // No force_form → field absent (clean spread composition).
+    expect("forceForm" in tasks[1]!).toBe(false);
+  });
+
   it("skips entries with malformed shape (missing slug)", async () => {
     const yamlText = `services:
   - { name: bad }

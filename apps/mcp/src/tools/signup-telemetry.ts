@@ -41,8 +41,14 @@ export function finalOutcomeOf(result: {
 // Single ProvisionEvent emit (design Decision 1). Every terminal path —
 // replay-served, bot, and the housekeeper discover worker — funnels
 // through this one mapper so the event shape can't drift across call
-// sites. Fire-and-forget + fail-open. Observation only; auto-demote
-// still rides on postReplayOutcome (the source-of-truth rule).
+// sites. Fail-open. Observation only; auto-demote still rides on
+// postReplayOutcome (the source-of-truth rule).
+//
+// Returns the underlying POST promise so callers choose their completion
+// model: the long-running `provision` server fire-and-forgets
+// (`void emitProvisionEvent(...)`); the housekeeper `--once` path AWAITS
+// it, because that process calls process.exit() right after the batch and
+// would otherwise kill the in-flight POST before it lands.
 export function emitProvisionEvent(
   registry: SkillRegistryClient,
   args: {
@@ -57,8 +63,8 @@ export function emitProvisionEvent(
     stepTrail?: string;
     replayServed: boolean;
   },
-): void {
-  void registry.recordProvisionEvent({
+): Promise<unknown> {
+  return registry.recordProvisionEvent({
     service: args.service,
     status: args.result.success ? "success" : "failed",
     initialStrategy: args.initialStrategy,

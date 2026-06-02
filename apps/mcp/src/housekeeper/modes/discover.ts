@@ -83,7 +83,12 @@ function flushStepTrail(steps: readonly string[], service: string): void {
 // deliberately do NOT emit a UniversalBotFailureRecord here — that table
 // is the end-user demand signal this worker's own queue consumes, and
 // self-feeding it would make the bot re-harvest its own failures.
-function recordDiscoverTelemetry(
+// AWAITED, unlike the provision server's fire-and-forget: the housekeeper
+// `--once` process calls process.exit() right after the batch, so an
+// un-awaited POST is killed before it lands (this is exactly why early
+// discover runs recorded NOTHING). We await both emits here, bounded by
+// the clients' own timeouts, so the events flush before the process exits.
+async function recordDiscoverTelemetry(
   input: { service: string; signupUrl?: string },
   result: SignupResult,
   ctx: {
@@ -94,11 +99,11 @@ function recordDiscoverTelemetry(
     startedAt: number;
     stepsSink: readonly string[];
   },
-): void {
+): Promise<void> {
   try {
     const registry = clientFromEnv(ctx.accountId);
     if (registry !== null) {
-      emitProvisionEvent(registry, {
+      await emitProvisionEvent(registry, {
         service: input.service,
         provisionId: ctx.provisionId,
         startedAt: ctx.startedAt,
@@ -112,7 +117,7 @@ function recordDiscoverTelemetry(
       });
     }
     if (result.captcha !== undefined) {
-      void postCaptchaEvent(ctx.apiBase, ctx.machineToken, {
+      await postCaptchaEvent(ctx.apiBase, ctx.machineToken, {
         service: input.service,
         captcha_kind: result.captcha.kind,
         blocked: result.captcha.blocked,
@@ -140,9 +145,19 @@ export async function runDiscover(
     oauthProvider?: "google" | "github";
     /** Canonical signup URL (curated YAML override). */
     signupUrl?: string;
+    /**
+     * Force the email/password form path (skip OAuth) so the run hits the
+     * form-side captcha. From the YAML `force_form` or the
+     * UNIVERSAL_BOT_FORCE_FORM env (ad-hoc A/B runs).
+     */
+    forceForm?: boolean;
   },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
+  // Env override lets an ad-hoc `--service=…` A/B run force the form path
+  // without editing the YAML.
+  const forceForm =
+    input.forceForm === true || process.env.UNIVERSAL_BOT_FORCE_FORM === "1";
   const machineToken = cfg.machineToken ?? process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
   const apiBase =
     cfg.apiBase ??
@@ -232,14 +247,15 @@ export async function runDiscover(
       // overnight batch were really wrong-URL navigations to parked
       // / unrelated `.com` pages that didn't have the OAuth button.
       ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
+      ...(forceForm ? { forceForm: true } : {}),
     });
   } catch (err) {
     // Dump the step trail before bailing — without it, debugging
     // mid-run failures requires re-running the whole thing.
     flushStepTrail(stepsSink, input.service);
     // Record the crash as a failed ProvisionEvent so the dashboard sees
-    // it (no captcha info on a crash). Same fail-open posture.
-    recordDiscoverTelemetry(
+    // it (no captcha info on a crash). Awaited so it flushes before exit.
+    await recordDiscoverTelemetry(
       input,
       { success: false, error: "bot_crash", steps: [...stepsSink] },
       telemetryCtx,
@@ -254,9 +270,9 @@ export async function runDiscover(
   flushStepTrail(stepsSink, input.service);
 
   // Emit ProvisionEvent (+ CaptchaEvent when a captcha was hit) for the
-  // finished run. This is the fix for the discover telemetry gap — the
-  // dashboard funnel/failure views were blind to harvest runs.
-  recordDiscoverTelemetry(input, result, telemetryCtx);
+  // finished run. Awaited so the POSTs land before the --once process
+  // exits (see recordDiscoverTelemetry).
+  await recordDiscoverTelemetry(input, result, telemetryCtx);
 
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).
@@ -364,6 +380,7 @@ export async function handleDiscover(
       ? { oauthProvider: task.oauthProvider }
       : {}),
     ...(task.signupUrl !== undefined ? { signupUrl: task.signupUrl } : {}),
+    ...(task.forceForm === true ? { forceForm: true } : {}),
   });
   log(`discover end:   ${task.service} → ${outcome.kind} (${outcome.reason.slice(0, 120)})`);
   return outcome;

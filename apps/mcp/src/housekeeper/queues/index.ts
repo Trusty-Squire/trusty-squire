@@ -52,6 +52,11 @@ export type HousekeeperTask =
       // but never plumbed to the task. Fix surfaces 5 oauth_required
       // failures that were really wrong-URL navigations.
       signupUrl?: string;
+      // Force the email/password form path (skip OAuth) so the run hits
+      // the form-side captcha (Turnstile/reCAPTCHA-v3). From the YAML
+      // `force_form: true`. Used to A/B the CDP-hardening on services
+      // whose OAuth would otherwise bypass the challenge.
+      forceForm?: boolean;
       // Optional metadata for the notifier surfaces (telegram, GH issue).
       // Discovery candidates come with telemetry counts; seed/ad-hoc
       // tasks leave this null.
@@ -113,6 +118,10 @@ interface YamlServiceEntry {
   status?: string;
   signup_url?: string;
   oauth_provider?: string | null;
+  // Force the email/password form path (skip OAuth) so the run hits the
+  // form-side captcha. For services whose OAuth would bypass a
+  // Turnstile/reCAPTCHA-v3 we want to A/B against.
+  force_form?: boolean;
   notes?: string;
 }
 
@@ -159,6 +168,7 @@ export class YamlSeedQueue implements QueueProvider {
         ...(e.signup_url !== undefined && e.signup_url.length > 0
           ? { signupUrl: e.signup_url }
           : {}),
+        ...(e.force_form === true ? { forceForm: true } : {}),
       };
     });
   }
