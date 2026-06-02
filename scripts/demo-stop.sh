@@ -51,5 +51,5 @@ rm -rf "$REPO_ROOT/.demo-urls"
 
 green "✓ Demo stopped."
 echo
-echo "Postgres/Redis/MailHog are still up (docker). Stop with:"
+echo "Postgres/Redis are still up (docker). Stop with:"
 echo "  docker compose -f docker-compose.dev.yml down"

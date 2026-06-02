@@ -50,7 +50,7 @@ bold "Installing pnpm workspace dependencies…"
 pnpm install
 
 # ── Start services ───────────────────────────────────────────
-bold "Starting Postgres, Redis, MailHog (Docker)…"
+bold "Starting Postgres, Redis (Docker)…"
 docker compose -f docker-compose.dev.yml up -d
 
 # ── Wait for Postgres ────────────────────────────────────────
@@ -97,8 +97,6 @@ bold "Local environment ready."
 cat <<EOF
   Postgres:    postgresql://dev:dev@localhost:5432/trusty_squire
   Redis:       redis://localhost:6379
-  MailHog UI:  http://localhost:8025
-  MailHog SMTP: localhost:1025
 
 Stop services:  docker compose -f docker-compose.dev.yml down
 Reset data:     docker compose -f docker-compose.dev.yml down -v

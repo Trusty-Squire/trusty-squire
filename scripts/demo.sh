@@ -105,7 +105,7 @@ else
 fi
 
 # ── Infrastructure ───────────────────────────────────────────
-bold "Bringing up Postgres + Redis + MailHog (docker)…"
+bold "Bringing up Postgres + Redis (docker)…"
 $DOCKER_CMD compose -f docker-compose.dev.yml up -d >/dev/null
 ATTEMPTS=0
 until $DOCKER_CMD compose -f docker-compose.dev.yml exec -T postgres pg_isready -U dev -d trusty_squire >/dev/null 2>&1; do
@@ -232,7 +232,6 @@ if [ "$ENABLE_TUNNELS" = true ]; then
   📱 Open on your phone:  $PWA_TUNNEL_URL
   
   API Tunnel:            $API_TUNNEL_URL
-  MailHog:               http://localhost:8025 (local only)
 
   Note: Vouchflow is in STUB MODE (fake passkeys for demo)
 
@@ -253,7 +252,6 @@ else
   PWA:           http://localhost:3002
   API:           http://localhost:3000
   Mock Resend:   http://localhost:4001
-  MailHog UI:    http://localhost:8025
 
 Try it:
   1. Sign up at http://localhost:3002/signup
