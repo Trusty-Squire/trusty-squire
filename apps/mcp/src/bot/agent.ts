@@ -473,6 +473,12 @@ export interface SignupTask {
   // Absent (or no affordance found) → the form-fill path. T13 added
   // GitHub alongside Google.
   oauthProvider?: OAuthProviderId | undefined;
+  // Force the email/password FORM path even when the page (and the bot's
+  // profile) would otherwise prefer OAuth. Used to exercise a service's
+  // form-side captcha (e.g. Turnstile/reCAPTCHA-v3 on the signup form)
+  // that OAuth would bypass — the A/B harness for the CDP-hardening work
+  // needs the form path to actually hit the challenge.
+  forceForm?: boolean | undefined;
   // Free-text guidance the post-verify planner uses when filling
   // permission/scope dropdowns on token-creation forms (Sentry et al).
   // Default (undefined) → planner is told to pick MAX permissions
@@ -3219,6 +3225,10 @@ export class SignupAgent {
     task: SignupTask,
     steps: string[],
   ): Promise<OAuthProviderId[]> {
+    if (task.forceForm === true) {
+      steps.push("Force-form: OAuth-first scan suppressed — taking the email/password path");
+      return [];
+    }
     const ordered = orderOAuthCandidates(task.oauthProvider, loggedInProviders());
     if (ordered.length === 0) return [];
     const pinNote =

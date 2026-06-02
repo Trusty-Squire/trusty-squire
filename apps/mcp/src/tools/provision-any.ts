@@ -724,7 +724,8 @@ async function runSignupTask(
       if (replayed !== null) {
         response = buildSignupResponse(input, replayed);
         // Replay served it — emit the unified event (replay/replay/ok).
-        emitProvisionEvent(registry, {
+        // Fire-and-forget: the MCP server stays up, so no need to await.
+        void emitProvisionEvent(registry, {
           service: input.service,
           provisionId,
           startedAt,
@@ -893,7 +894,8 @@ async function runSignupTask(
     // replay was attempted first: skill present but fell through here =
     // replay/bot/miss; no skill = bot/bot/na.
     if (registry !== null) {
-      emitProvisionEvent(registry, {
+      // Fire-and-forget: the MCP server stays up, so no need to await.
+      void emitProvisionEvent(registry, {
         service: input.service,
         provisionId,
         startedAt,
