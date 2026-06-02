@@ -30,26 +30,40 @@ Free LLM tier (`UNIVERSAL_BOT_LLM_TIER=free`), auto-promote default-on
   triage the failure-kind histogram → feeds A2 + the harvester-subagent
   failure corpus.
 
-### A2 — Closed-loop skill remediation [P1, designed, ~1-2 days]
-**Full design: `docs/DESIGN-closed-loop-remediation.md` (eng-review
-locked 2026-06-02).** Reframed from a passive dashboard panel — a sole
-operator won't crawl panels to diagnose rot. The telemetry should DRIVE
-the housekeeper toward autonomous remediation. The admin dashboard
-already consumes ProvisionEvents (`admin-dashboard.ts`, recent-failures
-+ demand + funnel + cache-hit panels); building another passive view
-adds little.
+### A2 — Closed-loop skill remediation [P1, IMPLEMENTED on branch, deploy-gated]
+**Built 2026-06-02 on branch `closed-loop-remediation` (T1–T9, 9 commits).
+Design: `docs/DESIGN-closed-loop-remediation.md`.** All green:
+skill-schema 41 · registry 195 · mcp 956.
+- T1 shared failure taxonomy (`@trusty-squire/skill-schema`); T2/T3 dedup
+  the 2-copy wall sets onto it.
+- T4 demotion classifier: the verifier demote counter advances only on
+  ROT (step/validator/extraction); walls quarantine on first hit;
+  infra/transient/unknown never demote. `demotion_reason` persisted
+  (fills the `void reason` TODO) + new `quarantined` status. 8 regression
+  tests prove the anti-thrash behavior.
+- T5 demotion→rediscovery: `/admin/discovery-candidates` surfaces
+  demoted services regardless of demand, excludes quarantined.
+- T6 `GET /admin/needs-human` worklist; T8 `mcp skill needs-human` CLI.
+- T7 `mcp housekeeper --mode=heal` chained verify→discover + one digest.
+- T9 systemd 12h timer (`tools/systemd/`).
 
-Locked decisions: (D1) scheduled chained verify→discover pass on the
-existing 12h loop; (D2) classify verifier failures wall/transient/rot
-so the 3-strike demote anchors on FIXABLE ROT only (walls→quarantine,
-transient→backoff) — stops the chain thrashing on transient blips;
-(D3) persist `demotion_reason` (fills the `void reason` TODO) + a
-read-only `GET /admin/needs-human` worklist, non-destructive so
-services are manually targetable later; (D4) one canonical failure
-taxonomy in `@trusty-squire/skill-schema` (kills the existing 2-copy
-wall-kind drift). 9 tasks (T1–T9), 2 critical regression tests on the
-verifier demote counter. Build T1 (shared taxonomy) first; then
-registry + mcp lanes in parallel.
+**Remaining before it's live (deploy-gated — NOT done):**
+1. **Apply the migration** `20260602000000_demotion_reason` to the prod
+   registry DB (additive nullable column; `prisma migrate deploy` or
+   manual `ALTER TABLE`). Written but never run against prod.
+2. **Deploy the registry** (`trusty-squire-registry`) with the new
+   routes/classifier; **republish `@trusty-squire/mcp`** for the
+   housekeeper host (`--mode=heal`, `skill needs-human`).
+3. **Install the systemd timer** on the headless box (see
+   `tools/systemd/README.md`).
+4. **Review + merge** the branch (8 prior commits + these 9).
+
+**Deferred sub-items (in the design's NOT-in-scope):** event-driven
+demotion-webhook listener; mutable "mark resolved" worklist; bounded-N
+rediscovery counter (walls already quarantine; non-wall re-loops are
+surfaced in the digest/worklist for manual quarantine, not yet
+auto-capped); the prod-path (non-verifier) demotion classifier
+(`consecutive_failures`) — fast-follow, same treatment as T4.
 
 ### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
 The A/B harness is **code-complete** (baseline vs `cdp_hardened`
