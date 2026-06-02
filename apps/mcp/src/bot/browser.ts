@@ -70,12 +70,20 @@ function getChromium(): typeof baseChromium {
     let baseLauncher: unknown = baseChromium;
     if (hardened) {
       // rebrowser-playwright-core defers/isolates the Runtime.enable CDP
-      // call. alwaysIsolated runs every page.evaluate in an isolated
-      // world — the only mode that closes the mainWorldExecution tell
-      // (DESIGN-antibot-hardening.md D3). Set the fix mode BEFORE the
-      // require so the patch reads it; default it but honor an operator pin.
+      // call. Fix mode = `addBinding`, NOT `alwaysIsolated`: the latter
+      // gives the cleanest leak closure on a static page but CRASHES the
+      // bot's real flow — a live harvest run died with
+      // "Target page, context or browser has been closed" at the OAuth
+      // scan, because forcing every page.evaluate into an isolated world
+      // breaks the prewarm/multi-page juggling. `addBinding` keeps
+      // main-world evaluate (the flow works) while still avoiding the
+      // leaky Runtime.enable call — it closes the sourceUrl/UtilityScript
+      // tell but leaves mainWorldExecution detectable. That partial
+      // closure is the price of a launcher that actually completes
+      // signups. See DESIGN-antibot-hardening.md D3 (revised). Set BEFORE
+      // the require so the patch reads it; honor an operator pin.
       if (process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE === undefined) {
-        process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE = "alwaysIsolated";
+        process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE = "addBinding";
       }
       const rebrowser = require("rebrowser-playwright-core") as {
         chromium: typeof baseChromium;
@@ -450,24 +458,29 @@ export class BrowserController {
     // Resolve the launcher first so activeStealthProfile is set before we
     // decide on executablePath below.
     const launcher = getChromium();
-    // In hardened mode the rebrowser-core launcher expects its own
-    // bundled chromium revision, which we deliberately don't install (we
-    // keep playwright's). When no real channel was detected, point it at
-    // the installed playwright chromium — the spike proved the 1.52
-    // launcher drives a 1.59 chromium fine. With a channel detected, let
-    // it launch that real browser (channel + executablePath are mutually
-    // exclusive in Playwright).
-    const hardenedExecutablePath =
-      activeStealthProfileValue() === "cdp_hardened" && channel === null
-        ? baseChromium.executablePath()
-        : null;
+    const hardened = activeStealthProfileValue() === "cdp_hardened";
+    // In hardened mode, ALWAYS drive the bundled (playwright-matched)
+    // chromium via executablePath and IGNORE the real-Chrome channel.
+    // rebrowser-playwright-core's older CDP driver cannot reliably drive
+    // an arbitrary *new* real Chrome (observed: Chrome 148 →
+    // "Target page, context or browser has been closed" mid-flow), while
+    // the spike validated it against the bundled chromium revision. The
+    // bundled binary is the version the driver expects; channel +
+    // executablePath are mutually exclusive in Playwright, so we drop the
+    // channel here. (This makes the hardened arm use bundled chromium vs
+    // the baseline's real Chrome — a known A/B confound, documented in
+    // DESIGN-antibot-hardening.md.)
+    const hardenedExecutablePath = hardened ? baseChromium.executablePath() : null;
+    const effectiveChannel = hardened ? null : channel;
+    // Keep telemetry honest: report what actually launched.
+    this.launchedChannel = effectiveChannel;
     const context = await launchWithProfileGate(this.profileDir, () =>
       launcher.launchPersistentContext(this.profileDir, {
       headless: chromeHeadless,
       ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
       // `channel:` selects a real installed browser over the bundled
-      // binary; omitted entirely when null.
-      ...(channel !== null ? { channel } : {}),
+      // binary; omitted in hardened mode and when null.
+      ...(effectiveChannel !== null ? { channel: effectiveChannel } : {}),
       ...(hardenedExecutablePath !== null
         ? { executablePath: hardenedExecutablePath }
         : {}),
