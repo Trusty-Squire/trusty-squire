@@ -148,4 +148,51 @@ describe("POST /v1/captcha-events", () => {
     });
     expect(captchaStore.events[0]?.captcha_variant).toBe("unknown");
   });
+
+  // CDP-hardening A/B tag (DESIGN-antibot-hardening.md). The route
+  // allowlists the two profiles; anything else (or absence) records
+  // null so the A/B dimension stays clean.
+  it("records stealth_profile=cdp_hardened when the bot reports it", async () => {
+    const token = await issueMachineToken();
+    const res = await post(token, {
+      service: "Cloudflare",
+      captcha_kind: "turnstile",
+      blocked: true,
+      stealth_profile: "cdp_hardened",
+    });
+    expect(res.statusCode).toBe(202);
+    expect(captchaStore.events[0]?.stealth_profile).toBe("cdp_hardened");
+  });
+
+  it("records stealth_profile=baseline when the bot reports it", async () => {
+    const token = await issueMachineToken();
+    await post(token, {
+      service: "Cloudflare",
+      captcha_kind: "turnstile",
+      blocked: true,
+      stealth_profile: "baseline",
+    });
+    expect(captchaStore.events[0]?.stealth_profile).toBe("baseline");
+  });
+
+  it("records stealth_profile=null when a pre-CDP-hardening client omits it", async () => {
+    const token = await issueMachineToken();
+    await post(token, {
+      service: "Resend",
+      captcha_kind: "turnstile",
+      blocked: false,
+    });
+    expect(captchaStore.events[0]?.stealth_profile).toBeNull();
+  });
+
+  it("records stealth_profile=null for an unrecognized value", async () => {
+    const token = await issueMachineToken();
+    await post(token, {
+      service: "Mailgun",
+      captcha_kind: "recaptcha",
+      blocked: true,
+      stealth_profile: "turbo_mode",
+    });
+    expect(captchaStore.events[0]?.stealth_profile).toBeNull();
+  });
 });

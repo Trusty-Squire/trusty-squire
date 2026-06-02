@@ -90,12 +90,18 @@ model CaptchaEvent {
   captcha_variant    String?
   challenge_rendered Boolean?
   signup_succeeded   Boolean?
+  // Which stealth launcher ran: "baseline" (vanilla playwright) or
+  // "cdp_hardened" (rebrowser-playwright-core, Runtime.enable leak
+  // closed). null = pre-CDP-hardening client. The A/B tag for measuring
+  // whether the patch lowers block rate — DESIGN-antibot-hardening.md.
+  stealth_profile    String?
 
   @@index([occurred_at])
   @@index([asn_class, blocked])
   @@index([service, blocked])
   @@index([proxied, blocked])
   @@index([captcha_variant, signup_succeeded])
+  @@index([stealth_profile, blocked])
 }
 
 // Rolling per-machine-token LLM-call ledger. The proxy at /v1/llm/chat

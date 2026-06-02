@@ -101,6 +101,27 @@ Axiom, Better Stack, Qdrant, Highlight. Worth doing after a few
 days of observation at 15 to confirm the existing entries don't
 need attention first.
 
+### AB2–AB6 — Anti-bot hardening, items 2–6 [strategic, sequenced]
+Full plan: `docs/DESIGN-antibot-hardening.md`. **Slice 1 (telemetry
+gap + CDP `Runtime.enable` patch) is locked + implementing** — close
+the discover-path `ProvisionEvent` gap and land the flag-gated
+`rebrowser-playwright` fix so the bot stops leaking automation on the
+CDP control channel. Items 2–6 are the deferred fingerprint/network/
+behavior layers; **sequence each after Slice 1's A/B baseline reads
+out** so every change is measured against block-rate, not vibes:
+- **AB2** — real Chrome channel + real GPU host (off Xvfb/SwiftShader
+  WebGL tell).
+- **AB3** — network coherence (residential SOCKS passthrough, avoid
+  `unknown` ASN, geo/timezone/Accept-Language alignment — a bare proxy
+  field-tested as *not* enough).
+- **AB4** — warm persistent profile + logged-in Google identity (the
+  reCAPTCHA-v3 reputation lever).
+- **AB5** — behavior depth: pre-widget scroll/dwell/mouse before the
+  signup widget (v3 scores the whole session, not just the form).
+- **AB6** — pick battles: classify by challenge hardness, route
+  unwinnable max-Turnstile signups (e.g. Cloudflare dashboard) to a
+  manual path instead of burning bot runs + LLM calls on a 0% prospect.
+
 ---
 
 ## Tier 3 — eventually

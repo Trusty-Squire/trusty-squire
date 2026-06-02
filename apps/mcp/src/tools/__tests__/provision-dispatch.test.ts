@@ -4,7 +4,8 @@
 // fire-and-forget and intentionally not asserted here.
 
 import { describe, expect, it } from "vitest";
-import { resolveDispatch, finalOutcomeOf } from "../provision-any.js";
+import { resolveDispatch } from "../provision-any.js";
+import { finalOutcomeOf } from "../signup-telemetry.js";
 
 describe("resolveDispatch", () => {
   it("replay served → replay / replay / ok", () => {
@@ -51,6 +52,17 @@ describe("finalOutcomeOf", () => {
     for (const kind of ["captcha_blocked", "anti_bot_blocked", "captcha"]) {
       expect(finalOutcomeOf({ success: false, error: kind })).toBe("blocked");
     }
+  });
+
+  it("SUFFIXED wall failures → blocked (prefix match)", () => {
+    // Real bot errors carry a suffix; an exact-match previously
+    // mis-classified these as "failed". See DESIGN-antibot-hardening.md.
+    expect(
+      finalOutcomeOf({ success: false, error: "anti_bot_blocked: Cloudflare on SSO callback" }),
+    ).toBe("blocked");
+    expect(
+      finalOutcomeOf({ success: false, error: "captcha_blocked: Turnstile checkbox" }),
+    ).toBe("blocked");
   });
 
   it("non-wall failures → failed", () => {

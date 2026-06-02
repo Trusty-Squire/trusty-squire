@@ -18,13 +18,15 @@
 // will later promote on the first verifier success.
 
 import { randomBytes } from "node:crypto";
-import { UniversalSignupBot } from "../../bot/index.js";
+import { UniversalSignupBot, type SignupResult } from "../../bot/index.js";
 import { pickLLMPair } from "../../bot/llm-client.js";
 import { InboxClient } from "../../bot/inbox-client.js";
 import {
   isAutoPromoteEnabled,
   runAutoPromote,
 } from "../../tools/provision-any.js";
+import { emitProvisionEvent, postCaptchaEvent } from "../../tools/signup-telemetry.js";
+import { clientFromEnv, generateProvisionId } from "../../skill-registry-client.js";
 import type { HousekeeperTask } from "../queues/index.js";
 import type { HousekeeperOpts } from "../orchestrator.js";
 
@@ -70,6 +72,65 @@ function flushStepTrail(steps: readonly string[], service: string): void {
   );
   for (const s of steps) {
     process.stderr.write(`  ${s}\n`);
+  }
+}
+
+// Emit the same telemetry the provision router emits, so harvest runs
+// show up in the operator dashboard's funnel + failure views (they were
+// previously blind — DESIGN-antibot-hardening.md D1). Dispatch is always
+// bot→bot (the discover worker never replays a skill). Fire-and-forget +
+// fail-open: a telemetry error never changes the discover outcome. We
+// deliberately do NOT emit a UniversalBotFailureRecord here — that table
+// is the end-user demand signal this worker's own queue consumes, and
+// self-feeding it would make the bot re-harvest its own failures.
+function recordDiscoverTelemetry(
+  input: { service: string; signupUrl?: string },
+  result: SignupResult,
+  ctx: {
+    accountId: string;
+    apiBase: string;
+    machineToken: string;
+    provisionId: string;
+    startedAt: number;
+    stepsSink: readonly string[];
+  },
+): void {
+  try {
+    const registry = clientFromEnv(ctx.accountId);
+    if (registry !== null) {
+      emitProvisionEvent(registry, {
+        service: input.service,
+        provisionId: ctx.provisionId,
+        startedAt: ctx.startedAt,
+        initialStrategy: "bot",
+        finalStrategy: "bot",
+        replayOutcome: "na",
+        result,
+        ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
+        ...(ctx.stepsSink.length > 0 ? { stepTrail: ctx.stepsSink.join("\n") } : {}),
+        replayServed: false,
+      });
+    }
+    if (result.captcha !== undefined) {
+      void postCaptchaEvent(ctx.apiBase, ctx.machineToken, {
+        service: input.service,
+        captcha_kind: result.captcha.kind,
+        blocked: result.captcha.blocked,
+        proxied: result.proxied ?? false,
+        captcha_variant: result.captcha.variant,
+        challenge_rendered: result.captcha.challenge_rendered,
+        signup_succeeded: result.success,
+        ...(result.stealth_profile !== undefined
+          ? { stealth_profile: result.stealth_profile }
+          : {}),
+      });
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[housekeeper] ${input.service}: telemetry emit failed (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
   }
 }
 
@@ -134,6 +195,18 @@ export async function runDiscover(
   const stepsSink: string[] = [];
 
   const bot = cfg.bot ?? new UniversalSignupBot();
+  // Telemetry correlation + duration baseline — shared by the success,
+  // failure, and crash emits below.
+  const provisionId = generateProvisionId();
+  const startedAt = Date.now();
+  const telemetryCtx = {
+    accountId,
+    apiBase,
+    machineToken,
+    provisionId,
+    startedAt,
+    stepsSink,
+  };
   let result;
   try {
     result = await bot.signup({
@@ -164,6 +237,13 @@ export async function runDiscover(
     // Dump the step trail before bailing — without it, debugging
     // mid-run failures requires re-running the whole thing.
     flushStepTrail(stepsSink, input.service);
+    // Record the crash as a failed ProvisionEvent so the dashboard sees
+    // it (no captcha info on a crash). Same fail-open posture.
+    recordDiscoverTelemetry(
+      input,
+      { success: false, error: "bot_crash", steps: [...stepsSink] },
+      telemetryCtx,
+    );
     return {
       kind: "failed",
       reason: `bot crash: ${err instanceof Error ? err.message : String(err)}`,
@@ -172,6 +252,11 @@ export async function runDiscover(
   // Always flush — operator wants to see what happened on success
   // (to vet the capture) AND on failure (to diagnose).
   flushStepTrail(stepsSink, input.service);
+
+  // Emit ProvisionEvent (+ CaptchaEvent when a captcha was hit) for the
+  // finished run. This is the fix for the discover telemetry gap — the
+  // dashboard funnel/failure views were blind to harvest runs.
+  recordDiscoverTelemetry(input, result, telemetryCtx);
 
   // Auto-promote on success — same pipeline provision-any.ts fires
   // for end-user signups (Phase 2 makes this land as pending-review).
