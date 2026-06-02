@@ -1,11 +1,24 @@
 # DESIGN — Anti-bot hardening (fighting the Turnstile / reCAPTCHA-v3 hard wall)
 
-Status: **Slice 1 implemented + tested (2026-06-01), unshipped.** Items 2–6
-recorded as deferred — pick up after Slice 1 ships and its A/B telemetry
-reads out. Branch `antibot-cdp-telemetry`; both packages build + typecheck
-+ full suites green (MCP 942, API 197). Not yet deployed — the
-CaptchaEvent column needs the guarded `release_command` db-push on the
-next API deploy, and the mcp republish carries the rebrowser dep.
+Status: **Slice 1 implemented + tested + API deployed (2026-06-01).**
+Items 2–6 recorded as deferred — pick up after the A/B telemetry reads
+out. Branch `antibot-cdp-telemetry`; both packages build + typecheck +
+full suites green (MCP 943, API 197).
+
+Deploy state:
+- **API: DEPLOYED.** `flyctl deploy` ran the guarded `release_command`
+  (`prisma db push`) successfully → `CaptchaEvent.stealth_profile` column
+  is live in prod `trustysquire`. API health 200.
+- **mcp republish: PENDING.** Carries the rebrowser dep. Blocked on
+  `NPM_AUTOMATION_TOKEN` (not available in this environment; the vault is
+  write-only so the token can't be fed to the npm CLI). NOT required for
+  the operator A/B — the housekeeper runs from a source checkout, not
+  `npx`. Needed only to ship the hardened launcher to end-user installs
+  (and it ships dark behind `BOT_CDP_HARDENED`). Publish via the
+  CLAUDE.md procedure when the token is available.
+- **To start the A/B:** build the mcp package on the housekeeper host and
+  run discover with `BOT_CDP_HARDENED=1` for the hardened arm; compare
+  `CaptchaEvent` block rates by `stealth_profile`.
 
 ### Follow-up FIXED 2026-06-01 — finalOutcomeOf prefix match
 `finalOutcomeOf` used to exact-match `WALL_FAILURE_KINDS`
