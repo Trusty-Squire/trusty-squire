@@ -370,6 +370,46 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       });
     },
   );
+
+  // ── GET /admin/needs-human ─────────────────────────────────────────
+  // T6 — the operator worklist. A sole operator won't crawl per-skill
+  // panels, so this rolls up everything that needs a human into one
+  // sortable list: demoted (rot — a fast-follow auto-rediscovery may
+  // re-skill it, but until then it's broken) and quarantined (wall /
+  // gave-up — needs a manual signup or harder anti-bot work). Each row
+  // carries WHY (demotion_reason), the last attempt, and the skill_id as
+  // the capture handle so the operator can pick up where the bot left
+  // off. Read-only — resolution is the existing reactivate/approve paths.
+  fastify.get<{ Querystring: { limit?: string } }>(
+    "/admin/needs-human",
+    async (req, reply) => {
+      if (denyIfNotAdmin(req as { headers: Record<string, unknown> }, reply)) return;
+      const limit = numFromQuery(req.query.limit, 100, 1, 500);
+      const [demoted, quarantined] = await Promise.all([
+        opts.store.listSkills({ status: "demoted", limit }),
+        opts.store.listSkills({ status: "quarantined", limit }),
+      ]);
+      const rows = [...demoted, ...quarantined].map((s) => ({
+        service: s.service,
+        skill_id: s.skill_id,
+        status: s.status,
+        // rot:<kind> / wall:<kind> / manual:<reason> — null on legacy
+        // rows demoted before T4.
+        reason: s.demotion_reason,
+        // Quarantine (wall) blocks the bot; demotion (rot) may auto-heal.
+        needs: s.status === "quarantined" ? "manual" : "rediscovery-or-manual",
+        last_attempt_at:
+          (s.last_verified_at ?? s.last_replayed_at)?.toISOString() ?? null,
+        verifier_failed: s.verifier_failed,
+      }));
+      // Most-recently-failed first so the operator sees fresh breakage.
+      rows.sort(
+        (a, b) =>
+          (b.last_attempt_at ?? "").localeCompare(a.last_attempt_at ?? ""),
+      );
+      reply.send({ ok: true, count: rows.length, items: rows.slice(0, limit) });
+    },
+  );
 };
 
 function numFromQuery(
