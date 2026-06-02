@@ -31,6 +31,7 @@ import { VerifierRegistryClient } from "./registry-client.js";
 import {
   runOneBatch,
   runHousekeeperLoop,
+  runHealLoop,
   type HousekeeperOpts,
   type ReplayMode,
 } from "./orchestrator.js";
@@ -50,7 +51,9 @@ const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 // Two runners: verify (skill replay) and discover (universal bot).
 // 'discover' is fed by either telemetry candidates or a curated YAML
 // (--from); the YAML feed is the former "harvest" path.
-type Mode = "verify" | "discover";
+// 'heal' (T7) chains verify→discover in one scheduled pass and emits a
+// single digest — the self-healing loop.
+type Mode = "verify" | "discover" | "heal";
 
 interface ParsedArgs {
   once: boolean;
@@ -89,6 +92,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--full") args.replayMode = "full";
     else if (arg === "--mode=verify") args.mode = "verify";
     else if (arg === "--mode=discover") args.mode = "discover";
+    else if (arg === "--mode=heal") args.mode = "heal";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
@@ -199,6 +203,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // admin API.
   if (
     (args.mode === "verify" ||
+      args.mode === "heal" ||
       (args.mode === "discover" && args.seedPath === undefined)) &&
     args.service === undefined &&
     (args.adminBearer === undefined || args.adminBearer.length === 0)
@@ -212,6 +217,44 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     baseUrl: args.registryUrl,
     adminBearer: args.adminBearer ?? "missing-admin-bearer-unused-by-this-queue",
   });
+
+  // T7 — heal mode: chain verify→discover in one pass + one digest. Needs
+  // BOTH a replay runner (verifier queue) and a discover runner (telemetry
+  // candidates, which now include freshly-demoted services via T5).
+  if (args.mode === "heal") {
+    const { runDiscover } = await import("./modes/discover.js");
+    const healDiscover: HousekeeperOpts["discover"] = (input: {
+      service: string;
+      oauthProvider?: "google" | "github";
+      signupUrl?: string;
+    }) => runDiscover(input);
+    const base = {
+      client,
+      notifiers,
+      replay: createReplayRunner(),
+      discover: healDiscover,
+      replayMode: args.replayMode,
+      once: args.once,
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+    };
+    try {
+      await runHealLoop({
+        verify: { ...base, queue: new RegistryVerifierQueue(client) },
+        discover: { ...base, queue: new RegistryDiscoverQueue(client) },
+        notifiers,
+        once: args.once,
+        ...(args.intervalSeconds !== undefined
+          ? { intervalMs: args.intervalSeconds * 1000 }
+          : {}),
+      });
+      return 0;
+    } catch (err) {
+      console.error(
+        `housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
 
   // Pick queue provider. --service overrides --mode. --mode=verify →
   // verifier queue; --mode=discover → telemetry candidates, or the

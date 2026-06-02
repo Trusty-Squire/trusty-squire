@@ -113,6 +113,14 @@ export async function resolveChatIdFromUpdates(
 // ── Formatting ────────────────────────────────────────────────────
 
 function formatEvent(event: NotifierEvent): string {
+  if (event.kind === "heal_digest") {
+    return (
+      `🩺 Heal pass\n${event.summary}` +
+      (event.needs_human > 0
+        ? `\n\n${event.needs_human} need a human — GET /admin/needs-human`
+        : "")
+    );
+  }
   if (event.kind === "replay_outcome") {
     const emoji =
       event.outcome === "success"

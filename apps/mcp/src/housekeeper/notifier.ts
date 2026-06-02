@@ -15,7 +15,7 @@ export type NotifierEvent =
       service: string;
       skill_id: string;
       outcome: "success" | "failure" | "skipped";
-      transition: "promoted" | "retired" | "demoted" | "none";
+      transition: "promoted" | "retired" | "demoted" | "quarantined" | "none";
       reason: string;
     }
   | {
@@ -29,6 +29,17 @@ export type NotifierEvent =
         top_error_kind?: string;
         most_recent_at?: string | null;
       };
+    }
+  // T7 — one per-run digest for the self-healing pass, so a sole operator
+  // gets an actionable line instead of per-service noise.
+  | {
+      kind: "heal_digest";
+      verified: number;
+      demoted: number;
+      quarantined: number;
+      reskilled: number;
+      needs_human: number;
+      summary: string;
     };
 
 export interface Notifier {
@@ -45,6 +56,10 @@ export class LogNotifier implements Notifier {
   readonly name = "log";
   constructor(private readonly write: (line: string) => void = (l) => process.stderr.write(l + "\n")) {}
   async notify(event: NotifierEvent): Promise<void> {
+    if (event.kind === "heal_digest") {
+      this.write(`[heal] ${event.summary}`);
+      return;
+    }
     const prefix = event.kind === "replay_outcome" ? "[replay]" : "[discover]";
     const tail =
       event.kind === "replay_outcome"

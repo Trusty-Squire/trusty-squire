@@ -32,7 +32,7 @@ export interface VerifierQueueItem {
 }
 
 export interface VerifierOutcomeResponse {
-  transition: "promoted" | "retired" | "demoted" | "none";
+  transition: "promoted" | "retired" | "demoted" | "quarantined" | "none";
   status: string;
   verifier_succeeded: number;
   verifier_failed: number;
