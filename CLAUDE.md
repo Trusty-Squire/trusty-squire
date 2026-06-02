@@ -308,11 +308,15 @@ bin symlink and would catch any regression of the above.
 
 ### Fly app names
 - `trusty-squire-api`        — main API
-- `trusty-squire-pwa`        — web UI
+- `trustysquire`             — web UI / product site (`apps/web`), at
+  trustysquire.ai. Fly auto-stop/auto-start (idle → machine stops, wakes
+  on first request), so it shows "suspended" when idle but still serves.
 - `trusty-squire-registry`   — adapter registry
 - `trusty-squire-db`         — Postgres-flex cluster. Two databases:
   `trustysquire` (api schema) + `trustysquire_inbox` (inbox schema).
-- (`trusty-squire-mail`)     — DESTROYED. Old postfix server, not in use.
+- The old `trusty-squire-mail` postfix server was deleted 2026-06-02
+  (inbound mail is Resend-backed; see the inbound pipeline above). Its
+  `mailserver/` config + the Gmail-forwarding doc were removed with it.
 
 ### Fly secrets (set on `trusty-squire-api`)
 | Secret | Purpose |
