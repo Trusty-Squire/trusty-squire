@@ -1,0 +1,15 @@
+# Fires the closed-loop heal pass every 12h (matches the orchestrator's
+# default loop interval). Persistent=true → if the box was asleep/off at
+# the scheduled time, it runs on next boot rather than skipping a cycle.
+[Unit]
+Description=Run the Trusty Squire heal pass every 12h
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=12h
+Persistent=true
+# Spread the start a little so it never lines up exactly with other timers.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -449,12 +449,26 @@ npm tarball (`apps/mcp/package.json`'s `files` array excludes
 `dist/housekeeper`). Run from a source checkout:
 `node apps/mcp/dist/bin.js housekeeper [opts]`.
 
-Two modes share one CLI — `--mode=verify` (skill replay; the default)
-and `--mode=discover` (universal bot). Discover sources from telemetry
-candidates by default, or from a curated YAML when `--from=<path>` is
-set (the former "harvest" case). `--service=<slug>` is an ad-hoc
-single-service shortcut that implies discover. Each requires different
-auth.
+Three modes share one CLI — `--mode=verify` (skill replay; the default),
+`--mode=discover` (universal bot), and `--mode=heal` (the closed-loop
+self-healing pass). Discover sources from telemetry candidates by
+default, or from a curated YAML when `--from=<path>` is set (the former
+"harvest" case). `--service=<slug>` is an ad-hoc single-service shortcut
+that implies discover. Each requires different auth.
+
+**`--mode=heal` (closed loop, `docs/DESIGN-closed-loop-remediation.md`).**
+One scheduled pass chains verify→discover and emits ONE digest. Verify
+demotes skills only on FIXABLE ROT (step/validator/extraction ×3 — walls
+quarantine on the first hit; transient/infra blips never demote, so the
+loop can't thrash a working skill); discover then re-skills the
+freshly-demoted services (sourced regardless of demand) and skips
+quarantined ones. The digest (`verified N · demoted M · quarantined Q ·
+re-skilled K · needs human ~X`) goes to Telegram + the journal — the
+actionable line instead of crawling panels. The operator worklist is
+`mcp skill needs-human` (or `GET /admin/needs-human`); each row carries
+WHY (`demotion_reason` = rot/wall/manual). Run it on a 12h systemd user
+timer — see `tools/systemd/` (service + timer + install README). Needs
+`REGISTRY_ADMIN_BEARER` (both phases are admin-gated).
 
 | Env var | Required by | Effect |
 |---|---|---|
