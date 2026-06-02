@@ -13,6 +13,7 @@
 // wires the Prisma store via server.ts.
 
 import { randomUUID } from "node:crypto";
+import { isWallFailure } from "@trusty-squire/skill-schema";
 
 // Dispatch model (Decision 10). Strategy = which path; outcome = result.
 export type ProvisionStrategy = "replay" | "bot";
@@ -46,17 +47,13 @@ export interface ProvisionEventInput {
   duration_ms?: number | null;
 }
 
-// Wall failure kinds — a terminal captcha/anti-bot wall rather than a
-// fixable failure. The demand-harvest damper down-weights services whose
-// failures are dominated by these. Registry-local copy (the MCP keeps
-// its own); the failure_kind taxonomy is deferred — see
-// docs/DESIGN-provision-event-dashboard.md. Unknown kinds are NOT walls
-// (Decision 6: fail toward harvesting).
-const WALL_FAILURE_KINDS = new Set(["captcha_blocked", "anti_bot_blocked", "captcha"]);
-
-export function isWallFailure(kind: string): boolean {
-  return WALL_FAILURE_KINDS.has(kind);
-}
+// Wall classification (terminal captcha/anti-bot — the demand damper
+// down-weights services dominated by these) now comes from the shared
+// failure taxonomy in @trusty-squire/skill-schema, so this damper, the
+// demotion classifier, and the mcp signup telemetry can't drift apart.
+// Re-exported for existing registry call sites. Unknown kinds are still
+// NOT walls (skill-schema defaults them to transient).
+export { isWallFailure };
 
 // Cache-hit 3-way breakdown over a window (design Decision 10 partition).
 export interface CacheHitBreakdown {

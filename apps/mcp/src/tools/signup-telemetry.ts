@@ -10,32 +10,24 @@
 // (Codex review, DESIGN-antibot-hardening.md D1). Everything here is
 // fire-and-forget + fail-open: it never blocks or fails a signup.
 
+import { isWallFailure } from "@trusty-squire/skill-schema";
 import { detectAsn, type CaptchaVariant } from "../bot/index.js";
 import { VERSION } from "../version.js";
 import type { SkillRegistryClient } from "../skill-registry-client.js";
 
-// Failure-kind PREFIXES that count as a "wall" (blocked, not failed):
-// the run died on an unwinnable challenge rather than a fixable bug.
-// Prefix-matched because real bot errors carry a suffix
-// ("anti_bot_blocked: Cloudflare on SSO callback") — an exact-match
-// under-reported every suffixed wall as "failed" (the DiscoveryBot
-// outcome mapping already uses prefix regex; this aligns the registry
-// final_outcome leg with it). See DESIGN-antibot-hardening.md.
-export const WALL_FAILURE_KINDS = [
-  "captcha_blocked",
-  "anti_bot_blocked",
-  "captcha",
-] as const;
-
+// A "wall" failure (terminal anti-bot challenge → blocked, not failed)
+// is classified by the shared failure taxonomy in
+// @trusty-squire/skill-schema — the SAME definition the registry demand
+// damper and demotion classifier use, so they can't drift. isWallFailure
+// matches the leading token, so suffixed kinds
+// ("anti_bot_blocked: Cloudflare on SSO callback") still classify as
+// walls. See DESIGN-antibot-hardening.md + DESIGN-closed-loop-remediation.md.
 export function finalOutcomeOf(result: {
   success: boolean;
   error?: string;
 }): "ok" | "failed" | "blocked" {
   if (result.success) return "ok";
-  const error = result.error;
-  return error !== undefined && WALL_FAILURE_KINDS.some((k) => error.startsWith(k))
-    ? "blocked"
-    : "failed";
+  return isWallFailure(result.error) ? "blocked" : "failed";
 }
 
 // Single ProvisionEvent emit (design Decision 1). Every terminal path —
