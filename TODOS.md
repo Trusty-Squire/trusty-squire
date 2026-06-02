@@ -8,6 +8,75 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ---
 
+## Tier 0 — active now (this session, 2026-06-02)
+
+The closed-loop hardening + telemetry-fix session shipped rc.1→rc.5
+(npm `next` = `0.8.14-rc.5`) and merged PRs #108–#115. Slice 1 of the
+anti-bot plan is **done**, not pending (see AB note below). What's
+live and what's immediately next:
+
+### A1 — Housekeeper harvest RUNNING [in-flight]
+Launched 2026-06-02 over **75 services** from the queue that have no
+active skill and aren't wall-blocked (excludes the 3 hard walls:
+openai, clerk, mixpanel; excludes skip-status + already-skilled).
+Free LLM tier (`UNIVERSAL_BOT_LLM_TIER=free`), auto-promote default-on
+— every bot success synthesizes + signs + publishes a skill.
+- Detached run: `nohup bash /tmp/harvest-run.sh` → `~/harvest-discover.log`.
+- Monitor: `tail -f ~/harvest-discover.log`. Stop: `pkill -f 'bin.js housekeeper'`.
+- ~10h batch (≈75 real signups). Outcomes post to the registry as
+  ProvisionEvents (the 120-char `failure_kind` truncation fix means
+  they now actually land — previously 400'd).
+- **Next:** once it drains, read the ProvisionEvent outcomes and
+  triage the failure-kind histogram → feeds A2 + the harvester-subagent
+  failure corpus.
+
+### A2 — Closed-loop skill remediation [P1, designed, ~1-2 days]
+**Full design: `docs/DESIGN-closed-loop-remediation.md` (eng-review
+locked 2026-06-02).** Reframed from a passive dashboard panel — a sole
+operator won't crawl panels to diagnose rot. The telemetry should DRIVE
+the housekeeper toward autonomous remediation. The admin dashboard
+already consumes ProvisionEvents (`admin-dashboard.ts`, recent-failures
++ demand + funnel + cache-hit panels); building another passive view
+adds little.
+
+Locked decisions: (D1) scheduled chained verify→discover pass on the
+existing 12h loop; (D2) classify verifier failures wall/transient/rot
+so the 3-strike demote anchors on FIXABLE ROT only (walls→quarantine,
+transient→backoff) — stops the chain thrashing on transient blips;
+(D3) persist `demotion_reason` (fills the `void reason` TODO) + a
+read-only `GET /admin/needs-human` worklist, non-destructive so
+services are manually targetable later; (D4) one canonical failure
+taxonomy in `@trusty-squire/skill-schema` (kills the existing 2-copy
+wall-kind drift). 9 tasks (T1–T9), 2 critical regression tests on the
+verifier demote counter. Build T1 (shared taxonomy) first; then
+registry + mcp lanes in parallel.
+
+### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
+The A/B harness is **code-complete** (baseline vs `cdp_hardened`
+stealth profile, `stealth_profile` column on CaptchaEvent, invisible-
+Turnstile recording, shadow-DOM widget detection). It is blocked on
+*input*: no queue service currently presents a detectable invisible
+Turnstile / reCAPTCHA-v3 *on a form path* the bot reaches. Resend
+dropped its Turnstile; the rest OAuth past it. Need to find/confirm a
+service that renders a scoreable challenge on the form, then run the
+A/B for a concrete block-rate delta. Until then AB2–AB6 stay deferred
+(they sequence after this baseline reads out).
+
+### A4 — `findCaptchaWidget` shadow-DOM solve-path parity [P2, ~1 hour]
+`detectCaptchaVariant` was fixed this session to see modern shadow-DOM
+Turnstile (iframe-in-shadow-root). The *solve* path (`findCaptchaWidget`
+click-and-wait position lookup) likely still uses the same pre-shadow
+querySelector and would fail to locate the checkbox on a visible
+shadow-DOM Turnstile. Audit + apply the same iframe-URL/shadow-pierce
+detection so detection and solving agree.
+
+> Vouchflow P4 (device-attestation gating the vault) is **explicitly
+> skipped for now** per operator call 2026-06-02 — it's wired but
+> enforces nothing (see Tier 4 P4 + the `vouchflow-wired-but-not-
+> enforcing` memory). Not in this session's scope.
+
+---
+
 ## Tier 1 — ship next (ungated, clear payoff)
 
 ### F12 — User-relayed SMS verification [P1, ~half day]
@@ -94,20 +163,26 @@ services.yaml 15 → 200. Route Cloudflare-protected services to a
 Mac-based harvester (real GPU). Central queue coordination via
 registry (not FS state).
 
-### services.yaml +10 expansion [~1 hour data curation]
-Bring the queue from 15 → 25 with confident Google-OAuth additions:
-Cohere, Fireworks, Google AI Studio, Perplexity, Netlify, Loops,
-Axiom, Better Stack, Qdrant, Highlight. Worth doing after a few
-days of observation at 15 to confirm the existing entries don't
-need attention first.
+### services.yaml curation pass [~1 hour data curation]
+The queue is now ~101 services (`tools/housekeeper-services.yaml`).
+The active harvest (Tier 0 A1) covers the 75 with no active skill and
+no wall. Curation work that remains: prune entries that prove
+permanently wall-blocked from the headless box (route to G4's
+residential-capture path instead), and confirm `oauth_provider` /
+`signup_url` accuracy for the long tail as failure data accumulates.
 
 ### AB2–AB6 — Anti-bot hardening, items 2–6 [strategic, sequenced]
-Full plan: `docs/DESIGN-antibot-hardening.md`. **Slice 1 (telemetry
-gap + CDP `Runtime.enable` patch) is locked + implementing** — close
-the discover-path `ProvisionEvent` gap and land the flag-gated
-`rebrowser-playwright` fix so the bot stops leaking automation on the
-CDP control channel. Items 2–6 are the deferred fingerprint/network/
-behavior layers; **sequence each after Slice 1's A/B baseline reads
+Full plan: `docs/DESIGN-antibot-hardening.md`. **Slice 1 SHIPPED
+(rc.1–rc.5, PRs #108/#110/#112):** discover-path `ProvisionEvent` gap
+closed (+ the 120-char `failure_kind` truncation fix that was the real
+"only ~2 rows ever" cause), the flag-gated `rebrowser-playwright` CDP
+`Runtime.enable` patch landed in `addBinding` mode (full
+`alwaysIsolated` isolation proved non-viable — it crashes the bot's
+own locator/title utility-context ops; documented in the design doc),
+plus invisible-Turnstile recording + shadow-DOM widget detection. The
+A/B that measures Slice 1's block-rate delta is **blocked on service
+sourcing** — see Tier 0 A3. Items 2–6 are the deferred fingerprint/
+network/behavior layers; **sequence each after the A/B baseline reads
 out** so every change is measured against block-rate, not vibes:
 - **AB2** — real Chrome channel + real GPU host (off Xvfb/SwiftShader
   WebGL tell).
