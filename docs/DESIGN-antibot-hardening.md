@@ -217,6 +217,40 @@ pinning playwright down to 1.52. Revisit if rebrowser ships a 1.59 match.
 **LOCKED 2026-06-01: keep playwright 1.59, add rebrowser-core 1.52 behind
 the flag.**
 
+**Field finding + fix (2026-06-01, post-merge A/B runs) — D3 REVISED.**
+The spikes validated leak-closure + compose on a *static detector page*
+only. The first real hardened harvest runs **crashed** —
+`page.evaluate: Target page, context or browser has been closed` at the
+OAuth scan — while baseline succeeded on the same service. Two hypotheses
+were tested live:
+1. *Browser version* (host real Chrome is v148, rebrowser-core's driver
+   is 1.52-era). Forced the hardened arm onto the **bundled chromium-1217**
+   (spike-validated combo) via `executablePath`, dropping the channel.
+   **Still crashed, identically** → not the cause.
+2. *Isolation mode.* Re-ran with `REBROWSER_PATCHES_RUNTIME_FIX_MODE=addBinding`
+   instead of `alwaysIsolated`. **Succeeded** — full signup, 13 steps,
+   credential extracted.
+
+**Root cause: `alwaysIsolated` crashes the bot's real flow** (forcing
+every `page.evaluate` into an isolated world breaks the prewarm /
+multi-page juggling), independent of browser version. **Fix:** default
+the hardened fix-mode to **`addBinding`** (functional) and keep the
+bundled-chromium launch (version-matched to the 1.52 driver, removes the
+Chrome-148 variable).
+
+**Cost — D3 is materially weakened.** `addBinding` keeps main-world
+`evaluate`, so it closes the `sourceUrlLeak` (UtilityScript stack tell)
+but **leaves `mainWorldExecution` + `dummyFn` detectable** (spike 2). So
+the hardened arm is now a *partial* CDP hardening, not the full
+isolated-world closure D3 originally locked. It's the strongest mode that
+actually completes signups. Whether this partial closure measurably
+lowers the Turnstile/v3 block rate is exactly what the A/B must answer —
+the upside is now smaller than first hoped.
+
+**Known A/B confound:** hardened runs bundled chromium while baseline runs
+real Chrome — two variables differ. For a clean attribution, force the
+baseline arm to bundled chromium too when running the comparison.
+
 Rejected: `patch-package` (postinstall patches silently no-op across the
 npx/pnpm install matrix end users hit); in-house CDP fix (we'd own a deep
 internal patch that breaks on every Playwright bump); swap-without-spike
