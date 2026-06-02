@@ -12,7 +12,7 @@ cd trusty-squire
 ./scripts/bootstrap.sh
 ```
 
-That installs workspace dependencies, brings up local Postgres/Redis/MailHog via Docker, and reports the service URLs. After it finishes, `pnpm typecheck` and `pnpm test` should pass cleanly.
+That installs workspace dependencies, brings up local Postgres/Redis via Docker, and reports the service URLs. After it finishes, `pnpm typecheck` and `pnpm test` should pass cleanly.
 
 Stop services: `docker compose -f docker-compose.dev.yml down`
 Reset data:    `docker compose -f docker-compose.dev.yml down -v`
