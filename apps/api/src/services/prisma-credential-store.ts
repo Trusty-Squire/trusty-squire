@@ -176,6 +176,13 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  async setLabel(reference: string, label: string): Promise<void> {
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { label },
+    });
+  }
+
   async findByIdForAccountIncludingDeleted(
     id: string,
     accountId: string,
