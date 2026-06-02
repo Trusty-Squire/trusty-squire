@@ -585,6 +585,13 @@ export interface SignupResult {
   // different signal from one on a bare datacenter IP.
   proxied?: boolean;
 
+  // Which stealth launcher this run used: "cdp_hardened" when the
+  // rebrowser-playwright-core launcher loaded (BOT_CDP_HARDENED set +
+  // fork present), else "baseline". The CaptchaEvent A/B tag that lets
+  // us measure whether the Runtime.enable patch lowers block rate —
+  // see docs/DESIGN-antibot-hardening.md.
+  stealth_profile?: "baseline" | "cdp_hardened";
+
   // Skill promoter (0.7.0): when a SignupResult was produced by
   // replaying a Tier-2 learned skill (vs the universal bot), these
   // fields identify the skill so the caller can include them in the
@@ -2443,13 +2450,19 @@ export class SignupAgent {
   // refactor that adds a 7th return path.
   private resultTail(): Pick<
     SignupResult,
-    "llm_calls" | "llm_backends" | "browser_channel" | "proxied" | "captcha"
+    | "llm_calls"
+    | "llm_backends"
+    | "browser_channel"
+    | "proxied"
+    | "captcha"
+    | "stealth_profile"
   > {
     return {
       llm_calls: this.llmCallCount,
       llm_backends: [...this.backendsUsed],
       browser_channel: this.browser.channel,
       proxied: this.browser.proxied !== null,
+      stealth_profile: this.browser.stealthProfile,
       ...(this.captchaEncounter !== undefined ? { captcha: this.captchaEncounter } : {}),
     };
   }

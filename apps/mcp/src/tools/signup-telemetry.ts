@@ -1,0 +1,137 @@
+// Shared post-signup telemetry emit — the one place a finished bot run
+// turns into registry + API analytics events. BOTH call paths funnel
+// through here so the event shapes can't drift:
+//   - the `provision` MCP tool (provision-any.ts, end-user signups)
+//   - the housekeeper discover worker (modes/discover.ts, operator harvest)
+//
+// Before this module the captcha-event POST lived only in provision-any,
+// so the discover path emitted NEITHER a ProvisionEvent NOR a
+// CaptchaEvent — the operator dashboard was blind to every harvest run
+// (Codex review, DESIGN-antibot-hardening.md D1). Everything here is
+// fire-and-forget + fail-open: it never blocks or fails a signup.
+
+import { detectAsn, type CaptchaVariant } from "../bot/index.js";
+import { VERSION } from "../version.js";
+import type { SkillRegistryClient } from "../skill-registry-client.js";
+
+// Failure-kind PREFIXES that count as a "wall" (blocked, not failed):
+// the run died on an unwinnable challenge rather than a fixable bug.
+// Prefix-matched because real bot errors carry a suffix
+// ("anti_bot_blocked: Cloudflare on SSO callback") — an exact-match
+// under-reported every suffixed wall as "failed" (the DiscoveryBot
+// outcome mapping already uses prefix regex; this aligns the registry
+// final_outcome leg with it). See DESIGN-antibot-hardening.md.
+export const WALL_FAILURE_KINDS = [
+  "captcha_blocked",
+  "anti_bot_blocked",
+  "captcha",
+] as const;
+
+export function finalOutcomeOf(result: {
+  success: boolean;
+  error?: string;
+}): "ok" | "failed" | "blocked" {
+  if (result.success) return "ok";
+  const error = result.error;
+  return error !== undefined && WALL_FAILURE_KINDS.some((k) => error.startsWith(k))
+    ? "blocked"
+    : "failed";
+}
+
+// Single ProvisionEvent emit (design Decision 1). Every terminal path —
+// replay-served, bot, and the housekeeper discover worker — funnels
+// through this one mapper so the event shape can't drift across call
+// sites. Fire-and-forget + fail-open. Observation only; auto-demote
+// still rides on postReplayOutcome (the source-of-truth rule).
+export function emitProvisionEvent(
+  registry: SkillRegistryClient,
+  args: {
+    service: string;
+    provisionId: string;
+    startedAt: number;
+    initialStrategy: "replay" | "bot";
+    finalStrategy: "replay" | "bot";
+    replayOutcome: "ok" | "miss" | "na";
+    result: { success: boolean; error?: string };
+    signupUrl?: string;
+    stepTrail?: string;
+    replayServed: boolean;
+  },
+): void {
+  void registry.recordProvisionEvent({
+    service: args.service,
+    status: args.result.success ? "success" : "failed",
+    initialStrategy: args.initialStrategy,
+    finalStrategy: args.finalStrategy,
+    replayOutcome: args.replayOutcome,
+    finalOutcome: finalOutcomeOf(args.result),
+    ...(args.result.success === false && args.result.error !== undefined
+      ? { failureKind: args.result.error }
+      : {}),
+    ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
+    provisionId: args.provisionId,
+    ...(args.stepTrail !== undefined ? { stepTrail: args.stepTrail } : {}),
+    // Replay is LLM/captcha-free → known-zero cost. The bot path leaves
+    // these unset; USD cost is tracked server-side (LLMUsageEvent), not
+    // known here.
+    ...(args.replayServed ? { llmCost: 0, captchaCost: 0 } : {}),
+    mcpVersion: VERSION,
+    durationMs: Date.now() - args.startedAt,
+  });
+}
+
+// Best-effort POST to /v1/captcha-events. We don't care about the
+// response — at worst the event is lost, which is no worse than the
+// pre-instrumentation state. Captures fresh asn at event time when
+// possible; the API also falls back to the install-time asn from the
+// MachineToken row if we can't supply one here. `stealth_profile` tags
+// which launcher ran so the CDP-hardening A/B is measurable.
+export async function postCaptchaEvent(
+  apiBase: string,
+  machineToken: string,
+  event: {
+    service: string;
+    captcha_kind: "turnstile" | "recaptcha";
+    blocked: boolean;
+    proxied: boolean;
+    captcha_variant: CaptchaVariant;
+    challenge_rendered: boolean;
+    signup_succeeded: boolean;
+    stealth_profile?: "baseline" | "cdp_hardened";
+  },
+): Promise<void> {
+  try {
+    const asn = await detectAsn();
+    const body = {
+      service: event.service,
+      captcha_kind: event.captcha_kind,
+      blocked: event.blocked,
+      proxied: event.proxied,
+      captcha_variant: event.captcha_variant,
+      challenge_rendered: event.challenge_rendered,
+      signup_succeeded: event.signup_succeeded,
+      ...(event.stealth_profile !== undefined
+        ? { stealth_profile: event.stealth_profile }
+        : {}),
+      ...(asn !== null
+        ? {
+            asn: { class: asn.class, org: asn.org, country: asn.country, number: asn.asn },
+          }
+        : {}),
+    };
+    await fetch(`${apiBase}/v1/captcha-events`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-machine-token": machineToken,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error(
+      `[signup-telemetry] captcha event report failed (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}

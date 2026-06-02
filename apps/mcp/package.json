@@ -51,6 +51,7 @@
     "playwright": "^1.49.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "rebrowser-playwright-core": "^1.52.0",
     "smol-toml": "^1.6.1",
     "tldts": "^7.0.30",
     "yaml": "^2.6.1",

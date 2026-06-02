@@ -93,6 +93,14 @@ export async function registerCaptchaEventsRoute(
     const signupSucceeded =
       typeof b.signup_succeeded === "boolean" ? b.signup_succeeded : null;
 
+    // Which stealth launcher ran. Allowlisted like captcha_kind — an
+    // unrecognized value records as null rather than polluting the A/B
+    // dimension. Absent on pre-CDP-hardening clients → null.
+    const stealthProfile =
+      b.stealth_profile === "baseline" || b.stealth_profile === "cdp_hardened"
+        ? b.stealth_profile
+        : null;
+
     // Prefer the asn captured at event time (richer signal — the user
     // may have moved networks since install) but fall back to the
     // install-time asn from the MachineToken row so we always have
@@ -124,6 +132,7 @@ export async function registerCaptchaEventsRoute(
       captcha_variant: captchaVariant,
       challenge_rendered: challengeRendered,
       signup_succeeded: signupSucceeded,
+      stealth_profile: stealthProfile,
       asn_class: asnClass,
       asn_org: asnOrg,
       machine_token: tokenRow.token,

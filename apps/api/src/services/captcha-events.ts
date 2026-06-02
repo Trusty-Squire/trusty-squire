@@ -36,6 +36,10 @@ export interface CaptchaEventRecord {
   captcha_variant: string | null;
   challenge_rendered: boolean | null;
   signup_succeeded: boolean | null;
+  // Which stealth launcher ran: "baseline" | "cdp_hardened". null =
+  // pre-CDP-hardening client. The A/B tag for the Runtime.enable patch
+  // — see docs/DESIGN-antibot-hardening.md.
+  stealth_profile: string | null;
   // The asn class of the machine when this event happened. Captured
   // at event time rather than read from MachineToken row at query
   // time because the machine might have moved networks since install
@@ -73,6 +77,7 @@ export class PrismaCaptchaEventStore implements CaptchaEventStore {
         captcha_variant: event.captcha_variant,
         challenge_rendered: event.challenge_rendered,
         signup_succeeded: event.signup_succeeded,
+        stealth_profile: event.stealth_profile,
         asn_class: event.asn_class,
         asn_org: event.asn_org,
         machine_token: event.machine_token,

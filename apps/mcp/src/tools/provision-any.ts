@@ -22,12 +22,11 @@ import {
   UniversalSignupBot,
   InboxClient,
   ProxyLLMClient,
-  detectAsn,
   BrowserController,
   replaySkill,
   type LLMPair,
-  type CaptchaVariant,
 } from "../bot/index.js";
+import { emitProvisionEvent, postCaptchaEvent } from "./signup-telemetry.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
 import { VERSION } from "../version.js";
@@ -459,19 +458,6 @@ function toReplayOutcomeBody(
   };
 }
 
-// Wall failure kinds the bot emits — a terminal "blocked" wall rather
-// than a fixable "failed". Used to set final_outcome on the event.
-// (The registry's demand-harvest damper keeps its own copy in a
-// different package; the failure_kind taxonomy is deferred — see
-// docs/DESIGN-provision-event-dashboard.md.)
-const WALL_FAILURE_KINDS = new Set(["captcha_blocked", "anti_bot_blocked", "captcha"]);
-
-export function finalOutcomeOf(result: { success: boolean; error?: string }): "ok" | "failed" | "blocked" {
-  if (result.success) return "ok";
-  return result.error !== undefined && WALL_FAILURE_KINDS.has(result.error)
-    ? "blocked"
-    : "failed";
-}
 
 // Resolve the dispatch strategy/outcome for the ProvisionEvent from two
 // facts the router knows: did a replay serve the request, and was a
@@ -495,49 +481,6 @@ export function resolveDispatch(
   }
   // No skill for this service → bot direct.
   return { initialStrategy: "bot", finalStrategy: "bot", replayOutcome: "na" };
-}
-
-// Single ProvisionEvent emit (design Decision 1). Both terminal paths —
-// replay-served and bot — funnel through this one mapper so the event
-// shape can't drift across call sites. Fire-and-forget + fail-open: it
-// never blocks or fails a provision. This is observation only;
-// auto-demote still rides on postReplayOutcome (the source-of-truth
-// rule in the design doc).
-function emitProvisionEvent(
-  registry: SkillRegistryClient,
-  args: {
-    service: string;
-    provisionId: string;
-    startedAt: number;
-    initialStrategy: "replay" | "bot";
-    finalStrategy: "replay" | "bot";
-    replayOutcome: "ok" | "miss" | "na";
-    result: { success: boolean; error?: string };
-    signupUrl?: string;
-    stepTrail?: string;
-    replayServed: boolean;
-  },
-): void {
-  void registry.recordProvisionEvent({
-    service: args.service,
-    status: args.result.success ? "success" : "failed",
-    initialStrategy: args.initialStrategy,
-    finalStrategy: args.finalStrategy,
-    replayOutcome: args.replayOutcome,
-    finalOutcome: finalOutcomeOf(args.result),
-    ...(args.result.success === false && args.result.error !== undefined
-      ? { failureKind: args.result.error }
-      : {}),
-    ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
-    provisionId: args.provisionId,
-    ...(args.stepTrail !== undefined ? { stepTrail: args.stepTrail } : {}),
-    // Replay is LLM/captcha-free → known-zero cost. The bot path leaves
-    // these unset; USD cost is tracked server-side (LLMUsageEvent), not
-    // known here.
-    ...(args.replayServed ? { llmCost: 0, captchaCost: 0 } : {}),
-    mcpVersion: VERSION,
-    durationMs: Date.now() - args.startedAt,
-  });
 }
 
 // Skill promoter — Tier 2 router (0.7.0).
@@ -912,6 +855,9 @@ async function runSignupTask(
         captcha_variant: result.captcha.variant,
         challenge_rendered: result.captcha.challenge_rendered,
         signup_succeeded: result.success,
+        ...(result.stealth_profile !== undefined
+          ? { stealth_profile: result.stealth_profile }
+          : {}),
       });
     }
 
@@ -1230,57 +1176,6 @@ function parseConsentScopes(
     }
   }
   return { allRequested, unauthorized };
-}
-
-// Best-effort POST to /v1/captcha-events. We don't care about the
-// response — at worst the event is lost, which is no worse than the
-// pre-instrumentation state. Captures fresh asn at event time when
-// possible; the API also falls back to the install-time asn from the
-// MachineToken row if we can't supply one here.
-async function postCaptchaEvent(
-  apiBase: string,
-  machineToken: string,
-  event: {
-    service: string;
-    captcha_kind: "turnstile" | "recaptcha";
-    blocked: boolean;
-    proxied: boolean;
-    captcha_variant: CaptchaVariant;
-    challenge_rendered: boolean;
-    signup_succeeded: boolean;
-  },
-): Promise<void> {
-  try {
-    const asn = await detectAsn();
-    const body = {
-      service: event.service,
-      captcha_kind: event.captcha_kind,
-      blocked: event.blocked,
-      proxied: event.proxied,
-      captcha_variant: event.captcha_variant,
-      challenge_rendered: event.challenge_rendered,
-      signup_succeeded: event.signup_succeeded,
-      ...(asn !== null
-        ? {
-            asn: { class: asn.class, org: asn.org, country: asn.country, number: asn.asn },
-          }
-        : {}),
-    };
-    await fetch(`${apiBase}/v1/captcha-events`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-machine-token": machineToken,
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    console.error(
-      `[provision-any] captcha event report failed (non-fatal): ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-  }
 }
 
 // Stores the keys a signup yielded into the paired account's vault via
