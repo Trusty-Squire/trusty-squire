@@ -33,21 +33,20 @@
 - slug: resend
   name: Resend
   signup_url: https://resend.com/signup
-  oauth_provider: null
-  force_form: true
+  oauth_provider: google
   scope_hint: null
   status: pending
-  notes: 'Cloudflare Turnstile (invisible, score-based) on the email signup
+  notes: 'Harvests via Google OAuth (succeeds; OAuth skips email
 
-    form. force_form skips the bot''s OAuth-first path (the profile''s
+    verification). Was briefly switched to force_form as a CDP-hardening
 
-    Google session would otherwise click "Sign in with Google" and bypass
+    A/B target, but the current signup form presents NO detectable captcha
 
-    the challenge entirely) so the run actually hits Turnstile — this is
+    (verified 2026-06-02: no cf-turnstile-response), and the form path
 
-    the non-OAuth Turnstile/v3 service the CDP-hardening A/B needs. Tier-1
+    fails at verification_not_sent on the young trustysquire.com domain —
 
-    behavior simulation passes it; previously verified post-captcha.
+    so force_form was reverted. Not a usable Turnstile A/B target.
 
     '
 - slug: postmark
