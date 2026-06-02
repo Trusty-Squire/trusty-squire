@@ -30,40 +30,40 @@ Free LLM tier (`UNIVERSAL_BOT_LLM_TIER=free`), auto-promote default-on
   triage the failure-kind histogram → feeds A2 + the harvester-subagent
   failure corpus.
 
-### A2 — Closed-loop skill remediation [P1, IMPLEMENTED on branch, deploy-gated]
-**Built 2026-06-02 on branch `closed-loop-remediation` (T1–T9, 9 commits).
-Design: `docs/DESIGN-closed-loop-remediation.md`.** All green:
-skill-schema 41 · registry 195 · mcp 956.
-- T1 shared failure taxonomy (`@trusty-squire/skill-schema`); T2/T3 dedup
-  the 2-copy wall sets onto it.
-- T4 demotion classifier: the verifier demote counter advances only on
-  ROT (step/validator/extraction); walls quarantine on first hit;
-  infra/transient/unknown never demote. `demotion_reason` persisted
-  (fills the `void reason` TODO) + new `quarantined` status. 8 regression
-  tests prove the anti-thrash behavior.
-- T5 demotion→rediscovery: `/admin/discovery-candidates` surfaces
-  demoted services regardless of demand, excludes quarantined.
-- T6 `GET /admin/needs-human` worklist; T8 `mcp skill needs-human` CLI.
-- T7 `mcp housekeeper --mode=heal` chained verify→discover + one digest.
-- T9 systemd 12h timer (`tools/systemd/`).
+### A2 — Closed-loop skill remediation [SHIPPED 2026-06-02]
+**Done end-to-end (T1–T10). PR #116 merged to main; registry deployed
+(v18, both migrations applied); mcp 0.8.14 + skill-schema 0.1.1 on npm
+`latest`; systemd timer installed + enabled.** Design:
+`docs/DESIGN-closed-loop-remediation.md`. T4 classifier (demote only on
+rot), T5 demotion→rediscovery, T6 `/admin/needs-human` + T8 CLI, T7
+`--mode=heal` + digest, T9 timer, T10 heartbeat + admin status panel.
 
-**Remaining before it's live (deploy-gated — NOT done):**
-1. **Apply the migration** `20260602000000_demotion_reason` to the prod
-   registry DB (additive nullable column; `prisma migrate deploy` or
-   manual `ALTER TABLE`). Written but never run against prod.
-2. **Deploy the registry** (`trusty-squire-registry`) with the new
-   routes/classifier; **republish `@trusty-squire/mcp`** for the
-   housekeeper host (`--mode=heal`, `skill needs-human`).
-3. **Install the systemd timer** on the headless box (see
-   `tools/systemd/README.md`).
-4. **Review + merge** the branch (8 prior commits + these 9).
+**Two small loose ends:**
+- The heal timer is enabled but **not yet `start`ed** — held to avoid a
+  Chrome-profile collision with the A1 harvest. Once the harvest
+  finishes: `systemctl --user start trusty-squire-heal.timer` (or it
+  auto-starts on next boot).
+- CI registry auto-deploy was flaky on the Fly release_command timeout;
+  fixed with `--wait-timeout 600` in `release-registry.yml` (the manual
+  deploy already shipped v18). `FLY_API_TOKEN` is fine (red herring).
 
-**Deferred sub-items (in the design's NOT-in-scope):** event-driven
-demotion-webhook listener; mutable "mark resolved" worklist; bounded-N
-rediscovery counter (walls already quarantine; non-wall re-loops are
-surfaced in the digest/worklist for manual quarantine, not yet
-auto-capped); the prod-path (non-verifier) demotion classifier
-(`consecutive_failures`) — fast-follow, same treatment as T4.
+**Deferred sub-items (design NOT-in-scope), now the natural fast-follows:**
+prod-path (non-verifier) demotion classifier on `consecutive_failures`
+(same treatment as T4); bounded-N rediscovery counter (walls already
+quarantine; non-wall re-loops only surface in the digest/worklist today);
+event-driven demotion-webhook listener; mutable "mark resolved" worklist.
+
+### A5 — `oauth_onboarding_failed`: the new #1 bot failure [P1, fresh from the harvest]
+With the bot OAuth session refreshed, the 2026-06-02 re-run hit **0
+`needs_login`** — but `oauth_onboarding_failed` became the dominant
+failure (~9 of the first 40): the bot signs in via Google fine and the
+account is created, but it can't navigate the **post-signup onboarding**
+to reach/extract the API key. These are near-misses (accounts exist), so
+the payoff is high. Audit the post-OAuth onboarding loop in the bot
+(`agent.ts` onboarding navigation + extraction) against a few of the
+failing services (groq, etc.); likely needs better "where's the API key"
+navigation/heuristics or a per-service onboarding hint. Related to F7
+(multi-step flows).
 
 ### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
 The A/B harness is **code-complete** (baseline vs `cdp_hardened`
