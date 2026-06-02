@@ -251,6 +251,48 @@ the upside is now smaller than first hoped.
 real Chrome — two variables differ. For a clean attribution, force the
 baseline arm to bundled chromium too when running the comparison.
 
+### Can we get FULL isolation without crashing? (investigated 2026-06-02 — NO, not with rebrowser-core 1.52)
+
+Goal: close `mainWorldExecution`/`dummyFn` (full isolated-world execution)
+without the crash, i.e. make `alwaysIsolated` viable. Built a minimal
+repro (launchPersistentContext + stealth + alwaysIsolated, bundled
+chromium, under Xvfb) and bisected the crash:
+
+| op after a navigation | alwaysIsolated |
+|---|---|
+| `page.evaluate(() => …)` | **works** (rebrowser hooks it → isolated world) |
+| `page.title()` | **CRASH** — "Target page… has been closed" |
+| `page.locator("a").count()` | **CRASH** — same |
+
+Root cause: rebrowser-core 1.52's `alwaysIsolated` patch hooks the public
+`page.evaluate` but **breaks playwright's internal utility-context
+operations** — `title()`, `content()`, and *every locator op*
+(`.count()`/`.click()`/`.fill()`/`$$`). It forces the main-world execution
+context away, and playwright's own internals (which depend on that
+utility context) then throw "target closed". Tested across default page,
+fresh `newPage()`, and `launch`+`newContext` — all crash; only the
+spike's bare `browser.newPage()`+`evaluate`-only path (no locators/title)
+survived, which is why the spike missed it.
+
+The bot uses locators **pervasively** (it's the entire inventory/click/
+fill surface) — there is no avoiding the utility context. So
+`alwaysIsolated` is structurally incompatible with the bot, not fixable by
+dodging one call. The only way to full isolation *without* the crash is an
+**in-house CDP isolation layer** on vanilla playwright that preserves
+playwright's utility context while routing our scripts to a separate
+isolated world — i.e. re-implementing rebrowser-patches ourselves. That is
+the deep, version-fragile "in-house CDP fix" D2 explicitly rejected; not
+worth it for a flag-gated experiment.
+
+**Conclusion: `addBinding` is the ceiling for this approach.** It closes
+the primary Playwright CDP tell — the `sourceUrlLeak` / UtilityScript
+stack signature that Cloudflare-class detectors key on (⚪️ in spike 2) —
+and is fully functional. The residual `mainWorldExecution`/`dummyFn`
+exposure requires a site to *actively trap DOM prototype methods*, a
+rarer/more aggressive technique than the Runtime.enable leak. So the
+hardened arm is a real-but-partial improvement; whether it moves the
+Turnstile/v3 block rate is what the A/B measures.
+
 Rejected: `patch-package` (postinstall patches silently no-op across the
 npx/pnpm install matrix end users hit); in-house CDP fix (we'd own a deep
 internal patch that breaks on every Playwright bump); swap-without-spike
