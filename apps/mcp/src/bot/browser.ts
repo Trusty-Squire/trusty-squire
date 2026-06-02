@@ -2051,7 +2051,17 @@ export class BrowserController {
           visible('iframe[src*="recaptcha/api2/bframe"]') ||
           visible('iframe[src*="hcaptcha.com"][src*="challenge"]');
         let variant = "unknown";
-        if (present('iframe[src*="challenges.cloudflare.com"]')) {
+        // Turnstile: modern Cloudflare renders its iframe inside a SHADOW
+        // DOM, so `querySelector('iframe[src*=challenges.cloudflare.com]')`
+        // misses it entirely (verified on demo.turnstile.workers.dev:
+        // iframe selector false, cf-turnstile-response input true). Detect
+        // via the response input + host div, which live in the light DOM —
+        // the iframe is a fallback for older/non-shadow embeds.
+        if (
+          present('input[name="cf-turnstile-response"]') ||
+          present(".cf-turnstile") ||
+          present('iframe[src*="challenges.cloudflare.com"]')
+        ) {
           variant = "turnstile";
         } else if (present('iframe[src*="hcaptcha.com"]')) {
           variant = "hcaptcha";
