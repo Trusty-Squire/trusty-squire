@@ -221,6 +221,14 @@ export interface SkillStore {
   recordVerifierOutcome(input: RecordVerifierOutcomeInput): Promise<RecordVerifierOutcomeResult>;
 
   /**
+   * T10 — record a closed-loop heal-pass heartbeat (one per `housekeeper
+   * --mode=heal` run) and read the latest. The admin dashboard reads the
+   * latest + its age to show whether the self-healing timer is alive.
+   */
+  recordHealRun(input: HealRunInput): Promise<HealRunRecord>;
+  latestHealRun(): Promise<HealRunRecord | null>;
+
+  /**
    * Count replay-outcome writes for an account in a recent window.
    * Backs the 60/min rate limit on POST /skills/:id/replay-outcome
    * (C9). Returns the count; the route layer decides whether to 429.
@@ -271,6 +279,27 @@ export interface RecordVerifierOutcomeInput {
   duration_ms?: number;
   // Optional now() override for deterministic tests.
   now?: Date;
+}
+
+export interface HealRunInput {
+  verified: number;
+  demoted: number;
+  quarantined: number;
+  reskilled: number;
+  needs_human: number;
+  mcp_version?: string;
+  now?: Date;
+}
+
+export interface HealRunRecord {
+  id: string;
+  ran_at: Date;
+  verified: number;
+  demoted: number;
+  quarantined: number;
+  reskilled: number;
+  needs_human: number;
+  mcp_version: string | null;
 }
 
 export interface RecordVerifierOutcomeResult {

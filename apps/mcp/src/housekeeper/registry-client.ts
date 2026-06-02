@@ -170,4 +170,28 @@ export class VerifierRegistryClient {
     }
     return (await res.json()) as VerifierOutcomeResponse;
   }
+
+  // T10 — report a heal-pass heartbeat so the admin dashboard can show the
+  // self-healing timer is alive. Fire-and-forget at the call site.
+  async postHealHeartbeat(input: {
+    verified: number;
+    demoted: number;
+    quarantined: number;
+    reskilled: number;
+    needs_human: number;
+    mcp_version?: string;
+  }): Promise<void> {
+    const url = `${this.baseUrl}/admin/heal-heartbeat`;
+    const res = await this.fetchFn(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.adminBearer}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      throw new Error(`postHealHeartbeat: ${res.status} ${res.statusText}`);
+    }
+  }
 }

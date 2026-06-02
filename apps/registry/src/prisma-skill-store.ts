@@ -15,6 +15,8 @@ import {
   type RecordReplayResult,
   type RecordVerifierOutcomeInput,
   type RecordVerifierOutcomeResult,
+  type HealRunInput,
+  type HealRunRecord,
   type SkillCaptureRecord,
   type SkillReplayRecord,
   type SkillStore,
@@ -396,6 +398,26 @@ export class PrismaSkillStore implements SkillStore {
     });
   }
 
+  async recordHealRun(input: HealRunInput): Promise<HealRunRecord> {
+    const row = await this.client.healRun.create({
+      data: {
+        verified: input.verified,
+        demoted: input.demoted,
+        quarantined: input.quarantined,
+        reskilled: input.reskilled,
+        needs_human: input.needs_human,
+        ...(input.now !== undefined ? { ran_at: input.now } : {}),
+        ...(input.mcp_version !== undefined ? { mcp_version: input.mcp_version } : {}),
+      },
+    });
+    return toHealRunRecord(row as PrismaHealRunRow);
+  }
+
+  async latestHealRun(): Promise<HealRunRecord | null> {
+    const row = await this.client.healRun.findFirst({ orderBy: { ran_at: "desc" } });
+    return row === null ? null : toHealRunRecord(row as PrismaHealRunRow);
+  }
+
   async listReplays(skill_id: string, limit: number): Promise<SkillReplayRecord[]> {
     const rows = await this.client.skillReplayRecord.findMany({
       where: { skill_id },
@@ -584,6 +606,30 @@ type PrismaCaptureRow = {
   uploaded_at: Date;
   uploaded_by: string;
 };
+
+type PrismaHealRunRow = {
+  id: string;
+  ran_at: Date;
+  verified: number;
+  demoted: number;
+  quarantined: number;
+  reskilled: number;
+  needs_human: number;
+  mcp_version: string | null;
+};
+
+function toHealRunRecord(row: PrismaHealRunRow): HealRunRecord {
+  return {
+    id: row.id,
+    ran_at: row.ran_at,
+    verified: row.verified,
+    demoted: row.demoted,
+    quarantined: row.quarantined,
+    reskilled: row.reskilled,
+    needs_human: row.needs_human,
+    mcp_version: row.mcp_version,
+  };
+}
 
 function toCaptureRecord(row: PrismaCaptureRow): SkillCaptureRecord {
   return {

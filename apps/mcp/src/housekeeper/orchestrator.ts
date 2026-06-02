@@ -198,6 +198,32 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
     needs_human: Math.max(0, needsHuman),
     summary: digest,
   });
+
+  // Heartbeat the registry so the admin status panel knows the timer is
+  // alive (T10). Fail-open: a missing method (test doubles) or a network
+  // blip must never break the pass.
+  try {
+    const c = opts.verify.client as {
+      postHealHeartbeat?: (i: {
+        verified: number;
+        demoted: number;
+        quarantined: number;
+        reskilled: number;
+        needs_human: number;
+      }) => Promise<void>;
+    };
+    if (typeof c.postHealHeartbeat === "function") {
+      await c.postHealHeartbeat({
+        verified: verify.attempted,
+        demoted: verify.transitions.demoted,
+        quarantined: verify.transitions.quarantined,
+        reskilled,
+        needs_human: Math.max(0, needsHuman),
+      });
+    }
+  } catch (err) {
+    log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
   return { verify, discover };
 }
 

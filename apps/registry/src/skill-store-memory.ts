@@ -13,6 +13,8 @@ import type {
   RecordReplayResult,
   RecordVerifierOutcomeInput,
   RecordVerifierOutcomeResult,
+  HealRunInput,
+  HealRunRecord,
   SkillCaptureRecord,
   SkillReplayRecord,
   SkillStore,
@@ -40,11 +42,33 @@ export class InMemorySkillStore implements SkillStore {
   // replayed_at when 5+ records land in the same millisecond
   // (vitest's sub-ms inject loop hits this).
   private replaySeq: number;
+  private healRuns: HealRunRecord[];
 
   constructor() {
     this.skills = new Map();
     this.replays = [];
     this.replaySeq = 0;
+    this.healRuns = [];
+  }
+
+  async recordHealRun(input: HealRunInput): Promise<HealRunRecord> {
+    const rec: HealRunRecord = {
+      id: randomUUID(),
+      ran_at: input.now ?? new Date(),
+      verified: input.verified,
+      demoted: input.demoted,
+      quarantined: input.quarantined,
+      reskilled: input.reskilled,
+      needs_human: input.needs_human,
+      mcp_version: input.mcp_version ?? null,
+    };
+    this.healRuns.push(rec);
+    return rec;
+  }
+
+  async latestHealRun(): Promise<HealRunRecord | null> {
+    if (this.healRuns.length === 0) return null;
+    return [...this.healRuns].sort((a, b) => b.ran_at.getTime() - a.ran_at.getTime())[0]!;
   }
 
   async insert(input: InsertSkillInput): Promise<SkillStoreRecord> {

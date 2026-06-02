@@ -410,6 +410,33 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       reply.send({ ok: true, count: rows.length, items: rows.slice(0, limit) });
     },
   );
+
+  // ── POST /admin/heal-heartbeat ─────────────────────────────────────
+  // T10 — the heal pass reports in after each run. The dashboard reads the
+  // latest + its age to show whether the self-healing timer is alive (the
+  // timer runs on the operator's box; the registry can't see systemd).
+  fastify.post<{ Body: unknown }>(
+    "/admin/heal-heartbeat",
+    async (req, reply) => {
+      if (denyIfNotAdmin(req as { headers: Record<string, unknown> }, reply)) return;
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const intField = (k: string): number => {
+        const v = b[k];
+        return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+      };
+      const rec = await opts.store.recordHealRun({
+        verified: intField("verified"),
+        demoted: intField("demoted"),
+        quarantined: intField("quarantined"),
+        reskilled: intField("reskilled"),
+        needs_human: intField("needs_human"),
+        ...(typeof b["mcp_version"] === "string"
+          ? { mcp_version: (b["mcp_version"] as string).slice(0, 40) }
+          : {}),
+      });
+      reply.code(201).send({ ok: true, id: rec.id, ran_at: rec.ran_at.toISOString() });
+    },
+  );
 };
 
 function numFromQuery(
