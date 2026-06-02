@@ -103,4 +103,10 @@ jobs:
             echo "::error::FLY_API_TOKEN is not set. Add it as a repo secret before merging this workflow."
             exit 1
           fi
-          flyctl deploy --config apps/registry/fly.toml --dockerfile apps/registry/Dockerfile.fly --remote-only
+          # --wait-timeout 600: Fly's default 5-min wait on the
+          # release_command (prisma migrate deploy) machine sometimes
+          # times out reporting `stopped` even when the migration
+          # succeeded — a transient machine-state-reporting hiccup, not a
+          # migration failure. Give it 10 min so a flaky state report
+          # doesn't abort an otherwise-good deploy.
+          flyctl deploy --config apps/registry/fly.toml --dockerfile apps/registry/Dockerfile.fly --remote-only --wait-timeout 600
