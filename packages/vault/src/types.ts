@@ -77,6 +77,9 @@ export interface CredentialStore {
   // Clear deleted_at, bringing a soft-deleted credential back to active.
   restore(reference: string): Promise<void>;
   setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
+  // Rename an entry — updates the (non-secret) label only. Leaves the
+  // encrypted payload + allowed_hosts untouched.
+  setLabel(reference: string, label: string): Promise<void>;
   // Hard-delete every credential row (active + soft-deleted) for the
   // account — the irreversible offboarding purge. Returns rows removed.
   purgeAccount(accountId: string): Promise<number>;
@@ -122,6 +125,13 @@ export const VAULT_AUDIT_TYPES = {
   collapsed: "vault.credential_collapsed",
   proxyExecuted: "vault.proxy_executed",
   proxyRejected: "vault.proxy_rejected",
+  // Entry label changed (web rename). Non-secret metadata edit — distinct
+  // from `rotated` (which re-encrypts the payload).
+  renamed: "vault.credential_renamed",
+  // A new field added to an existing entry's encrypted blob (web). The
+  // payload is re-encrypted to merge the field; distinct from `rotated`
+  // (full replace) so an additive edit is queryable on its own.
+  fieldAdded: "vault.credential_field_added",
 } as const;
 export type VaultAuditType = (typeof VAULT_AUDIT_TYPES)[keyof typeof VAULT_AUDIT_TYPES];
 

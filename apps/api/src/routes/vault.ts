@@ -7,6 +7,8 @@
 //   PATCH  /v1/vault/credentials/:id            → web: replace fields
 //   DELETE /v1/vault/credentials/:id            → web: soft delete
 //   PATCH  /v1/vault/credentials/:id/allowed-hosts → web: edit allowlist
+//   PATCH  /v1/vault/credentials/:id/label      → web: rename entry
+//   POST   /v1/vault/credentials/:id/fields     → web: add a field
 //
 // store is an upsert keyed (account, service, label) — re-storing a
 // service overwrites it (that IS rotation). Agents cannot rotate or
@@ -18,6 +20,7 @@ import { ulid } from "ulid";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import {
   CredentialNotFoundError,
+  FieldExistsError,
   RestoreConflictError,
   deriveAllowedHosts,
   VAULT_AUDIT_TYPES,
@@ -79,6 +82,18 @@ const patchBody = z
 
 const allowedHostsBody = z.object({
   hosts: z.array(z.string().min(1).max(253)).max(50),
+});
+
+// Rename an entry — same bound as the store label (1..60).
+const renameBody = z.object({
+  label: z.string().min(1).max(60),
+});
+
+// Add ONE field to an existing entry. Additive only — a name collision
+// is rejected (changing a value is the rotate/PATCH path).
+const addFieldBody = z.object({
+  name: z.string().min(1).max(120),
+  value: z.string().min(1).max(8192),
 });
 
 // Destructive-action guard — an explicit confirm so a stray request can't
@@ -456,6 +471,89 @@ export const registerVaultRoute: FastifyPluginAsync<{
       }
       await opts.deps.credentialStore.setAllowedHosts(target.reference, normalised);
       return reply.code(200).send({ allowed_hosts: normalised });
+    },
+  );
+
+  // ── rename entry (web) ───────────────────────────────────────
+  // Changes the entry's label only — non-secret metadata, no re-encrypt.
+  fastify.patch<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/label",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = renameBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const target = await opts.deps.credentialStore.findByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      try {
+        const result = await opts.deps.vault.rename(
+          target.reference,
+          auth.account_id,
+          parsed.data.label,
+        );
+        return reply.code(200).send(result);
+      } catch (err) {
+        if (err instanceof CredentialNotFoundError) {
+          reply.code(404).send({ error: "credential_not_found" });
+          return;
+        }
+        throw err;
+      }
+    },
+  );
+
+  // ── add a field to an entry (web) ────────────────────────────
+  // Additive: the server decrypts the existing blob, merges the new
+  // field, and re-encrypts (the UI can't supply existing values — the
+  // vault is write-only across this boundary). Name collision → 409.
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/fields",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = addFieldBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const target = await opts.deps.credentialStore.findByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      try {
+        const result = await opts.deps.vault.addField(
+          target.reference,
+          auth.account_id,
+          parsed.data.name,
+          parsed.data.value,
+        );
+        return reply.code(200).send(result);
+      } catch (err) {
+        if (err instanceof FieldExistsError) {
+          reply.code(409).send({ error: "field_exists", field: err.field });
+          return;
+        }
+        if (err instanceof CredentialNotFoundError) {
+          reply.code(404).send({ error: "credential_not_found" });
+          return;
+        }
+        throw err;
+      }
     },
   );
 };

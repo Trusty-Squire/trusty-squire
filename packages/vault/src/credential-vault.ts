@@ -165,6 +165,15 @@ export class CredentialNotFoundError extends Error {
     this.name = "CredentialNotFoundError";
   }
 }
+// addField refused: the entry already has a field with this name. Adding
+// is additive — changing an existing field's value is the rotate path.
+// API maps to 409.
+export class FieldExistsError extends Error {
+  constructor(public readonly field: string) {
+    super(`field already exists: ${field}`);
+    this.name = "FieldExistsError";
+  }
+}
 // Restore refused: an active credential already occupies this entry's
 // (service, label) slot, so undeleting would create a duplicate active
 // twin and break the one-active-per-(account,service,label) invariant.
@@ -310,6 +319,72 @@ export class CredentialVault implements VaultClient {
       requester: "user",
     });
     return { rotated_at: now.toISOString() };
+  }
+
+  // Web-only: rename an entry. Changes the (non-secret) label only —
+  // the encrypted payload, field names, and allowed_hosts are untouched.
+  // Account-scoped.
+  async rename(
+    reference: string,
+    accountId: string,
+    label: string,
+  ): Promise<{ label: string }> {
+    const trimmed = label.trim();
+    if (trimmed.length === 0) {
+      throw new Error("label must not be empty");
+    }
+    const existing = await this.deps.store.findActive(reference);
+    if (existing === null || existing.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    await this.deps.store.setLabel(reference, trimmed);
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.renamed, {
+      reference,
+      requester: "user",
+      label: trimmed,
+    });
+    return { label: trimmed };
+  }
+
+  // Web-only: add a single field to an existing entry WITHOUT the caller
+  // supplying the existing field values (the vault is write-only across
+  // the API boundary, so the UI can't round-trip them). We decrypt the
+  // current blob server-side, merge the new field, and re-encrypt. A
+  // collision on `name` is rejected — adding is additive; changing an
+  // existing field's value is the rotate/replaceFields path.
+  async addField(
+    reference: string,
+    accountId: string,
+    name: string,
+    value: string,
+  ): Promise<{ field_names: string[] }> {
+    const fieldName = name.trim();
+    if (fieldName.length === 0) {
+      throw new Error("field name must not be empty");
+    }
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    const current = await this.decryptFields(record);
+    if (Object.prototype.hasOwnProperty.call(current, fieldName)) {
+      throw new FieldExistsError(fieldName);
+    }
+    const merged = { ...current, [fieldName]: value };
+    const fieldNames = Object.keys(merged);
+    const now = this.now();
+    const env = await this.encryptFields(reference, accountId, merged);
+    await this.deps.store.replaceSecret(reference, {
+      ...env,
+      field_names: fieldNames,
+      rotatedAt: now,
+    });
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.fieldAdded, {
+      reference,
+      requester: "user",
+      label: record.label,
+    });
+    return { field_names: fieldNames };
   }
 
   async retrieve(

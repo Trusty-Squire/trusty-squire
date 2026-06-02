@@ -17,6 +17,7 @@ export {
   CredentialVault,
   coerceFieldMap,
   CredentialNotFoundError,
+  FieldExistsError,
   StaleAssertionError,
   VaultRateLimitError,
   AllowlistViolationError,

@@ -542,6 +542,14 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   border:1px solid rgba(224,177,90,.4);border-radius:999px;padding:1px 7px;
   vertical-align:1px;cursor:help}
 
+/* Per-entry name chip next to the service title (shown when an entry has
+   been renamed off the "default" label). Accent-toned, mono — sibling to
+   .badge-stale. */
+.badge-label{margin-left:8px;font-family:var(--mono);font-size:10px;
+  letter-spacing:.04em;color:var(--muted);
+  border:1px solid var(--border);border-radius:999px;padding:1px 7px;
+  vertical-align:1px}
+
 /* Inline envelope-health result, sits in the secret line next to reveal. */
 .health-ok{font-family:var(--mono);font-size:11.5px;color:var(--ok)}
 .health-bad{font-family:var(--mono);font-size:11.5px;color:var(--err)}

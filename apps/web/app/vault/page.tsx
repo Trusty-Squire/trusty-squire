@@ -9,6 +9,7 @@ import {
   ApiError,
   apiDelete,
   apiGet,
+  apiPatch,
   apiPost,
   timeAgo,
 } from "../lib/api";
@@ -16,6 +17,11 @@ import {
 interface Cred {
   id: string;
   service: string | null;
+  // Per-entry name within a service ("default" unless renamed). Lets the
+  // user distinguish multiple entries under one service.
+  label: string;
+  // Plaintext names of the secret fields (NOT the values).
+  field_names: string[];
   key_name: string | null;
   type: string;
   allowed_hosts: string[];
@@ -152,7 +158,14 @@ export default function VaultPage() {
         <>
           <div className="vault-list">
             {creds.map((cred) => (
-              <VaultRow key={cred.id} cred={cred} onDeleted={onDeleted} />
+              <VaultRow
+                key={cred.id}
+                cred={cred}
+                onDeleted={onDeleted}
+                onChanged={() => {
+                  void load();
+                }}
+              />
             ))}
           </div>
           {/* keyboard rail — static "fast" signal (no handlers wired) */}
@@ -203,9 +216,11 @@ type Status = "idle" | "checking" | "ok" | "bad" | "copied";
 function VaultRow({
   cred,
   onDeleted,
+  onChanged,
 }: {
   cred: Cred;
   onDeleted: (cred: Cred) => void;
+  onChanged: () => void;
 }) {
   // Revealed secret is a name→value map: a lone key is { value: "…" },
   // AWS-style creds carry multiple named fields. null = not yet fetched.
@@ -213,6 +228,8 @@ function VaultRow({
   const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [addingField, setAddingField] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
 
   // Fetch + cache the field map once; reveal and copy both need it.
@@ -290,6 +307,11 @@ function VaultRow({
       <div>
         <div className="svc">
           {cred.service ?? "Unknown service"}
+          {cred.label !== "default" && (
+            <span className="badge-label" title="Entry name">
+              {cred.label}
+            </span>
+          )}
           {cred.stale && (
             <span className="badge-stale" title="Older than the rotation window — consider re-storing this key.">
               rotate
@@ -337,6 +359,8 @@ function VaultRow({
           { key: "reveal", label: shown ? "Hide" : "Reveal", onClick: onReveal },
           { key: "copy", label: "Copy", onClick: onCopy },
           { key: "verify", label: "Verify", onClick: onVerify },
+          { key: "rename", label: "Rename", onClick: () => setRenaming(true) },
+          { key: "add-field", label: "Add field", onClick: () => setAddingField(true) },
           { key: "delete", label: "Delete", onClick: () => setConfirmDelete(true), danger: true },
         ]}
       />
@@ -348,6 +372,32 @@ function VaultRow({
           onDeleted={() => {
             setConfirmDelete(false);
             onDeleted(cred);
+          }}
+        />
+      )}
+
+      {renaming && (
+        <RenameModal
+          cred={cred}
+          onClose={() => setRenaming(false)}
+          onRenamed={() => {
+            setRenaming(false);
+            onChanged();
+          }}
+        />
+      )}
+
+      {addingField && (
+        <AddFieldModal
+          cred={cred}
+          onClose={() => setAddingField(false)}
+          onAdded={() => {
+            setAddingField(false);
+            // The cached reveal is now missing the new field — drop it so
+            // the next reveal re-fetches the full set.
+            setFields(null);
+            setShown(false);
+            onChanged();
           }}
         />
       )}
@@ -458,6 +508,167 @@ function DeleteModal({
           </button>
           <button className="btn-secondary" type="button" onClick={onClose}>
             Keep it
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Rename an entry's label (non-secret). Re-store/rotation is unaffected.
+function RenameModal({
+  cred,
+  onClose,
+  onRenamed,
+}: {
+  cred: Cred;
+  onClose: () => void;
+  onRenamed: () => void;
+}) {
+  const [label, setLabel] = useState(cred.label === "default" ? "" : cred.label);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    const next = label.trim();
+    if (next.length === 0) {
+      setError("Enter a name.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: next });
+      onRenamed();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rename failed.");
+      setBusy(false);
+    }
+  }, [cred.id, label, onRenamed]);
+
+  return (
+    <Modal
+      title={`Rename ${cred.service ?? "entry"}`}
+      subtitle="A name to tell entries of the same service apart. Doesn't change the stored key."
+      onClose={onClose}
+    >
+      <div className="form">
+        {error !== null && <div className="form-err">{error}</div>}
+        <div className="field">
+          <label htmlFor={`rename-${cred.id}`}>Entry name</label>
+          <input
+            id={`rename-${cred.id}`}
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="e.g. prod, staging, personal"
+            maxLength={60}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void save();
+            }}
+          />
+        </div>
+        <div className="form-actions">
+          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
+            {busy ? "Saving…" : "Save name"}
+          </button>
+          <button className="btn-secondary" type="button" onClick={onClose}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Add a single new field to an entry. The server merges it into the
+// existing encrypted blob — we never see (or send) the existing values.
+function AddFieldModal({
+  cred,
+  onClose,
+  onAdded,
+}: {
+  cred: Cred;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    const fieldName = name.trim();
+    if (fieldName.length === 0 || value.length === 0) {
+      setError("Both a field name and a value are required.");
+      return;
+    }
+    if (cred.field_names.includes(fieldName)) {
+      setError(`This entry already has a "${fieldName}" field.`);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPost(`/v1/vault/credentials/${cred.id}/fields`, {
+        name: fieldName,
+        value,
+      });
+      onAdded();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setError(`This entry already has a "${fieldName}" field.`);
+      } else {
+        setError(err instanceof Error ? err.message : "Add field failed.");
+      }
+      setBusy(false);
+    }
+  }, [cred.id, cred.field_names, name, value, onAdded]);
+
+  return (
+    <Modal
+      title={`Add a field to ${cred.service ?? "entry"}`}
+      subtitle="Stored encrypted alongside the existing fields. Existing values are untouched."
+      onClose={onClose}
+    >
+      <div className="form">
+        {error !== null && <div className="form-err">{error}</div>}
+        {cred.field_names.length > 0 && (
+          <p className="hint">
+            Existing fields: <span className="mono">{cred.field_names.join(", ")}</span>
+          </p>
+        )}
+        <div className="field">
+          <label htmlFor={`field-name-${cred.id}`}>Field name</label>
+          <input
+            id={`field-name-${cred.id}`}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. region, account_id"
+            maxLength={120}
+            autoFocus
+          />
+        </div>
+        <div className="field">
+          <label htmlFor={`field-value-${cred.id}`}>Value</label>
+          <input
+            id={`field-value-${cred.id}`}
+            className="mono"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="secret value"
+            maxLength={8192}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void save();
+            }}
+          />
+        </div>
+        <div className="form-actions">
+          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
+            {busy ? "Adding…" : "Add field"}
+          </button>
+          <button className="btn-secondary" type="button" onClick={onClose}>
+            Cancel
           </button>
         </div>
       </div>
