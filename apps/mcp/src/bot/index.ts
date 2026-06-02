@@ -68,6 +68,10 @@ export interface UniversalSignupRequest {
   // they share the one persistent profile, which Chrome single-
   // instances, so a second OAuth run queues behind the first.
   oauthProvider?: OAuthProviderId | undefined;
+  // Force the email/password form path even when OAuth is available — so
+  // the run hits the form-side captcha (Turnstile/reCAPTCHA-v3) that OAuth
+  // bypasses. See SignupTask.forceForm.
+  forceForm?: boolean | undefined;
   // Free-text permission/scope hint that flows down to the post-verify
   // planner so it can pick option_text on token-permission dropdowns
   // intentionally. Default (undefined) → "max permissions" guidance.
@@ -181,6 +185,7 @@ export class UniversalSignupBot {
         allowBlindOAuthConsent: request.allowBlindOAuthConsent,
         machineToken: request.machineToken,
         apiBase: request.apiBase,
+        forceForm: request.forceForm,
       });
 
       console.error(`[UniversalBot] Result: ${result.success ? "SUCCESS" : "FAILED"}`);

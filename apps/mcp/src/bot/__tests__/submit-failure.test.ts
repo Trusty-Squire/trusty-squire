@@ -54,6 +54,9 @@ class SubmitFailsBrowser {
   async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
     return { found: false };
   }
+  async detectCaptchaVariant() {
+    return { variant: "unknown", challengeRendered: false };
+  }
   async getState(): Promise<BrowserState> {
     return {
       url: "https://resend.com/signup",

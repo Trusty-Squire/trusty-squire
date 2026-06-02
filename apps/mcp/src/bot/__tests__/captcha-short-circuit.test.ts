@@ -27,7 +27,13 @@ class FakeLLM implements LLMClient {
 // fake can't satisfy the nominal type without this narrowing.
 class FakeCaptchaBrowser {
   public solveCalls = 0;
-  constructor(private readonly result: CaptchaSolveResult) {}
+  constructor(
+    private readonly result: CaptchaSolveResult,
+    private readonly detectResult: {
+      variant: CaptchaVariant;
+      challengeRendered: boolean;
+    } = { variant: "unknown", challengeRendered: false },
+  ) {}
   async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
     this.solveCalls += 1;
     return this.result;
@@ -36,7 +42,7 @@ class FakeCaptchaBrowser {
     variant: CaptchaVariant;
     challengeRendered: boolean;
   }> {
-    return { variant: "unknown", challengeRendered: false };
+    return this.detectResult;
   }
 }
 
@@ -147,5 +153,64 @@ describe("captcha gate short-circuit", () => {
     const gate2 = await runGate(agent, "Post-submit", steps);
     expect(gate2.solved).toBe(true);
     expect(browser.solveCalls).toBe(2);
+  });
+
+  // Invisible Turnstile / reCAPTCHA-v3 recording — the silent-pass case
+  // the visible gate alone misses (the A/B's CDP-hardening target class).
+  function resolveEncounter(
+    agent: SignupAgent,
+  ): { kind: string; variant: string; challenge_rendered: boolean; blocked: boolean } | undefined {
+    return (
+      agent as unknown as {
+        resolveCaptchaEncounter: () => {
+          kind: string;
+          variant: string;
+          challenge_rendered: boolean;
+          blocked: boolean;
+        } | undefined;
+      }
+    ).resolveCaptchaEncounter.bind(agent)();
+  }
+
+  it("records a silent invisible-Turnstile encounter when no visible widget", async () => {
+    const browser = new FakeCaptchaBrowser({ found: false }, { variant: "turnstile", challengeRendered: false });
+    const agent = agentWith(browser);
+    const gate = await runGate(agent, "Pre-submit", []);
+    expect(gate.found).toBe(false);
+    expect(resolveEncounter(agent)).toMatchObject({
+      kind: "turnstile",
+      variant: "turnstile",
+      challenge_rendered: false,
+      blocked: false,
+    });
+  });
+
+  it("records an invisible reCAPTCHA-v3 silent encounter", async () => {
+    const browser = new FakeCaptchaBrowser({ found: false }, { variant: "recaptcha_v3", challengeRendered: false });
+    const agent = agentWith(browser);
+    await runGate(agent, "Pre-submit", []);
+    expect(resolveEncounter(agent)).toMatchObject({
+      kind: "recaptcha",
+      variant: "recaptcha_v3",
+      challenge_rendered: false,
+      blocked: false,
+    });
+  });
+
+  it("a VISIBLE blocked encounter wins over a synthesized invisible one", async () => {
+    const browser = new FakeCaptchaBrowser(
+      { found: true, solved: false, kind: "turnstile" },
+      { variant: "turnstile", challengeRendered: true },
+    );
+    const agent = agentWith(browser);
+    await runGate(agent, "Pre-submit", []);
+    expect(resolveEncounter(agent)).toMatchObject({ blocked: true });
+  });
+
+  it("no captcha of any kind → no encounter synthesized", async () => {
+    const browser = new FakeCaptchaBrowser({ found: false }, { variant: "unknown", challengeRendered: false });
+    const agent = agentWith(browser);
+    await runGate(agent, "Pre-submit", []);
+    expect(resolveEncounter(agent)).toBeUndefined();
   });
 });

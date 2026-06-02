@@ -115,6 +115,9 @@ class FakeBrowser {
   async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
     return { found: false };
   }
+  async detectCaptchaVariant() {
+    return { variant: "unknown", challengeRendered: false };
+  }
   async getState(): Promise<BrowserState> {
     return { url: "https://x.test/signup", title: "Sign up", html: "", screenshot: "" };
   }
