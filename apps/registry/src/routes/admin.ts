@@ -133,6 +133,9 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
           skill_id: req.params.skill_id,
           kind: req.body.kind,
           reason,
+          ...(req.body.failure_kind !== undefined
+            ? { failure_kind: req.body.failure_kind }
+            : {}),
           ...(req.body.duration_ms !== undefined
             ? { duration_ms: req.body.duration_ms }
             : {}),
@@ -149,7 +152,9 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       // Only fires on terminal verifier transitions to keep noise low.
       if (
         opts.demotionWebhookUrl !== undefined &&
-        (result.transition === "demoted" || result.transition === "retired")
+        (result.transition === "demoted" ||
+          result.transition === "retired" ||
+          result.transition === "quarantined")
       ) {
         const fetchFn = opts.fetchFn ?? globalThis.fetch;
         void fetchFn(opts.demotionWebhookUrl, {
@@ -267,11 +272,24 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       // The excludeServices set is "services with an active skill".
       // We pull active skills once and pass the slug-set down — the
       // store can't see across into SkillStore.
-      const activeSkills = await opts.store.listSkills({
-        status: "active",
-        limit: 500,
-      });
+      const [activeSkills, demotedSkills, quarantinedSkills] = await Promise.all([
+        opts.store.listSkills({ status: "active", limit: 500 }),
+        opts.store.listSkills({ status: "demoted", limit: 500 }),
+        opts.store.listSkills({ status: "quarantined", limit: 500 }),
+      ]);
       const excludeServices = new Set(activeSkills.map((s) => s.service));
+      // T5 — closed loop: a quarantined (wall) service is routed to the
+      // human pile, NEVER auto-rediscovered, so exclude it from candidates.
+      for (const s of quarantinedSkills) excludeServices.add(s.service);
+      // A freshly-demoted (rot) skill's service should be re-skilled
+      // REGARDLESS of demand — that's the demotion→rediscovery handoff.
+      // Prepended below so a known-broken skill gets re-captured ahead of
+      // demand-only candidates.
+      const demotedServices = [
+        ...new Set(
+          demotedSkills.map((s) => s.service).filter((svc) => !excludeServices.has(svc)),
+        ),
+      ];
 
       const failureCandidates = await opts.botFailureStore.listDiscoveryCandidates({
         sinceDays,
@@ -295,36 +313,128 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
           activeServices: excludeServices,
           limit,
         });
+        const demandItems = merged.map((c) => ({
+          service: c.service,
+          // Kept for backward-compat with the housekeeper queue mapper.
+          distinct_failures: c.distinct_failures,
+          top_error_kind: c.top_error_kind,
+          most_recent_at: c.most_recent_at?.toISOString() ?? null,
+          // New demand-signal fields.
+          volume: c.volume,
+          source: c.source,
+          wall_ratio: c.wall_ratio,
+        }));
+        const seen = new Set(demandItems.map((i) => i.service));
+        const demotedItems = demotedServices
+          .filter((svc) => !seen.has(svc))
+          .map((svc) => ({
+            service: svc,
+            distinct_failures: 0,
+            top_error_kind: "demoted",
+            most_recent_at: null,
+            volume: 0,
+            source: "demoted",
+            wall_ratio: 0,
+          }));
         reply.send({
           ok: true,
           since_days: sinceDays,
           min_distinct: minDistinct,
-          items: merged.map((c) => ({
-            service: c.service,
-            // Kept for backward-compat with the housekeeper queue mapper.
-            distinct_failures: c.distinct_failures,
-            top_error_kind: c.top_error_kind,
-            most_recent_at: c.most_recent_at?.toISOString() ?? null,
-            // New demand-signal fields.
-            volume: c.volume,
-            source: c.source,
-            wall_ratio: c.wall_ratio,
-          })),
+          // Demoted (rot) services first — re-skill known-broken skills
+          // ahead of demand-only discoveries — then the demand merge.
+          items: [...demotedItems, ...demandItems].slice(0, limit),
         });
         return;
       }
 
+      const failureItems = failureCandidates.map((c) => ({
+        service: c.service,
+        distinct_failures: c.distinct_failures,
+        top_error_kind: c.top_error_kind,
+        most_recent_at: c.most_recent_at.toISOString() as string | null,
+      }));
+      const seenF = new Set(failureItems.map((i) => i.service));
+      const demotedItemsF = demotedServices
+        .filter((svc) => !seenF.has(svc))
+        .map((svc) => ({
+          service: svc,
+          distinct_failures: 0,
+          top_error_kind: "demoted",
+          most_recent_at: null,
+        }));
       reply.send({
         ok: true,
         since_days: sinceDays,
         min_distinct: minDistinct,
-        items: failureCandidates.map((c) => ({
-          service: c.service,
-          distinct_failures: c.distinct_failures,
-          top_error_kind: c.top_error_kind,
-          most_recent_at: c.most_recent_at.toISOString(),
-        })),
+        items: [...demotedItemsF, ...failureItems].slice(0, limit),
       });
+    },
+  );
+
+  // ── GET /admin/needs-human ─────────────────────────────────────────
+  // T6 — the operator worklist. A sole operator won't crawl per-skill
+  // panels, so this rolls up everything that needs a human into one
+  // sortable list: demoted (rot — a fast-follow auto-rediscovery may
+  // re-skill it, but until then it's broken) and quarantined (wall /
+  // gave-up — needs a manual signup or harder anti-bot work). Each row
+  // carries WHY (demotion_reason), the last attempt, and the skill_id as
+  // the capture handle so the operator can pick up where the bot left
+  // off. Read-only — resolution is the existing reactivate/approve paths.
+  fastify.get<{ Querystring: { limit?: string } }>(
+    "/admin/needs-human",
+    async (req, reply) => {
+      if (denyIfNotAdmin(req as { headers: Record<string, unknown> }, reply)) return;
+      const limit = numFromQuery(req.query.limit, 100, 1, 500);
+      const [demoted, quarantined] = await Promise.all([
+        opts.store.listSkills({ status: "demoted", limit }),
+        opts.store.listSkills({ status: "quarantined", limit }),
+      ]);
+      const rows = [...demoted, ...quarantined].map((s) => ({
+        service: s.service,
+        skill_id: s.skill_id,
+        status: s.status,
+        // rot:<kind> / wall:<kind> / manual:<reason> — null on legacy
+        // rows demoted before T4.
+        reason: s.demotion_reason,
+        // Quarantine (wall) blocks the bot; demotion (rot) may auto-heal.
+        needs: s.status === "quarantined" ? "manual" : "rediscovery-or-manual",
+        last_attempt_at:
+          (s.last_verified_at ?? s.last_replayed_at)?.toISOString() ?? null,
+        verifier_failed: s.verifier_failed,
+      }));
+      // Most-recently-failed first so the operator sees fresh breakage.
+      rows.sort(
+        (a, b) =>
+          (b.last_attempt_at ?? "").localeCompare(a.last_attempt_at ?? ""),
+      );
+      reply.send({ ok: true, count: rows.length, items: rows.slice(0, limit) });
+    },
+  );
+
+  // ── POST /admin/heal-heartbeat ─────────────────────────────────────
+  // T10 — the heal pass reports in after each run. The dashboard reads the
+  // latest + its age to show whether the self-healing timer is alive (the
+  // timer runs on the operator's box; the registry can't see systemd).
+  fastify.post<{ Body: unknown }>(
+    "/admin/heal-heartbeat",
+    async (req, reply) => {
+      if (denyIfNotAdmin(req as { headers: Record<string, unknown> }, reply)) return;
+      const b = (req.body ?? {}) as Record<string, unknown>;
+      const intField = (k: string): number => {
+        const v = b[k];
+        return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+      };
+      const rec = await opts.store.recordHealRun({
+        verified: intField("verified"),
+        demoted: intField("demoted"),
+        quarantined: intField("quarantined"),
+        reskilled: intField("reskilled"),
+        needs_human: intField("needs_human"),
+        ...(typeof b["mcp_version"] === "string"
+          ? { mcp_version: (b["mcp_version"] as string).slice(0, 40) }
+          : {}),
+      });
+      reply.code(201).send({ ok: true, id: rec.id, ran_at: rec.ran_at.toISOString() });
     },
   );
 };
@@ -344,6 +454,11 @@ function numFromQuery(
 interface VerifierOutcomeBody {
   kind: "success" | "failure";
   reason: string;
+  // Structured failure kind (step_failed / validator_failed /
+  // extraction_failed / fetch_error / …) → drives the T4 demotion
+  // classifier. Optional: legacy workers omit it; a failure with no kind
+  // classifies as transient and never demotes.
+  failure_kind?: string;
   duration_ms?: number;
 }
 
@@ -369,6 +484,7 @@ function isVerifierOutcomeBody(body: unknown): body is VerifierOutcomeBody {
   const b = body as Record<string, unknown>;
   if (b["kind"] !== "success" && b["kind"] !== "failure") return false;
   if (typeof b["reason"] !== "string") return false;
+  if (b["failure_kind"] !== undefined && typeof b["failure_kind"] !== "string") return false;
   if (b["duration_ms"] !== undefined && typeof b["duration_ms"] !== "number") return false;
   return true;
 }

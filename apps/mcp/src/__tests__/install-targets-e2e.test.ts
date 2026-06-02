@@ -68,6 +68,12 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
   return {
     ...actual,
     ensureOAuthSession: vi.fn(async () => ({ status: "logged_in" as const })),
+    // install() probes live provider cookies via detectActiveProviderSessions,
+    // which launches a REAL persistent-context Chrome on the bot profile. In a
+    // test that contends with any running browser (e.g. a concurrent
+    // housekeeper harvest holding the profile lock) it blocks ~15s + retries
+    // and times the suite out. An e2e must not launch a real browser — stub it.
+    detectActiveProviderSessions: vi.fn(async () => ["google"] as const),
   };
 });
 

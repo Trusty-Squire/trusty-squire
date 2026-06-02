@@ -43,6 +43,9 @@ export class GithubIssueNotifier implements Notifier {
   }
 
   async notify(event: NotifierEvent): Promise<void> {
+    // One issue per SERVICE; the heal digest is a run-level summary with no
+    // service, so it doesn't map to an issue. Telegram + log carry it.
+    if (event.kind === "heal_digest") return;
     if (!this.checkAvailable()) return;
     const slug = serviceSlug(event.service);
     const existing = this.findIssueForSlug(slug);
@@ -208,6 +211,11 @@ function renderBodyAndStatus(event: NotifierEvent): {
   statusLabel: string;
   shouldClose: boolean;
 } {
+  // Unreachable — notify() returns early on heal_digest (no per-service
+  // issue). Guard so the discriminated-union narrowing below is exhaustive.
+  if (event.kind === "heal_digest") {
+    return { body: event.summary, statusLabel: "status:digest", shouldClose: false };
+  }
   if (event.kind === "replay_outcome") {
     const ts = new Date().toISOString();
     const shouldClose = event.outcome === "success" && event.transition === "promoted";

@@ -14,6 +14,24 @@ export interface RegistryPrismaClient {
   // Per-provision event rows: compat-score endpoint + dashboard
   // cache-hit/demand views. Renamed from provisionAttempt.
   provisionEvent: ProvisionEventDelegate;
+  // T10 — closed-loop heal-pass heartbeats for the admin status panel.
+  healRun: HealRunDelegate;
+}
+
+interface HealRunRow {
+  id: string;
+  ran_at: Date;
+  verified: number;
+  demoted: number;
+  quarantined: number;
+  reskilled: number;
+  needs_human: number;
+  mcp_version: string | null;
+}
+
+interface HealRunDelegate {
+  create(args: { data: Record<string, unknown> }): Promise<HealRunRow>;
+  findFirst(args: { orderBy?: Record<string, unknown> }): Promise<HealRunRow | null>;
 }
 
 export type RegistryPrismaTransaction = Omit<

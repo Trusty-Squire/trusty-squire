@@ -74,6 +74,7 @@ export interface HousekeeperBatchSummary {
     promoted: number;
     retired: number;
     demoted: number;
+    quarantined: number;
     none: number;
   };
 }
@@ -90,7 +91,7 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     failed: 0,
     blocked: 0,
     skipped: 0,
-    transitions: { promoted: 0, retired: 0, demoted: 0, none: 0 },
+    transitions: { promoted: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
   };
   for (const task of tasks) {
     summary.attempted += 1;
@@ -151,9 +152,99 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     `batch done: attempted=${summary.attempted} ok=${summary.succeeded} ` +
       `fail=${summary.failed} blocked=${summary.blocked} skipped=${summary.skipped} ` +
       `promoted=${summary.transitions.promoted} retired=${summary.transitions.retired} ` +
-      `demoted=${summary.transitions.demoted}`,
+      `demoted=${summary.transitions.demoted} quarantined=${summary.transitions.quarantined}`,
   );
   return summary;
+}
+
+// T7 — the self-healing pass. One scheduled run does verify THEN discover
+// in sequence: verify demotes rotting skills (and quarantines walls);
+// discover then re-skills the freshly-demoted services (T5 sourcing).
+// Emits ONE digest notification so a sole operator gets an actionable
+// line ("verified 12 · demoted 2 · re-skilled 1 · needs human: 3")
+// instead of crawling panels. Takes both queues' opts; the discover opts
+// reuse the same client/discover runner.
+export interface HealPassOpts {
+  verify: HousekeeperOpts; // queue.name === "verifier"
+  discover: HousekeeperOpts; // queue.name === "discovery" (telemetry candidates)
+  notifiers?: Notifier[];
+  log?: (line: string) => void;
+}
+
+export async function runHealPass(opts: HealPassOpts): Promise<{
+  verify: HousekeeperBatchSummary;
+  discover: HousekeeperBatchSummary;
+}> {
+  const log = opts.log ?? ((line: string) => console.log(`[housekeeper] ${line}`));
+  log("heal pass — phase 1/2: verify (demote rot, quarantine walls)");
+  const verify = await runOneBatch(opts.verify);
+  log("heal pass — phase 2/2: discover (re-skill freshly-demoted + demand)");
+  const discover = await runOneBatch(opts.discover);
+
+  // The digest: what rotted, what auto-healed, what still needs a human.
+  const reskilled = discover.transitions.promoted;
+  const needsHuman = verify.transitions.demoted + verify.transitions.quarantined - reskilled;
+  const digest =
+    `verified ${verify.attempted} · demoted ${verify.transitions.demoted} · ` +
+    `quarantined ${verify.transitions.quarantined} · re-skilled ${reskilled} · ` +
+    `needs human ~${Math.max(0, needsHuman)}`;
+  log(`heal pass done: ${digest}`);
+  await fanOutNotifier(opts.notifiers ?? [], log, {
+    kind: "heal_digest",
+    verified: verify.attempted,
+    demoted: verify.transitions.demoted,
+    quarantined: verify.transitions.quarantined,
+    reskilled,
+    needs_human: Math.max(0, needsHuman),
+    summary: digest,
+  });
+
+  // Heartbeat the registry so the admin status panel knows the timer is
+  // alive (T10). Fail-open: a missing method (test doubles) or a network
+  // blip must never break the pass.
+  try {
+    const c = opts.verify.client as {
+      postHealHeartbeat?: (i: {
+        verified: number;
+        demoted: number;
+        quarantined: number;
+        reskilled: number;
+        needs_human: number;
+      }) => Promise<void>;
+    };
+    if (typeof c.postHealHeartbeat === "function") {
+      await c.postHealHeartbeat({
+        verified: verify.attempted,
+        demoted: verify.transitions.demoted,
+        quarantined: verify.transitions.quarantined,
+        reskilled,
+        needs_human: Math.max(0, needsHuman),
+      });
+    }
+  } catch (err) {
+    log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { verify, discover };
+}
+
+export async function runHealLoop(opts: HealPassOpts & {
+  once?: boolean;
+  intervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<void> {
+  const log = opts.log ?? ((line: string) => console.log(`[housekeeper] ${line}`));
+  const sleep = opts.sleep ?? defaultSleep;
+  const intervalMs = opts.intervalMs ?? 12 * 60 * 60 * 1000;
+  for (;;) {
+    try {
+      await runHealPass(opts);
+    } catch (err) {
+      log(`ERROR: heal pass failed (${err instanceof Error ? err.message : String(err)}) — sleeping`);
+    }
+    if (opts.once === true) return;
+    log(`sleeping ${Math.round(intervalMs / 1000)}s until next heal pass…`);
+    await sleep(intervalMs);
+  }
 }
 
 export async function runHousekeeperLoop(opts: HousekeeperOpts): Promise<void> {

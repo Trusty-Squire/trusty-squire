@@ -32,7 +32,7 @@ export interface VerifierQueueItem {
 }
 
 export interface VerifierOutcomeResponse {
-  transition: "promoted" | "retired" | "demoted" | "none";
+  transition: "promoted" | "retired" | "demoted" | "quarantined" | "none";
   status: string;
   verifier_succeeded: number;
   verifier_failed: number;
@@ -110,7 +110,7 @@ export class VerifierRegistryClient {
       service: string;
       distinct_failures: number;
       top_error_kind: string;
-      most_recent_at: string;
+      most_recent_at: string | null;
     }>
   > {
     const url = new URL("/admin/discovery-candidates", this.baseUrl);
@@ -132,7 +132,7 @@ export class VerifierRegistryClient {
         service: string;
         distinct_failures: number;
         top_error_kind: string;
-        most_recent_at: string;
+        most_recent_at: string | null;
       }>;
     };
     if (body.ok !== true || !Array.isArray(body.items)) {
@@ -145,6 +145,8 @@ export class VerifierRegistryClient {
     skill_id: string;
     kind: "success" | "failure";
     reason: string;
+    // Structured failure kind for the demotion classifier (T4).
+    failure_kind?: string;
     duration_ms?: number;
   }): Promise<VerifierOutcomeResponse> {
     const url = `${this.baseUrl}/admin/skills/${encodeURIComponent(input.skill_id)}/verifier-outcome`;
@@ -157,6 +159,7 @@ export class VerifierRegistryClient {
       body: JSON.stringify({
         kind: input.kind,
         reason: input.reason,
+        ...(input.failure_kind !== undefined ? { failure_kind: input.failure_kind } : {}),
         ...(input.duration_ms !== undefined ? { duration_ms: input.duration_ms } : {}),
       }),
     });
@@ -166,5 +169,29 @@ export class VerifierRegistryClient {
       );
     }
     return (await res.json()) as VerifierOutcomeResponse;
+  }
+
+  // T10 — report a heal-pass heartbeat so the admin dashboard can show the
+  // self-healing timer is alive. Fire-and-forget at the call site.
+  async postHealHeartbeat(input: {
+    verified: number;
+    demoted: number;
+    quarantined: number;
+    reskilled: number;
+    needs_human: number;
+    mcp_version?: string;
+  }): Promise<void> {
+    const url = `${this.baseUrl}/admin/heal-heartbeat`;
+    const res = await this.fetchFn(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.adminBearer}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) {
+      throw new Error(`postHealHeartbeat: ${res.status} ${res.statusText}`);
+    }
   }
 }

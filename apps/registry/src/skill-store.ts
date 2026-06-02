@@ -21,6 +21,9 @@ export interface SkillStoreRecord {
   signed_at: Date;
   signed_by: string;
   status: string;
+  // Why this skill left `active` — rot:<kind> / wall:<kind> / operator
+  // reason. NULL while active/pending/superseded. (T4 — closed loop.)
+  demotion_reason: string | null;
   replays_succeeded: number;
   replays_failed: number;
   consecutive_failures: number;
@@ -218,6 +221,14 @@ export interface SkillStore {
   recordVerifierOutcome(input: RecordVerifierOutcomeInput): Promise<RecordVerifierOutcomeResult>;
 
   /**
+   * T10 — record a closed-loop heal-pass heartbeat (one per `housekeeper
+   * --mode=heal` run) and read the latest. The admin dashboard reads the
+   * latest + its age to show whether the self-healing timer is alive.
+   */
+  recordHealRun(input: HealRunInput): Promise<HealRunRecord>;
+  latestHealRun(): Promise<HealRunRecord | null>;
+
+  /**
    * Count replay-outcome writes for an account in a recent window.
    * Backs the 60/min rate limit on POST /skills/:id/replay-outcome
    * (C9). Returns the count; the route layer decides whether to 429.
@@ -257,10 +268,38 @@ export interface RecordVerifierOutcomeInput {
   kind: "success" | "failure";
   // Free-text from the worker. Capped at 2000 chars by the route.
   reason: string;
+  // Structured failure kind from the replay (step_failed, validator_failed,
+  // extraction_failed, fetch_error, verifier_error, …). Classified via the
+  // shared taxonomy to decide whether THIS failure advances the demote
+  // counter (T4 — closed loop). Optional: success outcomes + legacy callers
+  // omit it; a failure with no kind defaults to `transient` and never
+  // demotes (anti-thrash — see failure-taxonomy classifyFailure).
+  failure_kind?: string;
   // Optional duration metric for cost tracking.
   duration_ms?: number;
   // Optional now() override for deterministic tests.
   now?: Date;
+}
+
+export interface HealRunInput {
+  verified: number;
+  demoted: number;
+  quarantined: number;
+  reskilled: number;
+  needs_human: number;
+  mcp_version?: string;
+  now?: Date;
+}
+
+export interface HealRunRecord {
+  id: string;
+  ran_at: Date;
+  verified: number;
+  demoted: number;
+  quarantined: number;
+  reskilled: number;
+  needs_human: number;
+  mcp_version: string | null;
 }
 
 export interface RecordVerifierOutcomeResult {
@@ -268,8 +307,9 @@ export interface RecordVerifierOutcomeResult {
   // Describes the side effect (if any) the outcome caused.
   transition:
     | "promoted"      // pending-review reached 1 success → active
-    | "retired"       // pending-review reached 3 consecutive failures → deleted
-    | "demoted"       // active reached 3 consecutive verifier failures → demoted
+    | "retired"       // pending-review reached the failure threshold → deleted
+    | "demoted"       // active reached 3 consecutive ROT failures → demoted
+    | "quarantined"   // verifier hit a terminal WALL → quarantined (needs human)
     | "none";         // counters bumped, no status change
 }
 

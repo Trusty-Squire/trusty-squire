@@ -1,0 +1,27 @@
+# T9 — the closed-loop self-healing pass (DESIGN-closed-loop-remediation.md).
+# A systemd USER service (not system-wide): runs on the operator's headless
+# dev box as the operator, with their bot Chrome profile + env. Oneshot —
+# the .timer triggers one heal pass (verify→discover→digest) per fire.
+#
+# Install: see tools/systemd/README.md. Requires `loginctl enable-linger`
+# so the timer survives logout.
+[Unit]
+Description=Trusty Squire closed-loop heal pass (verify rot, re-skill, digest)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The housekeeper runs from a SOURCE checkout (it's excluded from the npm
+# tarball). Adjust WorkingDirectory if your checkout isn't ~/proj-ts.
+WorkingDirectory=%h/proj-ts
+# Operator env: REGISTRY_ADMIN_BEARER (required), TRUSTY_SQUIRE_REGISTRY_URL,
+# TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID (discover phase),
+# UNIVERSAL_BOT_LLM_TIER=free, optional TELEGRAM_BOT_TOKEN for the digest.
+EnvironmentFile=%h/.config/trusty-squire/harvester.env
+ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once --telegram
+# A heal pass drives real browser signups in the discover phase; give it
+# room but don't let a hung run wedge the timer.
+TimeoutStartSec=3h
+# Don't thrash on a transient failure — the next timer fire retries.
+Restart=no

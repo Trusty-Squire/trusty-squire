@@ -5,7 +5,7 @@
 // mix kinds even though current providers don't).
 
 import { describe, expect, it } from "vitest";
-import { runOneBatch } from "../orchestrator.js";
+import { runOneBatch, runHealPass } from "../orchestrator.js";
 import type { QueueProvider, HousekeeperTask } from "../queues/index.js";
 import type { Notifier, NotifierEvent } from "../notifier.js";
 import type { VerifierQueueItem } from "../registry-client.js";
@@ -289,5 +289,55 @@ describe("runOneBatch — mixed queue", () => {
     expect(discoverCalls).toBe(1);
     expect(summary.attempted).toBe(2);
     expect(summary.succeeded).toBe(2);
+  });
+});
+
+describe("runHealPass — chained verify→discover + digest (T7)", () => {
+  it("runs verify then discover and emits a heal_digest with counts", async () => {
+    const events: NotifierEvent[] = [];
+    const notifier: Notifier = { name: "cap", notify: async (e) => { events.push(e); } };
+
+    // verify: one replay that step_fails → demoted (mock client transition)
+    const { client: verifyClient } = recordingClient({ outcomeTransition: "demoted" });
+    // discover: one re-skill that publishes a fresh skill → promoted
+    const order: string[] = [];
+
+    const result = await runHealPass({
+      verify: {
+        queue: provider([{ kind: "replay", queueItem: makeQueueItem("01HEAL0000000000000000001") }]),
+        client: verifyClient as never,
+        replay: async () => {
+          order.push("verify");
+          return {
+            kind: "step_failed",
+            stepIndex: 1,
+            reason: "selector gone",
+            capturedStep: { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance: { run_id: "r1", round_index: 1 } },
+          };
+        },
+        log: () => undefined,
+      },
+      discover: {
+        queue: provider([{ kind: "discover", service: "neon" }]),
+        client: verifyClient as never,
+        discover: async () => {
+          order.push("discover");
+          return { kind: "ok", reason: "re-skilled" };
+        },
+        log: () => undefined,
+      },
+      notifiers: [notifier],
+      log: () => undefined,
+    });
+
+    // verify ran before discover (the chain), and the demote was counted
+    expect(order).toEqual(["verify", "discover"]);
+    expect(result.verify.transitions.demoted).toBe(1);
+    expect(result.discover.succeeded).toBe(1);
+
+    // one digest carrying the verify counts + a "needs human" tally
+    const digest = events.find((e) => e.kind === "heal_digest");
+    expect(digest).toBeDefined();
+    expect(digest).toMatchObject({ demoted: 1, verified: 1, needs_human: 1 });
   });
 });

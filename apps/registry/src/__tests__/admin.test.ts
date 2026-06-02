@@ -284,7 +284,7 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
         method: "POST",
         url: `/admin/skills/${skillId}/verifier-outcome`,
         headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-        payload: { kind: "failure", reason: `fail ${i + 1}` },
+        payload: { kind: "failure", failure_kind: "step_failed", reason: `fail ${i + 1}` },
       });
       lastBody = res.json();
     }
@@ -322,7 +322,7 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
         method: "POST",
         url: `/admin/skills/${skillId}/verifier-outcome`,
         headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-        payload: { kind: "failure", reason: `regression ${i + 1}` },
+        payload: { kind: "failure", failure_kind: "step_failed", reason: `regression ${i + 1}` },
       });
       lastBody = res.json();
     }
@@ -361,7 +361,7 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
         method: "POST",
         url: `/admin/skills/${skillId}/verifier-outcome`,
         headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-        payload: { kind: "failure", reason: `fail ${i + 1}` },
+        payload: { kind: "failure", failure_kind: "step_failed", reason: `fail ${i + 1}` },
       });
     }
     await new Promise((r) => setTimeout(r, 5));

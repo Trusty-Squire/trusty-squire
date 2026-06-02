@@ -25,3 +25,12 @@ export type {
   SkillCredentialSpec,
   SkillStatus,
 } from "./skill.js";
+export {
+  WALL_FAILURE_KINDS,
+  INFRA_FAILURE_KINDS,
+  ROT_FAILURE_KINDS,
+  classifyFailure,
+  failureCountsTowardDemotion,
+  isWallFailure,
+} from "./failure-taxonomy.js";
+export type { FailureClass } from "./failure-taxonomy.js";

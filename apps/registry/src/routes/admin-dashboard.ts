@@ -217,6 +217,9 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       hasRegistryData: pe !== undefined,
     };
 
+    // T10 — heal-pass heartbeat for the status panel.
+    const healRun = await opts.store.latestHealRun();
+
     const html = renderDashboard({
       activeSkills,
       demotedSkills,
@@ -228,6 +231,7 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       demandRows,
       activeServiceSet,
       funnel,
+      healRun,
     });
     reply.code(200).type("text/html; charset=utf-8").send(html);
   });
@@ -327,6 +331,7 @@ function renderDashboard(args: {
   demandRows: DemandRow[];
   activeServiceSet: Set<string>;
   funnel: FunnelPanelData;
+  healRun: Awaited<ReturnType<SkillStore["latestHealRun"]>>;
 }): string {
   // Tokens from DESIGN.md (the operator dashboard now follows the
   // product design system: Linear-leaning dark, mono-forward).
@@ -393,6 +398,7 @@ function renderDashboard(args: {
     `  <h1>Registry Admin</h1>`,
     `  <div class="pagesub">trusty-squire-registry · operator view · read-only</div>`,
     `  <nav>`,
+    `    <a href="#heal">Heal loop</a>`,
     `    <a href="#funnel">Funnel</a>`,
     `    <a href="#cachehit">Cache hit</a>`,
     `    <a href="#demand">Demand</a>`,
@@ -403,6 +409,7 @@ function renderDashboard(args: {
     `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
     `    <a href="#failures">Recent failures (${args.recentFailures.length})</a>`,
     `  </nav>`,
+    renderHealStatusSection(args.healRun),
     renderAcquisitionFunnelSection(args.funnel),
     renderEngagementSection(args.funnel),
     renderCacheHitSection(args.cacheHit),
@@ -517,6 +524,45 @@ function renderEngagementSection(f: FunnelPanelData): string {
 function pct(n: number, total: number): string {
   if (total === 0) return "0.0%";
   return `${((100 * n) / total).toFixed(1)}%`;
+}
+
+// T10 — at-a-glance status of the closed-loop self-healing pass. The
+// timer runs on the operator's box; this reads its last heartbeat and
+// flags DOWN when it's stale (>26h vs the 12h cadence) or never reported.
+function renderHealStatusSection(
+  healRun: Awaited<ReturnType<SkillStore["latestHealRun"]>>,
+): string {
+  const STALE_MS = 26 * 60 * 60 * 1000;
+  const head =
+    `<section id="heal"><h2>Self-healing loop</h2>` +
+    `<div class="desc">Heartbeat from the chained verify→discover pass ` +
+    `(<code>mcp housekeeper --mode=heal</code>). The timer runs on the ` +
+    `operator box; this is its last check-in.</div>`;
+  if (healRun === null) {
+    return (
+      head +
+      `<div class="northstar"><span class="status-demoted">● DOWN</span> — ` +
+      `no heal pass has ever reported. Is the systemd timer installed and ` +
+      `running? See <code>tools/systemd/</code>.</div></section>`
+    );
+  }
+  const ageMs = new Date().getTime() - healRun.ran_at.getTime();
+  const ageH = Math.max(0, Math.round(ageMs / 3_600_000));
+  const down = ageMs > STALE_MS;
+  const dot = down
+    ? `<span class="status-demoted">● DOWN</span>`
+    : `<span class="status-active">● HEALTHY</span>`;
+  const note = down
+    ? ` — last run ${ageH}h ago, past the 12h cadence. Check the timer on the operator box.`
+    : ` — last run ${ageH}h ago.`;
+  return (
+    head +
+    `<div class="northstar">${dot}${note}` +
+    `<div class="mono" style="margin-top:10px;color:var(--muted);font-size:13px">` +
+    `verified ${healRun.verified} · demoted ${healRun.demoted} · ` +
+    `quarantined ${healRun.quarantined} · re-skilled ${healRun.reskilled} · ` +
+    `needs human ${healRun.needs_human}</div></div></section>`
+  );
 }
 
 function renderCacheHitSection(cacheHit: CacheHitBreakdown | null): string {

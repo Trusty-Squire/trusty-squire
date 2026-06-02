@@ -63,7 +63,10 @@ export type HousekeeperTask =
       meta?: {
         distinct_failures?: number;
         top_error_kind?: string;
-        most_recent_at?: string;
+        // null for demoted-service rediscovery candidates (T5 — no
+        // demand timestamp; the service is re-skilled because its skill
+        // rotted, not because of recent demand).
+        most_recent_at?: string | null;
       };
     };
 

@@ -95,6 +95,8 @@ export async function runSkillCli(
     switch (subcommand) {
       case "list":
         return await cmdList(argv.slice(1), client, stdout);
+      case "needs-human":
+        return await cmdNeedsHuman(argv.slice(1), stdout);
       case "show":
         return await cmdShow(argv.slice(1), client, stdout);
       case "replays":
@@ -341,6 +343,108 @@ interface ShowResponse {
     replays_failed: number;
     consecutive_failures: number;
   };
+}
+
+// T8 — `mcp skill needs-human`: the operator worklist. Reads the
+// admin-gated /admin/needs-human roll-up (T6) so a sole operator sees what
+// rotted/walled in one place. Admin-bearer-authed (the housekeeper
+// operator already has REGISTRY_ADMIN_BEARER); the shared RegistryHttpClient
+// only carries x-account-id, so this does its own authed fetch.
+interface NeedsHumanItem {
+  service: string;
+  skill_id: string;
+  status: string;
+  reason: string | null;
+  needs: string;
+  last_attempt_at: string | null;
+  verifier_failed: number;
+}
+
+async function cmdNeedsHuman(
+  argv: string[],
+  out: (line: string) => void,
+): Promise<number> {
+  const parsed = parseFlags(argv);
+  rejectUnknownFlags(parsed, new Set(["limit", "json"]));
+
+  const baseUrl = (
+    process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? "https://registry.trustysquire.ai"
+  ).replace(/\/+$/, "");
+  const bearer = process.env.REGISTRY_ADMIN_BEARER;
+  if (bearer === undefined || bearer.length === 0) {
+    throw new CliExit(
+      ExitCode.CONFIG,
+      "REGISTRY_ADMIN_BEARER is required for `skill needs-human` (the worklist is admin-gated).",
+    );
+  }
+  const qs =
+    parsed.flags.limit !== undefined
+      ? `?limit=${encodeURIComponent(parsed.flags.limit)}`
+      : "";
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl}/admin/needs-human${qs}`, {
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+  } catch (err) {
+    throw new CliExit(
+      ExitCode.UNAVAILABLE,
+      `needs-human: registry unreachable — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!res.ok) {
+    throw new CliExit(
+      res.status === 401 ? ExitCode.CONFIG : ExitCode.UNAVAILABLE,
+      `needs-human: ${res.status} ${res.statusText}`,
+    );
+  }
+  const data = (await res.json()) as { ok: boolean; count: number; items: NeedsHumanItem[] };
+
+  if (parsed.booleans.has("json")) {
+    out(JSON.stringify(data, null, 2));
+    return ExitCode.OK;
+  }
+  if (data.items.length === 0) {
+    out("(nothing needs a human — registry is healthy ✓)");
+    return ExitCode.OK;
+  }
+
+  // Table: NEEDS  STATUS  SERVICE  REASON  LAST_ATTEMPT
+  const rows = data.items.map((i) => ({
+    needs: i.needs,
+    status: i.status,
+    service: i.service,
+    reason: i.reason ?? "(none)",
+    last: i.last_attempt_at?.slice(0, 10) ?? "—",
+  }));
+  const w = {
+    needs: Math.max(5, ...rows.map((r) => r.needs.length)),
+    status: Math.max(6, ...rows.map((r) => r.status.length)),
+    service: Math.max(7, ...rows.map((r) => r.service.length)),
+    reason: Math.max(6, ...rows.map((r) => r.reason.length)),
+  };
+  out(
+    [
+      "NEEDS".padEnd(w.needs),
+      "STATUS".padEnd(w.status),
+      "SERVICE".padEnd(w.service),
+      "REASON".padEnd(w.reason),
+      "LAST",
+    ].join("  "),
+  );
+  for (const r of rows) {
+    out(
+      [
+        r.needs.padEnd(w.needs),
+        r.status.padEnd(w.status),
+        r.service.padEnd(w.service),
+        r.reason.padEnd(w.reason),
+        r.last,
+      ].join("  "),
+    );
+  }
+  out(`\n${data.items.length} service(s) need a human.`);
+  return ExitCode.OK;
 }
 
 async function cmdShow(
@@ -1223,6 +1327,9 @@ Subcommands:
   list        [--service=X] [--status=S] [--limit=N] [--json] [--health]
               --health: aggregate view — services succeeded once + replay success rate
               List skills with optional filters.
+  needs-human [--limit=N] [--json]
+              The operator worklist: demoted (rot) + quarantined (wall)
+              skills with WHY + last attempt. Needs REGISTRY_ADMIN_BEARER.
 
   show        <skill_id> [--json]
               Show a skill's full record (steps, credentials, counters).

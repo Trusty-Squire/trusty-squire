@@ -47,6 +47,13 @@ model SkillRecord {
   // of truth.
   status               String
 
+  // Why this skill left `active`. Set when the verifier demotes
+  // (rot:<failure_kind>) or quarantines (wall:<failure_kind>), or an
+  // operator manually demotes. NULL while active/pending/superseded.
+  // Read by the /admin/needs-human worklist so a sole operator can
+  // target what actually broke without crawling per-skill panels.
+  demotion_reason      String?
+
   // Health counters. Updated via atomic SQL on each replay outcome.
   replays_succeeded    Int      @default(0)
   replays_failed       Int      @default(0)
@@ -361,4 +368,24 @@ model ProvisionEvent {
   // list-recent (admin dashboard).
   @@index([service, occurred_at(sort: Desc)])
   @@index([occurred_at(sort: Desc)])
+}
+
+// HealRun — T10. One row per closed-loop heal pass (mcp housekeeper
+// --mode=heal), POSTed as a heartbeat so the admin dashboard can show
+// whether the self-healing timer is alive (the timer runs on the
+// operator's box; the registry can't see systemd, so the pass reports
+// in). The dashboard reads only the latest row + its age; older rows are
+// a thin audit trail swept by retention.
+model HealRun {
+  id          String   @id @default(cuid())
+  ran_at      DateTime @default(now())
+  verified    Int
+  demoted     Int
+  quarantined Int
+  reskilled   Int
+  needs_human Int
+  // mcp version of the housekeeper that reported, for drift debugging.
+  mcp_version String?
+
+  @@index([ran_at(sort: Desc)])
 }
