@@ -342,3 +342,116 @@ describe("runDiscover — auto-promote logging", () => {
     expect(joined).toMatch(/\[auto-promote\]/);
   });
 });
+
+// D1 (DESIGN-antibot-hardening.md) — the discover path used to record
+// NEITHER a ProvisionEvent NOR a CaptchaEvent, so the operator dashboard
+// was blind to harvest runs. These assert the shared telemetry emit now
+// fires: a bot/bot/na ProvisionEvent to the registry, and a CaptchaEvent
+// carrying the stealth_profile A/B tag when the run hit a captcha.
+describe("runDiscover — telemetry emit (D1 gap fix)", () => {
+  let savedRegistryUrl: string | undefined;
+  let savedFetch: typeof globalThis.fetch;
+  const calls: Array<{ url: string; body: Record<string, unknown> | undefined }> = [];
+
+  beforeEach(() => {
+    savedRegistryUrl = process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+    process.env.TRUSTY_SQUIRE_REGISTRY_URL = "https://registry.test.local";
+    savedFetch = globalThis.fetch;
+    calls.length = 0;
+    globalThis.fetch = (async (url: string | URL, init?: { body?: unknown }): Promise<unknown> => {
+      let body: Record<string, unknown> | undefined;
+      try {
+        body =
+          init?.body !== undefined
+            ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+            : undefined;
+      } catch {
+        body = undefined;
+      }
+      calls.push({ url: String(url), body });
+      // Shape enough of a Response for fetchPostWithRetry + detectAsn.
+      return { ok: true, status: 202, json: async () => ({}), text: async () => "" };
+    }) as typeof globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = savedFetch;
+    if (savedRegistryUrl === undefined) delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+    else process.env.TRUSTY_SQUIRE_REGISTRY_URL = savedRegistryUrl;
+  });
+
+  it("emits a bot/bot/na ProvisionEvent + a stealth-tagged CaptchaEvent", async () => {
+    const bot = stubBot({
+      success: false,
+      // Realistic suffixed wall error — finalOutcomeOf prefix-matches
+      // WALL_FAILURE_KINDS, so this maps to final_outcome "blocked".
+      error: "captcha_blocked: Turnstile checkbox",
+      steps: ["hit a wall"],
+      stealth_profile: "cdp_hardened",
+      captcha: {
+        kind: "turnstile",
+        variant: "turnstile",
+        challenge_rendered: false,
+        blocked: true,
+      },
+    } as SignupResult);
+
+    const outcome = await runDiscover(
+      { service: "cloudflare" },
+      {
+        machineToken: "tok",
+        accountId: "acct-telemetry",
+        inboxClient: stubInbox(),
+        bot,
+        skipAutoPromote: true,
+      },
+    );
+    // The outcome is still correctly classified — telemetry is additive.
+    expect(outcome.kind).toBe("blocked");
+
+    // Flush the fire-and-forget emits (recordProvisionEvent is voided;
+    // postCaptchaEvent awaits detectAsn first).
+    await new Promise((r) => setTimeout(r, 25));
+
+    const attempt = calls.find(
+      (c) => /\/v1\/services\/.+\/attempts$/.test(c.url),
+    );
+    expect(attempt).toBeDefined();
+    expect(attempt?.body?.initial_strategy).toBe("bot");
+    expect(attempt?.body?.final_strategy).toBe("bot");
+    expect(attempt?.body?.replay_outcome).toBe("na");
+    expect(attempt?.body?.status).toBe("failed");
+    expect(attempt?.body?.final_outcome).toBe("blocked"); // captcha_blocked is a wall
+
+    const captcha = calls.find((c) => c.url.endsWith("/v1/captcha-events"));
+    expect(captcha).toBeDefined();
+    expect(captcha?.body?.stealth_profile).toBe("cdp_hardened");
+    expect(captcha?.body?.captcha_kind).toBe("turnstile");
+  });
+
+  it("does NOT post a CaptchaEvent when the run hit no captcha", async () => {
+    const bot = stubBot({
+      success: true,
+      credentials: { api_key: "sk-test-no-captcha" },
+      steps: [],
+      via: "bot",
+      stealth_profile: "baseline",
+    } as SignupResult);
+
+    await runDiscover(
+      { service: "ipinfo" },
+      {
+        machineToken: "tok",
+        accountId: "acct-telemetry",
+        inboxClient: stubInbox(),
+        bot,
+        skipAutoPromote: true,
+      },
+    );
+    await new Promise((r) => setTimeout(r, 25));
+
+    // ProvisionEvent still emitted (success)...
+    expect(calls.some((c) => /\/v1\/services\/.+\/attempts$/.test(c.url))).toBe(true);
+    // ...but no captcha-events POST, since result.captcha was undefined.
+    expect(calls.some((c) => c.url.endsWith("/v1/captcha-events"))).toBe(false);
+  });
+});

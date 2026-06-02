@@ -36,25 +36,74 @@ import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 // stealth as best-effort — a missing dep should never crash the bot.
 const require = createRequire(import.meta.url);
 
+export type StealthProfile = "baseline" | "cdp_hardened";
+
+// Whether the operator asked for the CDP-hardened launcher
+// (rebrowser-playwright-core, which closes the Runtime.enable leak that
+// Turnstile / reCAPTCHA-v3 score on). Flag-gated so it can be A/B'd
+// against the baseline launcher — see docs/DESIGN-antibot-hardening.md.
+function cdpHardeningRequested(): boolean {
+  const v = process.env.BOT_CDP_HARDENED;
+  return v === "1" || v === "true" || v === "on";
+}
+
 let cachedChromium: typeof baseChromium | null = null;
+// The stealth profile the cached launcher actually represents. Set the
+// first time getChromium() resolves a launcher and read back via
+// BrowserController.stealthProfile for the CaptchaEvent A/B tag. A
+// rebrowser load failure degrades it to "baseline" truthfully rather
+// than over-claiming "cdp_hardened" on a run that never got the patch.
+let activeStealthProfile: StealthProfile = "baseline";
+
+function activeStealthProfileValue(): StealthProfile {
+  return activeStealthProfile;
+}
+
 function getChromium(): typeof baseChromium {
   if (cachedChromium !== null) return cachedChromium;
+  const hardened = cdpHardeningRequested();
   try {
-    const { chromium: extra } = require("playwright-extra") as {
-      chromium: { use: (plugin: unknown) => unknown };
+    const { addExtra } = require("playwright-extra") as {
+      addExtra: (launcher: unknown) => { use: (plugin: unknown) => unknown };
     };
     const stealth = require("puppeteer-extra-plugin-stealth") as () => unknown;
+    let baseLauncher: unknown = baseChromium;
+    if (hardened) {
+      // rebrowser-playwright-core defers/isolates the Runtime.enable CDP
+      // call. alwaysIsolated runs every page.evaluate in an isolated
+      // world — the only mode that closes the mainWorldExecution tell
+      // (DESIGN-antibot-hardening.md D3). Set the fix mode BEFORE the
+      // require so the patch reads it; default it but honor an operator pin.
+      if (process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE === undefined) {
+        process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE = "alwaysIsolated";
+      }
+      const rebrowser = require("rebrowser-playwright-core") as {
+        chromium: typeof baseChromium;
+      };
+      baseLauncher = rebrowser.chromium;
+      activeStealthProfile = "cdp_hardened";
+    } else {
+      activeStealthProfile = "baseline";
+    }
+    // addExtra(baseChromium) is exactly what playwright-extra's default
+    // `chromium` export already is, so the baseline path is unchanged;
+    // the hardened path swaps in the rebrowser launcher underneath the
+    // same stealth wrap (Codex review: a bare import swap would NOT
+    // repoint the stealth-wrapped launcher — it must go through addExtra).
+    const extra = addExtra(baseLauncher);
     extra.use(stealth());
     cachedChromium = extra as unknown as typeof baseChromium;
   } catch (err) {
-    // Fall back to vanilla playwright if stealth isn't installed. The bot
-    // still works, it's just easier to fingerprint as a bot.
+    // Fall back to vanilla playwright if stealth (or the rebrowser fork)
+    // isn't installed. The bot still works, it's just easier to
+    // fingerprint as a bot — and the A/B tag stays truthfully "baseline".
     console.warn(
-      `[universal-bot] stealth plugin unavailable, falling back to vanilla chromium: ${
+      `[universal-bot] hardened launcher unavailable, falling back to vanilla chromium: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
     cachedChromium = baseChromium;
+    activeStealthProfile = "baseline";
   }
   return cachedChromium;
 }
@@ -281,6 +330,18 @@ export class BrowserController {
     return this.proxyServer;
   }
 
+  // The stealth profile the most recent .start() launched under:
+  // "cdp_hardened" when the rebrowser launcher actually loaded
+  // (BOT_CDP_HARDENED set + fork present), else "baseline". Surfaced
+  // for the CaptchaEvent A/B tag. Throws before .start() — same reason
+  // as channel/proxied.
+  get stealthProfile(): StealthProfile {
+    if (this.context === null) {
+      throw new Error("BrowserController.stealthProfile read before .start()");
+    }
+    return activeStealthProfileValue();
+  }
+
   async start(): Promise<void> {
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
@@ -386,13 +447,30 @@ export class BrowserController {
     // so the OAuth-first signup path reuses it instead of starting
     // logged-out. launchPersistentContext takes launch + context
     // options in one call.
+    // Resolve the launcher first so activeStealthProfile is set before we
+    // decide on executablePath below.
+    const launcher = getChromium();
+    // In hardened mode the rebrowser-core launcher expects its own
+    // bundled chromium revision, which we deliberately don't install (we
+    // keep playwright's). When no real channel was detected, point it at
+    // the installed playwright chromium — the spike proved the 1.52
+    // launcher drives a 1.59 chromium fine. With a channel detected, let
+    // it launch that real browser (channel + executablePath are mutually
+    // exclusive in Playwright).
+    const hardenedExecutablePath =
+      activeStealthProfileValue() === "cdp_hardened" && channel === null
+        ? baseChromium.executablePath()
+        : null;
     const context = await launchWithProfileGate(this.profileDir, () =>
-      getChromium().launchPersistentContext(this.profileDir, {
+      launcher.launchPersistentContext(this.profileDir, {
       headless: chromeHeadless,
       ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
       // `channel:` selects a real installed browser over the bundled
       // binary; omitted entirely when null.
       ...(channel !== null ? { channel } : {}),
+      ...(hardenedExecutablePath !== null
+        ? { executablePath: hardenedExecutablePath }
+        : {}),
       // `proxy:` routes egress through a residential proxy — only for
       // datacenter-class egress (see resolveProxy()).
       ...(proxy !== null ? { proxy } : {}),

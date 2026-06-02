@@ -64,23 +64,39 @@ export class PrismaSkillStore implements SkillStore {
     const payloadForStorage: Skill = { ...skill, status: effectiveStatus };
 
     try {
-      const row = await this.client.skillRecord.create({
-        data: {
-          skill_id: skill.skill_id,
-          service: skill.service,
-          version: skill.version,
-          payload_json: payloadForStorage,
-          signature,
-          signed_at,
-          signed_by,
-          status: effectiveStatus,
-          replays_succeeded: skill.replays_succeeded,
-          replays_failed: skill.replays_failed,
-          consecutive_failures: skill.consecutive_failures,
-          last_replayed_at: skill.last_replayed_at ? new Date(skill.last_replayed_at) : null,
-          superseded_at: skill.superseded_at ? new Date(skill.superseded_at) : null,
-          deleted_at: skill.deleted_at ? new Date(skill.deleted_at) : null,
-        },
+      const row = await this.client.$transaction(async (tx) => {
+        // One active skill per service. Supersede any existing active
+        // row(s) for this service BEFORE inserting the new active one,
+        // in the same transaction. The promote/approve/reactivate paths
+        // already did this; the direct publish path skipped it, so
+        // re-publishing a service (e.g. auto-promote re-running it)
+        // accumulated duplicate active rows. A partial unique index on
+        // (service) WHERE status='active' backstops this — a missed
+        // supersede now fails loud (P2002) instead of duplicating.
+        if (effectiveStatus === "active") {
+          await tx.skillRecord.updateMany({
+            where: { service: skill.service, status: "active", deleted_at: null },
+            data: { status: "superseded", superseded_at: new Date() },
+          });
+        }
+        return tx.skillRecord.create({
+          data: {
+            skill_id: skill.skill_id,
+            service: skill.service,
+            version: skill.version,
+            payload_json: payloadForStorage,
+            signature,
+            signed_at,
+            signed_by,
+            status: effectiveStatus,
+            replays_succeeded: skill.replays_succeeded,
+            replays_failed: skill.replays_failed,
+            consecutive_failures: skill.consecutive_failures,
+            last_replayed_at: skill.last_replayed_at ? new Date(skill.last_replayed_at) : null,
+            superseded_at: skill.superseded_at ? new Date(skill.superseded_at) : null,
+            deleted_at: skill.deleted_at ? new Date(skill.deleted_at) : null,
+          },
+        });
       });
       return toSkillStoreRecord(row as PrismaSkillRow);
     } catch (err) {

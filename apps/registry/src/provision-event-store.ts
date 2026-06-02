@@ -117,6 +117,13 @@ export interface ProvisionEventStore {
   /** Top services by total provision volume in the window, desc.
    *  Caller applies active-skill exclusion + wall damper. */
   demandByService(sinceMs: number, limit: number): Promise<DemandRow[]>;
+  /** Panel 1 funnel: distinct accounts with ANY event in the trailing
+   *  window (activated / WAU / MAU depending on the window passed). */
+  activeAccounts(sinceMs: number): Promise<number>;
+  /** Panel 1 funnel: distinct accounts with a SUCCESS in the trailing
+   *  window. NOT first-ever success (that needs all-time history) —
+   *  "succeeded ≥1 in window". */
+  succeededAccounts(sinceMs: number): Promise<number>;
 }
 
 function capTrail(trailRaw: string | null): string | null {
@@ -213,5 +220,23 @@ export class InMemoryProvisionEventStore implements ProvisionEventStore {
       .map(([service, b]) => ({ service, ...b }))
       .sort((a, b) => b.volume - a.volume)
       .slice(0, Math.max(1, limit));
+  }
+
+  async activeAccounts(sinceMs: number): Promise<number> {
+    const cutoff = Date.now() - sinceMs;
+    const seen = new Set<string>();
+    for (const r of this.rows) {
+      if (r.occurred_at.getTime() >= cutoff) seen.add(r.account_id);
+    }
+    return seen.size;
+  }
+
+  async succeededAccounts(sinceMs: number): Promise<number> {
+    const cutoff = Date.now() - sinceMs;
+    const seen = new Set<string>();
+    for (const r of this.rows) {
+      if (r.occurred_at.getTime() >= cutoff && r.status === "success") seen.add(r.account_id);
+    }
+    return seen.size;
   }
 }

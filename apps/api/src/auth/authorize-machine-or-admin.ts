@@ -41,11 +41,15 @@ function constantTimeEquals(a: string, b: string): boolean {
 // UNIVERSAL_BOT_API_KEY env var is missing — callers must fail closed.
 export type AdminBearerResult = "ok" | "unauthorized" | "unconfigured";
 
-// Verify the request carries `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`.
-// Used by routes that have no provider signature to verify (e.g. the
-// self-hosted Postfix webhook) and fall back to the operator bearer.
-export function checkAdminBearer(req: FastifyRequest): AdminBearerResult {
-  const expected = process.env.UNIVERSAL_BOT_API_KEY;
+// Generic timing-safe `Authorization: Bearer <expected>` check. Returns
+// `unconfigured` when `expected` is unset/empty (caller fails closed).
+// Shared so routes with their own dedicated token (e.g. the funnel
+// metrics endpoint's FUNNEL_METRICS_TOKEN) reuse one constant-time
+// compare instead of hand-rolling a third copy.
+export function verifyBearer(
+  req: FastifyRequest,
+  expected: string | undefined,
+): AdminBearerResult {
   if (expected === undefined || expected.length === 0) {
     return "unconfigured";
   }
@@ -55,6 +59,13 @@ export function checkAdminBearer(req: FastifyRequest): AdminBearerResult {
   }
   const presented = auth.slice("Bearer ".length).trim();
   return constantTimeEquals(presented, expected) ? "ok" : "unauthorized";
+}
+
+// Verify the request carries `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`.
+// Used by routes that have no provider signature to verify (e.g. the
+// self-hosted Postfix webhook) and fall back to the operator bearer.
+export function checkAdminBearer(req: FastifyRequest): AdminBearerResult {
+  return verifyBearer(req, process.env.UNIVERSAL_BOT_API_KEY);
 }
 
 // Authorize a request as either a the machine-token caller machine token or the admin

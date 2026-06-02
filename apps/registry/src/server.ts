@@ -24,6 +24,7 @@ import {
   InMemoryProvisionEventStore,
   type ProvisionEventStore,
 } from "./provision-event-store.js";
+import { adminAuthFromEnv, type AdminAuthConfig } from "./admin-auth.js";
 
 function numEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -42,6 +43,14 @@ export interface BuildServerOpts {
   // dashboard cache-hit/demand views. In-memory default; production
   // wires a Prisma-backed store at boot.
   provisionEventStore?: ProvisionEventStore;
+  // Google SSO config for the dashboard. Defaults to adminAuthFromEnv()
+  // when omitted; tests inject a config (or null for bearer-only).
+  adminAuth?: AdminAuthConfig | null;
+  // Panel 1 funnel: trusty-squire-api base + dedicated metrics token +
+  // an injectable fetch for the registry→API call (tests stub it).
+  apiBase?: string;
+  funnelMetricsToken?: string;
+  funnelFetchFn?: typeof globalThis.fetch;
   signer?: ManifestSigner;
   // Public key (base64url SPKI DER) used to verify POST /skills
   // signatures. When undefined the route logs a warn per publish and
@@ -153,6 +162,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   });
 
   const adminBearer = opts.adminBearer ?? process.env.REGISTRY_ADMIN_BEARER;
+  const funnelMetricsToken = opts.funnelMetricsToken ?? process.env.FUNNEL_METRICS_TOKEN;
   await fastify.register(registerAdminRoutes, {
     store: skillStore,
     botFailureStore,
@@ -165,15 +175,27 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
   });
+  // Workspace-restricted Google SSO for the browser dashboard. Read from
+  // env unless the caller injects a config (tests). Null = bearer-only.
+  const adminAuth: AdminAuthConfig | null = opts.adminAuth ?? adminAuthFromEnv();
   await fastify.register(registerAdminDashboardRoute, {
     store: skillStore,
     botFailureStore,
     // Surface the "Recent failures" gallery.
     provisionEventStore,
     extractFailureStore,
+    adminAuth,
     ...(adminBearer !== undefined && adminBearer.length > 0
       ? { adminBearer }
       : {}),
+    ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
+    // Panel 1 funnel: the API base + dedicated read-only metrics token.
+    // When the token is unset, Panel 1 renders registry-side stages only.
+    apiBase: opts.apiBase ?? process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev",
+    ...(funnelMetricsToken !== undefined && funnelMetricsToken.length > 0
+      ? { funnelMetricsToken }
+      : {}),
+    ...(opts.funnelFetchFn !== undefined ? { funnelFetchFn: opts.funnelFetchFn } : {}),
   });
 
   // Hourly background pruner. Best-effort — server doesn't crash if
