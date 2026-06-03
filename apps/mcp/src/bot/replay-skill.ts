@@ -52,7 +52,12 @@ import type {
 } from "@trusty-squire/skill-schema";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { loggedInProviders } from "./login-state.js";
-import { isTruncatedCapture, extractApiKeyFromText, findOAuthButton } from "./agent.js";
+import {
+  isTruncatedCapture,
+  extractApiKeyFromText,
+  findOAuthButton,
+  isCredentialNoiseCandidate,
+} from "./agent.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   filterByNearTextHint,
@@ -285,6 +290,29 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         stepToExecute = fallbackResult.substitute;
       } else if (fallbackResult.kind === "needs_login") {
         return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i };
+      } else if (
+        step.kind === "click" &&
+        isSkippableAbsentClick(
+          step,
+          i,
+          await countClickMatches(step, browser),
+          skill.steps,
+        )
+      ) {
+        // Account-state-dependent setup click (hookdeck "Create
+        // Project" class): the target button only existed in the
+        // original signup's account state. It's wholly absent now AND
+        // it isn't the credential-creating click — skip it and continue
+        // rather than hard-failing a replay that can still reach the
+        // credential. Step-trail note so the skip is visible to anyone
+        // triaging the run (and so a genuinely-required vanished button
+        // isn't silently swallowed without a paper trail).
+        console.error(
+          `[replay] step ${i} (click text_match=${JSON.stringify(step.text_match)}) ` +
+            `target absent from page; skipping as optional setup step. ` +
+            `Reason: ${validation.reason}`,
+        );
+        continue;
       } else {
         return {
           kind: "step_failed",
@@ -924,6 +952,7 @@ async function executeStep(
               if (cand.length > fallbackValidatorPoll.max_length) continue;
               if (!/\d/.test(cand)) continue;
               if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+              if (isCredentialNoiseCandidate(cand)) continue; // password-manager UI
               return { kind: "extract_ok", value: cand, via: "copy_button" };
             }
           } catch {
@@ -1015,6 +1044,7 @@ async function executeStep(
             if (cand.length > fallbackValidator.max_length) continue;
             if (!/\d/.test(cand)) continue;
             if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+            if (isCredentialNoiseCandidate(cand)) continue; // password-manager UI
             return { kind: "extract_ok", value: cand, via: "copy_button" };
           }
         } catch {
@@ -1108,6 +1138,7 @@ async function executeStep(
             if (cand.length > validator.max_length) continue;
             if (!/\d/.test(cand)) continue; // skip pure-letter nav strings
             if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue; // sanity
+            if (isCredentialNoiseCandidate(cand)) continue; // password-manager UI
             return { kind: "extract_ok", value: cand, via: "regex" };
           }
         } catch {
@@ -1140,6 +1171,33 @@ async function executeStep(
       if (step.pattern_name === "uuid_token") {
         try {
           const candidates = await browser.extractCredentialCandidates();
+          // Pattern-preference pass. This validator-blind tier accepts
+          // any bare 8-128 char alphanumeric token, which means a short
+          // password-manager UI word ("1Password", len 9, has a digit)
+          // could win over the real prefix-keyed credential that is ALSO
+          // on the page — the 0DTW2V66 render skill failed exactly this
+          // way (`got="1Password" length 9 below min_length 32`; the
+          // real `rnd_…` key was present but shadowed by DOM order).
+          // Render the candidates through the regex library FIRST: if
+          // any is a recognised credential (rnd_, re_, sk_, …), it is a
+          // far stronger signal than a bare word and must win.
+          for (const cand of candidates) {
+            const hit = extractApiKeyFromText(cand);
+            // A recognised prefix-key wins — UNLESS it fails this
+            // credential's own validator. extractApiKeyFromText can return
+            // a SUBSTRING of a dotted/opaque key (e.g. brevo's
+            // `xkeysib.<hex>.<hex>`) that isTruncatedCapture doesn't catch;
+            // handing that to the outer loop would just validator_fail.
+            // Defer to the validator-shaped tier below for those.
+            if (
+              hit !== null &&
+              !isTruncatedCapture(cand, hit) &&
+              (validator === undefined ||
+                candidateSatisfiesValidatorShape(hit, validator))
+            ) {
+              return { kind: "extract_ok", value: hit, via: "regex" };
+            }
+          }
           for (const cand of candidates) {
             if (cand.length < 8 || cand.length > 128) continue;
             if (!/\d/.test(cand)) continue;
@@ -1147,10 +1205,32 @@ async function executeStep(
             // Skip values that look like a URL/path/route — those
             // show up in <code> blocks for documentation snippets.
             if (cand.includes("/") || cand.includes(".")) continue;
+            // Skip password-manager / autofill UI affordances. They pass
+            // every shape check above (short, alphanumeric, has a digit)
+            // but are never the credential.
+            if (isCredentialNoiseCandidate(cand)) continue;
             return { kind: "extract_ok", value: cand, via: "regex" };
           }
         } catch {
           // Fall through to the canonical error below.
+        }
+        // 0.8.4 — validator-shaped candidate fallback. The rc.21 tier
+        // above uses fixed heuristics (digit-required, no dot/slash,
+        // 8-128) that miss real keys whose shape doesn't fit that mould
+        // (brevo's `opaque` key carries no digit guarantee; a key
+        // rendered with a `.` is excluded). Defer to the credential's
+        // OWN validator (length + shape_regex) as the guard instead —
+        // it's the authoritative shape gate the synthesizer published
+        // for this service, so accepting on it can't grab a wrong-shaped
+        // token. uuid_token-only, same as the rc.21 tier.
+        if (validator !== undefined) {
+          const validatedCand = await findValidatedCandidate(
+            browser,
+            validator,
+          );
+          if (validatedCand !== null) {
+            return { kind: "extract_ok", value: validatedCand, via: "regex" };
+          }
         }
       }
       throw new Error(`No credential matching pattern ${step.pattern_name} found on page.`);
@@ -1203,17 +1283,44 @@ async function executeStep(
     case "extract_via_regex_named": {
       const text = await browser.extractText();
       const extracted = extractApiKeyFromText(text);
-      if (extracted === null) {
-        throw new Error(
-          `No credential matching pattern ${step.pattern_name} (for ${step.produces}) found on page.`,
-        );
+      if (extracted !== null) {
+        return {
+          kind: "extract_named_ok",
+          produces: step.produces,
+          value: extracted,
+          via: "regex",
+        };
       }
-      return {
-        kind: "extract_named_ok",
-        produces: step.produces,
-        value: extracted,
-        via: "regex",
-      };
+      // 0.8.4 — validator-shaped candidate fallback, mirroring the
+      // single-cred extract_via_regex tier. The named regex library
+      // misses the key on a fresh-account replay when the synthesizer
+      // captured `uuid_token` (its DEFAULT for an unrecognised key) but
+      // the real value isn't uuid-shaped (statsig). Scan candidates and
+      // accept the first that satisfies THIS credential's own validator.
+      // uuid_token-only: prefix-anchored patterns stay strict and fail
+      // loud rather than grabbing arbitrary candidate text.
+      if (step.pattern_name === "uuid_token") {
+        const credSpec = skill.credentials.find(
+          (c) => c.name === step.produces,
+        );
+        if (credSpec !== undefined) {
+          const validatedCand = await findValidatedCandidate(
+            browser,
+            credSpec.post_extract_validator,
+          );
+          if (validatedCand !== null) {
+            return {
+              kind: "extract_named_ok",
+              produces: step.produces,
+              value: validatedCand,
+              via: "regex",
+            };
+          }
+        }
+      }
+      throw new Error(
+        `No credential matching pattern ${step.pattern_name} (for ${step.produces}) found on page.`,
+      );
     }
   }
   const _exhaustive: never = step;
@@ -1228,6 +1335,68 @@ interface ValidatorOk {
 interface ValidatorFail {
   ok: false;
   reason: string;
+}
+
+// 0.8.4 — deterministic (non-network) half of validateCredential: the
+// length bounds + shape_regex gate, minus the async sentinel HTTP probe.
+// Used by the candidate-fallback tier (findValidatedCandidate) to pick
+// the right value off the page BEFORE the outer loop runs the full
+// validateCredential (which also fires the sentinel). Mirrors the
+// length-relaxation in validateCredential exactly so the two agree on
+// what "shape-valid" means — a candidate this accepts won't then be
+// rejected on shape by validateCredential, only (possibly) by the
+// sentinel.
+function candidateSatisfiesValidatorShape(
+  value: string,
+  validator: SkillCredentialSpec["post_extract_validator"],
+): boolean {
+  const recognisedByLibrary = extractApiKeyFromText(value) === value;
+  if (!recognisedByLibrary) {
+    if (value.length < validator.min_length) return false;
+    if (value.length > validator.max_length) return false;
+  }
+  if (validator.shape_regex !== undefined) {
+    try {
+      if (!new RegExp(validator.shape_regex).test(value)) return false;
+    } catch {
+      // Invalid regex on the validator itself is a schema bug, not a
+      // credential rejection — matches validateCredential's pass-through.
+    }
+  }
+  return true;
+}
+
+// 0.8.4 — candidate-fallback for the generic `uuid_token` pattern.
+//
+// `uuid_token` is the synthesizer's DEFAULT pattern_name in
+// detectKnownCredentialPattern (promote-to-skill.ts) for a key with no
+// recognised prefix. The captured extract step therefore looks for a
+// uuid-shaped string via the named regex library — but on a fresh-
+// account replay the real key often isn't uuid-shaped (or the original
+// run saw a transient uuid that's now gone), so the named regex matches
+// nothing and the step hard-fails (brevo: `opaque`; statsig: `uuid`).
+//
+// This recovers those cases by scanning the page's credential candidates
+// and accepting the first that satisfies the credential's own validator
+// (length bounds + shape_regex). The validator IS the guard: a candidate
+// that doesn't match the published shape is rejected, so this can't grab
+// the wrong token. Callers fire it ONLY for `uuid_token` — prefix-
+// anchored patterns (resend/stripe/openrouter/…) stay strict and never
+// reach here, so a mistaken empty-page capture for those still fails
+// loud rather than grabbing arbitrary candidate text.
+async function findValidatedCandidate(
+  browser: BrowserController,
+  validator: SkillCredentialSpec["post_extract_validator"],
+): Promise<string | null> {
+  try {
+    const candidates = await browser.extractCredentialCandidates();
+    for (const cand of candidates) {
+      if (candidateSatisfiesValidatorShape(cand, validator)) return cand;
+    }
+  } catch {
+    // Non-fatal — caller falls through to its canonical failure.
+  }
+  return null;
 }
 
 async function validateCredential(
@@ -1602,12 +1771,41 @@ function substituteTemplate(template: string, values: Record<string, string>): s
 
 // ── Mode helpers ────────────────────────────────────────────────────
 
+function isExtractStep(step: SkillStep): boolean {
+  return (
+    step.kind === "extract_via_copy_button" ||
+    step.kind === "extract_via_regex" ||
+    step.kind === "extract_via_copy_button_named" ||
+    step.kind === "extract_via_regex_named"
+  );
+}
+
+// Index of the credential-creating click: the LAST click (plain or
+// OAuth) before the FIRST extract step. This is the load-bearing click
+// — the one that mints the token the extract then reads. Returns null
+// when there is no extract step, or no click precedes it. Used both by
+// the dry-mode cutoff and by the absent-click skip gate (the gate must
+// NEVER skip this click, since skipping it would silently bypass
+// credential creation and let a hollow replay report success).
+function creditCreatingClickIndex(steps: SkillStep[]): number | null {
+  for (let i = 0; i < steps.length; i++) {
+    if (!isExtractStep(steps[i]!)) continue;
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = steps[j]!;
+      if (prev.kind === "click" || prev.kind === "click_oauth_button") {
+        return j;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
 function computeDryStopIndex(steps: SkillStep[]): number {
-  // The credential-creating click is the click immediately before the
-  // first extract step. Dry mode stops at that click — pre-validates
-  // it (confirms the button is on the page), but does not execute it.
-  // If the skill has no extract step (shouldn't happen — synthesizer
-  // rejects), we just walk everything.
+  // Dry mode stops at the credential-creating click — pre-validates it
+  // (confirms the button is on the page), but does not execute it. If
+  // the skill has no extract step (shouldn't happen — synthesizer
+  // rejects), we walk everything.
   //
   // Single-credential assumption (0.7.0): only the FIRST extract step
   // determines the dry-mode cutoff. Multi-credential skills (0.8.0,
@@ -1618,26 +1816,61 @@ function computeDryStopIndex(steps: SkillStep[]): number {
   // function should return the cutoff for the LAST extract (so dry
   // mode walks far enough to validate every credential path) — but
   // that's an explicit redesign, not a drop-in change.
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i]!;
-    if (
-      step.kind === "extract_via_copy_button" ||
-      step.kind === "extract_via_regex" ||
-      step.kind === "extract_via_copy_button_named" ||
-      step.kind === "extract_via_regex_named"
-    ) {
-      // Find the last click before this extract.
-      for (let j = i - 1; j >= 0; j--) {
-        const prev = steps[j]!;
-        if (prev.kind === "click" || prev.kind === "click_oauth_button") {
-          return j; // stop before this click
-        }
-      }
-      // No click before extract — stop at the extract itself.
-      return i;
-    }
-  }
-  return steps.length;
+  const clickIdx = creditCreatingClickIndex(steps);
+  if (clickIdx !== null) return clickIdx;
+  // No click before the first extract — stop at the extract itself.
+  const firstExtract = steps.findIndex(isExtractStep);
+  return firstExtract === -1 ? steps.length : firstExtract;
+}
+
+// Absent-click skip gate (the "account-state-dependent setup step"
+// class). A captured `click` step can target a button that only
+// existed in the EXACT account state of the original signup — e.g.
+// hookdeck's first-time-account "Create Project" setup button, which
+// is simply not on the page when replay runs against a fresh or
+// already-set-up account. Pre-validation returns "No element matches
+// text_match=…" and, with no LLM substitute, the whole replay
+// hard-fails — even though the credential is still reachable.
+//
+// When the target is COMPLETELY ABSENT (zero text_match matches in the
+// inventory), treat the click as an optional setup step and continue.
+// Safety rails, so we never mask real breakage:
+//
+//   - Only the `click` kind (not click_oauth_button — a missing OAuth
+//     button is a genuine auth wall, handled by the needs_login path).
+//   - Only true absence (matchCount === 0). An ambiguous match (>1) or
+//     a role-filter-only miss means the element IS on the page but the
+//     skill can't pin it — that is real rot, still a hard failure.
+//   - NEVER the credential-creating click (last click before the first
+//     extract). Skipping that would bypass token creation and let a
+//     hollow replay report success against a stale page.
+//   - ONLY when a credential-creating click actually exists downstream.
+//     If the skill has no extract-anchored click at all, there's no
+//     credential path to protect and the click may be the only
+//     meaningful action — skipping is unsafe, so we don't.
+function isSkippableAbsentClick(
+  step: SkillStep,
+  stepIndex: number,
+  matchCount: number,
+  steps: SkillStep[],
+): boolean {
+  if (step.kind !== "click") return false;
+  if (matchCount !== 0) return false;
+  const credClickIdx = creditCreatingClickIndex(steps);
+  if (credClickIdx === null) return false;
+  return stepIndex !== credClickIdx;
+}
+
+// Count how many inventory elements a click step's text_match resolves
+// to BEFORE role/near-text narrowing. Zero means the target is wholly
+// absent from the page (the skip-gate case); a positive count means the
+// element exists but the skill can't uniquely pin it (real rot).
+async function countClickMatches(
+  step: Extract<SkillStep, { kind: "click" }>,
+  browser: BrowserController,
+): Promise<number> {
+  const inventory = await browser.extractInteractiveElements();
+  return inventory.filter((el) => matchesClickHint(el, step.text_match)).length;
 }
 
 // Dry-mode safety net for multi-credential skills (0.8.0). The main

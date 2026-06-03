@@ -5,7 +5,7 @@
 // trigger the premium-fallback retry.
 
 import { describe, expect, it } from "vitest";
-import { parseSignupPlan, parsePostVerifyStep } from "../agent.js";
+import { parseSignupPlan, parsePostVerifyStep, isSubmitTimeout } from "../agent.js";
 
 describe("parseSignupPlan — valid input", () => {
   it("parses a well-formed plan", () => {
@@ -273,5 +273,40 @@ describe("parsePostVerifyStep — rejection", () => {
   it("rejects an unknown step kind", () => {
     const raw = JSON.stringify({ kind: "teleport", reason: "" });
     expect(() => parsePostVerifyStep(raw)).toThrow(/unknown kind/i);
+  });
+});
+
+describe("isSubmitTimeout — stale-submit-selector recovery (Paddle)", () => {
+  it("matches a Playwright locator.waitFor visibility timeout", () => {
+    // The exact shape Paddle produced: a "Continue" click advanced the
+    // SPA, so clickSubmit's locator never became visible.
+    const reason =
+      "locator.waitFor: Timeout 20000ms exceeded.\n" +
+      "Call log:\n  - waiting for locator('div > main > div:nth-of-type(2) > button') to be visible";
+    expect(isSubmitTimeout(reason)).toBe(true);
+  });
+
+  it("matches a waitForSelector timeout", () => {
+    expect(
+      isSubmitTimeout("page.waitForSelector: Timeout 10000ms exceeded. waiting for selector"),
+    ).toBe(true);
+  });
+
+  it("does NOT match submit_disabled (handled by its own re-plan path)", () => {
+    expect(
+      isSubmitTimeout(
+        "submit_disabled: the submit button (#go) is disabled — a required field or agreement checkbox was not satisfied",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT match a genuine ambiguous-selector failure", () => {
+    expect(
+      isSubmitTimeout('submit selector "#go" matched 3 buttons, none scoring as a signup button'),
+    ).toBe(false);
+  });
+
+  it("does NOT match an arbitrary non-timeout error", () => {
+    expect(isSubmitTimeout("Browser not started")).toBe(false);
   });
 });

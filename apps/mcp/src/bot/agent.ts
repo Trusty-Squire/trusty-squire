@@ -97,10 +97,52 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
   "one more step",
 ];
 
-// Short probe when the post-submit page never prompted the user to check
-// their email. Legitimate verification mail almost always lands inside a
+// Short probe when, even after a settle, the post-submit page still never
+// prompted the user to check their email AND no account-created signal
+// appeared. Legitimate verification mail almost always lands inside a
 // minute; this catches the fast case without 300s of dead air.
 const VERIFICATION_PROBE_SECONDS = 45;
+
+// Settle window before the SECOND post-submit page read. SPA signups
+// (Postmark, ElevenLabs, Browserbase, Grafana Cloud, …) swap in their
+// "check your email" confirmation screen a beat AFTER submit. Reading the
+// DOM the instant extraction fails races that render and mislabels the
+// run as "no email expected", collapsing the poll to the 45s probe and
+// abandoning mail that was, in fact, on its way.
+const SUBMIT_SETTLE_SECONDS = 3;
+
+// Poll floor once the form CLEANLY SUBMITTED but the page text stayed
+// inconclusive about an email prompt (no "check your email", but also no
+// hard error/rejection). A clean submit means an account was created, so
+// real verification mail is plausibly inbound; transactional senders on a
+// fresh send (Postmark, SendGrid) routinely take longer than the 45s
+// probe. Polling 120s here — rather than bailing at 45s — is the
+// difference between catching that mail and a false `verification_not_sent`.
+// Still bounded so a genuinely-silent service doesn't hold the run for the
+// full 180s expected-email timeout.
+const SUBMITTED_PROBE_FLOOR_SECONDS = 120;
+
+// Post-submit page text that means the submit was REJECTED, not accepted —
+// no account was created, so no verification mail is coming and even the
+// 45s probe is wasted. Lets the bot bail immediately instead of polling.
+// Kept conservative: only unambiguous rejection phrasings.
+const SUBMIT_REJECTED_PATTERNS: readonly RegExp[] = [
+  /\balready\s+(?:registered|exists|in\s+use|taken|have\s+an\s+account)\b/i,
+  /\b(?:email|account|username)\s+(?:is\s+)?already\s+(?:registered|taken|in\s+use)\b/i,
+  /\bthat\s+email\s+is\s+already\b/i,
+  /\ban?\s+account\s+(?:with\s+(?:this|that)\s+email\s+)?already\s+exists\b/i,
+  /\bplease\s+(?:try\s+again|correct\s+the\s+errors?)\b/i,
+  /\bthis\s+field\s+is\s+required\b/i,
+  /\b(?:email|password)\s+cannot\s+be\s+empty\b/i,
+  /\binvalid\s+(?:email|password)\b/i,
+];
+
+// Exported for unit testing. True when the post-submit page reads like a
+// rejected submit (account not created), so the bot should not poll for a
+// verification email that will never arrive.
+export function submitWasRejected(pageText: string): boolean {
+  return SUBMIT_REJECTED_PATTERNS.some((p) => p.test(pageText));
+}
 
 // T7: page text that means the post-OAuth API key sits behind a
 // billing / payment-method wall. When the OAuth onboarding loop ends
@@ -222,18 +264,77 @@ const STUCK_LOOP_FALLBACK_PATHS: readonly string[] = [
   "/settings/tokens",
   "/settings/api-tokens",
   "/settings/account/api/auth-tokens/",
+  // 0.8.3-rc.2 — added after the post-OAuth onboarding drain
+  // (amplitude/groq/launchdarkly/modal/weaviate/…). These conventions
+  // were absent from the generic list and each cost a service its
+  // whole post-verify budget: LaunchDarkly hosts keys at
+  // /settings/authorization, a cohort of consoles use a bare
+  // /settings/access-tokens or /settings/api, and several put the
+  // developer surface at /settings/developers. They sit AFTER the
+  // historic, more-common paths so we don't regress an existing hit.
+  "/settings/authorization",
+  "/settings/access-tokens",
+  "/settings/developers",
+  "/settings/developer",
+  "/settings/api",
   "/account/api-keys",
   "/account/api_tokens",
+  "/account/api-tokens",
   "/account/keys",
   "/account/tokens",
+  "/account/access-tokens",
   "/api-keys",
   "/api_keys",
+  "/api-tokens",
   "/keys",
   "/tokens",
+  "/access-tokens",
   "/auth-tokens",
+  "/developers",
   "/dashboard/api-keys",
   "/dashboard/keys",
 ];
+
+// 0.8.3-rc.2 — curated per-service API-key paths, consulted BEFORE the
+// generic STUCK_LOOP_FALLBACK_PATHS list when the stuck origin belongs
+// to one of these vendors. The generic conventions can't reach these:
+// the path is either non-obvious (LaunchDarkly's /settings/authorization),
+// or the vendor splits the convention differently than the majority
+// (groq keys live at a bare /keys but the planner kept guessing
+// /settings/api-keys, which 404s). Keyed by service SLUG (lowercased,
+// alphanumerics only) so it survives the inbox-alias slug the bot is
+// invoked with, and additionally matched against the stuck URL's host so
+// a curated path is only ever composed onto the vendor it was harvested
+// from. Each entry is ordered most-specific-first.
+//
+// This is deliberately a SMALL map of paths the generic heuristic
+// provably can't derive — not a 12-service URL table. Most services in
+// the onboarding-drain cohort are fixed by the widened generic list
+// above; only the ones whose real path is genuinely un-guessable land
+// here.
+const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
+  // console.groq.com/keys — the planner kept trying /settings/api-keys
+  // (404). The bare /keys IS in the generic list but lands deep in the
+  // order; pin it first for groq so the first escalation hits.
+  groq: ["/keys", "/settings/keys"],
+  // app.launchdarkly.com/settings/authorization — LD's access-token UI.
+  // /settings/api-keys and /settings/generated-credentials both 404.
+  launchdarkly: ["/settings/authorization"],
+  // Weaviate keys are issued per-cluster, but the org-level admin page
+  // is the closest reachable surface; account-scoped guesses all 404.
+  weaviate: ["/account", "/settings/api-keys"],
+  // northflank hosts user API keys under the account menu, not a
+  // top-level /settings/keys.
+  northflank: ["/account/api", "/settings/api"],
+};
+
+// Normalize a service name to the slug used as a SERVICE_KEYS_PATHS key:
+// lowercased, alphanumerics only. Mirrors guessSignupUrl's slug rule so
+// the inbox-alias-derived service string (e.g. "Groq Cloud") resolves to
+// the same key the map is authored under. Exported for unit testing.
+export function serviceSlug(service: string): string {
+  return service.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
 
 // 0.8.2-rc.10 — heuristic for "this account already exists on the
 // service and its API keys are masked, with no path to reveal them."
@@ -306,34 +407,124 @@ export function detectExistingAccountNoExtract(input: {
   return false;
 }
 
-// Pick the next fallback URL to try from STUCK_LOOP_FALLBACK_PATHS
-// keyed against the origin of the currently-stuck URL. Returns null
-// when every path has already been attempted. Exported for unit tests.
+// A "mint a fresh key" affordance — a button/link that creates a new
+// API key/token. The label vocabulary is deliberately broad ("create",
+// "generate", "new", "add" paired with a key/token noun) but must be
+// paired with a credential noun so a bare "New project" / "Add member"
+// button on a dashboard isn't mistaken for a key-minting control.
+//
+// Word-boundary-anchored to avoid matching "recreate" / "regenerate
+// password" style false friends — though "regenerate" + a key noun IS
+// a valid mint affordance (rotating a key produces a fresh value), so
+// it's included explicitly.
+const CREATE_KEY_VERB = /\b(?:create|generate|regenerate|new|add|issue|mint)\b/i;
+const CREATE_KEY_NOUN =
+  /\b(?:api[\s_-]*keys?|secret[\s_-]*keys?|access[\s_-]*tokens?|personal[\s_-]*access[\s_-]*tokens?|api[\s_-]*tokens?|auth[\s_-]*tokens?|tokens?|keys?|credentials?)\b/i;
+// A standalone phrase that is unambiguously a key-minting control even
+// without the verb+noun co-occurrence test (some buttons read just
+// "New API key" with the verb folded into "new"). Kept separate so the
+// generic verb/noun pairing can stay strict.
+const CREATE_KEY_PHRASE =
+  /\b(?:create|generate|new|add|issue|mint)\s+(?:a\s+)?(?:new\s+)?(?:api|secret|access|auth|personal\s+access)?\s*(?:keys?|tokens?|credentials?)\b/i;
+
+// Scan an inventory for the single best "create new key / generate API
+// key / new token" affordance. Returns the matching element or null.
+// Exported for unit tests. Pure — operates on the inventory shape only,
+// no browser access, so it can be unit-tested with synthetic elements.
+export function findCreateKeyAffordance(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of inventory) {
+    // Only buttons / links / role=button are mint controls; an <input>
+    // (a text field named "key") is never the create action.
+    const isClickable =
+      el.tag === "button" ||
+      el.tag === "a" ||
+      el.role === "button" ||
+      el.role === "link";
+    if (!isClickable) continue;
+    // A non-visible element can't be clicked reliably; skip when the
+    // live extractor told us it's hidden (test fixtures that omit
+    // `visible` are treated as visible).
+    if (el.visible === false) continue;
+    const haystack = [
+      el.visibleText,
+      el.ariaLabel,
+      el.title,
+      el.labelText,
+      el.iconLabel,
+    ]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    if (haystack.length === 0) continue;
+    const phraseHit = CREATE_KEY_PHRASE.test(haystack);
+    const verbNounHit =
+      CREATE_KEY_VERB.test(haystack) && CREATE_KEY_NOUN.test(haystack);
+    if (!phraseHit && !verbNounHit) continue;
+    // Score: a full phrase match is the strongest signal; an explicit
+    // "api key" / "token" noun beats a bare "key"; in-viewport beats
+    // off-screen. Highest score wins so a precise "Create API Key" is
+    // preferred over a generic "Add key".
+    let score = 0;
+    if (phraseHit) score += 4;
+    if (/\bapi[\s_-]*keys?\b|\bapi[\s_-]*tokens?\b/i.test(haystack)) score += 2;
+    if (el.inViewport === true) score += 1;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+// Pick the next fallback URL to try, keyed against the origin of the
+// currently-stuck URL. The curated SERVICE_KEYS_PATHS for the run's
+// service (when its host matches the stuck origin) are tried FIRST,
+// then the generic STUCK_LOOP_FALLBACK_PATHS. Returns null when every
+// path has already been attempted. Exported for unit tests.
 export function pickStuckLoopFallbackUrl(
   currentUrl: string,
   alreadyTried: ReadonlySet<string>,
+  service?: string,
 ): string | null {
-  let origin: string;
+  let parsed: URL;
   try {
-    origin = new URL(currentUrl).origin;
+    parsed = new URL(currentUrl);
   } catch {
     return null;
   }
+  const origin = parsed.origin;
   // Skip a candidate when the current URL's path ALREADY matches it
   // (case-insensitive, trailing-slash tolerant). The planner is stuck
   // ON the page the candidate points to — navigating to the same URL
   // again won't break the cycle, only a different path will.
-  const currentPath = (() => {
-    try {
-      return new URL(currentUrl).pathname.replace(/\/+$/, "").toLowerCase();
-    } catch {
-      return "";
-    }
-  })();
-  for (const path of STUCK_LOOP_FALLBACK_PATHS) {
+  const currentPath = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+
+  // Compose curated per-service paths first, but only when the stuck
+  // origin's host actually belongs to the named service. The slug is
+  // a substring of the host for the vendors we curate (groq →
+  // console.groq.com, launchdarkly → app.launchdarkly.com, …); this
+  // host gate stops a curated path from being composed onto an
+  // unrelated origin the bot wandered onto (e.g. an OAuth provider or
+  // a redirect to a marketing domain).
+  const slug = service !== undefined ? serviceSlug(service) : "";
+  const curated =
+    slug !== "" &&
+    SERVICE_KEYS_PATHS[slug] !== undefined &&
+    parsed.hostname.toLowerCase().includes(slug)
+      ? SERVICE_KEYS_PATHS[slug]
+      : [];
+
+  // Curated paths lead; the generic list follows. De-dup so a path that
+  // appears in both (groq's /keys, /settings/keys) isn't offered twice.
+  const seen = new Set<string>();
+  for (const path of [...curated, ...STUCK_LOOP_FALLBACK_PATHS]) {
+    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
+    if (seen.has(candidatePath)) continue;
+    seen.add(candidatePath);
     const candidate = `${origin}${path}`;
     if (alreadyTried.has(candidate)) continue;
-    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
     if (candidatePath === currentPath) continue;
     return candidate;
   }
@@ -604,10 +795,11 @@ export interface SignupResult {
   proxied?: boolean;
 
   // Which stealth launcher this run used: "cdp_hardened" when the
-  // rebrowser-playwright-core launcher loaded (BOT_CDP_HARDENED set +
-  // fork present), else "baseline". The CaptchaEvent A/B tag that lets
-  // us measure whether the Runtime.enable patch lowers block rate —
-  // see docs/DESIGN-antibot-hardening.md.
+  // patchright launcher loaded (BOT_CDP_HARDENED set + patchright
+  // present), else "baseline". The CaptchaEvent A/B tag that lets us
+  // measure whether isolated-world execution (closing mainWorldExecution
+  // + webdriver tells) lowers block rate — see
+  // docs/DESIGN-antibot-hardening.md.
   stealth_profile?: "baseline" | "cdp_hardened";
 
   // Skill promoter (0.7.0): when a SignupResult was produced by
@@ -931,6 +1123,21 @@ export function parseSignupPlan(
   return notes !== undefined
     ? { actions, submit_selector: submitSelector, confidence, notes }
     : { actions, submit_selector: submitSelector, confidence };
+}
+
+// True when a clickSubmit failure is a Playwright visibility/attach
+// timeout rather than a genuine hard error. A timeout means the submit
+// selector resolved at plan-time but was gone by click-time — almost
+// always because an earlier action in the same plan advanced a
+// multi-step SPA (Paddle's "Continue" → next screen), so the right
+// recovery is a re-plan against the new page, not a run-ending
+// submit_failed. Matches Playwright's `locator.waitFor`/`waitForSelector`
+// timeout text; deliberately does NOT match `submit_disabled` (handled
+// separately) or other click errors (genuine failures). Exported for
+// unit testing.
+export function isSubmitTimeout(reason: string): boolean {
+  if (reason.startsWith("submit_disabled")) return false;
+  return /Timeout \d+ms exceeded/i.test(reason) && /waitfor|waiting for/i.test(reason);
 }
 
 // Render the element inventory as a compact text block for the
@@ -1816,6 +2023,50 @@ export function findFirstOAuthButton(
   return null;
 }
 
+// A page can gate the real login UI behind a generic "Sign In to
+// Continue" interstitial that renders NO provider affordance yet —
+// Qdrant's session-expiry flow redirects to /logout?aerr=expired whose
+// only element is a "Sign In to Continue" button; the Google button
+// lives one click deeper. The OAuth-first scan finds no provider
+// affordance and was bailing `oauth_required` without ever advancing.
+// This finds a generic sign-in-ish button to CLICK so the next scan can
+// see the provider buttons. Strictly gated on sign-in vocabulary so we
+// never click an arbitrary CTA: a bare "Continue" / "Get started" /
+// "Go to Dashboard" / 404-recovery / "Join Workspace" button does NOT
+// match — only text that explicitly reads as advancing into a login.
+// Caller bounds the number of click-throughs. Returns null when no such
+// affordance exists (the page is then either genuinely SSO-only, a 404,
+// or already authenticated). Exported for unit testing.
+const SIGN_IN_ADVANCE_RE =
+  /\b(?:sign[\s-]?in|log[\s-]?in|continue with email|continue to (?:sign|log)|get started)\b/i;
+export function findSignInAdvanceButton(
+  inventory: readonly InteractiveElement[],
+  providers: readonly OAuthProviderId[],
+): InteractiveElement | null {
+  // If a provider affordance is already present, advancing is pointless
+  // — the caller would have taken the OAuth path. Guard so a page that
+  // has both (e.g. a "Sign in" header link + "Continue with Google")
+  // never routes through this click-through path.
+  if (findFirstOAuthButton(inventory, providers) !== null) return null;
+  for (const e of inventory) {
+    const isButtonish =
+      e.tag === "button" ||
+      e.tag === "a" ||
+      e.role === "button" ||
+      e.type === "submit" ||
+      e.type === "button";
+    if (!isButtonish) continue;
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+    // Sanity-cap: a real sign-in button is short. A long string is a
+    // paragraph / card that happens to contain "sign in".
+    if (text.length === 0 || text.length > MAX_OAUTH_BUTTON_TEXT_CHARS) continue;
+    if (SIGN_IN_ADVANCE_RE.test(text)) return e;
+  }
+  return null;
+}
+
 // Order the OAuth providers the bot may use for a signup, given the
 // service's yaml pin (if any) and the providers the persistent profile
 // actually has a session for. `findFirstOAuthButton` walks this list in
@@ -2415,6 +2666,57 @@ export function extractApiKeyFromText(text: string): string | null {
   return null;
 }
 
+// Password-manager / autofill UI affordances that render as short
+// word-tokens on credential pages. A render API-keys page ships a
+// "Save to 1Password" / "1Password" autofill button next to the real
+// `rnd_…` key; LastPass, Bitwarden, and Dashlane do the same. These
+// strings are alphanumeric, often carry a digit ("1Password"), and sit
+// EARLIER in DOM order than the credential — so the validator-blind
+// candidate-scan tiers (replay-skill.ts) used to return them as the
+// "credential" and the downstream length validator then rejected them
+// (the 0DTW2V66 render skill: `got="1Password" length 9 below min 32`).
+// They are never credentials; reject them at the candidate layer so the
+// scan moves on to the real key instead of the right key being shadowed
+// by a UI word. Matched case-insensitively as a whole token (the
+// candidates the scan tiers feed in are already whitespace-trimmed
+// single tokens). Exported for unit testing.
+const CREDENTIAL_NOISE_TOKENS: readonly string[] = [
+  "1password",
+  "lastpass",
+  "bitwarden",
+  "dashlane",
+  "keepass",
+  "keeper",
+  "nordpass",
+  "proton pass",
+  "protonpass",
+  "autofill",
+  "passwords",
+];
+
+// Verb-prefixed UI affordances ("Save to 1Password", "Copy to
+// clipboard", "Add to vault"). The candidate-scan tiers tokenize on
+// whitespace so a multi-word affordance rarely survives as one
+// candidate — but extractText()/innerText passes glue it together, so
+// guard the leading verbs too.
+const CREDENTIAL_NOISE_PREFIXES: readonly string[] = [
+  "save to ",
+  "copy to ",
+  "add to ",
+  "store in ",
+];
+
+// True when a candidate string is a password-manager / autofill UI
+// affordance rather than a real credential value. Used by the replay
+// engine's raw-candidate scan tiers to keep "1Password"-class words
+// out of the credential slot. Exported for unit testing.
+export function isCredentialNoiseCandidate(candidate: string): boolean {
+  const lower = candidate.trim().toLowerCase();
+  if (lower.length === 0) return false;
+  if (CREDENTIAL_NOISE_TOKENS.includes(lower)) return true;
+  return CREDENTIAL_NOISE_PREFIXES.some((p) => lower.startsWith(p));
+}
+
 // Choose which link in a verification email to click. Scores each URL
 // by keyword and picks the best — but only if it scored positive.
 //
@@ -2699,6 +3001,12 @@ export class SignupAgent {
     let progressReplans = 0;
     let emptyPlans = 0;
     let oauthScanRetries = 0;
+    // Bounded click-throughs of a generic "Sign In to Continue"
+    // interstitial that gates the provider buttons (Qdrant). Capped so
+    // an SSO-only page that keeps re-showing a sign-in button (or a
+    // redirect loop) still terminates at oauth_required.
+    let signInAdvanceClicks = 0;
+    const MAX_SIGN_IN_ADVANCE_CLICKS = 2;
     let hint: string | undefined;
     // F14 — selectors the planner clicked WITHOUT advancing the page.
     // Each no-progress plan records its click selectors here; the next
@@ -2789,6 +3097,39 @@ export class SignupAgent {
               "treating as already authenticated, jumping to post-verify navigation",
           );
           return { kind: "already_oauth" };
+        }
+        // The provider buttons can sit one click behind a generic
+        // "Sign In to Continue" interstitial (Qdrant's session-expiry
+        // /logout?aerr=expired redirect renders only that button). The
+        // OAuth scan above found nothing because the real login UI
+        // hasn't been reached yet. Click the sign-in-ish affordance to
+        // advance, reset the async-render retries, and re-scan — bounded
+        // so a page that just keeps showing a sign-in button (genuine
+        // SSO-only / a redirect loop) still terminates at oauth_required
+        // rather than clicking forever.
+        if (signInAdvanceClicks < MAX_SIGN_IN_ADVANCE_CLICKS) {
+          const advance = findSignInAdvanceButton(inventory, oauthCandidates);
+          if (advance !== null) {
+            signInAdvanceClicks += 1;
+            steps.push(
+              `OAuth-first: no provider affordance, but found a generic ` +
+                `sign-in affordance (${JSON.stringify(advance.visibleText ?? advance.ariaLabel ?? "")}) ` +
+                `— clicking it to advance to the real login page ` +
+                `(${signInAdvanceClicks}/${MAX_SIGN_IN_ADVANCE_CLICKS})`,
+            );
+            try {
+              await this.browser.click(advance.selector);
+            } catch (err) {
+              steps.push(
+                `OAuth-first: sign-in advance click failed (${err instanceof Error ? err.message : String(err)}) ` +
+                  `— falling through to form-fill`,
+              );
+            }
+            // Reset the async-render budget for the now-advanced page so
+            // its provider buttons get the same couple of render retries.
+            oauthScanRetries = 0;
+            continue;
+          }
         }
         steps.push(
           "OAuth-first: no usable provider affordance on the page — " +
@@ -3116,6 +3457,29 @@ export class SignupAgent {
             "required input. Do NOT click a link." +
             uncheckedHint +
             emptyInputHint;
+          continue;
+        }
+        // A submit-selector visibility timeout means the element the
+        // planner picked is no longer on the page — typically because an
+        // earlier action in THIS plan advanced a multi-step SPA (Paddle's
+        // signup: a "Continue" click navigates to a new screen, so the
+        // submit selector that resolved at plan-time has vanished by the
+        // time clickSubmit polls for it). The page DID move forward, so
+        // re-plan against the new state rather than failing the whole run
+        // on a stale selector. Bounded by the same progressReplans
+        // headroom as the disabled-submit / post-validation re-plans.
+        if (isSubmitTimeout(reason)) {
+          if (++progressReplans > MAX_PROGRESS_REPLANS) {
+            return { kind: "submit_failed", reason };
+          }
+          steps.push(
+            `⚠ submit selector went stale (${reason.split("\n")[0]}) — the page likely advanced; re-planning`,
+          );
+          hint =
+            "The submit button selected last round was no longer present when " +
+            "we tried to click it — an earlier action probably advanced the page. " +
+            "Re-read the now-visible form and plan the next step (pick the submit " +
+            "button that is actually on the current screen).";
           continue;
         }
         steps.push(`⚠ submit click failed: ${reason}`);
@@ -3919,10 +4283,25 @@ export class SignupAgent {
       // Step 7: Email verification + post-verification navigation.
       let verificationFailed: string | undefined;
       if (credentials.api_key === undefined && credentials.username === undefined) {
-        // S3: read the post-submit page first. Whether it is actually
-        // asking the user to confirm by email decides both the no-inbox
-        // bail (M2) and, when an inbox exists, the poll duration.
-        const expectsEmail = expectsVerificationEmail(await this.browser.extractText());
+        // S3: read the post-submit page to decide both the no-inbox bail
+        // (M2) and, when an inbox exists, the poll duration. The page is
+        // read up to TWICE: once immediately, then — only if the first
+        // read was inconclusive — again after a short settle, because SPA
+        // signups render the "check your email" screen a beat after submit
+        // and sampling once races that render (the bug behind the
+        // Postmark/ElevenLabs/Browserbase/Grafana false `verification_not_sent`).
+        let postSubmitText = await this.browser.extractText();
+        let expectsEmail = expectsVerificationEmail(postSubmitText);
+        if (!expectsEmail && !submitWasRejected(postSubmitText)) {
+          await this.browser.wait(SUBMIT_SETTLE_SECONDS);
+          postSubmitText = await this.browser.extractText();
+          expectsEmail = expectsVerificationEmail(postSubmitText);
+        }
+        // A clean submit that did NOT visibly reject created an account —
+        // verification mail is plausibly inbound even without a "check
+        // your email" screen. Distinguish that from a rejected submit
+        // (already-registered, validation error) where no mail is coming.
+        const submitRejected = submitWasRejected(postSubmitText);
         if (task.inbox === undefined) {
           // M2/S3: no inbox to receive a verification email (the SES
           // inbound pipeline is mothballed — TODOS M1). If the page is
@@ -3943,16 +4322,26 @@ export class SignupAgent {
               `manually${where}.`;
           }
         } else {
-          // S3: don't blind-wait. If the page explicitly tells the user
-          // to check their email, poll the full timeout; if not, the
-          // service most likely sent nothing — run a short probe.
+          // S3: don't blind-wait, but don't under-poll a clean submit
+          // either. Three cases:
+          //   - page says "check your email"  → full timeout (mail is
+          //     definitely coming).
+          //   - submit visibly rejected       → 45s probe (no account was
+          //     created; no mail is coming).
+          //   - inconclusive but submit clean → 120s floor (an account was
+          //     created, so transactional mail is plausibly inbound and
+          //     can outlast the 45s probe; bounded below the full timeout).
           const verificationTimeoutSeconds = expectsEmail
             ? (task.verificationTimeoutSeconds ?? 180)
-            : VERIFICATION_PROBE_SECONDS;
+            : submitRejected
+              ? VERIFICATION_PROBE_SECONDS
+              : SUBMITTED_PROBE_FLOOR_SECONDS;
           steps.push(
             expectsEmail
               ? `Post-submit page asks to check email — polling inbox (up to ${verificationTimeoutSeconds}s)...`
-              : `Post-submit page shows no "check your email" prompt — short ${verificationTimeoutSeconds}s probe (S3: the service likely sent no verification email)...`,
+              : submitRejected
+                ? `Post-submit page shows a rejected submit — short ${verificationTimeoutSeconds}s probe (S3: no account created, no verification email expected)...`
+                : `Post-submit page is inconclusive but submit was clean — polling inbox up to ${verificationTimeoutSeconds}s (S3: an account may have been created and mail can lag)...`,
           );
           try {
             const email = await this.waitForVerificationEmail(
@@ -4001,7 +4390,9 @@ export class SignupAgent {
             steps.push(`Inbox poll failed: ${detail}`);
             verificationFailed = expectsEmail
               ? `verification_not_sent: form submitted and the page asked to check email, but none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (anti-abuse) or requires manual signup`
-              : `verification_not_sent: form submitted but the page never prompted to check email and none arrived in the ${verificationTimeoutSeconds}s probe — the service most likely dispatched no verification email`;
+              : submitRejected
+                ? `verification_not_sent: form submitted but the page reported a rejected submit (already-registered / validation error) and no mail arrived in the ${verificationTimeoutSeconds}s probe — no account was created`
+                : `verification_not_sent: form submitted cleanly but no "check your email" prompt appeared and none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (fresh-domain anti-abuse) or verifies by another channel (SMS / authenticator)`;
           }
         }
       }
@@ -5284,6 +5675,214 @@ ${formatInventory(input.inventory)}`,
     return out;
   }
 
+  // Run every visible-credential extraction tier the post-verify loop
+  // uses (legacy regex/clipboard/hidden-input + DOM-proximity labeled),
+  // merging first-wins into a single bundle. Used by attemptMintNewKey
+  // so the freshly-minted key — which may render as a modal value, a
+  // copy-button-only token, or a labeled table row — is caught by
+  // whichever tier fits the vendor's reveal UI.
+  private async harvestVisibleCredentials(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    try {
+      const legacy = await this.extractCredentials();
+      for (const [k, v] of Object.entries(legacy)) {
+        if (out[k] === undefined) out[k] = v;
+      }
+    } catch {
+      // best-effort — fall through to DOM-proximity
+    }
+    try {
+      const labeled = await this.extractFromDomProximity();
+      for (const [k, v] of Object.entries(labeled)) {
+        if (out[k] === undefined) out[k] = v;
+      }
+    } catch {
+      // best-effort
+    }
+    return out;
+  }
+
+  // SUCCEED on an already-signed-in / existing-account dashboard.
+  //
+  // When the bot lands on an authenticated dashboard whose API-keys
+  // page shows only NAMES of pre-existing keys (values are shown once
+  // at create-time and are unrecoverable), the historic behavior was to
+  // bail with existing_account_no_extract / no_credentials_after_already
+  // _signed_in. That's a usable outcome the bot threw away: a new key is
+  // a perfectly valid credential.
+  //
+  // This routine, given the current (existing-account) state:
+  //   1. Tries to extract a READABLE key right where we are — some
+  //      dashboards do show a usable value (a default key on a freshly
+  //      reused account, or a reveal affordance the loop hadn't fired).
+  //   2. If the current page isn't a keys page, walks the same
+  //      hardcoded keys-path fallbacks the stuck-loop escalation uses,
+  //      re-trying the readable-key extract at each.
+  //   3. On a keys page with no readable key, finds a "Create new key /
+  //      Generate API key / New token" affordance and CLICKS it, then
+  //      harvests the freshly-minted value (modal reveal + copy-button +
+  //      clipboard + labeled-row, via harvestVisibleCredentials, after a
+  //      short poll for the server round-trip that mints the key).
+  //
+  // Returns the minted/extracted credentials on success, or null when
+  // there is genuinely no way to produce a key for this identity (no
+  // create affordance anywhere — e.g. key creation is paywalled). The
+  // caller then falls through to the honest existing_account bail.
+  //
+  // Best-effort throughout: any browser error degrades to "couldn't
+  // mint" (null) rather than throwing — the existing classifier remains
+  // the safety net.
+  private async attemptMintNewKey(
+    steps: string[],
+  ): Promise<Record<string, string> | null> {
+    // The set of keys-page URLs we've navigated, so the fallback walk
+    // doesn't revisit one and the create-affordance search doesn't
+    // re-click on a page already shown to lack one.
+    const visitedKeysUrls = new Set<string>();
+
+    // Attempt readable-extract → create-and-extract on whatever page is
+    // currently loaded. Returns credentials on success, null otherwise.
+    const tryHere = async (): Promise<Record<string, string> | null> => {
+      // (a) A readable key already on the page (or behind a reveal
+      //     affordance the post-verify loop hadn't clicked yet).
+      let creds = await this.harvestVisibleCredentials();
+      if (hasAnyExtractedCredential(creds)) {
+        steps.push(
+          "Existing-account recovery: a readable key was already present on the keys page — extracted it.",
+        );
+        return creds;
+      }
+      // (b) Reveal pass — a masked-but-revealable existing key.
+      try {
+        const revealRes = await this.browser.revealMaskedCredentials();
+        if (revealRes.clicked > 0) {
+          await this.browser.wait(1);
+          creds = await this.harvestVisibleCredentials();
+          if (hasAnyExtractedCredential(creds)) {
+            steps.push(
+              `Existing-account recovery: revealed a masked existing key (clicked ${revealRes.clicked}) and extracted it.`,
+            );
+            return creds;
+          }
+        }
+      } catch {
+        // best-effort reveal
+      }
+      // (c) Mint a fresh key. Find + click a create affordance, then
+      //     harvest the newly-shown value.
+      const inventory = await this.buildInventory(steps, undefined, 80);
+      const createBtn = findCreateKeyAffordance(inventory);
+      if (createBtn === null) return null;
+      const label = (
+        createBtn.visibleText ??
+        createBtn.ariaLabel ??
+        createBtn.title ??
+        "create key"
+      ).trim();
+      steps.push(
+        `Existing-account recovery: no readable key — clicking a key-minting affordance ${JSON.stringify(label.slice(0, 40))}.`,
+      );
+      try {
+        await this.browser.click(createBtn.selector);
+      } catch (err) {
+        steps.push(
+          `Existing-account recovery: create-key click failed (${err instanceof Error ? err.message : String(err)}).`,
+        );
+        return null;
+      }
+      // Poll for the freshly-minted key — minting is a server
+      // round-trip (Render/Mistral/Mailtrap render the value into a
+      // modal after the POST returns). Reuse the modal-reveal poll
+      // budget the click branch uses elsewhere (~8s), early-exiting the
+      // moment any tier surfaces a credential. A confirmation dialog
+      // ("Name your key" → Create) is common; fire the reveal pass each
+      // round so a modal that needs a second confirm-then-show click is
+      // still harvested.
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        await this.browser.wait(0.5);
+        const minted = await this.harvestVisibleCredentials();
+        if (hasAnyExtractedCredential(minted)) {
+          steps.push(
+            "Existing-account recovery: extracted the freshly-minted key.",
+          );
+          return minted;
+        }
+        // A two-step create modal: clicking the page-level "Create key"
+        // opened a "name + confirm" dialog. Click a now-visible confirm
+        // affordance once, then keep polling.
+        try {
+          const modalInv = await this.browser.extractInteractiveElements();
+          const confirmBtn = findCreateKeyAffordance(modalInv);
+          if (
+            confirmBtn !== null &&
+            confirmBtn.selector !== createBtn.selector
+          ) {
+            await this.browser.click(confirmBtn.selector);
+          }
+        } catch {
+          // best-effort confirm
+        }
+      }
+      // Minted but the value didn't surface — try one last reveal +
+      // harvest (some vendors render the new key masked with a Show
+      // toggle even on first display).
+      try {
+        const revealRes = await this.browser.revealMaskedCredentials();
+        if (revealRes.clicked > 0) {
+          await this.browser.wait(1);
+          const afterReveal = await this.harvestVisibleCredentials();
+          if (hasAnyExtractedCredential(afterReveal)) {
+            steps.push(
+              "Existing-account recovery: revealed and extracted the freshly-minted key.",
+            );
+            return afterReveal;
+          }
+        }
+      } catch {
+        // best-effort
+      }
+      return null;
+    };
+
+    // Step 1 — try on the current page first.
+    try {
+      const state = await this.browser.getState();
+      visitedKeysUrls.add(state.url);
+      if (EXISTING_KEY_URL_HINT.test(state.url)) {
+        const here = await tryHere();
+        if (here !== null) return here;
+      }
+    } catch {
+      // best-effort — fall through to the fallback walk
+    }
+
+    // Step 2 — walk the hardcoded keys-path fallbacks. Even if Step 1
+    // ran (current page WAS a keys page but had no affordance), a
+    // different keys URL on the same origin may carry the create
+    // control (org-scoped vs account-scoped keys pages).
+    for (let i = 0; i < STUCK_LOOP_FALLBACK_PATHS.length; i++) {
+      let currentUrl: string;
+      try {
+        currentUrl = (await this.browser.getState()).url;
+      } catch {
+        break;
+      }
+      const fallback = pickStuckLoopFallbackUrl(currentUrl, visitedKeysUrls);
+      if (fallback === null) break;
+      visitedKeysUrls.add(fallback);
+      try {
+        await this.browser.goto(fallback);
+        await this.browser.waitForInteractiveDom(5, 15_000);
+      } catch {
+        continue;
+      }
+      const here = await tryHere();
+      if (here !== null) return here;
+    }
+    return null;
+  }
+
   private async postVerifyLoop(args: {
     service: string;
     credentials?: { email: string; password: string } | undefined;
@@ -6014,7 +6613,11 @@ ${formatInventory(input.inventory)}`,
               hint = undefined;
               continue;
             }
-            const fallback = pickStuckLoopFallbackUrl(state.url, triedFallbackUrls);
+            const fallback = pickStuckLoopFallbackUrl(
+              state.url,
+              triedFallbackUrls,
+              args.service,
+            );
             if (fallback !== null) {
               triedFallbackUrls.add(fallback);
               args.steps.push(
@@ -6607,29 +7210,75 @@ ${formatInventory(input.inventory)}`,
     const alreadyClassified =
       this.lastPostVerifyDoneReason !== null &&
       this.lastPostVerifyDoneReason.startsWith("[");
-    if (
-      credentials.api_key === undefined &&
-      credentials.username === undefined &&
-      !alreadyClassified
-    ) {
+    const noCredentialYet =
+      credentials.api_key === undefined && credentials.username === undefined;
+    // Distinct from a generic prior classification: ONLY the existing-
+    // account path is recoverable by minting. A [stuck_loop] / [paywall]
+    // / [anti_bot] marker is a different failure the mint flow can't fix,
+    // so leave those alone.
+    const alreadyExistingAccount =
+      this.lastPostVerifyDoneReason !== null &&
+      this.lastPostVerifyDoneReason.startsWith("[existing_account_no_extract]");
+    // The mint flow is appropriate for the existing-account /
+    // already-signed-in category ONLY. A [stuck_loop] / [paywall] /
+    // [anti_bot] marker is a different, non-recoverable failure — leave
+    // those alone. An UNclassified exit reaching here IS the
+    // already-signed-in case (postVerifyLoop only runs on an
+    // authenticated dashboard — `already_oauth` / post-OAuth), so it's
+    // eligible too; the mint flow self-gates by requiring a real keys
+    // page + a create affordance before it acts.
+    const mintEligible =
+      noCredentialYet && (!alreadyClassified || alreadyExistingAccount);
+    if (mintEligible) {
+      // SUCCEED-EVEN-WHEN-ACCOUNT-EXISTS: before bailing, navigate to
+      // the keys page and either extract a readable key or mint a fresh
+      // one. A new key is a valid outcome. attemptMintNewKey returns
+      // null when there is genuinely no create affordance anywhere (key
+      // creation paywalled / no keys page) — then we fall through to the
+      // honest bail.
+      let minted: Record<string, string> | null = null;
       try {
-        const finalState = await this.browser.getState();
-        const finalText = await this.browser.extractText().catch(() => "");
-        if (
-          detectExistingAccountNoExtract({
-            url: finalState.url,
-            pageText: finalText,
-            lastPlannerReason: this.lastPostVerifyDoneReason ?? "",
-          })
-        ) {
-          this.lastPostVerifyDoneReason =
-            `[existing_account_no_extract] at ${finalState.url}; latest planner reason: ${this.lastPostVerifyDoneReason ?? "(none — loop exhausted)"}`;
-          args.steps.push(
-            "Post-verify: classified as existing_account_no_extract — masked pre-existing key on an authenticated dashboard.",
-          );
-        }
+        minted = await this.attemptMintNewKey(args.steps);
       } catch {
-        // best-effort classifier — never block returning the (empty) credentials
+        // best-effort — degrade to the existing classifier below
+      }
+      if (minted !== null && hasAnyExtractedCredential(minted)) {
+        for (const [k, v] of Object.entries(minted)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
+        // Clear any existing-account sentinel — we recovered.
+        if (alreadyExistingAccount) this.lastPostVerifyDoneReason = null;
+        args.steps.push(
+          "Post-verify: existing-account / already-signed-in dashboard recovered — minted/extracted a usable key instead of bailing.",
+        );
+        return credentials;
+      }
+
+      // Mint failed. If the masked-pre-existing-key shape is detectable
+      // AND not already flagged by the stuck-loop early-exit, mark the
+      // honest existing_account_no_extract bail so the caller surfaces
+      // the precise status rather than the generic
+      // no_credentials_after_already_signed_in.
+      if (!alreadyExistingAccount) {
+        try {
+          const finalState = await this.browser.getState();
+          const finalText = await this.browser.extractText().catch(() => "");
+          if (
+            detectExistingAccountNoExtract({
+              url: finalState.url,
+              pageText: finalText,
+              lastPlannerReason: this.lastPostVerifyDoneReason ?? "",
+            })
+          ) {
+            this.lastPostVerifyDoneReason =
+              `[existing_account_no_extract] at ${finalState.url}; latest planner reason: ${this.lastPostVerifyDoneReason ?? "(none — loop exhausted)"}`;
+            args.steps.push(
+              "Post-verify: classified as existing_account_no_extract — pre-existing keys are masked and no key-minting affordance was found.",
+            );
+          }
+        } catch {
+          // best-effort classifier — never block returning credentials
+        }
       }
     }
     return credentials;

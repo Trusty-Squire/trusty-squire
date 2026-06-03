@@ -38,10 +38,11 @@ const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
 
-// Whether the operator asked for the CDP-hardened launcher
-// (rebrowser-playwright-core, which closes the Runtime.enable leak that
-// Turnstile / reCAPTCHA-v3 score on). Flag-gated so it can be A/B'd
-// against the baseline launcher — see docs/DESIGN-antibot-hardening.md.
+// Whether the operator asked for the CDP-hardened launcher (patchright,
+// which runs evaluations in an isolated world and removes the automation
+// tells — mainWorldExecution, navigator.webdriver — that Turnstile /
+// reCAPTCHA-v3 score on). Flag-gated so it can be A/B'd against the
+// stealth baseline — see docs/DESIGN-antibot-hardening.md.
 function cdpHardeningRequested(): boolean {
   const v = process.env.BOT_CDP_HARDENED;
   return v === "1" || v === "true" || v === "on";
@@ -51,7 +52,7 @@ let cachedChromium: typeof baseChromium | null = null;
 // The stealth profile the cached launcher actually represents. Set the
 // first time getChromium() resolves a launcher and read back via
 // BrowserController.stealthProfile for the CaptchaEvent A/B tag. A
-// rebrowser load failure degrades it to "baseline" truthfully rather
+// patchright load failure degrades it to "baseline" truthfully rather
 // than over-claiming "cdp_hardened" on a run that never got the patch.
 let activeStealthProfile: StealthProfile = "baseline";
 
@@ -63,42 +64,33 @@ function getChromium(): typeof baseChromium {
   if (cachedChromium !== null) return cachedChromium;
   const hardened = cdpHardeningRequested();
   try {
+    if (hardened) {
+      // patchright — a maintained Playwright fork that runs every
+      // evaluation in an ISOLATED world (so the bot's DOM probing is
+      // invisible to a page that traps DOM methods → closes the
+      // `mainWorldExecution` tell) and handles `navigator.webdriver`
+      // natively + correctly. Verified ALL-GREEN against the maintained
+      // rebrowser bot-detector (mainWorldExecution, navigatorWebdriver,
+      // viewport, runtimeEnableLeak all clean). It drives real Chrome
+      // (channel) directly — the earlier rebrowser fork couldn't, which is
+      // why the old hardened arm was forced onto bundled chromium and then
+      // crashed the OAuth flow. NO playwright-extra/stealth wrap here: the
+      // stealth plugin's manual `navigator.webdriver` defineProperty
+      // RE-ADDS a detectable property (proven counterproductive) — patchright
+      // does it right. See docs/DESIGN-antibot-hardening.md.
+      const patchright = require("patchright") as { chromium: typeof baseChromium };
+      cachedChromium = patchright.chromium;
+      activeStealthProfile = "cdp_hardened";
+      return cachedChromium;
+    }
+    // Baseline: playwright-extra + stealth (unchanged). addExtra(baseChromium)
+    // is exactly what playwright-extra's default `chromium` export already is.
     const { addExtra } = require("playwright-extra") as {
       addExtra: (launcher: unknown) => { use: (plugin: unknown) => unknown };
     };
     const stealth = require("puppeteer-extra-plugin-stealth") as () => unknown;
-    let baseLauncher: unknown = baseChromium;
-    if (hardened) {
-      // rebrowser-playwright-core defers/isolates the Runtime.enable CDP
-      // call. Fix mode = `addBinding`, NOT `alwaysIsolated`: the latter
-      // gives the cleanest leak closure on a static page but CRASHES the
-      // bot's real flow — a live harvest run died with
-      // "Target page, context or browser has been closed" at the OAuth
-      // scan, because forcing every page.evaluate into an isolated world
-      // breaks the prewarm/multi-page juggling. `addBinding` keeps
-      // main-world evaluate (the flow works) while still avoiding the
-      // leaky Runtime.enable call — it closes the sourceUrl/UtilityScript
-      // tell but leaves mainWorldExecution detectable. That partial
-      // closure is the price of a launcher that actually completes
-      // signups. See DESIGN-antibot-hardening.md D3 (revised). Set BEFORE
-      // the require so the patch reads it; honor an operator pin.
-      if (process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE === undefined) {
-        process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE = "addBinding";
-      }
-      const rebrowser = require("rebrowser-playwright-core") as {
-        chromium: typeof baseChromium;
-      };
-      baseLauncher = rebrowser.chromium;
-      activeStealthProfile = "cdp_hardened";
-    } else {
-      activeStealthProfile = "baseline";
-    }
-    // addExtra(baseChromium) is exactly what playwright-extra's default
-    // `chromium` export already is, so the baseline path is unchanged;
-    // the hardened path swaps in the rebrowser launcher underneath the
-    // same stealth wrap (Codex review: a bare import swap would NOT
-    // repoint the stealth-wrapped launcher — it must go through addExtra).
-    const extra = addExtra(baseLauncher);
+    activeStealthProfile = "baseline";
+    const extra = addExtra(baseChromium);
     extra.use(stealth());
     cachedChromium = extra as unknown as typeof baseChromium;
   } catch (err) {
@@ -339,8 +331,8 @@ export class BrowserController {
   }
 
   // The stealth profile the most recent .start() launched under:
-  // "cdp_hardened" when the rebrowser launcher actually loaded
-  // (BOT_CDP_HARDENED set + fork present), else "baseline". Surfaced
+  // "cdp_hardened" when the patchright launcher actually loaded
+  // (BOT_CDP_HARDENED set + patchright present), else "baseline". Surfaced
   // for the CaptchaEvent A/B tag. Throws before .start() — same reason
   // as channel/proxied.
   get stealthProfile(): StealthProfile {
@@ -459,31 +451,20 @@ export class BrowserController {
     // decide on executablePath below.
     const launcher = getChromium();
     const hardened = activeStealthProfileValue() === "cdp_hardened";
-    // In hardened mode, ALWAYS drive the bundled (playwright-matched)
-    // chromium via executablePath and IGNORE the real-Chrome channel.
-    // rebrowser-playwright-core's older CDP driver cannot reliably drive
-    // an arbitrary *new* real Chrome (observed: Chrome 148 →
-    // "Target page, context or browser has been closed" mid-flow), while
-    // the spike validated it against the bundled chromium revision. The
-    // bundled binary is the version the driver expects; channel +
-    // executablePath are mutually exclusive in Playwright, so we drop the
-    // channel here. (This makes the hardened arm use bundled chromium vs
-    // the baseline's real Chrome — a known A/B confound, documented in
-    // DESIGN-antibot-hardening.md.)
-    const hardenedExecutablePath = hardened ? baseChromium.executablePath() : null;
-    const effectiveChannel = hardened ? null : channel;
-    // Keep telemetry honest: report what actually launched.
-    this.launchedChannel = effectiveChannel;
+    // Both launchers drive real Chrome via `channel`: baseline through
+    // playwright+stealth, hardened through patchright. patchright closes
+    // the automation tells at the protocol layer and drives real Chrome
+    // directly — so it no longer needs the bundled-chromium pin the old
+    // rebrowser fork required (the pin is what crashed the OAuth flow and
+    // confounded the A/B). One binary for both arms.
+    this.launchedChannel = channel;
     const context = await launchWithProfileGate(this.profileDir, () =>
       launcher.launchPersistentContext(this.profileDir, {
       headless: chromeHeadless,
       ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
       // `channel:` selects a real installed browser over the bundled
-      // binary; omitted in hardened mode and when null.
-      ...(effectiveChannel !== null ? { channel: effectiveChannel } : {}),
-      ...(hardenedExecutablePath !== null
-        ? { executablePath: hardenedExecutablePath }
-        : {}),
+      // binary (omitted when channel detection found nothing).
+      ...(channel !== null ? { channel } : {}),
       // `proxy:` routes egress through a residential proxy — only for
       // datacenter-class egress (see resolveProxy()).
       ...(proxy !== null ? { proxy } : {}),
@@ -492,9 +473,17 @@ export class BrowserController {
         "--no-sandbox",
         "--disable-dev-shm-usage",
       ],
-      viewport: { width: 1280, height: 720 },
-      userAgent:
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      // `viewport: null` makes the page use the REAL OS window size
+      // instead of a hardcoded value. The old fixed 1280×720 is exactly
+      // Playwright's device-emulation default and is flagged by anti-bot
+      // detectors as "default Playwright viewport"; the real window
+      // (sized by the Xvfb display) reads as an ordinary browser.
+      viewport: null,
+      // No `userAgent` override: a real Chrome (channel) supplies a UA
+      // that AGREES with navigator.userAgentData + the binary version.
+      // The old hardcoded "Chrome/131" string mismatched the actual
+      // binary (148) — a UA-vs-userAgentData inconsistency that is itself
+      // a fingerprint tell. Let the browser report its own coherent UA.
       // locale stays en-US deliberately: matching it to the proxy
       // country would render signup pages in that language, and the
       // Claude vision form-planner expects English.
@@ -519,10 +508,17 @@ export class BrowserController {
       }),
     );
     this.context = context;
-    // Patch the navigator.webdriver flag — most anti-bot heuristics look here.
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    });
+    // Patch navigator.webdriver — BASELINE ONLY. Measured against the
+    // rebrowser bot-detector, this manual `defineProperty` is
+    // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
+    // property the detector then flags, whereas patchright removes it
+    // correctly at the source. So in hardened mode we leave it to
+    // patchright; only the stealth baseline gets the manual patch.
+    if (!hardened) {
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+    }
 
     // rc.33 — spoof WebGL renderer/vendor. Under Xvfb (or any non-GPU
     // host) Chrome falls back to SwiftShader, which reports
@@ -3075,7 +3071,16 @@ export class BrowserController {
         // whole inventory with "Cannot read properties of undefined
         // (reading 'querySelectorAll')", failing the run before the
         // planner ever saw the page. Skip such a node instead.
-        if (root === null || typeof root.querySelectorAll !== "function") return;
+        //
+        // `== null` (not `=== null`) is load-bearing: `el.shadowRoot` is
+        // typed `ShadowRoot | null`, but a detached/closed custom element
+        // can yield `undefined` at runtime. The recursion below calls
+        // `walk(el.shadowRoot)` whenever it isn't `null`, so an `undefined`
+        // shadowRoot reaches here and `typeof undefined.querySelectorAll`
+        // THROWS before the typeof guard can fire — exactly the #59
+        // redis-cloud crash, which recurred 2026-06-03 even with the
+        // null-only guard in place. The loose check covers both.
+        if (root == null || typeof root.querySelectorAll !== "function") return;
         root.querySelectorAll(SELECTOR).forEach((n) => collected.push(n));
         root.querySelectorAll("*").forEach((el) => {
           if (el.shadowRoot !== null) walk(el.shadowRoot);
@@ -3659,15 +3664,22 @@ interface ShadowWalkRoot {
   querySelectorAll(selectors: string): ArrayLike<ShadowWalkEl>;
 }
 interface ShadowWalkEl {
-  readonly shadowRoot: ShadowWalkRoot | null;
+  // `| undefined` mirrors the live DOM: `Element.shadowRoot` is typed
+  // `ShadowRoot | null`, but a detached/closed custom element yields
+  // `undefined` at runtime. The walk must survive that — see the guard.
+  readonly shadowRoot: ShadowWalkRoot | null | undefined;
 }
 export function collectAcrossShadowRoots(
-  root: ShadowWalkRoot | null,
+  root: ShadowWalkRoot | null | undefined,
   selector: string,
 ): ShadowWalkEl[] {
   const collected: ShadowWalkEl[] = [];
-  const walk = (r: ShadowWalkRoot | null): void => {
-    if (r === null || typeof r.querySelectorAll !== "function") return;
+  const walk = (r: ShadowWalkRoot | null | undefined): void => {
+    // `== null` (not `=== null`) covers both null and undefined — the
+    // recursion below calls walk() on any non-null shadowRoot, so an
+    // `undefined` one reaches here and `typeof undefined.querySelectorAll`
+    // would throw before the typeof guard fired (#59 redis-cloud).
+    if (r == null || typeof r.querySelectorAll !== "function") return;
     Array.from(r.querySelectorAll(selector)).forEach((n) => collected.push(n));
     Array.from(r.querySelectorAll("*")).forEach((el) => {
       if (el.shadowRoot !== null) walk(el.shadowRoot);

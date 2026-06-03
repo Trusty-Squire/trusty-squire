@@ -106,7 +106,10 @@ class FakeBrowser {
   async dismissConsentBanner(): Promise<string | null> { return null; }
   async type(): Promise<void> {}
   async check(): Promise<void> {}
-  async click(): Promise<void> {}
+  public clicked: string[] = [];
+  async click(selector: string): Promise<void> {
+    this.clicked.push(selector);
+  }
   public clickSubmitImpl: () => void = () => {};
   async clickSubmit(): Promise<void> {
     this.clickSubmitImpl();
@@ -150,6 +153,7 @@ function isController(_v: unknown): _v is BrowserController {
 async function runLoop(
   browser: FakeBrowser,
   llm: QueueLLM,
+  taskOver: Record<string, unknown> = {},
 ): Promise<{ outcome: Outcome; steps: string[] }> {
   const asController: unknown = browser;
   if (!isController(asController)) throw new Error("unreachable");
@@ -172,7 +176,11 @@ async function runLoop(
       ) => Promise<Outcome>;
     }
   ).planExecuteWithRetry.bind(agent);
-  const outcome = await fn({ service: "Test", email: "bot@inbox.test" }, fillValues, steps);
+  const outcome = await fn(
+    { service: "Test", email: "bot@inbox.test", ...taskOver },
+    fillValues,
+    steps,
+  );
   return { outcome, steps };
 }
 
@@ -458,5 +466,164 @@ describe("planExecuteWithRetry", () => {
 
     expect(outcome.kind).toBe("submitted");
     expect(steps.some((s) => /submit_disabled/i.test(s))).toBe(true);
+  });
+
+  // Paddle regression: a multi-step SPA where an earlier action advances
+  // the page, so the submit selector that resolved at plan-time has
+  // vanished by click-time. clickSubmit throws a Playwright visibility
+  // timeout. Pre-fix this returned submit_failed and ended the run; now
+  // it re-plans against the now-current page and submits cleanly.
+  it("re-plans when the submit selector went stale (Playwright timeout), instead of failing", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      // Round 1: a "Continue" button the planner submits to — but the
+      // click advances the SPA and this selector then vanishes.
+      [
+        mk({ tag: "input", type: "checkbox", labelText: "I agree", selector: "#agree" }),
+        mk({ tag: "button", visibleText: "Continue", selector: "#step1-continue" }),
+      ],
+      // Round 2: the genuinely-final form on the advanced page.
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    let submitCalls = 0;
+    browser.clickSubmitImpl = () => {
+      submitCalls += 1;
+      if (submitCalls === 1) {
+        throw new Error(
+          "locator.waitFor: Timeout 20000ms exceeded.\nCall log:\n  - waiting for locator('#step1-continue') to be visible",
+        );
+      }
+    };
+    const llm = new QueueLLM([
+      fillPlan("#agree", "#step1-continue"),
+      fillPlan("#email", "#go"),
+    ]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /went stale/i.test(s))).toBe(true);
+    expect(llm.calls).toBe(2); // re-planned once after the stale submit
+  });
+
+  // The carve-out is precise: a non-timeout submit click failure (e.g.
+  // an ambiguous selector matched several buttons, none disambiguated)
+  // is a genuine failure and still ends the run — it is NOT a stale-
+  // selector re-plan.
+  it("still fails submit_failed on a genuine (non-timeout) submit error", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    browser.clickSubmitImpl = () => {
+      throw new Error(
+        'submit selector "#go" matched 3 buttons, none scoring as a signup button',
+      );
+    };
+    const llm = new QueueLLM([fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submit_failed");
+    expect(steps.some((s) => /submit click failed/i.test(s))).toBe(true);
+  });
+
+  // OAuth click-through: a "Sign In to Continue" interstitial (Qdrant's
+  // session-expiry redirect) gates the provider buttons. The OAuth-first
+  // scan finds no provider affordance on round 1; the bot must CLICK the
+  // generic sign-in button to advance, then take the OAuth path on the
+  // revealed page — instead of bailing oauth_required. `oauthProvider`
+  // is pinned so the loop has a non-empty candidate list even with no
+  // host Google session (loggedInProviders is mocked to []).
+  it("clicks a 'Sign In to Continue' interstitial through to the revealed OAuth page", async () => {
+    const browser = new FakeBrowser();
+    const interstitial = mk({
+      tag: "button",
+      role: "button",
+      visibleText: "Sign In to Continue",
+      selector: "#signin",
+    });
+    const googleBtn = mk({
+      tag: "button",
+      visibleText: "Continue with Google",
+      selector: "#google",
+    });
+    // The page reveals the Google button only AFTER the interstitial is
+    // clicked — async-render retries before the click keep seeing only
+    // the "Sign In to Continue" button (the Qdrant behaviour). Model it
+    // off the click recorder rather than the per-call queue so the
+    // retries don't advance the page on their own.
+    browser.extractInteractiveElements = async () =>
+      browser.clicked.includes("#signin") ? [googleBtn] : [interstitial];
+    const llm = new QueueLLM(["{}"]);
+
+    const { outcome, steps } = await runLoop(browser, llm, {
+      oauthProvider: "google",
+    });
+
+    expect(outcome.kind).toBe("oauth");
+    expect((outcome as { selector?: string }).selector).toBe("#google");
+    // It clicked the interstitial button to advance.
+    expect(browser.clicked).toContain("#signin");
+    expect(steps.some((s) => /clicking it to advance to the real login/i.test(s))).toBe(true);
+    // No planner call — this is all pre-form-fill.
+    expect(llm.calls).toBe(0);
+  });
+
+  // A genuine form page is unchanged: no provider affordance, no sign-in
+  // interstitial — the bot fills the form, never click-throughs.
+  it("does NOT click-through on a real signup form (form-fill path unchanged)", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    const llm = new QueueLLM([fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm, {
+      oauthProvider: "google",
+    });
+
+    expect(outcome.kind).toBe("submitted");
+    expect(browser.clicked).not.toContain("#signin");
+    expect(steps.some((s) => /clicking it to advance/i.test(s))).toBe(false);
+  });
+
+  // Enterprise-SSO-only / no recoverable affordance: the page keeps
+  // showing a sign-in button that never reveals a provider button (a
+  // redirect loop / true SSO-only). The bounded click-through must give
+  // up and still return oauth_required rather than clicking forever.
+  it("still returns oauth_required when the interstitial never reveals a provider button", async () => {
+    const browser = new FakeBrowser();
+    // Every round serves the same lone sign-in button — clicking never
+    // advances to a provider affordance.
+    browser.inventoryQueue = [
+      [
+        mk({
+          tag: "button",
+          role: "button",
+          visibleText: "Sign In to Continue",
+          selector: "#signin",
+        }),
+      ],
+    ];
+    const llm = new QueueLLM(["{}"]);
+
+    const { outcome, steps } = await runLoop(browser, llm, {
+      oauthProvider: "google",
+    });
+
+    expect(outcome.kind).toBe("oauth_required");
+    // It tried the click-through, but the cap (2) stopped it.
+    expect(browser.clicked.filter((s) => s === "#signin").length).toBe(2);
+    expect(llm.calls).toBe(0);
   });
 });

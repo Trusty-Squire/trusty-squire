@@ -123,6 +123,9 @@ importers:
       ora:
         specifier: ^8.1.1
         version: 8.2.0
+      patchright:
+        specifier: ^1.60.2
+        version: 1.60.2
       playwright:
         specifier: ^1.49.0
         version: 1.59.1
@@ -5906,6 +5909,22 @@ packages:
   /parseurl@1.3.3:
     resolution: {integrity: sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ==}
     engines: {node: '>= 0.8'}
+    dev: false
+
+  /patchright-core@1.60.2:
+    resolution: {integrity: sha512-AzUYfbXla1/VVvIKJYK+tOQkdx7PwIM5qSnxz7Hnf2CcRdnqnM6n+goPQl3JLlLdeLj0WA6xlzRn2w/Da7wD4g==}
+    engines: {node: '>=18'}
+    hasBin: true
+    dev: false
+
+  /patchright@1.60.2:
+    resolution: {integrity: sha512-4gkWJllmwVcqrcAxjecy6XFsA2df/VXVPj5t+Ezimwm/LPr2QYY8nzcj2FBAb/3u67wu58EXAPLlIZzuFKbeqA==}
+    engines: {node: '>=18'}
+    hasBin: true
+    dependencies:
+      patchright-core: 1.60.2
+    optionalDependencies:
+      fsevents: 2.3.2
     dev: false
 
   /path-exists@4.0.0:

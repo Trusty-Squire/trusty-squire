@@ -552,6 +552,185 @@ describe("replaySkill — LLM fallback", () => {
   });
 });
 
+// ── Absent setup-click skip (account-state-dependent steps) ─────────
+//
+// hookdeck class: the captured "Create Project" click only existed in
+// the original signup's first-time account state. On replay against a
+// fresh / already-set-up account the button is simply gone. The replay
+// engine must skip the absent NON-credential-creating click and keep
+// going, rather than hard-failing a credential it can still reach.
+
+describe("replaySkill — absent setup-click skip", () => {
+  it("skips a wholly-absent non-credential click and reaches the credential (hookdeck case)", async () => {
+    const b = stubBrowser();
+    // The page does NOT have "Create Project" (the first-time-account
+    // setup button). It DOES have "Create Token" (the credential-
+    // creating click) and a Copy button.
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor([
+      "Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        // Step 0: the account-state-dependent setup click — ABSENT now.
+        { kind: "click", text_match: "Create Project", role_hint: "button", provenance },
+        // Step 1: the credential-creating click — present.
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.credential).toBe("db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+
+    // The absent setup button was never clicked; the credential-creating
+    // button WAS clicked.
+    const clicks = b.history.filter((c) => c.method === "click");
+    expect(clicks.some((c) => c.args[0] === "button.create-token")).toBe(true);
+    expect(clicks.some((c) => String(c.args[0]).includes("project"))).toBe(false);
+  });
+
+  it("does NOT skip when the absent click IS the credential-creating click", async () => {
+    const b = stubBrowser();
+    // The credential-creating "Create Token" button is gone. Skipping it
+    // would bypass token creation and let a hollow replay claim success,
+    // so this must still hard-fail.
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Some unrelated button", selector: "button.x" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(0);
+  });
+
+  it("does NOT skip an absent click that is the last click with no later credential click", async () => {
+    const b = stubBrowser();
+    // navigate -> click(absent) -> extract. The click is the last click
+    // before the extract, so it IS the credential-creating click — a
+    // missing one is genuine rot, not an optional setup step.
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Unrelated", selector: "button.x" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "navigate", url: "https://example.com/tokens", provenance },
+        { kind: "click", text_match: "Create Project", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(1);
+  });
+
+  it("does NOT skip when the click target is PRESENT but ambiguous (real rot)", async () => {
+    const b = stubBrowser();
+    // "Create Project" resolves to TWO non-button links — the element
+    // exists but the skill can't pin it. That's a real ambiguity, not a
+    // vanished setup step, so it must NOT be silently skipped.
+    b.setInventoryFor("extract", [
+      inv({ tag: "a", visibleText: "Create Project", selector: "a.help" }),
+      inv({ tag: "a", visibleText: "Create Project", selector: "a.docs" }),
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Project", provenance },
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(0);
+  });
+
+  it("prefers an LLM substitute over skipping when the fallback supplies one", async () => {
+    const b = stubBrowser();
+    // "Create Project" is absent, but a substitute "Start Project" IS on
+    // the page and the planner finds it. The substitute must win over the
+    // skip path (the skip is the last-resort behaviour).
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Start Project", role: "button", selector: "button.start" }),
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor([
+      "Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+    ]);
+
+    const llmFallback = vi.fn(
+      async (input: LLMFallbackInput): Promise<SkillStep | null> => {
+        expect(input.capturedStep.kind).toBe("click");
+        return {
+          kind: "click",
+          text_match: "Start Project",
+          role_hint: "button",
+          provenance: { run_id: "fallback", round_index: 0 },
+        };
+      },
+    );
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Project", role_hint: "button", provenance },
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      llmFallback,
+    });
+
+    expect(llmFallback).toHaveBeenCalledOnce();
+    expect(result.kind).toBe("ok");
+    const clicks = b.history.filter((c) => c.method === "click");
+    // The substitute was clicked — the absent step was NOT merely skipped.
+    expect(clicks.some((c) => c.args[0] === "button.start")).toBe(true);
+  });
+});
+
 // ── needs_login on OAuth without a profile session ──────────────────
 
 describe("replaySkill — OAuth needs_login", () => {
@@ -1384,6 +1563,78 @@ describe("replaySkill — rc.8 fallback fixes", () => {
     expect(result.kind).toBe("step_failed");
   });
 
+  // ── render 0DTW2V66 regression — password-manager UI ≠ credential ──
+  // The auto-promoted render skill was synthesized as `uuid_token` with
+  // a {32, 80} validator (the synthesizer didn't recognise `rnd_` and
+  // fell back to uuid). On replay the render API-keys page renders a
+  // "1Password" autofill affordance; the validator-blind uuid_token
+  // tier accepted it (len 9, alphanumeric, has a digit) and the
+  // downstream validator then rejected it
+  // (`got="1Password" length 9 below min_length 32`). The real `rnd_…`
+  // key was on the same page but lost to DOM order.
+  it("prefers the rnd_ key over a '1Password' UI affordance (render 0DTW2V66)", async () => {
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_regex", pattern_name: "uuid_token", provenance }],
+      {
+        service: "render",
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "RENDER_API_KEY",
+            post_extract_validator: { min_length: 32, max_length: 80 },
+          },
+        ],
+      },
+    );
+    // The glued body text doesn't surface the rnd_ key at a word
+    // boundary (it's inside a <code> element). The candidate list — which
+    // includes structural <code>/<pre> textContent — carries both the UI
+    // word AND the real key. "1Password" appears first (DOM order).
+    b.setTextFor("API KeysName render-key 1Password");
+    b.setCandidatesFor([
+      "1Password", // ← password-manager UI affordance, len 9, has a digit
+      "rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF", // ← the real render key
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF");
+    }
+  });
+
+  it("returns no credential rather than '1Password' when only UI noise is present", async () => {
+    // Same render-class page, but the real key never rendered (timing /
+    // wrong page). The bot must NOT hand "1Password" up the chain — a
+    // password-manager UI word is never a credential. Better to fail
+    // clean (the universal-bot fallback re-runs) than publish garbage.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_regex", pattern_name: "uuid_token", provenance }],
+      {
+        service: "render",
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "RENDER_API_KEY",
+            post_extract_validator: { min_length: 32, max_length: 80 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("API KeysName 1Password Save to 1Password");
+    b.setCandidatesFor(["1Password", "Save to 1Password", "Bitwarden"]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    // No credential extracted at all → step_failed (the canonical
+    // "No credential matching pattern uuid_token" throw), NOT a
+    // validator_failed carrying "1Password".
+    expect(result.kind).toBe("step_failed");
+  });
+
   // ── 0.8.2-rc.22 — copy-button executor falls back to text scan ────
   it("recovers via validator-filtered candidates when no Copy button is visible (extract_via_copy_button)", async () => {
     // Railway-class page: the captured skill expected a Copy button to
@@ -1455,6 +1706,182 @@ describe("replaySkill — rc.8 fallback fixes", () => {
       expect(result.reason).toMatch(/inventory=1/);
       expect(result.reason).toMatch(/copyButtons=0/);
     }
+  });
+
+  // ── 0.8.4 — validator-shaped candidate fallback for uuid_token ─────
+  // The synthesizer's DEFAULT pattern for an unrecognised key is
+  // `uuid_token` (detectKnownCredentialPattern). On a fresh-account
+  // replay the real key often isn't uuid-shaped, so the named regex
+  // library misses it. The prior fixed-heuristic tiers (digit-required,
+  // no dot/slash) also miss keys whose shape doesn't fit that mould.
+  // This tier defers to the credential's OWN validator (length +
+  // shape_regex) — the authoritative shape gate the synthesizer
+  // published — so it can recover the key without grabbing garbage.
+  // Repro: brevo (KB64G1GS62S4T4T3BZS7GEFD5Z) + statsig
+  // (F779G61KCE9AXZENDPRW4DK3MZ) both replay-failed here.
+  it("recovers a dotted opaque key the heuristic tiers reject but the validator accepts (brevo-class)", async () => {
+    // brevo: extract_via_regex, pattern uuid_token, shape_hint opaque.
+    // A dotted key (e.g. SG-style `xkeysib.<hex>.<hex>`) is excluded by
+    // the rc.21 no-dot heuristic, so only the validator-shaped tier can
+    // surface it. The validator's shape_regex pins the real shape.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://app.brevo.com/settings/keys/api", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "BREVO_API_KEY",
+            post_extract_validator: {
+              min_length: 16,
+              max_length: 128,
+              shape_regex: "^xkeysib\\.[a-f0-9]{32}\\.[a-f0-9]{16}$",
+            },
+          },
+        ],
+      },
+    );
+    const realKey =
+      "xkeysib.0123456789abcdef0123456789abcdef.0123456789abcdef";
+    b.setTextFor("API keysYour keysNo labeled key the library can parse");
+    b.setCandidatesFor([
+      "Dashboard",
+      "API keys",
+      realKey, // dotted → rc.21 tier skips it; validator shape_regex matches
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe(realKey);
+    }
+  });
+
+  it("named extract_via_regex(uuid_token) falls back to the produces credential's validator (statsig-class)", async () => {
+    // statsig: extract_via_regex_named, pattern uuid_token, shape_hint
+    // uuid. The named variant previously had NO fallback — it threw
+    // immediately when the regex library missed. It must now scan
+    // candidates against the validator of the credential named by
+    // `produces`.
+    const b = stubBrowser();
+    const realKey = "secret-server-7c4d4e2c9c411234567890abcdef0011";
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://console.statsig.com/api_keys", provenance },
+        {
+          kind: "extract_via_regex_named",
+          pattern_name: "uuid_token",
+          produces: "server_key",
+          provenance,
+        },
+      ],
+      {
+        credentials: [
+          {
+            name: "server_key",
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "STATSIG_SERVER_KEY",
+            post_extract_validator: {
+              min_length: 20,
+              max_length: 64,
+              shape_regex: "^secret-server-[a-f0-9]{32}$",
+            },
+          },
+        ],
+      },
+    );
+    b.setTextFor("Server secret keysno parseable prefix here");
+    b.setCandidatesFor(["Console", "API keys", realKey]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    // A single-credential skill expressed via the *_named step kind
+    // returns ok_multi (the outer loop branches on the named step's
+    // presence, not the credential count).
+    expect(result.kind).toBe("ok_multi");
+    if (result.kind === "ok_multi") {
+      expect(result.credentials.server_key).toBe(realKey);
+    }
+  });
+
+  it("validator-shaped fallback still FAILS when no candidate satisfies the validator", async () => {
+    // Guard: the validator is the only gate. When nothing on the page
+    // matches the published shape, the step must still fail — the
+    // fallback must not loosen extraction into grabbing the wrong value.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://app.brevo.com/settings/keys/api", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "BREVO_API_KEY",
+            post_extract_validator: {
+              min_length: 16,
+              max_length: 128,
+              shape_regex: "^xkeysib\\.[a-f0-9]{32}\\.[a-f0-9]{16}$",
+            },
+          },
+        ],
+      },
+    );
+    b.setTextFor("no parseable key");
+    // Dotted strings so the rc.21 heuristic tier (which skips any
+    // candidate containing a ".") doesn't claim them first — this
+    // isolates the validator-shaped tier. None match the brevo
+    // shape_regex, so the validator rejects every one.
+    b.setCandidatesFor([
+      "Dashboard",
+      "some.other.token.value",
+      "xkeysib.tooshort",
+      "xkeysib.ZZZZ.not-hex-at-all", // right prefix shape, wrong charset
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
+  });
+
+  it("named validator-shaped fallback does NOT fire for prefixed patterns (only uuid_token)", async () => {
+    // Defensive mirror of the single-cred negative test, on the named
+    // path: a stripe_secret-pattern named extract must NOT fall through
+    // to validator-shaped candidate grabbing.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        {
+          kind: "extract_via_regex_named",
+          pattern_name: "stripe_secret",
+          produces: "secret_key",
+          provenance,
+        },
+      ],
+      {
+        credentials: [
+          {
+            name: "secret_key",
+            type: "api_key",
+            shape_hint: "prefix:sk_live",
+            env_var_suggestion: "STRIPE_SECRET_KEY",
+            post_extract_validator: { min_length: 8, max_length: 128 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("no sk_ key visible on this page");
+    // A candidate that WOULD satisfy the loose validator, but the
+    // pattern is prefixed so the fallback must not fire.
+    b.setCandidatesFor(["someArbitrary123Token"]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
   });
 });
 

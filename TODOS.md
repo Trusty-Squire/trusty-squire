@@ -103,16 +103,36 @@ state-dependent "Create Project" step only valid on a first-time account.
 The closed loop surfaces these without thrashing (single failures don't
 demote). Batch the A6 fix with A4/A5 on the next mcp bump (0.8.16).
 
-### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
-The A/B harness is **code-complete** (baseline vs `cdp_hardened`
-stealth profile, `stealth_profile` column on CaptchaEvent, invisible-
-Turnstile recording, shadow-DOM widget detection). It is blocked on
-*input*: no queue service currently presents a detectable invisible
-Turnstile / reCAPTCHA-v3 *on a form path* the bot reaches. Resend
-dropped its Turnstile; the rest OAuth past it. Need to find/confirm a
-service that renders a scoreable challenge on the form, then run the
-A/B for a concrete block-rate delta. Until then AB2–AB6 stay deferred
-(they sequence after this baseline reads out).
+### A3 — Anti-bot: fingerprint FIXED (patchright); IP is the remaining blocker [P1]
+**The CDP-fingerprint half is solved + shipped (commit 2485b38).** The
+hardened launcher is now **patchright** — verified ALL-GREEN against the
+rebrowser bot-detector through the real `BrowserController` path
+(`mainWorldExecution`/`navigatorWebdriver`/`viewport`/`runtimeEnableLeak`
+all clean). `Runtime.enable` never leaked; that premise was a ghost (see
+the doc banner + [[project-antibot-runtime-enable-ghost]]).
+
+**Full-flow A/B on a datacenter IP (2026-06-03, `BOT_CDP_HARDENED=1`,
+4 wall services):** plausible still `captcha_blocked` (reCAPTCHA flagged
+the session), tally still `anti_bot_blocked` (Cloudflare risk-score) —
+**so the clean browser alone does NOT beat reCAPTCHA-v3/Cloudflare on a
+datacenter IP. The IP is now the blocker** (the doc was wrong in the
+OTHER direction too: it claimed IP doesn't matter). **codesandbox showed
+`"Verification successful"`** in the Cloudflare interstitial — the clean
+browser PASSED, but the bot's interstitial-handler didn't detect the
+cleared state and timed out → a fixable **bot bug**, not a wall.
+
+**Next, in order:**
+1. **The never-run experiment: clean browser + residential IP together.**
+   Both halves have only ever been tested separately (and the proxy test
+   used a dirty browser). Revive a residential endpoint (Tellskill Mac or
+   a cheap residential proxy), set `UNIVERSAL_BOT_PROXY_URL` +
+   `BOT_CDP_HARDENED=1`, re-run this A/B. This is the decisive test.
+2. **Fix the codesandbox-class interstitial bug** — recognize the
+   Cloudflare `"Verification successful"` state and proceed instead of
+   timing out as `anti_bot_blocked`.
+3. Make `BOT_CDP_HARDENED=1` the default once (1) confirms a conversion
+   lift (it ships dark today — flag-gated off).
+Harness to reuse for any future measurement: `/tmp/cdp-detect`.
 
 ### A4 — `findCaptchaWidget` shadow-DOM solve-path parity [DONE 2026-06-02]
 Audited: the hypothesis was partly wrong. `findCaptchaWidget` uses
@@ -356,3 +376,45 @@ These aren't TODOs — operational reminders.
 - **Dedicated GitHub App** for the harvester subagent identity
   (vs the user-account PAT). Revisit before Phase 4 (when the
   subagent starts opening real PRs).
+
+## Impossible-class signups — tackle NEXT (G4 / residential IP / manual)
+From the 2026-06-03 fan-out re-run; confirmed not bot-code-fixable in the
+current egress (datacenter IP). Revisit with a residential proxy (G4) or
+manual capture:
+- **Captcha walls:** cronitor, plausible
+- **Anti-bot gateways:** codesandbox, tally
+- **OAuth-loop / anti-bot OAuth-callback rejection:** cockroachdb,
+  growthbook, plunk, uploadcare
+- **Non-basic OAuth scope (needs operator review):** inngest
+These were EXCLUDED from the step-3 fan-out (every other failing service
+is being fixed). Tackle this list once a residential egress path exists.
+
+**More walls confirmed by the step-3 subagents (read the actual page
+snapshots, 2026-06-03) — also EXCLUDED from the first re-run:**
+- **Hard verification gates (need F12 SMS-relay / human):** sendgrid
+  (SMS/phone MFA), circleci (authenticator-app TOTP), betterstack-uptime +
+  betterstack-logs (magic-link gated behind invisible reCAPTCHA — the
+  submit button stays disabled until the captcha token populates; NOT
+  billing, despite an earlier mislabel).
+- **Credit-card billing gate — ONLY mailgun (verified, 2026-06-03).** Its
+  signup form (`signup.mailgun.com/new/signup`) renders "Add payment info
+  now" (pre-checked) + "Cardholder Name" + "Billing Address (line 1/2)" +
+  City/State/Country/Currency, and `#submit-button` stays **disabled**
+  until a valid card (in a Stripe iframe the bot can't fill) is entered.
+  Possible future fix: try UNCHECKING "Add payment info now" to defer the
+  card — uncertain Mailgun still allows a no-card free signup.
+
+**Re-ADDED to the active set after URL curation (2026-06-03, commits
+69b0bdc + caa32bc) — were mislabeled "dead/disabled":**
+- 7 stale signup URLs fixed in `tools/housekeeper-services.yaml` (daytona,
+  loops, temporal, typesense, workos, baselime, hatchet) + highlight
+  (URL was already correct; the "workspaces disabled" snapshot was an
+  existing-workspace state on the shared identity, now handled by the
+  already-account mint path). Re-test wave: `/tmp/harvest-rerun4-urls.yaml`.
+
+**Inbox infra, NOT bot code (`verification_not_sent`):** the re-run with
+the raised 120s probe floor still finds no mail (browserbase waited the
+full 120s, none arrived). Root cause is the `@trustysquire.ai` catch-all →
+IMAP mailbox delivery, not probe timing. Operator action: verify
+`GMAIL_USER`/`WORKSPACE_IMAP_*` on `trusty-squire-api` points at the
+mailbox the catch-all actually delivers to (see the inbox-agent diagnosis).

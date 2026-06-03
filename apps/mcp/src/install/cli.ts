@@ -395,10 +395,13 @@ async function connect(args: Argv): Promise<void> {
     if (preflight !== null) {
       ui.divider();
       await writeAgentConfig(target, agent, args);
-      ui.success(
-        `Already provisioned (${preflight.providers.join(" + ")}). ` +
-          `${agent.display_name} config refreshed.`,
-      );
+      const provNote =
+        preflight.providers.length > 0
+          ? `Already provisioned (${preflight.providers.join(" + ")}).`
+          : `Session valid — no bot OAuth login on this machine yet ` +
+            `(run ${ui.code("npx @trusty-squire/mcp login")} to enable ` +
+            `OAuth-preferring signups).`;
+      ui.success(`${provNote} ${agent.display_name} config refreshed.`);
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
@@ -572,10 +575,42 @@ export async function agentTokenStillValid(
   }
 }
 
+// Pure gate for the `connect` fast path: given the read session, whether
+// its agent token still validated, and the bot's provider markers, decide
+// whether connect can (re)write the MCP config WITHOUT a browser re-claim.
+//
+// The provider marker is INFORMATIONAL — it tells the signup bot which
+// providers to auto-prefer for OAuth, NOT whether the host agent can be
+// wired up. A valid session (machine + agent token that just validated)
+// is sufficient. Gating on a non-empty marker used to force a full
+// browser re-claim on any box whose bot profile had no login yet (a fresh
+// machine that restored session.json, or a headless box where the claim
+// browser can't run) — leaving the user with NO config written and no
+// clear reason. So an empty `providers` is fine; we still return
+// provisioned. Exported for unit tests.
+export function decideProvisioned(
+  session: SessionData | null,
+  tokenValid: boolean,
+  providers: OAuthProviderId[],
+): { providers: OAuthProviderId[] } | null {
+  if (
+    session === null ||
+    session.machine_token === undefined ||
+    session.agent_session_token === undefined ||
+    session.account_id === undefined
+  ) {
+    return null;
+  }
+  if (!tokenValid) return null;
+  return { providers };
+}
+
 async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[] } | null> {
   try {
     const storage = await openSessionStorage();
     const session = await storage.read();
+    // Need the token present before we can validate it; an incomplete
+    // session is decided (→ null) without an API round-trip.
     if (
       session === null ||
       session.machine_token === undefined ||
@@ -589,10 +624,7 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
       session.api_base_url,
       session.agent_session_token,
     );
-    if (!stillValid) return null;
-    const providers = loggedInProviders();
-    if (providers.length === 0) return null;
-    return { providers };
+    return decideProvisioned(session, stillValid, loggedInProviders());
   } catch {
     return null;
   }
