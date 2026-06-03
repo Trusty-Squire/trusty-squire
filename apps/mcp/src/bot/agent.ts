@@ -97,10 +97,52 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
   "one more step",
 ];
 
-// Short probe when the post-submit page never prompted the user to check
-// their email. Legitimate verification mail almost always lands inside a
+// Short probe when, even after a settle, the post-submit page still never
+// prompted the user to check their email AND no account-created signal
+// appeared. Legitimate verification mail almost always lands inside a
 // minute; this catches the fast case without 300s of dead air.
 const VERIFICATION_PROBE_SECONDS = 45;
+
+// Settle window before the SECOND post-submit page read. SPA signups
+// (Postmark, ElevenLabs, Browserbase, Grafana Cloud, …) swap in their
+// "check your email" confirmation screen a beat AFTER submit. Reading the
+// DOM the instant extraction fails races that render and mislabels the
+// run as "no email expected", collapsing the poll to the 45s probe and
+// abandoning mail that was, in fact, on its way.
+const SUBMIT_SETTLE_SECONDS = 3;
+
+// Poll floor once the form CLEANLY SUBMITTED but the page text stayed
+// inconclusive about an email prompt (no "check your email", but also no
+// hard error/rejection). A clean submit means an account was created, so
+// real verification mail is plausibly inbound; transactional senders on a
+// fresh send (Postmark, SendGrid) routinely take longer than the 45s
+// probe. Polling 120s here — rather than bailing at 45s — is the
+// difference between catching that mail and a false `verification_not_sent`.
+// Still bounded so a genuinely-silent service doesn't hold the run for the
+// full 180s expected-email timeout.
+const SUBMITTED_PROBE_FLOOR_SECONDS = 120;
+
+// Post-submit page text that means the submit was REJECTED, not accepted —
+// no account was created, so no verification mail is coming and even the
+// 45s probe is wasted. Lets the bot bail immediately instead of polling.
+// Kept conservative: only unambiguous rejection phrasings.
+const SUBMIT_REJECTED_PATTERNS: readonly RegExp[] = [
+  /\balready\s+(?:registered|exists|in\s+use|taken|have\s+an\s+account)\b/i,
+  /\b(?:email|account|username)\s+(?:is\s+)?already\s+(?:registered|taken|in\s+use)\b/i,
+  /\bthat\s+email\s+is\s+already\b/i,
+  /\ban?\s+account\s+(?:with\s+(?:this|that)\s+email\s+)?already\s+exists\b/i,
+  /\bplease\s+(?:try\s+again|correct\s+the\s+errors?)\b/i,
+  /\bthis\s+field\s+is\s+required\b/i,
+  /\b(?:email|password)\s+cannot\s+be\s+empty\b/i,
+  /\binvalid\s+(?:email|password)\b/i,
+];
+
+// Exported for unit testing. True when the post-submit page reads like a
+// rejected submit (account not created), so the bot should not poll for a
+// verification email that will never arrive.
+export function submitWasRejected(pageText: string): boolean {
+  return SUBMIT_REJECTED_PATTERNS.some((p) => p.test(pageText));
+}
 
 // T7: page text that means the post-OAuth API key sits behind a
 // billing / payment-method wall. When the OAuth onboarding loop ends
@@ -3970,10 +4012,25 @@ export class SignupAgent {
       // Step 7: Email verification + post-verification navigation.
       let verificationFailed: string | undefined;
       if (credentials.api_key === undefined && credentials.username === undefined) {
-        // S3: read the post-submit page first. Whether it is actually
-        // asking the user to confirm by email decides both the no-inbox
-        // bail (M2) and, when an inbox exists, the poll duration.
-        const expectsEmail = expectsVerificationEmail(await this.browser.extractText());
+        // S3: read the post-submit page to decide both the no-inbox bail
+        // (M2) and, when an inbox exists, the poll duration. The page is
+        // read up to TWICE: once immediately, then — only if the first
+        // read was inconclusive — again after a short settle, because SPA
+        // signups render the "check your email" screen a beat after submit
+        // and sampling once races that render (the bug behind the
+        // Postmark/ElevenLabs/Browserbase/Grafana false `verification_not_sent`).
+        let postSubmitText = await this.browser.extractText();
+        let expectsEmail = expectsVerificationEmail(postSubmitText);
+        if (!expectsEmail && !submitWasRejected(postSubmitText)) {
+          await this.browser.wait(SUBMIT_SETTLE_SECONDS);
+          postSubmitText = await this.browser.extractText();
+          expectsEmail = expectsVerificationEmail(postSubmitText);
+        }
+        // A clean submit that did NOT visibly reject created an account —
+        // verification mail is plausibly inbound even without a "check
+        // your email" screen. Distinguish that from a rejected submit
+        // (already-registered, validation error) where no mail is coming.
+        const submitRejected = submitWasRejected(postSubmitText);
         if (task.inbox === undefined) {
           // M2/S3: no inbox to receive a verification email (the SES
           // inbound pipeline is mothballed — TODOS M1). If the page is
@@ -3994,16 +4051,26 @@ export class SignupAgent {
               `manually${where}.`;
           }
         } else {
-          // S3: don't blind-wait. If the page explicitly tells the user
-          // to check their email, poll the full timeout; if not, the
-          // service most likely sent nothing — run a short probe.
+          // S3: don't blind-wait, but don't under-poll a clean submit
+          // either. Three cases:
+          //   - page says "check your email"  → full timeout (mail is
+          //     definitely coming).
+          //   - submit visibly rejected       → 45s probe (no account was
+          //     created; no mail is coming).
+          //   - inconclusive but submit clean → 120s floor (an account was
+          //     created, so transactional mail is plausibly inbound and
+          //     can outlast the 45s probe; bounded below the full timeout).
           const verificationTimeoutSeconds = expectsEmail
             ? (task.verificationTimeoutSeconds ?? 180)
-            : VERIFICATION_PROBE_SECONDS;
+            : submitRejected
+              ? VERIFICATION_PROBE_SECONDS
+              : SUBMITTED_PROBE_FLOOR_SECONDS;
           steps.push(
             expectsEmail
               ? `Post-submit page asks to check email — polling inbox (up to ${verificationTimeoutSeconds}s)...`
-              : `Post-submit page shows no "check your email" prompt — short ${verificationTimeoutSeconds}s probe (S3: the service likely sent no verification email)...`,
+              : submitRejected
+                ? `Post-submit page shows a rejected submit — short ${verificationTimeoutSeconds}s probe (S3: no account created, no verification email expected)...`
+                : `Post-submit page is inconclusive but submit was clean — polling inbox up to ${verificationTimeoutSeconds}s (S3: an account may have been created and mail can lag)...`,
           );
           try {
             const email = await this.waitForVerificationEmail(
@@ -4052,7 +4119,9 @@ export class SignupAgent {
             steps.push(`Inbox poll failed: ${detail}`);
             verificationFailed = expectsEmail
               ? `verification_not_sent: form submitted and the page asked to check email, but none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (anti-abuse) or requires manual signup`
-              : `verification_not_sent: form submitted but the page never prompted to check email and none arrived in the ${verificationTimeoutSeconds}s probe — the service most likely dispatched no verification email`;
+              : submitRejected
+                ? `verification_not_sent: form submitted but the page reported a rejected submit (already-registered / validation error) and no mail arrived in the ${verificationTimeoutSeconds}s probe — no account was created`
+                : `verification_not_sent: form submitted cleanly but no "check your email" prompt appeared and none arrived in ${verificationTimeoutSeconds}s — the service likely withheld it (fresh-domain anti-abuse) or verifies by another channel (SMS / authenticator)`;
           }
         }
       }
