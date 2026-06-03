@@ -407,6 +407,77 @@ export function detectExistingAccountNoExtract(input: {
   return false;
 }
 
+// A "mint a fresh key" affordance — a button/link that creates a new
+// API key/token. The label vocabulary is deliberately broad ("create",
+// "generate", "new", "add" paired with a key/token noun) but must be
+// paired with a credential noun so a bare "New project" / "Add member"
+// button on a dashboard isn't mistaken for a key-minting control.
+//
+// Word-boundary-anchored to avoid matching "recreate" / "regenerate
+// password" style false friends — though "regenerate" + a key noun IS
+// a valid mint affordance (rotating a key produces a fresh value), so
+// it's included explicitly.
+const CREATE_KEY_VERB = /\b(?:create|generate|regenerate|new|add|issue|mint)\b/i;
+const CREATE_KEY_NOUN =
+  /\b(?:api[\s_-]*keys?|secret[\s_-]*keys?|access[\s_-]*tokens?|personal[\s_-]*access[\s_-]*tokens?|api[\s_-]*tokens?|auth[\s_-]*tokens?|tokens?|keys?|credentials?)\b/i;
+// A standalone phrase that is unambiguously a key-minting control even
+// without the verb+noun co-occurrence test (some buttons read just
+// "New API key" with the verb folded into "new"). Kept separate so the
+// generic verb/noun pairing can stay strict.
+const CREATE_KEY_PHRASE =
+  /\b(?:create|generate|new|add|issue|mint)\s+(?:a\s+)?(?:new\s+)?(?:api|secret|access|auth|personal\s+access)?\s*(?:keys?|tokens?|credentials?)\b/i;
+
+// Scan an inventory for the single best "create new key / generate API
+// key / new token" affordance. Returns the matching element or null.
+// Exported for unit tests. Pure — operates on the inventory shape only,
+// no browser access, so it can be unit-tested with synthetic elements.
+export function findCreateKeyAffordance(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of inventory) {
+    // Only buttons / links / role=button are mint controls; an <input>
+    // (a text field named "key") is never the create action.
+    const isClickable =
+      el.tag === "button" ||
+      el.tag === "a" ||
+      el.role === "button" ||
+      el.role === "link";
+    if (!isClickable) continue;
+    // A non-visible element can't be clicked reliably; skip when the
+    // live extractor told us it's hidden (test fixtures that omit
+    // `visible` are treated as visible).
+    if (el.visible === false) continue;
+    const haystack = [
+      el.visibleText,
+      el.ariaLabel,
+      el.title,
+      el.labelText,
+      el.iconLabel,
+    ]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    if (haystack.length === 0) continue;
+    const phraseHit = CREATE_KEY_PHRASE.test(haystack);
+    const verbNounHit =
+      CREATE_KEY_VERB.test(haystack) && CREATE_KEY_NOUN.test(haystack);
+    if (!phraseHit && !verbNounHit) continue;
+    // Score: a full phrase match is the strongest signal; an explicit
+    // "api key" / "token" noun beats a bare "key"; in-viewport beats
+    // off-screen. Highest score wins so a precise "Create API Key" is
+    // preferred over a generic "Add key".
+    let score = 0;
+    if (phraseHit) score += 4;
+    if (/\bapi[\s_-]*keys?\b|\bapi[\s_-]*tokens?\b/i.test(haystack)) score += 2;
+    if (el.inViewport === true) score += 1;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
 // Pick the next fallback URL to try, keyed against the origin of the
 // currently-stuck URL. The curated SERVICE_KEYS_PATHS for the run's
 // service (when its host matches the stuck origin) are tried FIRST,
@@ -5603,6 +5674,214 @@ ${formatInventory(input.inventory)}`,
     return out;
   }
 
+  // Run every visible-credential extraction tier the post-verify loop
+  // uses (legacy regex/clipboard/hidden-input + DOM-proximity labeled),
+  // merging first-wins into a single bundle. Used by attemptMintNewKey
+  // so the freshly-minted key — which may render as a modal value, a
+  // copy-button-only token, or a labeled table row — is caught by
+  // whichever tier fits the vendor's reveal UI.
+  private async harvestVisibleCredentials(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    try {
+      const legacy = await this.extractCredentials();
+      for (const [k, v] of Object.entries(legacy)) {
+        if (out[k] === undefined) out[k] = v;
+      }
+    } catch {
+      // best-effort — fall through to DOM-proximity
+    }
+    try {
+      const labeled = await this.extractFromDomProximity();
+      for (const [k, v] of Object.entries(labeled)) {
+        if (out[k] === undefined) out[k] = v;
+      }
+    } catch {
+      // best-effort
+    }
+    return out;
+  }
+
+  // SUCCEED on an already-signed-in / existing-account dashboard.
+  //
+  // When the bot lands on an authenticated dashboard whose API-keys
+  // page shows only NAMES of pre-existing keys (values are shown once
+  // at create-time and are unrecoverable), the historic behavior was to
+  // bail with existing_account_no_extract / no_credentials_after_already
+  // _signed_in. That's a usable outcome the bot threw away: a new key is
+  // a perfectly valid credential.
+  //
+  // This routine, given the current (existing-account) state:
+  //   1. Tries to extract a READABLE key right where we are — some
+  //      dashboards do show a usable value (a default key on a freshly
+  //      reused account, or a reveal affordance the loop hadn't fired).
+  //   2. If the current page isn't a keys page, walks the same
+  //      hardcoded keys-path fallbacks the stuck-loop escalation uses,
+  //      re-trying the readable-key extract at each.
+  //   3. On a keys page with no readable key, finds a "Create new key /
+  //      Generate API key / New token" affordance and CLICKS it, then
+  //      harvests the freshly-minted value (modal reveal + copy-button +
+  //      clipboard + labeled-row, via harvestVisibleCredentials, after a
+  //      short poll for the server round-trip that mints the key).
+  //
+  // Returns the minted/extracted credentials on success, or null when
+  // there is genuinely no way to produce a key for this identity (no
+  // create affordance anywhere — e.g. key creation is paywalled). The
+  // caller then falls through to the honest existing_account bail.
+  //
+  // Best-effort throughout: any browser error degrades to "couldn't
+  // mint" (null) rather than throwing — the existing classifier remains
+  // the safety net.
+  private async attemptMintNewKey(
+    steps: string[],
+  ): Promise<Record<string, string> | null> {
+    // The set of keys-page URLs we've navigated, so the fallback walk
+    // doesn't revisit one and the create-affordance search doesn't
+    // re-click on a page already shown to lack one.
+    const visitedKeysUrls = new Set<string>();
+
+    // Attempt readable-extract → create-and-extract on whatever page is
+    // currently loaded. Returns credentials on success, null otherwise.
+    const tryHere = async (): Promise<Record<string, string> | null> => {
+      // (a) A readable key already on the page (or behind a reveal
+      //     affordance the post-verify loop hadn't clicked yet).
+      let creds = await this.harvestVisibleCredentials();
+      if (hasAnyExtractedCredential(creds)) {
+        steps.push(
+          "Existing-account recovery: a readable key was already present on the keys page — extracted it.",
+        );
+        return creds;
+      }
+      // (b) Reveal pass — a masked-but-revealable existing key.
+      try {
+        const revealRes = await this.browser.revealMaskedCredentials();
+        if (revealRes.clicked > 0) {
+          await this.browser.wait(1);
+          creds = await this.harvestVisibleCredentials();
+          if (hasAnyExtractedCredential(creds)) {
+            steps.push(
+              `Existing-account recovery: revealed a masked existing key (clicked ${revealRes.clicked}) and extracted it.`,
+            );
+            return creds;
+          }
+        }
+      } catch {
+        // best-effort reveal
+      }
+      // (c) Mint a fresh key. Find + click a create affordance, then
+      //     harvest the newly-shown value.
+      const inventory = await this.buildInventory(steps, undefined, 80);
+      const createBtn = findCreateKeyAffordance(inventory);
+      if (createBtn === null) return null;
+      const label = (
+        createBtn.visibleText ??
+        createBtn.ariaLabel ??
+        createBtn.title ??
+        "create key"
+      ).trim();
+      steps.push(
+        `Existing-account recovery: no readable key — clicking a key-minting affordance ${JSON.stringify(label.slice(0, 40))}.`,
+      );
+      try {
+        await this.browser.click(createBtn.selector);
+      } catch (err) {
+        steps.push(
+          `Existing-account recovery: create-key click failed (${err instanceof Error ? err.message : String(err)}).`,
+        );
+        return null;
+      }
+      // Poll for the freshly-minted key — minting is a server
+      // round-trip (Render/Mistral/Mailtrap render the value into a
+      // modal after the POST returns). Reuse the modal-reveal poll
+      // budget the click branch uses elsewhere (~8s), early-exiting the
+      // moment any tier surfaces a credential. A confirmation dialog
+      // ("Name your key" → Create) is common; fire the reveal pass each
+      // round so a modal that needs a second confirm-then-show click is
+      // still harvested.
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        await this.browser.wait(0.5);
+        const minted = await this.harvestVisibleCredentials();
+        if (hasAnyExtractedCredential(minted)) {
+          steps.push(
+            "Existing-account recovery: extracted the freshly-minted key.",
+          );
+          return minted;
+        }
+        // A two-step create modal: clicking the page-level "Create key"
+        // opened a "name + confirm" dialog. Click a now-visible confirm
+        // affordance once, then keep polling.
+        try {
+          const modalInv = await this.browser.extractInteractiveElements();
+          const confirmBtn = findCreateKeyAffordance(modalInv);
+          if (
+            confirmBtn !== null &&
+            confirmBtn.selector !== createBtn.selector
+          ) {
+            await this.browser.click(confirmBtn.selector);
+          }
+        } catch {
+          // best-effort confirm
+        }
+      }
+      // Minted but the value didn't surface — try one last reveal +
+      // harvest (some vendors render the new key masked with a Show
+      // toggle even on first display).
+      try {
+        const revealRes = await this.browser.revealMaskedCredentials();
+        if (revealRes.clicked > 0) {
+          await this.browser.wait(1);
+          const afterReveal = await this.harvestVisibleCredentials();
+          if (hasAnyExtractedCredential(afterReveal)) {
+            steps.push(
+              "Existing-account recovery: revealed and extracted the freshly-minted key.",
+            );
+            return afterReveal;
+          }
+        }
+      } catch {
+        // best-effort
+      }
+      return null;
+    };
+
+    // Step 1 — try on the current page first.
+    try {
+      const state = await this.browser.getState();
+      visitedKeysUrls.add(state.url);
+      if (EXISTING_KEY_URL_HINT.test(state.url)) {
+        const here = await tryHere();
+        if (here !== null) return here;
+      }
+    } catch {
+      // best-effort — fall through to the fallback walk
+    }
+
+    // Step 2 — walk the hardcoded keys-path fallbacks. Even if Step 1
+    // ran (current page WAS a keys page but had no affordance), a
+    // different keys URL on the same origin may carry the create
+    // control (org-scoped vs account-scoped keys pages).
+    for (let i = 0; i < STUCK_LOOP_FALLBACK_PATHS.length; i++) {
+      let currentUrl: string;
+      try {
+        currentUrl = (await this.browser.getState()).url;
+      } catch {
+        break;
+      }
+      const fallback = pickStuckLoopFallbackUrl(currentUrl, visitedKeysUrls);
+      if (fallback === null) break;
+      visitedKeysUrls.add(fallback);
+      try {
+        await this.browser.goto(fallback);
+        await this.browser.waitForInteractiveDom(5, 15_000);
+      } catch {
+        continue;
+      }
+      const here = await tryHere();
+      if (here !== null) return here;
+    }
+    return null;
+  }
+
   private async postVerifyLoop(args: {
     service: string;
     credentials?: { email: string; password: string } | undefined;
@@ -6930,29 +7209,75 @@ ${formatInventory(input.inventory)}`,
     const alreadyClassified =
       this.lastPostVerifyDoneReason !== null &&
       this.lastPostVerifyDoneReason.startsWith("[");
-    if (
-      credentials.api_key === undefined &&
-      credentials.username === undefined &&
-      !alreadyClassified
-    ) {
+    const noCredentialYet =
+      credentials.api_key === undefined && credentials.username === undefined;
+    // Distinct from a generic prior classification: ONLY the existing-
+    // account path is recoverable by minting. A [stuck_loop] / [paywall]
+    // / [anti_bot] marker is a different failure the mint flow can't fix,
+    // so leave those alone.
+    const alreadyExistingAccount =
+      this.lastPostVerifyDoneReason !== null &&
+      this.lastPostVerifyDoneReason.startsWith("[existing_account_no_extract]");
+    // The mint flow is appropriate for the existing-account /
+    // already-signed-in category ONLY. A [stuck_loop] / [paywall] /
+    // [anti_bot] marker is a different, non-recoverable failure — leave
+    // those alone. An UNclassified exit reaching here IS the
+    // already-signed-in case (postVerifyLoop only runs on an
+    // authenticated dashboard — `already_oauth` / post-OAuth), so it's
+    // eligible too; the mint flow self-gates by requiring a real keys
+    // page + a create affordance before it acts.
+    const mintEligible =
+      noCredentialYet && (!alreadyClassified || alreadyExistingAccount);
+    if (mintEligible) {
+      // SUCCEED-EVEN-WHEN-ACCOUNT-EXISTS: before bailing, navigate to
+      // the keys page and either extract a readable key or mint a fresh
+      // one. A new key is a valid outcome. attemptMintNewKey returns
+      // null when there is genuinely no create affordance anywhere (key
+      // creation paywalled / no keys page) — then we fall through to the
+      // honest bail.
+      let minted: Record<string, string> | null = null;
       try {
-        const finalState = await this.browser.getState();
-        const finalText = await this.browser.extractText().catch(() => "");
-        if (
-          detectExistingAccountNoExtract({
-            url: finalState.url,
-            pageText: finalText,
-            lastPlannerReason: this.lastPostVerifyDoneReason ?? "",
-          })
-        ) {
-          this.lastPostVerifyDoneReason =
-            `[existing_account_no_extract] at ${finalState.url}; latest planner reason: ${this.lastPostVerifyDoneReason ?? "(none — loop exhausted)"}`;
-          args.steps.push(
-            "Post-verify: classified as existing_account_no_extract — masked pre-existing key on an authenticated dashboard.",
-          );
-        }
+        minted = await this.attemptMintNewKey(args.steps);
       } catch {
-        // best-effort classifier — never block returning the (empty) credentials
+        // best-effort — degrade to the existing classifier below
+      }
+      if (minted !== null && hasAnyExtractedCredential(minted)) {
+        for (const [k, v] of Object.entries(minted)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
+        // Clear any existing-account sentinel — we recovered.
+        if (alreadyExistingAccount) this.lastPostVerifyDoneReason = null;
+        args.steps.push(
+          "Post-verify: existing-account / already-signed-in dashboard recovered — minted/extracted a usable key instead of bailing.",
+        );
+        return credentials;
+      }
+
+      // Mint failed. If the masked-pre-existing-key shape is detectable
+      // AND not already flagged by the stuck-loop early-exit, mark the
+      // honest existing_account_no_extract bail so the caller surfaces
+      // the precise status rather than the generic
+      // no_credentials_after_already_signed_in.
+      if (!alreadyExistingAccount) {
+        try {
+          const finalState = await this.browser.getState();
+          const finalText = await this.browser.extractText().catch(() => "");
+          if (
+            detectExistingAccountNoExtract({
+              url: finalState.url,
+              pageText: finalText,
+              lastPlannerReason: this.lastPostVerifyDoneReason ?? "",
+            })
+          ) {
+            this.lastPostVerifyDoneReason =
+              `[existing_account_no_extract] at ${finalState.url}; latest planner reason: ${this.lastPostVerifyDoneReason ?? "(none — loop exhausted)"}`;
+            args.steps.push(
+              "Post-verify: classified as existing_account_no_extract — pre-existing keys are masked and no key-minting affordance was found.",
+            );
+          }
+        } catch {
+          // best-effort classifier — never block returning credentials
+        }
       }
     }
     return credentials;
