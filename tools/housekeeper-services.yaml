@@ -992,7 +992,7 @@
     '
 - slug: hatchet
   name: Hatchet
-  signup_url: https://app.dev.hatchet-tools.com/auth/login
+  signup_url: https://cloud.hatchet.run/auth/register
   oauth_provider: github
   scope_hint: null
   status: pending
