@@ -430,13 +430,17 @@ The 24 rerun3 failures were triaged into buckets (see
   (commit e60291a) — the bot now recognizes a PASSED Cloudflare challenge
   ('Verification successful') instead of bailing on the static copy. Matters
   now that patchright actually passes the challenge.
-- **INFRA-inbox (4: fathom/postmark/elevenlabs/browserbase):** DIAGNOSED —
-  the workspace IMAP poller falls back to GMAIL_USER (personal gmail) because
-  WORKSPACE_IMAP_USER is unset, so it reads the wrong mailbox and never sees
-  the trustysquire.ai catch-all. **OPERATOR ACTION:** set
-  `WORKSPACE_IMAP_USER=lunchbox@trustysquire.ai` + `WORKSPACE_IMAP_PASSWORD`
-  (Workspace app password) on `trusty-squire-api`. Commit 3a751b0 makes the
-  misconfig visible in the bot trail (`mailbox_domain_mismatch`).
+- **INFRA-inbox (4: fathom/postmark/elevenlabs/browserbase):** FIXED +
+  VERIFIED end-to-end (2026-06-03). The workspace IMAP poller was pointed at
+  a mailbox that authenticated but didn't receive the trustysquire.ai
+  catch-all, AND the app password was stale. Fixed by setting
+  `WORKSPACE_IMAP_USER=lunchbox@trustysquire.ai` + a FRESH app password (made
+  after enabling IMAP on that Workspace account) on `trusty-squire-api`.
+  Verified: a test email to `<rand>@trustysquire.ai` → catch-all →
+  lunchbox@trustysquire.ai mailbox → IMAP poll returned `found`. The 4
+  verification_not_sent services should now pass. Commit 3a751b0 added a
+  `mailbox_domain_mismatch` diagnostic so this class of misconfig surfaces
+  in the bot trail instead of a silent "no mail" next time.
 - **AUTH-WALL (8: groq/xata/ipdata/stripe/stytch/weaviate/northflank/
   launchdarkly):** OAuth never completed. NEXT: re-test with
   `BOT_CDP_HARDENED=1` (patchright) — the clean fingerprint may now clear
