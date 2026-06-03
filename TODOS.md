@@ -127,9 +127,11 @@ cleared state and timed out → a fixable **bot bug**, not a wall.
    used a dirty browser). Revive a residential endpoint (Tellskill Mac or
    a cheap residential proxy), set `UNIVERSAL_BOT_PROXY_URL` +
    `BOT_CDP_HARDENED=1`, re-run this A/B. This is the decisive test.
-2. **Fix the codesandbox-class interstitial bug** — recognize the
-   Cloudflare `"Verification successful"` state and proceed instead of
-   timing out as `anti_bot_blocked`.
+2. ~~Fix the codesandbox-class interstitial bug~~ **DONE (commit e60291a)**
+   — `classifyInterstitialText` now recognizes the Cloudflare
+   `"Verification successful"` state (separate from the static challenge
+   copy) and waits patiently through the stuck redirect instead of timing
+   out as `anti_bot_blocked`.
 3. Make `BOT_CDP_HARDENED=1` the default once (1) confirms a conversion
    lift (it ships dark today — flag-gated off).
 Harness to reuse for any future measurement: `/tmp/cdp-detect`.
