@@ -552,6 +552,185 @@ describe("replaySkill — LLM fallback", () => {
   });
 });
 
+// ── Absent setup-click skip (account-state-dependent steps) ─────────
+//
+// hookdeck class: the captured "Create Project" click only existed in
+// the original signup's first-time account state. On replay against a
+// fresh / already-set-up account the button is simply gone. The replay
+// engine must skip the absent NON-credential-creating click and keep
+// going, rather than hard-failing a credential it can still reach.
+
+describe("replaySkill — absent setup-click skip", () => {
+  it("skips a wholly-absent non-credential click and reaches the credential (hookdeck case)", async () => {
+    const b = stubBrowser();
+    // The page does NOT have "Create Project" (the first-time-account
+    // setup button). It DOES have "Create Token" (the credential-
+    // creating click) and a Copy button.
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor([
+      "Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        // Step 0: the account-state-dependent setup click — ABSENT now.
+        { kind: "click", text_match: "Create Project", role_hint: "button", provenance },
+        // Step 1: the credential-creating click — present.
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.credential).toBe("db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+
+    // The absent setup button was never clicked; the credential-creating
+    // button WAS clicked.
+    const clicks = b.history.filter((c) => c.method === "click");
+    expect(clicks.some((c) => c.args[0] === "button.create-token")).toBe(true);
+    expect(clicks.some((c) => String(c.args[0]).includes("project"))).toBe(false);
+  });
+
+  it("does NOT skip when the absent click IS the credential-creating click", async () => {
+    const b = stubBrowser();
+    // The credential-creating "Create Token" button is gone. Skipping it
+    // would bypass token creation and let a hollow replay claim success,
+    // so this must still hard-fail.
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Some unrelated button", selector: "button.x" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(0);
+  });
+
+  it("does NOT skip an absent click that is the last click with no later credential click", async () => {
+    const b = stubBrowser();
+    // navigate -> click(absent) -> extract. The click is the last click
+    // before the extract, so it IS the credential-creating click — a
+    // missing one is genuine rot, not an optional setup step.
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Unrelated", selector: "button.x" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "navigate", url: "https://example.com/tokens", provenance },
+        { kind: "click", text_match: "Create Project", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(1);
+  });
+
+  it("does NOT skip when the click target is PRESENT but ambiguous (real rot)", async () => {
+    const b = stubBrowser();
+    // "Create Project" resolves to TWO non-button links — the element
+    // exists but the skill can't pin it. That's a real ambiguity, not a
+    // vanished setup step, so it must NOT be silently skipped.
+    b.setInventoryFor("extract", [
+      inv({ tag: "a", visibleText: "Create Project", selector: "a.help" }),
+      inv({ tag: "a", visibleText: "Create Project", selector: "a.docs" }),
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Project", provenance },
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(0);
+  });
+
+  it("prefers an LLM substitute over skipping when the fallback supplies one", async () => {
+    const b = stubBrowser();
+    // "Create Project" is absent, but a substitute "Start Project" IS on
+    // the page and the planner finds it. The substitute must win over the
+    // skip path (the skip is the last-resort behaviour).
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Start Project", role: "button", selector: "button.start" }),
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor([
+      "Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+    ]);
+
+    const llmFallback = vi.fn(
+      async (input: LLMFallbackInput): Promise<SkillStep | null> => {
+        expect(input.capturedStep.kind).toBe("click");
+        return {
+          kind: "click",
+          text_match: "Start Project",
+          role_hint: "button",
+          provenance: { run_id: "fallback", round_index: 0 },
+        };
+      },
+    );
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Project", role_hint: "button", provenance },
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      llmFallback,
+    });
+
+    expect(llmFallback).toHaveBeenCalledOnce();
+    expect(result.kind).toBe("ok");
+    const clicks = b.history.filter((c) => c.method === "click");
+    // The substitute was clicked — the absent step was NOT merely skipped.
+    expect(clicks.some((c) => c.args[0] === "button.start")).toBe(true);
+  });
+});
+
 // ── needs_login on OAuth without a profile session ──────────────────
 
 describe("replaySkill — OAuth needs_login", () => {
