@@ -1948,7 +1948,14 @@ export class BrowserController {
   } | null> {
     if (!this.page) throw new Error("Browser not started");
 
-    // Phase 1: iframe shape with polling.
+    // Phase 1: widget shape with polling. page.locator (unlike the
+    // querySelector in detectCaptchaVariant) pierces OPEN shadow roots,
+    // so the Cloudflare iframe is reachable even on modern shadow-DOM
+    // Turnstile embeds. The `.cf-turnstile` host div is added as a
+    // fallback for CLOSED-shadow embeds where the iframe isn't reachable
+    // but the (light-DOM) host is — clicking the host box still triggers
+    // the widget. This mirrors detectCaptchaVariant's iframe-OR-host
+    // check so detection and solving agree (A4).
     //   Cloudflare Turnstile: src contains "challenges.cloudflare.com"
     //   reCAPTCHA v2:         src contains "recaptcha/api2"
     const iframeCandidates: Array<{
@@ -1957,6 +1964,10 @@ export class BrowserController {
     }> = [
       { kind: "turnstile", selector: 'iframe[src*="challenges.cloudflare.com"]' },
       { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2"]' },
+      // Host-div fallbacks (light DOM) — preferred order keeps the iframe
+      // first when present (more precise click target).
+      { kind: "turnstile", selector: ".cf-turnstile" },
+      { kind: "turnstile", selector: "#clerk-captcha" },
     ];
     const iframeDeadline = Date.now() + 5000;
     while (Date.now() < iframeDeadline) {

@@ -76,13 +76,18 @@ service that renders a scoreable challenge on the form, then run the
 A/B for a concrete block-rate delta. Until then AB2–AB6 stay deferred
 (they sequence after this baseline reads out).
 
-### A4 — `findCaptchaWidget` shadow-DOM solve-path parity [P2, ~1 hour]
-`detectCaptchaVariant` was fixed this session to see modern shadow-DOM
-Turnstile (iframe-in-shadow-root). The *solve* path (`findCaptchaWidget`
-click-and-wait position lookup) likely still uses the same pre-shadow
-querySelector and would fail to locate the checkbox on a visible
-shadow-DOM Turnstile. Audit + apply the same iframe-URL/shadow-pierce
-detection so detection and solving agree.
+### A4 — `findCaptchaWidget` shadow-DOM solve-path parity [DONE 2026-06-02]
+Audited: the hypothesis was partly wrong. `findCaptchaWidget` uses
+Playwright `page.locator` (NOT the `document.querySelector` that
+`detectCaptchaVariant` uses), and Playwright pierces OPEN shadow roots —
+so the solve path was already shadow-aware for the common case, plus
+Phase 2 anchors on the light-DOM `cf-turnstile-response` input. The real
+gap: the solve path checked iframe + response-input but NOT the
+`.cf-turnstile` host div directly — the exact extra check the detection
+fix added. Closed it: added `.cf-turnstile` + `#clerk-captcha` host-div
+fallbacks to Phase 1 (preferred order keeps the iframe first when
+present), so detection and solving now agree on the closed-shadow case.
+Not deployed yet — batch with A5 on the next mcp republish.
 
 > Vouchflow P4 (device-attestation gating the vault) is **explicitly
 > skipped for now** per operator call 2026-06-02 — it's wired but
