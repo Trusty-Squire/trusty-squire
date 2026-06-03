@@ -2746,6 +2746,27 @@ function isLLMPair(x: LLMClient | LLMPair): x is LLMPair {
   return "primary" in x && typeof x.primary === "object" && x.primary !== null;
 }
 
+// True when the last `threshold` executed ACTIONS (click/select/check/
+// fill — steps meant to mutate the page) each left the page content
+// UNCHANGED. That is the signature of a broken onboarding wizard that
+// re-presents itself no matter what the bot clicks (the axiom case,
+// measured 2026-06-03): the planner keeps correctly reacting to a
+// visibly-unfilled form, but the click never registers, so without this
+// the run burns all 24 rounds + LLM budget re-clicking the same card.
+// Navigates / waits / extracts are excluded — they legitimately don't
+// change the current DOM (navigate changes URL, wait pauses). Pure +
+// exported for unit tests.
+export function isStalledOnActions(
+  effects: ReadonlyArray<{ kind: string; pageUnchanged: boolean }>,
+  threshold = 3,
+): boolean {
+  if (effects.length < threshold) return false;
+  const ACTION_KINDS = new Set(["click", "select", "check", "fill"]);
+  return effects
+    .slice(-threshold)
+    .every((e) => ACTION_KINDS.has(e.kind) && e.pageUnchanged);
+}
+
 export class SignupAgent {
   // Per-run counter so a single SignupAgent (which lives one run) can't
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
@@ -5992,6 +6013,13 @@ ${formatInventory(input.inventory)}`,
     // navigate produced no progress. Inject a hint forcing a CLICK
     // on something visible in the current inventory.
     let prevNavigateFromUrl: string | null = null;
+    // Stalled-wizard breaker. Tracks a content signature of the page +
+    // the effect of each executed action, so we can detect an onboarding
+    // wizard that re-presents itself (clicks don't register) and break
+    // out instead of burning every round on it. See isStalledOnActions.
+    let prevContentSig: string | null = null;
+    let lastActionKind: string | null = null;
+    const actionEffects: Array<{ kind: string; pageUnchanged: boolean }> = [];
     // 0.8.2-rc.10 — escalation for the stuck-loop detector.
     //
     // The existing detector injects a re-plan hint when the planner
@@ -6152,6 +6180,33 @@ ${formatInventory(input.inventory)}`,
         );
         await this.browser.wait(2);
         continue;
+      }
+      // Stalled-wizard breaker. Build a content signature (URL + each
+      // inventory element's selector + label) and judge whether the
+      // PREVIOUS executed action changed the page. If the last few
+      // page-mutating actions all left the page identical, a wizard is
+      // re-presenting itself and clicking it does nothing — stop here so
+      // we don't waste the remaining rounds + LLM budget. (axiom: 4×
+      // role-card re-clicks that never advanced.)
+      const contentSig = (
+        state.url +
+        "§" +
+        inventory
+          .map((e) => `${e.selector}·${(e.visibleText ?? e.ariaLabel ?? "").slice(0, 24)}`)
+          .join("|")
+      ).slice(0, 4000);
+      const pageUnchanged = prevContentSig !== null && contentSig === prevContentSig;
+      if (lastActionKind !== null) {
+        actionEffects.push({ kind: lastActionKind, pageUnchanged });
+      }
+      prevContentSig = contentSig;
+      if (isStalledOnActions(actionEffects)) {
+        args.steps.push(
+          `Post-verify: STALLED — the last 3 page-mutating actions left the page ` +
+            `identical (${state.url}). An onboarding wizard is re-presenting itself ` +
+            `(clicks not registering); giving up instead of burning the round budget.`,
+        );
+        break;
       }
       // Email-OTP gate that surfaced AFTER OAuth (the pre-OAuth signup
       // gate never saw it, so pendingOtpCode is unset). Convex's
@@ -6709,6 +6764,11 @@ ${formatInventory(input.inventory)}`,
         prevSignature = null;
         prevInventorySize = inventory.length;
       }
+
+      // Record the kind of the step we're ABOUT to execute (all re-plan
+      // `continue` guards are behind us here) so next round can judge
+      // whether it changed the page — the stalled-wizard breaker above.
+      lastActionKind = nextStep.kind;
 
       if (nextStep.kind === "done") {
         // When the planner bails because it encountered Google's
