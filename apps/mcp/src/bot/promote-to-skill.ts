@@ -193,6 +193,14 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // failure (collision, unparseable label) we REJECT rather than
   // silently fall back to single-cred — a multi-cred capture with
   // ambiguous labels is operator-fix territory.
+  // A6 — drop a spurious uuid_token regex extract when a copy-button
+  // extract co-exists (see dropSpuriousUuidExtract). PostHog/brevo/statsig
+  // class: a uuid-shaped onboarding-page value (e.g. a project_id) got
+  // captured as a second "credential" next to the real copy-button key,
+  // and upgradeToMultiCred made both required → replay hard-fails on a
+  // fresh account.
+  stepsResult.steps = dropSpuriousUuidExtract(stepsResult.steps);
+
   const extractStepIndices = stepsResult.steps
     .map((s, i) => ({ s, i }))
     .filter(
@@ -1216,6 +1224,27 @@ function detectKnownCredentialPattern(
   // set tightly enough (and the synthesizer DOES set it tightly when
   // it observed a short alphanumeric below).
   return "uuid_token";
+}
+
+// A6 — drop a spurious uuid_token regex extract when a copy-button
+// extract co-exists. Auto-promote sometimes captures a uuid-shaped value
+// on an onboarding page (e.g. PostHog's project_id) as a "credential"
+// next to the REAL copy-button key; upgradeToMultiCred then makes BOTH
+// required, so the verifier replay hard-fails on a fresh account where
+// the spurious uuid isn't present (observed 2026-06-02: posthog/brevo/
+// statsig). A copy-button extract is a strong, explicit credential
+// signal; `uuid_token` is detectKnownCredentialPattern's DEFAULT for
+// "unrecognized" — the weak/spurious one. With both present, the regex
+// is almost certainly the spurious capture, so drop it. No-op when there
+// is no copy-button extract (keeps a lone uuid_token skill), and leaves
+// genuine multi-cred untouched (distinct copy-button fields, or non-
+// uuid_token regex patterns like resend/stripe/render).
+export function dropSpuriousUuidExtract(steps: SkillStep[]): SkillStep[] {
+  const hasCopyButton = steps.some((s) => s.kind === "extract_via_copy_button");
+  if (!hasCopyButton) return steps;
+  return steps.filter(
+    (s) => !(s.kind === "extract_via_regex" && s.pattern_name === "uuid_token"),
+  );
 }
 
 function findCopyButton(
