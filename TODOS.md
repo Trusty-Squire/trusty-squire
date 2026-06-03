@@ -356,3 +356,15 @@ These aren't TODOs — operational reminders.
 - **Dedicated GitHub App** for the harvester subagent identity
   (vs the user-account PAT). Revisit before Phase 4 (when the
   subagent starts opening real PRs).
+
+## Impossible-class signups — tackle NEXT (G4 / residential IP / manual)
+From the 2026-06-03 fan-out re-run; confirmed not bot-code-fixable in the
+current egress (datacenter IP). Revisit with a residential proxy (G4) or
+manual capture:
+- **Captcha walls:** cronitor, plausible
+- **Anti-bot gateways:** codesandbox, tally
+- **OAuth-loop / anti-bot OAuth-callback rejection:** cockroachdb,
+  growthbook, plunk, uploadcare
+- **Non-basic OAuth scope (needs operator review):** inngest
+These were EXCLUDED from the step-3 fan-out (every other failing service
+is being fixed). Tackle this list once a residential egress path exists.
