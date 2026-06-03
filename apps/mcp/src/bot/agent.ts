@@ -264,18 +264,77 @@ const STUCK_LOOP_FALLBACK_PATHS: readonly string[] = [
   "/settings/tokens",
   "/settings/api-tokens",
   "/settings/account/api/auth-tokens/",
+  // 0.8.3-rc.2 — added after the post-OAuth onboarding drain
+  // (amplitude/groq/launchdarkly/modal/weaviate/…). These conventions
+  // were absent from the generic list and each cost a service its
+  // whole post-verify budget: LaunchDarkly hosts keys at
+  // /settings/authorization, a cohort of consoles use a bare
+  // /settings/access-tokens or /settings/api, and several put the
+  // developer surface at /settings/developers. They sit AFTER the
+  // historic, more-common paths so we don't regress an existing hit.
+  "/settings/authorization",
+  "/settings/access-tokens",
+  "/settings/developers",
+  "/settings/developer",
+  "/settings/api",
   "/account/api-keys",
   "/account/api_tokens",
+  "/account/api-tokens",
   "/account/keys",
   "/account/tokens",
+  "/account/access-tokens",
   "/api-keys",
   "/api_keys",
+  "/api-tokens",
   "/keys",
   "/tokens",
+  "/access-tokens",
   "/auth-tokens",
+  "/developers",
   "/dashboard/api-keys",
   "/dashboard/keys",
 ];
+
+// 0.8.3-rc.2 — curated per-service API-key paths, consulted BEFORE the
+// generic STUCK_LOOP_FALLBACK_PATHS list when the stuck origin belongs
+// to one of these vendors. The generic conventions can't reach these:
+// the path is either non-obvious (LaunchDarkly's /settings/authorization),
+// or the vendor splits the convention differently than the majority
+// (groq keys live at a bare /keys but the planner kept guessing
+// /settings/api-keys, which 404s). Keyed by service SLUG (lowercased,
+// alphanumerics only) so it survives the inbox-alias slug the bot is
+// invoked with, and additionally matched against the stuck URL's host so
+// a curated path is only ever composed onto the vendor it was harvested
+// from. Each entry is ordered most-specific-first.
+//
+// This is deliberately a SMALL map of paths the generic heuristic
+// provably can't derive — not a 12-service URL table. Most services in
+// the onboarding-drain cohort are fixed by the widened generic list
+// above; only the ones whose real path is genuinely un-guessable land
+// here.
+const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
+  // console.groq.com/keys — the planner kept trying /settings/api-keys
+  // (404). The bare /keys IS in the generic list but lands deep in the
+  // order; pin it first for groq so the first escalation hits.
+  groq: ["/keys", "/settings/keys"],
+  // app.launchdarkly.com/settings/authorization — LD's access-token UI.
+  // /settings/api-keys and /settings/generated-credentials both 404.
+  launchdarkly: ["/settings/authorization"],
+  // Weaviate keys are issued per-cluster, but the org-level admin page
+  // is the closest reachable surface; account-scoped guesses all 404.
+  weaviate: ["/account", "/settings/api-keys"],
+  // northflank hosts user API keys under the account menu, not a
+  // top-level /settings/keys.
+  northflank: ["/account/api", "/settings/api"],
+};
+
+// Normalize a service name to the slug used as a SERVICE_KEYS_PATHS key:
+// lowercased, alphanumerics only. Mirrors guessSignupUrl's slug rule so
+// the inbox-alias-derived service string (e.g. "Groq Cloud") resolves to
+// the same key the map is authored under. Exported for unit testing.
+export function serviceSlug(service: string): string {
+  return service.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
 
 // 0.8.2-rc.10 — heuristic for "this account already exists on the
 // service and its API keys are masked, with no path to reveal them."
@@ -348,34 +407,53 @@ export function detectExistingAccountNoExtract(input: {
   return false;
 }
 
-// Pick the next fallback URL to try from STUCK_LOOP_FALLBACK_PATHS
-// keyed against the origin of the currently-stuck URL. Returns null
-// when every path has already been attempted. Exported for unit tests.
+// Pick the next fallback URL to try, keyed against the origin of the
+// currently-stuck URL. The curated SERVICE_KEYS_PATHS for the run's
+// service (when its host matches the stuck origin) are tried FIRST,
+// then the generic STUCK_LOOP_FALLBACK_PATHS. Returns null when every
+// path has already been attempted. Exported for unit tests.
 export function pickStuckLoopFallbackUrl(
   currentUrl: string,
   alreadyTried: ReadonlySet<string>,
+  service?: string,
 ): string | null {
-  let origin: string;
+  let parsed: URL;
   try {
-    origin = new URL(currentUrl).origin;
+    parsed = new URL(currentUrl);
   } catch {
     return null;
   }
+  const origin = parsed.origin;
   // Skip a candidate when the current URL's path ALREADY matches it
   // (case-insensitive, trailing-slash tolerant). The planner is stuck
   // ON the page the candidate points to — navigating to the same URL
   // again won't break the cycle, only a different path will.
-  const currentPath = (() => {
-    try {
-      return new URL(currentUrl).pathname.replace(/\/+$/, "").toLowerCase();
-    } catch {
-      return "";
-    }
-  })();
-  for (const path of STUCK_LOOP_FALLBACK_PATHS) {
+  const currentPath = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+
+  // Compose curated per-service paths first, but only when the stuck
+  // origin's host actually belongs to the named service. The slug is
+  // a substring of the host for the vendors we curate (groq →
+  // console.groq.com, launchdarkly → app.launchdarkly.com, …); this
+  // host gate stops a curated path from being composed onto an
+  // unrelated origin the bot wandered onto (e.g. an OAuth provider or
+  // a redirect to a marketing domain).
+  const slug = service !== undefined ? serviceSlug(service) : "";
+  const curated =
+    slug !== "" &&
+    SERVICE_KEYS_PATHS[slug] !== undefined &&
+    parsed.hostname.toLowerCase().includes(slug)
+      ? SERVICE_KEYS_PATHS[slug]
+      : [];
+
+  // Curated paths lead; the generic list follows. De-dup so a path that
+  // appears in both (groq's /keys, /settings/keys) isn't offered twice.
+  const seen = new Set<string>();
+  for (const path of [...curated, ...STUCK_LOOP_FALLBACK_PATHS]) {
+    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
+    if (seen.has(candidatePath)) continue;
+    seen.add(candidatePath);
     const candidate = `${origin}${path}`;
     if (alreadyTried.has(candidate)) continue;
-    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
     if (candidatePath === currentPath) continue;
     return candidate;
   }
@@ -6172,7 +6250,11 @@ ${formatInventory(input.inventory)}`,
               hint = undefined;
               continue;
             }
-            const fallback = pickStuckLoopFallbackUrl(state.url, triedFallbackUrls);
+            const fallback = pickStuckLoopFallbackUrl(
+              state.url,
+              triedFallbackUrls,
+              args.service,
+            );
             if (fallback !== null) {
               triedFallbackUrls.add(fallback);
               args.steps.push(
