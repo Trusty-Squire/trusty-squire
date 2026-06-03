@@ -459,4 +459,70 @@ describe("planExecuteWithRetry", () => {
     expect(outcome.kind).toBe("submitted");
     expect(steps.some((s) => /submit_disabled/i.test(s))).toBe(true);
   });
+
+  // Paddle regression: a multi-step SPA where an earlier action advances
+  // the page, so the submit selector that resolved at plan-time has
+  // vanished by click-time. clickSubmit throws a Playwright visibility
+  // timeout. Pre-fix this returned submit_failed and ended the run; now
+  // it re-plans against the now-current page and submits cleanly.
+  it("re-plans when the submit selector went stale (Playwright timeout), instead of failing", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      // Round 1: a "Continue" button the planner submits to — but the
+      // click advances the SPA and this selector then vanishes.
+      [
+        mk({ tag: "input", type: "checkbox", labelText: "I agree", selector: "#agree" }),
+        mk({ tag: "button", visibleText: "Continue", selector: "#step1-continue" }),
+      ],
+      // Round 2: the genuinely-final form on the advanced page.
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    let submitCalls = 0;
+    browser.clickSubmitImpl = () => {
+      submitCalls += 1;
+      if (submitCalls === 1) {
+        throw new Error(
+          "locator.waitFor: Timeout 20000ms exceeded.\nCall log:\n  - waiting for locator('#step1-continue') to be visible",
+        );
+      }
+    };
+    const llm = new QueueLLM([
+      fillPlan("#agree", "#step1-continue"),
+      fillPlan("#email", "#go"),
+    ]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(steps.some((s) => /went stale/i.test(s))).toBe(true);
+    expect(llm.calls).toBe(2); // re-planned once after the stale submit
+  });
+
+  // The carve-out is precise: a non-timeout submit click failure (e.g.
+  // an ambiguous selector matched several buttons, none disambiguated)
+  // is a genuine failure and still ends the run — it is NOT a stale-
+  // selector re-plan.
+  it("still fails submit_failed on a genuine (non-timeout) submit error", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    browser.clickSubmitImpl = () => {
+      throw new Error(
+        'submit selector "#go" matched 3 buttons, none scoring as a signup button',
+      );
+    };
+    const llm = new QueueLLM([fillPlan("#email", "#go")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submit_failed");
+    expect(steps.some((s) => /submit click failed/i.test(s))).toBe(true);
+  });
 });

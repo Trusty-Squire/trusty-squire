@@ -65,6 +65,27 @@ describe("collectAcrossShadowRoots — guard against roots with no querySelector
     expect(tagsOf(out)).toContain("match");
   });
 
+  it("does not throw when a nested shadowRoot is `undefined` (the 2026-06-03 #59 recurrence)", () => {
+    // The crash the null-only guard missed: `Element.shadowRoot` is typed
+    // `ShadowRoot | null`, but a detached/closed custom element yields
+    // `undefined`. The recursion calls walk() on any non-null shadowRoot,
+    // so `undefined` reached `typeof undefined.querySelectorAll` and threw
+    // "Cannot read properties of undefined (reading 'querySelectorAll')" —
+    // exactly redis-cloud's live failure. The loose `== null` guard fixes it.
+    const host = el("host", undefined);
+    const tree = root([el("match")], [host]);
+    let out: ReturnType<typeof collectAcrossShadowRoots> = [];
+    expect(() => {
+      out = collectAcrossShadowRoots(tree, "sel");
+    }).not.toThrow();
+    expect(tagsOf(out)).toContain("match");
+  });
+
+  it("does not throw when the top-level root is `undefined`", () => {
+    expect(() => collectAcrossShadowRoots(undefined, "sel")).not.toThrow();
+    expect(collectAcrossShadowRoots(undefined, "sel")).toEqual([]);
+  });
+
   it("still pierces well-formed nested shadow roots", () => {
     const inner = root([el("inner")]);
     const host = el("host", inner);
