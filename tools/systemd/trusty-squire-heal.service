@@ -16,8 +16,10 @@ Type=oneshot
 # tarball). Adjust WorkingDirectory if your checkout isn't ~/proj-ts.
 WorkingDirectory=%h/proj-ts
 # Operator env: REGISTRY_ADMIN_BEARER (required), TRUSTY_SQUIRE_REGISTRY_URL,
-# TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID (discover phase),
 # UNIVERSAL_BOT_LLM_TIER=free, optional TELEGRAM_BOT_TOKEN for the digest.
+# The machine token + account id (discover phase) do NOT need to live in
+# harvester.env — the CLI auto-reads them from ~/.config/trusty-squire/
+# session.json (an explicit env value still wins if you set one).
 EnvironmentFile=%h/.config/trusty-squire/harvester.env
 ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once --telegram
 # A heal pass drives real browser signups in the discover phase; give it
