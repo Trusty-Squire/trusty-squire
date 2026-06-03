@@ -1,5 +1,41 @@
 # DESIGN — Anti-bot hardening (fighting the Turnstile / reCAPTCHA-v3 hard wall)
 
+> ## ⚠️ UPDATE 2026-06-03 — MEASURED: the central premise below was wrong
+>
+> This doc claims `Runtime.enable` is a binary, undefeatable CDP tell and
+> that a residential proxy "did not lift conversion." Both were re-tested
+> against the **maintained rebrowser bot-detector** (the authoritative
+> suite) and a measurement harness (`/tmp/cdp-detect`, the thing this doc
+> lamented we never had). Findings:
+>
+> 1. **`Runtime.enable` does NOT leak** in current Playwright — it reads
+>    "no leak detected" on *bare vanilla*, before any patch. Upstream
+>    closed it. The whole premise was stale.
+> 2. **`rebrowser-playwright-core` was never installed**, so
+>    `BOT_CDP_HARDENED` had hardened **zero** runs. Every "anti-bot wall"
+>    failure ran on vanilla leaky Playwright.
+> 3. The **real** tells were `mainWorldExecution` (the bot's main-world
+>    DOM probing), `navigator.webdriver` (the manual `defineProperty`
+>    patch RE-ADDED a detectable property — self-inflicted), and
+>    `viewport` (hardcoded 1280×720 = Playwright's default).
+> 4. **The residential-proxy test was confounded** — it ran with a browser
+>    that was screaming automation on the three tells above. Clean IP +
+>    dirty browser still blocks. **Nobody ever tested a clean browser +
+>    clean IP together.**
+>
+> **Fix shipped (commit 2485b38):** the hardened launcher is now
+> **patchright** (isolated-world execution + native webdriver handling,
+> drives real Chrome via channel without the rebrowser crash), plus
+> `viewport:null`, dropped the stale hardcoded UA, removed the
+> counterproductive webdriver patch (hardened arm), and bumped Xvfb to
+> 1920×1080. Verified **ALL-GREEN** through the real `BrowserController`
+> launch path. The captcha solver / 2Captcha analysis below stands; the
+> "Runtime.enable is unbeatable" and "residential IP doesn't help"
+> conclusions do not. Open question now measuring: does the all-green
+> browser get past a live wall on a datacenter IP, or is the residual
+> block IP-bound (→ the never-run hardened-browser + residential-IP
+> experiment)?
+
 Status: **Slice 1 implemented + tested + API deployed (2026-06-01).**
 Items 2–6 recorded as deferred — pick up after the A/B telemetry reads
 out. Branch `antibot-cdp-telemetry`; both packages build + typecheck +
