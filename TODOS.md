@@ -368,3 +368,17 @@ manual capture:
 - **Non-basic OAuth scope (needs operator review):** inngest
 These were EXCLUDED from the step-3 fan-out (every other failing service
 is being fixed). Tackle this list once a residential egress path exists.
+
+**More walls confirmed by the step-3 subagents (read the actual page
+snapshots, 2026-06-03) — also EXCLUDED from the re-run:**
+- **Stale 404 signup URLs (URL curation, NOT bot code):** daytona, loops,
+  temporal, typesense, workos, baselime — the seed `signup_url` 404s or
+  lands on a marketing page. Refresh the URLs in the discovery seed; these
+  are not anti-bot, just wrong/dead links. Cheapest follow-up of the batch.
+- **Signups administratively disabled:** highlight ("Creating new
+  workspaces is disabled").
+- **Hard verification gates (need F12 SMS-relay / human):** sendgrid
+  (SMS/phone MFA), circleci (authenticator-app TOTP), betterstack-uptime +
+  betterstack-logs (magic-link gated behind invisible reCAPTCHA token).
+- **Credit-card billing gate (same class as Vercel/MailerSend):** mailgun.
+- **Dead dev host:** hatchet (`app.dev.hatchet-tools.com` → ERR_CONNECTION_REFUSED).
