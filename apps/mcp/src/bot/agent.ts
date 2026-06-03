@@ -1477,6 +1477,47 @@ export function detectAlreadySignedIn(args: {
   );
   if (hasCredentialInput) return false;
 
+  // Signal 0 — a strong post-login URL path. An onboarding /
+  // getting-started / welcome route is only reachable AFTER you're
+  // authenticated (you cannot see a "you're all set, next steps" wizard
+  // without a session), so the URL alone is conclusive here — unlike the
+  // weaker dashboard paths in Signal 3, no paired creation-CTA is needed.
+  // last9 lands the bot on /v2/organizations/<slug>/getting-started with
+  // its Google session already active; its buttons ("Choose your region",
+  // "You're all set! Next steps", "Upgrade Plan") matched none of the CTA
+  // vocabularies below, so it used to bail `oauth_required` — claiming
+  // "only OAuth/SSO signup, no email/password form" while the bot was in
+  // fact fully signed in. The precondition above already ruled out a
+  // signup chooser (no credential input).
+  // ...UNLESS the page still presents a signup/OAuth chooser (a
+  // "Continue with Google" button or a bare "Sign up"/"Log in"). Some
+  // services route the login chooser through an /onboarding-style URL; if
+  // a provider button is visible, the bot must OAuth via it, not treat the
+  // page as already-authenticated. (PostHog TS-1923.)
+  const hasSignupAffordance = inventory.some((e) => {
+    const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+    return (
+      /\b(?:continue with|sign ?up with|sign ?in with|log ?in with|with (?:google|github|gitlab|microsoft|apple))\b/.test(
+        t,
+      ) || /^(?:sign ?up|sign ?in|log ?in|create (?:an )?account)$/.test(t)
+    );
+  });
+  try {
+    if (
+      !hasSignupAffordance &&
+      /\/(?:getting-started|get-started|onboarding|welcome)(?:\/|$)/i.test(
+        new URL(url).pathname,
+      )
+    ) {
+      return true;
+    }
+  } catch {
+    // malformed URL — fall through to the other signals
+  }
+
   const visibleTextOf = (e: InteractiveElement): string =>
     `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
 
