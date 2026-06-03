@@ -1563,6 +1563,78 @@ describe("replaySkill — rc.8 fallback fixes", () => {
     expect(result.kind).toBe("step_failed");
   });
 
+  // ── render 0DTW2V66 regression — password-manager UI ≠ credential ──
+  // The auto-promoted render skill was synthesized as `uuid_token` with
+  // a {32, 80} validator (the synthesizer didn't recognise `rnd_` and
+  // fell back to uuid). On replay the render API-keys page renders a
+  // "1Password" autofill affordance; the validator-blind uuid_token
+  // tier accepted it (len 9, alphanumeric, has a digit) and the
+  // downstream validator then rejected it
+  // (`got="1Password" length 9 below min_length 32`). The real `rnd_…`
+  // key was on the same page but lost to DOM order.
+  it("prefers the rnd_ key over a '1Password' UI affordance (render 0DTW2V66)", async () => {
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_regex", pattern_name: "uuid_token", provenance }],
+      {
+        service: "render",
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "RENDER_API_KEY",
+            post_extract_validator: { min_length: 32, max_length: 80 },
+          },
+        ],
+      },
+    );
+    // The glued body text doesn't surface the rnd_ key at a word
+    // boundary (it's inside a <code> element). The candidate list — which
+    // includes structural <code>/<pre> textContent — carries both the UI
+    // word AND the real key. "1Password" appears first (DOM order).
+    b.setTextFor("API KeysName render-key 1Password");
+    b.setCandidatesFor([
+      "1Password", // ← password-manager UI affordance, len 9, has a digit
+      "rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF", // ← the real render key
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF");
+    }
+  });
+
+  it("returns no credential rather than '1Password' when only UI noise is present", async () => {
+    // Same render-class page, but the real key never rendered (timing /
+    // wrong page). The bot must NOT hand "1Password" up the chain — a
+    // password-manager UI word is never a credential. Better to fail
+    // clean (the universal-bot fallback re-runs) than publish garbage.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [{ kind: "extract_via_regex", pattern_name: "uuid_token", provenance }],
+      {
+        service: "render",
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "uuid",
+            env_var_suggestion: "RENDER_API_KEY",
+            post_extract_validator: { min_length: 32, max_length: 80 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("API KeysName 1Password Save to 1Password");
+    b.setCandidatesFor(["1Password", "Save to 1Password", "Bitwarden"]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    // No credential extracted at all → step_failed (the canonical
+    // "No credential matching pattern uuid_token" throw), NOT a
+    // validator_failed carrying "1Password".
+    expect(result.kind).toBe("step_failed");
+  });
+
   // ── 0.8.2-rc.22 — copy-button executor falls back to text scan ────
   it("recovers via validator-filtered candidates when no Copy button is visible (extract_via_copy_button)", async () => {
     // Railway-class page: the captured skill expected a Copy button to

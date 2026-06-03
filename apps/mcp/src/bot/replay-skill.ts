@@ -52,7 +52,12 @@ import type {
 } from "@trusty-squire/skill-schema";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { loggedInProviders } from "./login-state.js";
-import { isTruncatedCapture, extractApiKeyFromText, findOAuthButton } from "./agent.js";
+import {
+  isTruncatedCapture,
+  extractApiKeyFromText,
+  findOAuthButton,
+  isCredentialNoiseCandidate,
+} from "./agent.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   filterByNearTextHint,
@@ -947,6 +952,7 @@ async function executeStep(
               if (cand.length > fallbackValidatorPoll.max_length) continue;
               if (!/\d/.test(cand)) continue;
               if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+              if (isCredentialNoiseCandidate(cand)) continue; // password-manager UI
               return { kind: "extract_ok", value: cand, via: "copy_button" };
             }
           } catch {
@@ -1038,6 +1044,7 @@ async function executeStep(
             if (cand.length > fallbackValidator.max_length) continue;
             if (!/\d/.test(cand)) continue;
             if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue;
+            if (isCredentialNoiseCandidate(cand)) continue; // password-manager UI
             return { kind: "extract_ok", value: cand, via: "copy_button" };
           }
         } catch {
@@ -1131,6 +1138,7 @@ async function executeStep(
             if (cand.length > validator.max_length) continue;
             if (!/\d/.test(cand)) continue; // skip pure-letter nav strings
             if (!/^[a-zA-Z0-9_\-]+$/.test(cand)) continue; // sanity
+            if (isCredentialNoiseCandidate(cand)) continue; // password-manager UI
             return { kind: "extract_ok", value: cand, via: "regex" };
           }
         } catch {
@@ -1163,6 +1171,22 @@ async function executeStep(
       if (step.pattern_name === "uuid_token") {
         try {
           const candidates = await browser.extractCredentialCandidates();
+          // Pattern-preference pass. This validator-blind tier accepts
+          // any bare 8-128 char alphanumeric token, which means a short
+          // password-manager UI word ("1Password", len 9, has a digit)
+          // could win over the real prefix-keyed credential that is ALSO
+          // on the page — the 0DTW2V66 render skill failed exactly this
+          // way (`got="1Password" length 9 below min_length 32`; the
+          // real `rnd_…` key was present but shadowed by DOM order).
+          // Render the candidates through the regex library FIRST: if
+          // any is a recognised credential (rnd_, re_, sk_, …), it is a
+          // far stronger signal than a bare word and must win.
+          for (const cand of candidates) {
+            const hit = extractApiKeyFromText(cand);
+            if (hit !== null && !isTruncatedCapture(cand, hit)) {
+              return { kind: "extract_ok", value: hit, via: "regex" };
+            }
+          }
           for (const cand of candidates) {
             if (cand.length < 8 || cand.length > 128) continue;
             if (!/\d/.test(cand)) continue;
@@ -1170,6 +1194,10 @@ async function executeStep(
             // Skip values that look like a URL/path/route — those
             // show up in <code> blocks for documentation snippets.
             if (cand.includes("/") || cand.includes(".")) continue;
+            // Skip password-manager / autofill UI affordances. They pass
+            // every shape check above (short, alphanumeric, has a digit)
+            // but are never the credential.
+            if (isCredentialNoiseCandidate(cand)) continue;
             return { kind: "extract_ok", value: cand, via: "regex" };
           }
         } catch {
