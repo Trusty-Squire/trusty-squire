@@ -2415,6 +2415,57 @@ export function extractApiKeyFromText(text: string): string | null {
   return null;
 }
 
+// Password-manager / autofill UI affordances that render as short
+// word-tokens on credential pages. A render API-keys page ships a
+// "Save to 1Password" / "1Password" autofill button next to the real
+// `rnd_…` key; LastPass, Bitwarden, and Dashlane do the same. These
+// strings are alphanumeric, often carry a digit ("1Password"), and sit
+// EARLIER in DOM order than the credential — so the validator-blind
+// candidate-scan tiers (replay-skill.ts) used to return them as the
+// "credential" and the downstream length validator then rejected them
+// (the 0DTW2V66 render skill: `got="1Password" length 9 below min 32`).
+// They are never credentials; reject them at the candidate layer so the
+// scan moves on to the real key instead of the right key being shadowed
+// by a UI word. Matched case-insensitively as a whole token (the
+// candidates the scan tiers feed in are already whitespace-trimmed
+// single tokens). Exported for unit testing.
+const CREDENTIAL_NOISE_TOKENS: readonly string[] = [
+  "1password",
+  "lastpass",
+  "bitwarden",
+  "dashlane",
+  "keepass",
+  "keeper",
+  "nordpass",
+  "proton pass",
+  "protonpass",
+  "autofill",
+  "passwords",
+];
+
+// Verb-prefixed UI affordances ("Save to 1Password", "Copy to
+// clipboard", "Add to vault"). The candidate-scan tiers tokenize on
+// whitespace so a multi-word affordance rarely survives as one
+// candidate — but extractText()/innerText passes glue it together, so
+// guard the leading verbs too.
+const CREDENTIAL_NOISE_PREFIXES: readonly string[] = [
+  "save to ",
+  "copy to ",
+  "add to ",
+  "store in ",
+];
+
+// True when a candidate string is a password-manager / autofill UI
+// affordance rather than a real credential value. Used by the replay
+// engine's raw-candidate scan tiers to keep "1Password"-class words
+// out of the credential slot. Exported for unit testing.
+export function isCredentialNoiseCandidate(candidate: string): boolean {
+  const lower = candidate.trim().toLowerCase();
+  if (lower.length === 0) return false;
+  if (CREDENTIAL_NOISE_TOKENS.includes(lower)) return true;
+  return CREDENTIAL_NOISE_PREFIXES.some((p) => lower.startsWith(p));
+}
+
 // Choose which link in a verification email to click. Scores each URL
 // by keyword and picks the best — but only if it scored positive.
 //

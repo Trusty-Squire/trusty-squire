@@ -9,7 +9,11 @@
 //     OpenAI / Stripe key modals.
 
 import { describe, expect, it } from "vitest";
-import { extractApiKeyFromText, isTruncatedCapture } from "../agent.js";
+import {
+  extractApiKeyFromText,
+  isTruncatedCapture,
+  isCredentialNoiseCandidate,
+} from "../agent.js";
 
 describe("extractApiKeyFromText — prefixed keys", () => {
   it("extracts a Resend key", () => {
@@ -388,5 +392,48 @@ describe("extractApiKeyFromText — UUID-style tokens (Railway)", () => {
     expect(extractApiKeyFromText(`api token: ${UUID}`)).toBe(UUID);
     expect(extractApiKeyFromText(`API TOKEN: ${UUID}`)).toBe(UUID);
     expect(extractApiKeyFromText(`Api_Token = ${UUID}`)).toBe(UUID);
+  });
+});
+
+describe("isCredentialNoiseCandidate — password-manager UI affordances", () => {
+  it("flags password-manager brand words (any case)", () => {
+    for (const word of [
+      "1Password",
+      "1password",
+      "LastPass",
+      "Bitwarden",
+      "Dashlane",
+      "KeePass",
+      "Keeper",
+      "NordPass",
+      "Proton Pass",
+      "ProtonPass",
+      "Autofill",
+      "Passwords",
+    ]) {
+      expect(isCredentialNoiseCandidate(word)).toBe(true);
+    }
+  });
+
+  it("flags verb-prefixed affordances (Save to 1Password, Copy to clipboard)", () => {
+    expect(isCredentialNoiseCandidate("Save to 1Password")).toBe(true);
+    expect(isCredentialNoiseCandidate("Copy to clipboard")).toBe(true);
+    expect(isCredentialNoiseCandidate("Add to vault")).toBe(true);
+    expect(isCredentialNoiseCandidate("Store in Bitwarden")).toBe(true);
+  });
+
+  it("does NOT flag real credential values", () => {
+    // The exact shapes the scan tiers feed in — these must pass through.
+    expect(
+      isCredentialNoiseCandidate("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF"),
+    ).toBe(false);
+    expect(
+      isCredentialNoiseCandidate("5588a1c2-7c4d-4e2c-9c41-1234567890ab"),
+    ).toBe(false);
+    expect(isCredentialNoiseCandidate("f9a062f02fadf5")).toBe(false);
+    // A token whose body merely contains "password" as a substring is
+    // not a whole-token match and must not be flagged.
+    expect(isCredentialNoiseCandidate("my1passwordkeyabc123")).toBe(false);
+    expect(isCredentialNoiseCandidate("")).toBe(false);
   });
 });
