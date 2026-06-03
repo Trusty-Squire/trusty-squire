@@ -1635,6 +1635,182 @@ describe("replaySkill — rc.8 fallback fixes", () => {
       expect(result.reason).toMatch(/copyButtons=0/);
     }
   });
+
+  // ── 0.8.4 — validator-shaped candidate fallback for uuid_token ─────
+  // The synthesizer's DEFAULT pattern for an unrecognised key is
+  // `uuid_token` (detectKnownCredentialPattern). On a fresh-account
+  // replay the real key often isn't uuid-shaped, so the named regex
+  // library misses it. The prior fixed-heuristic tiers (digit-required,
+  // no dot/slash) also miss keys whose shape doesn't fit that mould.
+  // This tier defers to the credential's OWN validator (length +
+  // shape_regex) — the authoritative shape gate the synthesizer
+  // published — so it can recover the key without grabbing garbage.
+  // Repro: brevo (KB64G1GS62S4T4T3BZS7GEFD5Z) + statsig
+  // (F779G61KCE9AXZENDPRW4DK3MZ) both replay-failed here.
+  it("recovers a dotted opaque key the heuristic tiers reject but the validator accepts (brevo-class)", async () => {
+    // brevo: extract_via_regex, pattern uuid_token, shape_hint opaque.
+    // A dotted key (e.g. SG-style `xkeysib.<hex>.<hex>`) is excluded by
+    // the rc.21 no-dot heuristic, so only the validator-shaped tier can
+    // surface it. The validator's shape_regex pins the real shape.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://app.brevo.com/settings/keys/api", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "BREVO_API_KEY",
+            post_extract_validator: {
+              min_length: 16,
+              max_length: 128,
+              shape_regex: "^xkeysib\\.[a-f0-9]{32}\\.[a-f0-9]{16}$",
+            },
+          },
+        ],
+      },
+    );
+    const realKey =
+      "xkeysib.0123456789abcdef0123456789abcdef.0123456789abcdef";
+    b.setTextFor("API keysYour keysNo labeled key the library can parse");
+    b.setCandidatesFor([
+      "Dashboard",
+      "API keys",
+      realKey, // dotted → rc.21 tier skips it; validator shape_regex matches
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.credential).toBe(realKey);
+    }
+  });
+
+  it("named extract_via_regex(uuid_token) falls back to the produces credential's validator (statsig-class)", async () => {
+    // statsig: extract_via_regex_named, pattern uuid_token, shape_hint
+    // uuid. The named variant previously had NO fallback — it threw
+    // immediately when the regex library missed. It must now scan
+    // candidates against the validator of the credential named by
+    // `produces`.
+    const b = stubBrowser();
+    const realKey = "secret-server-7c4d4e2c9c411234567890abcdef0011";
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://console.statsig.com/api_keys", provenance },
+        {
+          kind: "extract_via_regex_named",
+          pattern_name: "uuid_token",
+          produces: "server_key",
+          provenance,
+        },
+      ],
+      {
+        credentials: [
+          {
+            name: "server_key",
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "STATSIG_SERVER_KEY",
+            post_extract_validator: {
+              min_length: 20,
+              max_length: 64,
+              shape_regex: "^secret-server-[a-f0-9]{32}$",
+            },
+          },
+        ],
+      },
+    );
+    b.setTextFor("Server secret keysno parseable prefix here");
+    b.setCandidatesFor(["Console", "API keys", realKey]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    // A single-credential skill expressed via the *_named step kind
+    // returns ok_multi (the outer loop branches on the named step's
+    // presence, not the credential count).
+    expect(result.kind).toBe("ok_multi");
+    if (result.kind === "ok_multi") {
+      expect(result.credentials.server_key).toBe(realKey);
+    }
+  });
+
+  it("validator-shaped fallback still FAILS when no candidate satisfies the validator", async () => {
+    // Guard: the validator is the only gate. When nothing on the page
+    // matches the published shape, the step must still fail — the
+    // fallback must not loosen extraction into grabbing the wrong value.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://app.brevo.com/settings/keys/api", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
+      ],
+      {
+        credentials: [
+          {
+            type: "api_key",
+            shape_hint: "opaque",
+            env_var_suggestion: "BREVO_API_KEY",
+            post_extract_validator: {
+              min_length: 16,
+              max_length: 128,
+              shape_regex: "^xkeysib\\.[a-f0-9]{32}\\.[a-f0-9]{16}$",
+            },
+          },
+        ],
+      },
+    );
+    b.setTextFor("no parseable key");
+    // Dotted strings so the rc.21 heuristic tier (which skips any
+    // candidate containing a ".") doesn't claim them first — this
+    // isolates the validator-shaped tier. None match the brevo
+    // shape_regex, so the validator rejects every one.
+    b.setCandidatesFor([
+      "Dashboard",
+      "some.other.token.value",
+      "xkeysib.tooshort",
+      "xkeysib.ZZZZ.not-hex-at-all", // right prefix shape, wrong charset
+    ]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
+  });
+
+  it("named validator-shaped fallback does NOT fire for prefixed patterns (only uuid_token)", async () => {
+    // Defensive mirror of the single-cred negative test, on the named
+    // path: a stripe_secret-pattern named extract must NOT fall through
+    // to validator-shaped candidate grabbing.
+    const b = stubBrowser();
+    const skill = skillWith(
+      [
+        {
+          kind: "extract_via_regex_named",
+          pattern_name: "stripe_secret",
+          produces: "secret_key",
+          provenance,
+        },
+      ],
+      {
+        credentials: [
+          {
+            name: "secret_key",
+            type: "api_key",
+            shape_hint: "prefix:sk_live",
+            env_var_suggestion: "STRIPE_SECRET_KEY",
+            post_extract_validator: { min_length: 8, max_length: 128 },
+          },
+        ],
+      },
+    );
+    b.setTextFor("no sk_ key visible on this page");
+    // A candidate that WOULD satisfy the loose validator, but the
+    // pattern is prefixed so the fallback must not fire.
+    b.setCandidatesFor(["someArbitrary123Token"]);
+
+    const result = await replaySkill({ skill, browser: b.controller, mode: "full" });
+    expect(result.kind).toBe("step_failed");
+  });
 });
 
 // ── URL drift detection + OAuth recovery (0.8.2-rc.22) ───────────────

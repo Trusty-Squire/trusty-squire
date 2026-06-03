@@ -1175,6 +1175,24 @@ async function executeStep(
         } catch {
           // Fall through to the canonical error below.
         }
+        // 0.8.4 — validator-shaped candidate fallback. The rc.21 tier
+        // above uses fixed heuristics (digit-required, no dot/slash,
+        // 8-128) that miss real keys whose shape doesn't fit that mould
+        // (brevo's `opaque` key carries no digit guarantee; a key
+        // rendered with a `.` is excluded). Defer to the credential's
+        // OWN validator (length + shape_regex) as the guard instead —
+        // it's the authoritative shape gate the synthesizer published
+        // for this service, so accepting on it can't grab a wrong-shaped
+        // token. uuid_token-only, same as the rc.21 tier.
+        if (validator !== undefined) {
+          const validatedCand = await findValidatedCandidate(
+            browser,
+            validator,
+          );
+          if (validatedCand !== null) {
+            return { kind: "extract_ok", value: validatedCand, via: "regex" };
+          }
+        }
       }
       throw new Error(`No credential matching pattern ${step.pattern_name} found on page.`);
     }
@@ -1226,17 +1244,44 @@ async function executeStep(
     case "extract_via_regex_named": {
       const text = await browser.extractText();
       const extracted = extractApiKeyFromText(text);
-      if (extracted === null) {
-        throw new Error(
-          `No credential matching pattern ${step.pattern_name} (for ${step.produces}) found on page.`,
-        );
+      if (extracted !== null) {
+        return {
+          kind: "extract_named_ok",
+          produces: step.produces,
+          value: extracted,
+          via: "regex",
+        };
       }
-      return {
-        kind: "extract_named_ok",
-        produces: step.produces,
-        value: extracted,
-        via: "regex",
-      };
+      // 0.8.4 — validator-shaped candidate fallback, mirroring the
+      // single-cred extract_via_regex tier. The named regex library
+      // misses the key on a fresh-account replay when the synthesizer
+      // captured `uuid_token` (its DEFAULT for an unrecognised key) but
+      // the real value isn't uuid-shaped (statsig). Scan candidates and
+      // accept the first that satisfies THIS credential's own validator.
+      // uuid_token-only: prefix-anchored patterns stay strict and fail
+      // loud rather than grabbing arbitrary candidate text.
+      if (step.pattern_name === "uuid_token") {
+        const credSpec = skill.credentials.find(
+          (c) => c.name === step.produces,
+        );
+        if (credSpec !== undefined) {
+          const validatedCand = await findValidatedCandidate(
+            browser,
+            credSpec.post_extract_validator,
+          );
+          if (validatedCand !== null) {
+            return {
+              kind: "extract_named_ok",
+              produces: step.produces,
+              value: validatedCand,
+              via: "regex",
+            };
+          }
+        }
+      }
+      throw new Error(
+        `No credential matching pattern ${step.pattern_name} (for ${step.produces}) found on page.`,
+      );
     }
   }
   const _exhaustive: never = step;
@@ -1251,6 +1296,68 @@ interface ValidatorOk {
 interface ValidatorFail {
   ok: false;
   reason: string;
+}
+
+// 0.8.4 — deterministic (non-network) half of validateCredential: the
+// length bounds + shape_regex gate, minus the async sentinel HTTP probe.
+// Used by the candidate-fallback tier (findValidatedCandidate) to pick
+// the right value off the page BEFORE the outer loop runs the full
+// validateCredential (which also fires the sentinel). Mirrors the
+// length-relaxation in validateCredential exactly so the two agree on
+// what "shape-valid" means — a candidate this accepts won't then be
+// rejected on shape by validateCredential, only (possibly) by the
+// sentinel.
+function candidateSatisfiesValidatorShape(
+  value: string,
+  validator: SkillCredentialSpec["post_extract_validator"],
+): boolean {
+  const recognisedByLibrary = extractApiKeyFromText(value) === value;
+  if (!recognisedByLibrary) {
+    if (value.length < validator.min_length) return false;
+    if (value.length > validator.max_length) return false;
+  }
+  if (validator.shape_regex !== undefined) {
+    try {
+      if (!new RegExp(validator.shape_regex).test(value)) return false;
+    } catch {
+      // Invalid regex on the validator itself is a schema bug, not a
+      // credential rejection — matches validateCredential's pass-through.
+    }
+  }
+  return true;
+}
+
+// 0.8.4 — candidate-fallback for the generic `uuid_token` pattern.
+//
+// `uuid_token` is the synthesizer's DEFAULT pattern_name in
+// detectKnownCredentialPattern (promote-to-skill.ts) for a key with no
+// recognised prefix. The captured extract step therefore looks for a
+// uuid-shaped string via the named regex library — but on a fresh-
+// account replay the real key often isn't uuid-shaped (or the original
+// run saw a transient uuid that's now gone), so the named regex matches
+// nothing and the step hard-fails (brevo: `opaque`; statsig: `uuid`).
+//
+// This recovers those cases by scanning the page's credential candidates
+// and accepting the first that satisfies the credential's own validator
+// (length bounds + shape_regex). The validator IS the guard: a candidate
+// that doesn't match the published shape is rejected, so this can't grab
+// the wrong token. Callers fire it ONLY for `uuid_token` — prefix-
+// anchored patterns (resend/stripe/openrouter/…) stay strict and never
+// reach here, so a mistaken empty-page capture for those still fails
+// loud rather than grabbing arbitrary candidate text.
+async function findValidatedCandidate(
+  browser: BrowserController,
+  validator: SkillCredentialSpec["post_extract_validator"],
+): Promise<string | null> {
+  try {
+    const candidates = await browser.extractCredentialCandidates();
+    for (const cand of candidates) {
+      if (candidateSatisfiesValidatorShape(cand, validator)) return cand;
+    }
+  } catch {
+    // Non-fatal — caller falls through to its canonical failure.
+  }
+  return null;
 }
 
 async function validateCredential(
