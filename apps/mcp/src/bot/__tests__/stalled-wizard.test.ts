@@ -11,7 +11,21 @@ import {
   isLoadingShellText,
   isSignupOrLoginRoute,
   originRoot,
+  isAuthProcessingText,
 } from "../agent.js";
+
+describe("isAuthProcessingText (async-session provisioning guard)", () => {
+  it("flags Stytch B2B org-provisioning / login copy the bot must wait through", () => {
+    expect(isAuthProcessingText("Build Fast Creating your organization...")).toBe(true);
+    expect(isAuthProcessingText("Logging in...")).toBe(true);
+    expect(isAuthProcessingText("Authenticating, one moment")).toBe(true);
+    expect(isAuthProcessingText("Redirecting you to your dashboard")).toBe(true);
+  });
+  it("does NOT flag a settled dashboard or a plain login form", () => {
+    expect(isAuthProcessingText("API Keys Dashboard Playground Default Project")).toBe(false);
+    expect(isAuthProcessingText("Create Account or Login Continue with Google")).toBe(false);
+  });
+});
 
 describe("isSignupOrLoginRoute (post-OAuth dead-route escape)", () => {
   it("flags signup/login/register routes an authed user shouldn't sit on", () => {

@@ -2900,6 +2900,21 @@ export function isLoadingShellText(text: string): boolean {
   );
 }
 
+// Transient "the session is being established RIGHT NOW" copy. MEASURED on
+// groq (Stytch B2B): after the OAuth callback, /authenticate shows
+// "Logging in…" then "Creating your organization…" for ~5-7s of async
+// discovery+org-creation+session calls before redirecting to the dashboard.
+// Interrupting that window (navigating away, or — worse — re-clicking the
+// OAuth button) ABORTS the org creation and the session never finalizes,
+// which is exactly how the bot was failing groq. When this text is present
+// the bot must WAIT, never act. Generalizes to any async-session auth
+// (Stytch / WorkOS / Auth0 org provisioning). Exported for unit tests.
+export function isAuthProcessingText(text: string): boolean {
+  return /logging in|signing in|creating your organization|creating your account|setting up your account|authenticating|finishing (?:sign|log)|redirecting you|one moment/i.test(
+    text,
+  );
+}
+
 export class SignupAgent {
   // Per-run counter so a single SignupAgent (which lives one run) can't
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
@@ -5139,14 +5154,30 @@ export class SignupAgent {
     // acting now (the rc.20 second-click retry, or post-verify navigation)
     // interrupts it, stranding the run on the login page. Give a callback-
     // shaped URL a chance to redirect itself away before we touch anything.
-    if (isLoginPageUrl(this.browser.currentUrl())) {
-      for (let i = 0; i < 6 && isLoginPageUrl(this.browser.currentUrl()); i++) {
+    {
+      // Wait while EITHER the URL is still callback/login-shaped OR the page
+      // shows async-session processing copy ("Creating your organization…").
+      // Budget 24s — MEASURED: Stytch B2B's discovery+org-creation+session
+      // chain takes ~5-7s but varies, and the bot's own page reads add jitter;
+      // a short URL-only wait exits mid-provisioning and the rc.20 retry then
+      // re-clicks OAuth and aborts it. Re-read text each tick.
+      let settled = false;
+      for (let i = 0; i < 12; i++) {
+        const url = this.browser.currentUrl();
+        const text = await this.browser.extractText().catch(() => "");
+        if (!isLoginPageUrl(url) && !isAuthProcessingText(text)) {
+          settled = true;
+          break;
+        }
+        if (i === 0 && isAuthProcessingText(text)) {
+          steps.push("OAuth: session is provisioning (auth-processing screen) — holding, not touching the page.");
+        }
         await this.browser.wait(2);
       }
       const settledUrl = this.browser.currentUrl();
       steps.push(
         `OAuth: waited for the callback to settle — now at ${pathOf(settledUrl)}` +
-          (isLoginPageUrl(settledUrl) ? " (still login-shaped)" : " (redirected to the app)"),
+          (settled ? " (redirected to the app)" : " (still login/processing-shaped)"),
       );
     }
     // Dead-route escape. The OAuth often returns to the SIGNUP url it
