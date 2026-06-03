@@ -1787,7 +1787,18 @@ export function findOAuthButton(
       .replace(/\s+/g, " ")
       .trim();
     if (!keywordRe.test(text)) continue;
-    if (/\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text)) {
+    // "with <provider>" is the OAuth-button idiom and is accepted
+    // directly — it survives an SVG accessible name glued to the verb.
+    // elevenlabs renders its button text as "GoogleSign up with Google",
+    // which fuses "sign" into "googlesign" so the bare \bsign\b check
+    // misses, but "with google" still matches. (A blanket camelCase split
+    // can't be used to un-glue it — it would mangle the provider name
+    // itself, e.g. "GitHub" → "Git Hub".)
+    const withProviderRe = new RegExp(`\\bwith ${keyword}\\b`);
+    if (
+      /\b(sign|signup|signin|continue|log ?in|connect|auth)\b/.test(text) ||
+      withProviderRe.test(text)
+    ) {
       return e;
     }
     // rc.39 — minimal-label OAuth buttons. Some auth UIs render the

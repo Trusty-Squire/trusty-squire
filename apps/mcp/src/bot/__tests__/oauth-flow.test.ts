@@ -238,6 +238,19 @@ describe("findOAuthButton", () => {
     expect(findOAuthButton([icon], "google")?.selector).toBe("#b");
   });
 
+  it("matches a button whose SVG name is GLUED to its text ('GoogleSign up with Google')", () => {
+    // elevenlabs (and similar) render the provider icon's accessible name
+    // concatenated to the button text with no space, fusing the verb into
+    // "googlesign". The camelCase split must recover it so the bot OAuths
+    // in instead of falling back to a bouncing email signup.
+    const glued = mk({
+      tag: "button",
+      visibleText: "GoogleSign up with Google",
+      selector: "#glued",
+    });
+    expect(findOAuthButton([glued], "google")?.selector).toBe("#glued");
+  });
+
   it("matches a 'Continue with GitHub' button when the provider is github", () => {
     const gh = mk({ tag: "button", visibleText: "Continue with GitHub", selector: "#gh" });
     expect(findOAuthButton([gh], "github")?.selector).toBe("#gh");
