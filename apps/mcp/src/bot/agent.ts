@@ -975,6 +975,21 @@ export function parseSignupPlan(
     : { actions, submit_selector: submitSelector, confidence };
 }
 
+// True when a clickSubmit failure is a Playwright visibility/attach
+// timeout rather than a genuine hard error. A timeout means the submit
+// selector resolved at plan-time but was gone by click-time — almost
+// always because an earlier action in the same plan advanced a
+// multi-step SPA (Paddle's "Continue" → next screen), so the right
+// recovery is a re-plan against the new page, not a run-ending
+// submit_failed. Matches Playwright's `locator.waitFor`/`waitForSelector`
+// timeout text; deliberately does NOT match `submit_disabled` (handled
+// separately) or other click errors (genuine failures). Exported for
+// unit testing.
+export function isSubmitTimeout(reason: string): boolean {
+  if (reason.startsWith("submit_disabled")) return false;
+  return /Timeout \d+ms exceeded/i.test(reason) && /waitfor|waiting for/i.test(reason);
+}
+
 // Render the element inventory as a compact text block for the
 // planner — one line per element, ending with the verified
 // `selector=` the planner must copy verbatim (F3 T3).
@@ -3209,6 +3224,29 @@ export class SignupAgent {
             "required input. Do NOT click a link." +
             uncheckedHint +
             emptyInputHint;
+          continue;
+        }
+        // A submit-selector visibility timeout means the element the
+        // planner picked is no longer on the page — typically because an
+        // earlier action in THIS plan advanced a multi-step SPA (Paddle's
+        // signup: a "Continue" click navigates to a new screen, so the
+        // submit selector that resolved at plan-time has vanished by the
+        // time clickSubmit polls for it). The page DID move forward, so
+        // re-plan against the new state rather than failing the whole run
+        // on a stale selector. Bounded by the same progressReplans
+        // headroom as the disabled-submit / post-validation re-plans.
+        if (isSubmitTimeout(reason)) {
+          if (++progressReplans > MAX_PROGRESS_REPLANS) {
+            return { kind: "submit_failed", reason };
+          }
+          steps.push(
+            `⚠ submit selector went stale (${reason.split("\n")[0]}) — the page likely advanced; re-planning`,
+          );
+          hint =
+            "The submit button selected last round was no longer present when " +
+            "we tried to click it — an earlier action probably advanced the page. " +
+            "Re-read the now-visible form and plan the next step (pick the submit " +
+            "button that is actually on the current screen).";
           continue;
         }
         steps.push(`⚠ submit click failed: ${reason}`);

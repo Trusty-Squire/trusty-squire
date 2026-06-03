@@ -3075,7 +3075,16 @@ export class BrowserController {
         // whole inventory with "Cannot read properties of undefined
         // (reading 'querySelectorAll')", failing the run before the
         // planner ever saw the page. Skip such a node instead.
-        if (root === null || typeof root.querySelectorAll !== "function") return;
+        //
+        // `== null` (not `=== null`) is load-bearing: `el.shadowRoot` is
+        // typed `ShadowRoot | null`, but a detached/closed custom element
+        // can yield `undefined` at runtime. The recursion below calls
+        // `walk(el.shadowRoot)` whenever it isn't `null`, so an `undefined`
+        // shadowRoot reaches here and `typeof undefined.querySelectorAll`
+        // THROWS before the typeof guard can fire — exactly the #59
+        // redis-cloud crash, which recurred 2026-06-03 even with the
+        // null-only guard in place. The loose check covers both.
+        if (root == null || typeof root.querySelectorAll !== "function") return;
         root.querySelectorAll(SELECTOR).forEach((n) => collected.push(n));
         root.querySelectorAll("*").forEach((el) => {
           if (el.shadowRoot !== null) walk(el.shadowRoot);
@@ -3659,15 +3668,22 @@ interface ShadowWalkRoot {
   querySelectorAll(selectors: string): ArrayLike<ShadowWalkEl>;
 }
 interface ShadowWalkEl {
-  readonly shadowRoot: ShadowWalkRoot | null;
+  // `| undefined` mirrors the live DOM: `Element.shadowRoot` is typed
+  // `ShadowRoot | null`, but a detached/closed custom element yields
+  // `undefined` at runtime. The walk must survive that — see the guard.
+  readonly shadowRoot: ShadowWalkRoot | null | undefined;
 }
 export function collectAcrossShadowRoots(
-  root: ShadowWalkRoot | null,
+  root: ShadowWalkRoot | null | undefined,
   selector: string,
 ): ShadowWalkEl[] {
   const collected: ShadowWalkEl[] = [];
-  const walk = (r: ShadowWalkRoot | null): void => {
-    if (r === null || typeof r.querySelectorAll !== "function") return;
+  const walk = (r: ShadowWalkRoot | null | undefined): void => {
+    // `== null` (not `=== null`) covers both null and undefined — the
+    // recursion below calls walk() on any non-null shadowRoot, so an
+    // `undefined` one reaches here and `typeof undefined.querySelectorAll`
+    // would throw before the typeof guard fired (#59 redis-cloud).
+    if (r == null || typeof r.querySelectorAll !== "function") return;
     Array.from(r.querySelectorAll(selector)).forEach((n) => collected.push(n));
     Array.from(r.querySelectorAll("*")).forEach((el) => {
       if (el.shadowRoot !== null) walk(el.shadowRoot);
