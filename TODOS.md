@@ -53,17 +53,33 @@ prod-path (non-verifier) demotion classifier on `consecutive_failures`
 quarantine; non-wall re-loops only surface in the digest/worklist today);
 event-driven demotion-webhook listener; mutable "mark resolved" worklist.
 
-### A5 — `oauth_onboarding_failed`: the new #1 bot failure [P1, fresh from the harvest]
+### A5 — `oauth_onboarding_failed` [P1, dominant sub-cause FIXED 2026-06-02; rest open]
 With the bot OAuth session refreshed, the 2026-06-02 re-run hit **0
-`needs_login`** — but `oauth_onboarding_failed` became the dominant
-failure (~9 of the first 40): the bot signs in via Google fine and the
-account is created, but it can't navigate the **post-signup onboarding**
-to reach/extract the API key. These are near-misses (accounts exist), so
-the payoff is high. Audit the post-OAuth onboarding loop in the bot
-(`agent.ts` onboarding navigation + extraction) against a few of the
-failing services (groq, etc.); likely needs better "where's the API key"
-navigation/heuristics or a per-service onboarding hint. Related to F7
-(multi-step flows).
+`needs_login`** but `oauth_onboarding_failed` became the #1 failure.
+Trail analysis (groq) showed the dominant sub-cause is a
+**misclassification + thrash**, not onboarding navigation: the OAuth
+callback DIDN'T persist (groq's `/authenticate` still showed a social
+login screen), but the bot logged "signed in via Google", then the
+vision planner correctly kept asking to log in while the bot stubbornly
+overrode it ("already authenticated; skipping") — thrashing all 24
+post-verify rounds and ending in a mislabeled `oauth_onboarding_failed`.
+
+**Fixed:** `postVerifyLoop` now counts the planner's login-asks on an
+OAuth run; a 2nd ask means the page is genuinely still a login screen, so
+it throws `OAuthSessionNotPersistedError` → the call site returns the
+correct `oauth_session_not_persisted`. Stops the 24-round LLM thrash and
+classifies it right (these are anti-bot OAuth-callback rejections / G4
+residential-capture candidates, not repairable onboarding bugs). The
+existing `detectManualLoginFallback` gate only caught manual
+email+password forms; this catches the social-login-bounce case.
+
+**Still open (the genuinely onboarding-navigation cases):** services where
+OAuth DID persist but the bot can't reach the API key (wrong/missing
+fallback path, multi-step wizard, project-must-exist-first). Re-triage
+the bucket after a re-run with this fix in — the residual
+`oauth_onboarding_failed` count after reclassification is the real
+navigation-improvement target. Related to F7 (multi-step flows).
+Not deployed yet — batch with A4 on the next mcp republish.
 
 ### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
 The A/B harness is **code-complete** (baseline vs `cdp_hardened`

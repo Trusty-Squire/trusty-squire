@@ -192,6 +192,18 @@ export class LLMCallBudgetExceeded extends Error {
   }
 }
 
+// A5 — thrown from postVerifyLoop when an OAuth run keeps landing on a
+// login page (the planner asks to log in ≥2 times): the OAuth callback
+// never established a session, so the post-verify thrash would only end
+// in a mislabeled oauth_onboarding_failed. The OAuth call site catches
+// this and returns the correct oauth_session_not_persisted classification.
+export class OAuthSessionNotPersistedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OAuthSessionNotPersistedError";
+  }
+}
+
 // 0.8.2-rc.10 — common dashboard paths that vendors host their
 // per-account API key UI at. Ordered most-specific first so a
 // fallback navigate doesn't land short of the actual page. Returned
@@ -4724,14 +4736,24 @@ export class SignupAgent {
     // siblings were never extracted. postVerifyLoop's top-of-iter
     // early-exit is itself multi-cred-aware (rc.13), so when there's
     // nothing more to do, it returns on the first iteration.
-    credentials = await this.postVerifyLoop({
-      service: task.service,
-      maxRounds: task.postVerifyMaxRounds ?? 24,
-      steps,
-      ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
-      ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
-      ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
-    });
+    try {
+      credentials = await this.postVerifyLoop({
+        service: task.service,
+        maxRounds: task.postVerifyMaxRounds ?? 24,
+        steps,
+        ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+        ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
+        ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+      });
+    } catch (err) {
+      // A5 — OAuth bounced back to a login page; classify correctly
+      // (oauth_session_not_persisted) instead of thrashing into
+      // oauth_onboarding_failed.
+      if (err instanceof OAuthSessionNotPersistedError) {
+        return { success: false, error: err.message, steps, ...this.resultTail() };
+      }
+      throw err;
+    }
     if (credentials.api_key !== undefined) {
       return {
         success: true,
@@ -5295,6 +5317,13 @@ ${formatInventory(input.inventory)}`,
       // DOM-proximity again, this is just an opportunistic seed.
     }
     let loginAttempts = 0;
+    // A5 — on an OAuth run the planner asks to `login` only when it SEES a
+    // login page, which after a good OAuth it shouldn't. Repeated asks
+    // mean the OAuth callback never established a session (the page is
+    // still a social/login screen, e.g. groq's /authenticate). Count them
+    // so the loop can bail with oauth_session_not_persisted instead of
+    // thrashing maxRounds and mislabeling it oauth_onboarding_failed.
+    let oauthLoginRequests = 0;
     let planFailures = 0;
     // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
     // gate planFailures (so a transient 502 won't push us into the
@@ -6436,11 +6465,28 @@ ${formatInventory(input.inventory)}`,
           await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {
           if (args.credentials === undefined) {
-            // OAuth run — no password to give, and the Google session
-            // already authenticated us. Treat `login` as a no-op note.
+            // OAuth run — no password to give. A single ask can be a
+            // transient mid-render read, but a SECOND ask means the page
+            // keeps presenting login: the OAuth session didn't persist.
+            // Bail with the right classification (A5) instead of thrashing
+            // the rest of maxRounds and ending in oauth_onboarding_failed.
+            oauthLoginRequests += 1;
+            if (oauthLoginRequests >= 2) {
+              const st = await this.browser.getState().catch(() => null);
+              args.steps.push(
+                "Post-verify: planner hit a login page twice on an OAuth run — " +
+                  "the OAuth session didn't persist; bailing.",
+              );
+              throw new OAuthSessionNotPersistedError(
+                `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the ` +
+                  `page still presents a login screen (${st !== null ? pathOf(st.url) : "?"}) — the ` +
+                  `OAuth callback never established a session (anti-bot rejection of the callback, ` +
+                  `or a service-side session-storage issue). Finish the signup manually.`,
+              );
+            }
             args.steps.push(
-              "Post-verify: planner asked to log in, but this is an OAuth run — " +
-                "already authenticated via Google; skipping.",
+              "Post-verify: planner asked to log in on an OAuth run — already " +
+                "authenticated via Google; skipping (1st ask, may be a transient read).",
             );
           } else if (loginAttempts >= 2) {
             args.steps.push("Post-verify: already attempted login twice — stopping.");
