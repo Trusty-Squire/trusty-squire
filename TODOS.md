@@ -370,15 +370,31 @@ These were EXCLUDED from the step-3 fan-out (every other failing service
 is being fixed). Tackle this list once a residential egress path exists.
 
 **More walls confirmed by the step-3 subagents (read the actual page
-snapshots, 2026-06-03) — also EXCLUDED from the re-run:**
-- **Stale 404 signup URLs (URL curation, NOT bot code):** daytona, loops,
-  temporal, typesense, workos, baselime — the seed `signup_url` 404s or
-  lands on a marketing page. Refresh the URLs in the discovery seed; these
-  are not anti-bot, just wrong/dead links. Cheapest follow-up of the batch.
-- **Signups administratively disabled:** highlight ("Creating new
-  workspaces is disabled").
+snapshots, 2026-06-03) — also EXCLUDED from the first re-run:**
 - **Hard verification gates (need F12 SMS-relay / human):** sendgrid
   (SMS/phone MFA), circleci (authenticator-app TOTP), betterstack-uptime +
-  betterstack-logs (magic-link gated behind invisible reCAPTCHA token).
-- **Credit-card billing gate (same class as Vercel/MailerSend):** mailgun.
-- **Dead dev host:** hatchet (`app.dev.hatchet-tools.com` → ERR_CONNECTION_REFUSED).
+  betterstack-logs (magic-link gated behind invisible reCAPTCHA — the
+  submit button stays disabled until the captcha token populates; NOT
+  billing, despite an earlier mislabel).
+- **Credit-card billing gate — ONLY mailgun (verified, 2026-06-03).** Its
+  signup form (`signup.mailgun.com/new/signup`) renders "Add payment info
+  now" (pre-checked) + "Cardholder Name" + "Billing Address (line 1/2)" +
+  City/State/Country/Currency, and `#submit-button` stays **disabled**
+  until a valid card (in a Stripe iframe the bot can't fill) is entered.
+  Possible future fix: try UNCHECKING "Add payment info now" to defer the
+  card — uncertain Mailgun still allows a no-card free signup.
+
+**Re-ADDED to the active set after URL curation (2026-06-03, commits
+69b0bdc + caa32bc) — were mislabeled "dead/disabled":**
+- 7 stale signup URLs fixed in `tools/housekeeper-services.yaml` (daytona,
+  loops, temporal, typesense, workos, baselime, hatchet) + highlight
+  (URL was already correct; the "workspaces disabled" snapshot was an
+  existing-workspace state on the shared identity, now handled by the
+  already-account mint path). Re-test wave: `/tmp/harvest-rerun4-urls.yaml`.
+
+**Inbox infra, NOT bot code (`verification_not_sent`):** the re-run with
+the raised 120s probe floor still finds no mail (browserbase waited the
+full 120s, none arrived). Root cause is the `@trustysquire.ai` catch-all →
+IMAP mailbox delivery, not probe timing. Operator action: verify
+`GMAIL_USER`/`WORKSPACE_IMAP_*` on `trusty-squire-api` points at the
+mailbox the catch-all actually delivers to (see the inbox-agent diagnosis).
