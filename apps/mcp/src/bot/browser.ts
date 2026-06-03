@@ -134,7 +134,7 @@ export interface BrowserControllerOptions {
   profileDir?: string;
 }
 
-export type CaptchaKind = "turnstile" | "recaptcha";
+export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
 // Finer-grained captcha classification for spike telemetry (T3.2).
 // `recaptcha_v3` covers any score-mode reCAPTCHA with no clickable
@@ -1956,6 +1956,12 @@ export class BrowserController {
           'textarea[name="g-recaptcha-response"]',
         ) as HTMLTextAreaElement | null;
         if (recaptcha !== null && recaptcha.value.length > 0) return true;
+        // hCaptcha populates its own response textarea on a passed
+        // checkbox (plausible). Same shape as reCAPTCHA's.
+        const hcaptcha = document.querySelector(
+          'textarea[name="h-captcha-response"]',
+        ) as HTMLTextAreaElement | null;
+        if (hcaptcha !== null && hcaptcha.value.length > 0) return true;
         // Some Turnstile installs use a managed mode that emits its
         // own attribute on the host div when solved.
         const cfManaged = document.querySelector(".cf-turnstile[data-state='success']");
@@ -1992,7 +1998,7 @@ export class BrowserController {
   //       widget's click handler is registered on the host div, so
   //       a click inside the host box still triggers the challenge.
   private async findCaptchaWidget(): Promise<{
-    kind: "turnstile" | "recaptcha";
+    kind: CaptchaKind;
     box: { x: number; y: number; width: number; height: number };
   } | null> {
     if (!this.page) throw new Error("Browser not started");
@@ -2008,15 +2014,21 @@ export class BrowserController {
     //   Cloudflare Turnstile: src contains "challenges.cloudflare.com"
     //   reCAPTCHA v2:         src contains "recaptcha/api2"
     const iframeCandidates: Array<{
-      kind: "turnstile" | "recaptcha";
+      kind: CaptchaKind;
       selector: string;
     }> = [
       { kind: "turnstile", selector: 'iframe[src*="challenges.cloudflare.com"]' },
       { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2"]' },
+      // hCaptcha's checkbox iframe (the anchor frame). Plausible and other
+      // hCaptcha sites render this; clicking it ticks the box the same way
+      // Turnstile/reCAPTCHA do.
+      { kind: "hcaptcha", selector: 'iframe[src*="hcaptcha.com"][src*="frame=checkbox"]' },
+      { kind: "hcaptcha", selector: 'iframe[src*="newassets.hcaptcha.com"]' },
       // Host-div fallbacks (light DOM) — preferred order keeps the iframe
       // first when present (more precise click target).
       { kind: "turnstile", selector: ".cf-turnstile" },
       { kind: "turnstile", selector: "#clerk-captcha" },
+      { kind: "hcaptcha", selector: ".h-captcha" },
     ];
     const iframeDeadline = Date.now() + 5000;
     while (Date.now() < iframeDeadline) {
@@ -2039,11 +2051,12 @@ export class BrowserController {
     // injected by the captcha JS even before the iframe; locate it,
     // walk up to a visible ancestor, return that bounding box.
     const hostCandidates: Array<{
-      kind: "turnstile" | "recaptcha";
+      kind: CaptchaKind;
       selector: string;
     }> = [
       { kind: "turnstile", selector: 'input[name="cf-turnstile-response"]' },
       { kind: "recaptcha", selector: 'textarea[name="g-recaptcha-response"]' },
+      { kind: "hcaptcha", selector: 'textarea[name="h-captcha-response"]' },
     ];
     for (const { kind, selector } of hostCandidates) {
       const locator = this.page.locator(selector);
@@ -2254,6 +2267,77 @@ export class BrowserController {
         return true;
       }, token);
       return injected;
+    } catch {
+      return false;
+    }
+  }
+
+  // Tier 3 hCaptcha support — extract the hCaptcha sitekey so 2Captcha
+  // can solve it. hCaptcha publishes its key on `.h-captcha[data-sitekey]`
+  // or in the checkbox iframe's `?sitekey=` query. Keys are UUIDs (the
+  // reCAPTCHA `6L` guard in extractRecaptchaSitekey deliberately rejects
+  // them, which is why hCaptcha needs its own extractor). Returns null
+  // when no hCaptcha widget is present.
+  async extractHcaptchaSitekey(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        const div = document.querySelector<HTMLElement>(".h-captcha[data-sitekey], [data-hcaptcha-sitekey]");
+        if (div !== null) {
+          const k =
+            div.getAttribute("data-sitekey") ??
+            div.getAttribute("data-hcaptcha-sitekey");
+          if (k !== null && k.length > 10) return k;
+        }
+        const iframe = document.querySelector<HTMLIFrameElement>(
+          'iframe[src*="hcaptcha.com"]',
+        );
+        if (iframe !== null) {
+          const k = new URL(iframe.src).searchParams.get("sitekey");
+          if (k !== null && k.length > 10) return k;
+        }
+        return null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // Inject a 2Captcha-resolved hCaptcha token into the page's
+  // h-captcha-response textarea(s) and fire the widget's data-callback
+  // if the page registered one. Mirrors injectRecaptchaToken; hCaptcha
+  // also mirrors the response token into a g-recaptcha-response textarea
+  // on some compat installs, so populate both names if present.
+  async injectHcaptchaToken(token: string): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate((tok: string) => {
+        const inputs = Array.from(
+          document.querySelectorAll<HTMLTextAreaElement>(
+            'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+          ),
+        );
+        if (inputs.length === 0) return false;
+        for (const input of inputs) {
+          input.value = tok;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        // Fire the data-callback the page registered on the .h-captcha
+        // host (hCaptcha calls it by name on window). Best-effort — the
+        // populated textarea is what server-side validation reads.
+        try {
+          const host = document.querySelector<HTMLElement>(".h-captcha[data-callback]");
+          const name = host?.getAttribute("data-callback");
+          if (name !== null && name !== undefined) {
+            const fn = (window as unknown as Record<string, unknown>)[name];
+            if (typeof fn === "function") (fn as (t: string) => void)(tok);
+          }
+        } catch {
+          // no named callback — DOM injection stands.
+        }
+        return true;
+      }, token);
     } catch {
       return false;
     }
@@ -3053,9 +3137,16 @@ export class BrowserController {
     if (first.verificationPassed) {
       const patient = await this.pollUntilInterstitialClears(timeoutMs);
       if (patient.cleared) return;
-      // The challenge passed but Cloudflare's auto-redirect stalled. Force
-      // the cleared page ourselves by re-navigating past the one-shot
-      // challenge token (the clearance cookie now serves the real page).
+      // "Verification successful" but the page never advances is the
+      // signature of a STALE cf_clearance cookie — issued on a prior visit
+      // (often a different egress IP), which CF matches ("successful") but
+      // the origin then rejects, looping forever on "Waiting for the page
+      // to load." MEASURED: a clean profile clears codesandbox's challenge
+      // in ~12s; the stale cookie is what stalls the shared profile. Drop
+      // the CF cookies to force a FRESH challenge, then reload.
+      if (await this.clearCloudflareCookiesAndRetry(timeoutMs)) return;
+      // Or the auto-redirect simply stalled with a still-valid clearance —
+      // re-navigate past the one-shot challenge token.
       if (await this.forceNavigatePastClearedChallenge()) return;
     }
     // Force the real page: now that the cf_clearance cookie is set, a
@@ -3070,6 +3161,30 @@ export class BrowserController {
       // reload failed — proceed with what's there
     }
     await this.pollUntilInterstitialClears(Math.max(5000, timeoutMs / 2));
+  }
+
+  // Drop Cloudflare's anti-bot cookies (cf_clearance + __cf_bm) so the next
+  // request triggers a FRESH managed challenge, then reload and wait for it
+  // to clear. Scoped to cookie NAME — only CF's own cookies are removed, so
+  // an OAuth provider's session on accounts.google.com / github.com is
+  // untouched. A fresh challenge on a residential IP clears in ~12-15s, so
+  // we give it a generous window. Returns true if the interstitial is gone.
+  private async clearCloudflareCookiesAndRetry(timeoutMs: number): Promise<boolean> {
+    if (!this.page || !this.context) return false;
+    try {
+      await this.context.clearCookies({ name: "cf_clearance" });
+      await this.context.clearCookies({ name: "__cf_bm" });
+    } catch {
+      // clearCookies filter unsupported / failed — nothing to retry on.
+      return false;
+    }
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 });
+    } catch {
+      // reload failed — still give the poll a chance below.
+    }
+    const after = await this.pollUntilInterstitialClears(Math.max(20_000, timeoutMs));
+    return after.cleared || !after.detected;
   }
 
   // With a CONFIRMED Cloudflare pass, re-navigate to the current URL with

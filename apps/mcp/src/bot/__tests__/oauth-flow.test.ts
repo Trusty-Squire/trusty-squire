@@ -188,6 +188,7 @@ class NeverInbox implements AgentInbox {
     subject: string;
     from_address: string;
     parsed_links: ReadonlyArray<string>;
+    parsed_codes: ReadonlyArray<string>;
   }> {
     this.calls += 1;
     throw new Error("inbox must not be polled on an OAuth run");
@@ -548,6 +549,31 @@ describe("isLoginLoopState", () => {
     });
     expect(
       isLoginLoopState("https://service.com/authenticate", [githubBtn], "google"),
+    ).toBeNull();
+  });
+
+  it("STILL fires when a bare email field sits next to the Google button (real groq /authenticate)", () => {
+    // groq's /authenticate shows an "or continue with email" magic-link
+    // input ALONGSIDE the OAuth buttons. A bare email field must NOT
+    // suppress the login-loop retry that groq requires to finalize its
+    // Stytch session — that suppression was the oauth_session_not_persisted bug.
+    const emailInput = mk({ tag: "input", type: "email", selector: "#email-input" });
+    const hit = isLoginLoopState(
+      "https://console.groq.com/authenticate",
+      [emailInput, googleBtn],
+      "google",
+    );
+    expect(hit?.selector).toBe("#g");
+  });
+
+  it("returns null on a genuine email+PASSWORD hybrid form (Clerk/Auth0 credential creation)", () => {
+    // The real hybrid form the guard exists for: OAuth buttons PLUS a
+    // password input means the service wants a credential created, which
+    // the planner (not another OAuth click) must drive.
+    const emailInput = mk({ tag: "input", type: "email", selector: "#email" });
+    const pwInput = mk({ tag: "input", type: "password", selector: "#pw" });
+    expect(
+      isLoginLoopState("https://service.com/sign-up", [emailInput, pwInput, googleBtn], "google"),
     ).toBeNull();
   });
 

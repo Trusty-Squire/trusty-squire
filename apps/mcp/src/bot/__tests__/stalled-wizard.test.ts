@@ -5,7 +5,70 @@
 // breaker the run burns all 24 post-verify rounds + LLM budget.
 
 import { describe, expect, it } from "vitest";
-import { isStalledOnActions, isLoginPageUrl } from "../agent.js";
+import {
+  isStalledOnActions,
+  isLoginPageUrl,
+  isLoadingShellText,
+  isSignupOrLoginRoute,
+  originRoot,
+} from "../agent.js";
+
+describe("isSignupOrLoginRoute (post-OAuth dead-route escape)", () => {
+  it("flags signup/login/register routes an authed user shouldn't sit on", () => {
+    expect(isSignupOrLoginRoute("https://app.northflank.com/signup")).toBe(true);
+    expect(isSignupOrLoginRoute("https://x.example/sign-up")).toBe(true);
+    expect(isSignupOrLoginRoute("https://x.example/register")).toBe(true);
+    expect(isSignupOrLoginRoute("https://console.groq.com/authenticate")).toBe(true);
+    expect(isSignupOrLoginRoute("https://x.example/login")).toBe(true);
+  });
+  it("does NOT flag dashboard/app routes", () => {
+    expect(isSignupOrLoginRoute("https://app.northflank.com/projects")).toBe(false);
+    expect(isSignupOrLoginRoute("https://x.example/settings/api-keys")).toBe(false);
+    // "signup-success" is its own segment, not the bare "signup" route —
+    // a post-signup landing page is NOT a dead route.
+    expect(isSignupOrLoginRoute("https://x.example/signup-success/welcome")).toBe(false);
+    expect(isSignupOrLoginRoute("https://x.example/dashboard")).toBe(false);
+  });
+  it("never throws on a malformed URL", () => {
+    expect(isSignupOrLoginRoute("not a url")).toBe(false);
+  });
+});
+
+describe("originRoot", () => {
+  it("returns scheme://host/ with no path or query", () => {
+    expect(originRoot("https://app.northflank.com/signup?x=1")).toBe("https://app.northflank.com/");
+    expect(originRoot("https://console.groq.com/authenticate")).toBe("https://console.groq.com/");
+  });
+  it("returns null on a malformed URL", () => {
+    expect(originRoot("nope")).toBeNull();
+  });
+});
+
+describe("isLoadingShellText (SPA hydration guard)", () => {
+  it("fires on northflank's real post-OAuth loading shell", () => {
+    // Exact body text from the northflank /settings/access-tokens trail.
+    expect(
+      isLoadingShellText(
+        "Northflank Cloud Platform Connecting This application cannot function " +
+          "without JavaScript. Please enable it to continue.",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on common loading-shell phrasings", () => {
+    expect(isLoadingShellText("Loading…")).toBe(true);
+    expect(isLoadingShellText("Please wait while we get things ready")).toBe(true);
+    expect(isLoadingShellText("Initializing your workspace")).toBe(true);
+    expect(isLoadingShellText("Please enable JavaScript to continue")).toBe(true);
+  });
+
+  it("does NOT fire on a real dashboard with token UI", () => {
+    expect(
+      isLoadingShellText("API Tokens Create token Your personal access tokens Revoke"),
+    ).toBe(false);
+    expect(isLoadingShellText("Create your API key — Settings")).toBe(false);
+  });
+});
 
 describe("isLoginPageUrl (non-persisting-OAuth detector)", () => {
   it("flags real login/authenticate pages (groq, northflank, amplitude)", () => {

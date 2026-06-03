@@ -54,6 +54,7 @@ export interface AgentInbox {
     subject: string;
     from_address: string;
     parsed_links: ReadonlyArray<string>;
+    parsed_codes: ReadonlyArray<string>;
   }>;
 }
 
@@ -816,7 +817,7 @@ export interface SignupResult {
   // hit at least one captcha widget — null/undefined otherwise. The
   // MCP tool layer reads this to emit a CaptchaEvent.
   captcha?: {
-    kind: "turnstile" | "recaptcha";
+    kind: CaptchaKind;
     // Finer family classification + whether an image-grid challenge
     // actually rendered (vs a checkbox that passed, or score-only
     // reCAPTCHA). Spike telemetry — feeds CaptchaEvent (T3.2).
@@ -1927,18 +1928,26 @@ export function isLoginLoopState(
   // loop-detect path saw the Google button + the login-shaped URL
   // and looped OAuth indefinitely.
   //
-  // When BOTH (1) an email/password input is visible AND (2) an
-  // OAuth button for the provider we just used is visible, the page
-  // is a hybrid form, not a loop. Return null so the caller falls
-  // through to the post-verify flow — its planner can drive the
-  // form-fill, the captcha gate (Cloudflare turnstile shows up as a
-  // `check`-shaped checkbox in inventory), and the Continue click
-  // the same way the form-fill phase does for non-OAuth signups.
-  const hasCredentialInput = inventory.some(
-    (e) =>
-      e.tag === "input" && (e.type === "email" || e.type === "password"),
+  // When a PASSWORD input is visible alongside (2) an OAuth button for
+  // the provider we just used, the page is a genuine hybrid
+  // credential-creation form (Clerk/Auth0: email + password [+ turnstile]),
+  // not a loop. Return null so the caller falls through to the
+  // post-verify flow — its planner drives the form-fill, the captcha
+  // gate, and the Continue click the same way the form-fill phase does.
+  //
+  // A BARE EMAIL field does NOT count: it's the near-universal "or
+  // continue with email" magic-link/OTP alternative that sits next to
+  // the OAuth buttons on an ordinary login page (groq's /authenticate,
+  // northflank's /login, …). Treating that as a hybrid form suppressed
+  // the login-loop OAuth retry these services REQUIRE — they finalize
+  // the Stytch/WorkOS session only on a second OAuth click — and
+  // stranded them at oauth_session_not_persisted. The email-OTP case
+  // that genuinely needs the planner is caught separately downstream
+  // (detectEmailOtpGate), so narrowing to password here is safe.
+  const hasPasswordInput = inventory.some(
+    (e) => e.tag === "input" && e.type === "password",
   );
-  if (hasCredentialInput) return null;
+  if (hasPasswordInput) return null;
   return findOAuthButton(inventory, provider);
 }
 
@@ -2840,6 +2849,57 @@ export function isLoginPageUrl(url: string): boolean {
   return /[?&]google-auth-error\b/i.test(url);
 }
 
+// A pre-account route (signup OR login OR register) — the set of paths an
+// AUTHENTICATED user has no business sitting on. Broader than
+// isLoginPageUrl (which is tuned for the OAuth-callback-loop detector and
+// deliberately excludes /signup). Used for the post-OAuth dead-route
+// escape. Exported for unit tests.
+export function isSignupOrLoginRoute(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return /(?:^|\/)(?:login|signin|sign-in|sign[_-]?up|signup|register|authenticate|sso)(?:\/|$)/.test(
+      path,
+    );
+  } catch {
+    return false;
+  }
+}
+
+// The scheme://host root of a URL (no path/query) — the place a service
+// redirects an authenticated user to their dashboard. Null on a malformed
+// URL. Exported for unit tests.
+export function originRoot(url: string): string | null {
+  try {
+    return new URL(url).origin + "/";
+  } catch {
+    return null;
+  }
+}
+
+// A modern SPA dashboard often paints a "Connecting…" / "Loading…" shell
+// (plus the static <noscript> "enable JavaScript" fallback) for a beat
+// while its JS bundle and websocket finish — especially over a
+// high-latency residential tunnel. During that window the page has ZERO
+// interactive elements. northflank's /settings/access-tokens lands on
+// exactly this shell post-OAuth; the post-verify planner reads the empty
+// inventory and concludes {"kind":"done","no elements"} ~2s in, abandoning
+// a page that was about to render the token UI. Detect the shell so the
+// caller can wait for hydration instead of giving up. Matched ONLY
+// alongside an empty inventory, so the narrow phrasing here won't swallow
+// a real dashboard that merely contains the word "loading". Exported for
+// unit tests.
+export function isLoadingShellText(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    /\bconnecting\b|\bloading\b|please wait|getting things ready|initiali[sz]ing/.test(
+      t,
+    ) ||
+    /cannot function without javascript|please enable (?:it|javascript)|enable javascript to/.test(
+      t,
+    )
+  );
+}
+
 export class SignupAgent {
   // Per-run counter so a single SignupAgent (which lives one run) can't
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
@@ -3004,6 +3064,41 @@ export class SignupAgent {
               ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : ""));
           }
         }
+      }
+    }
+    // Tier 3 for hCaptcha (plausible). Distinct provider, distinct
+    // 2Captcha method (method=hcaptcha) + a UUID sitekey the reCAPTCHA
+    // `6L` guard rejects — so it needs its own extractor, solver call,
+    // and h-captcha-response injector. Same structure as reCAPTCHA Tier 3.
+    if (
+      !result.solved &&
+      result.kind === "hcaptcha" &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
+      const sitekey = await this.browser.extractHcaptchaSitekey();
+      const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+      if (sitekey !== null && pageUrl !== undefined) {
+        steps.push(`${label} captcha: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`);
+        const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+        if (solveRes.kind === "ok") {
+          const injected = await this.browser.injectHcaptchaToken(solveRes.token);
+          if (injected) {
+            steps.push(
+              `${label} captcha: Tier 3 hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+            );
+            result = { ...result, solved: true };
+          } else {
+            steps.push(
+              `${label} captcha: Tier 3 hCaptcha token arrived but page injection failed — captcha stays blocked`,
+            );
+          }
+        } else {
+          steps.push(`${label} captcha: Tier 3 hCaptcha ${solveRes.kind}` +
+            ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+            ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : ""));
+        }
+      } else if (sitekey === null) {
+        steps.push(`${label} captcha: hCaptcha widget detected but no sitekey found — cannot Tier-3 solve`);
       }
     }
     // rc.32 — forensic snapshot after the captcha attempt. Without
@@ -4482,11 +4577,29 @@ export class SignupAgent {
                     ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
                   });
                 }
+              } else if (email.parsed_codes.length > 0) {
+                credentials = await this.enterEmailVerificationCode(
+                  email.parsed_codes[0] ?? "",
+                  task,
+                  password,
+                  steps,
+                );
               } else {
                 steps.push("Email had no usable verification link.");
               }
+            } else if (email.parsed_codes.length > 0) {
+              // No links at all, but the email carries a numeric code
+              // (plausible: "Enter 4011 to verify your email address").
+              // The signup page transitioned to a code-input step after
+              // submit — type the code in rather than waiting for a link.
+              credentials = await this.enterEmailVerificationCode(
+                email.parsed_codes[0] ?? "",
+                task,
+                password,
+                steps,
+              );
             } else {
-              steps.push("Email had no parsed links — skipping verification click.");
+              steps.push("Email had no parsed links or codes — skipping verification.");
             }
           } catch (err) {
             const detail = err instanceof Error ? err.message : String(err);
@@ -5018,6 +5131,47 @@ export class SignupAgent {
     // for same-tab redirects) and drive post-OAuth onboarding.
     await this.browser.settleAfterOAuth();
     await this.browser.wait(2);
+    // Token-exchange settle. Stytch/WorkOS-style services (groq) bounce the
+    // OAuth back to a callback page (/authenticate?token=…) and complete an
+    // ASYNC token→session exchange there, THEN redirect to the dashboard.
+    // With a warm Google session the round-trip is near-instant, so the bot
+    // arrives at the callback while the exchange is still in flight — and
+    // acting now (the rc.20 second-click retry, or post-verify navigation)
+    // interrupts it, stranding the run on the login page. Give a callback-
+    // shaped URL a chance to redirect itself away before we touch anything.
+    if (isLoginPageUrl(this.browser.currentUrl())) {
+      for (let i = 0; i < 6 && isLoginPageUrl(this.browser.currentUrl()); i++) {
+        await this.browser.wait(2);
+      }
+      const settledUrl = this.browser.currentUrl();
+      steps.push(
+        `OAuth: waited for the callback to settle — now at ${pathOf(settledUrl)}` +
+          (isLoginPageUrl(settledUrl) ? " (still login-shaped)" : " (redirected to the app)"),
+      );
+    }
+    // Dead-route escape. The OAuth often returns to the SIGNUP url it
+    // started from (northflank: app.northflank.com/signup). For an account
+    // that now EXISTS, /signup (and /login, /register…) is a dead route the
+    // SPA can't render — it hangs on a "Connecting" shell forever and the
+    // post-verify planner reads it as "signed out." Navigating to the app
+    // ORIGIN ROOT lets the service redirect an authenticated user to its
+    // real dashboard. Generalizes: a service already on its dashboard has a
+    // non-auth path here and is left alone.
+    if (isSignupOrLoginRoute(this.browser.currentUrl())) {
+      const root = originRoot(this.browser.currentUrl());
+      if (root !== null) {
+        steps.push(
+          `OAuth: post-auth landing is a signup/login route (${pathOf(this.browser.currentUrl())}) — ` +
+            `navigating to the app root (${root}) so the service routes us to the dashboard.`,
+        );
+        try {
+          await this.browser.goto(root);
+          await this.browser.wait(2);
+        } catch {
+          // navigation hiccup — the post-verify loop re-reads regardless.
+        }
+      }
+    }
     await saveDebugSnapshot(this.browser, "oauth-post-consent");
     steps.push(
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
@@ -5599,9 +5753,16 @@ ${formatInventory(input.inventory)}`,
     subject: string;
     from_address: string;
     parsed_links: ReadonlyArray<string>;
+    parsed_codes: ReadonlyArray<string>;
   }> {
     const deadline = Date.now() + totalSeconds * 1000;
-    const pattern = /verify|confirm|welcome|activate|complete|finish|set\s*up/i;
+    // `verif` (not `verify`) so the matcher also catches "verification" —
+    // "verification" does NOT contain the substring "verify" (…ifi… vs
+    // …ify), which silently dropped plausible's "4011 is your Plausible
+    // email verification code" and timed the whole signup out. `code` /
+    // `one[- ]?time` / `otp` catch code-based verification subjects too.
+    const pattern =
+      /verif|confirm|welcome|activate|complete|finish|set\s*up|\bcode\b|one[\s-]?time|\botp\b|sign[\s-]?up/i;
     let lastErr: unknown = null;
     while (Date.now() < deadline) {
       const remainingSeconds = Math.max(1, Math.floor((deadline - Date.now()) / 1000));
@@ -5622,6 +5783,43 @@ ${formatInventory(input.inventory)}`,
       }
     }
     throw lastErr ?? new Error("verification email did not arrive in time");
+  }
+
+  // Code-based email verification (plausible: "Enter 4011 to verify your
+  // email address"). The signup email carried a numeric code and no
+  // clickable link, and the page transitioned to a code-input step after
+  // submit. Seed the post-verify planner with the code so it fills the
+  // input + clicks Verify, then drives on to the API key. Generalizes to
+  // every service that verifies by emailed code rather than link.
+  private async enterEmailVerificationCode(
+    code: string,
+    task: SignupTask,
+    password: string,
+    steps: string[],
+  ): Promise<Record<string, string>> {
+    if (code.length === 0) {
+      steps.push("Verification email exposed a code field but it was empty — skipping.");
+      return {};
+    }
+    steps.push(`Email carries a verification CODE (${code}) and no link — entering it on the page.`);
+    // The post-submit "enter code" view may still be hydrating.
+    await this.browser.waitForFormReady();
+    const hint =
+      `Email verification code retrieved: "${code}". The current page has a ` +
+      `verification-code / OTP input (placeholder like "Code" / "Verification code", ` +
+      `or several single-digit boxes — fill the FIRST and the browser auto-distributes). ` +
+      `Issue {"kind":"fill","selector":"…","value":"${code}"} on it, then NEXT round click ` +
+      `the Verify / Confirm / Continue / Submit button.`;
+    return this.postVerifyLoop({
+      service: task.service,
+      credentials: { email: task.email, password },
+      maxRounds: task.postVerifyMaxRounds ?? 6,
+      steps,
+      initialHint: hint,
+      ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
+      ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
+      ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+    });
   }
 
   // Drive the browser toward the API key after the account exists —
@@ -5998,6 +6196,10 @@ ${formatInventory(input.inventory)}`,
     // signup gate does.
     machineToken?: string | undefined;
     apiBase?: string | undefined;
+    // Seed the planner's first round with a hint — e.g. a verification
+    // CODE pulled from the signup email (plausible) that the bot must type
+    // into the on-page code input rather than click a link.
+    initialHint?: string | undefined;
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     // 0.8.2-rc.15 — also seed DOM-proximity at loop entry. If the
@@ -6052,7 +6254,7 @@ ${formatInventory(input.inventory)}`,
     // truncated (the S3-class trap: the planner sees a key-shaped
     // string and keeps asking to extract it forever), or when the
     // planner's last step was rejected.
-    let hint: string | undefined;
+    let hint: string | undefined = args.initialHint;
     // rc.27 — when the email_otp gate handler retrieved a code from
     // the operator's gmail, seed the FIRST round's hint with the
     // code + explicit fill+submit instructions. Cleared after one
@@ -6272,6 +6474,46 @@ ${formatInventory(input.inventory)}`,
         );
         await this.browser.wait(2);
         continue;
+      }
+      // SPA hydration guard. A post-OAuth dashboard (northflank's
+      // /settings/access-tokens, PostHog) can render a "Connecting"/loading
+      // shell while its JS bundle + websocket finish — slow over a
+      // residential tunnel. The shell often carries a stray element or two
+      // (a logo link, the <noscript>), so gating on an EMPTY inventory
+      // misses it; the loading-shell TEXT is the authoritative "not yet
+      // rendered" signal. Wait while that text persists, then proceed with
+      // whatever's there (an honest "still a shell" beats a premature done —
+      // and if the SPA never hydrates, e.g. a blocked websocket, the bound
+      // keeps us from hanging).
+      //
+      // Budget = 6x3s = 18s. MEASURED: a dashboard SPA gated on a websocket
+      // (northflank's wss://platform.northflank.com/websocket) hydrates in
+      // ~12-15s over the tunnel. A larger budget BACKFIRES on a page that
+      // will NEVER hydrate (e.g. an authed user stranded on /signup): the
+      // wait re-runs every round and burns the 600s run cap. The escape for
+      // a never-hydrating route is navigate-to-root post-OAuth, not a longer
+      // wait here.
+      const HYDRATION_TICKS = 6;
+      for (
+        let hydrationWait = 0;
+        hydrationWait < HYDRATION_TICKS &&
+        isLoadingShellText(await this.browser.extractText().catch(() => ""));
+        hydrationWait++
+      ) {
+        args.steps.push(
+          `Post-verify round ${round}: ${pathOf(state.url)} is a loading shell ` +
+            `(hydration wait ${hydrationWait + 1}/${HYDRATION_TICKS}) — waiting for the SPA to render`,
+        );
+        await this.browser.wait(3);
+        try {
+          [state, inventory] = await Promise.all([
+            this.browser.getState(),
+            this.buildInventory(args.steps, undefined, 80),
+          ]);
+        } catch {
+          // mid-navigation read — keep the prior state/inventory and let
+          // the next hydration tick (or the planner) retry.
+        }
       }
       // Stalled-wizard breaker. Build a content signature (URL + each
       // inventory element's selector + label) and judge whether the

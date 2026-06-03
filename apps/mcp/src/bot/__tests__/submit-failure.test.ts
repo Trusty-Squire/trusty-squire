@@ -125,6 +125,7 @@ class SpyInbox implements AgentInbox {
     subject: string;
     from_address: string;
     parsed_links: ReadonlyArray<string>;
+    parsed_codes: ReadonlyArray<string>;
   }> {
     this.waitCalls += 1;
     throw new Error("inbox should not have been polled");
