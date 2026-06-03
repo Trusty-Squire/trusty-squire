@@ -418,3 +418,29 @@ full 120s, none arrived). Root cause is the `@trustysquire.ai` catch-all →
 IMAP mailbox delivery, not probe timing. Operator action: verify
 `GMAIL_USER`/`WORKSPACE_IMAP_*` on `trusty-squire-api` points at the
 mailbox the catch-all actually delivers to (see the inbox-agent diagnosis).
+
+## Remaining-buckets sweep (2026-06-03) — status after the rerun3 triage
+The 24 rerun3 failures were triaged into buckets (see
+[[project-planner-generalization-plan]] memory). Progress:
+- **PLANNER-NAV (6):** Cloudinary prompt de-contamination (proven) + the
+  deterministic wizard-loop breaker (live-verified on axiom). Done.
+- **INTERSTITIAL (1: lambda-labs + the codesandbox class):** FIXED
+  (commit e60291a) — the bot now recognizes a PASSED Cloudflare challenge
+  ('Verification successful') instead of bailing on the static copy. Matters
+  now that patchright actually passes the challenge.
+- **INFRA-inbox (4: fathom/postmark/elevenlabs/browserbase):** DIAGNOSED —
+  the workspace IMAP poller falls back to GMAIL_USER (personal gmail) because
+  WORKSPACE_IMAP_USER is unset, so it reads the wrong mailbox and never sees
+  the trustysquire.ai catch-all. **OPERATOR ACTION:** set
+  `WORKSPACE_IMAP_USER=lunchbox@trustysquire.ai` + `WORKSPACE_IMAP_PASSWORD`
+  (Workspace app password) on `trusty-squire-api`. Commit 3a751b0 makes the
+  misconfig visible in the bot trail (`mailbox_domain_mismatch`).
+- **AUTH-WALL (8: groq/xata/ipdata/stripe/stytch/weaviate/northflank/
+  launchdarkly):** OAuth never completed. NEXT: re-test with
+  `BOT_CDP_HARDENED=1` (patchright) — the clean fingerprint may now clear
+  some of these (the datacenter-IP block from the A/B is the open variable).
+  xata is a Keycloak `first-broker-login` account-LINK gate (different — the
+  bot may be able to click "link account"); worth a focused look.
+- **SSO/2FA (4: last9/qdrant/redis-cloud/grafana-cloud):** qdrant → GitHub
+  2FA (wall, needs TOTP); last9 → already-signed-in (already-account mint may
+  cover it); redis-cloud/grafana-cloud → SSO. Mostly walls.
