@@ -617,7 +617,7 @@
     '
 - slug: baselime
   name: Baselime
-  signup_url: https://console.baselime.io/signup
+  signup_url: https://baselime.io/
   oauth_provider: github
   scope_hint: null
   status: pending
@@ -685,7 +685,7 @@
     '
 - slug: loops
   name: Loops
-  signup_url: https://app.loops.so/signup
+  signup_url: https://app.loops.so/register
   oauth_provider: google
   scope_hint: null
   status: pending
@@ -769,7 +769,7 @@
     '
 - slug: typesense
   name: Typesense Cloud
-  signup_url: https://cloud.typesense.org/signin
+  signup_url: https://cloud.typesense.org/
   oauth_provider: google
   scope_hint: null
   status: pending
@@ -816,7 +816,7 @@
     2026-05-29 retry-with-evidence: Confirmed via screenshot (2nd run, 2026-05-29): identical ''Looks like there was an error!'' page with NO interactive elements after Google OAuth. URL is dashboard/authenticate?route=%2Fstart-now&source=oauth. Stytch''s dashboard is broken for the methoxine@gmail.com identity — likely a stuck dashboard state Stytch-side. No code path can drive past zero interactive elements. Either wait for Stytch to fix, use a different identity, or contact Stytch support.'
 - slug: workos
   name: WorkOS
-  signup_url: https://dashboard.workos.com/sign-up
+  signup_url: https://workos.com/signup
   oauth_provider: google
   scope_hint: null
   status: pending
@@ -904,7 +904,7 @@
     '
 - slug: daytona
   name: Daytona
-  signup_url: https://app.daytona.io/signin
+  signup_url: https://app.daytona.io/
   oauth_provider: github
   scope_hint: null
   status: pending
@@ -979,7 +979,7 @@
     2026-05-29 retry-with-evidence: Bot''s own safety guard fires (`oauth_consent_needs_review`) — the Google consent screen requested scopes the bot couldn''t parse from URL, and the safety policy is to pause rather than blind-approve. This is CORRECT behavior, not a bug. To unblock: either review the consent screen manually and approve, or update the bot''s consent parser if the scope format changed.'
 - slug: temporal
   name: Temporal Cloud
-  signup_url: https://cloud.temporal.io/signup
+  signup_url: https://temporal.io/get-cloud
   oauth_provider: google
   scope_hint: null
   status: pending
