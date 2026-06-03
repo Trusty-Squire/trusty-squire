@@ -285,6 +285,29 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         stepToExecute = fallbackResult.substitute;
       } else if (fallbackResult.kind === "needs_login") {
         return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i };
+      } else if (
+        step.kind === "click" &&
+        isSkippableAbsentClick(
+          step,
+          i,
+          await countClickMatches(step, browser),
+          skill.steps,
+        )
+      ) {
+        // Account-state-dependent setup click (hookdeck "Create
+        // Project" class): the target button only existed in the
+        // original signup's account state. It's wholly absent now AND
+        // it isn't the credential-creating click — skip it and continue
+        // rather than hard-failing a replay that can still reach the
+        // credential. Step-trail note so the skip is visible to anyone
+        // triaging the run (and so a genuinely-required vanished button
+        // isn't silently swallowed without a paper trail).
+        console.error(
+          `[replay] step ${i} (click text_match=${JSON.stringify(step.text_match)}) ` +
+            `target absent from page; skipping as optional setup step. ` +
+            `Reason: ${validation.reason}`,
+        );
+        continue;
       } else {
         return {
           kind: "step_failed",
@@ -1602,12 +1625,41 @@ function substituteTemplate(template: string, values: Record<string, string>): s
 
 // ── Mode helpers ────────────────────────────────────────────────────
 
+function isExtractStep(step: SkillStep): boolean {
+  return (
+    step.kind === "extract_via_copy_button" ||
+    step.kind === "extract_via_regex" ||
+    step.kind === "extract_via_copy_button_named" ||
+    step.kind === "extract_via_regex_named"
+  );
+}
+
+// Index of the credential-creating click: the LAST click (plain or
+// OAuth) before the FIRST extract step. This is the load-bearing click
+// — the one that mints the token the extract then reads. Returns null
+// when there is no extract step, or no click precedes it. Used both by
+// the dry-mode cutoff and by the absent-click skip gate (the gate must
+// NEVER skip this click, since skipping it would silently bypass
+// credential creation and let a hollow replay report success).
+function creditCreatingClickIndex(steps: SkillStep[]): number | null {
+  for (let i = 0; i < steps.length; i++) {
+    if (!isExtractStep(steps[i]!)) continue;
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = steps[j]!;
+      if (prev.kind === "click" || prev.kind === "click_oauth_button") {
+        return j;
+      }
+    }
+    return null;
+  }
+  return null;
+}
+
 function computeDryStopIndex(steps: SkillStep[]): number {
-  // The credential-creating click is the click immediately before the
-  // first extract step. Dry mode stops at that click — pre-validates
-  // it (confirms the button is on the page), but does not execute it.
-  // If the skill has no extract step (shouldn't happen — synthesizer
-  // rejects), we just walk everything.
+  // Dry mode stops at the credential-creating click — pre-validates it
+  // (confirms the button is on the page), but does not execute it. If
+  // the skill has no extract step (shouldn't happen — synthesizer
+  // rejects), we walk everything.
   //
   // Single-credential assumption (0.7.0): only the FIRST extract step
   // determines the dry-mode cutoff. Multi-credential skills (0.8.0,
@@ -1618,26 +1670,61 @@ function computeDryStopIndex(steps: SkillStep[]): number {
   // function should return the cutoff for the LAST extract (so dry
   // mode walks far enough to validate every credential path) — but
   // that's an explicit redesign, not a drop-in change.
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i]!;
-    if (
-      step.kind === "extract_via_copy_button" ||
-      step.kind === "extract_via_regex" ||
-      step.kind === "extract_via_copy_button_named" ||
-      step.kind === "extract_via_regex_named"
-    ) {
-      // Find the last click before this extract.
-      for (let j = i - 1; j >= 0; j--) {
-        const prev = steps[j]!;
-        if (prev.kind === "click" || prev.kind === "click_oauth_button") {
-          return j; // stop before this click
-        }
-      }
-      // No click before extract — stop at the extract itself.
-      return i;
-    }
-  }
-  return steps.length;
+  const clickIdx = creditCreatingClickIndex(steps);
+  if (clickIdx !== null) return clickIdx;
+  // No click before the first extract — stop at the extract itself.
+  const firstExtract = steps.findIndex(isExtractStep);
+  return firstExtract === -1 ? steps.length : firstExtract;
+}
+
+// Absent-click skip gate (the "account-state-dependent setup step"
+// class). A captured `click` step can target a button that only
+// existed in the EXACT account state of the original signup — e.g.
+// hookdeck's first-time-account "Create Project" setup button, which
+// is simply not on the page when replay runs against a fresh or
+// already-set-up account. Pre-validation returns "No element matches
+// text_match=…" and, with no LLM substitute, the whole replay
+// hard-fails — even though the credential is still reachable.
+//
+// When the target is COMPLETELY ABSENT (zero text_match matches in the
+// inventory), treat the click as an optional setup step and continue.
+// Safety rails, so we never mask real breakage:
+//
+//   - Only the `click` kind (not click_oauth_button — a missing OAuth
+//     button is a genuine auth wall, handled by the needs_login path).
+//   - Only true absence (matchCount === 0). An ambiguous match (>1) or
+//     a role-filter-only miss means the element IS on the page but the
+//     skill can't pin it — that is real rot, still a hard failure.
+//   - NEVER the credential-creating click (last click before the first
+//     extract). Skipping that would bypass token creation and let a
+//     hollow replay report success against a stale page.
+//   - ONLY when a credential-creating click actually exists downstream.
+//     If the skill has no extract-anchored click at all, there's no
+//     credential path to protect and the click may be the only
+//     meaningful action — skipping is unsafe, so we don't.
+function isSkippableAbsentClick(
+  step: SkillStep,
+  stepIndex: number,
+  matchCount: number,
+  steps: SkillStep[],
+): boolean {
+  if (step.kind !== "click") return false;
+  if (matchCount !== 0) return false;
+  const credClickIdx = creditCreatingClickIndex(steps);
+  if (credClickIdx === null) return false;
+  return stepIndex !== credClickIdx;
+}
+
+// Count how many inventory elements a click step's text_match resolves
+// to BEFORE role/near-text narrowing. Zero means the target is wholly
+// absent from the page (the skip-gate case); a positive count means the
+// element exists but the skill can't uniquely pin it (real rot).
+async function countClickMatches(
+  step: Extract<SkillStep, { kind: "click" }>,
+  browser: BrowserController,
+): Promise<number> {
+  const inventory = await browser.extractInteractiveElements();
+  return inventory.filter((el) => matchesClickHint(el, step.text_match)).length;
 }
 
 // Dry-mode safety net for multi-credential skills (0.8.0). The main
