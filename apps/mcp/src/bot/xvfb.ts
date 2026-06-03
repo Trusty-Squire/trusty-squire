@@ -40,7 +40,7 @@ function binaryOnPath(bin: string): boolean {
   return paths.some((p) => p.length > 0 && existsSync(join(p, bin)));
 }
 
-// Start a minimal Xvfb instance at 1280x720x24. Resolves when the
+// Start a minimal Xvfb instance at 1920x1080x24. Resolves when the
 // display socket appears (Xvfb prints nothing useful on stdout, so we
 // poll for /tmp/.X11-unix/X<n>). Rejects after 5s if the socket
 // doesn't appear — usually means Xvfb crashed (missing fonts etc.).
@@ -48,8 +48,13 @@ export async function startXvfb(opts?: {
   width?: number;
   height?: number;
 }): Promise<XvfbRig> {
-  const width = opts?.width ?? 1280;
-  const height = opts?.height ?? 720;
+  // 1920×1080 is the most common real desktop resolution. The old
+  // 1280×720 default doubled as Playwright's emulated-device viewport
+  // default, so with `viewport: null` the page would have read back the
+  // exact Playwright default — an anti-bot tell. A stock 1080p display
+  // reads as an ordinary laptop/desktop.
+  const width = opts?.width ?? 1920;
+  const height = opts?.height ?? 1080;
   const display = pickFreeDisplay();
   const displayNum = display.slice(1);
 
