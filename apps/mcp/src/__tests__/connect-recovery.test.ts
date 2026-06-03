@@ -7,11 +7,24 @@
 //       the explicit /install/done. isClaimTerminalUrl encodes that.
 
 import { describe, expect, it } from "vitest";
-import { agentTokenStillValid, isClaimTerminalUrl } from "../install/cli.js";
+import {
+  agentTokenStillValid,
+  decideProvisioned,
+  isClaimTerminalUrl,
+} from "../install/cli.js";
+import type { SessionData } from "../session.js";
 
 function fakeFetch(status: number): typeof fetch {
   return (async () => new Response(null, { status })) as unknown as typeof fetch;
 }
+
+const fullSession: SessionData = {
+  api_base_url: "https://api.test",
+  saved_at: "2026-05-30T00:00:00.000Z",
+  machine_token: "mt",
+  agent_session_token: "st",
+  account_id: "acc_1",
+};
 
 describe("agentTokenStillValid (fix #1: expired-token detection)", () => {
   it("returns true on 200 (token live)", async () => {
@@ -49,6 +62,33 @@ describe("agentTokenStillValid (fix #1: expired-token detection)", () => {
     await agentTokenStillValid("https://api.test", "mcp_session_abc", spyFetch);
     expect(seen.url).toBe("https://api.test/v1/vault/credentials");
     expect(seen.auth).toBe("Bearer mcp_session_abc");
+  });
+});
+
+describe("decideProvisioned (fast-path gate: write config without a re-claim)", () => {
+  it("provisioned when the session is valid even with NO provider marker (the gap fix)", () => {
+    // The real bug: a valid session whose bot profile has no OAuth login
+    // yet (fresh box / headless) was forced through a full browser claim
+    // and ended up writing NO config. Empty providers must not block.
+    expect(decideProvisioned(fullSession, true, [])).toEqual({ providers: [] });
+  });
+
+  it("provisioned and carries the marked providers when present", () => {
+    expect(decideProvisioned(fullSession, true, ["google"])).toEqual({
+      providers: ["google"],
+    });
+  });
+
+  it("NOT provisioned when the agent token failed to validate (→ re-pair)", () => {
+    expect(decideProvisioned(fullSession, false, ["google"])).toBeNull();
+  });
+
+  it("NOT provisioned when the session is null or missing a required field", () => {
+    expect(decideProvisioned(null, true, ["google"])).toBeNull();
+    const { agent_session_token: _omit, ...noAgentToken } = fullSession;
+    expect(decideProvisioned(noAgentToken as SessionData, true, [])).toBeNull();
+    const { account_id: _omit2, ...noAccount } = fullSession;
+    expect(decideProvisioned(noAccount as SessionData, true, [])).toBeNull();
   });
 });
 
