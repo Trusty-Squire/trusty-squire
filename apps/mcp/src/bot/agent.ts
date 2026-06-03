@@ -2969,7 +2969,16 @@ export class SignupAgent {
       this.captchaSolver?.isAvailable() === true
     ) {
       const sitekey = await this.browser.extractRecaptchaSitekey();
-      if (sitekey !== null) {
+      if (sitekey === null) {
+        // result.kind said "recaptcha" but no key with the reCAPTCHA `6L`
+        // format is on the page — almost always an hCaptcha/Turnstile
+        // widget misbucketed by the host-input heuristic. 2Captcha's
+        // reCAPTCHA endpoint would reject the wrong-provider key
+        // (ERROR_WRONG_GOOGLEKEY); skip it and surface the real shape.
+        steps.push(
+          `${label} captcha: no genuine reCAPTCHA sitekey on page (widget is likely hCaptcha/Turnstile) — skipping 2Captcha`,
+        );
+      } else {
         const pageUrl = (await this.browser.getState().catch(() => null))?.url;
         if (pageUrl !== undefined) {
           steps.push(`${label} captcha: Tier 3 — submitting sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`);

@@ -282,6 +282,33 @@ export function classifyInterstitialText(text: string): {
   return { onInterstitial, verificationPassed };
 }
 
+// After a Cloudflare managed challenge PASSES, the cf_clearance cookie is
+// set but the URL still carries Cloudflare's single-use challenge token
+// (`__cf_chl_rt_tk`, `__cf_chl_tk`, `__cf_chl_f_tk`, …). Cloudflare's own
+// client-side redirect to the cleared page can stall — especially over a
+// high-latency residential tunnel, where the meta-refresh/JS hop never
+// fires inside our wait budget. Re-navigating to the SAME url with those
+// one-shot tokens stripped serves the real page directly (the clearance
+// cookie now satisfies the edge), instead of waiting on the stuck redirect.
+// Returns the cleaned URL, or null when there's no challenge token to strip
+// (nothing this can do better than a plain reload). Exported for unit tests.
+export function stripCloudflareChallengeParams(rawUrl: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  let changed = false;
+  for (const key of [...u.searchParams.keys()]) {
+    if (key.toLowerCase().startsWith("__cf_chl")) {
+      u.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  return changed ? u.toString() : null;
+}
+
 export class BrowserController {
   // The persistent browser context. Persistent (launchPersistentContext)
   // rather than an ephemeral context so the profile carries the user's
@@ -2122,20 +2149,35 @@ export class BrowserController {
   // help). Reads from the standard places sites declare it:
   //   1. <div class="g-recaptcha" data-sitekey="...">
   //   2. <iframe src="...?k=SITEKEY&...">  (api2/anchor frame)
-  //   3. <script>...sitekey: '...'...</script> via window globals
+  //
+  // CRITICAL: only ever returns a GENUINE reCAPTCHA key. hCaptcha
+  // (`.h-captcha`) and Turnstile (`.cf-turnstile`) ALSO publish a
+  // `data-sitekey` attribute, so a bare `[data-sitekey]` selector
+  // grabs the wrong provider's key and the caller ships it to
+  // 2Captcha's `userrecaptcha` endpoint → ERROR_WRONG_GOOGLEKEY (the
+  // plausible/hCaptcha case). The authoritative discriminator is the
+  // key FORMAT: reCAPTCHA public keys always start with `6L`; hCaptcha
+  // keys are UUIDs (`bc609205-…`); Turnstile keys start with `0x`. We
+  // both scope the selector away from the other widgets AND gate on
+  // the `6L` prefix, so no non-reCAPTCHA key can ever leak through.
   async extractRecaptchaSitekey(): Promise<string | null> {
     if (!this.page) throw new Error("Browser not started");
     try {
       const sitekey = await this.page.evaluate(() => {
-        // 1. div[data-sitekey] — the standard reCAPTCHA v2 anchor.
-        const div = document.querySelector<HTMLElement>(
-          "[data-sitekey], div.g-recaptcha[data-sitekey]",
+        const isRecaptchaKey = (k: string | null): k is string =>
+          k !== null && /^6L/.test(k) && k.length > 30;
+        // 1. data-sitekey, but NOT on an hCaptcha/Turnstile widget (or
+        //    nested inside one). Those publish data-sitekey too.
+        const anchors = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-sitekey]"),
+        ).filter(
+          (el) => el.closest(".h-captcha, .cf-turnstile") === null,
         );
-        if (div !== null) {
-          const k = div.getAttribute("data-sitekey");
-          if (k !== null && k.length > 10) return k;
+        for (const el of anchors) {
+          const k = el.getAttribute("data-sitekey");
+          if (isRecaptchaKey(k)) return k;
         }
-        // 2. The api2 iframe src carries ?k=SITEKEY.
+        // 2. The api2/enterprise iframe src carries ?k=SITEKEY.
         const iframes = Array.from(
           document.querySelectorAll<HTMLIFrameElement>(
             'iframe[src*="recaptcha/api2"], iframe[src*="recaptcha/enterprise"]',
@@ -2144,7 +2186,7 @@ export class BrowserController {
         for (const ifr of iframes) {
           const url = new URL(ifr.src);
           const k = url.searchParams.get("k");
-          if (k !== null && k.length > 10) return k;
+          if (isRecaptchaKey(k)) return k;
         }
         return null;
       });
@@ -3011,17 +3053,47 @@ export class BrowserController {
     if (first.verificationPassed) {
       const patient = await this.pollUntilInterstitialClears(timeoutMs);
       if (patient.cleared) return;
+      // The challenge passed but Cloudflare's auto-redirect stalled. Force
+      // the cleared page ourselves by re-navigating past the one-shot
+      // challenge token (the clearance cookie now serves the real page).
+      if (await this.forceNavigatePastClearedChallenge()) return;
     }
     // Force the real page: now that the cf_clearance cookie is set, a
-    // reload often renders it. (If it's a server-side risk-score block —
-    // fingerprint/IP — reload won't help, but the caller's inventory
-    // diagnostic will still surface the block.)
+    // reload often renders it. domcontentloaded (not networkidle) — the
+    // real page is usually a heavy SPA that never reaches networkidle, so
+    // waiting for it just burns the budget back into a timeout. (If it's a
+    // server-side risk-score block — fingerprint/IP — reload won't help,
+    // but the caller's inventory diagnostic will still surface the block.)
     try {
-      await this.page.reload({ waitUntil: "networkidle", timeout: 10_000 });
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 });
     } catch {
       // reload failed — proceed with what's there
     }
     await this.pollUntilInterstitialClears(Math.max(5000, timeoutMs / 2));
+  }
+
+  // With a CONFIRMED Cloudflare pass, re-navigate to the current URL with
+  // the one-shot `__cf_chl_*` challenge token stripped — the cf_clearance
+  // cookie is already set, so the edge serves the real page instead of the
+  // stuck redirect. Returns true if the interstitial is gone afterwards.
+  // Returns false (caller falls back to a plain reload) when there's no
+  // token to strip or the navigation didn't clear the gate.
+  private async forceNavigatePastClearedChallenge(): Promise<boolean> {
+    if (!this.page) return false;
+    const cleaned = stripCloudflareChallengeParams(this.page.url());
+    if (!cleaned) return false;
+    try {
+      await this.page.goto(cleaned, {
+        waitUntil: "domcontentloaded",
+        timeout: 15_000,
+      });
+    } catch {
+      return false;
+    }
+    const after = await this.pollUntilInterstitialClears(Math.max(5000, 8000));
+    // cleared = saw it then it went away; !detected = the real page rendered
+    // immediately (no interstitial on the post-nav page at all).
+    return after.cleared || !after.detected;
   }
 
   // One poll loop. `detected` = an interstitial was observed at least

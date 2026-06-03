@@ -6,7 +6,7 @@
 // reads a passed challenge as "still blocked" and the bot bails.
 
 import { describe, expect, it } from "vitest";
-import { classifyInterstitialText } from "../browser.js";
+import { classifyInterstitialText, stripCloudflareChallengeParams } from "../browser.js";
 
 describe("classifyInterstitialText", () => {
   it("passed-but-static-copy-present (the codesandbox case): onInterstitial AND verificationPassed", () => {
@@ -39,5 +39,31 @@ describe("classifyInterstitialText", () => {
 
   it("'you are verified' counts as passed", () => {
     expect(classifyInterstitialText("Success! You are now verified").verificationPassed).toBe(true);
+  });
+});
+
+describe("stripCloudflareChallengeParams", () => {
+  it("strips the one-shot challenge token (the codesandbox URL)", () => {
+    // The exact shape from the real codesandbox trail.
+    const got = stripCloudflareChallengeParams(
+      "https://codesandbox.io/signin?__cf_chl_rt_tk=79TC6R6m1W0qegjdyYbRrgH9FdxOlCg_kVqi73rdGsU-1780517514-1.0.1.1-EoEO4gdDEFbm",
+    );
+    expect(got).toBe("https://codesandbox.io/signin");
+  });
+
+  it("strips every __cf_chl_* variant but preserves unrelated query params", () => {
+    const got = stripCloudflareChallengeParams(
+      "https://x.example/signup?plan=pro&__cf_chl_tk=aaa&ref=hn&__cf_chl_f_tk=bbb",
+    );
+    expect(got).toBe("https://x.example/signup?plan=pro&ref=hn");
+  });
+
+  it("returns null when there is no challenge token to strip (plain reload suffices)", () => {
+    expect(stripCloudflareChallengeParams("https://x.example/signin?foo=1")).toBeNull();
+    expect(stripCloudflareChallengeParams("https://x.example/signin")).toBeNull();
+  });
+
+  it("never throws on a malformed URL", () => {
+    expect(stripCloudflareChallengeParams("not a url")).toBeNull();
   });
 });
