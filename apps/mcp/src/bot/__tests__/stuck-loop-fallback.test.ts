@@ -13,7 +13,24 @@ import { describe, expect, it } from "vitest";
 import {
   detectExistingAccountNoExtract,
   pickStuckLoopFallbackUrl,
+  serviceSlug,
 } from "../agent.js";
+
+// Drains pickStuckLoopFallbackUrl by repeatedly asking for the next
+// candidate and recording it as tried, until it returns null. Returns
+// the ordered list of distinct candidates offered. Bounded so a bug
+// that never returns null fails the test instead of hanging.
+function drainFallbacks(startUrl: string, service?: string): readonly string[] {
+  const tried = new Set<string>();
+  const offered: string[] = [];
+  for (let i = 0; i < 200; i++) {
+    const next = pickStuckLoopFallbackUrl(startUrl, tried, service);
+    if (next === null) return offered;
+    offered.push(next);
+    tried.add(next);
+  }
+  throw new Error("pickStuckLoopFallbackUrl never exhausted");
+}
 
 describe("pickStuckLoopFallbackUrl", () => {
   it("returns the most-specific path first on a stuck dashboard URL", () => {
@@ -53,33 +70,98 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://platform.claude.com/settings/api_keys");
   });
 
-  it("returns null when every fallback path is exhausted", () => {
-    const exhausted = new Set([
-      "https://example.test/settings/keys",
-      "https://example.test/settings/api-keys",
-      "https://example.test/settings/api_keys",
-      "https://example.test/settings/tokens",
-      "https://example.test/settings/api-tokens",
-      "https://example.test/settings/account/api/auth-tokens/",
-      "https://example.test/account/api-keys",
-      "https://example.test/account/api_tokens",
-      "https://example.test/account/keys",
-      "https://example.test/account/tokens",
-      "https://example.test/api-keys",
-      "https://example.test/api_keys",
-      "https://example.test/keys",
-      "https://example.test/tokens",
-      "https://example.test/auth-tokens",
-      "https://example.test/dashboard/api-keys",
-      "https://example.test/dashboard/keys",
-    ]);
+  it("returns null once every fallback path has been offered and tried", () => {
+    // Drive the helper to exhaustion by recording each candidate it
+    // offers — the list grew (rc.2), so enumerate dynamically instead
+    // of hard-coding it. After the drain, one more ask must be null.
+    const offered = drainFallbacks("https://example.test/dashboard");
+    expect(offered.length).toBeGreaterThan(0);
+    const tried = new Set(offered);
     expect(
-      pickStuckLoopFallbackUrl("https://example.test/dashboard", exhausted),
+      pickStuckLoopFallbackUrl("https://example.test/dashboard", tried),
     ).toBeNull();
+  });
+
+  it("never offers the same candidate URL twice across a full drain", () => {
+    const offered = drainFallbacks("https://example.test/dashboard");
+    expect(new Set(offered).size).toBe(offered.length);
+  });
+
+  it("offers /settings/authorization (LaunchDarkly's keys path) in the generic list", () => {
+    // Even without the service hint, the widened generic list must
+    // include LD's authorization page so the planner-agnostic drain
+    // eventually reaches it.
+    const offered = drainFallbacks("https://app.example.test/dashboard");
+    expect(offered).toContain("https://app.example.test/settings/authorization");
   });
 
   it("returns null when the URL isn't parseable", () => {
     expect(pickStuckLoopFallbackUrl("not-a-url", new Set())).toBeNull();
+  });
+
+  it("tries the curated per-service path FIRST when the host matches the service", () => {
+    // groq keys live at console.groq.com/keys; the planner kept guessing
+    // /settings/api-keys (404). With the service hint, /keys leads.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.groq.com/authenticate",
+      new Set(),
+      "groq",
+    );
+    expect(fallback).toBe("https://console.groq.com/keys");
+  });
+
+  it("resolves the curated path from a multi-word / cased service name via the slug", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.launchdarkly.com/dashboard",
+      new Set(),
+      "LaunchDarkly",
+    );
+    expect(fallback).toBe("https://app.launchdarkly.com/settings/authorization");
+  });
+
+  it("does NOT compose a curated path onto an unrelated host (host gate)", () => {
+    // The bot wandered onto an OAuth provider; the groq curated paths
+    // must not be glued onto accounts.google.com. Falls back to the
+    // generic list's first entry instead.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://accounts.google.com/oauth/authorize",
+      new Set(),
+      "groq",
+    );
+    expect(fallback).toBe("https://accounts.google.com/settings/keys");
+  });
+
+  it("does not offer a curated path twice when it also exists in the generic list", () => {
+    // groq's curated list is ["/keys", "/settings/keys"]; both also live
+    // in the generic list. A full drain must contain each exactly once.
+    const offered = drainFallbacks("https://console.groq.com/dashboard", "groq");
+    const keys = offered.filter((u) => u === "https://console.groq.com/keys");
+    const settingsKeys = offered.filter(
+      (u) => u === "https://console.groq.com/settings/keys",
+    );
+    expect(keys.length).toBe(1);
+    expect(settingsKeys.length).toBe(1);
+    // And the curated paths lead.
+    expect(offered[0]).toBe("https://console.groq.com/keys");
+    expect(offered[1]).toBe("https://console.groq.com/settings/keys");
+  });
+
+  it("falls back to the generic list for a service with no curated entry", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.somevendor.test/dashboard",
+      new Set(),
+      "somevendor",
+    );
+    expect(fallback).toBe("https://app.somevendor.test/settings/keys");
+  });
+});
+
+describe("serviceSlug", () => {
+  it("lowercases and strips non-alphanumerics", () => {
+    expect(serviceSlug("LaunchDarkly")).toBe("launchdarkly");
+    expect(serviceSlug("Groq Cloud")).toBe("groqcloud");
+    expect(serviceSlug("xata.io")).toBe("xataio");
+    expect(serviceSlug("north-flank")).toBe("northflank");
   });
 });
 
