@@ -5,7 +5,30 @@
 // breaker the run burns all 24 post-verify rounds + LLM budget.
 
 import { describe, expect, it } from "vitest";
-import { isStalledOnActions } from "../agent.js";
+import { isStalledOnActions, isLoginPageUrl } from "../agent.js";
+
+describe("isLoginPageUrl (non-persisting-OAuth detector)", () => {
+  it("flags real login/authenticate pages (groq, northflank, amplitude)", () => {
+    expect(isLoginPageUrl("https://console.groq.com/authenticate")).toBe(true);
+    expect(isLoginPageUrl("https://app.northflank.com/login")).toBe(true);
+    expect(isLoginPageUrl("https://app.amplitude.com/login?google-auth-error=1")).toBe(true);
+    expect(isLoginPageUrl("https://x.example/sign-in")).toBe(true);
+    expect(isLoginPageUrl("https://x.example/sso/start")).toBe(true);
+  });
+
+  it("does NOT flag authenticated dashboard / key pages", () => {
+    expect(isLoginPageUrl("https://console.groq.com/keys")).toBe(false);
+    expect(isLoginPageUrl("https://app.x.io/v2/organizations/me/getting-started")).toBe(false);
+    expect(isLoginPageUrl("https://x.example/settings/api-keys")).toBe(false);
+    // 'auth' as a substring of an unrelated path must not match.
+    expect(isLoginPageUrl("https://x.example/author/profile")).toBe(false);
+    expect(isLoginPageUrl("https://x.example/dashboard")).toBe(false);
+  });
+
+  it("never throws on a malformed URL", () => {
+    expect(isLoginPageUrl("not a url")).toBe(false);
+  });
+});
 
 const a = (kind: string, pageUnchanged: boolean) => ({ kind, pageUnchanged });
 

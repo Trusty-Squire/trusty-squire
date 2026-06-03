@@ -2819,6 +2819,27 @@ export function isStalledOnActions(
     .every((e) => ACTION_KINDS.has(e.kind) && e.pageUnchanged);
 }
 
+// True when a URL reads as a login / authentication screen. Service-
+// agnostic (path-based, no per-service hosts) — used to detect a
+// non-persisting OAuth session: after a successful OAuth, an
+// authenticated bot lands on a dashboard, not a login page. Pure +
+// exported for tests.
+export function isLoginPageUrl(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    if (
+      /(?:^|\/)(?:login|signin|sign-in|authenticate|sso)(?:\/|$)/.test(path)
+    ) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  // Some providers keep the path stable but flag the failed auth in the
+  // query (amplitude: /login?google-auth-error=…).
+  return /[?&]google-auth-error\b/i.test(url);
+}
+
 export class SignupAgent {
   // Per-run counter so a single SignupAgent (which lives one run) can't
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
@@ -5996,6 +6017,16 @@ ${formatInventory(input.inventory)}`,
     // so the loop can bail with oauth_session_not_persisted instead of
     // thrashing maxRounds and mislabeling it oauth_onboarding_failed.
     let oauthLoginRequests = 0;
+    // Consecutive rounds on an OAuth run where the page is STILL a login /
+    // authenticate screen. The planner usually doesn't return {"kind":
+    // "login"} here — it keeps CLICKING "Sign in with Google" (groq,
+    // northflank, amplitude), so the oauthLoginRequests counter above
+    // never trips. But the structural fact is decisive and service-
+    // agnostic: after OAuth, an authenticated bot is on a dashboard, not a
+    // login page. N consecutive login-page rounds ⇒ the callback never
+    // persisted (anti-bot/IP rejection) ⇒ oauth_session_not_persisted, not
+    // a navigation bug. Generalizes without per-service URLs.
+    let consecutiveOauthLoginPageRounds = 0;
     let planFailures = 0;
     // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
     // gate planFailures (so a transient 502 won't push us into the
@@ -6259,6 +6290,34 @@ ${formatInventory(input.inventory)}`,
             `(clicks not registering); giving up instead of burning the round budget.`,
         );
         break;
+      }
+      // Non-persisting-OAuth detector (A5, broadened). On an OAuth run the
+      // bot has ALREADY authenticated before this loop, so landing on a
+      // login page means the callback was rejected. The planner usually
+      // keeps clicking "Sign in with Google" rather than returning a
+      // {"kind":"login"} step, so the oauthLoginRequests counter misses
+      // it — track the structural fact (consecutive login-page rounds)
+      // instead. Generalizes across services (groq/northflank/amplitude)
+      // without per-service URLs; reclassifies these off the misleading
+      // oauth_onboarding_failed label into the truthful (and unwinnable-
+      // without-residential-egress) oauth_session_not_persisted wall.
+      if (args.credentials === undefined && isLoginPageUrl(state.url)) {
+        consecutiveOauthLoginPageRounds += 1;
+        if (consecutiveOauthLoginPageRounds >= 3) {
+          args.steps.push(
+            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
+              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback never persisted; bailing.`,
+          );
+          throw new OAuthSessionNotPersistedError(
+            `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
+              `still presents a login screen (${pathOf(state.url)}) after ` +
+              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback never established a ` +
+              `session (anti-bot / IP rejection of the callback). Not a navigation bug; needs ` +
+              `residential egress or manual signup.`,
+          );
+        }
+      } else {
+        consecutiveOauthLoginPageRounds = 0;
       }
       // Email-OTP gate that surfaced AFTER OAuth (the pre-OAuth signup
       // gate never saw it, so pendingOtpCode is unset). Convex's
