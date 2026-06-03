@@ -18,6 +18,7 @@ import {
   detectStuckOnGoogleOAuth,
   findOAuthButton,
   findFirstOAuthButton,
+  findSignInAdvanceButton,
   orderOAuthCandidates,
   isLoginLoopState,
   parsePostVerifyStep,
@@ -366,6 +367,85 @@ describe("findFirstOAuthButton", () => {
   it("returns null when no candidate's affordance is on the page", () => {
     const email = mk({ tag: "input", type: "email", selector: "#email" });
     expect(findFirstOAuthButton([email], ["google", "github"])).toBeNull();
+  });
+});
+
+// ───────────────────── findSignInAdvanceButton ─────────────────────
+
+describe("findSignInAdvanceButton", () => {
+  const PROVIDERS = ["google", "github"] as const;
+
+  it("matches Qdrant's 'Sign In to Continue' interstitial button", () => {
+    const btn = mk({
+      tag: "button",
+      role: "button",
+      visibleText: "Sign In to Continue",
+      selector: "#signin",
+    });
+    expect(findSignInAdvanceButton([btn], PROVIDERS)?.selector).toBe("#signin");
+  });
+
+  it("matches a bare 'Sign in' / 'Log in' affordance", () => {
+    const signIn = mk({ tag: "a", visibleText: "Sign in", selector: "#a" });
+    const logIn = mk({ tag: "button", visibleText: "Log in", selector: "#b" });
+    expect(findSignInAdvanceButton([signIn], PROVIDERS)?.selector).toBe("#a");
+    expect(findSignInAdvanceButton([logIn], PROVIDERS)?.selector).toBe("#b");
+  });
+
+  it("does NOT match non-auth CTAs (404 recovery, workspace, nav)", () => {
+    // daytona / workos 404 pages, highlight's disabled-workspace page.
+    const goDashboard = mk({
+      tag: "button",
+      visibleText: "Go to Dashboard",
+      selector: "#d",
+    });
+    const goDashboard2 = mk({
+      tag: "a",
+      role: "button",
+      visibleText: "Go to the dashboard",
+      selector: "#d2",
+    });
+    const joinWorkspace = mk({
+      tag: "button",
+      type: "submit",
+      visibleText: "Join Workspace",
+      selector: "#jw",
+    });
+    const home = mk({ tag: "a", visibleText: "Home", selector: "#home" });
+    const refresh = mk({ tag: "button", visibleText: "Try a refresh", selector: "#r" });
+    expect(
+      findSignInAdvanceButton(
+        [goDashboard, goDashboard2, joinWorkspace, home, refresh],
+        PROVIDERS,
+      ),
+    ).toBeNull();
+  });
+
+  it("does NOT match a bare 'Continue' (too ambiguous to click blind)", () => {
+    const cont = mk({ tag: "button", visibleText: "Continue", selector: "#c" });
+    expect(findSignInAdvanceButton([cont], PROVIDERS)).toBeNull();
+  });
+
+  it("returns null when a provider affordance is already present", () => {
+    // A page with BOTH a "Sign in" link and a real Google button must
+    // not route through the click-through path — the caller takes OAuth.
+    const signIn = mk({ tag: "a", visibleText: "Sign in", selector: "#a" });
+    const google = mk({
+      tag: "button",
+      visibleText: "Continue with Google",
+      selector: "#g",
+    });
+    expect(findSignInAdvanceButton([signIn, google], PROVIDERS)).toBeNull();
+  });
+
+  it("ignores a long paragraph that merely contains 'sign in'", () => {
+    const blurb = mk({
+      tag: "a",
+      visibleText:
+        "By continuing you agree to our terms; sign in to your account from the menu",
+      selector: "#blurb",
+    });
+    expect(findSignInAdvanceButton([blurb], PROVIDERS)).toBeNull();
   });
 });
 
