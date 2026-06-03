@@ -81,6 +81,28 @@ the bucket after a re-run with this fix in — the residual
 navigation-improvement target. Related to F7 (multi-step flows).
 Not deployed yet — batch with A4 on the next mcp republish.
 
+### A6 — harvest-promoted skills don't replay clean [dominant cause FIXED 2026-06-02]
+The first heal pass replayed the 20 harvest-auto-promoted skills. Honest
+triage (it was NOT 20/20): **6 replayed clean** (apify, supabase, falai,
+convex, neon×2); **8 were a one-off watcher artifact** — my re-run watcher
+checked `systemctl is-active`, but a Type=oneshot service reports
+`activating` while running, so it launched the re-run *during* the heal
+pass → `verifier_error: profile held by another run` (not a skill issue);
+**~6 genuine** brittle-extraction failures.
+
+**Fixed (A6 — the dominant ~4):** posthog/brevo/statsig captured a
+uuid-shaped onboarding-page value (e.g. PostHog's project_id) as a second
+required credential next to the real copy-button key → replay hard-failed
+on a fresh account. `dropSpuriousUuidExtract` drops the uuid_token regex
+extract when a copy-button extract co-exists. Go-forward; already-published
+broken skills re-synthesize via demote→rediscover.
+
+**Still open (per-service):** render — extraction anchored on "1Password"
+(wrong element; the validator correctly rejected it). hookdeck — captured a
+state-dependent "Create Project" step only valid on a first-time account.
+The closed loop surfaces these without thrashing (single failures don't
+demote). Batch the A6 fix with A4/A5 on the next mcp bump (0.8.16).
+
 ### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
 The A/B harness is **code-complete** (baseline vs `cdp_hardened`
 stealth profile, `stealth_profile` column on CaptchaEvent, invisible-
