@@ -6062,6 +6062,10 @@ ${formatInventory(input.inventory)}`,
     // Gate URLs we've already polled the operator's gmail for, so a
     // multi-round wait on the same email-OTP page doesn't re-poll.
     const otpPolledUrls = new Set<string>();
+    // Running summary of the steps the planner has taken, fed back into
+    // each planPostVerifyStep call so the (stateless) planner stops
+    // re-doing completed onboarding steps and re-navigating dead URLs.
+    const priorActions: string[] = [];
     for (let round = 0; round < args.maxRounds; round++) {
       const currentCredentialKeyCount = Object.keys(credentials).filter(
         (k) => !NON_CREDENTIAL_KEYS.has(k),
@@ -6203,6 +6207,7 @@ ${formatInventory(input.inventory)}`,
           inventory,
           ...(hint !== undefined ? { hint } : {}),
           ...(args.scopeHint !== undefined ? { scopeHint: args.scopeHint } : {}),
+          ...(priorActions.length > 0 ? { priorActions: priorActions.slice(-10) } : {}),
         });
       } catch (err) {
         // The planner's output did not validate — most often a
@@ -6268,6 +6273,20 @@ ${formatInventory(input.inventory)}`,
       // GitHub issue, leaking the credential. Redactor patterns mirror
       // tools/archived-harvester/redact.mjs — defense in depth.
       args.steps.push(`Post-verify ${round + 1}/${args.maxRounds}: ${nextStep.kind} — ${redactCredentials(nextStep.reason)}`);
+      // Feed this action back into the next round's planner context so it
+      // doesn't loop. Concise: where we were, what we did, why.
+      {
+        const where = state.url.replace(/^https?:\/\//, "").slice(0, 40);
+        const target =
+          "selector" in nextStep && nextStep.selector !== undefined
+            ? ` ${nextStep.selector.slice(0, 24)}`
+            : "url" in nextStep && nextStep.url !== undefined
+              ? ` →${nextStep.url.replace(/^https?:\/\//, "").slice(0, 36)}`
+              : "";
+        priorActions.push(
+          `@${where} ${nextStep.kind}${target}: ${redactCredentials(nextStep.reason).slice(0, 60)}`,
+        );
+      }
 
       // Dump this round's real page state + inventory in the E1
       // eval-corpus format so onboarding adapters can be iterated
@@ -7399,6 +7418,13 @@ ${formatInventory(input.inventory)}`,
     // to MAX permissions (Admin > Write > Read) on token-creation
     // forms.
     scopeHint?: string;
+    // A running summary of the steps already taken this session (most
+    // recent last). The planner is STATELESS per call — without this it
+    // re-does completed onboarding-wizard steps (role/company-size/ToS)
+    // and re-issues navigates to URLs that already failed to advance.
+    // Several existing prompt instructions ("if you already navigated
+    // here once and the URL didn't change…") are dead without it.
+    priorActions?: readonly string[];
   }): Promise<PostVerifyStep> {
     const visibleText = (input.state.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(0, 2500);
 
@@ -7434,7 +7460,25 @@ Schema:
   invent or guess a selector — one not in the inventory is rejected.
 - If the element you want is NOT in the inventory, use {"kind":"navigate"}
   to a likely settings URL instead of guessing a selector.
-
+${
+  input.priorActions !== undefined && input.priorActions.length > 0
+    ? `
+STEPS ALREADY TAKEN this session (most recent last). You plan ONE step
+at a time and do not otherwise remember earlier rounds — use this list
+so you do NOT loop:
+${input.priorActions.map((a, i) => `  ${i + 1}. ${a}`).join("\n")}
+- Do NOT repeat a completed onboarding-wizard step. If you already
+  selected a role / company-size / use-case or accepted the terms, that
+  step is DONE — move forward, never back to it.
+- Do NOT re-issue a {"kind":"navigate"} to a URL that already appears
+  above and did not advance you. If a settings URL errored or bounced
+  you back, try a DIFFERENT path or click a dashboard link instead.
+- If the last 3+ steps above are the same kind on the same URL with no
+  progress, you are stuck — try a genuinely different action or return
+  {"kind":"done"}.
+`
+    : ""
+}
 Strategy:
 - If a FULL, untruncated API key is visible, return {"kind":"extract"}.
 - **MULTI-CREDENTIAL SERVICES** — when the page shows TWO OR MORE
@@ -7446,10 +7490,13 @@ Strategy:
   labels EVERY visible credential in the format
   \`<canonical_label>='<value>'\` (use SINGLE quotes around values).
   The bot's labeled-extractor will pull EACH labeled value into the
-  credentials object. Example reason:
-  "The Cloudinary API Keys page shows cloud_name='dlq4xgrca' and
-  api_key='491741466469613' in the table; api_secret is hidden behind
-  a Reveal button."
+  credentials object. Example SHAPE (the bracketed parts are
+  PLACEHOLDERS — you MUST substitute the REAL values visible on the
+  CURRENT page; NEVER emit these literal bracket strings or any example
+  values, and never name a service that is not the one you are on):
+  "The API Keys page shows cloud_name='<real cloud_name from this page>'
+  and api_key='<real api_key from this page>' in the table; api_secret
+  is hidden behind a Reveal button."
   Use the standard canonical labels: api_key, api_secret, secret_key,
   publishable_key, access_token, client_id, client_secret, cloud_name,
   application_id, admin_api_key, search_api_key, account_sid,
@@ -7467,10 +7514,11 @@ Strategy:
   behind a Reveal button, return {"kind":"extract"} NOW for the
   visible labels (the bot's labeled extractor folds them into the
   credentials bundle) AND in the same reason field flag the masked
-  credential so the bot's automatic reveal pass fires. Example
-  reason for Cloudinary: "cloud_name='dlq4xgrca' and
-  api_key='491741466469613' are visible in the table; api_secret is
-  hidden behind a Reveal button — please unmask." The masked
+  credential so the bot's automatic reveal pass fires. Example SHAPE
+  (substitute the REAL values from the current page — the bracketed
+  parts are placeholders, never emit them literally): "cloud_name='<real
+  value>' and api_key='<real value>' are visible in the table;
+  api_secret is hidden behind a Reveal button — please unmask." The masked
   credential's label MUST appear with one of the trigger words
   (masked / hidden / reveal / unmask / bullets / asterisks) so the
   reveal pass triggers. Do this BEFORE attempting any explicit
