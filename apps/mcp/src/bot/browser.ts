@@ -256,6 +256,32 @@ async function detectChromiumChannel(): Promise<string | null> {
   return null;
 }
 
+// Classify an anti-bot interstitial page from its (title + body) text.
+// `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
+// `verificationPassed` is the signal the challenge SUCCEEDED — but
+// Cloudflare leaves the static "Just a moment / Performing security
+// verification" copy ON THE PAGE even after it appends "Verification
+// successful. Waiting for…", so `onInterstitial` alone wrongly reads as
+// "still blocked" and the bot bails as anti_bot_blocked — exactly what
+// stranded codesandbox/lambda-labs once patchright started PASSING the
+// challenge. When the challenge passed, the redirect is just racing/
+// stuck; the caller should be patient + reload, not give up. Exported
+// for unit tests.
+export function classifyInterstitialText(text: string): {
+  onInterstitial: boolean;
+  verificationPassed: boolean;
+} {
+  const onInterstitial =
+    /just a moment|performing security verification|verifying you are human|checking your browser|attention required/i.test(
+      text,
+    );
+  const verificationPassed =
+    /verification successful|you are (now )?verified|success!|challenge[- ]?(passed|complete)/i.test(
+      text,
+    );
+  return { onInterstitial, verificationPassed };
+}
+
 export class BrowserController {
   // The persistent browser context. Persistent (launchPersistentContext)
   // rather than an ephemeral context so the profile carries the user's
@@ -2974,20 +3000,22 @@ export class BrowserController {
   // rather than failing the whole signup.
   private async waitForAntiBotInterstitialToClear(timeoutMs: number): Promise<void> {
     if (!this.page) return;
-    let detected = await this.pollUntilInterstitialClears(timeoutMs);
-    if (!detected) {
-      // We either never saw an interstitial, or we saw one and it
-      // cleared on its own. Nothing more to do.
-      return;
+    const first = await this.pollUntilInterstitialClears(timeoutMs);
+    // Never saw an interstitial, or saw one and it cleared on its own —
+    // nothing more to do.
+    if (!first.detected || first.cleared) return;
+    // Still on the interstitial at the deadline. If Cloudflare reported
+    // the challenge PASSED ("Verification successful"), the redirect is
+    // just racing/stuck — be patient through ANOTHER full window before
+    // touching anything (a reload mid-redirect can re-arm the challenge).
+    if (first.verificationPassed) {
+      const patient = await this.pollUntilInterstitialClears(timeoutMs);
+      if (patient.cleared) return;
     }
-    // The interstitial outlived the wait. Cloudflare frequently shows
-    // "Verification successful. Wait" but then never fires the JS
-    // redirect — the challenge passed, but the redirect script got
-    // stuck or the cookie set is racing the navigation. A single
-    // reload, now that the cf_clearance cookie is set, often lets the
-    // real page render. (If the issue is a server-side risk-score
-    // block — fingerprint/IP — reload won't help, but the caller's
-    // inventory diagnostic will still surface the block.)
+    // Force the real page: now that the cf_clearance cookie is set, a
+    // reload often renders it. (If it's a server-side risk-score block —
+    // fingerprint/IP — reload won't help, but the caller's inventory
+    // diagnostic will still surface the block.)
     try {
       await this.page.reload({ waitUntil: "networkidle", timeout: 10_000 });
     } catch {
@@ -2996,12 +3024,18 @@ export class BrowserController {
     await this.pollUntilInterstitialClears(Math.max(5000, timeoutMs / 2));
   }
 
-  // One poll loop. Returns true if an interstitial was ever observed
-  // (cleared or still there at timeout), false if never seen.
-  private async pollUntilInterstitialClears(timeoutMs: number): Promise<boolean> {
-    if (!this.page) return false;
+  // One poll loop. `detected` = an interstitial was observed at least
+  // once; `cleared` = it was observed AND then went away (vs. still there
+  // at the deadline); `verificationPassed` = Cloudflare reported the
+  // challenge succeeded at some point during the wait (see
+  // classifyInterstitialText).
+  private async pollUntilInterstitialClears(
+    timeoutMs: number,
+  ): Promise<{ detected: boolean; cleared: boolean; verificationPassed: boolean }> {
+    if (!this.page) return { detected: false, cleared: false, verificationPassed: false };
     const deadline = Date.now() + timeoutMs;
     let detected = false;
+    let verificationPassed = false;
     while (Date.now() < deadline) {
       let title = "";
       let bodyText = "";
@@ -3014,22 +3048,20 @@ export class BrowserController {
         await new Promise((r) => setTimeout(r, 500));
         continue;
       }
-      const onInterstitial =
-        /just a moment|performing security verification|verifying you are human|checking your browser|attention required/i.test(
-          title + " " + bodyText,
-        );
-      if (!onInterstitial) {
+      const c = classifyInterstitialText(title + " " + bodyText);
+      if (c.verificationPassed) verificationPassed = true;
+      if (!c.onInterstitial) {
         if (detected) {
           // Give the freshly-revealed page a tick to hydrate before
           // the inventory scan.
           await new Promise((r) => setTimeout(r, 800));
         }
-        return detected;
+        return { detected, cleared: detected, verificationPassed };
       }
       detected = true;
       await new Promise((r) => setTimeout(r, 1000));
     }
-    return detected;
+    return { detected, cleared: false, verificationPassed };
   }
 
   // Walk the live DOM (piercing open shadow roots) and return every
