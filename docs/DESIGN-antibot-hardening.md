@@ -82,16 +82,27 @@ score. Two consequences:
    token, but Turnstile/v3 score at the IP + browser-fingerprint layer
    and *reject solver-supplied tokens*. (Solvers only help reCAPTCHA v2
    *image* grids — a different, visible challenge.)
-2. **A proxy alone did not move outcomes.** Field-tested: routing the
+2. ~~**A proxy alone did not move outcomes.** Field-tested: routing the
    bot through a residential Mac proxy did **not** lift conversion. The
    block is bound to the *browser fingerprint + automation tells*, not
-   primarily the egress IP. So "buy residential IPs" is not the fix.
+   primarily the egress IP. So "buy residential IPs" is not the fix.~~
+   **WRONG / CONFOUNDED (2026-06-03).** The proxy was tested with a
+   browser that was failing three other automation tells
+   (`mainWorldExecution`, `navigator.webdriver`, `viewport`). A clean IP
+   behind a dirty browser still blocks — that test proved nothing about
+   the proxy. Clean browser + clean IP has never been tested together.
 
-The investigation (live `CaptchaEvent` telemetry, 35 rows) showed the
+~~The investigation (live `CaptchaEvent` telemetry, 35 rows) showed the
 hardest tell is on the **control channel**, not the network: Playwright
 drives Chrome over CDP and calls `Runtime.enable`, which emits a
 page-detectable `executionContextCreated` event. That is a **binary**
-automation signal — no behavior-simulation, proxy, or solver defeats it.
+automation signal — no behavior-simulation, proxy, or solver defeats it.~~
+**MEASURED WRONG (2026-06-03).** `Runtime.enable` does **not** leak in
+current Playwright (the rebrowser bot-detector reports "no leak detected"
+on bare vanilla). The real tells were `mainWorldExecution`,
+`navigator.webdriver`, and `viewport` — all of which **patchright +
+config fixes defeat** (verified all-green). The "binary, undefeatable"
+framing was the single biggest wrong turn in this doc.
 
 ### Why telemetry is half-blind today
 

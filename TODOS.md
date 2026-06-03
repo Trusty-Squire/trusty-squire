@@ -103,16 +103,36 @@ state-dependent "Create Project" step only valid on a first-time account.
 The closed loop surfaces these without thrashing (single failures don't
 demote). Batch the A6 fix with A4/A5 on the next mcp bump (0.8.16).
 
-### A3 — Anti-bot A/B: source a service that actually triggers a wall [P1, blocked on sourcing]
-The A/B harness is **code-complete** (baseline vs `cdp_hardened`
-stealth profile, `stealth_profile` column on CaptchaEvent, invisible-
-Turnstile recording, shadow-DOM widget detection). It is blocked on
-*input*: no queue service currently presents a detectable invisible
-Turnstile / reCAPTCHA-v3 *on a form path* the bot reaches. Resend
-dropped its Turnstile; the rest OAuth past it. Need to find/confirm a
-service that renders a scoreable challenge on the form, then run the
-A/B for a concrete block-rate delta. Until then AB2–AB6 stay deferred
-(they sequence after this baseline reads out).
+### A3 — Anti-bot: fingerprint FIXED (patchright); IP is the remaining blocker [P1]
+**The CDP-fingerprint half is solved + shipped (commit 2485b38).** The
+hardened launcher is now **patchright** — verified ALL-GREEN against the
+rebrowser bot-detector through the real `BrowserController` path
+(`mainWorldExecution`/`navigatorWebdriver`/`viewport`/`runtimeEnableLeak`
+all clean). `Runtime.enable` never leaked; that premise was a ghost (see
+the doc banner + [[project-antibot-runtime-enable-ghost]]).
+
+**Full-flow A/B on a datacenter IP (2026-06-03, `BOT_CDP_HARDENED=1`,
+4 wall services):** plausible still `captcha_blocked` (reCAPTCHA flagged
+the session), tally still `anti_bot_blocked` (Cloudflare risk-score) —
+**so the clean browser alone does NOT beat reCAPTCHA-v3/Cloudflare on a
+datacenter IP. The IP is now the blocker** (the doc was wrong in the
+OTHER direction too: it claimed IP doesn't matter). **codesandbox showed
+`"Verification successful"`** in the Cloudflare interstitial — the clean
+browser PASSED, but the bot's interstitial-handler didn't detect the
+cleared state and timed out → a fixable **bot bug**, not a wall.
+
+**Next, in order:**
+1. **The never-run experiment: clean browser + residential IP together.**
+   Both halves have only ever been tested separately (and the proxy test
+   used a dirty browser). Revive a residential endpoint (Tellskill Mac or
+   a cheap residential proxy), set `UNIVERSAL_BOT_PROXY_URL` +
+   `BOT_CDP_HARDENED=1`, re-run this A/B. This is the decisive test.
+2. **Fix the codesandbox-class interstitial bug** — recognize the
+   Cloudflare `"Verification successful"` state and proceed instead of
+   timing out as `anti_bot_blocked`.
+3. Make `BOT_CDP_HARDENED=1` the default once (1) confirms a conversion
+   lift (it ships dark today — flag-gated off).
+Harness to reuse for any future measurement: `/tmp/cdp-detect`.
 
 ### A4 — `findCaptchaWidget` shadow-DOM solve-path parity [DONE 2026-06-02]
 Audited: the hypothesis was partly wrong. `findCaptchaWidget` uses

@@ -331,8 +331,8 @@ export class BrowserController {
   }
 
   // The stealth profile the most recent .start() launched under:
-  // "cdp_hardened" when the rebrowser launcher actually loaded
-  // (BOT_CDP_HARDENED set + fork present), else "baseline". Surfaced
+  // "cdp_hardened" when the patchright launcher actually loaded
+  // (BOT_CDP_HARDENED set + patchright present), else "baseline". Surfaced
   // for the CaptchaEvent A/B tag. Throws before .start() — same reason
   // as channel/proxied.
   get stealthProfile(): StealthProfile {

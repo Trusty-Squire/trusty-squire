@@ -795,10 +795,11 @@ export interface SignupResult {
   proxied?: boolean;
 
   // Which stealth launcher this run used: "cdp_hardened" when the
-  // rebrowser-playwright-core launcher loaded (BOT_CDP_HARDENED set +
-  // fork present), else "baseline". The CaptchaEvent A/B tag that lets
-  // us measure whether the Runtime.enable patch lowers block rate —
-  // see docs/DESIGN-antibot-hardening.md.
+  // patchright launcher loaded (BOT_CDP_HARDENED set + patchright
+  // present), else "baseline". The CaptchaEvent A/B tag that lets us
+  // measure whether isolated-world execution (closing mainWorldExecution
+  // + webdriver tells) lowers block rate — see
+  // docs/DESIGN-antibot-hardening.md.
   stealth_profile?: "baseline" | "cdp_hardened";
 
   // Skill promoter (0.7.0): when a SignupResult was produced by
