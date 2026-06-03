@@ -1816,6 +1816,50 @@ export function findFirstOAuthButton(
   return null;
 }
 
+// A page can gate the real login UI behind a generic "Sign In to
+// Continue" interstitial that renders NO provider affordance yet —
+// Qdrant's session-expiry flow redirects to /logout?aerr=expired whose
+// only element is a "Sign In to Continue" button; the Google button
+// lives one click deeper. The OAuth-first scan finds no provider
+// affordance and was bailing `oauth_required` without ever advancing.
+// This finds a generic sign-in-ish button to CLICK so the next scan can
+// see the provider buttons. Strictly gated on sign-in vocabulary so we
+// never click an arbitrary CTA: a bare "Continue" / "Get started" /
+// "Go to Dashboard" / 404-recovery / "Join Workspace" button does NOT
+// match — only text that explicitly reads as advancing into a login.
+// Caller bounds the number of click-throughs. Returns null when no such
+// affordance exists (the page is then either genuinely SSO-only, a 404,
+// or already authenticated). Exported for unit testing.
+const SIGN_IN_ADVANCE_RE =
+  /\b(?:sign[\s-]?in|log[\s-]?in|continue with email|continue to (?:sign|log)|get started)\b/i;
+export function findSignInAdvanceButton(
+  inventory: readonly InteractiveElement[],
+  providers: readonly OAuthProviderId[],
+): InteractiveElement | null {
+  // If a provider affordance is already present, advancing is pointless
+  // — the caller would have taken the OAuth path. Guard so a page that
+  // has both (e.g. a "Sign in" header link + "Continue with Google")
+  // never routes through this click-through path.
+  if (findFirstOAuthButton(inventory, providers) !== null) return null;
+  for (const e of inventory) {
+    const isButtonish =
+      e.tag === "button" ||
+      e.tag === "a" ||
+      e.role === "button" ||
+      e.type === "submit" ||
+      e.type === "button";
+    if (!isButtonish) continue;
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+    // Sanity-cap: a real sign-in button is short. A long string is a
+    // paragraph / card that happens to contain "sign in".
+    if (text.length === 0 || text.length > MAX_OAUTH_BUTTON_TEXT_CHARS) continue;
+    if (SIGN_IN_ADVANCE_RE.test(text)) return e;
+  }
+  return null;
+}
+
 // Order the OAuth providers the bot may use for a signup, given the
 // service's yaml pin (if any) and the providers the persistent profile
 // actually has a session for. `findFirstOAuthButton` walks this list in
@@ -2699,6 +2743,12 @@ export class SignupAgent {
     let progressReplans = 0;
     let emptyPlans = 0;
     let oauthScanRetries = 0;
+    // Bounded click-throughs of a generic "Sign In to Continue"
+    // interstitial that gates the provider buttons (Qdrant). Capped so
+    // an SSO-only page that keeps re-showing a sign-in button (or a
+    // redirect loop) still terminates at oauth_required.
+    let signInAdvanceClicks = 0;
+    const MAX_SIGN_IN_ADVANCE_CLICKS = 2;
     let hint: string | undefined;
     // F14 — selectors the planner clicked WITHOUT advancing the page.
     // Each no-progress plan records its click selectors here; the next
@@ -2789,6 +2839,39 @@ export class SignupAgent {
               "treating as already authenticated, jumping to post-verify navigation",
           );
           return { kind: "already_oauth" };
+        }
+        // The provider buttons can sit one click behind a generic
+        // "Sign In to Continue" interstitial (Qdrant's session-expiry
+        // /logout?aerr=expired redirect renders only that button). The
+        // OAuth scan above found nothing because the real login UI
+        // hasn't been reached yet. Click the sign-in-ish affordance to
+        // advance, reset the async-render retries, and re-scan — bounded
+        // so a page that just keeps showing a sign-in button (genuine
+        // SSO-only / a redirect loop) still terminates at oauth_required
+        // rather than clicking forever.
+        if (signInAdvanceClicks < MAX_SIGN_IN_ADVANCE_CLICKS) {
+          const advance = findSignInAdvanceButton(inventory, oauthCandidates);
+          if (advance !== null) {
+            signInAdvanceClicks += 1;
+            steps.push(
+              `OAuth-first: no provider affordance, but found a generic ` +
+                `sign-in affordance (${JSON.stringify(advance.visibleText ?? advance.ariaLabel ?? "")}) ` +
+                `— clicking it to advance to the real login page ` +
+                `(${signInAdvanceClicks}/${MAX_SIGN_IN_ADVANCE_CLICKS})`,
+            );
+            try {
+              await this.browser.click(advance.selector);
+            } catch (err) {
+              steps.push(
+                `OAuth-first: sign-in advance click failed (${err instanceof Error ? err.message : String(err)}) ` +
+                  `— falling through to form-fill`,
+              );
+            }
+            // Reset the async-render budget for the now-advanced page so
+            // its provider buttons get the same couple of render retries.
+            oauthScanRetries = 0;
+            continue;
+          }
         }
         steps.push(
           "OAuth-first: no usable provider affordance on the page — " +
