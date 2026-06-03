@@ -1183,7 +1183,18 @@ async function executeStep(
           // far stronger signal than a bare word and must win.
           for (const cand of candidates) {
             const hit = extractApiKeyFromText(cand);
-            if (hit !== null && !isTruncatedCapture(cand, hit)) {
+            // A recognised prefix-key wins — UNLESS it fails this
+            // credential's own validator. extractApiKeyFromText can return
+            // a SUBSTRING of a dotted/opaque key (e.g. brevo's
+            // `xkeysib.<hex>.<hex>`) that isTruncatedCapture doesn't catch;
+            // handing that to the outer loop would just validator_fail.
+            // Defer to the validator-shaped tier below for those.
+            if (
+              hit !== null &&
+              !isTruncatedCapture(cand, hit) &&
+              (validator === undefined ||
+                candidateSatisfiesValidatorShape(hit, validator))
+            ) {
               return { kind: "extract_ok", value: hit, via: "regex" };
             }
           }
