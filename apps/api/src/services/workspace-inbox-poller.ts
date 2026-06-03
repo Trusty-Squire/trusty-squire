@@ -71,73 +71,40 @@ export class WorkspaceInboxPoller {
     });
 
     let scanned = 0;
+    let sawCandidates = false;
     try {
       await client.connect();
-      const lock = await client.getMailboxLock("INBOX");
-      try {
-        // Server-side TO filter narrows the result set. Gmail's IMAP
-        // matches the literal address in any of the To/Cc/Bcc/
-        // Delivered-To headers — perfect for catch-all where the
-        // envelope-recipient rewriting puts the original alias in
-        // Delivered-To.
-        const searchResult = await client.search(
-          { since: sinceDate, to: wantTo },
-          { uid: true },
-        );
-        const uids: number[] = Array.isArray(searchResult) ? searchResult : [];
-        if (uids.length === 0) {
-          return { email: null, reason: "no_recent_messages", scanned: 0 };
+      // Search INBOX first, then Spam. Fresh-domain automated-signup
+      // verification mail is routinely spam-filtered, and this poller
+      // used to look ONLY in INBOX — silently returning
+      // verification_not_sent even though the mail had arrived (confirmed
+      // 2026-06-03: ipdata/imagekit verification mails sat in Spam).
+      // [Gmail]/Spam is Gmail's IMAP path for the spam folder; a non-
+      // Gmail server won't have it, so a missing-folder lock failure is
+      // skipped rather than fatal.
+      for (const mailbox of ["INBOX", "[Gmail]/Spam"]) {
+        let lock: Awaited<ReturnType<typeof client.getMailboxLock>>;
+        try {
+          lock = await client.getMailboxLock(mailbox);
+        } catch {
+          continue; // folder doesn't exist on this server
         }
-        uids.sort((a, b) => b - a);
-        for (const uid of uids.slice(0, 20)) {
-          scanned += 1;
-          const msg = await client.fetchOne(
-            String(uid),
-            { envelope: true, source: true, internalDate: true },
-            { uid: true },
-          );
-          if (msg === false || msg === null) continue;
-          if (msg.internalDate !== undefined) {
-            const ts =
-              msg.internalDate instanceof Date
-                ? msg.internalDate.getTime()
-                : new Date(msg.internalDate).getTime();
-            if (Number.isFinite(ts) && ts < sinceDate.getTime()) continue;
+        try {
+          const found = await this.searchMailbox(client, sinceDate, wantTo);
+          scanned += found.scanned;
+          if (found.scanned > 0) sawCandidates = true;
+          if (found.email !== null) {
+            return { email: found.email, reason: "found", scanned };
           }
-          const raw =
-            msg.source !== undefined ? msg.source.toString("utf8") : "";
-          const headerEnd = raw.search(/\r?\n\r?\n/);
-          const bodyOnly = headerEnd >= 0 ? raw.slice(headerEnd + 2) : raw;
-          const { text, html, links } = decodeMimeForVerification(bodyOnly);
-          const codes = extractShortCodes(text);
-          const fromAddrs = msg.envelope?.from ?? [];
-          const fromAddress =
-            fromAddrs.length > 0 && fromAddrs[0]
-              ? fromAddrs[0].address ?? ""
-              : "";
-          const subject = msg.envelope?.subject ?? "";
-          const receivedAt =
-            msg.internalDate instanceof Date
-              ? msg.internalDate.toISOString()
-              : new Date().toISOString();
-          return {
-            email: {
-              subject,
-              from_address: fromAddress,
-              body_text: text,
-              body_html: html,
-              parsed_links: links,
-              parsed_codes: codes,
-              received_at: receivedAt,
-            },
-            reason: "found",
-            scanned,
-          };
+        } finally {
+          lock.release();
         }
-        return { email: null, reason: "no_match", scanned };
-      } finally {
-        lock.release();
       }
+      return {
+        email: null,
+        reason: sawCandidates ? "no_match" : "no_recent_messages",
+        scanned,
+      };
     } catch (err) {
       return {
         email: null,
@@ -151,6 +118,69 @@ export class WorkspaceInboxPoller {
         // ignore
       }
     }
+  }
+
+  // Search the currently-locked mailbox for a message addressed to
+  // `wantTo` since `sinceDate`, returning the first with extractable
+  // content (or null). The server-side TO filter matches the literal
+  // address in any of the To/Cc/Bcc/Delivered-To headers — perfect for
+  // catch-all where envelope-recipient rewriting puts the original alias
+  // in Delivered-To.
+  private async searchMailbox(
+    client: ImapFlow,
+    sinceDate: Date,
+    wantTo: string,
+  ): Promise<{ email: WorkspacePollResult["email"]; scanned: number }> {
+    let scanned = 0;
+    const searchResult = await client.search(
+      { since: sinceDate, to: wantTo },
+      { uid: true },
+    );
+    const uids: number[] = Array.isArray(searchResult) ? searchResult : [];
+    if (uids.length === 0) return { email: null, scanned: 0 };
+    uids.sort((a, b) => b - a);
+    for (const uid of uids.slice(0, 20)) {
+      scanned += 1;
+      const msg = await client.fetchOne(
+        String(uid),
+        { envelope: true, source: true, internalDate: true },
+        { uid: true },
+      );
+      if (msg === false || msg === null) continue;
+      if (msg.internalDate !== undefined) {
+        const ts =
+          msg.internalDate instanceof Date
+            ? msg.internalDate.getTime()
+            : new Date(msg.internalDate).getTime();
+        if (Number.isFinite(ts) && ts < sinceDate.getTime()) continue;
+      }
+      const raw = msg.source !== undefined ? msg.source.toString("utf8") : "";
+      const headerEnd = raw.search(/\r?\n\r?\n/);
+      const bodyOnly = headerEnd >= 0 ? raw.slice(headerEnd + 2) : raw;
+      const { text, html, links } = decodeMimeForVerification(bodyOnly);
+      const codes = extractShortCodes(text);
+      const fromAddrs = msg.envelope?.from ?? [];
+      const fromAddress =
+        fromAddrs.length > 0 && fromAddrs[0] ? fromAddrs[0].address ?? "" : "";
+      const subject = msg.envelope?.subject ?? "";
+      const receivedAt =
+        msg.internalDate instanceof Date
+          ? msg.internalDate.toISOString()
+          : new Date().toISOString();
+      return {
+        email: {
+          subject,
+          from_address: fromAddress,
+          body_text: text,
+          body_html: html,
+          parsed_links: links,
+          parsed_codes: codes,
+          received_at: receivedAt,
+        },
+        scanned,
+      };
+    }
+    return { email: null, scanned };
   }
 }
 
