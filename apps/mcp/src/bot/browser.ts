@@ -1089,6 +1089,94 @@ export class BrowserController {
     }
   }
 
+  // Deterministic pre-submit guard: tick every visible, unchecked,
+  // non-disabled REQUIRED-AGREEMENT checkbox (terms/privacy/consent),
+  // while never touching marketing/newsletter opt-ins.
+  //
+  // Why this exists separate from the LLM planner: amplitude's signup
+  // has a required TOS checkbox the planner skipped (it read the
+  // adjacent data-storage card-radios as the whole cluster being
+  // "ambiguous radios"), and amplitude does NOT disable submit when the
+  // box is unticked — so the click silently no-ops and the bot then
+  // waits forever for a verification mail that never sends. This runs on
+  // EVERY submit, not only the `submit_disabled` path in clickSubmit().
+  //
+  // Returns the labels/testids it checked (for step logging); empty when
+  // it ticked nothing.
+  async checkRequiredAgreementBoxes(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    // Best-effort: a page-eval failure (navigation mid-call, detached
+    // frame) must never fail the parent submit — return nothing.
+    try {
+      return await this.page.evaluate(() => {
+        // These two regexes MUST stay byte-identical with
+        // AGREEMENT_TEXT_RE / MARKETING_TEXT_RE in this module — the
+        // page realm can't import, so they're inlined here.
+        const agreementRe =
+          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+        const marketingRe =
+          /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+
+        const checked: string[] = [];
+        const boxes = Array.from(
+          document.querySelectorAll<HTMLInputElement>(
+            'input[type="checkbox"]',
+          ),
+        );
+        for (const box of boxes) {
+          if (box.checked || box.disabled) continue;
+          const rect = box.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) continue;
+
+          // Associated text = attributes + a label[for=id] + nearest
+          // ancestor <label> + the immediately following sibling text.
+          const parts: string[] = [
+            box.getAttribute("data-testid") ?? "",
+            box.getAttribute("name") ?? "",
+            box.id,
+            box.getAttribute("aria-label") ?? "",
+          ];
+          if (box.id) {
+            const forLabel = document.querySelector(
+              `label[for="${CSS.escape(box.id)}"]`,
+            );
+            if (forLabel) parts.push(forLabel.textContent ?? "");
+          }
+          const ancestorLabel = box.closest("label");
+          if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
+          const sibling = box.nextSibling;
+          if (sibling && sibling.textContent) parts.push(sibling.textContent);
+          if (box.nextElementSibling) {
+            parts.push(box.nextElementSibling.textContent ?? "");
+          }
+
+          const text = parts.join(" ");
+          if (!agreementRe.test(text) || marketingRe.test(text)) continue;
+
+          // React/Vue controlled inputs ignore a bare `.checked = true`:
+          // their state lives in the framework, updated only by the real
+          // event flow. Set the property AND dispatch input/change AND a
+          // synthetic click so the controlled binding observes the flip.
+          box.checked = true;
+          box.dispatchEvent(new Event("input", { bubbles: true }));
+          box.dispatchEvent(new Event("change", { bubbles: true }));
+          box.click();
+
+          const label =
+            box.getAttribute("data-testid") ||
+            box.getAttribute("name") ||
+            box.id ||
+            box.getAttribute("aria-label") ||
+            "agreement-checkbox";
+          checked.push(label);
+        }
+        return checked;
+      });
+    } catch {
+      return [];
+    }
+  }
+
   // Scroll a Terms-of-Service style modal to the bottom so the gated
   // "Accept" button enables. Railway's signup is the canonical case:
   // a modal with a virtualized ToS list watches real `scroll` /
@@ -4262,6 +4350,31 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
     }
   });
   return bestIndex;
+}
+
+// ───────────── required-agreement checkbox guard ─────────────
+
+// Patterns shared by the pure helper below and the in-page evaluate in
+// `checkRequiredAgreementBoxes`. The evaluate runs in the page realm and
+// can't import, so the same two regexes are inlined there verbatim —
+// keep them BYTE-IDENTICAL with these.
+const AGREEMENT_TEXT_RE =
+  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+const MARKETING_TEXT_RE =
+  /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+
+// True when a checkbox's associated text reads as a REQUIRED agreement
+// (terms/privacy/consent) and NOT as a marketing/newsletter opt-in.
+//
+// Why a deterministic check instead of trusting the LLM planner:
+// amplitude's signup renders the required TOS checkbox next to a pair of
+// data-storage-location card-radios; the planner mistook the whole
+// cluster for "ambiguous radios" and skipped the box, and amplitude's
+// submit isn't disabled when it's unticked — so the form silently
+// no-ops. We must never flip a marketing opt-in on the user's behalf,
+// hence the explicit marketing exclusion.
+export function isAgreementCheckboxText(text: string): boolean {
+  return AGREEMENT_TEXT_RE.test(text) && !MARKETING_TEXT_RE.test(text);
 }
 
 // ───────────── residential proxy (S1) ─────────────

@@ -85,6 +85,9 @@ class SubmitsOkBrowser {
   async clickSubmit(_selector: string): Promise<void> {
     // Submit lands cleanly — the opposite of submit-failure.test.ts.
   }
+  async checkRequiredAgreementBoxes(): Promise<string[]> {
+    return [];
+  }
   async extractInteractiveElements(): Promise<InteractiveElement[]> {
     return [
       {

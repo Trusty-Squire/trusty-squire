@@ -79,6 +79,9 @@ class SubmitFailsBrowser {
       `submit selector "${selector}" matched 3 buttons, none scoring as a signup button`,
     );
   }
+  async checkRequiredAgreementBoxes(): Promise<string[]> {
+    return [];
+  }
   // A minimal inventory the planner's fixed plan (#email +
   // button[type=submit]) validates against.
   async extractInteractiveElements(): Promise<InteractiveElement[]> {

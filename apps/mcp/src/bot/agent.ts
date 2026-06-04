@@ -4118,6 +4118,20 @@ export class SignupAgent {
       // rejected.
       lastNoProgressClickSelectors = new Set();
 
+      // Deterministic agreement-checkbox guard — runs BEFORE the captcha
+      // gate + submit so the form is fully satisfied at submit time. The
+      // LLM planner sometimes skips a required TOS box (amplitude: it
+      // read the box as one of the adjacent card-radios), and when the
+      // service doesn't disable submit for an unchecked box, the click
+      // silently no-ops. This ticks terms/privacy/consent boxes while
+      // never touching marketing opt-ins. Best-effort: never throws.
+      const agreementBoxes = await this.browser.checkRequiredAgreementBoxes();
+      if (agreementBoxes.length > 0) {
+        steps.push(
+          `Form: checked required agreement box(es): [${agreementBoxes.join(", ")}]`,
+        );
+      }
+
       // Captcha gate + submit.
       const preGate = await this.runCaptchaGate("Pre-submit", steps);
       if (preGate.blocked) return { kind: "captcha_blocked", captchaKind: preGate.kind };
