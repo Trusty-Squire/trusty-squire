@@ -3528,7 +3528,15 @@ export class SignupAgent {
           steps.push(`${label} captcha: invisible Turnstile present, no visible challenge — recording silent encounter`);
         } else if (detected.variant === "recaptcha_v3") {
           this.invisibleCaptcha = { kind: "recaptcha", variant: "recaptcha_v3" };
-          steps.push(`${label} captcha: invisible reCAPTCHA v3 badge present — recording silent encounter`);
+          // Invisible reCAPTCHA scores in the background, but its token is only
+          // minted when grecaptcha.execute() runs — and a form like amplitude's
+          // REQUIRES that token to submit. Mint it now (passes on our ~1.0
+          // score) so the imminent submit carries a valid g-recaptcha-response,
+          // instead of submitting with an empty token and silently no-op'ing.
+          const minted = await this.browser.triggerInvisibleRecaptcha();
+          steps.push(
+            `${label} captcha: invisible reCAPTCHA v3 — ${minted ? "minted score token via grecaptcha.execute()" : "badge present, token not minted (form may submit it itself)"}`,
+          );
         }
       }
       return { found: false, solved: false, blocked: false, kind: "turnstile" };

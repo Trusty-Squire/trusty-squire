@@ -2454,6 +2454,67 @@ export class BrowserController {
     }
   }
 
+  // Mint the score token for an INVISIBLE reCAPTCHA by calling
+  // grecaptcha.execute() ourselves, then wait for g-recaptcha-response to
+  // populate. MEASURED on amplitude (2026-06-04): an invisible reCAPTCHA's
+  // token only exists once execute() runs, and amplitude's form REQUIRES it —
+  // merely skipping the badge (not clicking it) left the textarea empty and
+  // the submit silently no-op'd. With our ~1.0 v3 score, execute() returns a
+  // passing token in ~1-3s, so the subsequent submit carries a valid token.
+  // Handles both standard (grecaptcha) and enterprise (grecaptcha.enterprise)
+  // namespaces. Returns true once a token is present. Best-effort: a missing
+  // grecaptcha or an execute() throw resolves false (the form may still mint
+  // it on its own submit handler).
+  async triggerInvisibleRecaptcha(timeoutMs = 9000): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const tokenPresent = (): Promise<boolean> =>
+      this.page!.evaluate(() => {
+        const ta = document.querySelector(
+          'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+        ) as HTMLTextAreaElement | null;
+        return ta !== null && ta.value.length > 0;
+      }).catch(() => false);
+
+    if (await tokenPresent()) return true;
+
+    const fired = await this.page
+      .evaluate(() => {
+        const w = window as unknown as {
+          grecaptcha?: {
+            execute?: () => void;
+            enterprise?: { execute?: () => void };
+          };
+        };
+        const g = w.grecaptcha;
+        if (g === undefined) return false;
+        try {
+          // Bare execute() runs the page's first (here only) widget — for an
+          // invisible widget that's the score request. Try enterprise first
+          // when present (a v2-invisible page exposes plain execute()).
+          if (typeof g.enterprise?.execute === "function") {
+            g.enterprise.execute();
+            return true;
+          }
+          if (typeof g.execute === "function") {
+            g.execute();
+            return true;
+          }
+        } catch {
+          return false;
+        }
+        return false;
+      })
+      .catch(() => false);
+    if (!fired) return false;
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await this.sleep(500);
+      if (await tokenPresent()) return true;
+    }
+    return false;
+  }
+
   // Tier 3 hCaptcha support — extract the hCaptcha sitekey so 2Captcha
   // can solve it. hCaptcha publishes its key on `.h-captcha[data-sitekey]`
   // or in the checkbox iframe's `?sitekey=` query. Keys are UUIDs (the
