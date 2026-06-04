@@ -3918,6 +3918,43 @@ export class BrowserController {
     return this.page !== null ? this.page.url() : "";
   }
 
+  // Fetch a URL's final response (following redirects) and return its
+  // status, final URL, and body text — or null on any failure.
+  //
+  // WHY the CONTEXT request API (this.context.request) and not global
+  // fetch / a fresh node http client: the context's APIRequestContext
+  // shares the BrowserContext's proxy + cookie jar, so this egresses
+  // through the SAME residential tunnel the real navigation uses. That
+  // makes a probe here representative of what the browser would actually
+  // land on (same IP reputation, same cf_clearance cookie) — and needs no
+  // separate SOCKS/HTTP-proxy plumbing. Used by the signup-URL resolver to
+  // distinguish a stale /signup that serves a login SPA from the real
+  // signup form, BEFORE committing to a ~6-minute navigation.
+  //
+  // Bounded (15s, ≤10 redirects) and non-throwing — the resolver treats
+  // null as "couldn't tell" and escalates.
+  async fetchText(
+    url: string,
+  ): Promise<{ finalUrl: string; status: number; bodyText: string } | null> {
+    if (this.context === null) return null;
+    try {
+      const response = await this.context.request.get(url, {
+        maxRedirects: 10,
+        timeout: 15_000,
+        // We inspect 404/redirect bodies ourselves; don't let a non-2xx
+        // throw before we can classify it.
+        failOnStatusCode: false,
+      });
+      return {
+        finalUrl: response.url(),
+        status: response.status(),
+        bodyText: await response.text(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   // True when the active OAuth page is gone — for the popup flow, the
   // popup closing IS the signal the handshake finished.
   oauthPageClosed(): boolean {

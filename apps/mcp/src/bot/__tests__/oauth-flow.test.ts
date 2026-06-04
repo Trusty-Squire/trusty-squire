@@ -111,6 +111,15 @@ class FakeOAuthBrowser {
   }
   async prewarm(): Promise<void> {}
   async goto(): Promise<void> {}
+  // The signup-URL resolver probes via fetchText before navigating; null
+  // means "couldn't tell over HTTP" so the curated URL is kept as-is.
+  async fetchText(): Promise<{
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  } | null> {
+    return null;
+  }
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
   async dismissConsentBanner(): Promise<string | null> { return null; }

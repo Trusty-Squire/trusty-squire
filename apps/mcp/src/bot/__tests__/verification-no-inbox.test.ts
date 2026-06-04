@@ -47,6 +47,15 @@ class SubmitsOkBrowser {
   }
   async prewarm(): Promise<void> {}
   async goto(): Promise<void> {}
+  // The signup-URL resolver probes via this before navigating; null means
+  // "couldn't tell over HTTP" so the resolver leaves the curated URL as-is.
+  async fetchText(): Promise<{
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  } | null> {
+    return null;
+  }
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
   async dismissConsentBanner(): Promise<string | null> { return null; }

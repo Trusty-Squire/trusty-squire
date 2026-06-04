@@ -1404,6 +1404,246 @@ export function hostMatchesServiceDomain(
   return normalized === serviceSlug;
 }
 
+// Strip HTML tags + decode the handful of entities that show up in the
+// copy we key on, then lowercase. We classify on the VISIBLE COPY because
+// that's the only thing that reliably distinguishes a signup form from a
+// login form — both have an <input type="password"> and an email field,
+// so structure alone is ambiguous (the exact bug looksLikeSignupPage
+// can't see past). The decoded entities matter: "Create&nbsp;account" or
+// a "Don&apos;t have an account?" link would otherwise hide the
+// discriminating phrase behind an entity.
+function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+// Classify a fetched page as a signup form, a login form, or neither.
+//
+// WHY this exists: looksLikeSignupPage() answers "does this page have a
+// form?" — which a LOGIN page also satisfies (email + password + a
+// "Continue with Google" button). The discriminator is the COPY, not the
+// structure: a real email-signup form carries create-account CTA text
+// ("create account", "sign up", "get started", "register"); a login form
+// carries "sign in" / "log in" / "welcome back" and lacks the create CTA.
+// This is the heart of the stale-URL fix — a curated /signup that
+// silently serves the login SPA classifies as "login" here, which lets
+// the resolver reject it and probe for the real signup path.
+export function classifySignupHtml(
+  html: string,
+  title?: string,
+): "signup" | "login" | "other" {
+  const text = stripHtmlToText(html);
+  const titleLower = (title ?? "").toLowerCase();
+
+  // 404 / error shell wins regardless of stray form copy — a "not found"
+  // title is the strongest "this isn't the page you wanted" signal.
+  if (
+    titleLower.includes("404") ||
+    titleLower.includes("not found") ||
+    titleLower.includes("page not found")
+  ) {
+    return "other";
+  }
+
+  // A password field is the structural prerequisite for an auth form. We
+  // regex the RAW html (not the stripped text) because attribute values
+  // live inside the tags the stripper removes. Either the input type or a
+  // name="password"/id="password" counts — some SPAs render the field
+  // without an explicit type=password.
+  const hasPassword =
+    /type\s*=\s*["']?password["']?/i.test(html) ||
+    /(?:name|id)\s*=\s*["']?password["']?/i.test(html);
+
+  // Create-account CTA copy — the signup discriminator. "sign up" is
+  // word-bounded so it matches "sign up" but not "designup"; "get
+  // started" and "register" round out the common variants.
+  const hasSignupCta =
+    /\bcreate (?:an )?account\b/.test(text) ||
+    /\bcreate your account\b/.test(text) ||
+    /\bsign[\s-]?up\b/.test(text) ||
+    /\bget started\b/.test(text) ||
+    /\bregister\b/.test(text);
+
+  // Generic login copy — present on any sign-IN form.
+  const hasLoginCopy =
+    /\bsign in\b/.test(text) ||
+    /\blog[\s-]?in\b/.test(text) ||
+    /\bwelcome back\b/.test(text);
+
+  // LOGIN-DOMINANT headings: even when a "Sign up" link sits in the
+  // footer ("Don't have an account? Sign up"), these headings mean the
+  // PRIMARY form is login. Used to veto a false "signup" read.
+  const loginDominant =
+    /\bsign in to your account\b/.test(text) ||
+    /\bwelcome back\b/.test(text) ||
+    /\blog[\s-]?in to\b/.test(text);
+
+  if (hasPassword && hasSignupCta && !loginDominant) {
+    // Has the form AND advertises account creation, and isn't a login
+    // page that merely links to signup — this is the page we want.
+    return "signup";
+  }
+
+  // A login-dominant heading wins even when a stray signup link bumped
+  // hasSignupCta (the "Don't have an account? Sign up" footer case).
+  if (loginDominant && hasPassword) {
+    return "login";
+  }
+
+  if (hasLoginCopy && !hasSignupCta) {
+    // Login copy with no create-account CTA anywhere — a sign-in form.
+    return "login";
+  }
+
+  // No password field and no clear CTA → marketing page / empty SPA shell
+  // / 404 body. Not a form we can fill.
+  return "other";
+}
+
+// Conventional signup paths to probe, in priority order. Small + ordered
+// on purpose — we want the FIRST real signup form, not a fan-out across
+// dozens of guesses that each cost a round-trip over a residential
+// tunnel. "/auth/signup" sits high because it catches the plunk case
+// (app.useplunk.com/auth/signup 308 → next-app.useplunk.com/auth/signup).
+const CONVENTIONAL_SIGNUP_PATHS = [
+  "/signup",
+  "/auth/signup",
+  "/sign-up",
+  "/register",
+  "/users/sign_up",
+  "/account/signup",
+  "/join",
+] as const;
+
+// Host-prefix swaps: dashboards live behind app./console./dashboard./www.,
+// but the signup form often lives on auth. or the bare apex. Swapping the
+// leading label widens the probe to those hosts without fanning out
+// blindly across arbitrary subdomains.
+const SIGNUP_HOST_PREFIX_SWAPS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^app\./, "auth."],
+  [/^www\./, "auth."],
+  [/^console\./, "auth."],
+  [/^dashboard\./, "auth."],
+];
+
+// Build the ordered, de-duped candidate URL set for the probe: every
+// conventional path across (the hint host, the prefix-swapped hosts, and
+// the bare eTLD+1). The resolver's final domain-safety check guards
+// against a candidate that ends up redirecting off-domain.
+function buildSignupCandidates(hint: URL): string[] {
+  const hosts = new Set<string>([hint.hostname]);
+  for (const [from, to] of SIGNUP_HOST_PREFIX_SWAPS) {
+    if (from.test(hint.hostname)) {
+      hosts.add(hint.hostname.replace(from, to));
+    }
+  }
+  const registered = getDomain(hint.hostname);
+  if (registered !== null) hosts.add(registered);
+
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  // Path-major so each path is tried across all hosts before the next
+  // path — "/signup" everywhere, then "/auth/signup" everywhere, etc.
+  for (const path of CONVENTIONAL_SIGNUP_PATHS) {
+    for (const host of hosts) {
+      const url = `https://${host}${path}`;
+      if (!seen.has(url)) {
+        seen.add(url);
+        candidates.push(url);
+      }
+    }
+  }
+  return candidates;
+}
+
+// Tier A of the signup-URL resolver — the HTTP fast-path. Given a hint URL
+// (curated YAML or a guess) and an injectable redirect-following fetcher,
+// return a URL that actually serves a signup FORM, or null if the HTTP
+// probe can't resolve one (the caller then escalates to the landing-page
+// CTA or the Google-search fallback).
+//
+// `fetchText` is injected so this is unit-testable with a fake — in
+// production it's bound to BrowserController.fetchText, which egresses
+// through the same residential proxy + cookie jar as the real navigation,
+// so a redirect/HTML read here is representative of what the browser would
+// land on. Pure-ish: no browser, no globals beyond the PSL helper.
+export async function resolveSignupUrlByProbe(
+  hintUrl: string,
+  serviceSlug: string,
+  fetchText: (
+    url: string,
+  ) => Promise<{ finalUrl: string; status: number; bodyText: string } | null>,
+  log?: (m: string) => void,
+): Promise<string | null> {
+  const note = (m: string): void => log?.(m);
+
+  let hint: URL;
+  try {
+    hint = new URL(hintUrl);
+  } catch {
+    note(`[signup-url] hint ${hintUrl} is not a URL — skipping HTTP probe`);
+    return null;
+  }
+
+  // Fast path: the hint itself, followed through redirects. A 308 chain
+  // (plunk's app. → next-app.) resolves here for free.
+  const hintRes = await fetchText(hintUrl);
+  if (hintRes !== null && classifySignupHtml(hintRes.bodyText) === "signup") {
+    if (hintRes.finalUrl !== hintUrl) {
+      note(`[signup-url] hint ${hintUrl} redirected to signup ${hintRes.finalUrl}`);
+    } else {
+      note(`[signup-url] hint ${hintUrl} is already a signup form`);
+    }
+    return hintRes.finalUrl;
+  }
+  note(
+    `[signup-url] hint ${hintUrl} did not classify as signup` +
+      (hintRes === null
+        ? " (fetch failed)"
+        : ` (${classifySignupHtml(hintRes.bodyText)})`),
+  );
+
+  // Probe the conventional paths. The first one that BOTH classifies as a
+  // signup form AND lands on a host that still belongs to the service
+  // wins. The domain check guards against a path that redirects to a
+  // third party (e.g. a generic SSO portal on a different registered
+  // domain).
+  for (const candidate of buildSignupCandidates(hint)) {
+    if (candidate === hintUrl) continue; // already tried as the hint
+    const res = await fetchText(candidate);
+    if (res === null) continue;
+    if (classifySignupHtml(res.bodyText) !== "signup") continue;
+
+    let finalHost: string;
+    try {
+      finalHost = new URL(res.finalUrl).hostname;
+    } catch {
+      continue;
+    }
+    if (!hostMatchesServiceDomain(finalHost, serviceSlug)) {
+      note(
+        `[signup-url] candidate ${candidate} → ${res.finalUrl} rejected: ` +
+          `off-domain for ${serviceSlug}`,
+      );
+      continue;
+    }
+    note(`[signup-url] resolved via probe: ${candidate} → ${res.finalUrl}`);
+    return res.finalUrl;
+  }
+
+  note(`[signup-url] no conventional signup path resolved for ${hintUrl}`);
+  return null;
+}
+
 // BUG-3 GUARD — diagnostic flag for the Inventory snapshot. Stricter
 // than detectAntiBotBlock (no "cf-turnstile" / "recaptcha" raw-HTML
 // matches) because the previous regex false-positive matched legitimate
@@ -4355,6 +4595,38 @@ export class SignupAgent {
         }));
       let signupUrl = guessed;
 
+      // Tier A — HTTP fast-path signup-URL resolver. Before committing to
+      // the (~6-minute) navigation, probe the candidate over the SAME
+      // proxy via the context request API and confirm it actually serves a
+      // signup FORM (not a login SPA / 404). Curated signup_urls go stale
+      // (plunk's app.useplunk.com/signup now 404s and silently serves the
+      // login page; the real form moved to next-app.useplunk.com/auth/
+      // signup). The probe follows redirects + tries conventional paths
+      // and adopts a better URL when it finds one. Non-Google URLs only —
+      // a Google-search URL is the explicit fallback path, not a hint.
+      if (!isGoogleSearchUrl(signupUrl)) {
+        const serviceSlug = task.service.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const resolved = await resolveSignupUrlByProbe(
+          signupUrl,
+          serviceSlug,
+          (u) => this.browser.fetchText(u),
+          (m) => steps.push(m),
+        );
+        if (resolved !== null && resolved !== signupUrl) {
+          steps.push(`[signup-url] resolved ${signupUrl} → ${resolved}`);
+          // A curated URL that the resolver had to move is a stale-YAML
+          // signal worth surfacing in telemetry (curated URLs are
+          // supposed to be the trusted, hand-verified path).
+          if (task.signupUrl !== undefined) {
+            steps.push(
+              `⚠ curated signup_url for ${task.service} looks stale ` +
+                `(${signupUrl}); using ${resolved}`,
+            );
+          }
+          signupUrl = resolved;
+        }
+      }
+
       // Prewarm the target origin before hitting the (often-strict) signup
       // page. Two things this buys us:
       //   1. First-party cookies on the root domain. Cloudflare's
@@ -4379,31 +4651,107 @@ export class SignupAgent {
       // waitForFormReady in planExecuteWithRetry handles SPA settle.
       // No need for a blind 2s dwell here.
 
-      // When we *guessed* (no signup_url provided) and the page after
-      // load doesn't look like a signup page — no inputs, no OAuth
-      // affordance, or an obvious 404/error title — fall back to the
-      // search-and-find-link path. This is the safety net that lets
-      // the bot recover from a wrong canonical guess (e.g. a service
-      // that uses /register or a non-`.com` TLD).
+      // After load: does the rendered page look like a signup form?
+      // looksLikeSignupPage() can't tell signup from login (both have
+      // email+password), so we ALSO classify the rendered HTML's copy via
+      // classifySignupHtml — that's what distinguishes the two.
       //
-      // A curated task.signupUrl is trusted as-is (no fallback). Otherwise
-      // — whether the URL came from a promoted skill, the model, or the
-      // .com guess — verify it looks like a signup page and fall back to
-      // the search-and-find path if not. (A promoted-skill URL is replay-
-      // verified, so it passes; an LLM/.com guess that's wrong is recovered
-      // here.)
-      if (task.signupUrl === undefined && !(await this.looksLikeSignupPage())) {
-        steps.push(
-          `${guessed} didn't look like a signup page — searching for the real one`,
-        );
-        const fallbackSearch = `https://www.google.com/search?q=${encodeURIComponent(`${task.service} signup`)}`;
-        await this.browser.goto(fallbackSearch);
-        // PERF: domcontentloaded from goto() + findSignupLink reads
-        // the DOM itself — no blind dwell needed.
-        signupUrl = fallbackSearch;
+      // A curated task.signupUrl is no longer trusted blindly: it can land
+      // on a login page (a stale path the SPA reroutes to /login). We
+      // trigger recovery for BOTH guessed and curated URLs — but
+      // conservatively for curated ones, to avoid regressing a good
+      // curated URL: recover ONLY when the copy classifies as "login" or
+      // "other" AND looksLikeSignupPage also disagrees. The structural
+      // check is the backstop for an OAuth-only signup page ("Continue
+      // with Google", no email/password copy) that classifySignupHtml
+      // would otherwise read as "other". (A promoted-skill URL is replay-
+      // verified and a guessed URL that's wrong is recovered here too.)
+      let needsRecovery = false;
+      if (task.signupUrl === undefined) {
+        needsRecovery = !(await this.looksLikeSignupPage());
+      } else {
+        const rendered = (await this.browser.getState()).html;
+        const klass = classifySignupHtml(rendered);
+        if (klass !== "signup" && !(await this.looksLikeSignupPage())) {
+          needsRecovery = true;
+          steps.push(
+            `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
+          );
+        }
       }
 
-      if (signupUrl !== guessed || isGoogleSearchUrl(signupUrl)) {
+      if (needsRecovery) {
+        if (task.signupUrl === undefined) {
+          steps.push(
+            `${signupUrl} didn't look like a signup page — attempting recovery`,
+          );
+        }
+
+        // Tier B — landing-page CTA self-heal. Before the heavyweight
+        // Google-search path, navigate to the site root and click the
+        // highest-scored signup CTA (same scorer the planner uses). This
+        // catches static-host SPAs that serve a 200 empty shell for every
+        // path (so the HTTP probe can't tell signup from login) but DO
+        // render a real "Sign up" CTA once the JS hydrates on the root.
+        const root = originRoot(signupUrl);
+        let recovered = false;
+        if (root !== null) {
+          steps.push(`[signup-url] Tier B: landing-page CTA at ${root}`);
+          try {
+            await this.runPrewarm(root, steps);
+            await this.browser.goto(root);
+            const inventory = await this.browser.extractInteractiveElements();
+            // Score every interactive element's text; pick the best
+            // signup CTA. Providers are driven negative by scoreSignupButton
+            // (we want the email-signup affordance, not an OAuth button).
+            let best: { el: InteractiveElement; score: number } | null = null;
+            for (const el of inventory) {
+              const label =
+                el.visibleText ?? el.ariaLabel ?? el.iconLabel ?? el.title ?? "";
+              if (label.trim().length === 0) continue;
+              const score = scoreSignupButton(label, ["google", "github"]);
+              if (best === null || score > best.score) best = { el, score };
+            }
+            if (best !== null && best.score > 0) {
+              steps.push(
+                `[signup-url] Tier B clicking CTA "${(best.el.visibleText ?? best.el.ariaLabel ?? "").slice(0, 40)}" (score ${best.score})`,
+              );
+              await this.browser.click(best.el.selector);
+              const landed = (await this.browser.getState()).html;
+              if (classifySignupHtml(landed) === "signup") {
+                const url = this.browser.currentUrl();
+                steps.push(`[signup-url] Tier B recovered signup page: ${url}`);
+                signupUrl = url;
+                recovered = true;
+              } else {
+                steps.push(
+                  `[signup-url] Tier B click did not reach a signup form — falling through to search`,
+                );
+              }
+            } else {
+              steps.push(
+                `[signup-url] Tier B found no scoring signup CTA on ${root}`,
+              );
+            }
+          } catch (err) {
+            steps.push(
+              `[signup-url] Tier B failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
+        // Final fallback — the existing Google-search + findSignupLink
+        // path, unchanged. Only when Tier B didn't recover.
+        if (!recovered) {
+          const fallbackSearch = `https://www.google.com/search?q=${encodeURIComponent(`${task.service} signup`)}`;
+          await this.browser.goto(fallbackSearch);
+          // PERF: domcontentloaded from goto() + findSignupLink reads
+          // the DOM itself — no blind dwell needed.
+          signupUrl = fallbackSearch;
+        }
+      }
+
+      if (isGoogleSearchUrl(signupUrl)) {
         steps.push("Searching for signup page...");
         const found = await this.findSignupLink(task.service);
         if (found !== null) {
@@ -4420,18 +4768,16 @@ export class SignupAgent {
           // fallback, the bot is sitting on a SERP with no usable
           // destination — abort rather than let the form-fill planner
           // happily fill the Google search box.
-          if (isGoogleSearchUrl(signupUrl)) {
-            return {
-              success: false,
-              error:
-                `no_signup_link: searched for ${task.service}'s signup page and ` +
-                `found no on-domain candidates. The service likely doesn't have ` +
-                `a public self-serve signup, or the bot's domain guard rejected ` +
-                `every match. Sign up manually.`,
-              steps,
-              ...this.resultTail(),
-            };
-          }
+          return {
+            success: false,
+            error:
+              `no_signup_link: searched for ${task.service}'s signup page and ` +
+              `found no on-domain candidates. The service likely doesn't have ` +
+              `a public self-serve signup, or the bot's domain guard rejected ` +
+              `every match. Sign up manually.`,
+            steps,
+            ...this.resultTail(),
+          };
         }
       }
 
