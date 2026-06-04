@@ -8082,9 +8082,17 @@ Strategy:
   capture whatever IS visible (even if just a cloud_name with no
   api_secret) and return the partial bundle to the caller, which is
   more useful than five wasted rounds of clicking a dead reveal.
-- To reach API keys, prefer a {"kind":"navigate"} straight to the
-  service's API-keys settings URL — note these usually live under the
-  user/ACCOUNT settings, not a project or workspace's settings.
+- To reach API keys, PREFER clicking a visible "API Keys" / "Tokens" /
+  "Developer" / "Settings" link in the INVENTORY (a verified selector) — that
+  always lands on the real page. Only use {"kind":"navigate"} to a GUESSED
+  settings URL when NO such link is in the inventory, and NEVER guess the same
+  URL twice. These pages usually live under user/ACCOUNT settings, not a
+  project or workspace's settings.
+- **404 RECOVERY.** If the page is a 404 / "not found" / "page doesn't exist"
+  / "we couldn't find" (a guessed URL missed), do NOT retry it or guess
+  another URL. {"kind":"navigate"} to the service's app ROOT/dashboard (the
+  bare origin, e.g. https://app.<service>.com/) and find the API-keys link in
+  the nav from there.
 - **EXCEPT** when the page has a very small inventory (5 or fewer elements)
   and one of them is an onboarding CTA — patterns like "Get started",
   "Continue", "Activate", "Enable API", "Start free trial", "Set up".
@@ -8108,7 +8116,21 @@ Strategy:
   "done" while a card-radio cluster is still visible.
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
-- If the page wants the user to create a project/key before showing it, fill the minimum and click create.
+- **EMPTY DASHBOARD — create the first resource.** Many services do NOT expose
+  an API key until you create your first organization / project / cluster /
+  database / service / workspace. If the dashboard shows NO existing resources
+  (an empty state, "Create your first…", "No projects/clusters yet", "Get
+  started by creating…", or just a lone "Create"/"New <resource>"/"+ New" CTA
+  and nothing else useful), CLICK that CTA, then on the following rounds fill
+  the minimal required fields (use a generated name like ts-<random> for
+  name/slug fields, pick the first/free option for plans/regions) and confirm.
+  The API-keys / tokens page appears only AFTER a resource exists. Do NOT
+  return {"kind":"done"} or {"kind":"login"} on an empty dashboard while a
+  create-resource CTA is visible — that is the path forward, not a dead end.
+- **Pre-filled fields are DONE — advance, don't re-touch.** If a required
+  onboarding field (first name, company, email) is ALREADY populated, or a
+  required selectable is ALREADY selected, do NOT re-fill/re-select it — click
+  Continue / Next / Submit to move forward. Re-filling a satisfied field loops.
 - For ANY dropdown — native (tag=select) OR a custom combobox (role=combobox / aria-haspopup=listbox, common on modern React apps like Sentry / Stripe / Vercel) — use {"kind":"select"}. "click" on a combobox trigger opens it but does not pick an option; do not click it repeatedly.
 - When you need a SPECIFIC option from the dropdown — e.g. "Project: Read" on Sentry's permissions picker, or a specific region — include "option_text" with the visible label. The executor matches it case-insensitively as a substring. Omit "option_text" when any option is fine (a placeholder country picker).
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
