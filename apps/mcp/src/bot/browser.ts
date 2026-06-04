@@ -3737,6 +3737,20 @@ export class BrowserController {
         ) {
           return true;
         }
+        // On-demand One-Tap: the page loads the GSI client script but renders
+        // no static button and may not have initialized `google.accounts.id`
+        // yet (amplitude, clerk). A plain click on the in-page "Sign in with
+        // Google" affordance never redirects, so the bot used to falsely
+        // conclude "signed in" and bounce to login. Treat the loaded client
+        // script as a GSI affordance so the agent routes through
+        // tryGoogleGsiLogin, which now raises One-Tap programmatically.
+        if (
+          document.querySelector(
+            'script[src*="accounts.google.com/gsi/client"]',
+          ) !== null
+        ) {
+          return true;
+        }
         const g = (window as unknown as {
           google?: { accounts?: { id?: unknown } };
         }).google;
@@ -3770,17 +3784,47 @@ export class BrowserController {
       cdp = await this.context.newCDPSession(this.page);
       await cdp.send("FedCm.enable", { disableRejectionDelay: true });
       cdp.on("FedCm.dialogShown", (ev: unknown) => {
-        const dialogId = (ev as { dialogId?: string }).dialogId;
+        const e = ev as { dialogId?: string; dialogType?: string };
+        const dialogId = e.dialogId;
         if (dialogId === undefined) return;
         void (async () => {
+          // A ConfirmIdpLogin dialog has no account list — it's the "Continue
+          // as / sign in to Google" confirmation that precedes the account
+          // chooser. selectAccount would error on it, so drive the confirm
+          // button directly and skip selectAccount for this dialog type.
+          if (e.dialogType === "ConfirmIdpLogin") {
+            try {
+              await cdp!.send("FedCm.clickDialogButton", {
+                dialogId,
+                dialogButton: "ConfirmIdpLoginContinue",
+              });
+            } catch {
+              // method/param may not apply to this build/dialog — non-fatal;
+              // a subsequent AccountChooser dialog still resolves via select.
+            }
+            return;
+          }
           try {
-            // Pick the first account. Some flows then need the "Continue as"
-            // confirm button; selectAccount alone usually completes it, and
-            // a failed confirm is non-fatal.
+            // Pick the first account on the account-chooser dialog.
             await cdp!.send("FedCm.selectAccount", { dialogId, accountIndex: 0 });
             fedcmResolved = true;
           } catch {
             // dialog dismissed or already resolved
+          }
+          if (!fedcmResolved) {
+            // Some flows surface a "Continue as <name>" confirm even on the
+            // account dialog; selectAccount alone usually completes it, but
+            // when it didn't, try the confirm button as a fallback. Failure
+            // is non-fatal — the popup/none path still applies.
+            try {
+              await cdp!.send("FedCm.clickDialogButton", {
+                dialogId,
+                dialogButton: "ConfirmIdpLoginContinue",
+              });
+              fedcmResolved = true;
+            } catch {
+              // button absent or not applicable — degrade to popup/none
+            }
           }
         })();
       });
@@ -3794,6 +3838,39 @@ export class BrowserController {
       .catch((): Page | null => null);
 
     await this.click(triggerSelector);
+
+    // On-demand One-Tap: when the page loaded the GSI client but rendered no
+    // static button, the click above hits an in-page affordance that never
+    // raises a dialog on its own. If neither a FedCM dialog nor a popup has
+    // appeared shortly after the click, ask GSI to raise One-Tap itself.
+    // `google.accounts.id.prompt()` triggers the FedCM dialog our handler is
+    // already listening for. Guarded — `window.google.accounts.id` may be
+    // undefined (no-op) and any failure must degrade to the popup/none path.
+    if (cdp !== null) {
+      const promptDeadline = Date.now() + Math.min(4_000, timeoutMs);
+      while (
+        Date.now() < promptDeadline &&
+        !fedcmResolved &&
+        this.context.pages().length <= 1
+      ) {
+        await this.sleep(250);
+      }
+      if (!fedcmResolved && this.context.pages().length <= 1) {
+        try {
+          await this.page.evaluate(() => {
+            const g = (window as unknown as {
+              google?: { accounts?: { id?: { prompt?: () => void } } };
+            }).google;
+            const id = g?.accounts?.id;
+            if (id !== undefined && typeof id.prompt === "function") {
+              id.prompt();
+            }
+          });
+        } catch {
+          // GSI not initialized / prompt unavailable — popup/none still apply
+        }
+      }
+    }
 
     // Resolve when a popup opens OR FedCM completes OR we hit the deadline.
     const fedcmWait = (async (): Promise<null> => {
