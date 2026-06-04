@@ -63,12 +63,23 @@ See memory `project-four-walls-measured-jun03`. Harnesses:
        driver has nothing to catch here. (FedCm follow-ups in the GSI block
        remain valid for a *real* gsi/button or One-Tap service, just not
        northflank.)
-     So every northflank OAuth path is walled: Google=inert button,
-     GitHub=2FA-on-authorize, GitLab/Bitbucket=no session,
-     email=recaptcha+withheld verification. northflank is effectively
-     **needs-human** unless the operator clears GitHub's 2FA wall
-     (login --provider=github --force-relogin → "Verify 2FA now") and it
-     doesn't re-arm per-authorize.
+     - **GitHub path — fully driven now, stops at install-time 2FA (DEFINITIVE).**
+       With the login 2FA cleared + warm session, the bot finds the logo
+       button, drives OAuth, the session is VALID (snapshot shows
+       `"login":"lunchboxfortwo"`), and it reaches northflank's GitHub APP
+       install page (/apps/northflank-cloud-build-run/installations/select_target).
+       There GitHub demands a FRESH "Verify two-factor authentication" sudo
+       prompt for the install — separate from the login 2FA, re-armed per
+       sensitive action — which the bot cannot enter. classifyGitHubAuthState
+       now reads GitHub-App install pages as consent (9ae5313), but the 2FA
+       challenge (correctly) takes precedence.
+     So every northflank path is a NON-bot wall: Google=inert button,
+     GitHub=install-time sudo-2FA (human), GitLab/Bitbucket=no session,
+     email=recaptcha+withheld verification. **northflank = needs-human.** Every
+     bot-capability layer (logo detection, pin order, login-proxy, GSI driver,
+     hydration scan, App-install classification) is now fixed; only the
+     GitHub sudo-2FA gate remains, and it is outside the bot's control. A
+     future "pause-for-human-2FA mid-signup (noVNC)" feature could clear it.
   - **Follow-up bug:** logged-in-providers.json got out of sync (github
      session live in cookies but absent from the marker → loggedInProviders()
      returned ["google"], so the pin-respecting order fell back to google).
