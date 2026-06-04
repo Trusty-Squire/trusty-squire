@@ -619,6 +619,11 @@ async function runDisplayedChrome(
       channel: "chrome",
       headless: false,
       viewport: { width: 1280, height: 800 },
+      // Drop Playwright's default --enable-automation switch: it paints the
+      // "Chrome is being controlled by automated test software" infobar AND
+      // is itself an automation fingerprint the provider can read during the
+      // sign-in (so removing it also helps the session survive).
+      ignoreDefaultArgs: ["--enable-automation"],
       args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
       ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
     }),
@@ -728,6 +733,9 @@ async function runHeadlessChrome(
       headless: false,
       viewport: null, // use the real window size
       env: { ...process.env, DISPLAY: display },
+      // Drop --enable-automation: kills the "controlled by automated test
+      // software" infobar and the matching automation fingerprint.
+      ignoreDefaultArgs: ["--enable-automation"],
       ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
       args: [
         `--window-position=0,0`,
