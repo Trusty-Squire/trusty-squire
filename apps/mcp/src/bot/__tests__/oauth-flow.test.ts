@@ -471,12 +471,16 @@ describe("findSignInAdvanceButton", () => {
 // ───────────────────── orderOAuthCandidates ─────────────────────
 
 describe("orderOAuthCandidates", () => {
-  it("prefers Google over a non-Google PIN when a Google session exists", () => {
-    // Convex pins github, but the profile has a Google session — Google
-    // leads (blocks less hard), github is the fallback for pages that
-    // only offer github.
-    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["google", "github"]);
-    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["google", "github"]);
+  it("leads with an explicit pin when its session is warm, Google as fallback", () => {
+    // northflank pins github (its Google is One-Tap/FedCM the redirect flow
+    // can't drive); with a warm github session the pin leads, google trails
+    // as the fallback for pages that only offer google.
+    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["github", "google"]);
+    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["github", "google"]);
+  });
+
+  it("falls back to Google when the pinned provider's session is NOT warm", () => {
+    expect(orderOAuthCandidates("github", ["google"])).toEqual(["google", "github"]);
   });
 
   it("honours a non-Google pin when there's NO Google session (no regression)", () => {
@@ -484,8 +488,9 @@ describe("orderOAuthCandidates", () => {
     expect(orderOAuthCandidates("github", [])).toEqual(["github"]);
   });
 
-  it("returns just Google when Google is pinned", () => {
-    expect(orderOAuthCandidates("google", ["google", "github"])).toEqual(["google"]);
+  it("leads with Google when Google is pinned, github as fallback", () => {
+    expect(orderOAuthCandidates("google", ["google", "github"])).toEqual(["google", "github"]);
+    expect(orderOAuthCandidates("google", ["google"])).toEqual(["google"]);
   });
 
   it("with no pin, sorts logged-in providers Google-first", () => {

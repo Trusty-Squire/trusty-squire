@@ -2133,19 +2133,30 @@ export function findSignInAdvanceButton(
 // actually has a session for. `findFirstOAuthButton` walks this list in
 // order and uses the first provider the PAGE offers, so order = preference.
 //
-// KEY RULE: Google goes first whenever the profile has a Google session —
-// even over a non-Google pin. Empirically Google's OAuth blocks far less
-// hard than GitHub's: GitHub forces a "Verify your 2FA settings" wall on
-// the /authorize flow that the bot cannot clear, while a warm Google
-// session usually consents in one click (worst case a number-match the
-// operator taps). The pin (or the other session'd provider) stays in the
-// list as the FALLBACK for services that don't render a Google affordance,
-// so nothing regresses — a GitHub-only service still gets GitHub.
+// RULE 1 — respect an explicit pin when its session is warm. The operator
+// pins a provider for a reason the bot can't see from the page: e.g.
+// northflank surfaces Google only as on-demand One-Tap (a FedCM widget the
+// redirect flow can't drive) while its GitHub button is a clean redirect, so
+// the service is pinned github. Leading with the warm pin honors that, with
+// the OTHER warm provider kept as a fallback for pages that only render it.
+// (This became safe once `login` was fixed to establish the session through
+// the bot's egress proxy — a warm GitHub session no longer dies on an IP
+// jump, so it doesn't hit the /authorize 2FA wall the way a stale one did.)
+//
+// RULE 2 — with NO pin, Google leads when present: empirically its OAuth
+// blocks less hard than a cold GitHub flow.
 export function orderOAuthCandidates(
   pinned: OAuthProviderId | undefined,
   loggedIn: readonly OAuthProviderId[],
 ): OAuthProviderId[] {
   if (pinned !== undefined) {
+    if (loggedIn.includes(pinned)) {
+      const others = loggedIn
+        .filter((p) => p !== pinned)
+        .sort((a, b) => (a === "google" ? -1 : b === "google" ? 1 : 0));
+      return [pinned, ...others];
+    }
+    // Pin's session isn't warm — fall back to whatever IS (Google preferred).
     if (pinned !== "google" && loggedIn.includes("google")) return ["google", pinned];
     return [pinned];
   }
