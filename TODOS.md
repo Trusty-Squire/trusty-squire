@@ -117,6 +117,15 @@ key URLs — grafana-cloud, typesense, ipdata, last9, circleci, hookdeck,
 cockroachdb, betterstack-uptime; C) finish onboarding form-fill — imagekit,
 statsig, loops. (Also hatchet, typeform, xata.) Pairs with
 [[feedback-generalize-not-per-service]] + [[project-planner-generalization-plan]].
+- **VALIDATION round 1 (f3b4909):** re-ran the 21 nav corpus → +5 converted
+  (render, qdrant, workos = create-resource theme A; statsig = pre-filled C;
+  hookdeck). Themes work + generalize (A helps any create-first-resource
+  service). Remaining 16 are progressively bespoke: multi-step onboarding
+  wizards (axiom), complex key-creation forms (grafana access-policy), no
+  obvious key path (last9), email-verify (typesense/ipdata), github-only
+  (circleci), timeouts (kinde). Next round = diminishing returns / more
+  per-service shaped — weigh against the SESSION-wall (15) frontier.
+
 
 **DEFERRED — surface AFTER the planner changes land (separate frontiers):**
 - **SESSION-wall (15)** — `oauth_session_not_persisted`: the SERVICE rejected
