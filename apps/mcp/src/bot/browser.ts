@@ -622,35 +622,70 @@ export class BrowserController {
       });
     }
 
-    // rc.33 — spoof WebGL renderer/vendor toward a stock Intel laptop GPU.
-    // CAVEAT (measured 2026-06-04): this is EFFECTIVE only in the stealth
-    // BASELINE. Under patchright (hardened), addInitScript runs in an ISOLATED
-    // world, so this prototype patch never reaches the page's main world — the
-    // renderer reads through as the real Mesa/llvmpipe software string. We keep
-    // it for the baseline path; closing the hardened gap needs a binary-level
-    // spoof (patchright doesn't do WebGL), tracked as a follow-up. The
-    // --enable-unsafe-swiftshader launch flag above is what makes a WebGL
-    // context EXIST at all on the GPU-less host (the bigger win — "no WebGL"
-    // is the stronger tell). Doesn't change actual rendering — only strings.
-    await context.addInitScript(() => {
+    // rc.33 / 2026-06-04 — spoof the WebGL UNMASKED vendor+renderer toward a
+    // stock Intel GPU, so the software Mesa/llvmpipe string (--enable-unsafe-
+    // swiftshader gives us a context, but llvmpipe is itself a VM/headless
+    // tell) doesn't read through. Applied TWO ways because patchright
+    // (hardened) isolates document-start scripts from the page's main world:
+    //   • addInitScript — document-start; the effective path in the stealth
+    //     BASELINE (non-patchright).
+    //   • re-applied via page.evaluate on every navigation — the ONLY path that
+    //     reaches the MAIN world under patchright. MEASURED 2026-06-04:
+    //     addInitScript AND raw CDP Page.addScriptToEvaluateOnNewDocument both
+    //     land in patchright's isolated world (renderer stayed llvmpipe);
+    //     page.evaluate does not (renderer became Intel), and the v3 score held
+    //     at 1.0. Idempotent via a marker so the per-nav re-apply is cheap, and
+    //     getParameter.toString() is masked to the original native source so
+    //     the patch itself isn't a tell. Only strings change, not rendering.
+    const installWebglSpoof = (): void => {
       const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
       const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
-      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext) => {
+      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext): void => {
+        // The marker lives on the prototype so re-application is a no-op; the
+        // cast is the one typed-alternative-exhausted spot (adding an ad-hoc
+        // brand to a DOM prototype).
+        const marked = proto as WebGLRenderingContext & { __tsWebglPatched?: boolean };
+        if (marked.__tsWebglPatched === true) return;
         const orig = proto.getParameter;
+        const native = orig.toString();
         proto.getParameter = function (this: typeof proto, p: number) {
-          if (p === VENDOR_WEBGL) return "Intel Inc.";
-          if (p === RENDERER_WEBGL) return "Intel(R) UHD Graphics 620";
+          if (p === VENDOR_WEBGL) return "Google Inc. (Intel)";
+          if (p === RENDERER_WEBGL) {
+            return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)";
+          }
           return orig.call(this, p);
         };
+        Object.defineProperty(proto.getParameter, "toString", {
+          value: () => native,
+          configurable: true,
+          writable: true,
+        });
+        marked.__tsWebglPatched = true;
       };
       if (typeof WebGLRenderingContext !== "undefined") {
-        spoof(WebGLRenderingContext.prototype as WebGLRenderingContext);
+        spoof(WebGLRenderingContext.prototype);
       }
       if (typeof WebGL2RenderingContext !== "undefined") {
-        spoof(WebGL2RenderingContext.prototype as WebGL2RenderingContext);
+        spoof(WebGL2RenderingContext.prototype);
       }
-    });
+    };
+    await context.addInitScript(installWebglSpoof);
     this.page = context.pages()[0] ?? (await context.newPage());
+    // Re-apply on every navigation — the main-world reach patchright's isolated
+    // init world denies us. framenavigated fires at navigation-commit (before
+    // most page JS), so a late WebGL query (reCAPTCHA scores seconds in) sees
+    // the spoofed strings; a document-start fingerprinter could still race it.
+    const reapplyWebglSpoof = (): void => {
+      const pg = this.page;
+      if (pg === null) return;
+      void pg.evaluate(installWebglSpoof).catch(() => {
+        // mid-navigation / closed page — the next navigation re-applies.
+      });
+    };
+    this.page.on("framenavigated", (frame) => {
+      if (this.page !== null && frame === this.page.mainFrame()) reapplyWebglSpoof();
+    });
+    this.page.on("load", reapplyWebglSpoof);
 
     // rc.33 — captcha tracing. When UNIVERSAL_BOT_CAPTCHA_TRACE=1 is
     // set, log every response from Cloudflare/Google's challenge
