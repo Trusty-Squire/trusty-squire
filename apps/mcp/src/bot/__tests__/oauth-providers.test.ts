@@ -21,6 +21,25 @@ describe("classifyGitHubAuthState (T13)", () => {
     ).toBe("consent");
   });
 
+  it("treats a GitHub App install flow as consent, not needs_login (northflank)", () => {
+    // northflank uses a GitHub App: post-sign-in it routes to the install
+    // target-selection / install screens. Reaching these means the session
+    // is valid; classifying them needs_login wrongly aborted + cleared the
+    // marker.
+    expect(
+      classifyGitHubAuthState(
+        "https://github.com/apps/northflank-cloud-build-run/installations/select_target?state=149df09",
+        "Install northflank-cloud-build-run — Where do you want to install",
+      ),
+    ).toBe("consent");
+    expect(
+      classifyGitHubAuthState(
+        "https://github.com/apps/acme/installations/new?state=x",
+        "Install Acme — review permissions on your account",
+      ),
+    ).toBe("consent");
+  });
+
   it("classifies the GitHub login page as needs_login", () => {
     expect(
       classifyGitHubAuthState(
