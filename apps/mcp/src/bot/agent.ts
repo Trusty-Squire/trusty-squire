@@ -1679,6 +1679,42 @@ export function findSignupCtaElement(
   return best;
 }
 
+// True when a post-OAuth page is a read-only DEMO / sandbox the service drops
+// new users into (amplitude: app.amplitude.com/analytics/demo) rather than a
+// real account — there is no API key here, and a real org needs the page's
+// "Create a free account" CTA. Conservative: a `/demo` URL segment OR explicit
+// demo copy ("you are currently in the … demo" / "this is a demo"). Exported
+// for unit tests.
+export function isSandboxDemoState(url: string, bodyText: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    if (/(?:^|\/)demo(?:\/|$)/.test(path)) return true;
+  } catch {
+    // fall through to the text check
+  }
+  return /you are currently in the .{0,30}demo|this is (?:a|the) .{0,20}demo|viewing (?:the )?demo|demo (?:account|environment|workspace)\b/i.test(
+    bodyText,
+  );
+}
+
+// Find the "Create a free account" CTA that escapes a demo/sandbox into the
+// real signup. Distinct from findSignupCtaElement because the demo phrasing
+// ("Create a free account") has "free" between "a" and "account", which that
+// helper's tighter regex doesn't match. Clickable tags only. Exported for
+// unit tests.
+export function findCreateAccountCta(
+  inventory: ReadonlyArray<InteractiveElement>,
+): InteractiveElement | null {
+  const re =
+    /create\s+(?:a\s+)?(?:free\s+)?account|sign\s*up\s+for\s+free|get\s+started\s+for\s+free/i;
+  for (const e of inventory) {
+    if (e.tag !== "a" && e.tag !== "button" && e.role !== "button") continue;
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+    if (re.test(text)) return e;
+  }
+  return null;
+}
+
 // Conventional signup paths to probe, in priority order. Small + ordered
 // on purpose — we want the FIRST real signup form, not a fan-out across
 // dozens of guesses that each cost a round-trip over a residential
@@ -5146,11 +5182,25 @@ export class SignupAgent {
               };
             }
             oauthFallbackUsed = true;
-            const formUrl = task.signupUrl ?? this.browser.currentUrl();
-            steps.push(
-              `Re-routing to email/password signup at ${formUrl} after OAuth no-account.`,
-            );
-            await this.browser.goto(formUrl);
+            // If the OAuth recovery already left us ON a signup form (the
+            // amplitude demo-escape clicked "Create a free account" → the real
+            // /signup form), fill it IN PLACE — re-navigating to task.signupUrl
+            // could bounce back to the demo. Otherwise re-navigate (the
+            // login-only / no-account case left us on a /login page).
+            const onSignupFormHtml =
+              (await this.browser.getState().catch(() => null))?.html ?? "";
+            if (classifySignupHtml(onSignupFormHtml) === "signup") {
+              steps.push(
+                `OAuth recovery already on a signup form ` +
+                  `(${pathOf(this.browser.currentUrl())}) — filling in place.`,
+              );
+            } else {
+              const formUrl = task.signupUrl ?? this.browser.currentUrl();
+              steps.push(
+                `Re-routing to email/password signup at ${formUrl} after OAuth no-account.`,
+              );
+              await this.browser.goto(formUrl);
+            }
             outcome = await this.planExecuteWithRetry(
               task,
               fillValues,
@@ -6105,6 +6155,43 @@ export class SignupAgent {
     steps.push(
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
     );
+
+    // amplitude class — OAuth drops the bot into the service's READ-ONLY DEMO
+    // sandbox (app.amplitude.com/analytics/demo) instead of a real account: it
+    // has NO API key, and the only route to a real org is the prominent
+    // "Create a free account" CTA, which opens the real /signup form. Detect
+    // the demo state and click that CTA, then re-route to form-fill (the
+    // email/name/password form the bot now completes, multi-step password
+    // included). MEASURED 2026-06-04: without this the post-verify loop hunts
+    // the demo for a key that isn't there → oauth_onboarding_failed.
+    {
+      await this.browser.wait(2); // let the post-OAuth redirect settle onto the demo
+      const demoState = await this.browser.getState();
+      const demoText = await this.browser.extractText().catch(() => "");
+      if (isSandboxDemoState(demoState.url, demoText)) {
+        const cta = findCreateAccountCta(
+          await this.browser.extractInteractiveElements(),
+        );
+        if (cta !== null) {
+          steps.push(
+            `OAuth: landed in ${task.service}'s read-only demo sandbox ` +
+              `(${pathOf(demoState.url)}) — clicking ` +
+              `"${(cta.visibleText ?? "Create a free account").trim()}" to escape into ` +
+              `the real signup form.`,
+          );
+          try {
+            await this.browser.click(cta.selector);
+            await this.browser.wait(2);
+          } catch (err) {
+            steps.push(
+              `OAuth: demo-escape click threw (${err instanceof Error ? err.message : String(err)}) — ` +
+                `falling back to form-fill anyway.`,
+            );
+          }
+          return OAUTH_FALL_BACK_TO_FORM_FILL;
+        }
+      }
+    }
 
     // rc.20 — login-loop detection. Services like Groq complete the
     // Google OAuth handshake server-side but redirect back to a
