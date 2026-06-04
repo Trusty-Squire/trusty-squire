@@ -136,6 +136,40 @@ export interface BrowserControllerOptions {
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
+// Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
+// The auth cookies that mean "signed in": GitHub → `user_session`; Google →
+// any of the *SID session cookies (NID / CONSENT / 1P_JAR are set even when
+// logged out, so they are deliberately NOT signals). Host-scoped so a
+// google.com cookie can't pass for github. Cookie NAMES + presence only;
+// values are checked for non-triviality, never logged. Exported for tests.
+export function sessionProvidersFromCookies(
+  cookies: ReadonlyArray<{ name: string; value: string; domain: string }>,
+): OAuthProviderId[] {
+  const SIGNATURES: ReadonlyArray<{
+    provider: OAuthProviderId;
+    host: RegExp;
+    names: readonly string[];
+  }> = [
+    { provider: "github", host: /(^|\.)github\.com$/i, names: ["user_session"] },
+    {
+      provider: "google",
+      host: /(^|\.)google\.com$/i,
+      names: ["SID", "__Secure-1PSID", "__Secure-3PSID"],
+    },
+  ];
+  const live: OAuthProviderId[] = [];
+  for (const sig of SIGNATURES) {
+    const present = cookies.some(
+      (c) =>
+        sig.host.test(c.domain.replace(/^\./, "")) &&
+        sig.names.includes(c.name) &&
+        c.value.length > 10,
+    );
+    if (present) live.push(sig.provider);
+  }
+  return live;
+}
+
 // Finer-grained captcha classification for spike telemetry (T3.2).
 // `recaptcha_v3` covers any score-mode reCAPTCHA with no clickable
 // checkbox (true v3 and v2-invisible behave the same to the bot:
@@ -3811,6 +3845,23 @@ export class BrowserController {
   // popup closing IS the signal the handshake finished.
   oauthPageClosed(): boolean {
     return this.page === null || this.page.isClosed();
+  }
+
+  // Which OAuth providers have a LIVE session in this profile's cookie jar.
+  // The logged-in-providers.json marker is a memo that drifts out of sync
+  // (a --force-relogin clears it, a misclassified run clears it, a parallel
+  // run overwrites it) — so a session that is genuinely live in the cookies
+  // can go invisible to provider selection, which is exactly how a warm
+  // GitHub session got skipped in favour of a broken Google path. The cookie
+  // jar is the ground truth: read it directly. Cookie NAMES + presence only;
+  // values are never read into logs. Best-effort — a read failure returns [].
+  async detectSessionProviders(): Promise<OAuthProviderId[]> {
+    if (this.context === null) return [];
+    try {
+      return sessionProvidersFromCookies(await this.context.cookies());
+    } catch {
+      return [];
+    }
   }
 
   // Advance a provider's consent / account-chooser screen by one click

@@ -30,7 +30,11 @@ import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
 import { redactCredentials } from "./redact.js";
 import { readOperatorOtp, fromDomainFromUrl } from "./read-otp.js";
-import { loggedInProviders, clearProviderLoggedIn } from "./login-state.js";
+import {
+  loggedInProviders,
+  clearProviderLoggedIn,
+  markProviderLoggedIn,
+} from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
@@ -3428,7 +3432,7 @@ export class SignupAgent {
         // providers, the situation is recoverable — surface the
         // specific provider to seed.
         const visibleProviders = detectOAuthProvidersInInventory(inventory);
-        const haveSessions = loggedInProviders();
+        const haveSessions = await this.effectiveLoggedInProviders();
         const missingProviders = visibleProviders.filter(
           (p) => !haveSessions.includes(p),
         );
@@ -3890,6 +3894,26 @@ export class SignupAgent {
     }
   }
 
+  // Which OAuth providers can the bot actually use right now — the UNION of
+  // the logged-in-providers.json marker (a memo) and a LIVE read of the
+  // browser's cookie jar. The cookie jar is ground truth, so a warm session
+  // is never invisible just because the marker drifted (the GitHub-skipped-
+  // for-Google bug). Self-heals the marker for any live session it was
+  // missing. Falls back to the marker alone if the cookie read fails.
+  private async effectiveLoggedInProviders(): Promise<OAuthProviderId[]> {
+    const fromMarker = loggedInProviders();
+    let live: OAuthProviderId[] = [];
+    try {
+      live = await this.browser.detectSessionProviders();
+    } catch {
+      live = [];
+    }
+    for (const p of live) {
+      if (!fromMarker.includes(p)) markProviderLoggedIn(p);
+    }
+    return [...new Set([...fromMarker, ...live])];
+  }
+
   private async resolveOAuthCandidates(
     task: SignupTask,
     steps: string[],
@@ -3898,7 +3922,10 @@ export class SignupAgent {
       steps.push("Force-form: OAuth-first scan suppressed — taking the email/password path");
       return [];
     }
-    const ordered = orderOAuthCandidates(task.oauthProvider, loggedInProviders());
+    const ordered = orderOAuthCandidates(
+      task.oauthProvider,
+      await this.effectiveLoggedInProviders(),
+    );
     if (ordered.length === 0) return [];
     const pinNote =
       task.oauthProvider !== undefined &&
