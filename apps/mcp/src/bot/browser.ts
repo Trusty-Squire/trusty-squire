@@ -2516,28 +2516,58 @@ export class BrowserController {
       .evaluate(() => {
         const w = window as unknown as {
           grecaptcha?: {
-            execute?: () => void;
-            enterprise?: { execute?: () => void };
+            execute?: (widgetId?: number) => void;
+            enterprise?: { execute?: (widgetId?: number) => void };
           };
+          // grecaptcha stashes every rendered widget here, keyed by its
+          // numeric widget id. amplitude (and many SPAs) render the invisible
+          // widget with an EXPLICIT id, and a bare grecaptcha.execute() with
+          // no id throws "No reCAPTCHA clients exist" — MEASURED as "token not
+          // minted" on amplitude. Enumerate the clients and execute each by id.
+          ___grecaptcha_cfg?: { clients?: Record<string, unknown> };
         };
         const g = w.grecaptcha;
         if (g === undefined) return false;
-        try {
-          // Bare execute() runs the page's first (here only) widget — for an
-          // invisible widget that's the score request. Try enterprise first
-          // when present (a v2-invisible page exposes plain execute()).
-          if (typeof g.enterprise?.execute === "function") {
-            g.enterprise.execute();
-            return true;
+        let any = false;
+        const ids = (() => {
+          try {
+            return Object.keys(w.___grecaptcha_cfg?.clients ?? {});
+          } catch {
+            return [];
           }
-          if (typeof g.execute === "function") {
-            g.execute();
-            return true;
+        })();
+        for (const id of ids) {
+          const n = Number(id);
+          if (!Number.isFinite(n)) continue;
+          try {
+            g.enterprise?.execute?.(n);
+            any = true;
+          } catch {
+            /* not this namespace */
           }
-        } catch {
-          return false;
+          try {
+            g.execute?.(n);
+            any = true;
+          } catch {
+            /* widget already executed / wrong namespace */
+          }
         }
-        return false;
+        // Fallback: no enumerable clients — try the bare (first-widget) call,
+        // enterprise first (a v2-invisible page exposes plain execute()).
+        if (!any) {
+          try {
+            if (typeof g.enterprise?.execute === "function") {
+              g.enterprise.execute();
+              any = true;
+            } else if (typeof g.execute === "function") {
+              g.execute();
+              any = true;
+            }
+          } catch {
+            return false;
+          }
+        }
+        return any;
       })
       .catch(() => false);
     if (!fired) return false;
