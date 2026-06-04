@@ -1612,11 +1612,21 @@ export async function resolveSignupUrlByProbe(
         : ` (${classifySignupHtml(hintRes.bodyText)})`),
   );
 
+  // The hint's registered domain (eTLD+1) is the trusted anchor — it's the
+  // curated/guessed signup_url we were told to start from. A conventional-
+  // path candidate is in-bounds when it stays on that SAME registered
+  // domain, which is the robust check: the service SLUG frequently isn't
+  // the domain label (plunk's site is useplunk.com, railway's is
+  // railway.com), so matching the candidate against the slug wrongly
+  // rejected legitimate same-site redirects (plunk app.→next-app.). We keep
+  // a slug match as a secondary allowance for a curated hint that itself
+  // points at a canonical site on a different registered domain.
+  const hintDomain = getDomain(hint.hostname.toLowerCase());
+
   // Probe the conventional paths. The first one that BOTH classifies as a
-  // signup form AND lands on a host that still belongs to the service
-  // wins. The domain check guards against a path that redirects to a
-  // third party (e.g. a generic SSO portal on a different registered
-  // domain).
+  // signup form AND stays on the service's own registered domain wins. The
+  // domain check guards against a path that redirects to a third party
+  // (e.g. a generic SSO portal on a different registered domain).
   for (const candidate of buildSignupCandidates(hint)) {
     if (candidate === hintUrl) continue; // already tried as the hint
     const res = await fetchText(candidate);
@@ -1629,10 +1639,13 @@ export async function resolveSignupUrlByProbe(
     } catch {
       continue;
     }
-    if (!hostMatchesServiceDomain(finalHost, serviceSlug)) {
+    const finalDomain = getDomain(finalHost.toLowerCase());
+    const sameRegisteredDomain =
+      hintDomain !== null && finalDomain !== null && finalDomain === hintDomain;
+    if (!sameRegisteredDomain && !hostMatchesServiceDomain(finalHost, serviceSlug)) {
       note(
         `[signup-url] candidate ${candidate} → ${res.finalUrl} rejected: ` +
-          `off-domain for ${serviceSlug}`,
+          `off-domain (hint domain ${hintDomain ?? "?"})`,
       );
       continue;
     }

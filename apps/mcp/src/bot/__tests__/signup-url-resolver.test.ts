@@ -123,10 +123,16 @@ describe("resolveSignupUrlByProbe", () => {
   });
 
   it("recovers the plunk case: stale /signup (login) → /auth/signup (308 → next-app)", async () => {
+    // Slug is "plunk" (the real service slug) but the site is useplunk.com,
+    // and the conventional path redirects to a DIFFERENT subdomain
+    // (next-app.). The domain-safety check must anchor on the HINT's
+    // registered domain (useplunk.com), not the slug — else this same-site
+    // redirect is wrongly rejected as off-domain (the bug the live
+    // self-heal run caught 2026-06-04).
     const hint = "https://app.useplunk.com/signup";
     const resolved = await resolveSignupUrlByProbe(
       hint,
-      "useplunk",
+      "plunk",
       fakeFetch({
         // The curated hint silently serves the LOGIN page.
         [hint]: { body: PLUNK_LOGIN_HTML },
