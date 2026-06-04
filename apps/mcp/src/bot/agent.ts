@@ -6015,18 +6015,27 @@ export class SignupAgent {
     const postOAuthState = await this.browser.getState();
     const postOAuthInv = await this.buildInventory(steps, [provider.id]);
 
-    // amplitude class — post-OAuth LOGIN page that carries an in-page
-    // SIGNUP CTA. Google signed in fine, but the service has no account/org
-    // for this identity and expects us to CREATE one via the page's "Don't
-    // have an account? Sign up for free" link. The naive isLoginLoopState
-    // path below would see the Google button still present and re-trigger
-    // OAuth, looping until oauth_loop_detected. Instead: when the page
-    // classifies as login AND a genuine signup CTA is present, click that
-    // CTA and re-route into the email/password signup path (same sentinel
-    // the detectGoogleNoAccount gate uses ~40 lines below). CONSERVATIVE on
-    // purpose — only fires when classify==="login" AND a signup CTA exists,
-    // so services that legitimately need a second OAuth click fall through.
-    if (classifySignupHtml(postOAuthState.html) === "login") {
+    const loopBtn = isLoginLoopState(postOAuthState.url, postOAuthInv, provider.id);
+
+    // amplitude class — post-OAuth we're STUCK on a login page (the provider
+    // button is still present, or the URL is a login route) that carries an
+    // in-page SIGNUP CTA. Google signed in fine, but the service has no
+    // account/org for this identity and expects us to CREATE one via the
+    // page's "Don't have an account? Sign up for free" link. The naive
+    // loopBtn path below would re-trigger OAuth and loop until
+    // oauth_loop_detected. Instead: click the signup CTA and re-route into
+    // the email/password signup path (same sentinel the detectGoogleNoAccount
+    // gate uses ~40 lines below). CONSERVATIVE: only fires in the STUCK state
+    // (loopBtn or a login URL) and only when the page is NOT already a signup
+    // form, so a dashboard that successfully landed but carries a stray
+    // signup link is untouched, and a service that legitimately needs a
+    // second OAuth click (no signup CTA) falls through. NOTE: gate on
+    // classify !== "signup", NOT === "login": amplitude's Org-Login SSO page
+    // has no password field, so classifySignupHtml returns "other".
+    if (
+      (loopBtn !== null || isLoginPageUrl(postOAuthState.url)) &&
+      classifySignupHtml(postOAuthState.html) !== "signup"
+    ) {
       const signupCta = findSignupCtaElement(postOAuthInv);
       if (signupCta !== null) {
         const ctaText = (
@@ -6053,7 +6062,6 @@ export class SignupAgent {
       }
     }
 
-    const loopBtn = isLoginLoopState(postOAuthState.url, postOAuthInv, provider.id);
     if (loopBtn !== null) {
       steps.push(
         `Post-OAuth: landed on a login-like page (${pathOf(postOAuthState.url)}) ` +
