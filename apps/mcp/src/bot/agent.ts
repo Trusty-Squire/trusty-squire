@@ -59,6 +59,11 @@ export interface AgentInbox {
     from_address: string;
     parsed_links: ReadonlyArray<string>;
     parsed_codes: ReadonlyArray<string>;
+    // The rendered HTML body, when the inbox provides it — used to pick a
+    // verification link by ANCHOR TEXT when the URL is a click-tracker that
+    // hides the "verify"/"activate" keyword (SendGrid/Mailgun/…). Optional so
+    // test/stub inboxes need not supply it.
+    body_html?: string | null;
   }>;
 }
 
@@ -3347,6 +3352,49 @@ export function pickVerificationLink(links: readonly string[]): string | null {
   return top !== undefined && top.score > 0 ? top.url : null;
 }
 
+// Pick a verification link by its ANCHOR TEXT in the email HTML — the fallback
+// when pickVerificationLink (which scores the URL) fails because the link is
+// wrapped in a click-tracker that hides the keyword behind a redirect. MEASURED
+// on amplitude (2026-06-04): its "Activate account" link is a
+// u…ct.sendgrid.net/ls/click?upn=… URL (no "activate" in the URL), so the
+// URL scorer returned null and the bot fell to a false-positive "code" (the
+// year "2025"). The anchor TEXT still reads "Activate account". Pure + exported
+// for unit tests.
+export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
+  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let best: { url: string; score: number } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = anchorRe.exec(bodyHtml)) !== null) {
+    const href = (m[1] ?? "").replace(/&amp;/g, "&");
+    if (!/^https?:\/\//i.test(href)) continue;
+    const text = (m[2] ?? "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&[a-z]+;/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    let score = 0;
+    if (/\b(?:verify|confirm|activate)\b/.test(text)) score += 10;
+    if (
+      /verify (?:your )?email|confirm (?:your )?email|activate (?:your )?account|complete (?:your )?sign[\s-]?up/.test(
+        text,
+      )
+    ) {
+      score += 5;
+    }
+    if (/get started|finish setting up/.test(text)) score += 3;
+    if (
+      /unsubscribe|preferences|manage|view (?:in|this) (?:browser|email)|privacy|terms/.test(
+        text,
+      )
+    ) {
+      score -= 10;
+    }
+    if (score > (best?.score ?? 0)) best = { url: href, score };
+  }
+  return best !== null && best.score > 0 ? best.url : null;
+}
+
 // Discriminates LLMPair from LLMClient. LLMPair has `primary` (an
 // LLMClient); LLMClient has `createMessage`. They're mutually exclusive
 // shapes so a structural check is reliable.
@@ -5395,8 +5443,13 @@ export class SignupAgent {
             );
             steps.push(`Received: "${email.subject}" from ${email.from_address}`);
 
-            if (email.parsed_links.length > 0) {
-              const verifyLink = this.pickVerificationLink(Array.from(email.parsed_links));
+            if (email.parsed_links.length > 0 || (email.body_html ?? "") !== "") {
+              // URL-keyword scorer first; if it can't see past a click-tracker
+              // wrapper, fall back to matching the link's ANCHOR TEXT in the
+              // HTML body (amplitude's SendGrid-wrapped "Activate account").
+              const verifyLink =
+                this.pickVerificationLink(Array.from(email.parsed_links)) ??
+                pickVerificationLinkFromHtml(email.body_html ?? "");
               if (verifyLink !== null) {
                 steps.push(`Following verification link: ${verifyLink}`);
                 await this.browser.goto(verifyLink);
@@ -6833,6 +6886,7 @@ ${formatInventory(input.inventory)}`,
     from_address: string;
     parsed_links: ReadonlyArray<string>;
     parsed_codes: ReadonlyArray<string>;
+    body_html?: string | null;
   }> {
     const deadline = Date.now() + totalSeconds * 1000;
     // `verif` (not `verify`) so the matcher also catches "verification" —
