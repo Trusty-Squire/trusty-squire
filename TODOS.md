@@ -96,6 +96,45 @@ See memory `project-four-walls-measured-jun03`. Harnesses:
     `selectAccount` alone doesn't finalize; trigger One-Tap via
     `google.accounts.id.prompt()` for the on-demand variant; unit coverage.
 
+### A0.1 — Full harvest sweep results + the new frontier [2026-06-04]
+Re-ran the 75-task curated queue (northflank dropped) on the latest build to
+measure the aggregate lift from the session's OAuth fixes. Log:
+`~/.trusty-squire/logs/harvest-sweep-20260603-230052.log`.
+
+**Result: 18 ok (24%) · 13 skills promoted · but 58/75 (77%) AUTHENTICATED.**
+Only 5 services failed at the auth/login layer — the OAuth fixes (Google
+account-chooser, async-session settle, dead-route, logo-button, pin/cookie
+sessions) clearly worked. The bottleneck SHIFTED to post-OAuth navigation.
+Passes: ipinfo resend sentry neon together baseten convex redis-cloud chroma
+mailtrap brevo algolia e2b svix apify firecrawl elevenlabs modal.
+
+**ACTIVE NOW — planner-navigation work (A2 below): 20 services authenticated
+but the planner couldn't reach/extract the key.** Three generalizable prompt
+themes (corpus-driven, NOT per-service): A) create-the-first-resource
+(org/project/cluster) when no key is visible — axiom, kinde, meilisearch,
+qdrant, render, workos; B) locate key in-UI + 404-recovery, stop guessing
+key URLs — grafana-cloud, typesense, ipdata, last9, circleci, hookdeck,
+cockroachdb, betterstack-uptime; C) finish onboarding form-fill — imagekit,
+statsig, loops. (Also hatchet, typeform, xata.) Pairs with
+[[feedback-generalize-not-per-service]] + [[project-planner-generalization-plan]].
+
+**DEFERRED — surface AFTER the planner changes land (separate frontiers):**
+- **SESSION-wall (15)** — `oauth_session_not_persisted`: the SERVICE rejected
+  the OAuth callback and bounced to login (the northflank anti-bot class, a
+  session/fingerprint-layer problem, NOT planner): amplitude, baselime,
+  browserbase, clerk, cloudinary, daytona, falai, growthbook, netlify, paddle,
+  planetscale (github-only — needs the github session), plunk, replit,
+  uploadcare, upstash. This is the next hard frontier after navigation.
+- **GATE (7)** — billing/phone/2FA/email-verify, human-gated: anthropic,
+  fathom, flagsmith, lambda-labs, sendgrid, temporal, weaviate.
+- **CAPTCHA/anti-bot (3)**: codesandbox (stochastic CF), plausible (hCaptcha
+  solved + email withheld), tally.
+- **NO-key, mis-queued (2)** — no API key exists; DROP from the queue:
+  stackblitz (online IDE), zeabur.
+- **TRANSIENT (9)** — locator/proxy/timeout, likely pass on retry:
+  betterstack-logs, cronitor, deepinfra, honeycomb, launchdarkly, perplexity,
+  porter, scrapingbee, supabase. Re-run before treating as real failures.
+
 ### A1 — Housekeeper harvest RUNNING [in-flight]
 Launched 2026-06-02 over **75 services** from the queue that have no
 active skill and aren't wall-blocked (excludes the 3 hard walls:
