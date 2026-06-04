@@ -144,6 +144,29 @@ statsig, loops. (Also hatchet, typeform, xata.) Pairs with
   betterstack-logs, cronitor, deepinfra, honeycomb, launchdarkly, perplexity,
   porter, scrapingbee, supabase. Re-run before treating as real failures.
 
+
+### A0.2 — Session-wall frontier DECOMPOSED + round-2 stall fix [2026-06-04]
+Re-ran the 14 "session-wall" (oauth_session_not_persisted) services + the 3
+multi-step wizards. Log: ~/.trusty-squire/logs/r2sw-*.log. The frontier was
+NOT a monolithic anti-bot wall:
+- **9 of 14 were TRANSIENT** (run-to-run Google-session/chooser variance) —
+  on re-run 2 fully passed (falai, upstash) and 7 now authenticate and fail
+  downstream at navigation/verify (baselime, browserbase, cloudinary, daytona,
+  growthbook, netlify, paddle → join the planner-nav bucket).
+- **5 genuine, none a session-layer rejection** (probed amplitude via
+  /tmp/sessionwall-probe.mjs + read trails):
+  - GSI/One-Tap (Google widget doesn't redirect): **amplitude, clerk** →
+    needs the GSI/FedCM driver work already logged for northflank.
+  - **plunk** — Google OAuth COMPLETES then "No account found for this Google
+    account": its Google is LOGIN-ONLY. FIX (generalizable): when the
+    post-OAuth page says no-account/sign-up-first, FALL BACK to email signup
+    instead of bailing oauth_session_not_persisted.
+  - recaptcha-gated OAuth (captcha blocks the Google click): **replit,
+    uploadcare** → solve the recaptcha before/at the OAuth click.
+- **Round-2 stall fix (b8438c0):** axiom flipped STALLED→no_credentials (the
+  fix works — it no longer gives up in a multi-field wizard), but still can't
+  LOCATE the key (navigation bucket). meilisearch/kinde still fail.
+
 ### A1 — Housekeeper harvest RUNNING [in-flight]
 Launched 2026-06-02 over **75 services** from the queue that have no
 active skill and aren't wall-blocked (excludes the 3 hard walls:
