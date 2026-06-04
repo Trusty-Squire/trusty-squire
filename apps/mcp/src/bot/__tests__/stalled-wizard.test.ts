@@ -114,11 +114,36 @@ describe("isLoginPageUrl (non-persisting-OAuth detector)", () => {
 });
 
 const a = (kind: string, pageUnchanged: boolean) => ({ kind, pageUnchanged });
+const as = (kind: string, pageUnchanged: boolean, selector: string) => ({
+  kind,
+  pageUnchanged,
+  selector,
+});
 
 describe("isStalledOnActions", () => {
-  it("fires when 3 consecutive page-mutating actions left the page unchanged (axiom)", () => {
+  it("fires when 3 consecutive page-mutating actions left the page unchanged (selectorless, legacy)", () => {
     expect(
       isStalledOnActions([a("click", true), a("click", true), a("click", true)]),
+    ).toBe(true);
+  });
+
+  it("fires when the SAME selector is re-clicked with no change (genuine stuck wizard)", () => {
+    expect(
+      isStalledOnActions([as("click", true, "#card"), as("click", true, "#card"), as("click", true, "#card")]),
+    ).toBe(true);
+  });
+
+  it("does NOT fire when DISTINCT selectors are clicked unchanged (multi-field wizard progress — axiom)", () => {
+    // Selecting role, then company-size, then plan doesn't change the
+    // inventory, but each is a different choice — that's progress, not a stall.
+    expect(
+      isStalledOnActions([as("click", true, "#role"), as("click", true, "#size"), as("click", true, "#plan")]),
+    ).toBe(false);
+  });
+
+  it("fires when a selector repeats among distinct ones (looping back)", () => {
+    expect(
+      isStalledOnActions([as("click", true, "#role"), as("click", true, "#size"), as("click", true, "#role")]),
     ).toBe(true);
   });
 

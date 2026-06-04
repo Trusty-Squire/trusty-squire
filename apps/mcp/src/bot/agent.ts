@@ -2843,14 +2843,28 @@ function isLLMPair(x: LLMClient | LLMPair): x is LLMPair {
 // change the current DOM (navigate changes URL, wait pauses). Pure +
 // exported for unit tests.
 export function isStalledOnActions(
-  effects: ReadonlyArray<{ kind: string; pageUnchanged: boolean }>,
+  effects: ReadonlyArray<{ kind: string; pageUnchanged: boolean; selector?: string | null }>,
   threshold = 3,
 ): boolean {
   if (effects.length < threshold) return false;
   const ACTION_KINDS = new Set(["click", "select", "check", "fill"]);
-  return effects
-    .slice(-threshold)
-    .every((e) => ACTION_KINDS.has(e.kind) && e.pageUnchanged);
+  const recent = effects.slice(-threshold);
+  if (!recent.every((e) => ACTION_KINDS.has(e.kind) && e.pageUnchanged)) {
+    return false;
+  }
+  // A genuine stall RE-acts on the SAME element (the planner keeps clicking
+  // one card whose click never registers). Acting on DISTINCT selectors is
+  // PROGRESS through a multi-field wizard — selecting role, then company
+  // size, then a plan doesn't change the inventory, but each is a different
+  // choice (axiom). Only call it stalled when a selector REPEATS (fewer
+  // distinct selectors than actions). All-distinct → let the wizard finish.
+  const selectors = recent.map((e) => e.selector ?? "");
+  const distinct = new Set(selectors).size;
+  // If selectors weren't recorded (older callers pass none), fall back to the
+  // original kind+unchanged behavior so existing tests/paths don't regress.
+  const anyRecorded = recent.some((e) => e.selector !== undefined);
+  if (!anyRecorded) return true;
+  return distinct < threshold;
 }
 
 // True when a URL reads as a login / authentication screen. Service-
@@ -6439,7 +6453,12 @@ ${formatInventory(input.inventory)}`,
     // out instead of burning every round on it. See isStalledOnActions.
     let prevContentSig: string | null = null;
     let lastActionKind: string | null = null;
-    const actionEffects: Array<{ kind: string; pageUnchanged: boolean }> = [];
+    let lastActionSelector: string | null = null;
+    const actionEffects: Array<{
+      kind: string;
+      pageUnchanged: boolean;
+      selector: string | null;
+    }> = [];
     // 0.8.2-rc.10 — escalation for the stuck-loop detector.
     //
     // The existing detector injects a re-plan hint when the planner
@@ -6657,7 +6676,7 @@ ${formatInventory(input.inventory)}`,
       ).slice(0, 4000);
       const pageUnchanged = prevContentSig !== null && contentSig === prevContentSig;
       if (lastActionKind !== null) {
-        actionEffects.push({ kind: lastActionKind, pageUnchanged });
+        actionEffects.push({ kind: lastActionKind, pageUnchanged, selector: lastActionSelector });
       }
       prevContentSig = contentSig;
       if (isStalledOnActions(actionEffects)) {
@@ -7257,6 +7276,10 @@ ${formatInventory(input.inventory)}`,
       // `continue` guards are behind us here) so next round can judge
       // whether it changed the page — the stalled-wizard breaker above.
       lastActionKind = nextStep.kind;
+      lastActionSelector =
+        "selector" in nextStep && typeof nextStep.selector === "string"
+          ? nextStep.selector
+          : null;
 
       if (nextStep.kind === "done") {
         // When the planner bails because it encountered Google's
