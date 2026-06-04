@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   SignupAgent,
   detectEmailOtpGate,
+  detectGoogleNoAccount,
   detectManualLoginFallback,
   detectSsoRestriction,
   detectStuckOnGoogleOAuth,
@@ -747,6 +748,82 @@ describe("detectStuckOnGoogleOAuth (rc.24)", () => {
 
   it("does not fire on a malformed URL", () => {
     expect(detectStuckOnGoogleOAuth("not-a-url")).toBe(false);
+  });
+});
+
+describe("detectGoogleNoAccount — Google login-only re-route (plunk)", () => {
+  it("fires on plunk's no-account message in the URL query", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://app.useplunk.com/auth/login?message=No%20account%20found%20for%20this%20Google%20account",
+        "Log in to Plunk",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a 'Sign up to continue' prompt in the body", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://service.example.com/login",
+        "We couldn't sign you in. Sign up to continue.",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a google-auth-error query param", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://service.example.com/login?google-auth-error=1",
+        "Login",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on assorted no-account phrasings (body or query)", () => {
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "That account doesn't exist yet."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "We couldn't find an account for you."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "No account associated with that email."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "Please create an account to get started."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "You need to register first."),
+    ).toBe(true);
+  });
+
+  it("does NOT fire on a normal Google consent screen", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://accounts.google.com/signin/oauth/consent?client_id=…",
+        "Plunk wants access to your Google Account. This will allow Plunk to see your email address.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT fire on a normal post-login dashboard", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://app.useplunk.com/dashboard",
+        "Welcome back. Your projects, API keys, and usage.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT fire on a bare login page with no no-account phrasing", () => {
+    expect(
+      detectGoogleNoAccount("https://app.useplunk.com/auth/login", "Log in to your account"),
+    ).toBe(false);
+  });
+
+  it("tolerates a malformed URL (falls back to body text only)", () => {
+    expect(detectGoogleNoAccount("not-a-url", "No account found")).toBe(true);
+    expect(detectGoogleNoAccount("not-a-url", "Welcome to your dashboard")).toBe(false);
   });
 });
 

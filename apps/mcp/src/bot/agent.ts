@@ -2063,6 +2063,40 @@ export function detectSsoRestriction(pageText: string): boolean {
   );
 }
 
+// Google-OAuth-is-LOGIN-ONLY (plunk class). Some services accept Google
+// only to log an EXISTING account in; they do NOT auto-provision a new
+// account for a first-time Google identity. The OAuth handshake
+// completes, then the service bounces back to its login page with an
+// explicit "no account" message — e.g. plunk lands on
+// `…/auth/login?message=No%20account%20found%20for%20this%20Google%20account`.
+//
+// WHY a dedicated detector: this state otherwise trips
+// detectManualLoginFallback (it IS a /login form) and aborts as
+// `oauth_session_not_persisted` — misleading, because nothing dropped
+// the session; the account simply was never created. The correct
+// recovery is to abandon OAuth and create the account via the
+// email/password form. Caller re-routes to form-fill on a true return.
+//
+// Conservative by design: matches the URL query AND body text against
+// CLEAR no-account / must-sign-up phrasing. A normal consent page or a
+// post-login dashboard (which never carries these phrases) must NOT
+// match, or we'd wrongly abandon a working OAuth session.
+export function detectGoogleNoAccount(url: string, bodyText: string): boolean {
+  // Inspect the decoded query string (where plunk parks its message)
+  // plus the page body — both lowercased for case-insensitive matching.
+  let query = "";
+  try {
+    const u = new URL(url);
+    query = decodeURIComponent(u.search).toLowerCase();
+  } catch {
+    query = "";
+  }
+  const haystack = `${query}\n${bodyText.toLowerCase()}`;
+  const noAccountPhrase =
+    /no account found|account (?:doesn['’]?t|does not) exist|couldn['’]?t find (?:an|your) account|no account associated|sign up (?:first|to continue)|create an account|[?&]google-auth-error|register first/;
+  return noAccountPhrase.test(haystack);
+}
+
 // (d) Stuck-on-Google-OAuth-screens (Upstash class). After
 // settleAfterOAuth the URL is STILL on accounts.google.com — the
 // handshake didn't redirect through to the service. Most common
@@ -2954,6 +2988,14 @@ export function isAuthProcessingText(text: string): boolean {
   );
 }
 
+// Sentinel returned by runOAuthFlow when the OAuth path is a dead end
+// that the email/password form-fill path can still recover (Google
+// login-only services that never created an account — see
+// detectGoogleNoAccount). runSignup catches it and re-runs the form-fill
+// path with OAuth-first suppressed. A unique const so it can't collide
+// with any SignupResult.error string.
+const OAUTH_FALL_BACK_TO_FORM_FILL = "__fall_back_to_form_fill__" as const;
+
 export class SignupAgent {
   // Per-run counter so a single SignupAgent (which lives one run) can't
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
@@ -3240,6 +3282,13 @@ export class SignupAgent {
     task: SignupTask,
     fillValues: Record<FillValueKind, string>,
     steps: string[],
+    // When true, suppress the OAuth-first scan entirely and go straight
+    // to form-fill. Set by the re-route after the OAuth path discovered
+    // the Google identity has no account (detectGoogleNoAccount) — the
+    // page still carries a "Continue with Google" button, so without
+    // this the scan would re-pick OAuth and loop right back into the
+    // same no-account bounce. One-shot equivalent of committedToEmailPath.
+    forceFormFill = false,
   ): Promise<PlanExecOutcome> {
     const MAX_ERROR_REPLANS = 2;
     // 0.8.3-rc.1 — widened from 4 to 6 so submit_disabled re-plans
@@ -3274,7 +3323,7 @@ export class SignupAgent {
     // "Continue with Google" button and reroutes — exactly the
     // regression that produced the Security Code challenge on
     // methoxine's account during the rc.30 Railway run.
-    let committedToEmailPath = false;
+    let committedToEmailPath = forceFormFill;
 
     const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
     for (;;) {
@@ -4399,8 +4448,17 @@ export class SignupAgent {
         // `literal` has no fixed value — resolved per-action.
         literal: "",
       };
-      const outcome = await this.planExecuteWithRetry(task, fillValues, steps);
-      switch (outcome.kind) {
+      // `outcome` is re-computed when the OAuth path signals a form-fill
+      // fall-back (Google login-only / no-account, e.g. plunk): the
+      // `case "oauth"` handler re-runs planExecuteWithRetry with OAuth-
+      // first suppressed and loops back through this same switch, so
+      // every terminal case (submitted, planning_failed, …) stays in one
+      // place. Bounded to a single re-route so a service that keeps
+      // bouncing can't spin here.
+      let outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+      let oauthFallbackUsed = false;
+      dispatch: for (;;) {
+        switch (outcome.kind) {
         case "captcha_blocked":
           return {
             success: false,
@@ -4467,16 +4525,51 @@ export class SignupAgent {
             steps,
             ...this.resultTail(),
           };
-        case "oauth":
+        case "oauth": {
           // T6/T7 — OAuth-first path. runOAuthFlow drives the consent
           // handshake and post-OAuth onboarding to its own terminal
           // SignupResult; there is no form submit / email verification.
-          return await this.runOAuthFlow(
+          const oauthResult = await this.runOAuthFlow(
             task,
             outcome.selector,
             outcome.provider,
             steps,
           );
+          // Google login-only / no-account (plunk): OAuth is a dead end
+          // but the email/password form can still create the account.
+          // Re-run the form-fill path ONCE with OAuth-first suppressed
+          // (forceFormFill) — re-navigate to the signup form first since
+          // the OAuth flow left us on the service's /login page — then
+          // loop back through this switch to dispatch the new outcome.
+          if (oauthResult === OAUTH_FALL_BACK_TO_FORM_FILL) {
+            if (oauthFallbackUsed) {
+              // Already fell back once and OAuth came up again — refuse
+              // to ping-pong. Surface the dead end honestly.
+              return {
+                success: false,
+                error:
+                  `oauth_required: ${task.service}'s OAuth is login-only (no account for this ` +
+                  `identity) and the email/password fall-back did not complete a signup.`,
+                steps,
+                ...this.resultTail(),
+              };
+            }
+            oauthFallbackUsed = true;
+            const formUrl = task.signupUrl ?? this.browser.currentUrl();
+            steps.push(
+              `Re-routing to email/password signup at ${formUrl} after OAuth no-account.`,
+            );
+            await this.browser.goto(formUrl);
+            outcome = await this.planExecuteWithRetry(
+              task,
+              fillValues,
+              steps,
+              /* forceFormFill */ true,
+            );
+            continue dispatch;
+          }
+          return oauthResult;
+        }
         case "already_oauth": {
           // F17 — page rendered an authenticated dashboard (a
           // previous OAuth bind already linked the account). Skip
@@ -4557,8 +4650,9 @@ export class SignupAgent {
             ...this.resultTail(),
           };
         }
-        case "submitted":
-          break;
+          case "submitted":
+            break dispatch;
+        }
       }
       await saveDebugSnapshot(this.browser, "after-submit");
 
@@ -4752,7 +4846,13 @@ export class SignupAgent {
     oauthSelector: string,
     providerId: OAuthProviderId,
     steps: string[],
-  ): Promise<SignupResult> {
+    // Sentinel: when the post-OAuth page reveals the Google identity has
+    // no account (login-only OAuth, e.g. plunk), the flow returns
+    // OAUTH_FALL_BACK_TO_FORM_FILL instead of a terminal SignupResult so
+    // the caller re-runs the email/password form-fill path. Returning a
+    // sentinel (vs. driving form-fill from in here) keeps the single
+    // outcome-dispatch switch in runSignup as the one place that owns it.
+  ): Promise<SignupResult | typeof OAUTH_FALL_BACK_TO_FORM_FILL> {
     const provider = OAUTH_PROVIDERS[providerId];
     // `loginCmd` is only ever surfaced from a CHALLENGE / needs_login
     // abort — i.e. the bot HAS a session cookie but the provider is
@@ -5386,6 +5486,22 @@ export class SignupAgent {
       const gateState = await this.browser.getState();
       const gateText = await this.browser.extractText().catch(() => "");
       const gateInv = postOAuthInv;
+      // (a0) Google-login-only / no-account (plunk class). OAuth
+      // completed but the service bounced back saying this Google
+      // identity has no account (e.g. plunk's
+      // /auth/login?message=No%20account%20found…). MUST run before the
+      // manual-login-fallback gate below — this page IS a /login form, so
+      // detectManualLoginFallback would otherwise swallow it as
+      // oauth_session_not_persisted and abort. The account simply needs
+      // creating via email, so re-route to form-fill instead of bailing.
+      if (detectGoogleNoAccount(gateState.url, gateText)) {
+        steps.push(
+          `OAuth: ${provider.label} sign-in succeeded but ${task.service} has no account for ` +
+            `this identity (login-only OAuth, ${pathOf(gateState.url)}) — abandoning OAuth and ` +
+            `falling back to email/password signup to create the account.`,
+        );
+        return OAUTH_FALL_BACK_TO_FORM_FILL;
+      }
       // (a) Manual-login fallback (DigitalOcean, Hyperbolic). Service
       // dropped the OAuth session and rendered a /login form with
       // email + password inputs. Bot can't manually log in.
