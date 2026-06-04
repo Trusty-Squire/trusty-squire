@@ -2900,14 +2900,14 @@ export function originRoot(url: string): string | null {
 // a real dashboard that merely contains the word "loading". Exported for
 // unit tests.
 export function isLoadingShellText(text: string): boolean {
-  const t = text.toLowerCase();
-  return (
-    /\bconnecting\b|\bloading\b|please wait|getting things ready|initiali[sz]ing/.test(
-      t,
-    ) ||
-    /cannot function without javascript|please enable (?:it|javascript)|enable javascript to/.test(
-      t,
-    )
+  // ONLY transient "still rendering" copy. The <noscript> fallback
+  // ("This application cannot function without JavaScript…") is PERMANENT
+  // in the DOM and was matched here by mistake — it made northflank (whose
+  // noscript text never leaves the body) read as a perpetual loading shell,
+  // so the hydration waits never exited. JS-enabled pages keep that text
+  // forever, so it is not a signal.
+  return /\bconnecting\b|\bloading\b|please wait|getting things ready|initiali[sz]ing/i.test(
+    text,
   );
 }
 
@@ -3298,12 +3298,23 @@ export class SignupAgent {
         }
         // SSO buttons frequently load async — Mistral renders its
         // icon-only provider buttons after the email form. Re-extract
-        // a couple of times before giving up on the OAuth path.
-        if (oauthScanRetries < 2) {
+        // a couple of times before giving up on the OAuth path. On a
+        // websocket-gated SPA (northflank) the WHOLE page — provider
+        // buttons included — renders only after a ~15s hydration, so a
+        // "Connecting"/loading shell warrants far more patience than the
+        // default 2 retries (otherwise the bot gives up at ~6s and wrongly
+        // falls back to the email-signup path before the GitHub button
+        // even exists).
+        const oauthScanShell = isLoadingShellText(
+          await this.browser.extractText().catch(() => ""),
+        );
+        const maxOauthScanRetries = oauthScanShell ? 8 : 2;
+        if (oauthScanRetries < maxOauthScanRetries) {
           oauthScanRetries += 1;
           steps.push(
             `OAuth-first: no provider affordance yet — waiting for an ` +
-              `async render (retry ${oauthScanRetries}/2)`,
+              `async render (retry ${oauthScanRetries}/${maxOauthScanRetries}` +
+              `${oauthScanShell ? ", page still a loading shell" : ""})`,
           );
           await this.browser.wait(3);
           continue;

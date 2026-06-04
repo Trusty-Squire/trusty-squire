@@ -69,11 +69,17 @@ describe("isLoadingShellText (SPA hydration guard)", () => {
     ).toBe(true);
   });
 
-  it("fires on common loading-shell phrasings", () => {
+  it("fires on common TRANSIENT loading-shell phrasings", () => {
     expect(isLoadingShellText("Loading…")).toBe(true);
     expect(isLoadingShellText("Please wait while we get things ready")).toBe(true);
     expect(isLoadingShellText("Initializing your workspace")).toBe(true);
-    expect(isLoadingShellText("Please enable JavaScript to continue")).toBe(true);
+  });
+
+  it("does NOT fire on the permanent <noscript> fallback (it never leaves the DOM)", () => {
+    // northflank's hydrated page still contains this text — matching it made
+    // the page read as a perpetual loading shell.
+    expect(isLoadingShellText("This application cannot function without JavaScript. Please enable it.")).toBe(false);
+    expect(isLoadingShellText("Please enable JavaScript to continue")).toBe(false);
   });
 
   it("does NOT fire on a real dashboard with token UI", () => {
