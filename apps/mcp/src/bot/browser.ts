@@ -559,6 +559,21 @@ export class BrowserController {
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        // Enable software WebGL on the GPU-less Xvfb host. Without this,
+        // Chrome 120+ disables WebGL entirely (getContext("webgl") → null),
+        // which MEASURED (2026-06-04) as the bot's one real fingerprint gap:
+        // a browser with NO WebGL is itself an anti-bot tell (reCAPTCHA
+        // Enterprise / device-fingerprinting weight it). SwiftShader gives a
+        // real WebGL context. MEASURED 2026-06-04: with this on, WebGL reports
+        // a Mesa/llvmpipe software renderer and the reCAPTCHA v3 score stays
+        // 1.0 — a strict improvement over "no WebGL at all", which more
+        // fingerprint libs treat as suspicious than a software renderer. The
+        // rc.33 init-script below TRIES to spoof the renderer string to a real
+        // Intel GPU, but it is INERT under patchright (hardened) — see its
+        // comment. A clean GPU-string spoof under patchright needs binary-level
+        // support; tracked as a follow-up, not blocking (score is already 1.0).
+        "--enable-unsafe-swiftshader",
+        "--ignore-gpu-blocklist",
       ],
       // `viewport: null` makes the page use the REAL OS window size
       // instead of a hardcoded value. The old fixed 1280×720 is exactly
@@ -607,17 +622,16 @@ export class BrowserController {
       });
     }
 
-    // rc.33 — spoof WebGL renderer/vendor. Under Xvfb (or any non-GPU
-    // host) Chrome falls back to SwiftShader, which reports
-    //   UNMASKED_VENDOR_WEBGL   = "Google Inc. (Google)"
-    //   UNMASKED_RENDERER_WEBGL = "ANGLE (Google, ...SwiftShader...)"
-    // Both strings are on every published anti-bot fingerprint
-    // blocklist; Cloudflare Turnstile responds with error 600010
-    // ("internal client execution error") rather than even trying to
-    // grade the click. Override the two parameter codes on both
-    // WebGL1 and WebGL2 prototypes to look like a stock Intel laptop
-    // GPU. Doesn't change actual rendering — only the strings the
-    // fingerprint probe reads back.
+    // rc.33 — spoof WebGL renderer/vendor toward a stock Intel laptop GPU.
+    // CAVEAT (measured 2026-06-04): this is EFFECTIVE only in the stealth
+    // BASELINE. Under patchright (hardened), addInitScript runs in an ISOLATED
+    // world, so this prototype patch never reaches the page's main world — the
+    // renderer reads through as the real Mesa/llvmpipe software string. We keep
+    // it for the baseline path; closing the hardened gap needs a binary-level
+    // spoof (patchright doesn't do WebGL), tracked as a follow-up. The
+    // --enable-unsafe-swiftshader launch flag above is what makes a WebGL
+    // context EXIST at all on the GPU-less host (the bigger win — "no WebGL"
+    // is the stronger tell). Doesn't change actual rendering — only strings.
     await context.addInitScript(() => {
       const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
       const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
