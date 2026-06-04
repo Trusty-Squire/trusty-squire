@@ -264,6 +264,31 @@ describe("findOAuthButton", () => {
     expect(findOAuthButton([gh], "google")).toBeNull();
   });
 
+  it("matches a logo-only button whose <svg><title> leaked into text (northflank 'GitHubGitHub')", () => {
+    // northflank renders icon-only OAuth buttons as <button><svg><title>GitHub
+    // — the title leaks into textContent (doubled), so visibleText isn't empty
+    // AND \bgithub\b doesn't match the doubled run; only iconLabel is clean.
+    const logo = mk({
+      tag: "button",
+      visibleText: "GitHubGitHub",
+      iconLabel: "GitHub",
+      selector: "#gh-logo",
+    });
+    expect(findOAuthButton([logo], "github")?.selector).toBe("#gh-logo");
+  });
+
+  it("does NOT match a nav link that merely mentions the provider name", () => {
+    // "GitHub's Privacy Policy" leaves residue after stripping the keyword,
+    // so the logo-only path must reject it.
+    const navlink = mk({
+      tag: "a",
+      visibleText: "GitHub's Privacy Policy",
+      iconLabel: "GitHub",
+      selector: "#nav",
+    });
+    expect(findOAuthButton([navlink], "github")).toBeNull();
+  });
+
   it("returns null for a page with no matching affordance", () => {
     expect(
       findOAuthButton(

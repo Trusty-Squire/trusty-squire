@@ -1810,15 +1810,25 @@ export function findOAuthButton(
     // 1. An <a> whose href routes through the provider's OAuth endpoint.
     const href = (e.href ?? "").toLowerCase();
     if (href.length > 0 && hrefRe.test(href)) return e;
-    // 2. Icon-only button — named only by a descendant img/svg. Require
-    //    the element to be truly icon-only (no own visible text); a
-    //    populated visibleText means the iconLabel signal is redundant
-    //    with path 3 below, and accepting it here lets a card wrapper
-    //    with a stray <img alt="Google"> inside match.
-    if (
-      visibleText.length === 0 &&
-      keywordRe.test((e.iconLabel ?? "").toLowerCase())
-    ) {
+    // 2. Icon-only (logo) button — named only by a descendant img/svg.
+    //    Truly-empty visibleText is the clean case. But a logo button whose
+    //    <svg> carries a <title>GitHub</title> LEAKS that title into
+    //    textContent (northflank renders "GitHubGitHub" — doubled, which
+    //    also defeats the \bgithub\b match in path 3), so it isn't strictly
+    //    empty. Treat it as icon-only too WHEN its visible text is nothing
+    //    but the provider name (any number of times): strip every keyword
+    //    occurrence and require no residue. A nav link like "GitHub's
+    //    Privacy Policy" leaves residue and is correctly rejected. The
+    //    iconLabel must still independently name the provider, so a stray
+    //    one-word label can't false-positive.
+    const kw = keyword.toLowerCase();
+    const residue = visibleText
+      .toLowerCase()
+      .split(kw)
+      .join("")
+      .replace(/[\s·|/–-]+/g, "");
+    const isLogoOnly = visibleText.length === 0 || residue.length === 0;
+    if (isLogoOnly && keywordRe.test((e.iconLabel ?? "").toLowerCase())) {
       return e;
     }
     // 3. Visible text / accessible label naming the provider + an
