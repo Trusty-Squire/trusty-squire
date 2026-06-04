@@ -88,6 +88,22 @@ describe("isLoadingShellText (SPA hydration guard)", () => {
     ).toBe(false);
     expect(isLoadingShellText("Create your API key — Settings")).toBe(false);
   });
+
+  it("does NOT fire on the Google account chooser despite its stray 'Loading' label", () => {
+    // The clerk post-verify case: re-clicking "Sign in with Google" opens
+    // accounts.google.com's chooser, whose body carries a stray "Loading"
+    // label. It's an ACTIONABLE page (click the account card), not a
+    // hydration shell — idling through the hydration ticks here is the bug.
+    expect(
+      isLoadingShellText(
+        "Choose an account to continue to MyApp Loading user@example.com Use another account",
+      ),
+    ).toBe(false);
+  });
+
+  it("STILL fires on a genuine loading shell (chooser veto is narrow)", () => {
+    expect(isLoadingShellText("Loading…")).toBe(true);
+  });
 });
 
 describe("isLoginPageUrl (non-persisting-OAuth detector)", () => {

@@ -1509,6 +1509,75 @@ export function classifySignupHtml(
   return "other";
 }
 
+// Find the in-page "create an account" affordance on a LOGIN page that
+// also advertises signup ("Don't have an account? Sign up for free" —
+// the amplitude case). After Google OAuth, such a service has signed the
+// identity in but has no account/org for it, and expects the in-page
+// signup CTA to be clicked to create one. We surface that element so the
+// post-OAuth recovery can click it and re-route into the email/password
+// signup path, instead of re-triggering OAuth in a loop.
+//
+// A login page carries BOTH a "Sign in" submit button AND a "Sign up"
+// link — we want the latter. Returns null when no signup affordance is
+// present (so callers fall through to the existing re-OAuth path).
+export function findSignupCtaElement(
+  inventory: ReadonlyArray<InteractiveElement>,
+): InteractiveElement | null {
+  // Signup intent: "sign up" / "sign up for free" / "create (an) account" /
+  // "register" / "get started". Word-bounded so "signup" matches but
+  // "designup" doesn't.
+  const signupIntent =
+    /\b(?:sign[\s-]?up(?:\s+for\s+free)?|create\s+(?:an?\s+)?account|register|get\s+started)\b/i;
+  // OAuth affordances ("Continue with Google", "Sign in with GitHub") —
+  // clicking these re-triggers the OAuth handshake, the exact loop we're
+  // trying to escape. EXCLUDE them even though "sign in with" brushes the
+  // loginIntent regex below.
+  const oauthAffordance = /continue with|sign in with|log ?in with/i;
+  // Pure login affordance ("Sign in" / "Log in") WITHOUT a signup word —
+  // a login page's primary submit button. EXCLUDE it; we want the signup
+  // link sitting next to it, not the sign-in button.
+  const loginIntent = /\b(?:sign[\s-]?in|log[\s-]?in)\b/i;
+
+  let best: InteractiveElement | null = null;
+  for (const el of inventory) {
+    // Only clickable affordances — an <a>, a <button>, or anything with an
+    // explicit button role. A signup CTA is one of these; a bare <div>
+    // label isn't reliably clickable.
+    const isClickable =
+      el.tag === "a" ||
+      el.tag === "button" ||
+      (el.role ?? "").toLowerCase() === "button";
+    if (!isClickable) continue;
+
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+    if (label === "") continue;
+
+    // EXCLUDE OAuth buttons — clicking re-OAuths (the loop we're escaping).
+    if (oauthAffordance.test(label)) continue;
+    // Must read as a signup affordance.
+    if (!signupIntent.test(label)) continue;
+    // EXCLUDE a pure login button — one whose label reads as sign-IN but
+    // carries no signup word. (signupIntent already matched this element's
+    // own label, so this guard is defensive: it drops anything that is
+    // login-only despite a stray match.)
+    if (loginIntent.test(label) && !signupIntent.test(label)) continue;
+
+    // Prefer an <a>/<button> over a role=button div — a real link/button is
+    // the canonical signup CTA. First clickable match wins; an anchor or
+    // button upgrades a prior role-button-div pick.
+    if (best === null) {
+      best = el;
+    } else if (
+      best.tag !== "a" &&
+      best.tag !== "button" &&
+      (el.tag === "a" || el.tag === "button")
+    ) {
+      best = el;
+    }
+  }
+  return best;
+}
+
 // Conventional signup paths to probe, in priority order. Small + ordered
 // on purpose — we want the FIRST real signup form, not a fan-out across
 // dozens of guesses that each cost a round-trip over a residential
@@ -3215,6 +3284,12 @@ export function originRoot(url: string): string | null {
 // a real dashboard that merely contains the word "loading". Exported for
 // unit tests.
 export function isLoadingShellText(text: string): boolean {
+  // The Google account chooser ("Choose an account to continue to <App>")
+  // carries a stray "Loading" label but is an ACTIONABLE page, not a
+  // hydration shell — the clerk post-verify loop must click the account
+  // card, not idle through the hydration-wait ticks. Veto the shell read
+  // before the generic "loading" match below can fire on it.
+  if (/choose an account/i.test(text)) return false;
   // ONLY transient "still rendering" copy. The <noscript> fallback
   // ("This application cannot function without JavaScript…") is PERMANENT
   // in the DOM and was matched here by mistake — it made northflank (whose
@@ -5839,6 +5914,45 @@ export class SignupAgent {
     // never finalizes can't trap us in a loop.
     const postOAuthState = await this.browser.getState();
     const postOAuthInv = await this.buildInventory(steps, [provider.id]);
+
+    // amplitude class — post-OAuth LOGIN page that carries an in-page
+    // SIGNUP CTA. Google signed in fine, but the service has no account/org
+    // for this identity and expects us to CREATE one via the page's "Don't
+    // have an account? Sign up for free" link. The naive isLoginLoopState
+    // path below would see the Google button still present and re-trigger
+    // OAuth, looping until oauth_loop_detected. Instead: when the page
+    // classifies as login AND a genuine signup CTA is present, click that
+    // CTA and re-route into the email/password signup path (same sentinel
+    // the detectGoogleNoAccount gate uses ~40 lines below). CONSERVATIVE on
+    // purpose — only fires when classify==="login" AND a signup CTA exists,
+    // so services that legitimately need a second OAuth click fall through.
+    if (classifySignupHtml(postOAuthState.html) === "login") {
+      const signupCta = findSignupCtaElement(postOAuthInv);
+      if (signupCta !== null) {
+        const ctaText = (
+          signupCta.visibleText ??
+          signupCta.ariaLabel ??
+          "sign up"
+        ).trim();
+        steps.push(
+          `Post-OAuth: ${task.service} shows a login page with a signup CTA ("${ctaText}") — ` +
+            `${provider.label} identity has no account; clicking signup to create one.`,
+        );
+        try {
+          await this.browser.click(signupCta.selector);
+          await this.browser.wait(2);
+        } catch (err) {
+          steps.push(
+            `Post-OAuth: clicking the signup CTA threw (${err instanceof Error ? err.message : String(err)}) — ` +
+              `falling back to form-fill anyway.`,
+          );
+        }
+        // Re-route into the email/password signup path: runSignup catches
+        // this sentinel and re-runs form-fill on the now-signup page.
+        return OAUTH_FALL_BACK_TO_FORM_FILL;
+      }
+    }
+
     const loopBtn = isLoginLoopState(postOAuthState.url, postOAuthInv, provider.id);
     if (loopBtn !== null) {
       steps.push(
@@ -7136,6 +7250,38 @@ ${formatInventory(input.inventory)}`,
             `(${err instanceof Error ? err.message : String(err)}) — retrying`,
         );
         await this.browser.wait(2);
+        continue;
+      }
+      // clerk class — Google account chooser inside the post-verify loop.
+      // The planner re-clicked "Sign in with Google", which opened
+      // accounts.google.com's chooser (.../accountchooser?...). That page
+      // carries a stray "Loading" label (so the hydration guard below would
+      // burn all its ticks idling) and tryClickGoogleChooserCard is only
+      // wired into runOAuthFlow — so nothing here clicks the account card.
+      // Detect the chooser by URL or its "Choose an account" copy, click
+      // the card to continue OAuth, then skip the rest of this round's
+      // planning (the next round re-reads the post-chooser page).
+      const chooserText = await this.browser.extractText().catch(() => "");
+      if (
+        /accounts\.google\.com\/.*(accountchooser|chooseaccount|oauthchooseaccount)/i.test(
+          state.url,
+        ) ||
+        /choose an account/i.test(chooserText)
+      ) {
+        await this.tryClickGoogleChooserCard();
+        args.steps.push(
+          `Post-verify round ${round}: Google account chooser — clicked the account card to continue OAuth`,
+        );
+        await this.browser.wait(2);
+        try {
+          [state, inventory] = await Promise.all([
+            this.browser.getState(),
+            this.buildInventory(args.steps, undefined, 80),
+          ]);
+        } catch {
+          // mid-navigation read after the card click — the next round
+          // re-reads, so just fall through to it.
+        }
         continue;
       }
       // SPA hydration guard. A post-OAuth dashboard (northflank's
