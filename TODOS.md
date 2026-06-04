@@ -52,12 +52,23 @@ See memory `project-four-walls-measured-jun03`. Harnesses:
      ~15s; OAuth scan is hydration-aware, 4cbaf3d.)
   4. **REMAINING BLOCKER (human gate, not a bot gap):** GitHub forces a
      one-time "Verify 2FA now" re-verification on the /authorize flow that
-     the bot fast-aborts (needs the operator's authenticator). So every
-     northflank OAuth path is walled: Google=GSI/One-Tap, GitHub=2FA-on-
-     authorize, GitLab/Bitbucket=no session, email=recaptcha+withheld
-     verification. northflank is effectively **needs-human** unless the
-     operator clears GitHub's 2FA wall (login --provider=github
-     --force-relogin → "Verify 2FA now") and it doesn't re-arm per-authorize.
+     the bot fast-aborts (needs the operator's authenticator).
+     - **Google path is a DEAD END (corrected diagnosis).** northflank has a
+       `<button>Google</button>`, but MEASURED (warm session + CDP FedCm
+       enabled + real click): NO FedCM dialog, NO popup, NO navigation —
+       clicking it does nothing observable, and `google.accounts.id` never
+       loads. So the earlier "GSI/One-Tap" read was wrong; the button is
+       inert to automation and the bot's old "signed in via Google" was a
+       false positive (no-op click → /signup `not_provider` misread). The GSI
+       driver has nothing to catch here. (FedCm follow-ups in the GSI block
+       remain valid for a *real* gsi/button or One-Tap service, just not
+       northflank.)
+     So every northflank OAuth path is walled: Google=inert button,
+     GitHub=2FA-on-authorize, GitLab/Bitbucket=no session,
+     email=recaptcha+withheld verification. northflank is effectively
+     **needs-human** unless the operator clears GitHub's 2FA wall
+     (login --provider=github --force-relogin → "Verify 2FA now") and it
+     doesn't re-arm per-authorize.
   - **Follow-up bug:** logged-in-providers.json got out of sync (github
      session live in cookies but absent from the marker → loggedInProviders()
      returned ["google"], so the pin-respecting order fell back to google).
