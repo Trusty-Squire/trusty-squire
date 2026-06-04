@@ -2037,6 +2037,37 @@ export class BrowserController {
   } | null> {
     if (!this.page) throw new Error("Browser not started");
 
+    // An INVISIBLE reCAPTCHA (api2/anchor with size=invisible — the
+    // bottom-right badge) is score-mode: there is no checkbox to click, and
+    // its token is emitted only when the form's submit handler calls
+    // grecaptcha.execute(). It must NOT be treated as a solvable visible
+    // widget. MEASURED on amplitude (2026-06-04): the badge iframe is
+    // ~256×60, so it cleared the size filter below and got "found" + clicked;
+    // the pre-submit token-poll then timed out and the bot escalated to
+    // 2Captcha, which can't solve a score-mode widget (ERROR_CAPTCHA_
+    // UNSOLVABLE) → captcha_blocked — even though our v3 score is ~1.0 and a
+    // plain form-submit would have passed silently. Detect "invisible-only"
+    // (badge present, no visible checkbox anchor, no rendered bframe grid) and
+    // skip reCAPTCHA entirely so the signup proceeds to submit.
+    const recaptchaInvisibleOnly = await this.page
+      .evaluate(() => {
+        const q = (s: string): boolean => document.querySelector(s) !== null;
+        const visibleAnchor = Array.from(
+          document.querySelectorAll('iframe[src*="recaptcha/api2/anchor"]'),
+        ).some((f) => !/size=invisible/.test((f as HTMLIFrameElement).src));
+        const bframe = (() => {
+          const f = document.querySelector('iframe[src*="recaptcha/api2/bframe"]');
+          if (f === null) return false;
+          const r = f.getBoundingClientRect();
+          return r.width > 30 && r.height > 30;
+        })();
+        const invisiblePresent =
+          q('iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]') ||
+          q(".grecaptcha-badge");
+        return invisiblePresent && !visibleAnchor && !bframe;
+      })
+      .catch(() => false);
+
     // Phase 1: widget shape with polling. page.locator (unlike the
     // querySelector in detectCaptchaVariant) pierces OPEN shadow roots,
     // so the Cloudflare iframe is reachable even on modern shadow-DOM
@@ -2052,7 +2083,9 @@ export class BrowserController {
       selector: string;
     }> = [
       { kind: "turnstile", selector: 'iframe[src*="challenges.cloudflare.com"]' },
-      { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2"]' },
+      // Visible reCAPTCHA only — the size=invisible anchor (score-mode badge)
+      // is handled by the recaptchaInvisibleOnly skip above.
+      { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])' },
       // hCaptcha's checkbox iframe (the anchor frame). Plausible and other
       // hCaptcha sites render this; clicking it ticks the box the same way
       // Turnstile/reCAPTCHA do.
@@ -2093,6 +2126,10 @@ export class BrowserController {
       { kind: "hcaptcha", selector: 'textarea[name="h-captcha-response"]' },
     ];
     for (const { kind, selector } of hostCandidates) {
+      // The invisible reCAPTCHA's hidden g-recaptcha-response textarea lives
+      // INSIDE the .grecaptcha-badge (~256×60), so the walk-up below would
+      // return the badge box and we'd click it — the exact bug. Skip it.
+      if (kind === "recaptcha" && recaptchaInvisibleOnly) continue;
       const locator = this.page.locator(selector);
       const count = await locator.count();
       if (count === 0) continue;
@@ -2172,10 +2209,19 @@ export class BrowserController {
           variant = "turnstile";
         } else if (present('iframe[src*="hcaptcha.com"]')) {
           variant = "hcaptcha";
-        } else if (present('iframe[src*="recaptcha/api2/anchor"]')) {
+        } else if (
+          present(
+            'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])',
+          )
+        ) {
+          // VISIBLE checkbox anchor (size=normal) → clickable v2.
           variant = "recaptcha_v2";
-        } else if (present(".grecaptcha-badge")) {
-          // Badge but no clickable anchor → score-mode reCAPTCHA.
+        } else if (
+          present(".grecaptcha-badge") ||
+          present('iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]')
+        ) {
+          // Badge / size=invisible anchor and no clickable checkbox →
+          // score-mode reCAPTCHA (passes on submit, nothing to click).
           variant = "recaptcha_v3";
         }
         return { variant, challengeRendered };
