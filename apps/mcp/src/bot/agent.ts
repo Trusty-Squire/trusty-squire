@@ -656,6 +656,74 @@ export function isGoogleSearchUrl(url: string): boolean {
   }
 }
 
+// Google's NEWER consent screen (URL form
+// `accounts.google.com/signin/oauth/id?...&part=<opaque-token>`) hides
+// the requested scopes behind the opaque `part=` token — there is no
+// `scope=` query param to read, so extractOAuthScopes() returns null.
+// The only remaining signal is the visible DOM: the consent page lists
+// each requested item as a templated phrase. These pattern sets let us
+// classify that DOM as basic-only vs. reaching beyond identity.
+//
+// BASIC = the openid/email/profile family — the exact thing the
+// URL-readable happy path (scopesAreBasic → auto-approve) already
+// approves without a human. We require a positive basic signal so an
+// empty/ambiguous DOM never counts as basic.
+const GOOGLE_BASIC_CONSENT_PHRASES: readonly RegExp[] = [
+  // "See your primary Google Account email address"
+  /see\s+your\s+primary\s+google\s+account\s+email\s+address/i,
+  // generic email-address grant wording
+  /\byour\s+(?:primary\s+)?(?:google\s+account\s+)?email\s+address\b/i,
+  // "See your personal info, including any personal info you've made
+  // publicly available" / "See your public profile"
+  /see\s+your\s+personal\s+info/i,
+  /your\s+public\s+profile/i,
+  // "Associate you with your personal info on Google"
+  /associate\s+you\s+with\s+your\s+personal\s+info/i,
+];
+// Sensitive (non-basic) scope-grant wording. Any hit means the consent
+// reaches beyond identity — never auto-approve. Kept broad on purpose:
+// a false "non-basic" only costs a manual review, but a missed one
+// would auto-approve a sensitive grant.
+const GOOGLE_NON_BASIC_CONSENT_PHRASES: readonly RegExp[] = [
+  /\bcontacts?\b/i,
+  /\bcalendars?\b/i,
+  /\b(?:google\s+)?drive\b/i,
+  /\byour\s+files?\b/i,
+  /\bgmail\b/i,
+  /send\s+(?:email|mail|messages)/i,
+  /\bspreadsheets?\b/i,
+  /\bsheets\b/i,
+  /\bphotos\b/i,
+  /\byoutube\b/i,
+  /\bon\s+your\s+behalf\b/i,
+  /\bmanage\s+your\b/i,
+  /\bedit\s+your\b/i,
+  /\bdelete\s+your\b/i,
+  /see\s+and\s+download\s+your/i,
+];
+
+// "basic" = the consent DOM lists ONLY openid/email/profile-family
+// grants. See the block comment above for WHY this exists (Google hides
+// scopes behind `part=` in the new consent URL; the visible phrases are
+// the only signal, and a basic-only consent is what the URL-readable
+// path auto-approves anyway). Returns false on ambiguous/empty so the
+// caller keeps its conservative oauth_consent_needs_review abort —
+// this gate only RECOVERS the basic-only case, never widens approval.
+// Exported for unit testing.
+export function googleConsentIsBasicFromDom(bodyText: string): boolean {
+  // Reuse the existing danger scraper as the first backstop — if it
+  // flags any sensitive scope-grant phrase, this is not basic-only.
+  if (scrapeGoogleScopePhrases(bodyText).length > 0) return false;
+  const hasNonBasic = GOOGLE_NON_BASIC_CONSENT_PHRASES.some((p) =>
+    p.test(bodyText),
+  );
+  if (hasNonBasic) return false;
+  // Require a positive basic signal: an empty/ambiguous DOM (no
+  // recognizable grant wording) returns false so the caller does not
+  // approve blind.
+  return GOOGLE_BASIC_CONSENT_PHRASES.some((p) => p.test(bodyText));
+}
+
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
@@ -5732,6 +5800,38 @@ export class SignupAgent {
               `[${dangerPhrases.join(" | ")}]. Pausing for manual review.`,
             steps,
           );
+        }
+        // Google's newer consent URL hides the scope= param behind an
+        // opaque `part=` token, so extractOAuthScopes() returned null
+        // even on an entirely-basic email/profile consent (measured on
+        // uploadcare). The visible DOM is the only remaining signal: if
+        // it lists ONLY openid/email/profile-family grants (and the
+        // danger scraper above already cleared it), this is exactly the
+        // consent the URL-readable happy path auto-approves — so recover
+        // it here instead of blocking. Anything ambiguous falls through
+        // to the conservative abort below. Mirror the basic-scopes happy
+        // path: set consentAlreadyApproved, advance, handle !advanced.
+        if (
+          provider.id === "google" &&
+          !consentAlreadyApproved &&
+          googleConsentIsBasicFromDom(body)
+        ) {
+          steps.push(
+            "OAuth: consent scopes unreadable from URL but DOM lists only " +
+              "basic email/profile scopes — auto-approving",
+          );
+          consentAlreadyApproved = true;
+          const advanced = await this.browser.advanceOAuthConsent(provider.id);
+          if (!advanced) {
+            return this.oauthAbort(
+              "oauth_consent_needs_review",
+              `basic-only consent read from the ${provider.label} DOM but no ` +
+                `approve control found on the consent page — approve it manually.`,
+              steps,
+            );
+          }
+          await this.browser.wait(3);
+          continue;
         }
         // F16 — order matters here. The post-grant intermediate page
         // (after blind-consent approved on iter 1) is also classified
