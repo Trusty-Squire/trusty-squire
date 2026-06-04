@@ -4822,6 +4822,26 @@ export class SignupAgent {
         await this.browser.wait(1);
         continue;
       }
+      // Google "Choose an account" chooser. Its "…to continue to <app>" copy
+      // matches the consent classifier, but it is an account PICKER — it needs
+      // a card CLICK, not a scope approve. Google shows it before the real
+      // consent right after a fresh relogin (the first OAuth re-confirms the
+      // account). Without handling it here the bot tries to approve, stalls,
+      // and the page flips to needs_login → abort (every Google service fails
+      // until an OAuth is done once). Click the account card and re-read; the
+      // next pass lands on the real consent screen (or back at the service).
+      if (
+        provider.id === "google" &&
+        /\/(?:accountchooser|chooseaccount|oauthchooseaccount)/i.test(url)
+      ) {
+        const clicked = await this.tryClickGoogleChooserCard();
+        steps.push(
+          `OAuth: Google account chooser — ${clicked ? "clicked the account card" : "no clickable account card found"}`,
+        );
+        await this.browser.wait(2);
+        continue;
+      }
+
       const authState = provider.classifyAuthState(url, body);
       steps.push(`OAuth: ${provider.label} auth state = ${authState} (url=${url.slice(0, 120)})`);
 
