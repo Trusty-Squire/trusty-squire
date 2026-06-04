@@ -4877,12 +4877,55 @@ export class SignupAgent {
     // services that don't gate OAuth on Turnstile).
     try {
       const captcha = await this.browser.solveVisibleCaptcha(20_000);
-      if (captcha.found) {
+      if (captcha.found && captcha.solved) {
         steps.push(
-          captcha.solved
-            ? `OAuth: ticked the visible ${captcha.kind ?? "captcha"} checkbox before clicking the ${provider.label} affordance`
-            : `OAuth: visible ${captcha.kind ?? "captcha"} present but did not solve in 20s — clicking the ${provider.label} affordance anyway`,
+          `OAuth: ticked the visible ${captcha.kind} checkbox before clicking the ${provider.label} affordance`,
         );
+      } else if (captcha.found && !captcha.solved) {
+        // Tier-2 click-and-wait timed out. For reCAPTCHA v2 this is the
+        // SAME state the form-submit gate (runCaptchaGate) recovers from
+        // by escalating to the third-party solver — mirror that path here
+        // so OAuth-first flows aren't left clicking a Google button that
+        // the service keeps gated behind an unsolved checkbox (replit,
+        // uploadcare). Turnstile is deliberately NOT escalated: Cloudflare
+        // scores at the IP layer, so a solver-issued token is rejected
+        // anyway and only burns the 2Captcha balance.
+        let solvedViaTier3 = false;
+        if (captcha.kind === "recaptcha" && this.captchaSolver?.isAvailable() === true) {
+          const sitekey = await this.browser.extractRecaptchaSitekey();
+          const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+          if (sitekey !== null && pageUrl !== undefined) {
+            steps.push(
+              `OAuth: Tier 3 — submitting reCAPTCHA sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`,
+            );
+            const solveRes = await this.captchaSolver.solveRecaptchaV2({ sitekey, pageUrl });
+            if (solveRes.kind === "ok") {
+              const injected = await this.browser.injectRecaptchaToken(solveRes.token);
+              if (injected) {
+                solvedViaTier3 = true;
+                steps.push(
+                  `OAuth: Tier 3 solved the reCAPTCHA in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha — clicking the ${provider.label} affordance`,
+                );
+              } else {
+                steps.push(
+                  `OAuth: Tier 3 token arrived but page injection failed — clicking the ${provider.label} affordance anyway`,
+                );
+              }
+            } else {
+              steps.push(
+                `OAuth: Tier 3 ${solveRes.kind}` +
+                  ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+                  ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : "") +
+                  ` — clicking the ${provider.label} affordance anyway`,
+              );
+            }
+          }
+        }
+        if (!solvedViaTier3) {
+          steps.push(
+            `OAuth: visible ${captcha.kind} present but did not solve in 20s — clicking the ${provider.label} affordance anyway`,
+          );
+        }
       }
     } catch (err) {
       // Solver is best-effort; never block OAuth on its failure.

@@ -29,8 +29,10 @@ import { scoreSignupButton } from "../browser.js";
 import type {
   BrowserController,
   BrowserState,
+  CaptchaSolveResult,
   InteractiveElement,
 } from "../browser.js";
+import type { TwoCaptchaResult, TwoCaptchaSolver } from "../captcha-solver-2captcha.js";
 import type { LLMClient, LLMResponse } from "../llm-client.js";
 import { buildSignupResponse } from "../../tools/provision-any.js";
 
@@ -171,6 +173,26 @@ class FakeOAuthBrowser {
   }
   async settleAfterOAuth(): Promise<void> {
     this.settleCalls += 1;
+  }
+
+  // ── Visible-captcha precheck surface (OAuth Tier-2 → Tier-3) ──
+  // Defaults to "no widget" so the existing OAuth tests are unchanged.
+  // Captcha-precheck tests opt in by assigning these fields.
+  public visibleCaptchaResult: CaptchaSolveResult = { found: false };
+  public sitekey: string | null = null;
+  public injectTokenResult = true;
+  public extractSitekeyCalls = 0;
+  public injectedTokens: string[] = [];
+  async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
+    return this.visibleCaptchaResult;
+  }
+  async extractRecaptchaSitekey(): Promise<string | null> {
+    this.extractSitekeyCalls += 1;
+    return this.sitekey;
+  }
+  async injectRecaptchaToken(token: string): Promise<boolean> {
+    this.injectedTokens.push(token);
+    return this.injectTokenResult;
   }
 }
 
@@ -1106,6 +1128,108 @@ describe("GitHub OAuth signup (T13)", () => {
     expect(result.error ?? "").toMatch(/^needs_login:/);
     expect(browser.typeCalls).toHaveLength(0);
     expect(browser.advanceCalls).toBe(0);
+  });
+});
+
+// ───────────── OAuth visible-captcha precheck Tier-3 fall-through ─────────────
+// replit/uploadcare gate the Google button behind a reCAPTCHA the
+// Tier-2 click-and-wait can't tick. The precheck must escalate to the
+// 2Captcha solver (the same Tier-3 the form-submit gate uses) before
+// clicking Google — otherwise the OAuth click lands on a still-gated
+// button and the run never gets a session.
+
+// Stub solver returning a canned outcome. Shaped as TwoCaptchaSolver so
+// the agent's `captchaSolver` slot accepts it without hitting the network.
+class StubSolver {
+  public solveCalls: Array<{ sitekey: string; pageUrl: string }> = [];
+  constructor(
+    private readonly available: boolean,
+    private readonly outcome: TwoCaptchaResult,
+  ) {}
+  isAvailable(): boolean {
+    return this.available;
+  }
+  async solveRecaptchaV2(input: { sitekey: string; pageUrl: string }): Promise<TwoCaptchaResult> {
+    this.solveCalls.push({ sitekey: input.sitekey, pageUrl: input.pageUrl });
+    return this.outcome;
+  }
+}
+
+function agentWithSolver(browser: FakeOAuthBrowser, solver: StubSolver): SignupAgent {
+  const asController: unknown = browser;
+  if (!isController(asController)) throw new Error("unreachable");
+  const asSolver: unknown = solver;
+  return new SignupAgent(asController, new QueueLLM(["{}"]), {
+    googleChallengeTimeoutMs: 10,
+    captchaSolver: asSolver as TwoCaptchaSolver,
+  });
+}
+
+describe("OAuth visible-captcha precheck — Tier-3 escalation", () => {
+  function captchaScript(): FakeOAuthBrowser {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://uploadcare.com/accounts/signup/", text: "" },
+      CONSENT_BASIC,
+      PRODUCT_DASH("Dashboard — Your API Key: ts_oauthkey_abcdefghijklmnop12345"),
+    ]);
+    browser.visibleCaptchaResult = { found: true, solved: false, kind: "recaptcha" };
+    browser.sitekey = "6Lc_testsitekey_abcdef";
+    return browser;
+  }
+
+  it("escalates an unsolved reCAPTCHA to 2Captcha and injects the token", async () => {
+    const browser = captchaScript();
+    const solver = new StubSolver(true, { kind: "ok", token: "TOK-123", durationMs: 42_000 });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(result.success).toBe(true);
+    // The solver was asked to solve the page's sitekey, and the token
+    // was injected back into the page before the Google click.
+    expect(solver.solveCalls).toHaveLength(1);
+    expect(solver.solveCalls[0]?.sitekey).toBe("6Lc_testsitekey_abcdef");
+    expect(browser.injectedTokens).toEqual(["TOK-123"]);
+    expect(result.steps.some((s) => /Tier 3 — submitting reCAPTCHA sitekey to 2Captcha/i.test(s))).toBe(true);
+    expect(result.steps.some((s) => /Tier 3 solved the reCAPTCHA/i.test(s))).toBe(true);
+    // Google was still clicked exactly once.
+    expect(browser.startOAuthCalls).toBe(1);
+  });
+
+  it("clicks Google anyway when the Tier-3 solve fails (best-effort, never blocks)", async () => {
+    const browser = captchaScript();
+    const solver = new StubSolver(true, { kind: "solve_timeout", durationMs: 120_000 });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(solver.solveCalls).toHaveLength(1);
+    expect(browser.injectedTokens).toHaveLength(0);
+    expect(browser.startOAuthCalls).toBe(1); // OAuth click still happened
+    expect(result.steps.some((s) => /Tier 3 solve_timeout/i.test(s))).toBe(true);
+    expect(
+      result.steps.some((s) => /did not solve in 20s — clicking the .* affordance anyway/i.test(s)),
+    ).toBe(true);
+  });
+
+  it("does NOT escalate when the solver is unavailable (no TWOCAPTCHA_API_KEY)", async () => {
+    const browser = captchaScript();
+    const solver = new StubSolver(false, { kind: "no_key" });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(solver.solveCalls).toHaveLength(0);
+    expect(browser.extractSitekeyCalls).toBe(0);
+    expect(browser.startOAuthCalls).toBe(1);
+    expect(
+      result.steps.some((s) => /did not solve in 20s — clicking the .* affordance anyway/i.test(s)),
+    ).toBe(true);
+  });
+
+  it("does NOT escalate a Turnstile (scores at the IP layer; solver token is rejected)", async () => {
+    const browser = captchaScript();
+    browser.visibleCaptchaResult = { found: true, solved: false, kind: "turnstile" };
+    const solver = new StubSolver(true, { kind: "ok", token: "TOK-NO", durationMs: 1000 });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(solver.solveCalls).toHaveLength(0);
+    expect(browser.extractSitekeyCalls).toBe(0);
+    expect(browser.startOAuthCalls).toBe(1);
   });
 });
 
