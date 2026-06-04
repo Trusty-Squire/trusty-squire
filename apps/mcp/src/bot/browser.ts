@@ -23,7 +23,7 @@
 // agent.ts.
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, BrowserContext, Locator, Page } from "playwright";
+import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
@@ -3685,6 +3685,120 @@ export class BrowserController {
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
     }
+  }
+
+  // Does the page sign in with Google via Google Identity Services (GSI)
+  // rather than classic OAuth redirect? GSI renders its button in a
+  // cross-origin iframe (accounts.google.com/gsi/button) and/or exposes the
+  // `google.accounts.id` JS API; on use it raises a browser-native FedCM
+  // dialog or a popup and returns a JWT to a JS callback — there is NO
+  // redirect, so the classic startOAuth flow can't drive it. Detecting this
+  // is what lets the agent route to tryGoogleGsiLogin instead.
+  async hasGoogleGsiAffordance(): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      return await this.page.evaluate(() => {
+        if (
+          document.querySelector('iframe[src*="accounts.google.com/gsi/"]') !== null
+        ) {
+          return true;
+        }
+        const g = (window as unknown as {
+          google?: { accounts?: { id?: unknown } };
+        }).google;
+        return typeof g?.accounts?.id !== "undefined";
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  // Drive a Google Identity Services / FedCM sign-in. Two variants are
+  // handled:
+  //   - FedCM: clicking the GSI widget raises a browser-NATIVE credential
+  //     dialog (no DOM, no popup — invisible to Playwright). We enable the
+  //     CDP FedCm domain up front and auto-select the first account when
+  //     FedCm.dialogShown fires. The page's JS callback then receives the
+  //     JWT and establishes the session.
+  //   - Popup: older GSI opens a Google account-chooser window; we adopt it
+  //     like startOAuth does so the consent loop can drive it.
+  // Returns how it resolved. The caller then runs the SAME post-OAuth
+  // settle/consent/post-verify path as the redirect flow.
+  async tryGoogleGsiLogin(
+    triggerSelector: string,
+    timeoutMs = 25_000,
+  ): Promise<{ ok: boolean; via: "fedcm" | "popup" | "none" }> {
+    if (!this.page || !this.context) throw new Error("Browser not started");
+    this.oauthProductPage = this.page;
+    let fedcmResolved = false;
+    let cdp: CDPSession | null = null;
+    try {
+      cdp = await this.context.newCDPSession(this.page);
+      await cdp.send("FedCm.enable", { disableRejectionDelay: true });
+      cdp.on("FedCm.dialogShown", (ev: unknown) => {
+        const dialogId = (ev as { dialogId?: string }).dialogId;
+        if (dialogId === undefined) return;
+        void (async () => {
+          try {
+            // Pick the first account. Some flows then need the "Continue as"
+            // confirm button; selectAccount alone usually completes it, and
+            // a failed confirm is non-fatal.
+            await cdp!.send("FedCm.selectAccount", { dialogId, accountIndex: 0 });
+            fedcmResolved = true;
+          } catch {
+            // dialog dismissed or already resolved
+          }
+        })();
+      });
+    } catch {
+      cdp = null; // FedCm domain unavailable — the popup path still works
+    }
+
+    const popupPromise: Promise<Page | null> = this.context
+      .waitForEvent("page", { timeout: timeoutMs })
+      .then((p): Page | null => p)
+      .catch((): Page | null => null);
+
+    await this.click(triggerSelector);
+
+    // Resolve when a popup opens OR FedCM completes OR we hit the deadline.
+    const fedcmWait = (async (): Promise<null> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline && !fedcmResolved) {
+        await this.sleep(250);
+      }
+      return null;
+    })();
+    const popup: Page | null = await Promise.race([popupPromise, fedcmWait]);
+
+    if (cdp !== null) {
+      try {
+        await cdp.send("FedCm.disable");
+      } catch {
+        // best-effort
+      }
+    }
+
+    if (popup !== null && popup !== this.page && !popup.isClosed()) {
+      this.page = popup;
+      try {
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 });
+      } catch {
+        // consent loop re-reads regardless
+      }
+      return { ok: true, via: "popup" };
+    }
+    if (fedcmResolved) {
+      // Credential delivered to the page's JS callback — give the app a beat
+      // to exchange it for a session and redirect.
+      try {
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 10_000 });
+      } catch {
+        // best-effort
+      }
+      return { ok: true, via: "fedcm" };
+    }
+    return { ok: false, via: "none" };
   }
 
   // URL of the active page (the OAuth page mid-handshake, the product

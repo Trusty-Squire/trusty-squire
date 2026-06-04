@@ -4718,7 +4718,23 @@ export class SignupAgent {
       );
     }
     steps.push(`OAuth: clicking the ${provider.label} sign-in affordance`);
-    await this.browser.startOAuth(oauthSelector);
+    // Google Identity Services (GSI) / FedCM does NOT redirect — clicking the
+    // widget raises a browser-native FedCM dialog or a popup and returns a
+    // JWT to a JS callback. The classic startOAuth waits for a provider
+    // redirect that never comes, so it falsely concludes "signed in" and the
+    // session never persists (northflank). Detect GSI and drive it over CDP.
+    let gsiHandled = false;
+    if (provider.id === "google" && (await this.browser.hasGoogleGsiAffordance())) {
+      const gsi = await this.browser.tryGoogleGsiLogin(oauthSelector);
+      gsiHandled = true;
+      steps.push(
+        `OAuth: Google Identity Services / FedCM widget — resolved via ${gsi.via}` +
+          (gsi.ok ? "" : " (no FedCM dialog or popup appeared — the widget may need a different trigger)"),
+      );
+    }
+    if (!gsiHandled) {
+      await this.browser.startOAuth(oauthSelector);
+    }
     await this.browser.wait(3);
     await saveDebugSnapshot(this.browser, "oauth-after-click");
 

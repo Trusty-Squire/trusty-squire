@@ -152,6 +152,11 @@ class FakeOAuthBrowser {
     this.startOAuthCalls += 1;
     this.advance(); // land on the first Google screen
   }
+  // These tests exercise the classic OAuth-redirect path; report no GSI/FedCM
+  // widget so runOAuthFlow takes startOAuth (not tryGoogleGsiLogin).
+  async hasGoogleGsiAffordance(): Promise<boolean> {
+    return false;
+  }
   currentUrl(): string {
     return this.page().url;
   }

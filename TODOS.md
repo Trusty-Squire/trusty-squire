@@ -15,6 +15,44 @@ The closed-loop hardening + telemetry-fix session shipped rc.1→rc.5
 anti-bot plan is **done**, not pending (see AB note below). What's
 live and what's immediately next:
 
+### A0 — Four-walls measurement sweep + GSI/FedCM support [2026-06-03]
+Drove groq/northflank/codesandbox/plausible against the residential exit
+(patchright + SK-Broadband SOCKS); each "wall" was MEASURED, not guessed.
+Shipped commits 555aec8, 2743669, f680ce4, a7071b1, 95a7501 (+ GSI WIP).
+See memory `project-four-walls-measured-jun03`. Harnesses:
+`/tmp/oauth-probe.mjs` (OAuth network capture), `/tmp/cf-measure.mjs`
+(CF clearance + config bisection), `/tmp/hydrate-measure.mjs` (SPA ws probe).
+
+- **groq → GREEN ✅** (validated: ok, api_key, skill promoted). Was Stytch
+  B2B async org-provisioning ("Creating your organization" ~5-7s) being
+  interrupted by a URL-only settle-wait + the rc.20 re-OAuth retry. Fix:
+  `isAuthProcessingText` settle-wait (24s). NOT anti-bot — the OAuth network
+  probe is what distinguished an interrupted async step from a rejection.
+- **plausible → bot-capable** (captcha WALL BEATEN: hCaptcha via 2Captcha,
+  validated; + subject-matcher + code-entry fixes). Only gated by plausible
+  INTERMITTENTLY withholding the verification email (service-side anti-abuse).
+- **codesandbox → stochastic Cloudflare** risk gate. Measured: a minimal
+  browser config clears CF in ~12s but the bot's config sits near CF's
+  threshold; no deterministic config fix (stale-cookie theory disproven).
+- **northflank → needs GSI.** Google auth is Google Identity Services
+  (`accounts.google.com/gsi/button`, FedCM — NOT a redirect); the bot's
+  click-redirect model can't drive it (false "signed in" → /login). GitHub
+  path is blocked by the bot's Google-preference even with a warm session.
+  Also fixed: `login` now routes through the proxy (a7071b1 — the
+  "github-login-marker-lies" root cause) + drops --enable-automation (95a7501).
+
+  **GSI/FedCM support — WIP (this is the open item):**
+  - DONE: `BrowserController.hasGoogleGsiAffordance()` +
+    `tryGoogleGsiLogin()` (CDP `FedCm.enable` → auto-`selectAccount` on
+    `FedCm.dialogShown`, with a popup-variant fallback); wired into
+    `runOAuthFlow` (google + GSI detected → GSI driver instead of startOAuth).
+    CDP FedCm verified available in patchright 1.60.
+  - TODO: validate live against northflank; handle the FedCm "ConfirmIdpLogin"
+    dialog type + the "Continue as" confirm button (`FedCm.clickDialogButton`)
+    if `selectAccount` alone doesn't finalize; add the Google-preference
+    override so the bot can fall back to GitHub when GSI doesn't resolve; unit
+    coverage for the detection helper.
+
 ### A1 — Housekeeper harvest RUNNING [in-flight]
 Launched 2026-06-02 over **75 services** from the queue that have no
 active skill and aren't wall-blocked (excludes the 3 hard walls:
