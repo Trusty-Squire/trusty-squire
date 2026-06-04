@@ -1577,6 +1577,39 @@ export function classifySignupHtml(
   return "other";
 }
 
+// Pure: does this post-submit page look like a CONTINUATION step of the same
+// signup (a dedicated "Create your password" page — amplitude's step 2 — is the
+// canonical case) rather than a dashboard, a credentials page, or a
+// verify-your-email screen? Conservative on purpose: requires a VISIBLE, EMPTY
+// password input the bot still needs to fill AND a create/continue-style submit
+// control, and the page must NOT read as a verify-your-email screen or a login
+// form (a "sign in" page also has a password field, but re-filling it with the
+// run's generated password would just fail). Exported for unit tests.
+export function isContinuationFormStep(
+  html: string,
+  inventory: ReadonlyArray<InteractiveElement>,
+): boolean {
+  // A verify-your-email page is finished by the inbox poll, not re-filled.
+  if (expectsVerificationEmail(html)) return false;
+  // A login page must not be mistaken for a signup continuation.
+  if (classifySignupHtml(html) === "login") return false;
+  const hasEmptyPassword = inventory.some(
+    (e) =>
+      e.tag === "input" &&
+      e.type === "password" &&
+      e.visible !== false &&
+      (e.value ?? "") === "",
+  );
+  if (!hasEmptyPassword) return false;
+  return inventory.some((e) => {
+    if (e.tag !== "button" && e.type !== "submit") return false;
+    const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+    return /\b(?:create|continue|sign[\s-]?up|next|submit|finish|get started|done)\b/.test(
+      t,
+    );
+  });
+}
+
 // Find the in-page "create an account" affordance on a LOGIN page that
 // also advertises signup ("Don't have an account? Sign up for free" —
 // the amplitude case). After Google OAuth, such a service has signed the
@@ -5010,6 +5043,11 @@ export class SignupAgent {
       // bouncing can't spin here.
       let outcome = await this.planExecuteWithRetry(task, fillValues, steps);
       let oauthFallbackUsed = false;
+      // Multi-step signup guard (amplitude: email/name step → a dedicated
+      // "Create your password" step). Bounds how many continuation form steps
+      // we'll fill after the first submit before treating the signup as done.
+      let multiStepRounds = 0;
+      const MAX_MULTI_STEP_ROUNDS = 3;
       dispatch: for (;;) {
         switch (outcome.kind) {
         case "captcha_blocked":
@@ -5203,8 +5241,31 @@ export class SignupAgent {
             ...this.resultTail(),
           };
         }
-          case "submitted":
+          case "submitted": {
+            // Multi-step signup: a clean submit can land on ANOTHER form step
+            // (amplitude: a dedicated "Create your password" page) rather than
+            // the dashboard or a verify-email screen. Detect a continuation
+            // form step and run the fill-submit phase again on it, bounded,
+            // before treating the submit as done — otherwise the post-submit
+            // logic below polls the inbox for a verification email the
+            // half-finished signup never triggers. Conservative (a visible
+            // empty password input + a submit control, NOT a login or
+            // check-your-email page), so a genuine email-verification flow
+            // isn't mistaken for a form step.
+            if (multiStepRounds < MAX_MULTI_STEP_ROUNDS) {
+              const stepLabel = await this.detectContinuationFormStep();
+              if (stepLabel !== null) {
+                multiStepRounds += 1;
+                steps.push(
+                  `Post-submit: continuation form step detected (${stepLabel}) — ` +
+                    `filling + submitting (step ${multiStepRounds + 1}).`,
+                );
+                outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+                continue dispatch;
+              }
+            }
             break dispatch;
+          }
         }
       }
       await saveDebugSnapshot(this.browser, "after-submit");
@@ -9147,6 +9208,29 @@ ${formatInventory(input.inventory)}${
   //      purpose — a "Continue with Google" / "Login with Google" /
   //      icon-only Google button all count when the bot has a
   //      provider session).
+  // After a form submit, is the page a CONTINUATION step of the SAME signup
+  // (amplitude's dedicated "Create your password" page is the canonical case)
+  // rather than a dashboard, a credentials page, or a verify-your-email
+  // screen? Returns a short label for the step trail, or null. Reused
+  // fillValues already carry the password, so re-running planExecuteWithRetry
+  // fills it. See isContinuationFormStep for the (conservative) signals.
+  private async detectContinuationFormStep(): Promise<string | null> {
+    let html = "";
+    let url = "";
+    let inventory: InteractiveElement[];
+    try {
+      const state = await this.browser.getState();
+      html = state.html;
+      url = state.url;
+      inventory = await this.browser.extractInteractiveElements();
+    } catch {
+      return null;
+    }
+    return isContinuationFormStep(html, inventory)
+      ? `password step at ${pathOf(url)}`
+      : null;
+  }
+
   private async looksLikeSignupPage(): Promise<boolean> {
     const state = await this.browser.getState();
 
