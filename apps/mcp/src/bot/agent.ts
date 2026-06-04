@@ -2482,8 +2482,16 @@ export function detectGoogleNoAccount(url: string, bodyText: string): boolean {
     query = "";
   }
   const haystack = `${query}\n${bodyText.toLowerCase()}`;
+  // MEASURED 2026-06-04 (clerk): after Google OAuth, clerk bounces to its
+  // sign-in showing "The External Account was not found" — Google signed
+  // in but no clerk account exists for this identity (same class as plunk's
+  // "No account found"). The added "…not found" / "couldn't find an
+  // account" / "no such account" variants below catch clerk's wording.
+  // Every phrase still requires the word "account" (or "external account"),
+  // so a bare 404 "Page not found" does NOT trip this and abandon a working
+  // OAuth session.
   const noAccountPhrase =
-    /no account found|account (?:doesn['’]?t|does not) exist|couldn['’]?t find (?:an|your) account|no account associated|sign up (?:first|to continue)|create an account|[?&]google-auth-error|register first/;
+    /no account found|external account was not found|account (?:was )?not found|no (?:such )?account (?:found|exists)|account (?:doesn['’]?t|does not) exist|couldn['’]?t find (?:an|your) account|no account associated|sign up (?:first|to continue)|create an account|[?&]google-auth-error|register first/;
   return noAccountPhrase.test(haystack);
 }
 
@@ -2506,6 +2514,27 @@ export function detectStuckOnGoogleOAuth(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+// Is the current URL an OAuth/SSO CALLBACK route — the redirect target
+// where the SPA exchanges the provider code for a session? MEASURED
+// 2026-06-04: clerk's `/sign-in/sso-callback` does a token exchange that
+// renders even slower than its already-slow dashboard (~15s over the
+// residential proxy). On a callback route the SPA IS making progress, so
+// the post-verify hydration loop grants it a larger budget; on every
+// other route the smaller budget holds (a never-hydrating page must not
+// burn the run cap). Matches on the pathname only (PSL-safe via URL parse,
+// try/catch → false for non-URLs).
+export function isOAuthCallbackRoute(url: string): boolean {
+  let pathname = "";
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  return /\/sso-callback|\/oauth\/callback|\/auth\/callback|\/callback(?:\/|$)|\/login\/callback/i.test(
+    pathname,
+  );
 }
 
 // Scan the inventory for the first OAuth affordance among `providers`,
@@ -7410,7 +7439,16 @@ ${formatInventory(input.inventory)}`,
       // wait re-runs every round and burns the 600s run cap. The escape for
       // a never-hydrating route is navigate-to-root post-OAuth, not a longer
       // wait here.
-      const HYDRATION_TICKS = 6;
+      //
+      // ADAPTIVE exception (MEASURED 2026-06-04, clerk): an OAuth/SSO
+      // CALLBACK route does a token exchange that renders even slower than a
+      // plain dashboard — clerk's `/sign-in/sso-callback` outlasts 18s and
+      // the bot bailed at the edge with `oauth_session_not_persisted`. On a
+      // callback route the SPA IS making progress, so 12x3s = 36s of
+      // patience is warranted; everywhere else the 6-tick budget holds so a
+      // genuinely-stuck route still hits the navigate-to-root escape fast.
+      // Read the URL fresh each round (it may redirect off the callback).
+      const HYDRATION_TICKS = isOAuthCallbackRoute(state.url) ? 12 : 6;
       for (
         let hydrationWait = 0;
         hydrationWait < HYDRATION_TICKS &&

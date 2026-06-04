@@ -856,6 +856,29 @@ describe("detectGoogleNoAccount — Google login-only re-route (plunk)", () => {
     expect(detectGoogleNoAccount("not-a-url", "No account found")).toBe(true);
     expect(detectGoogleNoAccount("not-a-url", "Welcome to your dashboard")).toBe(false);
   });
+
+  // MEASURED 2026-06-04: clerk's post-OAuth sign-in copy + guards against a
+  // bare 404 mistakenly abandoning a working OAuth session.
+  it("fires on clerk's 'The External Account was not found' copy", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://dashboard.clerk.com/sign-in",
+        "The External Account was not found.",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a bare 'Account not found' message", () => {
+    expect(
+      detectGoogleNoAccount("https://x.com/sign-in", "Account not found"),
+    ).toBe(true);
+  });
+
+  it("does NOT fire on a generic 404 page (no 'account' in the phrase)", () => {
+    expect(
+      detectGoogleNoAccount("https://x.com/missing", "404 Page not found"),
+    ).toBe(false);
+  });
 });
 
 // ───────────────────── scoreSignupButton oauthProvider ─────────────────────
