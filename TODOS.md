@@ -34,24 +34,31 @@ See memory `project-four-walls-measured-jun03`. Harnesses:
 - **codesandbox → stochastic Cloudflare** risk gate. Measured: a minimal
   browser config clears CF in ~12s but the bot's config sits near CF's
   threshold; no deterministic config fix (stale-cookie theory disproven).
-- **northflank → needs GSI.** Google auth is Google Identity Services
-  (`accounts.google.com/gsi/button`, FedCM — NOT a redirect); the bot's
-  click-redirect model can't drive it (false "signed in" → /login). GitHub
-  path is blocked by the bot's Google-preference even with a warm session.
-  Also fixed: `login` now routes through the proxy (a7071b1 — the
-  "github-login-marker-lies" root cause) + drops --enable-automation (95a7501).
+- **northflank → a 3-layer onion, not yet green.** Peeled by measurement:
+  1. Google auth is GSI/One-Tap (FedCM, no redirect) — built GSI/FedCM
+     support (below) but northflank's Google is *on-demand One-Tap*, not a
+     static gsi/button, so it doesn't surface as a clickable affordance.
+  2. Provider preference led with Google over the github pin → fixed
+     (72192c1: lead with a warm pin). Plus `login` now routes through the
+     proxy (a7071b1 — the "github-login-marker-lies" root cause: session was
+     made from the datacenter IP, used from residential → killed) + drops
+     --enable-automation (95a7501). GitHub session now persists.
+  3. **REMAINING BLOCKER:** even leading with github + hydrated, the bot
+     can't FIND northflank's GitHub/GitLab/Bitbucket buttons — they're
+     logo-only (no accessible text/aria label), so findOAuthButton misses
+     them and the bot falls back to email signup (→ verification withheld).
+     northflank's SPA is also websocket-gated (~15s hydration); the OAuth
+     scan is now hydration-aware (4cbaf3d). **Next: logo-button detection
+     (vision planner or `a[href*="github.com"]`-style icon-link heuristics).**
 
-  **GSI/FedCM support — WIP (this is the open item):**
-  - DONE: `BrowserController.hasGoogleGsiAffordance()` +
-    `tryGoogleGsiLogin()` (CDP `FedCm.enable` → auto-`selectAccount` on
-    `FedCm.dialogShown`, with a popup-variant fallback); wired into
-    `runOAuthFlow` (google + GSI detected → GSI driver instead of startOAuth).
-    CDP FedCm verified available in patchright 1.60.
-  - TODO: validate live against northflank; handle the FedCm "ConfirmIdpLogin"
-    dialog type + the "Continue as" confirm button (`FedCm.clickDialogButton`)
-    if `selectAccount` alone doesn't finalize; add the Google-preference
-    override so the bot can fall back to GitHub when GSI doesn't resolve; unit
-    coverage for the detection helper.
+  **GSI/FedCM support — SHIPPED (commit 4969584):**
+  `BrowserController.hasGoogleGsiAffordance()` + `tryGoogleGsiLogin()` (CDP
+  `FedCm.enable` → auto-`selectAccount` on `FedCm.dialogShown`, popup-variant
+  fallback); wired into `runOAuthFlow`. CDP FedCm verified in patchright 1.60.
+  - TODO for a true static-GSI service: handle the FedCm "ConfirmIdpLogin"
+    dialog + the "Continue as" confirm button (`FedCm.clickDialogButton`) if
+    `selectAccount` alone doesn't finalize; trigger One-Tap via
+    `google.accounts.id.prompt()` for the on-demand variant; unit coverage.
 
 ### A1 — Housekeeper harvest RUNNING [in-flight]
 Launched 2026-06-02 over **75 services** from the queue that have no
