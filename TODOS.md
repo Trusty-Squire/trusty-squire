@@ -43,13 +43,27 @@ See memory `project-four-walls-measured-jun03`. Harnesses:
      proxy (a7071b1 — the "github-login-marker-lies" root cause: session was
      made from the datacenter IP, used from residential → killed) + drops
      --enable-automation (95a7501). GitHub session now persists.
-  3. **REMAINING BLOCKER:** even leading with github + hydrated, the bot
-     can't FIND northflank's GitHub/GitLab/Bitbucket buttons — they're
-     logo-only (no accessible text/aria label), so findOAuthButton misses
-     them and the bot falls back to email signup (→ verification withheld).
-     northflank's SPA is also websocket-gated (~15s hydration); the OAuth
-     scan is now hydration-aware (4cbaf3d). **Next: logo-button detection
-     (vision planner or `a[href*="github.com"]`-style icon-link heuristics).**
+  3. Logo-only OAuth buttons — FIXED + VALIDATED (651eed8). northflank's
+     GitHub/GitLab/Bitbucket buttons are `<button><svg><title>GitHub</title>`,
+     whose title LEAKS into textContent ("GitHubGitHub", doubled — also
+     defeats `\bgithub\b`). findOAuthButton now matches a logo button whose
+     visible text is nothing-but-the-provider-name + iconLabel names it. The
+     bot now finds + drives northflank's GitHub button. (SPA is ws-gated
+     ~15s; OAuth scan is hydration-aware, 4cbaf3d.)
+  4. **REMAINING BLOCKER (human gate, not a bot gap):** GitHub forces a
+     one-time "Verify 2FA now" re-verification on the /authorize flow that
+     the bot fast-aborts (needs the operator's authenticator). So every
+     northflank OAuth path is walled: Google=GSI/One-Tap, GitHub=2FA-on-
+     authorize, GitLab/Bitbucket=no session, email=recaptcha+withheld
+     verification. northflank is effectively **needs-human** unless the
+     operator clears GitHub's 2FA wall (login --provider=github
+     --force-relogin → "Verify 2FA now") and it doesn't re-arm per-authorize.
+  - **Follow-up bug:** logged-in-providers.json got out of sync (github
+     session live in cookies but absent from the marker → loggedInProviders()
+     returned ["google"], so the pin-respecting order fell back to google).
+     Corrected manually this session. loggedInProviders() should be
+     cookie-backed (or markProviderLoggedIn made resilient to overwrite) so a
+     warm session is never invisible.
 
   **GSI/FedCM support — SHIPPED (commit 4969584):**
   `BrowserController.hasGoogleGsiAffordance()` + `tryGoogleGsiLogin()` (CDP
