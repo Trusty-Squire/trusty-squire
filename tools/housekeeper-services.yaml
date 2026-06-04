@@ -694,11 +694,23 @@
     '
 - slug: plunk
   name: Plunk
-  signup_url: https://app.useplunk.com/signup
+  signup_url: https://next-app.useplunk.com/auth/signup
   oauth_provider: google
   scope_hint: null
   status: pending
   notes: 'Open-source transactional email. Google OAuth + email.
+
+    2026-06-04: signup moved to the "Plunk Next" subdomain. The old
+
+    app.useplunk.com/signup is a 404 (the SPA silently shows /auth/login,
+
+    and Google OAuth there returns "No account found" — login-only). Real
+
+    email signup is next-app.useplunk.com/auth/signup (email + password +
+
+    "Create account"). Fix-1 (OAuth-no-account → form-fill fallback) fires
+
+    correctly; it just needs this URL to land on the real form.
 
     '
 - slug: mailtrap
