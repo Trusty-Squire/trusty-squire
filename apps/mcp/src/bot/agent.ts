@@ -1582,6 +1582,28 @@ export function classifySignupHtml(
   return "other";
 }
 
+// Pull the email address an email-verification wall names ("check your
+// <addr> inbox", "we sent a link to <addr>"). Returns the first email-shaped
+// token, or null. Used to poll the RIGHT alias when the wall was reached
+// without a fresh submit (a pending account may carry an alias from a prior
+// run, not task.email). Exported for unit tests.
+export function extractVerifyWallAlias(text: string): string | null {
+  const re = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const addr = m[0];
+    // Reject email-SHAPED asset references — raw HTML carries script/style
+    // srcs like "amplitude-analytics-browser@2.42.4-fe68beca4b18.js" that the
+    // pattern otherwise matches. A real verification alias never ends in a
+    // file extension.
+    if (/\.(?:js|mjs|css|map|png|jpe?g|svg|gif|ico|woff2?|ttf|webp)$/i.test(addr)) {
+      continue;
+    }
+    return addr;
+  }
+  return null;
+}
+
 // Pure: does this post-submit page look like a CONTINUATION step of the same
 // signup (a dedicated "Create your password" page — amplitude's step 2 — is the
 // canonical case) rather than a dashboard, a credentials page, or a
@@ -3895,6 +3917,54 @@ export class SignupAgent {
         this.buildInventory(steps, oauthCandidates),
       ]);
 
+      // Email-verification WALL reached without a fresh submit — e.g. OAuth
+      // landed on a pending account's "Verify your email — check <addr>" page.
+      // A real signup form still has fields to fill; a wall has only
+      // Open-Gmail / Resend / Return buttons, on which the form-fill planner
+      // stalls. Route to the post-submit inbox-poll + verification-link flow
+      // instead, polling the alias the wall names (which may differ from
+      // task.email when a prior run created the pending account).
+      {
+        // Use the already-fetched state.html (don't call extractText() again —
+        // an extra read would shift queue-backed test mocks and isn't needed:
+        // the verification copy is in the rendered HTML).
+        const wallText = state.html;
+        const hasFillableInput = inventory.some(
+          (e) =>
+            e.tag === "input" &&
+            (e.type === "email" ||
+              e.type === "text" ||
+              e.type === "password" ||
+              e.type === null) &&
+            e.visible !== false,
+        );
+        if (!hasFillableInput && expectsVerificationEmail(wallText)) {
+          const alias = extractVerifyWallAlias(wallText);
+          this.pendingVerificationAlias = alias;
+          steps.push(
+            `Form: email-verification wall (no fields to fill${alias !== null ? `, check ${alias}` : ""}) — ` +
+              `routing to the inbox-poll + verification-link flow.`,
+          );
+          // The named link may be stale (a pending account from a prior run);
+          // click "Resend verification email" if present to refresh it.
+          const resend = inventory.find((e) => {
+            if (e.tag !== "button" && e.tag !== "a") return false;
+            const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+            return /resend (?:verification )?(?:email|link)|send (?:it )?again/.test(t);
+          });
+          if (resend !== undefined) {
+            try {
+              await this.browser.click(resend.selector);
+              steps.push(`Form: clicked "Resend verification email" to refresh the link.`);
+              await this.browser.wait(2);
+            } catch {
+              // non-fatal — poll for whatever's already in the inbox
+            }
+          }
+          return { kind: "submitted" };
+        }
+      }
+
       // OAuth-first (T6/T13 + auto-prefer): when the page carries a
       // "Sign in with <provider>" affordance for a provider the bot can
       // use, that button unconditionally outranks any form field — hand
@@ -4630,6 +4700,11 @@ export class SignupAgent {
   // it. Cleared once the loop emits a step that targets the OTP
   // input, so the hint doesn't echo into later unrelated rounds.
   private pendingOtpCode: string | null = null;
+  // Set when planExecuteWithRetry routes an email-verification WALL (reached
+  // without a fresh submit — e.g. OAuth landed on a pending account's "Verify
+  // your email — check <addr>" page) into the post-submit email flow. The poll
+  // targets this alias (the one the wall names) instead of task.email.
+  private pendingVerificationAlias: string | null = null;
   // rc.39 — when postVerifyLoop exits because the planner returned
   // `done`, capture the planner's stated reason so the caller can
   // factor it into paywall classification. Koyeb (and similar)
@@ -5438,7 +5513,7 @@ export class SignupAgent {
           try {
             const email = await this.waitForVerificationEmail(
               task.inbox,
-              task.email,
+              this.pendingVerificationAlias ?? task.email,
               verificationTimeoutSeconds,
             );
             steps.push(`Received: "${email.subject}" from ${email.from_address}`);

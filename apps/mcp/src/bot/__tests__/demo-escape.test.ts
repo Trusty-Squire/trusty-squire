@@ -64,3 +64,27 @@ describe("findCreateAccountCta", () => {
     ).toBeNull();
   });
 });
+
+import { extractVerifyWallAlias } from "../agent.js";
+
+describe("extractVerifyWallAlias", () => {
+  it("extracts the alias an amplitude verify-wall names", () => {
+    expect(
+      extractVerifyWallAlias(
+        "Verify your email address Check your amplitude-7cd6ae3d41d8@trustysquire.ai inbox for an email verification link",
+      ),
+    ).toBe("amplitude-7cd6ae3d41d8@trustysquire.ai");
+  });
+  it("handles 'we sent a link to <addr>' phrasing", () => {
+    expect(extractVerifyWallAlias("We sent a verification link to jane@example.com — open it")).toBe("jane@example.com");
+  });
+  it("skips email-shaped asset refs in raw HTML (the amplitude .js false positive)", () => {
+    const html =
+      '<script src="amplitude-analytics-browser@2.42.4-fe68beca4b18.js"></script>' +
+      "Check your amplitude-7cd6ae3d41d8@trustysquire.ai inbox";
+    expect(extractVerifyWallAlias(html)).toBe("amplitude-7cd6ae3d41d8@trustysquire.ai");
+  });
+  it("returns null when no email is present", () => {
+    expect(extractVerifyWallAlias("Verify your email address")).toBeNull();
+  });
+});
