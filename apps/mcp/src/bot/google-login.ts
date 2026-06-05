@@ -27,6 +27,7 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import {
   cpSync,
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -432,6 +433,11 @@ interface HeadlessRig {
   // Temp dir websockify serves (branded vnc.html + the installed
   // noVNC core). Removed on teardown.
   webDir?: string;
+  // G14 — 0600 file holding the VNC password. x11vnc reads it via
+  // `-passwdfile rm:…` (and self-removes), so the secret never appears
+  // on the process command line where `ps` could read it. Tracked here
+  // as a belt-and-suspenders unlink in case x11vnc never started.
+  passFile?: string;
 }
 
 function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
@@ -515,6 +521,13 @@ function teardown(rig: HeadlessRig): void {
       rmSync(rig.webDir, { recursive: true, force: true });
     } catch {
       // best-effort
+    }
+  }
+  if (rig.passFile !== undefined) {
+    try {
+      rmSync(rig.passFile, { force: true });
+    } catch {
+      // best-effort — x11vnc's `rm:` prefix usually removed it already.
     }
   }
 }
@@ -767,11 +780,18 @@ async function runHeadlessChrome(
 
       // 3. x11vnc on the display — localhost-only, password-gated, -noshm
       //    (the box's X server lacks the shared-memory extension).
+      //    G14 — pass the password via a 0600 file, NOT `-passwd <plain>`
+      //    on argv (which any `ps` could read). `rm:` makes x11vnc unlink
+      //    the file right after reading it.
+      const passFile = join(tmpdir(), `tsq-vnc-${process.pid}-${vncPort}.pass`);
+      writeFileSync(passFile, vncPassword, { mode: 0o600 });
+      chmodSync(passFile, 0o600); // writeFileSync's mode is honored only on create
+      rig.passFile = passFile;
       rig.procs.push(
         spawnBg("x11vnc", [
           "-display", display,
           "-rfbport", String(vncPort),
-          "-passwd", vncPassword,
+          "-passwdfile", `rm:${passFile}`,
           "-localhost", "-forever", "-shared", "-noshm", "-quiet",
         ]),
       );
