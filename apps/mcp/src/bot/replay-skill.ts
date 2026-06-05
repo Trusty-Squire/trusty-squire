@@ -155,6 +155,17 @@ export type ReplayOutcome =
   | { kind: "skill_demoted"; reason: string }
   | { kind: "dry_pass"; stepsWalked: number };
 
+// Credential-reveal poll window (ms). 8s in production — a service's
+// post-Create modal can take several seconds to render the key. Read from env
+// per call so tests can set it tiny (the fake browser's wait() returns
+// instantly, so the loop otherwise busy-spins the full 8s of wall-clock,
+// dozens of times across replay-skill.test.ts → ~82s, which trips vitest's
+// worker heartbeat under CI parallelism and fails the release verify job).
+export function revealPollMs(): number {
+  const v = Number.parseInt(process.env.UNIVERSAL_BOT_REVEAL_POLL_MS ?? "", 10);
+  return Number.isFinite(v) && v > 0 ? v : 8000;
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
@@ -935,7 +946,7 @@ async function executeStep(
       // inventory + emptiness, ending in the diagnostic throw.
       const fallbackValidatorPoll =
         skill.credentials[0]?.post_extract_validator;
-      const pollDeadline = Date.now() + 8000;
+      const pollDeadline = Date.now() + revealPollMs();
       let inventory = await browser.extractInteractiveElements();
       let copyButtons = inventory.filter(isCopyButton);
       let target = copyButtons.length === 1
@@ -1085,7 +1096,7 @@ async function executeStep(
       // forever on Railway-class flows even with the polling above.
       const UUID_RE =
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      const deadline = Date.now() + 8000;
+      const deadline = Date.now() + revealPollMs();
       while (Date.now() < deadline) {
         const text = await browser.extractText();
         const extracted = extractApiKeyFromText(text);
