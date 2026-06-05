@@ -122,12 +122,35 @@ export function redactText(
   for (const tok of identityTokens) {
     out = out.replace(new RegExp(escapeRegExp(tok), "gi"), "[REDACTED_ID]");
   }
-  out = out.replace(HIGH_ENTROPY_PATTERN, "[REDACTED_TOKEN]");
+  // High-entropy catch-all → "x". The sweep mostly fires on CSS-in-JS class
+  // hashes and data-attrs (page NOISE), not real secrets, and a page littered
+  // with "[REDACTED_TOKEN]" strings misleads the planner into reaching for
+  // {"kind":"extract"} — an eval artifact that doesn't happen on the real
+  // (unredacted) page. A neutral "x" still removes any unprefixed secret while
+  // not reading as an extractable token. (Prefixed keys / JWTs / emails keep
+  // their explicit labels above — those are few and meaningful.)
+  out = out.replace(HIGH_ENTROPY_PATTERN, "x");
   return out;
 }
 
+// Operator handles to ALWAYS scrub, regardless of whether the email
+// co-occurs on the page. The operator's stable identity (a GitHub/Google
+// handle like "lunchboxfortwo") shows up as an avatar alt / username / URL
+// path on services where the full email never appears, so the email-local-part
+// derivation alone misses it. Configured, not hardcoded:
+//   TRUSTY_SQUIRE_REDACT_IDENTITIES=lunchboxfortwo,otherhandle
+export function envIdentityTokens(): string[] {
+  const raw = process.env.TRUSTY_SQUIRE_REDACT_IDENTITIES;
+  if (raw === undefined) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length >= 3);
+}
+
 // Gather every identity token across a whole capture (state + inventory text)
-// so the local-part of an email in one field scrubs the bare handle in another.
+// so the local-part of an email in one field scrubs the bare handle in another,
+// plus any operator handles from the env denylist.
 export function identityTokensForCase(
   state: OnboardingCaseFile["state"],
   inventory: readonly InteractiveElement[],
@@ -141,7 +164,9 @@ export function identityTokensForCase(
       if (typeof v === "string") parts.push(v);
     }
   }
-  return collectIdentityTokens(parts.join("\n"));
+  const tokens = collectIdentityTokens(parts.join("\n"));
+  for (const t of envIdentityTokens()) tokens.add(t);
+  return tokens;
 }
 
 export function redactInventory(

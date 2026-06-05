@@ -35,20 +35,28 @@ import type { InteractiveElement } from "../browser.js";
 // ── redaction (R3) ──────────────────────────────────────────────────
 
 describe("redactText", () => {
-  it("scrubs provider keys, JWTs, slack/aws/github tokens, emails", () => {
+  it("scrubs provider keys, JWTs, slack/aws/github tokens, emails (labeled)", () => {
     const cases: Array<[string, string]> = [
       ["here is sk-ABCDwxyz0123456789 done", "ABCDwxyz0123456789"],
       ["bearer eyJhbGci0i.eyJzdWIi0i.SflKxwRJSMabc tail", "SflKxwRJSM"],
       ["token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 x", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"],
       ["aws AKIAIOSFODNN7EXAMPLE end", "AKIAIOSFODNN7EXAMPLE"],
       ["mail to alias+tag@trustysquire.ai please", "alias+tag@trustysquire.ai"],
-      ["raw abc123DEF456ghi789JKL012mno345PQR678 z", "abc123DEF456ghi789JKL012mno345PQR678"],
     ];
     for (const [input, secret] of cases) {
       const out = redactText(input);
       expect(out).not.toContain(secret);
       expect(out).toMatch(/\[REDACTED_/);
     }
+  });
+
+  it("scrubs unprefixed high-entropy tokens to a neutral marker (no TOKEN label)", () => {
+    // The high-entropy sweep mostly hits CSS-hash noise; its replacement must
+    // NOT read as an extractable token (it biased the planner toward extract).
+    const out = redactText("raw abc123DEF456ghi789JKL012mno345PQR678 z");
+    expect(out).not.toContain("abc123DEF456ghi789JKL012mno345PQR678");
+    expect(out).not.toContain("REDACTED_TOKEN");
+    expect(out).toBe("raw x z");
   });
 
   it("leaves benign prose untouched", () => {
