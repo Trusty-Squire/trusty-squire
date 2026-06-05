@@ -178,6 +178,24 @@ export class OpenRouterClient implements LLMClient {
       // degrades to "first 3" instead of failing the whole call.
       body["models"] = [this.model, ...this.fallbackModels].slice(0, 3);
     }
+    // Determinism lever (eval only). OpenRouter load-balances one model across
+    // multiple backend providers, and different providers give different
+    // outputs even at temperature 0 — so cross-run results flip on knife-edge
+    // pages. UNIVERSAL_BOT_OR_PROVIDER pins the backend (single provider,
+    // fallbacks off) so the offline eval is reproducible run-to-run. Unset in
+    // production, where provider fallback is wanted for reliability.
+    const orProvider = process.env.UNIVERSAL_BOT_OR_PROVIDER;
+    // Only pin the Gemini PRIMARY — a Google provider can't serve the Anthropic
+    // premium fallback, and pinning it there is a guaranteed 404 when the
+    // parse-failure retry fires.
+    const isGoogleModel = /google\/|gemini/i.test(this.model);
+    if (orProvider !== undefined && orProvider.trim().length > 0 && isGoogleModel) {
+      body["provider"] = {
+        order: orProvider.split(",").map((s) => s.trim()).filter((s) => s.length > 0),
+        allow_fallbacks: false,
+      };
+      body["seed"] = 1;
+    }
 
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",

@@ -79,8 +79,16 @@ UNIVERSAL_BOT_LLM_TIER=free npx tsx src/bot/eval-gate.ts
 # → regress: X/X · target-tune: a/b · target-holdout: c/d   (exit 1 if regress < 100%)
 ```
 
-The planner runs at temperature 0 (A1) so the result is deterministic. CI (A6)
-wires `eval-gate` into a path-filtered workflow on planner-prompt changes.
+The planner runs at temperature 0 (A1). Temp 0 alone is NOT enough for
+cross-run reproducibility through OpenRouter: it load-balances one model across
+multiple backend providers, and different providers decide differently even at
+temp 0 — so knife-edge pages flip run-to-run. **For a deterministic gate, pin
+the backend:** `UNIVERSAL_BOT_OR_PROVIDER="Google AI Studio"` (single provider,
+fallbacks off, fixed seed; applies to the Gemini primary only, never the
+Anthropic premium fallback). The absolute pass rate is then provider-specific;
+the run-to-run *delta* of a prompt change is what the gate measures cleanly.
+CI (A6) wires `eval-gate` into a path-filtered workflow on planner-prompt
+changes.
 
 ## A7 findings (2026-06-05, first live iteration)
 
