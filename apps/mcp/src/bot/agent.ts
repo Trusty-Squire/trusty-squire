@@ -9292,6 +9292,16 @@ ${loginGuidance}
   The API-keys / tokens page appears only AFTER a resource exists. Do NOT
   return {"kind":"done"} or {"kind":"login"} on an empty dashboard while a
   create-resource CTA is visible — that is the path forward, not a dead end.
+- **KEYS PAGE WITH EXISTING KEYS — mint a fresh one, do NOT extract the old.**
+  On an API-keys / tokens page that lists EXISTING keys (masked as ••••, or
+  shown only with Copy / Reveal / Revoke / Delete buttons) AND offers a
+  "Create" / "Generate" / "New token" / "New key" button, the listed keys are
+  UNRECOVERABLE — their full secret was shown once, at creation, so a "Copy"
+  button there yields only the masked display or a useless id. CLICK the
+  Create / Generate button to mint a FRESH key; do NOT {"kind":"extract"} and do
+  NOT click an existing key's Copy button on THIS page. Extract ONLY once the
+  new key's full, unmasked value is shown (usually a one-time modal right after
+  you click Create).
 - **Pre-filled fields are DONE — advance, don't re-touch.** If a required
   onboarding field (first name, company, email) is ALREADY populated, or a
   required selectable is ALREADY selected, do NOT re-fill/re-select it — click
