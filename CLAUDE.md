@@ -252,7 +252,7 @@ stale (they reference a `prisma:generate` script that no longer exists)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.8.16`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.8.17`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was
@@ -261,17 +261,40 @@ stale bot. As of `0.1.7` the bot is folded into `apps/mcp/src/bot/`;
 one package, one version, no skew. `@trusty-squire/universal-bot` is no
 longer published — do not recreate it.
 
-**Pack with `pnpm`, publish the tarball with `npm`.** `pnpm pack`
-resolves any `workspace:*` devDeps; the npm account has passkey-based
-2FA so plain `npm publish` / `pnpm publish` fail with `EOTP` from a
-non-interactive shell. Use an **npm Automation token**:
+**RELEASING IS CI-AUTOMATED — DO NOT publish from a laptop, and never ask
+for the npm token (it lives in GitHub Actions secrets, not locally).**
+`.github/workflows/release.yml` is the publisher. It fires on **push to
+`main` or `staging`** whenever `apps/mcp/package.json`'s `version` changes
+(path-filtered to the mcp tarball's inputs), re-runs lint+typecheck+test as
+a gate, then `npm publish`es `@trusty-squire/mcp@<version>` with provenance
+and cuts a GitHub release `v<version>`. It is idempotent: if tag `v<version>`
+already exists it's a no-op, so re-pushing `main` without a version bump does
+NOT republish.
+
+The release SOP (this is exactly what `/ship` automates — bump + CHANGELOG +
+PR; the merge does the rest):
+1. Bump `apps/mcp/package.json` `version` (the **source of truth**).
+   - `main`  → a **stable** semver (e.g. `0.8.17`) → publishes the `latest` tag.
+   - `staging` → a **prerelease** (e.g. `0.8.18-rc.1`) → publishes the `next` tag.
+   (A branch↔shape mismatch fails the workflow loudly.)
+2. Open a `release-<version>` PR → `main` (or push the bump straight to
+   `main`/`staging`).
+3. Merge it. The release workflow publishes to npm + creates the GitHub
+   release automatically. Confirm with `gh run watch` / `npm view
+   @trusty-squire/mcp dist-tags`.
+
+**Manual publish = EMERGENCY FALLBACK ONLY** (CI down, registry outage —
+needs the operator's Automation token, which a normal release never touches):
 
 ```bash
-cd apps/mcp && pnpm pack
+cd apps/mcp && pnpm pack   # pnpm resolves workspace:* devDeps
 printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_AUTOMATION_TOKEN" > /tmp/np
 npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /tmp/np
 rm -f /tmp/np
 ```
+(The account's passkey-2FA makes plain `npm publish`/`pnpm publish` fail with
+`EOTP` non-interactively, which is why the manual path needs the Automation
+token — but again, prefer the CI path and don't go looking for the token.)
 
 **npx workspace-collision gotcha (don't lose this).** Never run
 `npx @trusty-squire/mcp <cmd>` from inside `~/trusty-squire/apps/mcp/`
