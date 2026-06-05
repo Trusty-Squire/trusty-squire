@@ -4,10 +4,19 @@
 // fan-out, and the cross-kind interleaving (a queue can in principle
 // mix kinds even though current providers don't).
 
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { runOneBatch, runHealPass } from "../orchestrator.js";
 import type { QueueProvider, HousekeeperTask } from "../queues/index.js";
 import type { Notifier, NotifierEvent } from "../notifier.js";
+
+// Disable inter-run pacing here: no cooldown, no daily cap, and an isolated
+// state file — these tests exercise dispatch/tally, not pacing (pacing.test.ts
+// owns that), and must not depend on or touch the operator's real counter.
+process.env.UNIVERSAL_BOT_RUN_COOLDOWN_SEC = "0";
+process.env.UNIVERSAL_BOT_DAILY_SIGNUP_CAP = "0";
+process.env.UNIVERSAL_BOT_PACE_STATE_FILE = join(tmpdir(), `pace-orch-test-${process.pid}.json`);
 import type { VerifierQueueItem } from "../registry-client.js";
 import type { Skill } from "@trusty-squire/skill-schema";
 import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
@@ -198,6 +207,7 @@ describe("runOneBatch — discover path", () => {
         return { kind: "ok", reason: "ok" };
       },
       log: () => undefined,
+      sleep: async () => undefined, // fast-forward the inter-run cooldown
     });
     expect(summary.blocked).toBe(1);
     expect(summary.succeeded).toBe(1);
@@ -234,6 +244,7 @@ describe("runOneBatch — notifier fan-out", () => {
       discover: async () => ({ kind: "ok", reason: "ok" }),
       notifiers: [notifier],
       log: () => undefined,
+      sleep: async () => undefined, // fast-forward the inter-run cooldown
     });
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ kind: "discover_outcome", service: "a", outcome: "ok" });

@@ -66,7 +66,14 @@ export interface PacerDeps {
   log?: (msg: string) => void;
 }
 
-const DEFAULT_STATE_PATH = join(homedir(), ".trusty-squire", "signup-pacing.json");
+// Env-overridable so tests isolate their own state file (and never touch the
+// operator's real daily counter).
+function defaultStatePath(): string {
+  return (
+    process.env.UNIVERSAL_BOT_PACE_STATE_FILE ??
+    join(homedir(), ".trusty-squire", "signup-pacing.json")
+  );
+}
 
 export class RunPacer {
   private riskStreak = 0;
@@ -81,7 +88,7 @@ export class RunPacer {
   ) {
     this.sleepFn = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.nowFn = deps.now ?? ((): number => Date.now());
-    this.statePath = deps.statePath ?? DEFAULT_STATE_PATH;
+    this.statePath = deps.statePath ?? defaultStatePath();
     this.log = deps.log ?? ((): void => {});
   }
 
