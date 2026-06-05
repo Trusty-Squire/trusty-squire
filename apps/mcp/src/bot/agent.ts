@@ -9274,6 +9274,11 @@ Strategy:
   the FIRST card (least committal). After the click, expect a
   "Continue" / "Next" button on the following round — do NOT return
   "done" while a card-radio cluster is still visible.
+- Do NOT \`fill\` an input whose text is an illustrative EXAMPLE (it reads like
+  a full sentence, e.g. "Optimize images for my eCommerce site…") when the page
+  ALSO shows preset choice buttons for the same step (e.g. "Optimize assets",
+  "Transform images", "Next"). That input is a placeholder, not a field to
+  complete — click a preset option button or "Next" instead.
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - **EMPTY DASHBOARD — create the first resource.** Many services do NOT expose

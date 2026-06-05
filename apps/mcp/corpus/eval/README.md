@@ -65,3 +65,27 @@ UNIVERSAL_BOT_LLM_TIER=free npx tsx src/bot/eval-gate.ts
 
 The planner runs at temperature 0 (A1) so the result is deterministic. CI (A6)
 wires `eval-gate` into a path-filtered workflow on planner-prompt changes.
+
+## A7 findings (2026-06-05, first live iteration)
+
+First live baseline (cheap Gemini, temp 0): `target-tune 5/6 · target-holdout 3/3`,
+after fixing an image media-type bug it surfaced (commit ad664c6) `5/6 · 2/3`.
+Two genuine misses, both finish-onboarding pickers the card-radio detector missed.
+
+- **cloudinary (tune) — FIXED.** The use-case option is an illustrative
+  placeholder `<input>` ("Optimize images for my…"); the real choices are
+  preset buttons. Added a narrow planner bullet ("don't `fill` an example
+  placeholder when preset option buttons exist") → tune 6/6, stable.
+- **statsig + baseten (holdout) — NOT prompt bugs; perturbation-fragile at N=9.**
+  Measured directly: adding a *semantically-neutral* filler line of similar
+  length flips BOTH (baseten PASS→FAIL, statsig FAIL→PASS) even though temp 0
+  makes each fixed prompt deterministic. Their decision boundary is razor-thin,
+  so at a 9-case corpus a single knife-edge flip swings the holdout ±33% and the
+  number stops being a trustworthy gate. Chasing them with wording is fighting
+  an artifact (the overfitting the harness exists to prevent). **The real fix is
+  corpus expansion** — grow the target set toward the design's ~20 services so
+  per-case sensitivity is diluted, then the picker/extract patterns become
+  tunable with a stable gate. statsig stays sealed (holdout); do NOT tune on it.
+
+Net: ship the stable tune-validated fix; treat fragile holdout cases as a
+corpus-size limitation, not a prompt defect.
