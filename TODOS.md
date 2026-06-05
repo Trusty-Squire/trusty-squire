@@ -123,15 +123,6 @@ routes the `sms_phone` services (vercel/mailersend/twilio/sendgrid) to manual**
 clears them via the relay instead. The deep part is the mid-signup pause/resume
 (a session registry + async continuation), not the two MCP tools.
 
-### G16 — Dedicated Cloudflare named tunnel for noVNC [P2, ~2 hours]
-Replaces the random `*.trycloudflare.com` cold-start (80-char random subdomain,
-~5-10s allocation, unreadable on a phone). A named tunnel
-(`cloudflared tunnel run <name>`) bound to `vnc.trustysquire.ai` keeps routing
-pre-allocated — ~1s startup, short/branded URL, clean teardown. Free tier.
-Supersedes G15. Implementation: provision named tunnel + token, bind DNS via
-Cloudflare API, swap `google-login.ts`'s `cloudflared tunnel --url` for
-`tunnel run <name>`. One-time operator setup (token in `harvester.env`).
-
 ---
 
 ## Tier 2 — known good, no time pressure
