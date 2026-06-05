@@ -15,6 +15,9 @@ import { registerAdminFunnelRoute } from "./routes/admin-funnel.js";
 import { registerInboxRoute } from "./routes/inbox.js";
 import { registerLLMRoute } from "./routes/llm.js";
 import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
+import { registerBillingRoute } from "./routes/billing.js";
+import { registerStripeWebhookRoute } from "./routes/stripe-webhook.js";
+import { stripeClientFromEnv } from "./services/stripe-client.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerVaultRoute } from "./routes/vault.js";
@@ -45,6 +48,10 @@ export interface BuildServerOpts {
   // route. Production builds leave this undefined and the route
   // builds its own forwarder from GMAIL_USER / GMAIL_APP_PASSWORD.
   emailForwarder?: import("./services/email-forwarder.js").EmailForwarder;
+  // Test seam — injects a fake StripeClient into the billing + webhook
+  // routes (no live Stripe calls, no real signature). Production leaves
+  // this undefined → built from STRIPE_SECRET_KEY env (null when unset).
+  stripeClient?: import("./services/stripe-client.js").StripeClient;
 }
 
 // Base URL of the web app that install/approval links point at. The
@@ -176,8 +183,24 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps: {
       inbox: deps.inbox,
       machineTokenStore: deps.machineTokenStore,
+      accountStore: deps.accountStore,
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
+  });
+  // Billing — Stripe Checkout/Portal (web-authed) + the webhook that flips
+  // subscription_status. stripeClient is null when STRIPE_SECRET_KEY is
+  // unset; the routes register regardless and 503.
+  const stripeClient = opts.stripeClient ?? stripeClientFromEnv();
+  await fastify.register(registerBillingRoute, {
+    deps: {
+      accountStore: deps.accountStore,
+      stripe: stripeClient,
+      webBaseUrl: defaultPwaBaseUrl(),
+    },
+    requireWeb: auth.requireWeb,
+  });
+  await fastify.register(registerStripeWebhookRoute, {
+    deps: { accountStore: deps.accountStore, stripe: stripeClient },
   });
   await fastify.register(registerLLMRoute, {
     deps: {

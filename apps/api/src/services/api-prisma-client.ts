@@ -39,6 +39,10 @@ interface AccountRow {
   display_name: string;
   default_vault: string | null;
   created_at: Date;
+  stripe_customer_id: string | null;
+  subscription_status: string;
+  subscription_id: string | null;
+  current_period_end: Date | null;
 }
 
 interface OAuthIdentityRow {
@@ -183,8 +187,11 @@ export interface ApiPrismaClient {
   account: {
     create(args: { data: Record<string, unknown> }): Promise<AccountRow>;
     findUnique(args: {
-      where: { id: string } | { email: string };
+      where: { id: string } | { email: string } | { stripe_customer_id: string };
     }): Promise<AccountRow | null>;
+    // Billing: the Stripe webhook flips subscription_status (+ the
+    // customer/subscription ids) on the mapped account.
+    update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<AccountRow>;
     // Hard delete — cascades OAuthIdentity, Device, ActiveMandate,
     // WebSession, AgentSession via FK onDelete: Cascade.
     delete(args: { where: { id: string } }): Promise<AccountRow>;

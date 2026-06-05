@@ -11,6 +11,7 @@ import type {
   AccountRecord,
   AccountStore,
   DeviceRecord,
+  SubscriptionPatch,
 } from "./in-memory-account-store.js";
 
 type Platform = "ios" | "android" | "web";
@@ -43,6 +44,33 @@ export class PrismaAccountStore implements AccountStore {
   async findAccountById(id: string): Promise<AccountRecord | null> {
     const row = await this.prisma.account.findUnique({ where: { id } });
     return row === null ? null : this.toAccount(row);
+  }
+
+  async findAccountByStripeCustomerId(customerId: string): Promise<AccountRecord | null> {
+    const row = await this.prisma.account.findUnique({
+      where: { stripe_customer_id: customerId },
+    });
+    return row === null ? null : this.toAccount(row);
+  }
+
+  async setSubscription(accountId: string, patch: SubscriptionPatch): Promise<void> {
+    // Only `subscription_status` is mandatory; the ids/period are written
+    // when present (create/renew) and left untouched on a bare status flip.
+    await this.prisma.account.update({
+      where: { id: accountId },
+      data: {
+        subscription_status: patch.subscription_status,
+        ...(patch.stripe_customer_id !== undefined
+          ? { stripe_customer_id: patch.stripe_customer_id }
+          : {}),
+        ...(patch.subscription_id !== undefined
+          ? { subscription_id: patch.subscription_id }
+          : {}),
+        ...(patch.current_period_end !== undefined
+          ? { current_period_end: patch.current_period_end }
+          : {}),
+      },
+    });
   }
 
   async touchDevice(input: {
@@ -108,6 +136,10 @@ export class PrismaAccountStore implements AccountStore {
     display_name: string;
     default_vault: string | null;
     created_at: Date;
+    stripe_customer_id: string | null;
+    subscription_status: string;
+    subscription_id: string | null;
+    current_period_end: Date | null;
   }): AccountRecord {
     return {
       id: row.id,
@@ -115,6 +147,10 @@ export class PrismaAccountStore implements AccountStore {
       display_name: row.display_name,
       default_vault: row.default_vault,
       created_at: row.created_at,
+      stripe_customer_id: row.stripe_customer_id,
+      subscription_status: row.subscription_status,
+      subscription_id: row.subscription_id,
+      current_period_end: row.current_period_end,
     };
   }
 

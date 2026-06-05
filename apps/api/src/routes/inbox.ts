@@ -23,10 +23,13 @@ import {
   type AuthPrincipal,
 } from "../auth/authorize-machine-or-admin.js";
 import { defaultQuota, type MachineTokenStore } from "../services/machine-tokens.js";
+import type { AccountStore } from "../services/in-memory-account-store.js";
+import { subscriptionUnlocksQuota } from "../services/subscription-status.js";
 
 export interface InboxRouteDeps {
   inbox: InboxService;
   machineTokenStore: MachineTokenStore;
+  accountStore: AccountStore;
   now?: () => Date;
 }
 
@@ -87,10 +90,14 @@ export async function registerInboxRoute(
 
     // Free-tier signup quota. Counts against this machine_token for
     // now; per-account aggregation (sum across all machine_tokens
-    // bound to an account) is a follow-up.
+    // bound to an account) is a follow-up. An active subscription on the
+    // token's bound account lifts the quota entirely.
     if (principal.kind === "machine") {
       const quota = defaultQuota();
-      if (principal.signup_count >= quota) {
+      if (
+        principal.signup_count >= quota &&
+        !(await accountHasActiveSubscription(opts.deps.accountStore, principal))
+      ) {
         reply.code(402).send({
           error: "payment_required",
           quota_limit: quota,
@@ -228,4 +235,19 @@ export async function registerInboxRoute(
 
 function webAppBaseUrl(): string {
   return process.env.PWA_BASE_URL ?? "https://trustysquire.ai";
+}
+
+// Whether the machine token's BOUND account carries an active (quota-
+// lifting) subscription. Keyed strictly off the token's paired_account_id
+// — never the request body's account_id — so a caller can't claim someone
+// else's paid status. An unbound token (null) or unknown account falls
+// through to the free quota.
+async function accountHasActiveSubscription(
+  accountStore: AccountStore,
+  principal: { paired_account_id: string | null },
+): Promise<boolean> {
+  if (principal.paired_account_id === null) return false;
+  const account = await accountStore.findAccountById(principal.paired_account_id);
+  if (account === null) return false;
+  return subscriptionUnlocksQuota(account.subscription_status);
 }
