@@ -1,0 +1,26 @@
+# Build-context exclusions for the Fly deploy.
+#
+# flyctl resolves .dockerignore next to the --dockerfile
+# (apps/api/Dockerfile.fly), NOT the repo-root .dockerignore — so without
+# this file a cold remote builder ships the ENTIRE monorepo (~900MB of
+# node_modules + .git) over the wire every deploy, which is the ~6min
+# "transferring context" stall. Everything excluded here is either
+# regenerated inside the build (node_modules via `pnpm install`, dist via
+# `pnpm build`, the prisma client via `prisma generate`) or irrelevant to
+# it. Patterns are relative to the build context root (the repo root).
+**/node_modules
+.git
+.github
+**/.next
+**/dist
+**/.turbo
+**/*.tsbuildinfo
+**/coverage
+*.log
+.env
+.env.*
+.demo-logs
+.demo-pids
+.demo-urls
+debug-*.png
+debug-*.html
