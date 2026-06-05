@@ -52,7 +52,8 @@ npx tsx src/bot/label-target.ts ~/.trusty-squire/corpus/onboarding/<svc>-<run>-r
 
 Each case carries a `rationale` (audit trail) and `theme`. **`holdout/` is
 sealed**: report its macro-avg lift, never iterate the prompt against it (R5).
-The corpus is **20 cases (14 tune / 6 holdout)** across the three themes — grown
+The corpus is **30 cases (22 tune / 8 holdout)** across four themes
+(create-resource, locate-in-ui, finish-onboarding, oauth-login-wall) — grown
 from the initial 9 to dampen the per-case perturbation-fragility the first live
 A7 run exposed (see findings below). Grow it further as new N1 services surface.
 
@@ -62,6 +63,13 @@ on the page (e.g. `lunchboxfortwo` from `lunchboxfortwo@gmail.com`) and removes
 it everywhere — bare usernames leak as team names ("…'s team") and URL paths
 (`/users/<handle>/…`) that carry no `@`. Generic role local-parts
 (support/billing/security/…) are never treated as identities.
+
+The high-entropy catch-all (unprefixed tokens / CSS-hash noise) is replaced with
+a neutral `x`, NOT a `[REDACTED_TOKEN]` label — a page littered with "TOKEN"
+strings biased the planner toward `extract` (an eval artifact that doesn't happen
+on the real page). Set `TRUSTY_SQUIRE_REDACT_IDENTITIES=<handle>,…` so the
+redactor always scrubs the operator's account handle (it leaks as a bare
+username / avatar alt where the email never co-occurs).
 
 ## Running the gate
 
