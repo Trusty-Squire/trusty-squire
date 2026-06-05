@@ -4797,6 +4797,10 @@ export class SignupAgent {
     // so callLLM can detect a parse failure and trigger the premium
     // retry without the caller having to thread that logic through.
     parse?: (raw: string) => T;
+    // Sampling temperature. The navigation/form planners pass 0 for
+    // deterministic decisions (see docs/DESIGN-planner-navigation-eval.md);
+    // omitted → provider default.
+    temperature?: number;
   }): Promise<T extends undefined ? string : T> {
     // Use a typed helper because the conditional return type confuses
     // the inner narrowing.
@@ -4808,6 +4812,7 @@ export class SignupAgent {
     userBlocks: LLMBlock[];
     maxTokens: number;
     parse?: (raw: string) => T;
+    temperature?: number;
   }): Promise<T | string> {
     const callOne = async (client: LLMClient): Promise<string> => {
       if (this.llmCallCount >= MAX_LLM_CALLS_PER_SIGNUP) {
@@ -4827,6 +4832,7 @@ export class SignupAgent {
         system: args.system,
         user: args.userBlocks,
         max_tokens: args.maxTokens,
+        ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
       });
       this.llmCallCount += 1;
       this.backendsUsed.push(resp.backend);
@@ -6766,6 +6772,9 @@ export class SignupAgent {
       const screenshot = state.screenshot;
       if (screenshot === undefined || screenshot.length === 0) return null;
       const reply = await this.callLLM<string>({
+        // Reading a fixed number off a screen has one right answer — no
+        // sampling.
+        temperature: 0,
         system:
           "You read numbers from Google authentication challenge screens. " +
           "The screen shows a 2-3 digit number the user must tap on their phone " +
@@ -6928,6 +6937,9 @@ ${formatInventory(input.inventory)}`,
       system: systemPrompt,
       userBlocks,
       maxTokens: 1500,
+      // Deterministic form-fill picks (same rationale as the post-verify
+      // planner — D2). Removes a run-to-run flakiness source.
+      temperature: 0,
       parse: (raw) => parseSignupPlan(raw, allowed),
     });
   }
@@ -9303,6 +9315,12 @@ ${formatInventory(input.inventory)}${
       system: systemPrompt,
       userBlocks,
       maxTokens: 500,
+      // Deterministic: the same dashboard page must yield the same next step
+      // run-to-run, so the offline eval is a faithful, noise-free signal and
+      // signups don't "randomly" navigate differently (D2 / DESIGN-planner-
+      // navigation-eval.md). The stall-detector + prior-action memory are the
+      // escape from a deterministic loop.
+      temperature: 0,
       parse: (raw) => {
         const step = parsePostVerifyStep(raw, allowed);
         // A `check` must land on a real checkbox/radio — the planner

@@ -370,4 +370,48 @@ describe("/v1/llm/chat", () => {
     expect(res.statusCode).toBe(503);
     expect(res.json()).toMatchObject({ error: "llm_proxy_not_configured" });
   });
+
+  // A1 — the navigation planner sends temperature 0 for deterministic
+  // decisions; the proxy must forward it to OpenRouter (and omit it otherwise
+  // so non-planner callers keep the provider default).
+  function okOpenRouter(): ReturnType<typeof vi.fn> {
+    return vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+          model: "google/gemini-flash-1.5",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }
+
+  it("forwards temperature to OpenRouter when the body sets it", async () => {
+    const fetchMock = okOpenRouter();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, temperature: 0 },
+    });
+    expect(res.statusCode).toBe(200);
+    const orBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+    expect(orBody).toMatchObject({ temperature: 0 });
+  });
+
+  it("omits temperature from the OpenRouter body when unset", async () => {
+    const fetchMock = okOpenRouter();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: VALID_BODY,
+    });
+    expect(res.statusCode).toBe(200);
+    const orBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+    expect("temperature" in orBody).toBe(false);
+  });
 });
