@@ -218,3 +218,35 @@ describe("ProxyLLMClient — retry on transient upstream errors", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("ProxyLLMClient — temperature forwarding (A1)", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+  });
+
+  function captureBody(): { mock: ReturnType<typeof vi.fn>; body: () => Record<string, unknown> } {
+    const mock = vi.fn(async () =>
+      mockResponse(200, JSON.stringify({ text: "ok", backend: "b" })),
+    );
+    globalThis.fetch = mock as unknown as typeof fetch;
+    return {
+      mock,
+      body: () =>
+        JSON.parse(
+          (mock.mock.calls[0] as unknown as [unknown, { body: string }])[1].body,
+        ),
+    };
+  }
+
+  it("includes temperature in the wire body when set", async () => {
+    const cap = captureBody();
+    await newClient().createMessage({ ...REQUEST_FIXTURE, temperature: 0 });
+    expect(cap.body()).toMatchObject({ temperature: 0 });
+  });
+
+  it("omits temperature entirely when unset (provider default)", async () => {
+    const cap = captureBody();
+    await newClient().createMessage(REQUEST_FIXTURE);
+    expect("temperature" in cap.body()).toBe(false);
+  });
+})

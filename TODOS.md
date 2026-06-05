@@ -52,6 +52,15 @@ bespoke (multi-step wizards, complex key-creation forms, no-obvious-key-path).
 Weigh each round against diminishing returns. Pairs with
 [[feedback-generalize-not-per-service]] + [[project-planner-generalization-plan]].
 
+**Tooling landed (0.8.18):** the offline navigation-planner eval harness
+(`docs/DESIGN-planner-navigation-eval.md`) — temp-0 deterministic planner,
+auto-derived redacted regression corpus, hand-labeled target set, gated runner
+(`eval-gate`), CI gate, + a failure-stage flakiness aggregator. First live
+iteration fixed the cloudinary use-case-picker miss and surfaced + fixed an
+image media-type bug. **Open:** the holdout is perturbation-fragile at N=9 —
+expand the target corpus toward ~20 services before further prompt iteration
+(the regress set stays empty until new signups flow A2 outcome sidecars).
+
 ### N2 — amplitude: clean-identity end-to-end [P2, one run from a credential]
 Mechanically conquered (demo-escape → form → multi-step password → account
 created → activation email received → verify link followed). Not a clean

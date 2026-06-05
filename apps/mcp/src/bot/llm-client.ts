@@ -43,6 +43,13 @@ export interface LLMRequest {
   system: string;
   user: LLMBlock[];
   max_tokens: number;
+  // Sampling temperature. Omitted → the provider default (~0.7), i.e.
+  // non-deterministic: the same prompt can decide differently run-to-run. The
+  // post-OAuth navigation planner sets this to 0 so a given page yields the
+  // same decision every time — kills the dominant planner-flakiness source and
+  // makes the offline eval (eval-onboarding) faithful to production. See
+  // docs/DESIGN-planner-navigation-eval.md.
+  temperature?: number;
 }
 
 export interface LLMResponse {
@@ -86,6 +93,7 @@ export class AnthropicDirectClient implements LLMClient {
     const resp = await this.client.messages.create({
       model: this.model,
       max_tokens: req.max_tokens,
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       system: req.system,
       messages: [{ role: "user", content }],
     });
@@ -157,6 +165,7 @@ export class OpenRouterClient implements LLMClient {
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: req.max_tokens,
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       messages: [
         { role: "system", content: req.system },
         { role: "user", content: userContent },
@@ -294,6 +303,7 @@ export class ProxyLLMClient implements LLMClient {
           : { kind: "text" as const, text: b.text },
       ),
       max_tokens: req.max_tokens,
+      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       tier: this.tier,
     };
     const payload = JSON.stringify(body);

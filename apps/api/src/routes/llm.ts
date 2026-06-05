@@ -52,6 +52,9 @@ const chatBodySchema = z.object({
   //             waiting; quality drops are tolerable; rate-limit
   //             failures auto-fall through to the paid escape).
   tier: z.enum(["cheap", "premium", "free"]).default("cheap"),
+  // Sampling temperature, forwarded to OpenRouter. Omitted → provider default
+  // (~0.7). The navigation planner sends 0 for deterministic decisions.
+  temperature: z.number().min(0).max(2).optional(),
 });
 
 const CHEAP_MODEL = process.env.LLM_PROXY_CHEAP_MODEL ?? "google/gemini-flash-1.5";
@@ -188,6 +191,9 @@ export async function registerLLMRoute(
     const body: Record<string, unknown> = {
       model: primaryModel,
       max_tokens: parsed.data.max_tokens,
+      ...(parsed.data.temperature !== undefined
+        ? { temperature: parsed.data.temperature }
+        : {}),
       messages: [
         { role: "system", content: parsed.data.system },
         { role: "user", content: userContent },
