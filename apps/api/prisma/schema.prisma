@@ -161,7 +161,15 @@ model Account {
   // "free" default, "past_due", "canceled") leaves the quota in force.
   // The Stripe webhook is the only writer; the customer/subscription ids
   // are stored so the portal + subsequent webhook events can map back.
-  stripe_customer_id  String?   @unique
+  //
+  // NOT @unique on purpose: `prisma db push` (our flag-less release_command)
+  // refuses to add a unique constraint without --accept-data-loss — on every
+  // DB, fresh or not, since the check is static. The deploy is meant to abort
+  // on destructive migrations, so a unique constraint can never go through it.
+  // Uniqueness holds by construction instead (the webhook is the only writer,
+  // one Stripe customer per account); the index backs the customer→account
+  // lookup. Add the DB constraint later via a deliberate, flagged migration.
+  stripe_customer_id  String?
   subscription_status String    @default("free")
   subscription_id     String?
   current_period_end  DateTime?
@@ -171,6 +179,8 @@ model Account {
   web_sessions     WebSession[]
   agent_sessions   AgentSession[]
   active_mandate   ActiveMandate?
+
+  @@index([stripe_customer_id])
 }
 
 // A linked OAuth provider identity. The (provider, provider_user_id)
