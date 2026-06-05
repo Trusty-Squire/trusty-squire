@@ -40,12 +40,15 @@ import type { PostVerifyStep } from "./agent.js";
 
 type StepKind = PostVerifyStep["kind"];
 
+// The complete PostVerifyStep kind union (agent.ts). "check" (tick a ToS
+// checkbox) was missing — a real planner move on org-create forms.
 const VALID_KINDS: ReadonlySet<string> = new Set([
   "click",
   "fill",
   "navigate",
   "extract",
   "select",
+  "check",
   "done",
   "login",
   "wait",

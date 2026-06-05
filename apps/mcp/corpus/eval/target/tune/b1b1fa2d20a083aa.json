@@ -5,7 +5,7 @@
   "source": "human",
   "holdout": false,
   "theme": "create-resource",
-  "rationale": "must create the organization (fill name + Create) before any key exists",
+  "rationale": "org-create form with a REQUIRED ToS checkbox (input[name=terms]): fill name, tick terms, then Create — all valid; checkbox gates submit",
   "name": "Mistral — Admin - Mistral AI",
   "oauth": true,
   "state": {
@@ -162,6 +162,7 @@
   ],
   "expect": {
     "acceptKinds": [
+      "check",
       "click",
       "fill",
       "navigate"
