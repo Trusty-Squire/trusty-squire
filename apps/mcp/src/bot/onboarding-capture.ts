@@ -42,6 +42,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep, SignupResult } from "./agent.js";
+import { classifyFailureStage, type FailureStage } from "./failure-stage.js";
 
 // Capture format version. Bumped when round-shape changes incompatibly.
 // The promoter rejects unknown versions (E2). Same-major minor changes
@@ -235,9 +236,9 @@ export interface RunOutcomeRecord {
   // The credential field NAMES (api_key / username / …) — safe labels,
   // never the secret values. See the REDACTION note above.
   credential_fields: readonly string[];
-  // Coarse, best-effort classification of where a failed run stopped.
-  // "none" on success. See classifyFailureStage.
-  failure_stage: string;
+  // Which terminal stage a failed run stopped at (B1 taxonomy). "none" on
+  // success. See classifyFailureStage in failure-stage.ts.
+  failure_stage: FailureStage;
   // Highest captured round index, or null if the run captured no rounds.
   terminal_round: number | null;
 }
@@ -249,23 +250,11 @@ export interface OnboardingOutcomeFile {
   outcome: RunOutcomeRecord;
 }
 
-// Coarse failure-stage label. Pure + exported so the eval and tests can
-// reason about it without a live run. `reachedOnboarding` is true when
-// the run captured at least one post-verify round — it disambiguates a
-// form-stage bail (never got past signup) from a navigation-stage bail
-// (got into onboarding then stuck), which the error string alone can't.
-export function classifyFailureStage(
-  result: Pick<SignupResult, "success" | "error" | "captcha">,
-  reachedOnboarding: boolean,
-): string {
-  if (result.success) return "none";
-  if (result.captcha?.blocked) return "captcha";
-  const err = (result.error ?? "").toLowerCase();
-  if (err.includes("anti_bot") || err.includes("anti-bot")) return "anti_bot";
-  if (err.includes("oauth")) return "oauth";
-  if (err.includes("verification") || err.includes("verify")) return "verification";
-  if (reachedOnboarding) return "navigation";
-  return "form";
+// True when this run captured at least one post-verify round. Lets the
+// finalizer derive `reachedOnboarding` for the failure-stage classifier
+// without re-reading the disk.
+export function capturedAnyRound(): boolean {
+  return lastRound !== undefined;
 }
 
 // Redaction-safe summary of a finished run. Pure + exported for tests.

@@ -37,6 +37,7 @@ import {
 } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
+import type { FailureStage } from "./failure-stage.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
   pickLLMPair,
@@ -848,6 +849,10 @@ export interface SignupResult {
   };
   error?: string;
   steps: string[];
+  // B1 — the terminal failure-stage label (flakiness taxonomy). Set on the
+  // finished result so telemetry + the outcome sidecar share one value.
+  // "none" on success; see classifyFailureStage in failure-stage.ts.
+  failure_stage?: FailureStage;
   // How many LLM calls this run made. Useful for cost accounting and
   // for catching regressions where a refactor accidentally doubles the
   // round-trips.

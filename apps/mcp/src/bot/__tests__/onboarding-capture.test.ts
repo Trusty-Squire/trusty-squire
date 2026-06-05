@@ -13,7 +13,6 @@ import {
   CAPTURE_FORMAT_VERSION,
   captureOnboardingRound,
   captureRunOutcome,
-  classifyFailureStage,
   resetCaptureChain,
   resolveCaptureDir,
   summarizeRunOutcome,
@@ -445,31 +444,8 @@ function mockResult(over: Partial<SignupResult> = {}): SignupResult {
   };
 }
 
-describe("classifyFailureStage", () => {
-  it("returns 'none' on success", () => {
-    expect(classifyFailureStage({ success: true }, true)).toBe("none");
-  });
-
-  it("classifies a blocked captcha", () => {
-    expect(
-      classifyFailureStage(
-        { success: false, captcha: { kind: "turnstile", variant: "turnstile", challenge_rendered: true, blocked: true } },
-        false,
-      ),
-    ).toBe("captcha");
-  });
-
-  it("reads anti-bot / oauth / verification from the error string", () => {
-    expect(classifyFailureStage({ success: false, error: "anti_bot_blocked" }, false)).toBe("anti_bot");
-    expect(classifyFailureStage({ success: false, error: "oauth_required" }, false)).toBe("oauth");
-    expect(classifyFailureStage({ success: false, error: "verification_not_sent" }, false)).toBe("verification");
-  });
-
-  it("uses reachedOnboarding to split navigation from form failures", () => {
-    expect(classifyFailureStage({ success: false, error: "stuck" }, true)).toBe("navigation");
-    expect(classifyFailureStage({ success: false, error: "stuck" }, false)).toBe("form");
-  });
-});
+// classifyFailureStage now lives in failure-stage.ts (B1) with its own
+// table test — see failure-stage.test.ts.
 
 describe("summarizeRunOutcome — redaction (R3)", () => {
   it("records credential FIELD NAMES, never values", () => {

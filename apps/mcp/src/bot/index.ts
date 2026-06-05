@@ -14,7 +14,8 @@ import type { AgentInbox } from "./agent.js";
 import { withOAuthLock } from "./oauth-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
-import { captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
+import { capturedAnyRound, captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
+import { classifyFailureStage } from "./failure-stage.js";
 
 export {
   type SignupResult,
@@ -195,6 +196,11 @@ export class UniversalSignupBot {
       if (result.error) {
         console.error(`[UniversalBot] Error: ${result.error}`);
       }
+
+      // B1 — tag the structured terminal stage onto the result so telemetry
+      // and the outcome sidecar share one value (the flakiness histogram is
+      // built from it). reachedOnboarding = did any post-verify round capture.
+      result.failure_stage = classifyFailureStage(result, capturedAnyRound());
 
       // A2 — write the run-outcome sidecar next to this run's captured
       // rounds so the offline eval (A3) can label them: rounds from a

@@ -116,7 +116,7 @@ function mkOutcome(ok: boolean, terminal: number | null): OnboardingOutcomeFile 
       ok,
       credential_present: ok,
       credential_fields: ok ? ["api_key"] : [],
-      failure_stage: ok ? "none" : "navigation",
+      failure_stage: ok ? "none" : "planner_loop",
       terminal_round: terminal,
     },
   };
