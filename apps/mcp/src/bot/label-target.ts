@@ -25,6 +25,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   caseId,
+  identityTokensForCase,
   pageSignature,
   redactInventory,
   redactPageState,
@@ -39,12 +40,15 @@ import type { PostVerifyStep } from "./agent.js";
 
 type StepKind = PostVerifyStep["kind"];
 
+// The complete PostVerifyStep kind union (agent.ts). "check" (tick a ToS
+// checkbox) was missing — a real planner move on org-create forms.
 const VALID_KINDS: ReadonlySet<string> = new Set([
   "click",
   "fill",
   "navigate",
   "extract",
   "select",
+  "check",
   "done",
   "login",
   "wait",
@@ -75,6 +79,7 @@ export function buildTargetCase(
     if (!VALID_KINDS.has(k)) throw new Error(`unknown step kind: ${k}`);
   }
   const sig = pageSignature(capture.service, capture.state, capture.inventory);
+  const idTokens = identityTokensForCase(capture.state, capture.inventory);
   return {
     id: caseId(sig),
     service: capture.service,
@@ -85,8 +90,8 @@ export function buildTargetCase(
     ...(label.rationale !== undefined ? { rationale: label.rationale } : {}),
     name: `${capture.service} — ${capture.state.title || capture.state.url}`,
     oauth: capture.oauth,
-    state: redactPageState(capture.state),
-    inventory: redactInventory(capture.inventory),
+    state: redactPageState(capture.state, idTokens),
+    inventory: redactInventory(capture.inventory, idTokens),
     expect: {
       acceptKinds: [...label.acceptKinds].sort(),
       ...(label.rejectKinds && label.rejectKinds.length > 0

@@ -65,6 +65,10 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*\b/gi,
   // Prefixed provider keys (sk-/pk_/rnd_/tsq_/re_/key-/api_/token_ …)
   /\b(?:sk|pk|rk|ak|sb|re|rnd|tsq|key|api|tok|token|secret|access)[-_][A-Za-z0-9]{12,}\b/gi,
+  // Long hex runs — API tokens / hashes that carry no prefix and fall under
+  // the 32-char high-entropy floor (e.g. IPInfo's 14-hex access token). 12+
+  // pure-hex is overwhelmingly a token/hash, not page text.
+  /\b[0-9a-f]{12,}\b/gi,
 ];
 // Email / alias — both the local and inbound trustysquire aliases plus any
 // other address present in the page.
@@ -75,40 +79,126 @@ const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 const HIGH_ENTROPY_PATTERN =
   /\b(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g;
 
-export function redactText(input: string): string {
+// Generic email local-parts that are roles, not identities — never scrub these
+// as PII (they'd over-redact legitimate page text).
+const GENERIC_LOCALPARTS: ReadonlySet<string> = new Set([
+  "support",
+  "contact",
+  "noreply",
+  "no-reply",
+  "account",
+  "billing",
+  "security",
+  "notifications",
+]);
+
+// Collect identity tokens from a case's full text: the local-part of every
+// email present (e.g. "lunchboxfortwo" from "lunchboxfortwo@gmail.com"). The
+// operator's handle leaks as a bare username in team names ("lunchboxfortwo's
+// team") and URL paths ("/users/lunchboxfortwo/…") that carry no "@", so the
+// email pattern alone misses them. We scrub the local-part everywhere it
+// appears. Length >=6 + the generic-role denylist keeps us off common words.
+export function collectIdentityTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const m of text.matchAll(EMAIL_PATTERN)) {
+    const local = m[0].split("@")[0];
+    if (local === undefined) continue;
+    const lc = local.toLowerCase();
+    if (lc.length >= 6 && !GENERIC_LOCALPARTS.has(lc)) tokens.add(lc);
+  }
+  return tokens;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function redactText(
+  input: string,
+  identityTokens: ReadonlySet<string> = new Set(),
+): string {
   let out = input;
   for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED_SECRET]");
   out = out.replace(EMAIL_PATTERN, "[REDACTED_EMAIL]");
-  out = out.replace(HIGH_ENTROPY_PATTERN, "[REDACTED_TOKEN]");
+  // Identity handles: substring (not word-boundary) so "Llunchboxfortwo" and
+  // "/teams/lunchboxfortwo" are both caught. Tokens are >=6-char distinct
+  // account handles, so substring scrubbing won't hit common words.
+  for (const tok of identityTokens) {
+    out = out.replace(new RegExp(escapeRegExp(tok), "gi"), "[REDACTED_ID]");
+  }
+  // High-entropy catch-all → "x". The sweep mostly fires on CSS-in-JS class
+  // hashes and data-attrs (page NOISE), not real secrets, and a page littered
+  // with "[REDACTED_TOKEN]" strings misleads the planner into reaching for
+  // {"kind":"extract"} — an eval artifact that doesn't happen on the real
+  // (unredacted) page. A neutral "x" still removes any unprefixed secret while
+  // not reading as an extractable token. (Prefixed keys / JWTs / emails keep
+  // their explicit labels above — those are few and meaningful.)
+  out = out.replace(HIGH_ENTROPY_PATTERN, "x");
   return out;
 }
 
-function redactOrNull(v: string | null): string | null {
-  return v === null ? null : redactText(v);
+// Operator handles to ALWAYS scrub, regardless of whether the email
+// co-occurs on the page. The operator's stable identity (a GitHub/Google
+// handle like "lunchboxfortwo") shows up as an avatar alt / username / URL
+// path on services where the full email never appears, so the email-local-part
+// derivation alone misses it. Configured, not hardcoded:
+//   TRUSTY_SQUIRE_REDACT_IDENTITIES=lunchboxfortwo,otherhandle
+export function envIdentityTokens(): string[] {
+  const raw = process.env.TRUSTY_SQUIRE_REDACT_IDENTITIES;
+  if (raw === undefined) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length >= 3);
 }
 
-export function redactInventory(inv: readonly InteractiveElement[]): InteractiveElement[] {
+// Gather every identity token across a whole capture (state + inventory text)
+// so the local-part of an email in one field scrubs the bare handle in another,
+// plus any operator handles from the env denylist.
+export function identityTokensForCase(
+  state: OnboardingCaseFile["state"],
+  inventory: readonly InteractiveElement[],
+): Set<string> {
+  const parts: string[] = [state.url, state.title, state.html];
+  for (const e of inventory) {
+    for (const v of [
+      e.id, e.name, e.placeholder, e.ariaLabel, e.labelText, e.visibleText,
+      e.selector, e.href, e.iconLabel, e.title, e.value, e.selectedOptionText,
+    ]) {
+      if (typeof v === "string") parts.push(v);
+    }
+  }
+  const tokens = collectIdentityTokens(parts.join("\n"));
+  for (const t of envIdentityTokens()) tokens.add(t);
+  return tokens;
+}
+
+export function redactInventory(
+  inv: readonly InteractiveElement[],
+  identityTokens: ReadonlySet<string> = new Set(),
+): InteractiveElement[] {
+  const r = (v: string | null): string | null => (v === null ? null : redactText(v, identityTokens));
   return inv.map((e) => ({
     ...e,
-    id: redactOrNull(e.id),
-    name: redactOrNull(e.name),
-    placeholder: redactOrNull(e.placeholder),
-    ariaLabel: redactOrNull(e.ariaLabel),
-    labelText: redactOrNull(e.labelText),
-    visibleText: redactOrNull(e.visibleText),
-    selector: redactText(e.selector),
-    ...(e.href !== undefined ? { href: redactOrNull(e.href) } : {}),
-    ...(e.iconLabel !== undefined ? { iconLabel: redactOrNull(e.iconLabel) } : {}),
-    ...(e.title !== undefined ? { title: redactOrNull(e.title) } : {}),
-    ...(e.value !== undefined ? { value: redactOrNull(e.value) } : {}),
+    id: r(e.id),
+    name: r(e.name),
+    placeholder: r(e.placeholder),
+    ariaLabel: r(e.ariaLabel),
+    labelText: r(e.labelText),
+    visibleText: r(e.visibleText),
+    selector: redactText(e.selector, identityTokens),
+    ...(e.href !== undefined ? { href: r(e.href ?? null) } : {}),
+    ...(e.iconLabel !== undefined ? { iconLabel: r(e.iconLabel ?? null) } : {}),
+    ...(e.title !== undefined ? { title: r(e.title ?? null) } : {}),
+    ...(e.value !== undefined ? { value: r(e.value ?? null) } : {}),
     ...(e.selectedOptionText !== undefined
-      ? { selectedOptionText: redactOrNull(e.selectedOptionText) }
+      ? { selectedOptionText: r(e.selectedOptionText ?? null) }
       : {}),
     ...(e.selectOptions != null
       ? {
           selectOptions: e.selectOptions.map((o) => ({
-            value: redactText(o.value),
-            text: redactText(o.text),
+            value: redactText(o.value, identityTokens),
+            text: redactText(o.text, identityTokens),
           })),
         }
       : {}),
@@ -117,11 +207,12 @@ export function redactInventory(inv: readonly InteractiveElement[]): Interactive
 
 export function redactPageState(
   state: OnboardingCaseFile["state"],
+  identityTokens: ReadonlySet<string> = new Set(),
 ): OnboardingEvalCase["state"] {
   return {
-    url: redactText(state.url),
-    title: redactText(state.title),
-    html: redactText(state.html),
+    url: redactText(state.url, identityTokens),
+    title: redactText(state.title, identityTokens),
+    html: redactText(state.html, identityTokens),
     screenshot: BLANK_PNG,
   };
 }
@@ -176,8 +267,36 @@ interface AcceptAgg {
   sample: OnboardingCaseFile; // first capture of this signature — the substrate
 }
 
+// Credential VALUES a successful run surfaced — the regress redactor must
+// scrub them from the success-page html, because a regress case is built FROM
+// a successful run and that page shows the extracted key. The planner quotes
+// the value in its extract-step reason ("access_token='f9a0…'"); such values
+// are often short / unprefixed (a 14-char IPInfo token) and would slip the
+// generic sweeps, but they are REAL secrets and must never reach the committed
+// corpus. Substring-scrubbed (case-insensitive), so over-inclusion of a
+// non-secret reason word is a harmless no-op unless it's literally on the page.
+const REASON_TOKEN = /[`'"=:\s(]([A-Za-z0-9][A-Za-z0-9_.\-]{7,})[`'")]?/g;
+export function credentialValuesFromRuns(groups: readonly RunGroup[]): Set<string> {
+  const values = new Set<string>();
+  for (const g of groups) {
+    if (g.outcome?.outcome.ok !== true) continue; // only success pages show keys
+    for (const r of g.rounds) {
+      const obs = r.case.observed as { reason?: string };
+      const reason = typeof obs.reason === "string" ? obs.reason : "";
+      for (const m of reason.matchAll(REASON_TOKEN)) {
+        const v = m[1];
+        if (v !== undefined && /[0-9]/.test(v) && /[A-Za-z]/.test(v)) values.add(v);
+      }
+    }
+  }
+  return values;
+}
+
 // Derive regress cases from grouped runs. Pure — exported for unit testing.
 export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
+  // Global secret denylist — extracted credential values across all successful
+  // runs, scrubbed from EVERY emitted case's html (a no-op where absent).
+  const credentialValues = credentialValuesFromRuns(groups);
   const accept = new Map<string, AcceptAgg>();
   const stuck = new Map<string, Set<StepKind>>();
 
@@ -212,6 +331,8 @@ export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
       ? [...stuckKinds].filter((k) => !agg.kinds.has(k)).sort()
       : [];
     const id = caseId(sig);
+    const idTokens = identityTokensForCase(agg.sample.state, agg.sample.inventory);
+    for (const v of credentialValues) idTokens.add(v);
     cases.push({
       id,
       service: agg.sample.service,
@@ -219,8 +340,8 @@ export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
       source: "gold_path",
       name: `${agg.sample.service} — ${normalizeUrl(agg.sample.state.url)}`,
       oauth: agg.sample.oauth,
-      state: redactPageState(agg.sample.state),
-      inventory: redactInventory(agg.sample.inventory),
+      state: redactPageState(agg.sample.state, idTokens),
+      inventory: redactInventory(agg.sample.inventory, idTokens),
       expect: {
         acceptKinds,
         ...(rejectKinds.length > 0 ? { rejectKinds } : {}),

@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildRegressCases,
+  collectIdentityTokens,
+  identityTokensForCase,
   pageSignature,
   readCaptureGroups,
   redactText,
@@ -26,21 +28,20 @@ import {
   type OnboardingCaseFile,
   type OnboardingOutcomeFile,
 } from "../onboarding-capture.js";
-import { scoreBucket, regressGatePassed, type EvalCaseFile } from "../eval-corpus.js";
+import { scoreBucket, scoreRegress, regressGatePassed, type EvalCaseFile } from "../eval-corpus.js";
 import type { PostVerifyStep, SignupResult } from "../agent.js";
 import type { InteractiveElement } from "../browser.js";
 
 // ── redaction (R3) ──────────────────────────────────────────────────
 
 describe("redactText", () => {
-  it("scrubs provider keys, JWTs, slack/aws/github tokens, emails", () => {
+  it("scrubs provider keys, JWTs, slack/aws/github tokens, emails (labeled)", () => {
     const cases: Array<[string, string]> = [
       ["here is sk-ABCDwxyz0123456789 done", "ABCDwxyz0123456789"],
       ["bearer eyJhbGci0i.eyJzdWIi0i.SflKxwRJSMabc tail", "SflKxwRJSM"],
       ["token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 x", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"],
       ["aws AKIAIOSFODNN7EXAMPLE end", "AKIAIOSFODNN7EXAMPLE"],
       ["mail to alias+tag@trustysquire.ai please", "alias+tag@trustysquire.ai"],
-      ["raw abc123DEF456ghi789JKL012mno345PQR678 z", "abc123DEF456ghi789JKL012mno345PQR678"],
     ];
     for (const [input, secret] of cases) {
       const out = redactText(input);
@@ -49,9 +50,41 @@ describe("redactText", () => {
     }
   });
 
+  it("scrubs unprefixed high-entropy tokens to a neutral marker (no TOKEN label)", () => {
+    // The high-entropy sweep mostly hits CSS-hash noise; its replacement must
+    // NOT read as an extractable token (it biased the planner toward extract).
+    const out = redactText("raw abc123DEF456ghi789JKL012mno345PQR678 z");
+    expect(out).not.toContain("abc123DEF456ghi789JKL012mno345PQR678");
+    expect(out).not.toContain("REDACTED_TOKEN");
+    expect(out).toBe("raw x z");
+  });
+
   it("leaves benign prose untouched", () => {
     const benign = "Create your first API key in Settings, then click Done.";
     expect(redactText(benign)).toBe(benign);
+  });
+
+  it("scrubs an operator handle that appears as a bare username (no @)", () => {
+    // the email is on the page (→ identity token), the handle leaks elsewhere
+    const tokens = collectIdentityTokens("signed in as lunchboxfortwo@gmail.com");
+    expect(tokens.has("lunchboxfortwo")).toBe(true);
+    const html = '<a href="/teams/lunchboxfortwo">Llunchboxfortwo’s team</a>';
+    const out = redactText(html, tokens);
+    expect(out).not.toContain("lunchboxfortwo");
+    expect(out).toContain("[REDACTED_ID]");
+  });
+
+  it("does not treat generic role local-parts as identities", () => {
+    const tokens = collectIdentityTokens("mailto:support@acme.com and noreply@acme.com");
+    expect(tokens.size).toBe(0);
+  });
+
+  it("identityTokensForCase pulls handles from inventory + state together", () => {
+    const tokens = identityTokensForCase(
+      { url: "https://x.test/u/janedoe123", title: "T", html: "<b>hi</b>", screenshot: "" },
+      [el({ visibleText: "janedoe123@corp.io" })],
+    );
+    expect(tokens.has("janedoe123")).toBe(true);
   });
 });
 
@@ -215,6 +248,23 @@ describe("buildRegressCases", () => {
     );
     expect(buildRegressCases([onlyFailed])).toHaveLength(0);
   });
+
+  it("scrubs the extracted credential VALUE from a regress case's html (R3)", () => {
+    // a SUCCESS page shows the real key; the planner quoted it in its extract
+    // reason. Both the page html AND the reason carry the value — neither may
+    // reach the committed corpus. The IPInfo case: a 14-hex token under the
+    // 32-char high-entropy floor.
+    const tok = "f9a062f02fadf5"; // 14 hex
+    const observed = { kind: "extract", reason: `access_token='${tok}' is visible` } as PostVerifyStep;
+    const html = `<code>access_token: ${tok}</code><button>Done</button>`;
+    const g = group(
+      "ipinfo",
+      [{ index: 0, case: mkRound("ipinfo", "https://ipinfo.io/account/token", observed, inv, html) }],
+      mkOutcome(true, 0),
+    );
+    const json = JSON.stringify(buildRegressCases([g])[0]);
+    expect(json).not.toContain(tok);
+  });
 });
 
 describe("pageSignature", () => {
@@ -296,8 +346,21 @@ describe("regress gate (A5)", () => {
 
   it("trips the gate on a deliberately-wrong (reject) step", async () => {
     const plan = async () => step("done"); // "done" is the derived reject kind
-    const bucket = await scoreBucket(builtCases, plan);
+    const bucket = await scoreBucket(builtCases, plan, scoreRegress);
     expect(regressGatePassed(bucket)).toBe(false);
     expect(bucket.failures.length).toBeGreaterThan(0);
+  });
+
+  it("R1: reject-driven regress does NOT fail on merely-differing kind", async () => {
+    // a regress case with NO rejectKinds (purely-successful page): the planner
+    // picking a different-but-not-rejected kind must PASS — the live netlify
+    // bug (failing "done" where history showed "navigate", no reject present).
+    const okOnly = buildRegressCases([
+      group("svc", [{ index: 0, case: mkRound("svc", url, step("navigate"), inv) }], mkOutcome(true, 0)),
+    ]);
+    expect(okOnly[0]!.expect.rejectKinds).toBeUndefined();
+    const plan = async () => step("done"); // differs from the historical "navigate"
+    const bucket = await scoreBucket(okOnly, plan, scoreRegress);
+    expect(regressGatePassed(bucket)).toBe(true); // no reject → no gate trip
   });
 });

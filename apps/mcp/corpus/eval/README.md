@@ -7,6 +7,12 @@ The committed, **redacted** corpus for the navigation-planner eval
 corpus/eval/
 ├── regress/          auto-derived from SUCCESSFUL captures' gold paths
 │                     (build-corpus.ts). The merge gate: must stay 100%.
+│                     REJECT-DRIVEN (R1): a case fails ONLY when the planner
+│                     picks a known-wrong rejectKind (derived from a FAILED run
+│                     on that page), never when it merely differs from the one
+│                     historical accept kind. So a case from a purely-successful
+│                     page (no rejects) is a vacuous pass until failed-run data
+│                     gives it rejects — and a different eval model can't break it.
 └── target/
     ├── tune/         hand-labeled N1 stuck pages — iterate the prompt here
     └── holdout/      sealed; report macro-avg lift, never tune on it (R5)
@@ -52,8 +58,24 @@ npx tsx src/bot/label-target.ts ~/.trusty-squire/corpus/onboarding/<svc>-<run>-r
 
 Each case carries a `rationale` (audit trail) and `theme`. **`holdout/` is
 sealed**: report its macro-avg lift, never iterate the prompt against it (R5).
-The current seed is 9 cases (6 tune / 3 holdout, 3 per theme); grow it as new
-N1 services surface.
+The corpus is **30 cases (22 tune / 8 holdout)** across four themes
+(create-resource, locate-in-ui, finish-onboarding, oauth-login-wall) — grown
+from the initial 9 to dampen the per-case perturbation-fragility the first live
+A7 run exposed (see findings below). Grow it further as new N1 services surface.
+
+**Redaction covers operator identity, not just secrets.** The R3 pass also
+scrubs the operator's account handle: it collects the local-part of every email
+on the page (e.g. `lunchboxfortwo` from `lunchboxfortwo@gmail.com`) and removes
+it everywhere — bare usernames leak as team names ("…'s team") and URL paths
+(`/users/<handle>/…`) that carry no `@`. Generic role local-parts
+(support/billing/security/…) are never treated as identities.
+
+The high-entropy catch-all (unprefixed tokens / CSS-hash noise) is replaced with
+a neutral `x`, NOT a `[REDACTED_TOKEN]` label — a page littered with "TOKEN"
+strings biased the planner toward `extract` (an eval artifact that doesn't happen
+on the real page). Set `TRUSTY_SQUIRE_REDACT_IDENTITIES=<handle>,…` so the
+redactor always scrubs the operator's account handle (it leaks as a bare
+username / avatar alt where the email never co-occurs).
 
 ## Running the gate
 
@@ -63,8 +85,16 @@ UNIVERSAL_BOT_LLM_TIER=free npx tsx src/bot/eval-gate.ts
 # → regress: X/X · target-tune: a/b · target-holdout: c/d   (exit 1 if regress < 100%)
 ```
 
-The planner runs at temperature 0 (A1) so the result is deterministic. CI (A6)
-wires `eval-gate` into a path-filtered workflow on planner-prompt changes.
+The planner runs at temperature 0 (A1). Temp 0 alone is NOT enough for
+cross-run reproducibility through OpenRouter: it load-balances one model across
+multiple backend providers, and different providers decide differently even at
+temp 0 — so knife-edge pages flip run-to-run. **For a deterministic gate, pin
+the backend:** `UNIVERSAL_BOT_OR_PROVIDER="Google AI Studio"` (single provider,
+fallbacks off, fixed seed; applies to the Gemini primary only, never the
+Anthropic premium fallback). The absolute pass rate is then provider-specific;
+the run-to-run *delta* of a prompt change is what the gate measures cleanly.
+CI (A6) wires `eval-gate` into a path-filtered workflow on planner-prompt
+changes.
 
 ## A7 findings (2026-06-05, first live iteration)
 

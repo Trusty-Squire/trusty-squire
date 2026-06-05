@@ -9,6 +9,14 @@ import type { Skill, SkillStep } from "@trusty-squire/skill-schema";
 import type { BrowserController, InteractiveElement } from "../browser.js";
 import { replaySkill, type LLMFallbackInput } from "../replay-skill.js";
 
+// The stub browser's wait() returns instantly, so the credential-reveal poll
+// otherwise busy-spins its full 8s deadline (no key ever appears) — dozens of
+// times across this file → ~82s, which trips vitest's worker heartbeat under
+// CI parallelism and FAILED the release verify job. Shrink it to 30ms; the
+// poll's correctness doesn't depend on wall-clock (the stub is stateless per
+// call), only on whether a candidate ever shows up.
+process.env.UNIVERSAL_BOT_REVEAL_POLL_MS = "30";
+
 // ── Stub browser ────────────────────────────────────────────────────
 //
 // Implements enough of BrowserController for the replay engine to

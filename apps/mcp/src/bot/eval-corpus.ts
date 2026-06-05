@@ -101,25 +101,45 @@ export interface GateBucketResult {
   failures: Array<{ id: string; service: string; detail: string }>;
 }
 
+// Regress scorer (R1): the regress gate fails ONLY when the planner picks a
+// KNOWN-WRONG action (a rejectKind derived from a failed run on this page), NOT
+// when it merely differs from the one historical accept kind. A regress case
+// auto-derived from a single successful run has a narrow accept set; scoring it
+// accept-strict would fail on any benign deviation (or a different eval model),
+// which is exactly the brittleness R1 warns against. acceptKinds documents the
+// gold path; only rejectKinds gate.
+export function scoreRegress(
+  step: PostVerifyStep,
+  expect: OnboardingExpectation,
+): OnboardingScore {
+  if (expect.rejectKinds?.includes(step.kind) === true) {
+    return { pass: false, detail: `chose "${step.kind}" — known-wrong (regress reject) for this page` };
+  }
+  return { pass: true, detail: `chose "${step.kind}" — no reject hit` };
+}
+
 // Score one bucket of cases with a plan function. The plan function is the
 // real planner at temp 0 in the live runner, or a deterministic fake in
-// tests. Pure given its inputs.
+// tests. `score` defaults to the accept+reject target scorer; the regress
+// bucket passes scoreRegress (reject-only). Pure given its inputs.
 export async function scoreBucket(
   cases: readonly EvalCaseFile[],
   plan: (c: EvalCaseFile) => Promise<PostVerifyStep>,
+  score: (step: PostVerifyStep, expect: OnboardingExpectation) => OnboardingScore = (s, e) =>
+    scoreOnboardingStep(s, e),
 ): Promise<GateBucketResult> {
   let passed = 0;
   const failures: GateBucketResult["failures"] = [];
   for (const c of cases) {
-    let score: OnboardingScore;
+    let result: OnboardingScore;
     try {
       const step = await plan(c);
-      score = scoreOnboardingStep(step, c.expect as OnboardingExpectation);
+      result = score(step, c.expect as OnboardingExpectation);
     } catch (err) {
-      score = { pass: false, detail: err instanceof Error ? err.message : String(err) };
+      result = { pass: false, detail: err instanceof Error ? err.message : String(err) };
     }
-    if (score.pass) passed += 1;
-    else failures.push({ id: c.id, service: c.service, detail: score.detail });
+    if (result.pass) passed += 1;
+    else failures.push({ id: c.id, service: c.service, detail: result.detail });
   }
   return { passed, total: cases.length, failures };
 }
