@@ -248,6 +248,23 @@ describe("buildRegressCases", () => {
     );
     expect(buildRegressCases([onlyFailed])).toHaveLength(0);
   });
+
+  it("scrubs the extracted credential VALUE from a regress case's html (R3)", () => {
+    // a SUCCESS page shows the real key; the planner quoted it in its extract
+    // reason. Both the page html AND the reason carry the value — neither may
+    // reach the committed corpus. The IPInfo case: a 14-hex token under the
+    // 32-char high-entropy floor.
+    const tok = "f9a062f02fadf5"; // 14 hex
+    const observed = { kind: "extract", reason: `access_token='${tok}' is visible` } as PostVerifyStep;
+    const html = `<code>access_token: ${tok}</code><button>Done</button>`;
+    const g = group(
+      "ipinfo",
+      [{ index: 0, case: mkRound("ipinfo", "https://ipinfo.io/account/token", observed, inv, html) }],
+      mkOutcome(true, 0),
+    );
+    const json = JSON.stringify(buildRegressCases([g])[0]);
+    expect(json).not.toContain(tok);
+  });
 });
 
 describe("pageSignature", () => {

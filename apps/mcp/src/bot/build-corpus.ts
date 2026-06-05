@@ -65,6 +65,10 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*\b/gi,
   // Prefixed provider keys (sk-/pk_/rnd_/tsq_/re_/key-/api_/token_ …)
   /\b(?:sk|pk|rk|ak|sb|re|rnd|tsq|key|api|tok|token|secret|access)[-_][A-Za-z0-9]{12,}\b/gi,
+  // Long hex runs — API tokens / hashes that carry no prefix and fall under
+  // the 32-char high-entropy floor (e.g. IPInfo's 14-hex access token). 12+
+  // pure-hex is overwhelmingly a token/hash, not page text.
+  /\b[0-9a-f]{12,}\b/gi,
 ];
 // Email / alias — both the local and inbound trustysquire aliases plus any
 // other address present in the page.
@@ -263,8 +267,36 @@ interface AcceptAgg {
   sample: OnboardingCaseFile; // first capture of this signature — the substrate
 }
 
+// Credential VALUES a successful run surfaced — the regress redactor must
+// scrub them from the success-page html, because a regress case is built FROM
+// a successful run and that page shows the extracted key. The planner quotes
+// the value in its extract-step reason ("access_token='f9a0…'"); such values
+// are often short / unprefixed (a 14-char IPInfo token) and would slip the
+// generic sweeps, but they are REAL secrets and must never reach the committed
+// corpus. Substring-scrubbed (case-insensitive), so over-inclusion of a
+// non-secret reason word is a harmless no-op unless it's literally on the page.
+const REASON_TOKEN = /[`'"=:\s(]([A-Za-z0-9][A-Za-z0-9_.\-]{7,})[`'")]?/g;
+export function credentialValuesFromRuns(groups: readonly RunGroup[]): Set<string> {
+  const values = new Set<string>();
+  for (const g of groups) {
+    if (g.outcome?.outcome.ok !== true) continue; // only success pages show keys
+    for (const r of g.rounds) {
+      const obs = r.case.observed as { reason?: string };
+      const reason = typeof obs.reason === "string" ? obs.reason : "";
+      for (const m of reason.matchAll(REASON_TOKEN)) {
+        const v = m[1];
+        if (v !== undefined && /[0-9]/.test(v) && /[A-Za-z]/.test(v)) values.add(v);
+      }
+    }
+  }
+  return values;
+}
+
 // Derive regress cases from grouped runs. Pure — exported for unit testing.
 export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
+  // Global secret denylist — extracted credential values across all successful
+  // runs, scrubbed from EVERY emitted case's html (a no-op where absent).
+  const credentialValues = credentialValuesFromRuns(groups);
   const accept = new Map<string, AcceptAgg>();
   const stuck = new Map<string, Set<StepKind>>();
 
@@ -300,6 +332,7 @@ export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
       : [];
     const id = caseId(sig);
     const idTokens = identityTokensForCase(agg.sample.state, agg.sample.inventory);
+    for (const v of credentialValues) idTokens.add(v);
     cases.push({
       id,
       service: agg.sample.service,
