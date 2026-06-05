@@ -87,7 +87,7 @@ function redactOrNull(v: string | null): string | null {
   return v === null ? null : redactText(v);
 }
 
-function redactInventory(inv: readonly InteractiveElement[]): InteractiveElement[] {
+export function redactInventory(inv: readonly InteractiveElement[]): InteractiveElement[] {
   return inv.map((e) => ({
     ...e,
     id: redactOrNull(e.id),
@@ -151,7 +151,7 @@ export function pageSignature(
   return `${service.toLowerCase()}::${normalizeUrl(state.url)}::${selectors}`;
 }
 
-function caseId(signature: string): string {
+export function caseId(signature: string): string {
   return createHash("sha256").update(signature).digest("hex").slice(0, 16);
 }
 

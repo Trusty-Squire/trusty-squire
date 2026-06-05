@@ -41,6 +41,12 @@ export interface EvalCaseFile extends OnboardingEvalCase {
   // target/ cases are further split so inspection of `tune` never leaks into
   // the sealed `holdout` measurement (R5). Absent for regress.
   holdout?: boolean;
+  // target-only: which of the 3 N1 themes this page exercises
+  // (create-resource | locate-in-ui | finish-onboarding). Report-only.
+  theme?: string;
+  // target-only: the labeler's one-line justification for the accept/reject
+  // choice — an audit trail so a human can review a hand-label later.
+  rationale?: string;
 }
 
 // Repo-committed corpus root: apps/mcp/corpus/eval/. The builder writes

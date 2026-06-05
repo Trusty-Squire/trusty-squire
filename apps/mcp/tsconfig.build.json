@@ -12,6 +12,7 @@
     "src/bot/eval-corpus.ts",
     "src/bot/eval-gate.ts",
     "src/bot/build-corpus.ts",
+    "src/bot/label-target.ts",
     "src/bot/oauth-login-spike.ts",
     "src/bot/oauth-thin-slice.ts",
     "src/bot/oauth-affordance-probe.ts",

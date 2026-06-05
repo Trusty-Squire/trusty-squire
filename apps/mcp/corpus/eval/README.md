@@ -33,6 +33,28 @@ npx tsx src/bot/build-corpus.ts <dir>    # explicit capture dir
 The cases are content-hash-named for stable git diffs. **Only redacted cases
 are committed** — the raw captures never leave `$HOME`.
 
+## How target/ is built (A4)
+
+`target/` is hand-labeled — the ~20 N1 services whose post-OAuth navigation the
+planner gets stuck on, across three themes: **create-resource**,
+**locate-in-ui** (incl. 404 dead-ends), **finish-onboarding**. `label-target.ts`
+does the mechanical part: it copies a real stuck-page capture, runs it through
+the **same R3 redaction** as the regress builder (target cases are committed
+too), and writes it to the right `tune`/`holdout` bucket with the operator's
+label.
+
+```bash
+cd apps/mcp
+npx tsx src/bot/label-target.ts ~/.trusty-squire/corpus/onboarding/<svc>-<run>-r<N>.json \
+  --theme=create-resource --accept=click,navigate --reject=done,login,extract \
+  --rationale='keys-empty page — must click Create, not give up' [--holdout]
+```
+
+Each case carries a `rationale` (audit trail) and `theme`. **`holdout/` is
+sealed**: report its macro-avg lift, never iterate the prompt against it (R5).
+The current seed is 9 cases (6 tune / 3 holdout, 3 per theme); grow it as new
+N1 services surface.
+
 ## Running the gate
 
 ```bash
