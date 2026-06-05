@@ -47,7 +47,10 @@ export class PrismaAccountStore implements AccountStore {
   }
 
   async findAccountByStripeCustomerId(customerId: string): Promise<AccountRecord | null> {
-    const row = await this.prisma.account.findUnique({
+    // findFirst, not findUnique: stripe_customer_id isn't a DB-unique column
+    // (see schema note). Uniqueness holds by construction — the webhook is the
+    // only writer and maps one Stripe customer to one account.
+    const row = await this.prisma.account.findFirst({
       where: { stripe_customer_id: customerId },
     });
     return row === null ? null : this.toAccount(row);

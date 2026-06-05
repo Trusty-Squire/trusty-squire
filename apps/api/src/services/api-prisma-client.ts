@@ -187,8 +187,12 @@ export interface ApiPrismaClient {
   account: {
     create(args: { data: Record<string, unknown> }): Promise<AccountRow>;
     findUnique(args: {
-      where: { id: string } | { email: string } | { stripe_customer_id: string };
+      where: { id: string } | { email: string };
     }): Promise<AccountRow | null>;
+    // Billing: map a Stripe customer back to its account. stripe_customer_id
+    // is not a DB-unique column (see schema note), so this is findFirst, not
+    // findUnique — uniqueness is guaranteed by the webhook write path.
+    findFirst(args: { where: Record<string, unknown> }): Promise<AccountRow | null>;
     // Billing: the Stripe webhook flips subscription_status (+ the
     // customer/subscription ids) on the mapped account.
     update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<AccountRow>;
