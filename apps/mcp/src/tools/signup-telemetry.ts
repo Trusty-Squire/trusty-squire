@@ -11,7 +11,7 @@
 // fire-and-forget + fail-open: it never blocks or fails a signup.
 
 import { isWallFailure } from "@trusty-squire/skill-schema";
-import { detectAsn, type CaptchaVariant } from "../bot/index.js";
+import { detectAsn, type CaptchaVariant, type CaptchaKind } from "../bot/index.js";
 import { VERSION } from "../version.js";
 import type { SkillRegistryClient } from "../skill-registry-client.js";
 
@@ -89,7 +89,7 @@ export async function postCaptchaEvent(
   machineToken: string,
   event: {
     service: string;
-    captcha_kind: "turnstile" | "recaptcha";
+    captcha_kind: CaptchaKind;
     blocked: boolean;
     proxied: boolean;
     captcha_variant: CaptchaVariant;

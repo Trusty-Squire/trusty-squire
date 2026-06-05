@@ -42,6 +42,15 @@ class SubmitFailsBrowser {
   }
   async prewarm(): Promise<void> {}
   async goto(): Promise<void> {}
+  // The signup-URL resolver probes via fetchText before navigating; null
+  // means "couldn't tell over HTTP" so the curated URL is kept as-is.
+  async fetchText(): Promise<{
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  } | null> {
+    return null;
+  }
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
   async dismissConsentBanner(): Promise<string | null> { return null; }
@@ -69,6 +78,9 @@ class SubmitFailsBrowser {
     throw new Error(
       `submit selector "${selector}" matched 3 buttons, none scoring as a signup button`,
     );
+  }
+  async checkRequiredAgreementBoxes(): Promise<string[]> {
+    return [];
   }
   // A minimal inventory the planner's fixed plan (#email +
   // button[type=submit]) validates against.
@@ -125,6 +137,7 @@ class SpyInbox implements AgentInbox {
     subject: string;
     from_address: string;
     parsed_links: ReadonlyArray<string>;
+    parsed_codes: ReadonlyArray<string>;
   }> {
     this.waitCalls += 1;
     throw new Error("inbox should not have been polled");

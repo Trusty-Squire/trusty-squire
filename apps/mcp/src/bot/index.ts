@@ -25,7 +25,7 @@ export {
 export { withOAuthLock } from "./oauth-lock.js";
 export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export { BrowserController } from "./browser.js";
-export type { CaptchaVariant } from "./browser.js";
+export type { CaptchaVariant, CaptchaKind } from "./browser.js";
 export { replaySkill, type ReplayOutcome, type ReplayInput } from "./replay-skill.js";
 export { InboxClient } from "./inbox-client.js";
 export type { AgentInbox };

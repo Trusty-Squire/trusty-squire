@@ -23,7 +23,7 @@
 // agent.ts.
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, BrowserContext, Locator, Page } from "playwright";
+import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
@@ -134,7 +134,41 @@ export interface BrowserControllerOptions {
   profileDir?: string;
 }
 
-export type CaptchaKind = "turnstile" | "recaptcha";
+export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
+
+// Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
+// The auth cookies that mean "signed in": GitHub → `user_session`; Google →
+// any of the *SID session cookies (NID / CONSENT / 1P_JAR are set even when
+// logged out, so they are deliberately NOT signals). Host-scoped so a
+// google.com cookie can't pass for github. Cookie NAMES + presence only;
+// values are checked for non-triviality, never logged. Exported for tests.
+export function sessionProvidersFromCookies(
+  cookies: ReadonlyArray<{ name: string; value: string; domain: string }>,
+): OAuthProviderId[] {
+  const SIGNATURES: ReadonlyArray<{
+    provider: OAuthProviderId;
+    host: RegExp;
+    names: readonly string[];
+  }> = [
+    { provider: "github", host: /(^|\.)github\.com$/i, names: ["user_session"] },
+    {
+      provider: "google",
+      host: /(^|\.)google\.com$/i,
+      names: ["SID", "__Secure-1PSID", "__Secure-3PSID"],
+    },
+  ];
+  const live: OAuthProviderId[] = [];
+  for (const sig of SIGNATURES) {
+    const present = cookies.some(
+      (c) =>
+        sig.host.test(c.domain.replace(/^\./, "")) &&
+        sig.names.includes(c.name) &&
+        c.value.length > 10,
+    );
+    if (present) live.push(sig.provider);
+  }
+  return live;
+}
 
 // Finer-grained captcha classification for spike telemetry (T3.2).
 // `recaptcha_v3` covers any score-mode reCAPTCHA with no clickable
@@ -254,6 +288,59 @@ async function detectChromiumChannel(): Promise<string | null> {
     }
   }
   return null;
+}
+
+// Classify an anti-bot interstitial page from its (title + body) text.
+// `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
+// `verificationPassed` is the signal the challenge SUCCEEDED — but
+// Cloudflare leaves the static "Just a moment / Performing security
+// verification" copy ON THE PAGE even after it appends "Verification
+// successful. Waiting for…", so `onInterstitial` alone wrongly reads as
+// "still blocked" and the bot bails as anti_bot_blocked — exactly what
+// stranded codesandbox/lambda-labs once patchright started PASSING the
+// challenge. When the challenge passed, the redirect is just racing/
+// stuck; the caller should be patient + reload, not give up. Exported
+// for unit tests.
+export function classifyInterstitialText(text: string): {
+  onInterstitial: boolean;
+  verificationPassed: boolean;
+} {
+  const onInterstitial =
+    /just a moment|performing security verification|verifying you are human|checking your browser|attention required/i.test(
+      text,
+    );
+  const verificationPassed =
+    /verification successful|you are (now )?verified|success!|challenge[- ]?(passed|complete)/i.test(
+      text,
+    );
+  return { onInterstitial, verificationPassed };
+}
+
+// After a Cloudflare managed challenge PASSES, the cf_clearance cookie is
+// set but the URL still carries Cloudflare's single-use challenge token
+// (`__cf_chl_rt_tk`, `__cf_chl_tk`, `__cf_chl_f_tk`, …). Cloudflare's own
+// client-side redirect to the cleared page can stall — especially over a
+// high-latency residential tunnel, where the meta-refresh/JS hop never
+// fires inside our wait budget. Re-navigating to the SAME url with those
+// one-shot tokens stripped serves the real page directly (the clearance
+// cookie now satisfies the edge), instead of waiting on the stuck redirect.
+// Returns the cleaned URL, or null when there's no challenge token to strip
+// (nothing this can do better than a plain reload). Exported for unit tests.
+export function stripCloudflareChallengeParams(rawUrl: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  let changed = false;
+  for (const key of [...u.searchParams.keys()]) {
+    if (key.toLowerCase().startsWith("__cf_chl")) {
+      u.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  return changed ? u.toString() : null;
 }
 
 export class BrowserController {
@@ -472,6 +559,21 @@ export class BrowserController {
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        // Enable software WebGL on the GPU-less Xvfb host. Without this,
+        // Chrome 120+ disables WebGL entirely (getContext("webgl") → null),
+        // which MEASURED (2026-06-04) as the bot's one real fingerprint gap:
+        // a browser with NO WebGL is itself an anti-bot tell (reCAPTCHA
+        // Enterprise / device-fingerprinting weight it). SwiftShader gives a
+        // real WebGL context. MEASURED 2026-06-04: with this on, WebGL reports
+        // a Mesa/llvmpipe software renderer and the reCAPTCHA v3 score stays
+        // 1.0 — a strict improvement over "no WebGL at all", which more
+        // fingerprint libs treat as suspicious than a software renderer. The
+        // rc.33 init-script below TRIES to spoof the renderer string to a real
+        // Intel GPU, but it is INERT under patchright (hardened) — see its
+        // comment. A clean GPU-string spoof under patchright needs binary-level
+        // support; tracked as a follow-up, not blocking (score is already 1.0).
+        "--enable-unsafe-swiftshader",
+        "--ignore-gpu-blocklist",
       ],
       // `viewport: null` makes the page use the REAL OS window size
       // instead of a hardcoded value. The old fixed 1280×720 is exactly
@@ -520,36 +622,70 @@ export class BrowserController {
       });
     }
 
-    // rc.33 — spoof WebGL renderer/vendor. Under Xvfb (or any non-GPU
-    // host) Chrome falls back to SwiftShader, which reports
-    //   UNMASKED_VENDOR_WEBGL   = "Google Inc. (Google)"
-    //   UNMASKED_RENDERER_WEBGL = "ANGLE (Google, ...SwiftShader...)"
-    // Both strings are on every published anti-bot fingerprint
-    // blocklist; Cloudflare Turnstile responds with error 600010
-    // ("internal client execution error") rather than even trying to
-    // grade the click. Override the two parameter codes on both
-    // WebGL1 and WebGL2 prototypes to look like a stock Intel laptop
-    // GPU. Doesn't change actual rendering — only the strings the
-    // fingerprint probe reads back.
-    await context.addInitScript(() => {
+    // rc.33 / 2026-06-04 — spoof the WebGL UNMASKED vendor+renderer toward a
+    // stock Intel GPU, so the software Mesa/llvmpipe string (--enable-unsafe-
+    // swiftshader gives us a context, but llvmpipe is itself a VM/headless
+    // tell) doesn't read through. Applied TWO ways because patchright
+    // (hardened) isolates document-start scripts from the page's main world:
+    //   • addInitScript — document-start; the effective path in the stealth
+    //     BASELINE (non-patchright).
+    //   • re-applied via page.evaluate on every navigation — the ONLY path that
+    //     reaches the MAIN world under patchright. MEASURED 2026-06-04:
+    //     addInitScript AND raw CDP Page.addScriptToEvaluateOnNewDocument both
+    //     land in patchright's isolated world (renderer stayed llvmpipe);
+    //     page.evaluate does not (renderer became Intel), and the v3 score held
+    //     at 1.0. Idempotent via a marker so the per-nav re-apply is cheap, and
+    //     getParameter.toString() is masked to the original native source so
+    //     the patch itself isn't a tell. Only strings change, not rendering.
+    const installWebglSpoof = (): void => {
       const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
       const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
-      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext) => {
+      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext): void => {
+        // The marker lives on the prototype so re-application is a no-op; the
+        // cast is the one typed-alternative-exhausted spot (adding an ad-hoc
+        // brand to a DOM prototype).
+        const marked = proto as WebGLRenderingContext & { __tsWebglPatched?: boolean };
+        if (marked.__tsWebglPatched === true) return;
         const orig = proto.getParameter;
+        const native = orig.toString();
         proto.getParameter = function (this: typeof proto, p: number) {
-          if (p === VENDOR_WEBGL) return "Intel Inc.";
-          if (p === RENDERER_WEBGL) return "Intel(R) UHD Graphics 620";
+          if (p === VENDOR_WEBGL) return "Google Inc. (Intel)";
+          if (p === RENDERER_WEBGL) {
+            return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)";
+          }
           return orig.call(this, p);
         };
+        Object.defineProperty(proto.getParameter, "toString", {
+          value: () => native,
+          configurable: true,
+          writable: true,
+        });
+        marked.__tsWebglPatched = true;
       };
       if (typeof WebGLRenderingContext !== "undefined") {
-        spoof(WebGLRenderingContext.prototype as WebGLRenderingContext);
+        spoof(WebGLRenderingContext.prototype);
       }
       if (typeof WebGL2RenderingContext !== "undefined") {
-        spoof(WebGL2RenderingContext.prototype as WebGL2RenderingContext);
+        spoof(WebGL2RenderingContext.prototype);
       }
-    });
+    };
+    await context.addInitScript(installWebglSpoof);
     this.page = context.pages()[0] ?? (await context.newPage());
+    // Re-apply on every navigation — the main-world reach patchright's isolated
+    // init world denies us. framenavigated fires at navigation-commit (before
+    // most page JS), so a late WebGL query (reCAPTCHA scores seconds in) sees
+    // the spoofed strings; a document-start fingerprinter could still race it.
+    const reapplyWebglSpoof = (): void => {
+      const pg = this.page;
+      if (pg === null) return;
+      void pg.evaluate(installWebglSpoof).catch(() => {
+        // mid-navigation / closed page — the next navigation re-applies.
+      });
+    };
+    this.page.on("framenavigated", (frame) => {
+      if (this.page !== null && frame === this.page.mainFrame()) reapplyWebglSpoof();
+    });
+    this.page.on("load", reapplyWebglSpoof);
 
     // rc.33 — captcha tracing. When UNIVERSAL_BOT_CAPTCHA_TRACE=1 is
     // set, log every response from Cloudflare/Google's challenge
@@ -985,6 +1121,94 @@ export class BrowserController {
       }
     } catch {
       await this.page.check(selector, { force: true });
+    }
+  }
+
+  // Deterministic pre-submit guard: tick every visible, unchecked,
+  // non-disabled REQUIRED-AGREEMENT checkbox (terms/privacy/consent),
+  // while never touching marketing/newsletter opt-ins.
+  //
+  // Why this exists separate from the LLM planner: amplitude's signup
+  // has a required TOS checkbox the planner skipped (it read the
+  // adjacent data-storage card-radios as the whole cluster being
+  // "ambiguous radios"), and amplitude does NOT disable submit when the
+  // box is unticked — so the click silently no-ops and the bot then
+  // waits forever for a verification mail that never sends. This runs on
+  // EVERY submit, not only the `submit_disabled` path in clickSubmit().
+  //
+  // Returns the labels/testids it checked (for step logging); empty when
+  // it ticked nothing.
+  async checkRequiredAgreementBoxes(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    // Best-effort: a page-eval failure (navigation mid-call, detached
+    // frame) must never fail the parent submit — return nothing.
+    try {
+      return await this.page.evaluate(() => {
+        // These two regexes MUST stay byte-identical with
+        // AGREEMENT_TEXT_RE / MARKETING_TEXT_RE in this module — the
+        // page realm can't import, so they're inlined here.
+        const agreementRe =
+          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+        const marketingRe =
+          /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+
+        const checked: string[] = [];
+        const boxes = Array.from(
+          document.querySelectorAll<HTMLInputElement>(
+            'input[type="checkbox"]',
+          ),
+        );
+        for (const box of boxes) {
+          if (box.checked || box.disabled) continue;
+          const rect = box.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) continue;
+
+          // Associated text = attributes + a label[for=id] + nearest
+          // ancestor <label> + the immediately following sibling text.
+          const parts: string[] = [
+            box.getAttribute("data-testid") ?? "",
+            box.getAttribute("name") ?? "",
+            box.id,
+            box.getAttribute("aria-label") ?? "",
+          ];
+          if (box.id) {
+            const forLabel = document.querySelector(
+              `label[for="${CSS.escape(box.id)}"]`,
+            );
+            if (forLabel) parts.push(forLabel.textContent ?? "");
+          }
+          const ancestorLabel = box.closest("label");
+          if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
+          const sibling = box.nextSibling;
+          if (sibling && sibling.textContent) parts.push(sibling.textContent);
+          if (box.nextElementSibling) {
+            parts.push(box.nextElementSibling.textContent ?? "");
+          }
+
+          const text = parts.join(" ");
+          if (!agreementRe.test(text) || marketingRe.test(text)) continue;
+
+          // React/Vue controlled inputs ignore a bare `.checked = true`:
+          // their state lives in the framework, updated only by the real
+          // event flow. Set the property AND dispatch input/change AND a
+          // synthetic click so the controlled binding observes the flip.
+          box.checked = true;
+          box.dispatchEvent(new Event("input", { bubbles: true }));
+          box.dispatchEvent(new Event("change", { bubbles: true }));
+          box.click();
+
+          const label =
+            box.getAttribute("data-testid") ||
+            box.getAttribute("name") ||
+            box.id ||
+            box.getAttribute("aria-label") ||
+            "agreement-checkbox";
+          checked.push(label);
+        }
+        return checked;
+      });
+    } catch {
+      return [];
     }
   }
 
@@ -1903,6 +2127,12 @@ export class BrowserController {
           'textarea[name="g-recaptcha-response"]',
         ) as HTMLTextAreaElement | null;
         if (recaptcha !== null && recaptcha.value.length > 0) return true;
+        // hCaptcha populates its own response textarea on a passed
+        // checkbox (plausible). Same shape as reCAPTCHA's.
+        const hcaptcha = document.querySelector(
+          'textarea[name="h-captcha-response"]',
+        ) as HTMLTextAreaElement | null;
+        if (hcaptcha !== null && hcaptcha.value.length > 0) return true;
         // Some Turnstile installs use a managed mode that emits its
         // own attribute on the host div when solved.
         const cfManaged = document.querySelector(".cf-turnstile[data-state='success']");
@@ -1939,10 +2169,41 @@ export class BrowserController {
   //       widget's click handler is registered on the host div, so
   //       a click inside the host box still triggers the challenge.
   private async findCaptchaWidget(): Promise<{
-    kind: "turnstile" | "recaptcha";
+    kind: CaptchaKind;
     box: { x: number; y: number; width: number; height: number };
   } | null> {
     if (!this.page) throw new Error("Browser not started");
+
+    // An INVISIBLE reCAPTCHA (api2/anchor with size=invisible — the
+    // bottom-right badge) is score-mode: there is no checkbox to click, and
+    // its token is emitted only when the form's submit handler calls
+    // grecaptcha.execute(). It must NOT be treated as a solvable visible
+    // widget. MEASURED on amplitude (2026-06-04): the badge iframe is
+    // ~256×60, so it cleared the size filter below and got "found" + clicked;
+    // the pre-submit token-poll then timed out and the bot escalated to
+    // 2Captcha, which can't solve a score-mode widget (ERROR_CAPTCHA_
+    // UNSOLVABLE) → captcha_blocked — even though our v3 score is ~1.0 and a
+    // plain form-submit would have passed silently. Detect "invisible-only"
+    // (badge present, no visible checkbox anchor, no rendered bframe grid) and
+    // skip reCAPTCHA entirely so the signup proceeds to submit.
+    const recaptchaInvisibleOnly = await this.page
+      .evaluate(() => {
+        const q = (s: string): boolean => document.querySelector(s) !== null;
+        const visibleAnchor = Array.from(
+          document.querySelectorAll('iframe[src*="recaptcha/api2/anchor"]'),
+        ).some((f) => !/size=invisible/.test((f as HTMLIFrameElement).src));
+        const bframe = (() => {
+          const f = document.querySelector('iframe[src*="recaptcha/api2/bframe"]');
+          if (f === null) return false;
+          const r = f.getBoundingClientRect();
+          return r.width > 30 && r.height > 30;
+        })();
+        const invisiblePresent =
+          q('iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]') ||
+          q(".grecaptcha-badge");
+        return invisiblePresent && !visibleAnchor && !bframe;
+      })
+      .catch(() => false);
 
     // Phase 1: widget shape with polling. page.locator (unlike the
     // querySelector in detectCaptchaVariant) pierces OPEN shadow roots,
@@ -1955,15 +2216,23 @@ export class BrowserController {
     //   Cloudflare Turnstile: src contains "challenges.cloudflare.com"
     //   reCAPTCHA v2:         src contains "recaptcha/api2"
     const iframeCandidates: Array<{
-      kind: "turnstile" | "recaptcha";
+      kind: CaptchaKind;
       selector: string;
     }> = [
       { kind: "turnstile", selector: 'iframe[src*="challenges.cloudflare.com"]' },
-      { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2"]' },
+      // Visible reCAPTCHA only — the size=invisible anchor (score-mode badge)
+      // is handled by the recaptchaInvisibleOnly skip above.
+      { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])' },
+      // hCaptcha's checkbox iframe (the anchor frame). Plausible and other
+      // hCaptcha sites render this; clicking it ticks the box the same way
+      // Turnstile/reCAPTCHA do.
+      { kind: "hcaptcha", selector: 'iframe[src*="hcaptcha.com"][src*="frame=checkbox"]' },
+      { kind: "hcaptcha", selector: 'iframe[src*="newassets.hcaptcha.com"]' },
       // Host-div fallbacks (light DOM) — preferred order keeps the iframe
       // first when present (more precise click target).
       { kind: "turnstile", selector: ".cf-turnstile" },
       { kind: "turnstile", selector: "#clerk-captcha" },
+      { kind: "hcaptcha", selector: ".h-captcha" },
     ];
     const iframeDeadline = Date.now() + 5000;
     while (Date.now() < iframeDeadline) {
@@ -1986,13 +2255,18 @@ export class BrowserController {
     // injected by the captcha JS even before the iframe; locate it,
     // walk up to a visible ancestor, return that bounding box.
     const hostCandidates: Array<{
-      kind: "turnstile" | "recaptcha";
+      kind: CaptchaKind;
       selector: string;
     }> = [
       { kind: "turnstile", selector: 'input[name="cf-turnstile-response"]' },
       { kind: "recaptcha", selector: 'textarea[name="g-recaptcha-response"]' },
+      { kind: "hcaptcha", selector: 'textarea[name="h-captcha-response"]' },
     ];
     for (const { kind, selector } of hostCandidates) {
+      // The invisible reCAPTCHA's hidden g-recaptcha-response textarea lives
+      // INSIDE the .grecaptcha-badge (~256×60), so the walk-up below would
+      // return the badge box and we'd click it — the exact bug. Skip it.
+      if (kind === "recaptcha" && recaptchaInvisibleOnly) continue;
       const locator = this.page.locator(selector);
       const count = await locator.count();
       if (count === 0) continue;
@@ -2072,10 +2346,19 @@ export class BrowserController {
           variant = "turnstile";
         } else if (present('iframe[src*="hcaptcha.com"]')) {
           variant = "hcaptcha";
-        } else if (present('iframe[src*="recaptcha/api2/anchor"]')) {
+        } else if (
+          present(
+            'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])',
+          )
+        ) {
+          // VISIBLE checkbox anchor (size=normal) → clickable v2.
           variant = "recaptcha_v2";
-        } else if (present(".grecaptcha-badge")) {
-          // Badge but no clickable anchor → score-mode reCAPTCHA.
+        } else if (
+          present(".grecaptcha-badge") ||
+          present('iframe[src*="recaptcha/api2/anchor"][src*="size=invisible"]')
+        ) {
+          // Badge / size=invisible anchor and no clickable checkbox →
+          // score-mode reCAPTCHA (passes on submit, nothing to click).
           variant = "recaptcha_v3";
         }
         return { variant, challengeRendered };
@@ -2096,20 +2379,35 @@ export class BrowserController {
   // help). Reads from the standard places sites declare it:
   //   1. <div class="g-recaptcha" data-sitekey="...">
   //   2. <iframe src="...?k=SITEKEY&...">  (api2/anchor frame)
-  //   3. <script>...sitekey: '...'...</script> via window globals
+  //
+  // CRITICAL: only ever returns a GENUINE reCAPTCHA key. hCaptcha
+  // (`.h-captcha`) and Turnstile (`.cf-turnstile`) ALSO publish a
+  // `data-sitekey` attribute, so a bare `[data-sitekey]` selector
+  // grabs the wrong provider's key and the caller ships it to
+  // 2Captcha's `userrecaptcha` endpoint → ERROR_WRONG_GOOGLEKEY (the
+  // plausible/hCaptcha case). The authoritative discriminator is the
+  // key FORMAT: reCAPTCHA public keys always start with `6L`; hCaptcha
+  // keys are UUIDs (`bc609205-…`); Turnstile keys start with `0x`. We
+  // both scope the selector away from the other widgets AND gate on
+  // the `6L` prefix, so no non-reCAPTCHA key can ever leak through.
   async extractRecaptchaSitekey(): Promise<string | null> {
     if (!this.page) throw new Error("Browser not started");
     try {
       const sitekey = await this.page.evaluate(() => {
-        // 1. div[data-sitekey] — the standard reCAPTCHA v2 anchor.
-        const div = document.querySelector<HTMLElement>(
-          "[data-sitekey], div.g-recaptcha[data-sitekey]",
+        const isRecaptchaKey = (k: string | null): k is string =>
+          k !== null && /^6L/.test(k) && k.length > 30;
+        // 1. data-sitekey, but NOT on an hCaptcha/Turnstile widget (or
+        //    nested inside one). Those publish data-sitekey too.
+        const anchors = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-sitekey]"),
+        ).filter(
+          (el) => el.closest(".h-captcha, .cf-turnstile") === null,
         );
-        if (div !== null) {
-          const k = div.getAttribute("data-sitekey");
-          if (k !== null && k.length > 10) return k;
+        for (const el of anchors) {
+          const k = el.getAttribute("data-sitekey");
+          if (isRecaptchaKey(k)) return k;
         }
-        // 2. The api2 iframe src carries ?k=SITEKEY.
+        // 2. The api2/enterprise iframe src carries ?k=SITEKEY.
         const iframes = Array.from(
           document.querySelectorAll<HTMLIFrameElement>(
             'iframe[src*="recaptcha/api2"], iframe[src*="recaptcha/enterprise"]',
@@ -2118,7 +2416,7 @@ export class BrowserController {
         for (const ifr of iframes) {
           const url = new URL(ifr.src);
           const k = url.searchParams.get("k");
-          if (k !== null && k.length > 10) return k;
+          if (isRecaptchaKey(k)) return k;
         }
         return null;
       });
@@ -2186,6 +2484,168 @@ export class BrowserController {
         return true;
       }, token);
       return injected;
+    } catch {
+      return false;
+    }
+  }
+
+  // Mint the score token for an INVISIBLE reCAPTCHA by calling
+  // grecaptcha.execute() ourselves, then wait for g-recaptcha-response to
+  // populate. MEASURED on amplitude (2026-06-04): an invisible reCAPTCHA's
+  // token only exists once execute() runs, and amplitude's form REQUIRES it —
+  // merely skipping the badge (not clicking it) left the textarea empty and
+  // the submit silently no-op'd. With our ~1.0 v3 score, execute() returns a
+  // passing token in ~1-3s, so the subsequent submit carries a valid token.
+  // Handles both standard (grecaptcha) and enterprise (grecaptcha.enterprise)
+  // namespaces. Returns true once a token is present. Best-effort: a missing
+  // grecaptcha or an execute() throw resolves false (the form may still mint
+  // it on its own submit handler).
+  async triggerInvisibleRecaptcha(timeoutMs = 9000): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const tokenPresent = (): Promise<boolean> =>
+      this.page!.evaluate(() => {
+        const ta = document.querySelector(
+          'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+        ) as HTMLTextAreaElement | null;
+        return ta !== null && ta.value.length > 0;
+      }).catch(() => false);
+
+    if (await tokenPresent()) return true;
+
+    const fired = await this.page
+      .evaluate(() => {
+        const w = window as unknown as {
+          grecaptcha?: {
+            execute?: (widgetId?: number) => void;
+            enterprise?: { execute?: (widgetId?: number) => void };
+          };
+          // grecaptcha stashes every rendered widget here, keyed by its
+          // numeric widget id. amplitude (and many SPAs) render the invisible
+          // widget with an EXPLICIT id, and a bare grecaptcha.execute() with
+          // no id throws "No reCAPTCHA clients exist" — MEASURED as "token not
+          // minted" on amplitude. Enumerate the clients and execute each by id.
+          ___grecaptcha_cfg?: { clients?: Record<string, unknown> };
+        };
+        const g = w.grecaptcha;
+        if (g === undefined) return false;
+        let any = false;
+        const ids = (() => {
+          try {
+            return Object.keys(w.___grecaptcha_cfg?.clients ?? {});
+          } catch {
+            return [];
+          }
+        })();
+        for (const id of ids) {
+          const n = Number(id);
+          if (!Number.isFinite(n)) continue;
+          try {
+            g.enterprise?.execute?.(n);
+            any = true;
+          } catch {
+            /* not this namespace */
+          }
+          try {
+            g.execute?.(n);
+            any = true;
+          } catch {
+            /* widget already executed / wrong namespace */
+          }
+        }
+        // Fallback: no enumerable clients — try the bare (first-widget) call,
+        // enterprise first (a v2-invisible page exposes plain execute()).
+        if (!any) {
+          try {
+            if (typeof g.enterprise?.execute === "function") {
+              g.enterprise.execute();
+              any = true;
+            } else if (typeof g.execute === "function") {
+              g.execute();
+              any = true;
+            }
+          } catch {
+            return false;
+          }
+        }
+        return any;
+      })
+      .catch(() => false);
+    if (!fired) return false;
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await this.sleep(500);
+      if (await tokenPresent()) return true;
+    }
+    return false;
+  }
+
+  // Tier 3 hCaptcha support — extract the hCaptcha sitekey so 2Captcha
+  // can solve it. hCaptcha publishes its key on `.h-captcha[data-sitekey]`
+  // or in the checkbox iframe's `?sitekey=` query. Keys are UUIDs (the
+  // reCAPTCHA `6L` guard in extractRecaptchaSitekey deliberately rejects
+  // them, which is why hCaptcha needs its own extractor). Returns null
+  // when no hCaptcha widget is present.
+  async extractHcaptchaSitekey(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        const div = document.querySelector<HTMLElement>(".h-captcha[data-sitekey], [data-hcaptcha-sitekey]");
+        if (div !== null) {
+          const k =
+            div.getAttribute("data-sitekey") ??
+            div.getAttribute("data-hcaptcha-sitekey");
+          if (k !== null && k.length > 10) return k;
+        }
+        const iframe = document.querySelector<HTMLIFrameElement>(
+          'iframe[src*="hcaptcha.com"]',
+        );
+        if (iframe !== null) {
+          const k = new URL(iframe.src).searchParams.get("sitekey");
+          if (k !== null && k.length > 10) return k;
+        }
+        return null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // Inject a 2Captcha-resolved hCaptcha token into the page's
+  // h-captcha-response textarea(s) and fire the widget's data-callback
+  // if the page registered one. Mirrors injectRecaptchaToken; hCaptcha
+  // also mirrors the response token into a g-recaptcha-response textarea
+  // on some compat installs, so populate both names if present.
+  async injectHcaptchaToken(token: string): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate((tok: string) => {
+        const inputs = Array.from(
+          document.querySelectorAll<HTMLTextAreaElement>(
+            'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+          ),
+        );
+        if (inputs.length === 0) return false;
+        for (const input of inputs) {
+          input.value = tok;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        // Fire the data-callback the page registered on the .h-captcha
+        // host (hCaptcha calls it by name on window). Best-effort — the
+        // populated textarea is what server-side validation reads.
+        try {
+          const host = document.querySelector<HTMLElement>(".h-captcha[data-callback]");
+          const name = host?.getAttribute("data-callback");
+          if (name !== null && name !== undefined) {
+            const fn = (window as unknown as Record<string, unknown>)[name];
+            if (typeof fn === "function") (fn as (t: string) => void)(tok);
+          }
+        } catch {
+          // no named callback — DOM injection stands.
+        }
+        return true;
+      }, token);
     } catch {
       return false;
     }
@@ -2974,34 +3434,103 @@ export class BrowserController {
   // rather than failing the whole signup.
   private async waitForAntiBotInterstitialToClear(timeoutMs: number): Promise<void> {
     if (!this.page) return;
-    let detected = await this.pollUntilInterstitialClears(timeoutMs);
-    if (!detected) {
-      // We either never saw an interstitial, or we saw one and it
-      // cleared on its own. Nothing more to do.
-      return;
+    const first = await this.pollUntilInterstitialClears(timeoutMs);
+    // Never saw an interstitial, or saw one and it cleared on its own —
+    // nothing more to do.
+    if (!first.detected || first.cleared) return;
+    // Still on the interstitial at the deadline. If Cloudflare reported
+    // the challenge PASSED ("Verification successful"), the redirect is
+    // just racing/stuck — be patient through ANOTHER full window before
+    // touching anything (a reload mid-redirect can re-arm the challenge).
+    if (first.verificationPassed) {
+      const patient = await this.pollUntilInterstitialClears(timeoutMs);
+      if (patient.cleared) return;
+      // "Verification successful" but the page never advances is the
+      // signature of a STALE cf_clearance cookie — issued on a prior visit
+      // (often a different egress IP), which CF matches ("successful") but
+      // the origin then rejects, looping forever on "Waiting for the page
+      // to load." MEASURED: a clean profile clears codesandbox's challenge
+      // in ~12s; the stale cookie is what stalls the shared profile. Drop
+      // the CF cookies to force a FRESH challenge, then reload.
+      if (await this.clearCloudflareCookiesAndRetry(timeoutMs)) return;
+      // Or the auto-redirect simply stalled with a still-valid clearance —
+      // re-navigate past the one-shot challenge token.
+      if (await this.forceNavigatePastClearedChallenge()) return;
     }
-    // The interstitial outlived the wait. Cloudflare frequently shows
-    // "Verification successful. Wait" but then never fires the JS
-    // redirect — the challenge passed, but the redirect script got
-    // stuck or the cookie set is racing the navigation. A single
-    // reload, now that the cf_clearance cookie is set, often lets the
-    // real page render. (If the issue is a server-side risk-score
-    // block — fingerprint/IP — reload won't help, but the caller's
-    // inventory diagnostic will still surface the block.)
+    // Force the real page: now that the cf_clearance cookie is set, a
+    // reload often renders it. domcontentloaded (not networkidle) — the
+    // real page is usually a heavy SPA that never reaches networkidle, so
+    // waiting for it just burns the budget back into a timeout. (If it's a
+    // server-side risk-score block — fingerprint/IP — reload won't help,
+    // but the caller's inventory diagnostic will still surface the block.)
     try {
-      await this.page.reload({ waitUntil: "networkidle", timeout: 10_000 });
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 15_000 });
     } catch {
       // reload failed — proceed with what's there
     }
     await this.pollUntilInterstitialClears(Math.max(5000, timeoutMs / 2));
   }
 
-  // One poll loop. Returns true if an interstitial was ever observed
-  // (cleared or still there at timeout), false if never seen.
-  private async pollUntilInterstitialClears(timeoutMs: number): Promise<boolean> {
+  // Drop Cloudflare's anti-bot cookies (cf_clearance + __cf_bm) so the next
+  // request triggers a FRESH managed challenge, then reload and wait for it
+  // to clear. Scoped to cookie NAME — only CF's own cookies are removed, so
+  // an OAuth provider's session on accounts.google.com / github.com is
+  // untouched. A fresh challenge on a residential IP clears in ~12-15s, so
+  // we give it a generous window. Returns true if the interstitial is gone.
+  private async clearCloudflareCookiesAndRetry(timeoutMs: number): Promise<boolean> {
+    if (!this.page || !this.context) return false;
+    try {
+      await this.context.clearCookies({ name: "cf_clearance" });
+      await this.context.clearCookies({ name: "__cf_bm" });
+    } catch {
+      // clearCookies filter unsupported / failed — nothing to retry on.
+      return false;
+    }
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 });
+    } catch {
+      // reload failed — still give the poll a chance below.
+    }
+    const after = await this.pollUntilInterstitialClears(Math.max(20_000, timeoutMs));
+    return after.cleared || !after.detected;
+  }
+
+  // With a CONFIRMED Cloudflare pass, re-navigate to the current URL with
+  // the one-shot `__cf_chl_*` challenge token stripped — the cf_clearance
+  // cookie is already set, so the edge serves the real page instead of the
+  // stuck redirect. Returns true if the interstitial is gone afterwards.
+  // Returns false (caller falls back to a plain reload) when there's no
+  // token to strip or the navigation didn't clear the gate.
+  private async forceNavigatePastClearedChallenge(): Promise<boolean> {
     if (!this.page) return false;
+    const cleaned = stripCloudflareChallengeParams(this.page.url());
+    if (!cleaned) return false;
+    try {
+      await this.page.goto(cleaned, {
+        waitUntil: "domcontentloaded",
+        timeout: 15_000,
+      });
+    } catch {
+      return false;
+    }
+    const after = await this.pollUntilInterstitialClears(Math.max(5000, 8000));
+    // cleared = saw it then it went away; !detected = the real page rendered
+    // immediately (no interstitial on the post-nav page at all).
+    return after.cleared || !after.detected;
+  }
+
+  // One poll loop. `detected` = an interstitial was observed at least
+  // once; `cleared` = it was observed AND then went away (vs. still there
+  // at the deadline); `verificationPassed` = Cloudflare reported the
+  // challenge succeeded at some point during the wait (see
+  // classifyInterstitialText).
+  private async pollUntilInterstitialClears(
+    timeoutMs: number,
+  ): Promise<{ detected: boolean; cleared: boolean; verificationPassed: boolean }> {
+    if (!this.page) return { detected: false, cleared: false, verificationPassed: false };
     const deadline = Date.now() + timeoutMs;
     let detected = false;
+    let verificationPassed = false;
     while (Date.now() < deadline) {
       let title = "";
       let bodyText = "";
@@ -3014,22 +3543,20 @@ export class BrowserController {
         await new Promise((r) => setTimeout(r, 500));
         continue;
       }
-      const onInterstitial =
-        /just a moment|performing security verification|verifying you are human|checking your browser|attention required/i.test(
-          title + " " + bodyText,
-        );
-      if (!onInterstitial) {
+      const c = classifyInterstitialText(title + " " + bodyText);
+      if (c.verificationPassed) verificationPassed = true;
+      if (!c.onInterstitial) {
         if (detected) {
           // Give the freshly-revealed page a tick to hydrate before
           // the inventory scan.
           await new Promise((r) => setTimeout(r, 800));
         }
-        return detected;
+        return { detected, cleared: detected, verificationPassed };
       }
       detected = true;
       await new Promise((r) => setTimeout(r, 1000));
     }
-    return detected;
+    return { detected, cleared: false, verificationPassed };
   }
 
   // Walk the live DOM (piercing open shadow roots) and return every
@@ -3468,16 +3995,261 @@ export class BrowserController {
     }
   }
 
+  // Does the page sign in with Google via Google Identity Services (GSI)
+  // rather than classic OAuth redirect? GSI renders its button in a
+  // cross-origin iframe (accounts.google.com/gsi/button) and/or exposes the
+  // `google.accounts.id` JS API; on use it raises a browser-native FedCM
+  // dialog or a popup and returns a JWT to a JS callback — there is NO
+  // redirect, so the classic startOAuth flow can't drive it. Detecting this
+  // is what lets the agent route to tryGoogleGsiLogin instead.
+  async hasGoogleGsiAffordance(): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      return await this.page.evaluate(() => {
+        if (
+          document.querySelector('iframe[src*="accounts.google.com/gsi/"]') !== null
+        ) {
+          return true;
+        }
+        // On-demand One-Tap: the page loads the GSI client script but renders
+        // no static button and may not have initialized `google.accounts.id`
+        // yet (amplitude, clerk). A plain click on the in-page "Sign in with
+        // Google" affordance never redirects, so the bot used to falsely
+        // conclude "signed in" and bounce to login. Treat the loaded client
+        // script as a GSI affordance so the agent routes through
+        // tryGoogleGsiLogin, which now raises One-Tap programmatically.
+        if (
+          document.querySelector(
+            'script[src*="accounts.google.com/gsi/client"]',
+          ) !== null
+        ) {
+          return true;
+        }
+        const g = (window as unknown as {
+          google?: { accounts?: { id?: unknown } };
+        }).google;
+        return typeof g?.accounts?.id !== "undefined";
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  // Drive a Google Identity Services / FedCM sign-in. Two variants are
+  // handled:
+  //   - FedCM: clicking the GSI widget raises a browser-NATIVE credential
+  //     dialog (no DOM, no popup — invisible to Playwright). We enable the
+  //     CDP FedCm domain up front and auto-select the first account when
+  //     FedCm.dialogShown fires. The page's JS callback then receives the
+  //     JWT and establishes the session.
+  //   - Popup: older GSI opens a Google account-chooser window; we adopt it
+  //     like startOAuth does so the consent loop can drive it.
+  // Returns how it resolved. The caller then runs the SAME post-OAuth
+  // settle/consent/post-verify path as the redirect flow.
+  async tryGoogleGsiLogin(
+    triggerSelector: string,
+    timeoutMs = 25_000,
+  ): Promise<{ ok: boolean; via: "fedcm" | "popup" | "none" }> {
+    if (!this.page || !this.context) throw new Error("Browser not started");
+    this.oauthProductPage = this.page;
+    let fedcmResolved = false;
+    let cdp: CDPSession | null = null;
+    try {
+      cdp = await this.context.newCDPSession(this.page);
+      await cdp.send("FedCm.enable", { disableRejectionDelay: true });
+      cdp.on("FedCm.dialogShown", (ev: unknown) => {
+        const e = ev as { dialogId?: string; dialogType?: string };
+        const dialogId = e.dialogId;
+        if (dialogId === undefined) return;
+        void (async () => {
+          // A ConfirmIdpLogin dialog has no account list — it's the "Continue
+          // as / sign in to Google" confirmation that precedes the account
+          // chooser. selectAccount would error on it, so drive the confirm
+          // button directly and skip selectAccount for this dialog type.
+          if (e.dialogType === "ConfirmIdpLogin") {
+            try {
+              await cdp!.send("FedCm.clickDialogButton", {
+                dialogId,
+                dialogButton: "ConfirmIdpLoginContinue",
+              });
+            } catch {
+              // method/param may not apply to this build/dialog — non-fatal;
+              // a subsequent AccountChooser dialog still resolves via select.
+            }
+            return;
+          }
+          try {
+            // Pick the first account on the account-chooser dialog.
+            await cdp!.send("FedCm.selectAccount", { dialogId, accountIndex: 0 });
+            fedcmResolved = true;
+          } catch {
+            // dialog dismissed or already resolved
+          }
+          if (!fedcmResolved) {
+            // Some flows surface a "Continue as <name>" confirm even on the
+            // account dialog; selectAccount alone usually completes it, but
+            // when it didn't, try the confirm button as a fallback. Failure
+            // is non-fatal — the popup/none path still applies.
+            try {
+              await cdp!.send("FedCm.clickDialogButton", {
+                dialogId,
+                dialogButton: "ConfirmIdpLoginContinue",
+              });
+              fedcmResolved = true;
+            } catch {
+              // button absent or not applicable — degrade to popup/none
+            }
+          }
+        })();
+      });
+    } catch {
+      cdp = null; // FedCm domain unavailable — the popup path still works
+    }
+
+    const popupPromise: Promise<Page | null> = this.context
+      .waitForEvent("page", { timeout: timeoutMs })
+      .then((p): Page | null => p)
+      .catch((): Page | null => null);
+
+    await this.click(triggerSelector);
+
+    // On-demand One-Tap: when the page loaded the GSI client but rendered no
+    // static button, the click above hits an in-page affordance that never
+    // raises a dialog on its own. If neither a FedCM dialog nor a popup has
+    // appeared shortly after the click, ask GSI to raise One-Tap itself.
+    // `google.accounts.id.prompt()` triggers the FedCM dialog our handler is
+    // already listening for. Guarded — `window.google.accounts.id` may be
+    // undefined (no-op) and any failure must degrade to the popup/none path.
+    if (cdp !== null) {
+      const promptDeadline = Date.now() + Math.min(4_000, timeoutMs);
+      while (
+        Date.now() < promptDeadline &&
+        !fedcmResolved &&
+        this.context.pages().length <= 1
+      ) {
+        await this.sleep(250);
+      }
+      if (!fedcmResolved && this.context.pages().length <= 1) {
+        try {
+          await this.page.evaluate(() => {
+            const g = (window as unknown as {
+              google?: { accounts?: { id?: { prompt?: () => void } } };
+            }).google;
+            const id = g?.accounts?.id;
+            if (id !== undefined && typeof id.prompt === "function") {
+              id.prompt();
+            }
+          });
+        } catch {
+          // GSI not initialized / prompt unavailable — popup/none still apply
+        }
+      }
+    }
+
+    // Resolve when a popup opens OR FedCM completes OR we hit the deadline.
+    const fedcmWait = (async (): Promise<null> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline && !fedcmResolved) {
+        await this.sleep(250);
+      }
+      return null;
+    })();
+    const popup: Page | null = await Promise.race([popupPromise, fedcmWait]);
+
+    if (cdp !== null) {
+      try {
+        await cdp.send("FedCm.disable");
+      } catch {
+        // best-effort
+      }
+    }
+
+    if (popup !== null && popup !== this.page && !popup.isClosed()) {
+      this.page = popup;
+      try {
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 });
+      } catch {
+        // consent loop re-reads regardless
+      }
+      return { ok: true, via: "popup" };
+    }
+    if (fedcmResolved) {
+      // Credential delivered to the page's JS callback — give the app a beat
+      // to exchange it for a session and redirect.
+      try {
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 10_000 });
+      } catch {
+        // best-effort
+      }
+      return { ok: true, via: "fedcm" };
+    }
+    return { ok: false, via: "none" };
+  }
+
   // URL of the active page (the OAuth page mid-handshake, the product
   // page otherwise). Cheap — no screenshot, unlike getState().
   currentUrl(): string {
     return this.page !== null ? this.page.url() : "";
   }
 
+  // Fetch a URL's final response (following redirects) and return its
+  // status, final URL, and body text — or null on any failure.
+  //
+  // WHY the CONTEXT request API (this.context.request) and not global
+  // fetch / a fresh node http client: the context's APIRequestContext
+  // shares the BrowserContext's proxy + cookie jar, so this egresses
+  // through the SAME residential tunnel the real navigation uses. That
+  // makes a probe here representative of what the browser would actually
+  // land on (same IP reputation, same cf_clearance cookie) — and needs no
+  // separate SOCKS/HTTP-proxy plumbing. Used by the signup-URL resolver to
+  // distinguish a stale /signup that serves a login SPA from the real
+  // signup form, BEFORE committing to a ~6-minute navigation.
+  //
+  // Bounded (15s, ≤10 redirects) and non-throwing — the resolver treats
+  // null as "couldn't tell" and escalates.
+  async fetchText(
+    url: string,
+  ): Promise<{ finalUrl: string; status: number; bodyText: string } | null> {
+    if (this.context === null) return null;
+    try {
+      const response = await this.context.request.get(url, {
+        maxRedirects: 10,
+        timeout: 15_000,
+        // We inspect 404/redirect bodies ourselves; don't let a non-2xx
+        // throw before we can classify it.
+        failOnStatusCode: false,
+      });
+      return {
+        finalUrl: response.url(),
+        status: response.status(),
+        bodyText: await response.text(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
   // True when the active OAuth page is gone — for the popup flow, the
   // popup closing IS the signal the handshake finished.
   oauthPageClosed(): boolean {
     return this.page === null || this.page.isClosed();
+  }
+
+  // Which OAuth providers have a LIVE session in this profile's cookie jar.
+  // The logged-in-providers.json marker is a memo that drifts out of sync
+  // (a --force-relogin clears it, a misclassified run clears it, a parallel
+  // run overwrites it) — so a session that is genuinely live in the cookies
+  // can go invisible to provider selection, which is exactly how a warm
+  // GitHub session got skipped in favour of a broken Google path. The cookie
+  // jar is the ground truth: read it directly. Cookie NAMES + presence only;
+  // values are never read into logs. Best-effort — a read failure returns [].
+  async detectSessionProviders(): Promise<OAuthProviderId[]> {
+    if (this.context === null) return [];
+    try {
+      return sessionProvidersFromCookies(await this.context.cookies());
+    } catch {
+      return [];
+    }
   }
 
   // Advance a provider's consent / account-chooser screen by one click
@@ -3704,6 +4476,31 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
     }
   });
   return bestIndex;
+}
+
+// ───────────── required-agreement checkbox guard ─────────────
+
+// Patterns shared by the pure helper below and the in-page evaluate in
+// `checkRequiredAgreementBoxes`. The evaluate runs in the page realm and
+// can't import, so the same two regexes are inlined there verbatim —
+// keep them BYTE-IDENTICAL with these.
+const AGREEMENT_TEXT_RE =
+  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+const MARKETING_TEXT_RE =
+  /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+
+// True when a checkbox's associated text reads as a REQUIRED agreement
+// (terms/privacy/consent) and NOT as a marketing/newsletter opt-in.
+//
+// Why a deterministic check instead of trusting the LLM planner:
+// amplitude's signup renders the required TOS checkbox next to a pair of
+// data-storage-location card-radios; the planner mistook the whole
+// cluster for "ambiguous radios" and skipped the box, and amplitude's
+// submit isn't disabled when it's unticked — so the form silently
+// no-ops. We must never flip a marketing opt-in on the user's behalf,
+// hence the explicit marketing exclusion.
+export function isAgreementCheckboxText(text: string): boolean {
+  return AGREEMENT_TEXT_RE.test(text) && !MARKETING_TEXT_RE.test(text);
 }
 
 // ───────────── residential proxy (S1) ─────────────

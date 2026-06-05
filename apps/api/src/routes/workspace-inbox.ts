@@ -54,6 +54,26 @@ export async function registerWorkspaceInboxRoute(
 
     const poller = new WorkspaceInboxPoller(cfg);
     const result = await poller.poll(input);
+    // Diagnostic: when no mail was found AND the alias domain differs
+    // from the mailbox the poller is actually reading, the workspace IMAP
+    // is almost certainly mis-pointed — WORKSPACE_IMAP_USER is unset so
+    // the poll fell back to GMAIL_USER (the OTP poller's personal gmail),
+    // which never receives the alias-domain catch-all. Surface it in the
+    // reason so the operator sees the misconfig in the bot's step trail
+    // instead of a silent "no_recent_messages".
+    if (result.email === null) {
+      const aliasDomain = input.to_address.split("@")[1]?.toLowerCase() ?? "";
+      const mailboxDomain = cfg.imapUser.split("@")[1]?.toLowerCase() ?? "";
+      if (aliasDomain !== "" && mailboxDomain !== "" && aliasDomain !== mailboxDomain) {
+        reply.code(200).send({
+          ...result,
+          reason:
+            `mailbox_domain_mismatch: polling @${mailboxDomain} but the alias is ` +
+            `@${aliasDomain} — set WORKSPACE_IMAP_USER to the @${aliasDomain} mailbox`,
+        } satisfies WorkspacePollResult);
+        return;
+      }
+    }
     reply.code(200).send(result);
   });
 }

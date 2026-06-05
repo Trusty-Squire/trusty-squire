@@ -114,6 +114,9 @@ class FakeBrowser {
   async clickSubmit(): Promise<void> {
     this.clickSubmitImpl();
   }
+  async checkRequiredAgreementBoxes(): Promise<string[]> {
+    return [];
+  }
   async selectOption(): Promise<void> {}
   async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
     return { found: false };

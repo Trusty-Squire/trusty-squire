@@ -56,6 +56,10 @@ export interface OnboardingEvalCase {
   state: { url: string; title: string; html: string; screenshot: string };
   inventory: InteractiveElement[];
   expect: OnboardingExpectation;
+  // Optional prior-action summary fed to the planner — lets a case test
+  // the anti-looping behaviour ("given you already did the wizard, do
+  // NOT re-click it"). Omitted for single-round decision cases.
+  priorActions?: readonly string[];
 }
 
 export interface OnboardingScore {
@@ -312,6 +316,7 @@ async function main(): Promise<void> {
         state: OnboardingEvalCase["state"];
         oauth: boolean;
         inventory: InteractiveElement[];
+        priorActions?: readonly string[];
       }) => Promise<PostVerifyStep>;
     }
   ).planPostVerifyStep.bind(agent);
@@ -326,6 +331,7 @@ async function main(): Promise<void> {
         state: c.state,
         oauth: c.oauth,
         inventory: c.inventory,
+        ...(c.priorActions !== undefined ? { priorActions: c.priorActions } : {}),
       });
       const score = scoreOnboardingStep(step, c.expect);
       if (score.pass) passed += 1;

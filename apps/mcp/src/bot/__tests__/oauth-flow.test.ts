@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import {
   SignupAgent,
   detectEmailOtpGate,
+  detectGoogleNoAccount,
   detectManualLoginFallback,
   detectSsoRestriction,
   detectStuckOnGoogleOAuth,
@@ -28,8 +29,10 @@ import { scoreSignupButton } from "../browser.js";
 import type {
   BrowserController,
   BrowserState,
+  CaptchaSolveResult,
   InteractiveElement,
 } from "../browser.js";
+import type { TwoCaptchaResult, TwoCaptchaSolver } from "../captcha-solver-2captcha.js";
 import type { LLMClient, LLMResponse } from "../llm-client.js";
 import { buildSignupResponse } from "../../tools/provision-any.js";
 
@@ -108,6 +111,15 @@ class FakeOAuthBrowser {
   }
   async prewarm(): Promise<void> {}
   async goto(): Promise<void> {}
+  // The signup-URL resolver probes via fetchText before navigating; null
+  // means "couldn't tell over HTTP" so the curated URL is kept as-is.
+  async fetchText(): Promise<{
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  } | null> {
+    return null;
+  }
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
   async dismissConsentBanner(): Promise<string | null> { return null; }
@@ -152,6 +164,11 @@ class FakeOAuthBrowser {
     this.startOAuthCalls += 1;
     this.advance(); // land on the first Google screen
   }
+  // These tests exercise the classic OAuth-redirect path; report no GSI/FedCM
+  // widget so runOAuthFlow takes startOAuth (not tryGoogleGsiLogin).
+  async hasGoogleGsiAffordance(): Promise<boolean> {
+    return false;
+  }
   currentUrl(): string {
     return this.page().url;
   }
@@ -165,6 +182,26 @@ class FakeOAuthBrowser {
   }
   async settleAfterOAuth(): Promise<void> {
     this.settleCalls += 1;
+  }
+
+  // ── Visible-captcha precheck surface (OAuth Tier-2 → Tier-3) ──
+  // Defaults to "no widget" so the existing OAuth tests are unchanged.
+  // Captcha-precheck tests opt in by assigning these fields.
+  public visibleCaptchaResult: CaptchaSolveResult = { found: false };
+  public sitekey: string | null = null;
+  public injectTokenResult = true;
+  public extractSitekeyCalls = 0;
+  public injectedTokens: string[] = [];
+  async solveVisibleCaptcha(): Promise<CaptchaSolveResult> {
+    return this.visibleCaptchaResult;
+  }
+  async extractRecaptchaSitekey(): Promise<string | null> {
+    this.extractSitekeyCalls += 1;
+    return this.sitekey;
+  }
+  async injectRecaptchaToken(token: string): Promise<boolean> {
+    this.injectedTokens.push(token);
+    return this.injectTokenResult;
   }
 }
 
@@ -188,6 +225,7 @@ class NeverInbox implements AgentInbox {
     subject: string;
     from_address: string;
     parsed_links: ReadonlyArray<string>;
+    parsed_codes: ReadonlyArray<string>;
   }> {
     this.calls += 1;
     throw new Error("inbox must not be polled on an OAuth run");
@@ -238,11 +276,49 @@ describe("findOAuthButton", () => {
     expect(findOAuthButton([icon], "google")?.selector).toBe("#b");
   });
 
+  it("matches a button whose SVG name is GLUED to its text ('GoogleSign up with Google')", () => {
+    // elevenlabs (and similar) render the provider icon's accessible name
+    // concatenated to the button text with no space, fusing the verb into
+    // "googlesign". The camelCase split must recover it so the bot OAuths
+    // in instead of falling back to a bouncing email signup.
+    const glued = mk({
+      tag: "button",
+      visibleText: "GoogleSign up with Google",
+      selector: "#glued",
+    });
+    expect(findOAuthButton([glued], "google")?.selector).toBe("#glued");
+  });
+
   it("matches a 'Continue with GitHub' button when the provider is github", () => {
     const gh = mk({ tag: "button", visibleText: "Continue with GitHub", selector: "#gh" });
     expect(findOAuthButton([gh], "github")?.selector).toBe("#gh");
     // ...but not when the requested provider is Google.
     expect(findOAuthButton([gh], "google")).toBeNull();
+  });
+
+  it("matches a logo-only button whose <svg><title> leaked into text (northflank 'GitHubGitHub')", () => {
+    // northflank renders icon-only OAuth buttons as <button><svg><title>GitHub
+    // — the title leaks into textContent (doubled), so visibleText isn't empty
+    // AND \bgithub\b doesn't match the doubled run; only iconLabel is clean.
+    const logo = mk({
+      tag: "button",
+      visibleText: "GitHubGitHub",
+      iconLabel: "GitHub",
+      selector: "#gh-logo",
+    });
+    expect(findOAuthButton([logo], "github")?.selector).toBe("#gh-logo");
+  });
+
+  it("does NOT match a nav link that merely mentions the provider name", () => {
+    // "GitHub's Privacy Policy" leaves residue after stripping the keyword,
+    // so the logo-only path must reject it.
+    const navlink = mk({
+      tag: "a",
+      visibleText: "GitHub's Privacy Policy",
+      iconLabel: "GitHub",
+      selector: "#nav",
+    });
+    expect(findOAuthButton([navlink], "github")).toBeNull();
   });
 
   it("returns null for a page with no matching affordance", () => {
@@ -452,12 +528,16 @@ describe("findSignInAdvanceButton", () => {
 // ───────────────────── orderOAuthCandidates ─────────────────────
 
 describe("orderOAuthCandidates", () => {
-  it("prefers Google over a non-Google PIN when a Google session exists", () => {
-    // Convex pins github, but the profile has a Google session — Google
-    // leads (blocks less hard), github is the fallback for pages that
-    // only offer github.
-    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["google", "github"]);
-    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["google", "github"]);
+  it("leads with an explicit pin when its session is warm, Google as fallback", () => {
+    // northflank pins github (its Google is One-Tap/FedCM the redirect flow
+    // can't drive); with a warm github session the pin leads, google trails
+    // as the fallback for pages that only offer google.
+    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["github", "google"]);
+    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["github", "google"]);
+  });
+
+  it("falls back to Google when the pinned provider's session is NOT warm", () => {
+    expect(orderOAuthCandidates("github", ["google"])).toEqual(["google", "github"]);
   });
 
   it("honours a non-Google pin when there's NO Google session (no regression)", () => {
@@ -465,8 +545,9 @@ describe("orderOAuthCandidates", () => {
     expect(orderOAuthCandidates("github", [])).toEqual(["github"]);
   });
 
-  it("returns just Google when Google is pinned", () => {
-    expect(orderOAuthCandidates("google", ["google", "github"])).toEqual(["google"]);
+  it("leads with Google when Google is pinned, github as fallback", () => {
+    expect(orderOAuthCandidates("google", ["google", "github"])).toEqual(["google", "github"]);
+    expect(orderOAuthCandidates("google", ["google"])).toEqual(["google"]);
   });
 
   it("with no pin, sorts logged-in providers Google-first", () => {
@@ -535,6 +616,31 @@ describe("isLoginLoopState", () => {
     });
     expect(
       isLoginLoopState("https://service.com/authenticate", [githubBtn], "google"),
+    ).toBeNull();
+  });
+
+  it("STILL fires when a bare email field sits next to the Google button (real groq /authenticate)", () => {
+    // groq's /authenticate shows an "or continue with email" magic-link
+    // input ALONGSIDE the OAuth buttons. A bare email field must NOT
+    // suppress the login-loop retry that groq requires to finalize its
+    // Stytch session — that suppression was the oauth_session_not_persisted bug.
+    const emailInput = mk({ tag: "input", type: "email", selector: "#email-input" });
+    const hit = isLoginLoopState(
+      "https://console.groq.com/authenticate",
+      [emailInput, googleBtn],
+      "google",
+    );
+    expect(hit?.selector).toBe("#g");
+  });
+
+  it("returns null on a genuine email+PASSWORD hybrid form (Clerk/Auth0 credential creation)", () => {
+    // The real hybrid form the guard exists for: OAuth buttons PLUS a
+    // password input means the service wants a credential created, which
+    // the planner (not another OAuth click) must drive.
+    const emailInput = mk({ tag: "input", type: "email", selector: "#email" });
+    const pwInput = mk({ tag: "input", type: "password", selector: "#pw" });
+    expect(
+      isLoginLoopState("https://service.com/sign-up", [emailInput, pwInput, googleBtn], "google"),
     ).toBeNull();
   });
 
@@ -673,6 +779,105 @@ describe("detectStuckOnGoogleOAuth (rc.24)", () => {
 
   it("does not fire on a malformed URL", () => {
     expect(detectStuckOnGoogleOAuth("not-a-url")).toBe(false);
+  });
+});
+
+describe("detectGoogleNoAccount — Google login-only re-route (plunk)", () => {
+  it("fires on plunk's no-account message in the URL query", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://app.useplunk.com/auth/login?message=No%20account%20found%20for%20this%20Google%20account",
+        "Log in to Plunk",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a 'Sign up to continue' prompt in the body", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://service.example.com/login",
+        "We couldn't sign you in. Sign up to continue.",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a google-auth-error query param", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://service.example.com/login?google-auth-error=1",
+        "Login",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on assorted no-account phrasings (body or query)", () => {
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "That account doesn't exist yet."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "We couldn't find an account for you."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "No account associated with that email."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "Please create an account to get started."),
+    ).toBe(true);
+    expect(
+      detectGoogleNoAccount("https://x.com/login", "You need to register first."),
+    ).toBe(true);
+  });
+
+  it("does NOT fire on a normal Google consent screen", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://accounts.google.com/signin/oauth/consent?client_id=…",
+        "Plunk wants access to your Google Account. This will allow Plunk to see your email address.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT fire on a normal post-login dashboard", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://app.useplunk.com/dashboard",
+        "Welcome back. Your projects, API keys, and usage.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT fire on a bare login page with no no-account phrasing", () => {
+    expect(
+      detectGoogleNoAccount("https://app.useplunk.com/auth/login", "Log in to your account"),
+    ).toBe(false);
+  });
+
+  it("tolerates a malformed URL (falls back to body text only)", () => {
+    expect(detectGoogleNoAccount("not-a-url", "No account found")).toBe(true);
+    expect(detectGoogleNoAccount("not-a-url", "Welcome to your dashboard")).toBe(false);
+  });
+
+  // MEASURED 2026-06-04: clerk's post-OAuth sign-in copy + guards against a
+  // bare 404 mistakenly abandoning a working OAuth session.
+  it("fires on clerk's 'The External Account was not found' copy", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://dashboard.clerk.com/sign-in",
+        "The External Account was not found.",
+      ),
+    ).toBe(true);
+  });
+
+  it("fires on a bare 'Account not found' message", () => {
+    expect(
+      detectGoogleNoAccount("https://x.com/sign-in", "Account not found"),
+    ).toBe(true);
+  });
+
+  it("does NOT fire on a generic 404 page (no 'account' in the phrase)", () => {
+    expect(
+      detectGoogleNoAccount("https://x.com/missing", "404 Page not found"),
+    ).toBe(false);
   });
 });
 
@@ -955,6 +1160,108 @@ describe("GitHub OAuth signup (T13)", () => {
     expect(result.error ?? "").toMatch(/^needs_login:/);
     expect(browser.typeCalls).toHaveLength(0);
     expect(browser.advanceCalls).toBe(0);
+  });
+});
+
+// ───────────── OAuth visible-captcha precheck Tier-3 fall-through ─────────────
+// replit/uploadcare gate the Google button behind a reCAPTCHA the
+// Tier-2 click-and-wait can't tick. The precheck must escalate to the
+// 2Captcha solver (the same Tier-3 the form-submit gate uses) before
+// clicking Google — otherwise the OAuth click lands on a still-gated
+// button and the run never gets a session.
+
+// Stub solver returning a canned outcome. Shaped as TwoCaptchaSolver so
+// the agent's `captchaSolver` slot accepts it without hitting the network.
+class StubSolver {
+  public solveCalls: Array<{ sitekey: string; pageUrl: string }> = [];
+  constructor(
+    private readonly available: boolean,
+    private readonly outcome: TwoCaptchaResult,
+  ) {}
+  isAvailable(): boolean {
+    return this.available;
+  }
+  async solveRecaptchaV2(input: { sitekey: string; pageUrl: string }): Promise<TwoCaptchaResult> {
+    this.solveCalls.push({ sitekey: input.sitekey, pageUrl: input.pageUrl });
+    return this.outcome;
+  }
+}
+
+function agentWithSolver(browser: FakeOAuthBrowser, solver: StubSolver): SignupAgent {
+  const asController: unknown = browser;
+  if (!isController(asController)) throw new Error("unreachable");
+  const asSolver: unknown = solver;
+  return new SignupAgent(asController, new QueueLLM(["{}"]), {
+    googleChallengeTimeoutMs: 10,
+    captchaSolver: asSolver as TwoCaptchaSolver,
+  });
+}
+
+describe("OAuth visible-captcha precheck — Tier-3 escalation", () => {
+  function captchaScript(): FakeOAuthBrowser {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://uploadcare.com/accounts/signup/", text: "" },
+      CONSENT_BASIC,
+      PRODUCT_DASH("Dashboard — Your API Key: ts_oauthkey_abcdefghijklmnop12345"),
+    ]);
+    browser.visibleCaptchaResult = { found: true, solved: false, kind: "recaptcha" };
+    browser.sitekey = "6Lc_testsitekey_abcdef";
+    return browser;
+  }
+
+  it("escalates an unsolved reCAPTCHA to 2Captcha and injects the token", async () => {
+    const browser = captchaScript();
+    const solver = new StubSolver(true, { kind: "ok", token: "TOK-123", durationMs: 42_000 });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(result.success).toBe(true);
+    // The solver was asked to solve the page's sitekey, and the token
+    // was injected back into the page before the Google click.
+    expect(solver.solveCalls).toHaveLength(1);
+    expect(solver.solveCalls[0]?.sitekey).toBe("6Lc_testsitekey_abcdef");
+    expect(browser.injectedTokens).toEqual(["TOK-123"]);
+    expect(result.steps.some((s) => /Tier 3 — submitting reCAPTCHA sitekey to 2Captcha/i.test(s))).toBe(true);
+    expect(result.steps.some((s) => /Tier 3 solved the reCAPTCHA/i.test(s))).toBe(true);
+    // Google was still clicked exactly once.
+    expect(browser.startOAuthCalls).toBe(1);
+  });
+
+  it("clicks Google anyway when the Tier-3 solve fails (best-effort, never blocks)", async () => {
+    const browser = captchaScript();
+    const solver = new StubSolver(true, { kind: "solve_timeout", durationMs: 120_000 });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(solver.solveCalls).toHaveLength(1);
+    expect(browser.injectedTokens).toHaveLength(0);
+    expect(browser.startOAuthCalls).toBe(1); // OAuth click still happened
+    expect(result.steps.some((s) => /Tier 3 solve_timeout/i.test(s))).toBe(true);
+    expect(
+      result.steps.some((s) => /did not solve in 20s — clicking the .* affordance anyway/i.test(s)),
+    ).toBe(true);
+  });
+
+  it("does NOT escalate when the solver is unavailable (no TWOCAPTCHA_API_KEY)", async () => {
+    const browser = captchaScript();
+    const solver = new StubSolver(false, { kind: "no_key" });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(solver.solveCalls).toHaveLength(0);
+    expect(browser.extractSitekeyCalls).toBe(0);
+    expect(browser.startOAuthCalls).toBe(1);
+    expect(
+      result.steps.some((s) => /did not solve in 20s — clicking the .* affordance anyway/i.test(s)),
+    ).toBe(true);
+  });
+
+  it("does NOT escalate a Turnstile (scores at the IP layer; solver token is rejected)", async () => {
+    const browser = captchaScript();
+    browser.visibleCaptchaResult = { found: true, solved: false, kind: "turnstile" };
+    const solver = new StubSolver(true, { kind: "ok", token: "TOK-NO", durationMs: 1000 });
+    const result = await agentWithSolver(browser, solver).signup(oauthTask());
+
+    expect(solver.solveCalls).toHaveLength(0);
+    expect(browser.extractSitekeyCalls).toBe(0);
+    expect(browser.startOAuthCalls).toBe(1);
   });
 });
 

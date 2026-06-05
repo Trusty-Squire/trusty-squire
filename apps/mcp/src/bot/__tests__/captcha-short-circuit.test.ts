@@ -44,6 +44,12 @@ class FakeCaptchaBrowser {
   }> {
     return this.detectResult;
   }
+  // Invoked by runCaptchaGate's invisible-reCAPTCHA branch to mint the score
+  // token; the short-circuit test only asserts the silent-encounter record, so
+  // a stub that reports "minted" is sufficient.
+  async triggerInvisibleRecaptcha(): Promise<boolean> {
+    return true;
+  }
 }
 
 function agentWith(browser: FakeCaptchaBrowser): SignupAgent {

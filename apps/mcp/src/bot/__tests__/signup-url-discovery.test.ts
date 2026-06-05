@@ -227,6 +227,33 @@ describe("detectAlreadySignedIn (F17)", () => {
     ).toBe(true);
   });
 
+  it("fires on a getting-started/onboarding URL even with no matching CTA (last9)", () => {
+    // last9 lands the already-Google-authed bot on
+    // /organizations/<slug>/getting-started; its buttons match none of
+    // the creation-CTA / workspace-picker vocabularies, so it used to bail
+    // oauth_required despite being fully signed in. A getting-started path
+    // is only reachable post-auth → the URL alone is conclusive.
+    expect(
+      detectAlreadySignedIn({
+        url: "https://app.last9.io/v2/organizations/gmail-lunchboxfortwo/getting-started?clusterId=c85",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Upgrade Plan" }),
+          mkEl({ tag: "button", visibleText: "Choose your region" }),
+          mkEl({ tag: "button", visibleText: "You're all set! Next steps" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("a getting-started URL with a credential input is NOT signed-in (precondition wins)", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://x.example/onboarding",
+        inventory: [mkEl({ tag: "input", type: "email" })],
+      }),
+    ).toBe(false);
+  });
+
   it("does NOT fire when an email or password input is present", () => {
     expect(
       detectAlreadySignedIn({

@@ -80,6 +80,39 @@ export class TwoCaptchaSolver {
     // challenges. 2Captcha returns an action-bound token when set.
     action?: string;
   }): Promise<TwoCaptchaResult> {
+    return this.submitAndPoll({
+      method: "userrecaptcha",
+      googlekey: input.sitekey,
+      pageurl: input.pageUrl,
+      ...(input.action !== undefined ? { action: input.action } : {}),
+    });
+  }
+
+  /**
+   * Submit an hCaptcha sitekey + page URL to 2Captcha (method=hcaptcha)
+   * and poll for the token. hCaptcha (plausible, several others) is a
+   * distinct provider from reCAPTCHA — 2Captcha routes it through a
+   * different worker pool and the response token goes into the page's
+   * `h-captcha-response` textarea, not `g-recaptcha-response`.
+   */
+  async solveHcaptcha(input: {
+    sitekey: string;
+    pageUrl: string;
+  }): Promise<TwoCaptchaResult> {
+    return this.submitAndPoll({
+      method: "hcaptcha",
+      sitekey: input.sitekey,
+      pageurl: input.pageUrl,
+    });
+  }
+
+  // Shared in.php submit + res.php poll. `params` carries the
+  // provider-specific fields (method + sitekey param name); everything
+  // else (auth, json, the polling loop, timeouts) is identical across
+  // reCAPTCHA and hCaptcha.
+  private async submitAndPoll(
+    params: Record<string, string>,
+  ): Promise<TwoCaptchaResult> {
     if (!this.isAvailable()) return { kind: "no_key" };
     const apiKey = this.apiKey!;
     const startMs = Date.now();
@@ -87,11 +120,8 @@ export class TwoCaptchaSolver {
     // ── 1. Submit ────────────────────────────────────────────────
     const inUrl = new URL(`${TWOCAPTCHA_BASE}/in.php`);
     inUrl.searchParams.set("key", apiKey);
-    inUrl.searchParams.set("method", "userrecaptcha");
-    inUrl.searchParams.set("googlekey", input.sitekey);
-    inUrl.searchParams.set("pageurl", input.pageUrl);
+    for (const [k, v] of Object.entries(params)) inUrl.searchParams.set(k, v);
     inUrl.searchParams.set("json", "1");
-    if (input.action !== undefined) inUrl.searchParams.set("action", input.action);
 
     let captchaId: string;
     try {

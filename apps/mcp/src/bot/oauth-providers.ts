@@ -69,12 +69,22 @@ export function classifyGitHubAuthState(url: string, bodyText: string): OAuthAut
     return "challenge";
   }
 
-  // Consent — the OAuth authorize screen. The path is the reliable
-  // signal; the text fallback catches a re-styled page.
+  // Consent — the OAuth authorize screen OR a GitHub APP install flow.
+  // Many services (northflank) use a GitHub App, not plain OAuth: after
+  // sign-in GitHub routes to /apps/<app>/installations/select_target (pick
+  // which account to install on) → /installations/new (the Install +
+  // permissions screen). Reaching these means the SESSION IS VALID and the
+  // app just needs installing — classifying them as needs_login (the old
+  // default) wrongly aborted a signed-in run and cleared the github marker.
+  // The path is the reliable signal; the text fallback catches re-styles.
   if (
     path.includes("/login/oauth/authorize") ||
+    /\/apps\/[^/]+\/installations\/(?:select_target|new|permissions)/.test(path) ||
+    path.includes("/installations/select_target") ||
     text.includes("wants to access your") ||
-    text.includes("by clicking authorize")
+    text.includes("by clicking authorize") ||
+    (text.includes("install") &&
+      (text.includes("on your account") || text.includes("github app")))
   ) {
     return "consent";
   }

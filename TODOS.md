@@ -15,6 +15,158 @@ The closed-loop hardening + telemetry-fix session shipped rc.1→rc.5
 anti-bot plan is **done**, not pending (see AB note below). What's
 live and what's immediately next:
 
+### A0 — Four-walls measurement sweep + GSI/FedCM support [2026-06-03]
+Drove groq/northflank/codesandbox/plausible against the residential exit
+(patchright + SK-Broadband SOCKS); each "wall" was MEASURED, not guessed.
+Shipped commits 555aec8, 2743669, f680ce4, a7071b1, 95a7501 (+ GSI WIP).
+See memory `project-four-walls-measured-jun03`. Harnesses:
+`/tmp/oauth-probe.mjs` (OAuth network capture), `/tmp/cf-measure.mjs`
+(CF clearance + config bisection), `/tmp/hydrate-measure.mjs` (SPA ws probe).
+
+- **groq → GREEN ✅** (validated: ok, api_key, skill promoted). Was Stytch
+  B2B async org-provisioning ("Creating your organization" ~5-7s) being
+  interrupted by a URL-only settle-wait + the rc.20 re-OAuth retry. Fix:
+  `isAuthProcessingText` settle-wait (24s). NOT anti-bot — the OAuth network
+  probe is what distinguished an interrupted async step from a rejection.
+- **plausible → bot-capable** (captcha WALL BEATEN: hCaptcha via 2Captcha,
+  validated; + subject-matcher + code-entry fixes). Only gated by plausible
+  INTERMITTENTLY withholding the verification email (service-side anti-abuse).
+- **codesandbox → stochastic Cloudflare** risk gate. Measured: a minimal
+  browser config clears CF in ~12s but the bot's config sits near CF's
+  threshold; no deterministic config fix (stale-cookie theory disproven).
+- **northflank → a 3-layer onion, not yet green.** Peeled by measurement:
+  1. Google auth is GSI/One-Tap (FedCM, no redirect) — built GSI/FedCM
+     support (below) but northflank's Google is *on-demand One-Tap*, not a
+     static gsi/button, so it doesn't surface as a clickable affordance.
+  2. Provider preference led with Google over the github pin → fixed
+     (72192c1: lead with a warm pin). Plus `login` now routes through the
+     proxy (a7071b1 — the "github-login-marker-lies" root cause: session was
+     made from the datacenter IP, used from residential → killed) + drops
+     --enable-automation (95a7501). GitHub session now persists.
+  3. Logo-only OAuth buttons — FIXED + VALIDATED (651eed8). northflank's
+     GitHub/GitLab/Bitbucket buttons are `<button><svg><title>GitHub</title>`,
+     whose title LEAKS into textContent ("GitHubGitHub", doubled — also
+     defeats `\bgithub\b`). findOAuthButton now matches a logo button whose
+     visible text is nothing-but-the-provider-name + iconLabel names it. The
+     bot now finds + drives northflank's GitHub button. (SPA is ws-gated
+     ~15s; OAuth scan is hydration-aware, 4cbaf3d.)
+  4. **REMAINING BLOCKER (human gate, not a bot gap):** GitHub forces a
+     one-time "Verify 2FA now" re-verification on the /authorize flow that
+     the bot fast-aborts (needs the operator's authenticator).
+     - **Google path is a DEAD END (corrected diagnosis).** northflank has a
+       `<button>Google</button>`, but MEASURED (warm session + CDP FedCm
+       enabled + real click): NO FedCM dialog, NO popup, NO navigation —
+       clicking it does nothing observable, and `google.accounts.id` never
+       loads. So the earlier "GSI/One-Tap" read was wrong; the button is
+       inert to automation and the bot's old "signed in via Google" was a
+       false positive (no-op click → /signup `not_provider` misread). The GSI
+       driver has nothing to catch here. (FedCm follow-ups in the GSI block
+       remain valid for a *real* gsi/button or One-Tap service, just not
+       northflank.)
+     - **GitHub path — fully driven now, stops at install-time 2FA (DEFINITIVE).**
+       With the login 2FA cleared + warm session, the bot finds the logo
+       button, drives OAuth, the session is VALID (snapshot shows
+       `"login":"lunchboxfortwo"`), and it reaches northflank's GitHub APP
+       install page (/apps/northflank-cloud-build-run/installations/select_target).
+       There GitHub demands a FRESH "Verify two-factor authentication" sudo
+       prompt for the install — separate from the login 2FA, re-armed per
+       sensitive action — which the bot cannot enter. classifyGitHubAuthState
+       now reads GitHub-App install pages as consent (9ae5313), but the 2FA
+       challenge (correctly) takes precedence.
+     So every northflank path is a NON-bot wall: Google=inert button,
+     GitHub=install-time sudo-2FA (human), GitLab/Bitbucket=no session,
+     email=recaptcha+withheld verification. **northflank = needs-human.** Every
+     bot-capability layer (logo detection, pin order, login-proxy, GSI driver,
+     hydration scan, App-install classification) is now fixed; only the
+     GitHub sudo-2FA gate remains, and it is outside the bot's control. A
+     future "pause-for-human-2FA mid-signup (noVNC)" feature could clear it.
+  - **Follow-up bug:** logged-in-providers.json got out of sync (github
+     session live in cookies but absent from the marker → loggedInProviders()
+     returned ["google"], so the pin-respecting order fell back to google).
+     Corrected manually this session. loggedInProviders() should be
+     cookie-backed (or markProviderLoggedIn made resilient to overwrite) so a
+     warm session is never invisible.
+
+  **GSI/FedCM support — SHIPPED (commit 4969584):**
+  `BrowserController.hasGoogleGsiAffordance()` + `tryGoogleGsiLogin()` (CDP
+  `FedCm.enable` → auto-`selectAccount` on `FedCm.dialogShown`, popup-variant
+  fallback); wired into `runOAuthFlow`. CDP FedCm verified in patchright 1.60.
+  - TODO for a true static-GSI service: handle the FedCm "ConfirmIdpLogin"
+    dialog + the "Continue as" confirm button (`FedCm.clickDialogButton`) if
+    `selectAccount` alone doesn't finalize; trigger One-Tap via
+    `google.accounts.id.prompt()` for the on-demand variant; unit coverage.
+
+### A0.1 — Full harvest sweep results + the new frontier [2026-06-04]
+Re-ran the 75-task curated queue (northflank dropped) on the latest build to
+measure the aggregate lift from the session's OAuth fixes. Log:
+`~/.trusty-squire/logs/harvest-sweep-20260603-230052.log`.
+
+**Result: 18 ok (24%) · 13 skills promoted · but 58/75 (77%) AUTHENTICATED.**
+Only 5 services failed at the auth/login layer — the OAuth fixes (Google
+account-chooser, async-session settle, dead-route, logo-button, pin/cookie
+sessions) clearly worked. The bottleneck SHIFTED to post-OAuth navigation.
+Passes: ipinfo resend sentry neon together baseten convex redis-cloud chroma
+mailtrap brevo algolia e2b svix apify firecrawl elevenlabs modal.
+
+**ACTIVE NOW — planner-navigation work (A2 below): 20 services authenticated
+but the planner couldn't reach/extract the key.** Three generalizable prompt
+themes (corpus-driven, NOT per-service): A) create-the-first-resource
+(org/project/cluster) when no key is visible — axiom, kinde, meilisearch,
+qdrant, render, workos; B) locate key in-UI + 404-recovery, stop guessing
+key URLs — grafana-cloud, typesense, ipdata, last9, circleci, hookdeck,
+cockroachdb, betterstack-uptime; C) finish onboarding form-fill — imagekit,
+statsig, loops. (Also hatchet, typeform, xata.) Pairs with
+[[feedback-generalize-not-per-service]] + [[project-planner-generalization-plan]].
+- **VALIDATION round 1 (f3b4909):** re-ran the 21 nav corpus → +5 converted
+  (render, qdrant, workos = create-resource theme A; statsig = pre-filled C;
+  hookdeck). Themes work + generalize (A helps any create-first-resource
+  service). Remaining 16 are progressively bespoke: multi-step onboarding
+  wizards (axiom), complex key-creation forms (grafana access-policy), no
+  obvious key path (last9), email-verify (typesense/ipdata), github-only
+  (circleci), timeouts (kinde). Next round = diminishing returns / more
+  per-service shaped — weigh against the SESSION-wall (15) frontier.
+
+
+**DEFERRED — surface AFTER the planner changes land (separate frontiers):**
+- **SESSION-wall (15)** — `oauth_session_not_persisted`: the SERVICE rejected
+  the OAuth callback and bounced to login (the northflank anti-bot class, a
+  session/fingerprint-layer problem, NOT planner): amplitude, baselime,
+  browserbase, clerk, cloudinary, daytona, falai, growthbook, netlify, paddle,
+  planetscale (github-only — needs the github session), plunk, replit,
+  uploadcare, upstash. This is the next hard frontier after navigation.
+- **GATE (7)** — billing/phone/2FA/email-verify, human-gated: anthropic,
+  fathom, flagsmith, lambda-labs, sendgrid, temporal, weaviate.
+- **CAPTCHA/anti-bot (3)**: codesandbox (stochastic CF), plausible (hCaptcha
+  solved + email withheld), tally.
+- **NO-key, mis-queued (2)** — no API key exists; DROP from the queue:
+  stackblitz (online IDE), zeabur.
+- **TRANSIENT (9)** — locator/proxy/timeout, likely pass on retry:
+  betterstack-logs, cronitor, deepinfra, honeycomb, launchdarkly, perplexity,
+  porter, scrapingbee, supabase. Re-run before treating as real failures.
+
+
+### A0.2 — Session-wall frontier DECOMPOSED + round-2 stall fix [2026-06-04]
+Re-ran the 14 "session-wall" (oauth_session_not_persisted) services + the 3
+multi-step wizards. Log: ~/.trusty-squire/logs/r2sw-*.log. The frontier was
+NOT a monolithic anti-bot wall:
+- **9 of 14 were TRANSIENT** (run-to-run Google-session/chooser variance) —
+  on re-run 2 fully passed (falai, upstash) and 7 now authenticate and fail
+  downstream at navigation/verify (baselime, browserbase, cloudinary, daytona,
+  growthbook, netlify, paddle → join the planner-nav bucket).
+- **5 genuine, none a session-layer rejection** (probed amplitude via
+  /tmp/sessionwall-probe.mjs + read trails):
+  - GSI/One-Tap (Google widget doesn't redirect): **amplitude, clerk** →
+    needs the GSI/FedCM driver work already logged for northflank.
+  - **plunk** — Google OAuth COMPLETES then "No account found for this Google
+    account": its Google is LOGIN-ONLY. FIX (generalizable): when the
+    post-OAuth page says no-account/sign-up-first, FALL BACK to email signup
+    instead of bailing oauth_session_not_persisted.
+  - recaptcha-gated OAuth (captcha blocks the Google click): **replit,
+    uploadcare** → solve the recaptcha before/at the OAuth click.
+- **Round-2 stall fix (b8438c0):** axiom flipped STALLED→no_credentials (the
+  fix works — it no longer gives up in a multi-field wizard), but still can't
+  LOCATE the key (navigation bucket). meilisearch/kinde still fail.
+
 ### A1 — Housekeeper harvest RUNNING [in-flight]
 Launched 2026-06-02 over **75 services** from the queue that have no
 active skill and aren't wall-blocked (excludes the 3 hard walls:
@@ -127,9 +279,11 @@ cleared state and timed out → a fixable **bot bug**, not a wall.
    used a dirty browser). Revive a residential endpoint (Tellskill Mac or
    a cheap residential proxy), set `UNIVERSAL_BOT_PROXY_URL` +
    `BOT_CDP_HARDENED=1`, re-run this A/B. This is the decisive test.
-2. **Fix the codesandbox-class interstitial bug** — recognize the
-   Cloudflare `"Verification successful"` state and proceed instead of
-   timing out as `anti_bot_blocked`.
+2. ~~Fix the codesandbox-class interstitial bug~~ **DONE (commit e60291a)**
+   — `classifyInterstitialText` now recognizes the Cloudflare
+   `"Verification successful"` state (separate from the static challenge
+   copy) and waits patiently through the stuck redirect instead of timing
+   out as `anti_bot_blocked`.
 3. Make `BOT_CDP_HARDENED=1` the default once (1) confirms a conversion
    lift (it ships dark today — flag-gated off).
 Harness to reuse for any future measurement: `/tmp/cdp-detect`.
@@ -418,3 +572,33 @@ full 120s, none arrived). Root cause is the `@trustysquire.ai` catch-all →
 IMAP mailbox delivery, not probe timing. Operator action: verify
 `GMAIL_USER`/`WORKSPACE_IMAP_*` on `trusty-squire-api` points at the
 mailbox the catch-all actually delivers to (see the inbox-agent diagnosis).
+
+## Remaining-buckets sweep (2026-06-03) — status after the rerun3 triage
+The 24 rerun3 failures were triaged into buckets (see
+[[project-planner-generalization-plan]] memory). Progress:
+- **PLANNER-NAV (6):** Cloudinary prompt de-contamination (proven) + the
+  deterministic wizard-loop breaker (live-verified on axiom). Done.
+- **INTERSTITIAL (1: lambda-labs + the codesandbox class):** FIXED
+  (commit e60291a) — the bot now recognizes a PASSED Cloudflare challenge
+  ('Verification successful') instead of bailing on the static copy. Matters
+  now that patchright actually passes the challenge.
+- **INFRA-inbox (4: fathom/postmark/elevenlabs/browserbase):** FIXED +
+  VERIFIED end-to-end (2026-06-03). The workspace IMAP poller was pointed at
+  a mailbox that authenticated but didn't receive the trustysquire.ai
+  catch-all, AND the app password was stale. Fixed by setting
+  `WORKSPACE_IMAP_USER=lunchbox@trustysquire.ai` + a FRESH app password (made
+  after enabling IMAP on that Workspace account) on `trusty-squire-api`.
+  Verified: a test email to `<rand>@trustysquire.ai` → catch-all →
+  lunchbox@trustysquire.ai mailbox → IMAP poll returned `found`. The 4
+  verification_not_sent services should now pass. Commit 3a751b0 added a
+  `mailbox_domain_mismatch` diagnostic so this class of misconfig surfaces
+  in the bot trail instead of a silent "no mail" next time.
+- **AUTH-WALL (8: groq/xata/ipdata/stripe/stytch/weaviate/northflank/
+  launchdarkly):** OAuth never completed. NEXT: re-test with
+  `BOT_CDP_HARDENED=1` (patchright) — the clean fingerprint may now clear
+  some of these (the datacenter-IP block from the A/B is the open variable).
+  xata is a Keycloak `first-broker-login` account-LINK gate (different — the
+  bot may be able to click "link account"); worth a focused look.
+- **SSO/2FA (4: last9/qdrant/redis-cloud/grafana-cloud):** qdrant → GitHub
+  2FA (wall, needs TOTP); last9 → already-signed-in (already-account mint may
+  cover it); redis-cloud/grafana-cloud → SSO. Mostly walls.

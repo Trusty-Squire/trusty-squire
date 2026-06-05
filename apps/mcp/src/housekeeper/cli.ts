@@ -181,8 +181,61 @@ Required env per mode:
 `);
 }
 
+// Fill TRUSTY_SQUIRE_MACHINE_TOKEN / _ACCOUNT_ID / _API_BASE from the
+// session file (keytar or ~/.config/trusty-squire/session.json, whichever
+// the install used) when the env doesn't already carry them. Best-effort
+// + non-overwriting: an existing env value always wins, and a
+// missing/unreadable session is a no-op (the downstream guards then fire
+// as before). Lets the systemd heal timer run without duplicating the
+// machine token into harvester.env.
+async function backfillOperatorCredsFromSession(): Promise<void> {
+  if (
+    process.env.TRUSTY_SQUIRE_MACHINE_TOKEN !== undefined &&
+    process.env.TRUSTY_SQUIRE_ACCOUNT_ID !== undefined
+  ) {
+    return;
+  }
+  try {
+    const { openSessionStorage } = await import("../session.js");
+    const session = await (await openSessionStorage()).read();
+    if (session === null) return;
+    if (
+      process.env.TRUSTY_SQUIRE_MACHINE_TOKEN === undefined &&
+      session.machine_token !== undefined
+    ) {
+      process.env.TRUSTY_SQUIRE_MACHINE_TOKEN = session.machine_token;
+    }
+    if (
+      process.env.TRUSTY_SQUIRE_ACCOUNT_ID === undefined &&
+      session.account_id !== undefined
+    ) {
+      process.env.TRUSTY_SQUIRE_ACCOUNT_ID = session.account_id;
+    }
+    if (
+      process.env.TRUSTY_SQUIRE_API_BASE === undefined &&
+      session.api_base_url !== undefined
+    ) {
+      process.env.TRUSTY_SQUIRE_API_BASE = session.api_base_url;
+    }
+  } catch {
+    // best-effort — the downstream "not set" guards surface the problem.
+  }
+}
+
 export async function runHousekeeperCli(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv);
+
+  // Backfill the operator credentials from the session file when they
+  // aren't already in the env. The machine token + account id live in
+  // session.json (the same file the MCP server + install flow read), NOT
+  // in harvester.env — so the systemd heal timer (EnvironmentFile=
+  // harvester.env) used to fail every discover phase with
+  // "TRUSTY_SQUIRE_MACHINE_TOKEN is not set". Populate process.env once
+  // here so every downstream reader works unchanged: the discover guard,
+  // the LLM proxy client (llm-client.ts reads the env directly), and the
+  // inbox client. Hand-rolled wrappers that already export the vars are
+  // unaffected (we only fill blanks).
+  await backfillOperatorCredsFromSession();
 
   // Always-on log notifier; optional ones layer on top.
   const notifiers: Notifier[] = [new LogNotifier()];

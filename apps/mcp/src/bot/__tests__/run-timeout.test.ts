@@ -24,6 +24,15 @@ class HangingBrowser {
     return null;
   }
   async prewarm(): Promise<void> {}
+  // The signup-URL resolver probes via fetchText before goto; returning
+  // null leaves the curated URL untouched so the run proceeds to goto.
+  async fetchText(): Promise<{
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  } | null> {
+    return null;
+  }
   async goto(): Promise<void> {
     return new Promise<void>(() => {
       /* never resolves */
