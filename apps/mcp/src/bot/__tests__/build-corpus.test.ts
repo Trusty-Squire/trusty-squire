@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildRegressCases,
+  collectIdentityTokens,
+  identityTokensForCase,
   pageSignature,
   readCaptureGroups,
   redactText,
@@ -52,6 +54,29 @@ describe("redactText", () => {
   it("leaves benign prose untouched", () => {
     const benign = "Create your first API key in Settings, then click Done.";
     expect(redactText(benign)).toBe(benign);
+  });
+
+  it("scrubs an operator handle that appears as a bare username (no @)", () => {
+    // the email is on the page (→ identity token), the handle leaks elsewhere
+    const tokens = collectIdentityTokens("signed in as lunchboxfortwo@gmail.com");
+    expect(tokens.has("lunchboxfortwo")).toBe(true);
+    const html = '<a href="/teams/lunchboxfortwo">Llunchboxfortwo’s team</a>';
+    const out = redactText(html, tokens);
+    expect(out).not.toContain("lunchboxfortwo");
+    expect(out).toContain("[REDACTED_ID]");
+  });
+
+  it("does not treat generic role local-parts as identities", () => {
+    const tokens = collectIdentityTokens("mailto:support@acme.com and noreply@acme.com");
+    expect(tokens.size).toBe(0);
+  });
+
+  it("identityTokensForCase pulls handles from inventory + state together", () => {
+    const tokens = identityTokensForCase(
+      { url: "https://x.test/u/janedoe123", title: "T", html: "<b>hi</b>", screenshot: "" },
+      [el({ visibleText: "janedoe123@corp.io" })],
+    );
+    expect(tokens.has("janedoe123")).toBe(true);
   });
 });
 

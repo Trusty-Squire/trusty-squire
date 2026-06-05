@@ -75,40 +75,101 @@ const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 const HIGH_ENTROPY_PATTERN =
   /\b(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g;
 
-export function redactText(input: string): string {
+// Generic email local-parts that are roles, not identities — never scrub these
+// as PII (they'd over-redact legitimate page text).
+const GENERIC_LOCALPARTS: ReadonlySet<string> = new Set([
+  "support",
+  "contact",
+  "noreply",
+  "no-reply",
+  "account",
+  "billing",
+  "security",
+  "notifications",
+]);
+
+// Collect identity tokens from a case's full text: the local-part of every
+// email present (e.g. "lunchboxfortwo" from "lunchboxfortwo@gmail.com"). The
+// operator's handle leaks as a bare username in team names ("lunchboxfortwo's
+// team") and URL paths ("/users/lunchboxfortwo/…") that carry no "@", so the
+// email pattern alone misses them. We scrub the local-part everywhere it
+// appears. Length >=6 + the generic-role denylist keeps us off common words.
+export function collectIdentityTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const m of text.matchAll(EMAIL_PATTERN)) {
+    const local = m[0].split("@")[0];
+    if (local === undefined) continue;
+    const lc = local.toLowerCase();
+    if (lc.length >= 6 && !GENERIC_LOCALPARTS.has(lc)) tokens.add(lc);
+  }
+  return tokens;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function redactText(
+  input: string,
+  identityTokens: ReadonlySet<string> = new Set(),
+): string {
   let out = input;
   for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED_SECRET]");
   out = out.replace(EMAIL_PATTERN, "[REDACTED_EMAIL]");
+  // Identity handles: substring (not word-boundary) so "Llunchboxfortwo" and
+  // "/teams/lunchboxfortwo" are both caught. Tokens are >=6-char distinct
+  // account handles, so substring scrubbing won't hit common words.
+  for (const tok of identityTokens) {
+    out = out.replace(new RegExp(escapeRegExp(tok), "gi"), "[REDACTED_ID]");
+  }
   out = out.replace(HIGH_ENTROPY_PATTERN, "[REDACTED_TOKEN]");
   return out;
 }
 
-function redactOrNull(v: string | null): string | null {
-  return v === null ? null : redactText(v);
+// Gather every identity token across a whole capture (state + inventory text)
+// so the local-part of an email in one field scrubs the bare handle in another.
+export function identityTokensForCase(
+  state: OnboardingCaseFile["state"],
+  inventory: readonly InteractiveElement[],
+): Set<string> {
+  const parts: string[] = [state.url, state.title, state.html];
+  for (const e of inventory) {
+    for (const v of [
+      e.id, e.name, e.placeholder, e.ariaLabel, e.labelText, e.visibleText,
+      e.selector, e.href, e.iconLabel, e.title, e.value, e.selectedOptionText,
+    ]) {
+      if (typeof v === "string") parts.push(v);
+    }
+  }
+  return collectIdentityTokens(parts.join("\n"));
 }
 
-export function redactInventory(inv: readonly InteractiveElement[]): InteractiveElement[] {
+export function redactInventory(
+  inv: readonly InteractiveElement[],
+  identityTokens: ReadonlySet<string> = new Set(),
+): InteractiveElement[] {
+  const r = (v: string | null): string | null => (v === null ? null : redactText(v, identityTokens));
   return inv.map((e) => ({
     ...e,
-    id: redactOrNull(e.id),
-    name: redactOrNull(e.name),
-    placeholder: redactOrNull(e.placeholder),
-    ariaLabel: redactOrNull(e.ariaLabel),
-    labelText: redactOrNull(e.labelText),
-    visibleText: redactOrNull(e.visibleText),
-    selector: redactText(e.selector),
-    ...(e.href !== undefined ? { href: redactOrNull(e.href) } : {}),
-    ...(e.iconLabel !== undefined ? { iconLabel: redactOrNull(e.iconLabel) } : {}),
-    ...(e.title !== undefined ? { title: redactOrNull(e.title) } : {}),
-    ...(e.value !== undefined ? { value: redactOrNull(e.value) } : {}),
+    id: r(e.id),
+    name: r(e.name),
+    placeholder: r(e.placeholder),
+    ariaLabel: r(e.ariaLabel),
+    labelText: r(e.labelText),
+    visibleText: r(e.visibleText),
+    selector: redactText(e.selector, identityTokens),
+    ...(e.href !== undefined ? { href: r(e.href ?? null) } : {}),
+    ...(e.iconLabel !== undefined ? { iconLabel: r(e.iconLabel ?? null) } : {}),
+    ...(e.title !== undefined ? { title: r(e.title ?? null) } : {}),
+    ...(e.value !== undefined ? { value: r(e.value ?? null) } : {}),
     ...(e.selectedOptionText !== undefined
-      ? { selectedOptionText: redactOrNull(e.selectedOptionText) }
+      ? { selectedOptionText: r(e.selectedOptionText ?? null) }
       : {}),
     ...(e.selectOptions != null
       ? {
           selectOptions: e.selectOptions.map((o) => ({
-            value: redactText(o.value),
-            text: redactText(o.text),
+            value: redactText(o.value, identityTokens),
+            text: redactText(o.text, identityTokens),
           })),
         }
       : {}),
@@ -117,11 +178,12 @@ export function redactInventory(inv: readonly InteractiveElement[]): Interactive
 
 export function redactPageState(
   state: OnboardingCaseFile["state"],
+  identityTokens: ReadonlySet<string> = new Set(),
 ): OnboardingEvalCase["state"] {
   return {
-    url: redactText(state.url),
-    title: redactText(state.title),
-    html: redactText(state.html),
+    url: redactText(state.url, identityTokens),
+    title: redactText(state.title, identityTokens),
+    html: redactText(state.html, identityTokens),
     screenshot: BLANK_PNG,
   };
 }
@@ -212,6 +274,7 @@ export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
       ? [...stuckKinds].filter((k) => !agg.kinds.has(k)).sort()
       : [];
     const id = caseId(sig);
+    const idTokens = identityTokensForCase(agg.sample.state, agg.sample.inventory);
     cases.push({
       id,
       service: agg.sample.service,
@@ -219,8 +282,8 @@ export function buildRegressCases(groups: readonly RunGroup[]): EvalCaseFile[] {
       source: "gold_path",
       name: `${agg.sample.service} — ${normalizeUrl(agg.sample.state.url)}`,
       oauth: agg.sample.oauth,
-      state: redactPageState(agg.sample.state),
-      inventory: redactInventory(agg.sample.inventory),
+      state: redactPageState(agg.sample.state, idTokens),
+      inventory: redactInventory(agg.sample.inventory, idTokens),
       expect: {
         acceptKinds,
         ...(rejectKinds.length > 0 ? { rejectKinds } : {}),
