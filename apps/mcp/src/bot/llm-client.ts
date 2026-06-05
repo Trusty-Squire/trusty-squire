@@ -520,9 +520,12 @@ export function pickLLMPair(opts: PickLLMClientOpts = {}): LLMPair {
       // Premium fallback: Claude Sonnet via OR — only triggers on parse
       // failures, so amortized cost is small. (anthropic/claude-3.5-sonnet
       // was retired from OpenRouter; claude-sonnet-4.5 is the current id.)
+      // UNIVERSAL_BOT_PREMIUM_MODEL overrides it — lets us A/B a cheaper
+      // fallback (e.g. anthropic/claude-haiku-4.5) against the eval harness
+      // before committing to a downgrade.
       const premium = new OpenRouterClient({
         apiKey: orKey,
-        model: "anthropic/claude-sonnet-4.5",
+        model: process.env.UNIVERSAL_BOT_PREMIUM_MODEL ?? "anthropic/claude-sonnet-4.5",
       });
       return { primary, premium };
     }
