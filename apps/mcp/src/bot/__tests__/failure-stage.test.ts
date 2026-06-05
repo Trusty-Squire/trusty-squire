@@ -39,6 +39,9 @@ describe("classifyFailureStage (B1 taxonomy)", () => {
     ["payment_required", false, "payment"],
     ["quota exceeded", false, "payment"],
     ["could not extract key — masked", true, "extract"],
+    // live (supabase): reached the dashboard, no key — extract, NOT oauth,
+    // even though "post-OAuth" contains "oauth"
+    ["no_credentials_after_already_signed_in: post-OAuth navigation did not surface an API key", true, "extract"],
     ["planning_failed", false, "planner_loop"],
     ["max_rounds reached", true, "planner_loop"],
     ["run_timeout", false, "run_timeout"],

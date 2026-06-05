@@ -81,7 +81,18 @@ export function classifyFailureStage(
   if (has("captcha")) return "captcha";
   if (has("account_chooser", "account chooser", "choose an account", "chooser")) return "account_chooser";
   if (has("consent", "scope_grant", "scope grant", "grant access", "allow access")) return "consent";
-  if (has("sso", "oauth", "callback")) return "oauth_handshake";
+  // "reached the dashboard but couldn't surface a key" is an EXTRACT-stage
+  // failure, not OAuth — check it BEFORE oauth so "post-OAuth navigation did
+  // not surface a key" (no_credentials_after_already_signed_in) doesn't get
+  // mis-bucketed by the bare "oauth" substring.
+  if (has("no_credential", "no credentials", "did not surface", "not surface", "no api key", "already_signed_in")) {
+    return "extract";
+  }
+  // Tightened: oauth_required / sso / a literal oauth callback — NOT bare
+  // "oauth" (which appears in "post-OAuth navigation …" success-path prose).
+  if (has("oauth_required", "sso", "sso-callback", "oauth callback", "oauth-callback", "oauth handshake")) {
+    return "oauth_handshake";
+  }
   if (has("hydrat", "clerk", "stytch", "not loaded", "spa ")) return "hydration";
   // phone before verify_email: a "phone verification" gate is more specific
   // than the generic email/OTP verification bucket.
