@@ -839,6 +839,17 @@ export type RoundUploader = (input: {
   screenshot_jpeg_base64?: string;
 }) => Promise<void>;
 
+// Detect an image block's media type from its base64 payload's magic bytes.
+// Live screenshots are JPEG (Playwright `type: "jpeg"`), so that's the
+// default — but the eval corpus uses a 1x1 PNG sentinel, and a PNG labeled
+// `image/jpeg` makes the Anthropic premium fallback 400 ("the image appears
+// to be a image/png image"). Base64 of the PNG magic (\x89PNG) is "iVBOR";
+// JPEG (\xFF\xD8\xFF) is "/9j/". Cheap providers tolerate a mislabel; strict
+// ones reject it — so always label what the bytes actually are.
+export function imageMediaType(base64: string): "image/png" | "image/jpeg" {
+  return base64.startsWith("iVBOR") ? "image/png" : "image/jpeg";
+}
+
 export interface SignupResult {
   success: boolean;
   credentials?: {
@@ -6790,7 +6801,7 @@ export class SignupAgent {
         userBlocks: [
           {
             kind: "image",
-            media_type: "image/jpeg",
+            media_type: imageMediaType(screenshot),
             data_base64: screenshot,
           },
           {
@@ -6925,7 +6936,7 @@ Output rules:
 
     const hintLine = input.hint !== undefined ? `\nHint: ${input.hint}` : "";
     const userBlocks: LLMBlock[] = [
-      { kind: "image", media_type: "image/jpeg", data_base64: input.screenshot },
+      { kind: "image", media_type: imageMediaType(input.screenshot), data_base64: input.screenshot },
       {
         kind: "text",
         text: `Service: ${input.service}
@@ -9296,7 +9307,7 @@ ${loginGuidance}
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [
-      { kind: "image", media_type: "image/jpeg", data_base64: input.state.screenshot },
+      { kind: "image", media_type: imageMediaType(input.state.screenshot), data_base64: input.state.screenshot },
       {
         kind: "text",
         text: `Service: ${input.service}
