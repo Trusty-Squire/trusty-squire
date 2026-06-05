@@ -14,7 +14,7 @@ import type { AgentInbox } from "./agent.js";
 import { withOAuthLock } from "./oauth-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
-import { resetCaptureChain } from "./onboarding-capture.js";
+import { captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
 
 export {
   type SignupResult,
@@ -195,6 +195,13 @@ export class UniversalSignupBot {
       if (result.error) {
         console.error(`[UniversalBot] Error: ${result.error}`);
       }
+
+      // A2 — write the run-outcome sidecar next to this run's captured
+      // rounds so the offline eval (A3) can label them: rounds from a
+      // successful run are good next-step examples; rounds from a failed
+      // one feed the reject list. No-op when capture is off or no rounds
+      // were captured. Best-effort — never fails the signup.
+      captureRunOutcome(request.service, result);
 
       return result;
     } finally {

@@ -231,7 +231,10 @@ describe("ProxyLLMClient — temperature forwarding (A1)", () => {
     globalThis.fetch = mock as unknown as typeof fetch;
     return {
       mock,
-      body: () => JSON.parse((mock.mock.calls[0]?.[1] as { body: string }).body),
+      body: () =>
+        JSON.parse(
+          (mock.mock.calls[0] as unknown as [unknown, { body: string }])[1].body,
+        ),
     };
   }
 

@@ -12,11 +12,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CAPTURE_FORMAT_VERSION,
   captureOnboardingRound,
+  captureRunOutcome,
+  classifyFailureStage,
+  resetCaptureChain,
   resolveCaptureDir,
+  summarizeRunOutcome,
   verifyCaptureChain,
   type OnboardingCaseFile,
+  type OnboardingOutcomeFile,
 } from "../onboarding-capture.js";
-import type { PostVerifyStep } from "../agent.js";
+import type { PostVerifyStep, SignupResult } from "../agent.js";
 
 // Synthetic test fixtures — never any real captures.
 
@@ -427,5 +432,108 @@ describe("verifyCaptureChain", () => {
         expect(v.rounds[i]!.prev_hash).toBe(v.rounds[i - 1]!.content_hash);
       }
     }
+  });
+});
+
+// ── Run-outcome sidecar (A2)  ───────────────────────────────────────
+
+function mockResult(over: Partial<SignupResult> = {}): SignupResult {
+  return {
+    success: false,
+    steps: [],
+    ...over,
+  };
+}
+
+describe("classifyFailureStage", () => {
+  it("returns 'none' on success", () => {
+    expect(classifyFailureStage({ success: true }, true)).toBe("none");
+  });
+
+  it("classifies a blocked captcha", () => {
+    expect(
+      classifyFailureStage(
+        { success: false, captcha: { kind: "turnstile", variant: "turnstile", challenge_rendered: true, blocked: true } },
+        false,
+      ),
+    ).toBe("captcha");
+  });
+
+  it("reads anti-bot / oauth / verification from the error string", () => {
+    expect(classifyFailureStage({ success: false, error: "anti_bot_blocked" }, false)).toBe("anti_bot");
+    expect(classifyFailureStage({ success: false, error: "oauth_required" }, false)).toBe("oauth");
+    expect(classifyFailureStage({ success: false, error: "verification_not_sent" }, false)).toBe("verification");
+  });
+
+  it("uses reachedOnboarding to split navigation from form failures", () => {
+    expect(classifyFailureStage({ success: false, error: "stuck" }, true)).toBe("navigation");
+    expect(classifyFailureStage({ success: false, error: "stuck" }, false)).toBe("form");
+  });
+});
+
+describe("summarizeRunOutcome — redaction (R3)", () => {
+  it("records credential FIELD NAMES, never values", () => {
+    const out = summarizeRunOutcome(
+      mockResult({ success: true, credentials: { api_key: "sk-secret-123", username: "" } }),
+      true,
+      2,
+    );
+    expect(out.ok).toBe(true);
+    expect(out.credential_present).toBe(true);
+    // empty-string field dropped; secret value never serialized
+    expect(out.credential_fields).toEqual(["api_key"]);
+    expect(JSON.stringify(out)).not.toContain("sk-secret-123");
+    expect(out.terminal_round).toBe(2);
+  });
+
+  it("marks credential_present false when no fields populated", () => {
+    const out = summarizeRunOutcome(mockResult({ success: false }), false, null);
+    expect(out.credential_present).toBe(false);
+    expect(out.credential_fields).toEqual([]);
+    expect(out.terminal_round).toBeNull();
+  });
+});
+
+describe("captureRunOutcome — sidecar file", () => {
+  it("writes <slug>-<runId>.outcome.json joined to the run's rounds", () => {
+    withCaptureDir((dir) => {
+      resetCaptureChain();
+      const service = uniqueService();
+      captureOnboardingRound(mockRound(0, service));
+      captureOnboardingRound(mockRound(1, service));
+      captureRunOutcome(service, mockResult({ success: true, credentials: { api_key: "sk-live-xyz" } }));
+
+      const outcomeFiles = readdirSync(dir).filter((f) => f.endsWith(".outcome.json"));
+      expect(outcomeFiles).toHaveLength(1);
+
+      const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      const roundFiles = readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".outcome.json"));
+      // the sidecar shares the <slug>-<runId> stem with the round files
+      const stem = outcomeFiles[0]!.slice(0, -".outcome.json".length);
+      expect(stem.startsWith(`${slug}-`)).toBe(true);
+      expect(roundFiles.every((f) => f.startsWith(`${stem}-r`))).toBe(true);
+
+      const written = JSON.parse(readFileSync(join(dir, outcomeFiles[0]!), "utf8")) as OnboardingOutcomeFile;
+      expect(written.capture_format_version).toBe(CAPTURE_FORMAT_VERSION);
+      expect(written.service).toBe(service);
+      expect(written.outcome.ok).toBe(true);
+      expect(written.outcome.terminal_round).toBe(1);
+      expect(written.outcome.failure_stage).toBe("none");
+      // the chain verifier must NOT pick up the sidecar as a round
+      const verified = verifyCaptureChain(dir, service, written.run_id);
+      expect(verified.ok).toBe(true);
+      if (verified.ok) expect(verified.rounds).toHaveLength(2);
+      // secret never lands on disk
+      expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-live-xyz");
+    });
+  });
+
+  it("no-ops when the run captured no rounds", () => {
+    withCaptureDir((dir) => {
+      resetCaptureChain();
+      const service = uniqueService();
+      captureRunOutcome(service, mockResult({ success: false, error: "form_failed" }));
+      expect(readdirSync(dir).filter((f) => f.endsWith(".outcome.json"))).toHaveLength(0);
+    });
   });
 });

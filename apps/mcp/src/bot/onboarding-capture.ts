@@ -41,7 +41,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InteractiveElement } from "./browser.js";
-import type { PostVerifyStep } from "./agent.js";
+import type { PostVerifyStep, SignupResult } from "./agent.js";
 
 // Capture format version. Bumped when round-shape changes incompatibly.
 // The promoter rejects unknown versions (E2). Same-major minor changes
@@ -72,6 +72,7 @@ export function currentRunId(): string | undefined {
 export function resetCaptureChain(): void {
   runId = undefined;
   chainHead.clear();
+  lastRound = undefined;
 }
 
 // Per-(service, runId) chain head. Each new round's `prev_hash` is the
@@ -83,6 +84,12 @@ export function resetCaptureChain(): void {
 // being process-scoped (no persistence — captures restart fresh on
 // next process).
 const chainHead = new Map<string, string>();
+
+// Highest round index captured this run, or undefined if no rounds yet.
+// captureRunOutcome reads this to stamp `terminal_round` — the round the
+// run reached (where a failure got stuck, or the last onboarding step on
+// success). Reset alongside runId/chainHead at the start of each signup.
+let lastRound: number | undefined;
 
 export interface OnboardingRoundCapture {
   service: string;
@@ -199,8 +206,111 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
     writeFileSync(file, JSON.stringify(corpusCase, null, 2));
 
     chainHead.set(chainKey, contentHash);
+    lastRound = Math.max(lastRound ?? -1, entry.round);
   } catch {
     // best-effort — capture is diagnostic, never load-bearing
+  }
+}
+
+// ── Run-outcome sidecar (A2) ────────────────────────────────────────
+//
+// The captured rounds record what the planner *did*; they don't record
+// whether the run as a whole *succeeded*. The offline eval (A3) needs
+// that join: rounds from a SUCCESSFUL run are trustworthy next-step
+// examples (they led to a credential); rounds from a FAILED run are the
+// opposite — the planner's `observed` step there is a candidate for the
+// REJECT list (it's a move that did NOT make progress). We write one
+// `<slug>-<runId>.outcome.json` sidecar per run, joined to the rounds by
+// the shared `<slug>-<runId>` stem.
+//
+// REDACTION (R3, P0): the sidecar carries credential FIELD NAMES only
+// (e.g. ["api_key"]) — never values. The eval only needs "did we extract
+// a credential"; persisting the value would write a live secret into the
+// corpus that ships nowhere but is trivially leakable.
+
+export interface RunOutcomeRecord {
+  ok: boolean;
+  // True when the run produced at least one non-empty credential field.
+  credential_present: boolean;
+  // The credential field NAMES (api_key / username / …) — safe labels,
+  // never the secret values. See the REDACTION note above.
+  credential_fields: readonly string[];
+  // Coarse, best-effort classification of where a failed run stopped.
+  // "none" on success. See classifyFailureStage.
+  failure_stage: string;
+  // Highest captured round index, or null if the run captured no rounds.
+  terminal_round: number | null;
+}
+
+export interface OnboardingOutcomeFile {
+  capture_format_version: typeof CAPTURE_FORMAT_VERSION;
+  service: string;
+  run_id: string;
+  outcome: RunOutcomeRecord;
+}
+
+// Coarse failure-stage label. Pure + exported so the eval and tests can
+// reason about it without a live run. `reachedOnboarding` is true when
+// the run captured at least one post-verify round — it disambiguates a
+// form-stage bail (never got past signup) from a navigation-stage bail
+// (got into onboarding then stuck), which the error string alone can't.
+export function classifyFailureStage(
+  result: Pick<SignupResult, "success" | "error" | "captcha">,
+  reachedOnboarding: boolean,
+): string {
+  if (result.success) return "none";
+  if (result.captcha?.blocked) return "captcha";
+  const err = (result.error ?? "").toLowerCase();
+  if (err.includes("anti_bot") || err.includes("anti-bot")) return "anti_bot";
+  if (err.includes("oauth")) return "oauth";
+  if (err.includes("verification") || err.includes("verify")) return "verification";
+  if (reachedOnboarding) return "navigation";
+  return "form";
+}
+
+// Redaction-safe summary of a finished run. Pure + exported for tests.
+export function summarizeRunOutcome(
+  result: SignupResult,
+  reachedOnboarding: boolean,
+  terminalRound: number | null,
+): RunOutcomeRecord {
+  const creds = result.credentials;
+  const fields = creds
+    ? Object.keys(creds).filter((k) => {
+        const v = creds[k];
+        return typeof v === "string" && v.length > 0;
+      })
+    : [];
+  return {
+    ok: result.success,
+    credential_present: fields.length > 0,
+    credential_fields: fields,
+    failure_stage: classifyFailureStage(result, reachedOnboarding),
+    terminal_round: terminalRound,
+  };
+}
+
+// Write the run-outcome sidecar. Best-effort, like the round capture.
+// Skips entirely when the run captured no rounds (runId undefined): the
+// eval is round-keyed, so an outcome with nothing to join against is
+// dead weight.
+export function captureRunOutcome(service: string, result: SignupResult): void {
+  const dir = resolveCaptureDir();
+  if (dir === null) return;
+  if (runId === undefined) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const file = join(dir, `${slug}-${runId}.outcome.json`);
+    const record: OnboardingOutcomeFile = {
+      capture_format_version: CAPTURE_FORMAT_VERSION,
+      service,
+      run_id: runId,
+      outcome: summarizeRunOutcome(result, lastRound !== undefined, lastRound ?? null),
+    };
+    writeFileSync(file, JSON.stringify(record, null, 2));
+  } catch {
+    // best-effort — outcome capture is diagnostic, never load-bearing
   }
 }
 
