@@ -36,6 +36,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Link className={pathname === "/agents" ? "on" : ""} href="/agents">
             Agents
           </Link>
+          <Link className={pathname === "/billing" ? "on" : ""} href="/billing">
+            Billing
+          </Link>
           <button type="button" onClick={signOut}>
             Sign out
           </button>

@@ -71,6 +71,9 @@ importers:
       pino:
         specifier: ^9.5.0
         version: 9.14.0
+      stripe:
+        specifier: ^22.2.0
+        version: 22.2.0(@types/node@20.19.40)
       ulid:
         specifier: ^2.3.0
         version: 2.4.0
@@ -7009,6 +7012,18 @@ packages:
     dependencies:
       js-tokens: 9.0.1
     dev: true
+
+  /stripe@22.2.0(@types/node@20.19.40):
+    resolution: {integrity: sha512-WFGpMOom9QZqso1kcnSwJsCdC1QHDlMoCOxBZRf3JraMzhkfw7dgSdD2a1CFZrqC+mzAfqeEtYILrZhWKIDruA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@types/node': '>=18'
+    peerDependenciesMeta:
+      '@types/node':
+        optional: true
+    dependencies:
+      '@types/node': 20.19.40
+    dev: false
 
   /styled-jsx@5.1.6(@babel/core@7.29.0)(react@19.2.4):
     resolution: {integrity: sha512-qSVyDTeMotdvQYoHWLNGwRFJHC+i+ZvdBRYosOFgC+Wg1vx4frN2/RG/NA7SYqqvKNLf39P2LSRA2pu6n0XYZA==}

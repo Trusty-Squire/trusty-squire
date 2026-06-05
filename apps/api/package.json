@@ -19,8 +19,8 @@
     "@fastify/cookie": "^9.4.0",
     "@fastify/rate-limit": "^9.1.0",
     "@prisma/client": "^5.22.0",
-    "@trusty-squire/skill-schema": "workspace:*",
     "@trusty-squire/inbox": "workspace:*",
+    "@trusty-squire/skill-schema": "workspace:*",
     "@trusty-squire/vault": "workspace:*",
     "bullmq": "^5.21.1",
     "fastify": "^4.28.0",
@@ -28,6 +28,7 @@
     "jose": "^5.9.6",
     "nodemailer": "^8.0.7",
     "pino": "^9.5.0",
+    "stripe": "^22.2.0",
     "ulid": "^2.3.0",
     "zod": "^3.23.8"
   },

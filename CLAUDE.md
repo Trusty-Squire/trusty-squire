@@ -353,6 +353,21 @@ bin symlink and would catch any regression of the above.
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | IMAP credentials for the operator's gmail. Read-only — backs `gmail-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, other WorkOS-backed services). Not used for outbound. |
 | `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
 | `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
+| `STRIPE_SECRET_KEY` | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified. |
+| `STRIPE_WEBHOOK_SECRET` | `whsec_…` signing secret for `/v1/webhooks/stripe`. The SDK verifies the `Stripe-Signature` over the raw body; a bad/missing signature is rejected 400. |
+| `STRIPE_PRICE_ID` | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard). |
+
+**Billing (Stripe):** the free-signup quota (`ACCOUNT_FREE_QUOTA`) returns
+`402 payment_required` + `cta_billing_url` once hit. The PWA `/billing` page
+opens Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on
+payment Stripe fires `/v1/webhooks/stripe` which flips the account's
+`subscription_status` to `active` — and `active`/`trialing` lift the quota
+(`subscription-status.ts`, consulted in `inbox.ts`). Manage/cancel via the
+Customer Portal (`POST /v1/billing/portal`). The bypass keys off the machine
+token's **bound** account, never the request body. New `Account` columns
+(`stripe_customer_id`, `subscription_status`, `subscription_id`,
+`current_period_end`) apply via the deploy's `db push` (all nullable/defaulted
+— non-destructive).
 
 **Webhook auth:** inbound mail arrives via Resend's webhook
 (`/v1/webhooks/resend-inbound`), verified by a Svix-style HMAC-SHA256

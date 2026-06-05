@@ -156,6 +156,16 @@ model Account {
   default_vault String?
   created_at    DateTime @default(now())
 
+  // Stripe billing. `subscription_status` is what the free-signup quota
+  // gate consults — "active" bypasses the quota; anything else (the
+  // "free" default, "past_due", "canceled") leaves the quota in force.
+  // The Stripe webhook is the only writer; the customer/subscription ids
+  // are stored so the portal + subsequent webhook events can map back.
+  stripe_customer_id  String?   @unique
+  subscription_status String    @default("free")
+  subscription_id     String?
+  current_period_end  DateTime?
+
   oauth_identities OAuthIdentity[]
   devices          Device[]
   web_sessions     WebSession[]

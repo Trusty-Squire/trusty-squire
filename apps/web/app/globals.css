@@ -212,6 +212,15 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .app-title{font-size:30px;font-weight:700;letter-spacing:-.03em;
   line-height:1.1}
 .app-sub{margin-top:7px;font-size:14.5px;color:var(--muted)}
+/* billing — plan card + post-checkout banners */
+.app-card{background:var(--surface);border:1px solid var(--line2);
+  border-radius:12px;padding:22px 24px;margin-top:18px;max-width:520px}
+.app-card .btn-primary,.app-card .btn-secondary{margin-top:18px;width:auto;
+  display:inline-flex;padding:9px 18px}
+.app-banner{margin-top:16px;padding:11px 15px;border-radius:9px;font-size:14px;
+  background:var(--surface);border:1px solid var(--line2);color:var(--fg);max-width:520px}
+.app-banner.ok{border-color:rgba(84,216,139,.4);color:var(--ok)}
+.app-banner.err{border-color:rgba(255,107,107,.4);color:var(--err)}
 /* count chip — mono value in a hairline pill (vault + agents headers) */
 .app-count{font-family:var(--mono);font-size:12px;color:var(--muted);
   font-weight:500;border:1px solid var(--line2);border-radius:999px;
