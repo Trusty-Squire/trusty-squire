@@ -8,7 +8,15 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ---
 
-## Where we are (2026-06-04, `@trusty-squire/mcp@0.8.17`)
+## Where we are (2026-06-05, `@trusty-squire/mcp@0.9.0`)
+
+**0.9.0 shipped to `latest`** — the post-OAuth navigation work: a deterministic
+planner (temp 0), the **create-over-extract N1 wall broken** (live-validated:
+netlify + baseten reach a key, baseten was the eval's sealed holdout), the
+offline eval harness, `failure_stage`, and layered R3 redaction. Plus G14 (VNC
+passwdfile) and AB6 (route known-unwinnable services to manual before the run).
+
+
 
 **The anti-bot frontier is settled: we are NOT detected.** Measured this
 session with the real `BrowserController` (patchright hardened + SK-Broadband
@@ -52,14 +60,30 @@ bespoke (multi-step wizards, complex key-creation forms, no-obvious-key-path).
 Weigh each round against diminishing returns. Pairs with
 [[feedback-generalize-not-per-service]] + [[project-planner-generalization-plan]].
 
-**Tooling landed (0.8.18):** the offline navigation-planner eval harness
-(`docs/DESIGN-planner-navigation-eval.md`) — temp-0 deterministic planner,
-auto-derived redacted regression corpus, hand-labeled target set, gated runner
-(`eval-gate`), CI gate, + a failure-stage flakiness aggregator. First live
-iteration fixed the cloudinary use-case-picker miss and surfaced + fixed an
-image media-type bug. **Open:** the holdout is perturbation-fragile at N=9 —
-expand the target corpus toward ~20 services before further prompt iteration
-(the regress set stays empty until new signups flow A2 outcome sidecars).
+**Shipped (0.9.0):** the offline navigation-planner eval harness
+(`docs/DESIGN-planner-navigation-eval.md`) is built AND used: temp-0
+deterministic planner (pin a backend with `UNIVERSAL_BOT_OR_PROVIDER` for
+cross-run determinism), auto-derived **reject-driven** regress set (R1, now
+seeded with 8 live cases), 30-case hand-labeled target set (4 themes), gated
+`eval-gate`, CI gate, B2 `failure-stats`. The **create-over-extract wall is
+broken** (netlify/qdrant/baseten/supabase + the anthropic holdout) and
+**live-validated** (netlify ✅ baseten ✅ on the housekeeper run). R3 redaction
+is layered + audited (operator-handle denylist, neutral high-entropy marker,
+extracted-credential-value scrub).
+
+**Open (N1, what's left):**
+- **Grow the regress set** — it gains real teeth as the housekeeper accumulates
+  FAILED-run rejects (a purely-successful page is a vacuous regress pass). The
+  20-service batch (2026-06-05) is the first feed.
+- **Bespoke per-service walls** remain (~14): multi-step wizards, complex
+  key-creation forms, no-obvious-key-path. Diminishing returns; the
+  deterministic gate makes each prompt change cleanly measurable.
+- **Single-step eval limit:** "extract" failures are SOFT (the bot recovers via
+  a "click Create" re-plan hint), so the single-step eval over-penalizes a
+  recoverable wasted round. Multi-round/trajectory eval is D1-rejected; the
+  housekeeper pass rate is the ground truth for those.
+- supabase (post-auth nav stuck) + qdrant (OAuth-only signup, no form) are
+  distinct buckets, not the extract wall.
 
 ### N2 — amplitude: clean-identity end-to-end [P2, one run from a credential]
 Mechanically conquered (demo-escape → form → multi-step password → account
@@ -93,16 +117,11 @@ numbers). Fix: a relay loop with two new MCP tools.
 5. User reads the SMS; `provide_sms_code(run_id, code)` types it + verifies.
 
 Doesn't touch the security boundary (the user's phone is the gate). Unblocks
-~3 services in the queue today, many more in the expansion pool.
-
-### G16 — Dedicated Cloudflare named tunnel for noVNC [P2, ~2 hours]
-Replaces the random `*.trycloudflare.com` cold-start (80-char random subdomain,
-~5-10s allocation, unreadable on a phone). A named tunnel
-(`cloudflared tunnel run <name>`) bound to `vnc.trustysquire.ai` keeps routing
-pre-allocated — ~1s startup, short/branded URL, clean teardown. Free tier.
-Supersedes G15. Implementation: provision named tunnel + token, bind DNS via
-Cloudflare API, swap `google-login.ts`'s `cloudflared tunnel --url` for
-`tunnel run <name>`. One-time operator setup (token in `harvester.env`).
+~3 services in the queue today, many more in the expansion pool. **AB6 now
+routes the `sms_phone` services (vercel/mailersend/twilio/sendgrid) to manual**
+— when F12 lands, drop those entries from `unwinnable-services.ts` so the bot
+clears them via the relay instead. The deep part is the mid-signup pause/resume
+(a session registry + async continuation), not the two MCP tools.
 
 ---
 
@@ -130,16 +149,16 @@ data accumulates (the resolver now self-heals most stale URLs, so this is lower
 urgency than before); prune entries with genuinely no API key (stackblitz,
 zeabur — online IDEs).
 
-### AB6 — Pick battles: route unwinnable signups to manual [strategic]
-Classify by challenge hardness and route the genuinely-unwinnable signups to a
-manual path instead of burning bot runs + LLM calls on a 0% prospect:
-**clerk** (its own dashboard SPA won't init/complete under automation —
-reproduced with and without proxy; not bot-detection), the **Cloudflare
-dashboard** (max-Turnstile + IP risk-score), and the **human-gated** set
-(SMS/phone, authenticator TOTP, credit-card: sendgrid, circleci, mailgun,
-betterstack). AB2 (real-GPU/WebGL tell) is effectively closed by the 0.8.17
-renderer spoof; AB3–AB5 (network/reputation/behavior levers) are deprioritized
-now that we score 1.0 — revisit only if a service-specific score drop appears.
+### AB6 — Pick battles: route unwinnable signups to manual [SHIPPED — denylist grows]
+Mechanism shipped (`unwinnable-services.ts` + `runSession()` short-circuit to
+`manual_signup_required` before launching Chrome; B1 stage `manual`). Initial
+denylist: clerk (spa_broken), cloudflare (max_antibot), vercel/mailersend/
+twilio/sendgrid (sms_phone), mailgun/circleci/betterstack (credit_card),
+northflank (github_2fa). **Ongoing:** add services to the denylist as 0%
+prospects surface from housekeeper data; drop the `sms_phone` entries once F12's
+relay can clear them. Override a single re-test with
+`UNIVERSAL_BOT_FORCE_UNWINNABLE=1`. (AB2 real-GPU/WebGL tell is closed by the
+renderer spoof; AB3–AB5 deprioritized at score 1.0.)
 
 ### F7 — Multi-step / inline-code flows [P2, mostly shipped — verify]
 The single-page→submit→email-link assumption is broken by multi-step (Mistral)
@@ -150,10 +169,6 @@ state-machine handles both shapes, and close or scope the residual.
 ---
 
 ## Tier 3 — eventually
-
-### G14 — Harden the noVNC password handoff [P3]
-`x11vnc -passwd <plaintext>` is readable via `ps`. Narrow surface
-(`-localhost` only). Fix: write to a 0600 file, use `-passwdfile`.
 
 ### T3.4 — reCAPTCHA v2 static-grid solver [large, deprioritized]
 Per the rejected-spike design. Heavy LLM cost; the proxy + 0.8.17 combo handles

@@ -1,5 +1,26 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.1 (2026-06-05)
+
+Operational hardening after the 0.9.0 live run burned a residential exit.
+
+- **Housekeeper inter-run pacing.** The discover loop fired signups back-to-back
+  within a batch and torched the residential IP's reputation (high-scrutiny
+  services started rejecting the session at the OAuth callback). Added a base
+  cooldown between live runs (`UNIVERSAL_BOT_RUN_COOLDOWN_SEC`, default 60s),
+  adaptive backoff that grows when runs show IP-risk symptoms (OAuth-reject /
+  dropped-conn / timeout / no-signup) and resets on a clean success, and a
+  per-IP daily cap (`UNIVERSAL_BOT_DAILY_SIGNUP_CAP`, default 30) that stops the
+  batch before it burns the exit. All env-tunable (0 disables).
+- **AB6 — route unwinnable services to manual.** Known 0% prospects (clerk SPA,
+  cloudflare dashboard, the SMS / credit-card / github-2fa human gates) now
+  short-circuit to `manual_signup_required` before launching Chrome instead of
+  burning ~6min + LLM calls. New B1 `manual` failure stage. Override with
+  `UNIVERSAL_BOT_FORCE_UNWINNABLE=1`.
+- **G14 — VNC password hardening.** The noVNC handoff passed the password as
+  `-passwd <plaintext>` on x11vnc's argv (readable via `ps`); now a 0600
+  `-passwdfile rm:<file>`.
+
 ## 0.9.0 (2026-06-05)
 
 Post-OAuth navigation: deterministic planner, N1 planner wins (eval- AND

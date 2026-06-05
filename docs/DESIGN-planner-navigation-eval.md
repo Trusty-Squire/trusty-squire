@@ -2,6 +2,38 @@
 
 Status: planned 2026-06-05. Owner: bot. Reviewed via /plan-eng-review.
 
+## SHIPPED (0.9.0, 2026-06-05)
+
+The plan is built and in production. What landed vs the workstreams below:
+
+- **A1–A7:** temp-0 planner; A2 run-outcome sidecars; A3 `build-corpus`
+  (reject-driven regress, R1) + R5 dedup; A4 `label-target` (30 cases, 4 themes:
+  create-resource / locate-in-ui / finish-onboarding / oauth-login-wall);
+  A5 `eval-gate`; A6 `planner-eval.yml`; A7 iterated live.
+- **B1–B2:** `failure-stage.ts` taxonomy (+ a `manual` stage for AB6) on
+  `SignupResult` and the outcome sidecar; `failure-stats.ts` aggregator.
+- **R3 redaction (layered, audited on real captures):** provider keys / JWTs /
+  emails, operator-handle denylist (`TRUSTY_SQUIRE_REDACT_IDENTITIES`), a
+  neutral high-entropy marker (a `[REDACTED_TOKEN]`-littered page biased the
+  planner toward extract), and an extracted-credential-value scrub.
+
+**Key findings the harness forced out (not in the original plan):**
+- **Determinism:** temp 0 isn't enough through OpenRouter (it routes one model
+  across backend providers that differ even at temp 0 — that was the
+  "perturbation"). `UNIVERSAL_BOT_OR_PROVIDER` pins a backend for bit-identical
+  re-runs; the routed average was flattering results.
+- **Soft walls:** "extract" failures are recoverable in production (a
+  "click Create" re-plan hint fires after a failed extract), so the single-step
+  eval over-penalizes them. The housekeeper pass rate is the ground truth.
+- **Biggest win (live-validated):** the **create-over-extract wall** — on a
+  keys page with a Create button, mint a fresh key instead of extracting a
+  masked/absent one. netlify ✅ + baseten ✅ (the sealed holdout) reached a key
+  on the live housekeeper run.
+
+**Open:** grow the regress set with FAILED-run rejects (housekeeper feeds it);
+the remaining ~14 N1 services are bespoke. See TODOS.md → N1.
+
+
 ## Problem
 
 Services authenticate fine (the 2026-06-04 sweep was 77% authenticated) but

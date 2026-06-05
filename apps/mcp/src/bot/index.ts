@@ -16,6 +16,7 @@ import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 import { capturedAnyRound, captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
 import { classifyFailureStage } from "./failure-stage.js";
+import { classifyUnwinnable } from "./unwinnable-services.js";
 
 export {
   type SignupResult,
@@ -138,6 +139,26 @@ export class UniversalSignupBot {
   }
 
   private async runSession(request: UniversalSignupRequest): Promise<SignupResult> {
+    // AB6 — short-circuit known-unwinnable services BEFORE launching Chrome.
+    // A 0% prospect (SPA won't automate, max anti-bot, human SMS/TOTP/card gate)
+    // wastes ~6min + LLM calls per run for nothing. Route it to manual with a
+    // clear reason. Override for a deliberate re-test with
+    // UNIVERSAL_BOT_FORCE_UNWINNABLE=1.
+    const manual = classifyUnwinnable(request.service);
+    if (manual !== null && process.env.UNIVERSAL_BOT_FORCE_UNWINNABLE !== "1") {
+      console.error(
+        `[UniversalBot] ${request.service}: known manual-only signup (${manual.gate}) — skipping bot run`,
+      );
+      return {
+        success: false,
+        error: `manual_signup_required: ${manual.reason}`,
+        failure_stage: "manual",
+        steps: [
+          `${request.service}: routed to manual (${manual.gate}) — ${manual.reason} ` +
+            `[set UNIVERSAL_BOT_FORCE_UNWINNABLE=1 to attempt anyway]`,
+        ],
+      };
+    }
     // rc.17 — reset the disk-capture chain state so this signup starts
     // a fresh runId + empty chainHead. Otherwise back-to-back signups
     // in the same bot process share runId and the second one's chain

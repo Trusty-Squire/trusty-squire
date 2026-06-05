@@ -22,6 +22,7 @@ import type { QueueProvider } from "./queues/index.js";
 import type { Notifier, NotifierEvent } from "./notifier.js";
 import type { CleanupOutcome } from "./cleanup.js";
 import { handleReplay, type ReplayMode, type ReplayRunner } from "./modes/verify.js";
+import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
 
 export type { ReplayMode, ReplayRunner } from "./modes/verify.js";
@@ -93,8 +94,29 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     skipped: 0,
     transitions: { promoted: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
   };
-  for (const task of tasks) {
+  // Inter-run pacing for live (discover) signups — keeps a clean residential
+  // exit clean (see pacing.ts). Replay tasks don't launch the bot, so they're
+  // never paced or counted.
+  const pacer = new RunPacer(pacingFromEnv(), { log });
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i]!;
+    const isLiveSignup = task.kind !== "replay";
+
+    if (isLiveSignup) {
+      const cap = pacer.capRemaining();
+      if (!cap.allowed) {
+        const left = tasks.length - i;
+        log(
+          `[pace] daily signup cap reached (${cap.used}/${cap.cap}) — stopping batch ` +
+            `to rest the IP; ${left} task(s) skipped.`,
+        );
+        summary.skipped += left;
+        break;
+      }
+    }
+
     summary.attempted += 1;
+    let pacingReason = "";
     try {
       if (task.kind === "replay") {
         const outcome = await handleReplay(task, opts, log);
@@ -113,6 +135,7 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
         });
       } else {
         const outcome = await handleDiscover(task, opts, log);
+        pacingReason = outcome.reason ?? "";
         if (outcome.kind === "ok") summary.succeeded += 1;
         else if (outcome.kind === "blocked") summary.blocked += 1;
         else summary.failed += 1;
@@ -143,9 +166,18 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
       }
     } catch (err) {
       summary.failed += 1;
+      pacingReason = err instanceof Error ? err.message : String(err);
       log(
         `task error (${task.kind}): ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+
+    // Count the run + adaptively back off; cooldown only when another live
+    // signup follows (no point sleeping after the last one).
+    if (isLiveSignup) {
+      pacer.recordRun(pacingReason);
+      const moreLive = tasks.slice(i + 1).some((t) => t.kind !== "replay");
+      if (moreLive) await pacer.cooldown();
     }
   }
   log(

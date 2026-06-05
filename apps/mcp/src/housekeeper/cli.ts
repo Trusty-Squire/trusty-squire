@@ -168,6 +168,13 @@ Pacing:
   --interval-seconds=N      Sleep between batches (default 43200 = 12h).
   --dry / --full            Replay mode for verify mode (default --full).
 
+  Inter-run (protects the residential exit from reputation burn — env):
+  UNIVERSAL_BOT_RUN_COOLDOWN_SEC  Base cooldown between live signups (default 60; 0 disables).
+  UNIVERSAL_BOT_DAILY_SIGNUP_CAP  Max live signups/day before the batch stops (default 30; 0 = ∞).
+  UNIVERSAL_BOT_PACE_MAX_BACKOFF  Cap on the adaptive multiplier when runs hit IP-risk (default 5).
+  (Cooldown grows base×(1+streak) per consecutive OAuth-reject / dropped-conn /
+   timeout / no-signup run, and resets on a clean success.)
+
 Auth:
   --registry-url=URL        Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=TOKEN      Override REGISTRY_ADMIN_BEARER.
