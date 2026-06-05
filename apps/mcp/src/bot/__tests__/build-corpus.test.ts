@@ -28,7 +28,7 @@ import {
   type OnboardingCaseFile,
   type OnboardingOutcomeFile,
 } from "../onboarding-capture.js";
-import { scoreBucket, regressGatePassed, type EvalCaseFile } from "../eval-corpus.js";
+import { scoreBucket, scoreRegress, regressGatePassed, type EvalCaseFile } from "../eval-corpus.js";
 import type { PostVerifyStep, SignupResult } from "../agent.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -346,8 +346,21 @@ describe("regress gate (A5)", () => {
 
   it("trips the gate on a deliberately-wrong (reject) step", async () => {
     const plan = async () => step("done"); // "done" is the derived reject kind
-    const bucket = await scoreBucket(builtCases, plan);
+    const bucket = await scoreBucket(builtCases, plan, scoreRegress);
     expect(regressGatePassed(bucket)).toBe(false);
     expect(bucket.failures.length).toBeGreaterThan(0);
+  });
+
+  it("R1: reject-driven regress does NOT fail on merely-differing kind", async () => {
+    // a regress case with NO rejectKinds (purely-successful page): the planner
+    // picking a different-but-not-rejected kind must PASS — the live netlify
+    // bug (failing "done" where history showed "navigate", no reject present).
+    const okOnly = buildRegressCases([
+      group("svc", [{ index: 0, case: mkRound("svc", url, step("navigate"), inv) }], mkOutcome(true, 0)),
+    ]);
+    expect(okOnly[0]!.expect.rejectKinds).toBeUndefined();
+    const plan = async () => step("done"); // differs from the historical "navigate"
+    const bucket = await scoreBucket(okOnly, plan, scoreRegress);
+    expect(regressGatePassed(bucket)).toBe(true); // no reject → no gate trip
   });
 });

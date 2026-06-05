@@ -7,6 +7,12 @@ The committed, **redacted** corpus for the navigation-planner eval
 corpus/eval/
 ├── regress/          auto-derived from SUCCESSFUL captures' gold paths
 │                     (build-corpus.ts). The merge gate: must stay 100%.
+│                     REJECT-DRIVEN (R1): a case fails ONLY when the planner
+│                     picks a known-wrong rejectKind (derived from a FAILED run
+│                     on that page), never when it merely differs from the one
+│                     historical accept kind. So a case from a purely-successful
+│                     page (no rejects) is a vacuous pass until failed-run data
+│                     gives it rejects — and a different eval model can't break it.
 └── target/
     ├── tune/         hand-labeled N1 stuck pages — iterate the prompt here
     └── holdout/      sealed; report macro-avg lift, never tune on it (R5)

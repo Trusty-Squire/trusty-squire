@@ -18,6 +18,7 @@ import {
   loadEvalCorpus,
   regressGatePassed,
   scoreBucket,
+  scoreRegress,
   type EvalCaseFile,
   type GateBucketResult,
 } from "./eval-corpus.js";
@@ -73,7 +74,9 @@ async function main(): Promise<void> {
     );
   }
   const plan = makePlanner();
-  const r = await scoreBucket(regress, plan);
+  // Regress is REJECT-driven (R1): fail only on a known-wrong action, never on
+  // differing from the one historical accept kind. Target is accept+reject.
+  const r = await scoreBucket(regress, plan, scoreRegress);
   const tt = await scoreBucket(targetTune, plan);
   const th = await scoreBucket(targetHoldout, plan);
 
