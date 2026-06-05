@@ -26,6 +26,8 @@ export type FailureStage =
   | "anti_bot"
   | "phone"
   | "payment"
+  // deliberately not attempted — a known-unwinnable service routed to manual (AB6)
+  | "manual"
   // — pre-onboarding generic form failure / unmapped —
   | "form"
   | "other";
@@ -47,6 +49,7 @@ export const ALL_FAILURE_STAGES: readonly FailureStage[] = [
   "anti_bot",
   "phone",
   "payment",
+  "manual",
   "form",
   "other",
 ];
@@ -73,6 +76,9 @@ export function classifyFailureStage(
 
   const err = (result.error ?? "").toLowerCase();
   const has = (...needles: string[]): boolean => needles.some((n) => err.includes(n));
+
+  // AB6 — a known-unwinnable service that was routed to manual before the run.
+  if (has("manual_signup_required")) return "manual";
 
   // Order matters: most-specific signal first.
   if (has("run_timeout", "run budget", "overall timeout")) return "run_timeout";

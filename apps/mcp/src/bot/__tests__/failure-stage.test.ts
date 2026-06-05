@@ -38,6 +38,7 @@ describe("classifyFailureStage (B1 taxonomy)", () => {
     ["phone verification gate", false, "phone"],
     ["payment_required", false, "payment"],
     ["quota exceeded", false, "payment"],
+    ["manual_signup_required: Clerk SPA won't automate", false, "manual"], // AB6
     ["could not extract key — masked", true, "extract"],
     // live (supabase): reached the dashboard, no key — extract, NOT oauth,
     // even though "post-OAuth" contains "oauth"
