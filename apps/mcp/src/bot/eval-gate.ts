@@ -22,28 +22,32 @@ import {
   type GateBucketResult,
 } from "./eval-corpus.js";
 
-// Bind planPostVerifyStep off a dummy-browser agent — the planner never
-// touches the browser (same pattern as eval-onboarding.ts). Returns a plan
-// function that scoreBucket drives over each case.
+type PlanInput = {
+  service: string;
+  round: number;
+  maxRounds: number;
+  state: EvalCaseFile["state"];
+  oauth: boolean;
+  inventory: InteractiveElement[];
+  priorActions?: readonly string[];
+};
+
+// Returns a plan function that scoreBucket drives over each case. Each case
+// gets a FRESH SignupAgent: the agent holds a per-signup LLM-call circuit
+// breaker (MAX_LLM_CALLS_PER_SIGNUP, default 15), and a shared agent would
+// accumulate that counter across cases — so once the corpus passes ~15 cases
+// every later case spuriously fails with "exceeded LLM call budget". The
+// planner never touches the browser, so a dummy controller is safe; the LLM
+// clients are stateless and shared across agents.
 function makePlanner(): (c: EvalCaseFile) => Promise<PostVerifyStep> {
   const dummyBrowser = {} as unknown as BrowserController;
-  const agent = new SignupAgent(dummyBrowser, pickLLMPair({ preferCheap: true }));
-  const planFor = (
-    agent as unknown as {
-      planPostVerifyStep: (i: {
-        service: string;
-        round: number;
-        maxRounds: number;
-        state: EvalCaseFile["state"];
-        oauth: boolean;
-        inventory: InteractiveElement[];
-        priorActions?: readonly string[];
-      }) => Promise<PostVerifyStep>;
-    }
-  ).planPostVerifyStep.bind(agent);
-
-  return (c: EvalCaseFile) =>
-    planFor({
+  const llm = pickLLMPair({ preferCheap: true });
+  return (c: EvalCaseFile) => {
+    const agent = new SignupAgent(dummyBrowser, llm);
+    const planFor = (
+      agent as unknown as { planPostVerifyStep: (i: PlanInput) => Promise<PostVerifyStep> }
+    ).planPostVerifyStep.bind(agent);
+    return planFor({
       service: c.service,
       round: 0,
       maxRounds: 8,
@@ -52,6 +56,7 @@ function makePlanner(): (c: EvalCaseFile) => Promise<PostVerifyStep> {
       inventory: c.inventory,
       ...(c.priorActions !== undefined ? { priorActions: c.priorActions } : {}),
     });
+  };
 }
 
 function printFailures(label: string, bucket: GateBucketResult): void {
