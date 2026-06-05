@@ -52,8 +52,16 @@ npx tsx src/bot/label-target.ts ~/.trusty-squire/corpus/onboarding/<svc>-<run>-r
 
 Each case carries a `rationale` (audit trail) and `theme`. **`holdout/` is
 sealed**: report its macro-avg lift, never iterate the prompt against it (R5).
-The current seed is 9 cases (6 tune / 3 holdout, 3 per theme); grow it as new
-N1 services surface.
+The corpus is **20 cases (14 tune / 6 holdout)** across the three themes — grown
+from the initial 9 to dampen the per-case perturbation-fragility the first live
+A7 run exposed (see findings below). Grow it further as new N1 services surface.
+
+**Redaction covers operator identity, not just secrets.** The R3 pass also
+scrubs the operator's account handle: it collects the local-part of every email
+on the page (e.g. `lunchboxfortwo` from `lunchboxfortwo@gmail.com`) and removes
+it everywhere — bare usernames leak as team names ("…'s team") and URL paths
+(`/users/<handle>/…`) that carry no `@`. Generic role local-parts
+(support/billing/security/…) are never treated as identities.
 
 ## Running the gate
 
