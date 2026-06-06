@@ -9,6 +9,15 @@ interface BillingStatus {
   subscription_status: string;
   has_customer: boolean;
   current_period_end: string | null;
+  cancel_at: string | null;
+}
+
+function fmtDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
 }
 
 // Mirrors the server's subscription-status helper: which statuses unlock
@@ -138,14 +147,21 @@ export default function BillingPage() {
             </div>
           )}
           <h2 className="app-title" style={{ fontSize: "18px" }}>
-            Paid plan — active
+            {status?.cancel_at != null ? "Paid plan — cancels soon" : "Paid plan — active"}
           </h2>
-          <p className="app-sub">
-            Unlimited signups.
-            {status?.current_period_end != null
-              ? ` Renews ${new Date(status.current_period_end).toLocaleDateString()}.`
-              : ""}
-          </p>
+          {status?.cancel_at != null ? (
+            <p className="app-sub">
+              Unlimited signups until {fmtDate(status.cancel_at)}. Your plan is set to cancel
+              then — reopen Manage to resume it before the date.
+            </p>
+          ) : (
+            <p className="app-sub">
+              Unlimited signups.
+              {status?.current_period_end != null
+                ? ` Renews ${fmtDate(status.current_period_end)}.`
+                : ""}
+            </p>
+          )}
           <button
             type="button"
             className="btn-secondary"

@@ -43,6 +43,7 @@ interface AccountRow {
   subscription_status: string;
   subscription_id: string | null;
   current_period_end: Date | null;
+  cancel_at: Date | null;
 }
 
 interface OAuthIdentityRow {

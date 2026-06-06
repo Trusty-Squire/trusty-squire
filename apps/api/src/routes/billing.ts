@@ -50,6 +50,9 @@ export async function registerBillingRoute(
         has_customer: account.stripe_customer_id !== null,
         current_period_end:
           account.current_period_end !== null ? account.current_period_end.toISOString() : null,
+        // Set when active but scheduled to cancel at period end → UI shows
+        // "active — cancels <date>". null when not cancelling.
+        cancel_at: account.cancel_at !== null ? account.cancel_at.toISOString() : null,
       });
     },
   );

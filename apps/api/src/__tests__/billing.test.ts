@@ -185,6 +185,25 @@ describe("billing — Stripe webhook", () => {
     expect(after?.subscription_status).toBe("canceled");
   });
 
+  it("subscription.updated with a scheduled cancel records cancel_at, stays active", async () => {
+    const acct = await h.deps.accountStore.createAccount("cancelling@test.dev", "Cancelling");
+    await h.deps.accountStore.setSubscription(acct.id, {
+      subscription_status: "active",
+      stripe_customer_id: "cus_cxl",
+      subscription_id: "sub_cxl",
+    });
+    const cancelAtUnix = 1783339629; // 2026-07-06
+    const res = await postEvent({
+      type: "customer.subscription.updated",
+      data: { object: { id: "sub_cxl", customer: "cus_cxl", status: "active", cancel_at: cancelAtUnix } },
+    });
+    expect(res.statusCode).toBe(200);
+    const after = await h.deps.accountStore.findAccountById(acct.id);
+    // Still active (keeps access to term) but the cancel date is now recorded.
+    expect(after?.subscription_status).toBe("active");
+    expect(after?.cancel_at?.getTime()).toBe(cancelAtUnix * 1000);
+  });
+
   it("an unknown event type is acked-and-ignored", async () => {
     const res = await postEvent({ type: "invoice.paid", data: { object: {} } });
     expect(res.statusCode).toBe(200);
