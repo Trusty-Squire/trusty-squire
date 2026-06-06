@@ -25,11 +25,14 @@ import {
 import { defaultQuota, type MachineTokenStore } from "../services/machine-tokens.js";
 import type { AccountStore } from "../services/in-memory-account-store.js";
 import { subscriptionUnlocksQuota } from "../services/subscription-status.js";
+import { mintUpgradeToken } from "../auth/upgrade-token.js";
 
 export interface InboxRouteDeps {
   inbox: InboxService;
   machineTokenStore: MachineTokenStore;
   accountStore: AccountStore;
+  // Signs the pre-authenticated upgrade-link token on the 402 paywall.
+  sessionSecret: string;
   now?: () => Date;
 }
 
@@ -98,14 +101,25 @@ export async function registerInboxRoute(
         principal.signup_count >= quota &&
         !(await accountHasActiveSubscription(opts.deps.accountStore, principal))
       ) {
+        // Pre-authenticated upgrade link: the token's bound account lets the
+        // /upgrade page start checkout with no separate browser login. Falls
+        // back to the plain /billing page when the token isn't account-bound.
+        const ctaBillingUrl =
+          principal.paired_account_id !== null
+            ? `${webAppBaseUrl()}/upgrade?t=${encodeURIComponent(
+                mintUpgradeToken(principal.paired_account_id, opts.deps.sessionSecret, now().getTime()),
+              )}`
+            : `${webAppBaseUrl()}/billing`;
         reply.code(402).send({
           error: "payment_required",
           quota_limit: quota,
           quota_used: principal.signup_count,
-          cta_billing_url: `${webAppBaseUrl()}/billing`,
+          quota_remaining: 0,
+          cta_billing_url: ctaBillingUrl,
           message:
-            `You've hit the free signup limit (${quota}). ` +
-            `Visit cta_billing_url to upgrade.`,
+            `Free signup limit reached (${quota}). Upgrade to unlimited for ` +
+            `$19/mo — no extra login, about 30 seconds: open cta_billing_url. ` +
+            `Already upgraded? Re-run the command.`,
         });
         return;
       }

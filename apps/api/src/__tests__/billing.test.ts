@@ -13,6 +13,7 @@ import type Stripe from "stripe";
 import { buildServer } from "../server.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
+import { mintUpgradeToken } from "../auth/upgrade-token.js";
 import { defaultQuota } from "../services/machine-tokens.js";
 import type {
   StripeClient,
@@ -285,5 +286,60 @@ describe("billing — checkout + portal routes", () => {
     } finally {
       await unconfigured.app.close();
     }
+  });
+});
+
+describe("billing — pre-authenticated upgrade (checkout-from-token)", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.app.close();
+  });
+
+  function postToken(token: string): Promise<{ statusCode: number; body: unknown }> {
+    return h.app
+      .inject({
+        method: "POST",
+        url: "/v1/billing/checkout-from-token",
+        headers: { "content-type": "application/json" },
+        payload: JSON.stringify({ token }),
+      })
+      .then((r) => ({ statusCode: r.statusCode, body: r.json() }));
+  }
+
+  it("a valid token starts checkout for its account — no cookie needed", async () => {
+    const acct = await h.deps.accountStore.createAccount("token@test.dev", "Tok");
+    const token = mintUpgradeToken(acct.id, SESSION_SECRET, Date.now());
+    const res = await postToken(token);
+    expect(res.statusCode).toBe(200);
+    expect((res.body as { url: string }).url).toContain("checkout.stripe.test");
+    expect(h.stripe.lastCheckout?.accountId).toBe(acct.id);
+  });
+
+  it("an expired token is 401", async () => {
+    const acct = await h.deps.accountStore.createAccount("expired@test.dev", "Exp");
+    const token = mintUpgradeToken(acct.id, SESSION_SECRET, Date.now() - 16 * 60 * 1000);
+    const res = await postToken(token);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("a token for an already-subscribed account is 409", async () => {
+    const acct = await h.deps.accountStore.createAccount("haspaid@test.dev", "Paid");
+    await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "active" });
+    const token = mintUpgradeToken(acct.id, SESSION_SECRET, Date.now());
+    const res = await postToken(token);
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("a missing token is 400", async () => {
+    const res = await h.app.inject({
+      method: "POST",
+      url: "/v1/billing/checkout-from-token",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({}),
+    });
+    expect(res.statusCode).toBe(400);
   });
 });

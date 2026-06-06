@@ -184,6 +184,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       inbox: deps.inbox,
       machineTokenStore: deps.machineTokenStore,
       accountStore: deps.accountStore,
+      sessionSecret: deps.sessionSecret,
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
   });
@@ -196,6 +197,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       accountStore: deps.accountStore,
       stripe: stripeClient,
       webBaseUrl: defaultPwaBaseUrl(),
+      sessionSecret: deps.sessionSecret,
     },
     requireWeb: auth.requireWeb,
   });
