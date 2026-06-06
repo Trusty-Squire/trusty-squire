@@ -150,7 +150,7 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   /* Hide only the top-level tab links on mobile (direct children). The plan
      pill stays, and items inside the account dropdown (nested, not direct
      children) stay reachable so Billing/Sign out work on phones. */
-  .nav-r > a:not(.pill):not(.signin):not(.plan-pill){display:none}
+  .nav-r > a:not(.pill):not(.signin):not(.plan-cta){display:none}
 }
 
 /* ===================== motion ===================== */
@@ -230,11 +230,13 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .upgrade-shell .app-card{max-width:380px}
 .upgrade-shell .btn-primary{margin-top:16px;display:inline-flex;width:auto;padding:9px 18px}
 /* plan pill + account menu (app header) */
-.nav-r .plan-pill{font-family:var(--mono);font-size:12px;font-weight:600;
-  padding:4px 10px;border-radius:999px;border:1px solid var(--line2);letter-spacing:.02em}
-.nav-r .plan-pill.pro{color:var(--accent);border-color:rgba(139,137,255,.45)}
-.nav-r .plan-pill.free{color:var(--muted)}
-.nav-r .plan-pill.free:hover{color:var(--fg);border-color:var(--accent)}
+/* free-tier upgrade CTA — accent outline, fills on hover (reads as a button) */
+.nav-r a.plan-cta{font-size:13px;font-weight:600;color:var(--accent);
+  border:1px solid rgba(139,137,255,.45);border-radius:999px;padding:5px 13px}
+.nav-r a.plan-cta:hover{background:var(--accent-fill);border-color:var(--accent-fill);color:#fff}
+/* paid-tier status chip — quiet, mono, NON-interactive (a label, not a control) */
+.nav-r .plan-chip{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--accent);
+  border:1px solid var(--line2);border-radius:999px;padding:3px 10px;letter-spacing:.02em;cursor:default}
 .acct-menu{position:relative;display:inline-flex}
 .acct-trigger{display:inline-flex;align-items:center;gap:5px}
 .acct-caret{font-size:10px;opacity:.7}

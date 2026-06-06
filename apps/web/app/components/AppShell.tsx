@@ -18,15 +18,6 @@ function isPro(status: PlanStatus | null): boolean {
   );
 }
 
-// Plan pill label. The web session can't see per-machine-token signup counts
-// (quota is per token), so this shows tier only — the "N signups left" runway
-// lives in the agent. "Pro · cancels" flags a scheduled cancellation.
-function planLabel(status: PlanStatus | null): string {
-  if (status === null) return "";
-  if (!isPro(status)) return "Free";
-  return status.cancel_at !== null ? "Pro · cancels" : "Pro";
-}
-
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -58,8 +49,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     router.push("/");
   }
 
-  const label = planLabel(plan);
-
   return (
     <div className="app-shell">
       <header className="app-nav">
@@ -78,15 +67,16 @@ export function AppShell({ children }: { children: ReactNode }) {
             Agents
           </Link>
 
-          {label !== "" && (
-            <Link
-              className={`plan-pill ${isPro(plan) ? "pro" : "free"}`}
-              href="/billing"
-              title={isPro(plan) ? "Manage your subscription" : "Upgrade to unlimited"}
-            >
-              {label}
-            </Link>
-          )}
+          {/* Split by intent: free → an Upgrade action; paid → a quiet status
+              chip (a label, not a control). Management lives in Account ▾. */}
+          {plan !== null &&
+            (isPro(plan) ? (
+              <span className="plan-chip">Pro</span>
+            ) : (
+              <Link className="plan-cta" href="/billing" title="Upgrade to unlimited">
+                Upgrade
+              </Link>
+            ))}
 
           <div className="acct-menu">
             <button
