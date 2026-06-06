@@ -173,6 +173,10 @@ model Account {
   subscription_status String    @default("free")
   subscription_id     String?
   current_period_end  DateTime?
+  // Set when the subscription is scheduled to end (cancel-at-period-end).
+  // null = not scheduled to cancel. Lets the UI show "active — cancels <date>"
+  // so a cancellation is visibly registered while access continues to term.
+  cancel_at           DateTime?
 
   oauth_identities OAuthIdentity[]
   devices          Device[]

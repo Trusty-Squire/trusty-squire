@@ -20,16 +20,20 @@ export interface AccountRecord {
   subscription_status: string;
   subscription_id: string | null;
   current_period_end: Date | null;
+  // Scheduled cancellation date (cancel-at-period-end); null = not cancelling.
+  cancel_at: Date | null;
 }
 
 // The subset of billing fields the Stripe webhook updates. `subscription_status`
 // is always set; the ids/period are present on create/renew, absent (left as-is)
-// on a bare status flip.
+// on a bare status flip. `cancel_at` is written explicitly (Date or null) on
+// subscription.updated so a resume clears it — pass it to set, omit to leave.
 export interface SubscriptionPatch {
   stripe_customer_id?: string;
   subscription_status: string;
   subscription_id?: string | null;
   current_period_end?: Date | null;
+  cancel_at?: Date | null;
 }
 
 export interface DeviceRecord {
@@ -88,6 +92,7 @@ export class InMemoryAccountStore implements AccountStore {
       subscription_status: "free",
       subscription_id: null,
       current_period_end: null,
+      cancel_at: null,
     };
     this.accounts.set(acc.id, acc);
     this.accountsByEmail.set(email.toLowerCase(), acc.id);
@@ -120,6 +125,7 @@ export class InMemoryAccountStore implements AccountStore {
     if (patch.stripe_customer_id !== undefined) acc.stripe_customer_id = patch.stripe_customer_id;
     if (patch.subscription_id !== undefined) acc.subscription_id = patch.subscription_id;
     if (patch.current_period_end !== undefined) acc.current_period_end = patch.current_period_end;
+    if (patch.cancel_at !== undefined) acc.cancel_at = patch.cancel_at;
   }
 
   async touchDevice(input: {

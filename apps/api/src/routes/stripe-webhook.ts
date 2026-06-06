@@ -92,6 +92,8 @@ async function handleEvent(
       }
       const patch: SubscriptionPatch = {
         subscription_status: "active",
+        // Fresh checkout → clear any stale cancellation schedule from a prior sub.
+        cancel_at: null,
         ...(stringId(session.customer) !== null
           ? { stripe_customer_id: stringId(session.customer)! }
           : {}),
@@ -116,13 +118,20 @@ async function handleEvent(
       }
       // On delete Stripe still reports the sub's last status; force "canceled"
       // so the account loses the paid tier regardless.
-      const status = event.type === "customer.subscription.deleted" ? "canceled" : sub.status;
+      const deleted = event.type === "customer.subscription.deleted";
+      const status = deleted ? "canceled" : sub.status;
+      // cancel_at is set when the user schedules a cancel-at-period-end (stays
+      // active until then); null once the sub is gone or the cancel is undone.
       await accountStore.setSubscription(account.id, {
         subscription_status: status,
         subscription_id: sub.id,
         current_period_end: periodEnd(sub),
+        cancel_at: deleted ? null : cancelAt(sub),
       });
-      fastify.log.info({ accountId: account.id, status }, "subscription status updated");
+      fastify.log.info(
+        { accountId: account.id, status, cancelAt: cancelAt(sub)?.toISOString() ?? null },
+        "subscription status updated",
+      );
       return;
     }
 
@@ -142,7 +151,20 @@ function stringId(value: string | { id: string } | null | undefined): string | n
 }
 
 function periodEnd(sub: Stripe.Subscription): Date | null {
-  const raw = (sub as unknown as { current_period_end?: number }).current_period_end;
+  // current_period_end moved from the subscription to the item in newer API
+  // versions (2026-04-22 returns it on items.data[0]); read both.
+  const s = sub as unknown as {
+    current_period_end?: number;
+    items?: { data?: Array<{ current_period_end?: number }> };
+  };
+  const raw = s.current_period_end ?? s.items?.data?.[0]?.current_period_end;
+  return typeof raw === "number" ? new Date(raw * 1000) : null;
+}
+
+// When the subscription is scheduled to cancel (cancel-at-period-end), Stripe
+// sets `cancel_at` to the effective end. null = not scheduled to cancel.
+function cancelAt(sub: Stripe.Subscription): Date | null {
+  const raw = (sub as unknown as { cancel_at?: number | null }).cancel_at;
   return typeof raw === "number" ? new Date(raw * 1000) : null;
 }
 

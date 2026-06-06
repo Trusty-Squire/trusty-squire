@@ -72,6 +72,7 @@ export class PrismaAccountStore implements AccountStore {
         ...(patch.current_period_end !== undefined
           ? { current_period_end: patch.current_period_end }
           : {}),
+        ...(patch.cancel_at !== undefined ? { cancel_at: patch.cancel_at } : {}),
       },
     });
   }
@@ -143,6 +144,7 @@ export class PrismaAccountStore implements AccountStore {
     subscription_status: string;
     subscription_id: string | null;
     current_period_end: Date | null;
+    cancel_at: Date | null;
   }): AccountRecord {
     return {
       id: row.id,
@@ -154,6 +156,7 @@ export class PrismaAccountStore implements AccountStore {
       subscription_status: row.subscription_status,
       subscription_id: row.subscription_id,
       current_period_end: row.current_period_end,
+      cancel_at: row.cancel_at,
     };
   }
 
