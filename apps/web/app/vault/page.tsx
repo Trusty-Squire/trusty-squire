@@ -230,6 +230,7 @@ function VaultRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [addingField, setAddingField] = useState(false);
+  const [editingHosts, setEditingHosts] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
 
   // Fetch + cache the field map once; reveal and copy both need it.
@@ -361,6 +362,7 @@ function VaultRow({
           { key: "verify", label: "Verify", onClick: onVerify },
           { key: "rename", label: "Rename", onClick: () => setRenaming(true) },
           { key: "add-field", label: "Add field", onClick: () => setAddingField(true) },
+          { key: "hosts", label: "Edit hosts", onClick: () => setEditingHosts(true) },
           { key: "delete", label: "Delete", onClick: () => setConfirmDelete(true), danger: true },
         ]}
       />
@@ -397,6 +399,17 @@ function VaultRow({
             // the next reveal re-fetches the full set.
             setFields(null);
             setShown(false);
+            onChanged();
+          }}
+        />
+      )}
+
+      {editingHosts && (
+        <EditHostsModal
+          cred={cred}
+          onClose={() => setEditingHosts(false)}
+          onSaved={() => {
+            setEditingHosts(false);
             onChanged();
           }}
         />
@@ -666,6 +679,87 @@ function AddFieldModal({
         <div className="form-actions">
           <button className="btn-primary" type="button" onClick={save} disabled={busy}>
             {busy ? "Adding…" : "Add field"}
+          </button>
+          <button className="btn-secondary" type="button" onClick={onClose}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Edit the host allowlist `use_credential` enforces against. The proxy
+// HARD-rejects any off-allowlist host (403), so a credential with an empty
+// list can't be used at all — this is how the user unblocks it. The server
+// normalises + validates each host (bare hostname, no scheme/path); a bad
+// entry comes back 400.
+function EditHostsModal({
+  cred,
+  onClose,
+  onSaved,
+}: {
+  cred: Cred;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  // One host per line — the simplest editor for a 1-3 entry list.
+  const [text, setText] = useState(cred.allowed_hosts.join("\n"));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useCallback(async () => {
+    // Accept newline- or comma-separated input; trim, drop blanks, dedupe.
+    const hosts = Array.from(
+      new Set(
+        text
+          .split(/[\n,]/)
+          .map((h) => h.trim())
+          .filter((h) => h.length > 0),
+      ),
+    );
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPatch(`/v1/vault/credentials/${cred.id}/allowed-hosts`, { hosts });
+      onSaved();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 400) {
+        setError("One of those isn't a valid host. Use a bare hostname like api.example.com (no https://, no path).");
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't save the hosts.");
+      }
+      setBusy(false);
+    }
+  }, [cred.id, text, onSaved]);
+
+  return (
+    <Modal
+      title={`Allowed hosts for ${cred.service ?? "this key"}`}
+      subtitle="use_credential can only call these hosts — everything else is blocked. One per line, bare hostname (e.g. api.openrouter.ai). Empty = the key can't be used until you add one."
+      onClose={onClose}
+    >
+      <div className="form">
+        {error !== null && <div className="form-err">{error}</div>}
+        <div className="field">
+          <label htmlFor={`hosts-${cred.id}`}>Hosts</label>
+          <textarea
+            id={`hosts-${cred.id}`}
+            className="mono"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={"api.openrouter.ai\npaper-api.alpaca.markets"}
+            rows={4}
+            autoFocus
+            onKeyDown={(e) => {
+              // Cmd/Ctrl+Enter saves; plain Enter inserts a newline (list).
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void save();
+            }}
+          />
+        </div>
+        <div className="form-actions">
+          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
+            {busy ? "Saving…" : "Save hosts"}
           </button>
           <button className="btn-secondary" type="button" onClick={onClose}>
             Cancel
