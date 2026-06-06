@@ -22,6 +22,26 @@ describe("deriveAllowedHosts", () => {
     expect(deriveAllowedHosts("Fal.AI")).toEqual(hosts);
   });
 
+  it("maps Alpaca to its paper, live, and data hosts", () => {
+    const hosts = [
+      "paper-api.alpaca.markets",
+      "api.alpaca.markets",
+      "data.alpaca.markets",
+    ];
+    expect(deriveAllowedHosts("Alpaca")).toEqual(hosts);
+    expect(deriveAllowedHosts("alpaca")).toEqual(hosts);
+  });
+
+  it("maps FRED (and the stlouisfed slug) to the data host", () => {
+    expect(deriveAllowedHosts("FRED")).toEqual(["api.stlouisfed.org"]);
+    expect(deriveAllowedHosts("fred")).toEqual(["api.stlouisfed.org"]);
+    expect(deriveAllowedHosts("St. Louis Fed")).toEqual(["api.stlouisfed.org"]);
+  });
+
+  it("maps OpenRouter to openrouter.ai", () => {
+    expect(deriveAllowedHosts("OpenRouter")).toEqual(["openrouter.ai"]);
+  });
+
   it("returns an empty list for unknown / missing services", () => {
     expect(deriveAllowedHosts("some-random-saas")).toEqual([]);
     expect(deriveAllowedHosts("")).toEqual([]);

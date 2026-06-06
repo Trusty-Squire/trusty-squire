@@ -42,6 +42,18 @@ export const KNOWN_SERVICE_HOSTS: Readonly<Record<string, readonly string[]>> = 
   koyeb: ["app.koyeb.com"],
   groq: ["api.groq.com"],
   huggingface: ["huggingface.co"],
+  // Alpaca — brokerage/market-data API. Paper-trading, live trading, and
+  // market data are SEPARATE hosts; seed all three so a paper key (the
+  // common case) works without an edit. normaliseService("Alpaca") → "alpaca".
+  alpaca: [
+    "paper-api.alpaca.markets",
+    "api.alpaca.markets",
+    "data.alpaca.markets",
+  ],
+  // FRED — St. Louis Fed economic data. Service is usually typed "FRED";
+  // the API lives on the stlouisfed.org host. Key both common slugs.
+  fred: ["api.stlouisfed.org"],
+  stlouisfed: ["api.stlouisfed.org"],
   // fal.ai — AI inference. Keys auth `Authorization: Key <id>:<secret>`
   // against the run/queue hosts. normaliseService("fal.ai") → "falai".
   falai: ["fal.run", "rest.alpha.fal.ai", "queue.fal.run"],
