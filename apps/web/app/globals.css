@@ -147,7 +147,10 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   h1{font-size:clamp(2.2rem,8vw,3rem)}
   .cap{grid-template-columns:1fr;gap:var(--s-2)}
   .cap-num{padding-top:0}
-  .nav-r a:not(.pill):not(.signin){display:none}
+  /* Hide only the top-level tab links on mobile (direct children). The plan
+     pill stays, and items inside the account dropdown (nested, not direct
+     children) stay reachable so Billing/Sign out work on phones. */
+  .nav-r > a:not(.pill):not(.signin):not(.plan-pill){display:none}
 }
 
 /* ===================== motion ===================== */
