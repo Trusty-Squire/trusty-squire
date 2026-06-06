@@ -17,37 +17,74 @@ function isActive(status: string): boolean {
   return status === "active" || status === "trialing";
 }
 
+// After checkout Stripe redirects here immediately, but the webhook that
+// flips us to `active` can land a beat later. Poll the real status for a
+// short window so we show the truth — never a stale "Free plan" sitting
+// under a "you're subscribed" banner.
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 25000;
+
 export default function BillingPage() {
   const router = useRouter();
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [banner, setBanner] = useState<"success" | "cancelled" | null>(null);
+  // Outcome flags from the Stripe redirect (?status=success|cancelled).
+  const [justPaid, setJustPaid] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
+  // True while polling for the webhook to land after a successful payment.
+  const [finalizing, setFinalizing] = useState(false);
 
-  // Read the post-checkout redirect outcome (?status=success|cancelled)
-  // on the client to avoid a useSearchParams Suspense boundary.
   useEffect(() => {
     const q = new URLSearchParams(window.location.search).get("status");
-    if (q === "success" || q === "cancelled") setBanner(q);
+    if (q === "success") {
+      setJustPaid(true);
+      setFinalizing(true);
+    } else if (q === "cancelled") {
+      setCancelled(true);
+    }
   }, []);
 
+  // Load status once; if we just paid, keep polling until active or timeout.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const startedAt = Date.now();
+    const cameFromSuccess =
+      new URLSearchParams(window.location.search).get("status") === "success";
+
+    async function load(): Promise<void> {
       try {
         const res = await apiGet<BillingStatus>("/v1/billing/status");
-        if (!cancelled) setStatus(res);
+        if (stopped) return;
+        setStatus(res);
+
+        if (cameFromSuccess && !isActive(res.subscription_status)) {
+          if (Date.now() - startedAt < POLL_TIMEOUT_MS) {
+            timer = setTimeout(load, POLL_INTERVAL_MS);
+            return; // keep finalizing
+          }
+          // Webhook hasn't landed within the window. Stop polling, but do NOT
+          // fall back to the Upgrade card — they paid. Show a soft notice.
+          setFinalizing(false);
+          return;
+        }
+        setFinalizing(false);
       } catch (err) {
-        if (cancelled) return;
+        if (stopped) return;
         if (err instanceof ApiError && err.status === 401) {
           router.replace("/login?next=/billing");
           return;
         }
         setError(err instanceof Error ? err.message : "Failed to load billing status.");
+        setFinalizing(false);
       }
-    })();
+    }
+
+    void load();
     return () => {
-      cancelled = true;
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [router]);
 
@@ -70,6 +107,8 @@ export default function BillingPage() {
   }, []);
 
   const active = status !== null && isActive(status.subscription_status);
+  // Paid, but the webhook hasn't flipped us to active yet (or didn't in time).
+  const awaitingActivation = justPaid && !active;
 
   return (
     <AppShell>
@@ -80,52 +119,93 @@ export default function BillingPage() {
         </div>
       </div>
 
-      {banner === "success" && (
-        <div className="app-banner ok">You&apos;re subscribed — thanks! Your signups are now unlimited.</div>
-      )}
-      {banner === "cancelled" && (
+      {cancelled && !active && (
         <div className="app-banner">Checkout cancelled — no charge was made.</div>
       )}
       {error !== null && <div className="app-banner err">{error}</div>}
 
-      {status === null && error === null && <p className="app-sub">Loading…</p>}
+      {/* First load on a normal visit (not a post-checkout return). */}
+      {status === null && !awaitingActivation && error === null && (
+        <p className="app-sub">Loading…</p>
+      )}
 
-      {status !== null && (
+      {/* Active subscription — the only place the success banner appears. */}
+      {active && (
         <div className="app-card">
-          {active ? (
-            <>
-              <h2 className="app-title" style={{ fontSize: "18px" }}>Paid plan — active</h2>
-              <p className="app-sub">
-                Unlimited signups.
-                {status.current_period_end !== null
-                  ? ` Renews ${new Date(status.current_period_end).toLocaleDateString()}.`
-                  : ""}
-              </p>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={busy}
-                onClick={() => go("/v1/billing/portal")}
-              >
-                {busy ? "Opening…" : "Manage subscription"}
-              </button>
-            </>
-          ) : (
-            <>
-              <h2 className="app-title" style={{ fontSize: "18px" }}>Free plan</h2>
-              <p className="app-sub">
-                You&apos;ve used your free signups. Upgrade for unlimited provisioning.
-              </p>
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={busy}
-                onClick={() => go("/v1/billing/checkout")}
-              >
-                {busy ? "Opening…" : "Upgrade"}
-              </button>
-            </>
+          {justPaid && (
+            <div className="app-banner ok" style={{ marginTop: 0, marginBottom: 16 }}>
+              You&apos;re subscribed — thanks! Your signups are now unlimited.
+            </div>
           )}
+          <h2 className="app-title" style={{ fontSize: "18px" }}>
+            Paid plan — active
+          </h2>
+          <p className="app-sub">
+            Unlimited signups.
+            {status?.current_period_end != null
+              ? ` Renews ${new Date(status.current_period_end).toLocaleDateString()}.`
+              : ""}
+          </p>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy}
+            onClick={() => go("/v1/billing/portal")}
+          >
+            {busy ? "Opening…" : "Manage subscription"}
+          </button>
+        </div>
+      )}
+
+      {/* Just paid, waiting on the webhook to confirm. No Upgrade button. */}
+      {awaitingActivation && finalizing && (
+        <div className="app-card">
+          <h2 className="app-title" style={{ fontSize: "18px" }}>
+            Finalizing your subscription…
+          </h2>
+          <p className="app-sub">
+            Payment received. Confirming with Stripe — this usually takes a few seconds.
+          </p>
+        </div>
+      )}
+
+      {/* Paid, but activation didn't land in the poll window. Still no Upgrade. */}
+      {awaitingActivation && !finalizing && (
+        <div className="app-card">
+          <h2 className="app-title" style={{ fontSize: "18px" }}>
+            Payment received
+          </h2>
+          <p className="app-sub">
+            Your subscription is taking a moment to activate. Refresh shortly — if it still
+            doesn&apos;t update, reach out and we&apos;ll sort it.
+          </p>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => window.location.assign("/billing")}
+          >
+            Refresh
+          </button>
+        </div>
+      )}
+
+      {/* Genuinely on the free plan. */}
+      {status !== null && !active && !awaitingActivation && (
+        <div className="app-card">
+          <h2 className="app-title" style={{ fontSize: "18px" }}>
+            Free plan
+          </h2>
+          <p className="app-sub">
+            You&apos;ve used your free signups. Upgrade for unlimited provisioning.
+          </p>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={busy}
+            onClick={() => go("/v1/billing/checkout")}
+          >
+            {busy ? "Opening…" : "Upgrade"}
+          </button>
         </div>
       )}
     </AppShell>
