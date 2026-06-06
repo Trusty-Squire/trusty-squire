@@ -226,6 +226,23 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   padding:24px;background:var(--bg);color:var(--fg)}
 .upgrade-shell .app-card{max-width:380px}
 .upgrade-shell .btn-primary{margin-top:16px;display:inline-flex;width:auto;padding:9px 18px}
+/* plan pill + account menu (app header) */
+.nav-r .plan-pill{font-family:var(--mono);font-size:12px;font-weight:600;
+  padding:4px 10px;border-radius:999px;border:1px solid var(--line2);letter-spacing:.02em}
+.nav-r .plan-pill.pro{color:var(--accent);border-color:rgba(139,137,255,.45)}
+.nav-r .plan-pill.free{color:var(--muted)}
+.nav-r .plan-pill.free:hover{color:var(--fg);border-color:var(--accent)}
+.acct-menu{position:relative;display:inline-flex}
+.acct-trigger{display:inline-flex;align-items:center;gap:5px}
+.acct-caret{font-size:10px;opacity:.7}
+.acct-backdrop{position:fixed;inset:0;z-index:40}
+.acct-dropdown{position:absolute;top:calc(100% + 8px);right:0;z-index:41;min-width:160px;
+  background:var(--raised);border:1px solid var(--line2);border-radius:10px;padding:6px;
+  display:flex;flex-direction:column;box-shadow:0 18px 40px -20px rgba(0,0,0,.8)}
+.acct-dropdown a,.acct-dropdown button{font:inherit;font-size:13.5px;text-align:left;
+  color:var(--muted);background:none;border:none;padding:8px 10px;border-radius:7px;
+  cursor:pointer;width:100%}
+.acct-dropdown a:hover,.acct-dropdown button:hover{color:var(--fg);background:var(--surface)}
 /* count chip — mono value in a hairline pill (vault + agents headers) */
 .app-count{font-family:var(--mono);font-size:12px;color:var(--muted);
   font-weight:500;border:1px solid var(--line2);border-radius:999px;
