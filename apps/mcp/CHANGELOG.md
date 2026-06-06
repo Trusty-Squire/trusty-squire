@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.3-rc.1 (2026-06-06)
+
+Prerelease cut from `main` to refresh the `next` tag (the prior `next`,
+0.8.14-rc.5, was stale and behind `latest`). No bot/MCP code changes since
+0.9.2 — the commits merged since then were web-app only (the `trustysquire`
+product site, deployed separately to Fly), so the published mcp tarball is
+byte-equivalent to 0.9.2 aside from the version string.
+
 ## 0.9.2 (2026-06-06)
 
 - **Quota runway nudge.** On a successful free-tier signup, `check_provision_status`
