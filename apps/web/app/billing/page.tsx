@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../lib/api";
+import { useQueryParam } from "../lib/use-query-param";
 
 interface BillingStatus {
   subscription_status: string;
@@ -38,29 +39,22 @@ export default function BillingPage() {
   const [status, setStatus] = useState<BillingStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Outcome flags from the Stripe redirect (?status=success|cancelled).
-  const [justPaid, setJustPaid] = useState(false);
-  const [cancelled, setCancelled] = useState(false);
-  // True while polling for the webhook to land after a successful payment.
-  const [finalizing, setFinalizing] = useState(false);
-
-  useEffect(() => {
-    const q = new URLSearchParams(window.location.search).get("status");
-    if (q === "success") {
-      setJustPaid(true);
-      setFinalizing(true);
-    } else if (q === "cancelled") {
-      setCancelled(true);
-    }
-  }, []);
+  // Outcome flags from the Stripe redirect — derived from the query param
+  // rather than seeded via an effect (which trips set-state-in-effect).
+  const statusParam = useQueryParam("status");
+  const justPaid = statusParam === "success";
+  const cancelled = statusParam === "cancelled";
+  // Polling for the webhook to land after a successful payment runs until
+  // the status goes active or the window times out. `finalizing` is the
+  // not-yet-done view of that, derived so the effect never seeds state.
+  const [pollDone, setPollDone] = useState(false);
+  const finalizing = !pollDone;
 
   // Load status once; if we just paid, keep polling until active or timeout.
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const startedAt = Date.now();
-    const cameFromSuccess =
-      new URLSearchParams(window.location.search).get("status") === "success";
 
     async function load(): Promise<void> {
       try {
@@ -68,17 +62,17 @@ export default function BillingPage() {
         if (stopped) return;
         setStatus(res);
 
-        if (cameFromSuccess && !isActive(res.subscription_status)) {
+        if (justPaid && !isActive(res.subscription_status)) {
           if (Date.now() - startedAt < POLL_TIMEOUT_MS) {
             timer = setTimeout(load, POLL_INTERVAL_MS);
             return; // keep finalizing
           }
           // Webhook hasn't landed within the window. Stop polling, but do NOT
           // fall back to the Upgrade card — they paid. Show a soft notice.
-          setFinalizing(false);
+          setPollDone(true);
           return;
         }
-        setFinalizing(false);
+        setPollDone(true);
       } catch (err) {
         if (stopped) return;
         if (err instanceof ApiError && err.status === 401) {
@@ -86,7 +80,7 @@ export default function BillingPage() {
           return;
         }
         setError(err instanceof Error ? err.message : "Failed to load billing status.");
-        setFinalizing(false);
+        setPollDone(true);
       }
     }
 
@@ -95,7 +89,7 @@ export default function BillingPage() {
       stopped = true;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [router]);
+  }, [router, justPaid]);
 
   // Open Stripe Checkout (subscribe) or the Billing Portal (manage) by
   // asking the API for the hosted URL, then navigating to it.

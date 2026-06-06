@@ -34,14 +34,14 @@ interface WhoamiResponse {
 }
 
 // Page-level state machine. Most renders are determined by `step` +
-// the wizard step states; the rarer ones (loading the page, invalid
-// token, expired install, server error) get their own branches.
+// the wizard step states; the rarer ones (loading the page, expired
+// install, server error) get their own branches. The missing-token
+// case is derived from `token` at render, not tracked here.
 type PageState =
   | "loading"
   | "wizard"
   | "expired"
-  | "error"
-  | "invalid_token";
+  | "error";
 
 export default function InstallPage() {
   const router = useRouter();
@@ -57,12 +57,10 @@ export default function InstallPage() {
   // weren't already claimed. The wizard then continues to step 2.
   const returnedFromAuth = useQueryParam("claim") === "1";
 
-  // Initial load: fetch state + whoami in parallel.
+  // Initial load: fetch state + whoami in parallel. A missing token is
+  // handled at render (see below), so just bail here without touching state.
   useEffect(() => {
-    if (token === null) {
-      setPage("invalid_token");
-      return;
-    }
+    if (token === null) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -188,23 +186,25 @@ export default function InstallPage() {
 
   // ---- Render branches -----------------------------------------------
 
-  if (page === "loading") {
-    return (
-      <Shell>
-        <p className="auth-sub" style={loadingStyle}>
-          <span className="spinner" /> Loading install request…
-        </p>
-      </Shell>
-    );
-  }
-
-  if (page === "invalid_token") {
+  // Missing token — derived directly from the query param, so no effect
+  // has to set a "page" state to reach this branch.
+  if (token === null) {
     return (
       <Shell>
         <h1>Invalid install link</h1>
         <p className="auth-sub">
           This link is missing its setup token. Run{" "}
           <code>npx @trusty-squire/mcp connect</code> again for a fresh one.
+        </p>
+      </Shell>
+    );
+  }
+
+  if (page === "loading") {
+    return (
+      <Shell>
+        <p className="auth-sub" style={loadingStyle}>
+          <span className="spinner" /> Loading install request…
         </p>
       </Shell>
     );
