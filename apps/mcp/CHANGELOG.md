@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.2 (2026-06-06)
+
+- **Quota runway nudge.** On a successful free-tier signup, `check_provision_status`
+  now appends "N free signups left — you'll be prompted to upgrade ($19/mo) when
+  they run out" while N is in the 1–3 band, so the paywall stops being an ambush.
+  Reads the existing `/v1/install/status`; the band naturally skips paid accounts
+  (which report 0). Best-effort — a status hiccup never alters or breaks a real
+  signup result. Pairs with the API/web one-click pre-authenticated upgrade link.
+
 ## 0.9.1 (2026-06-05)
 
 Operational hardening after the 0.9.0 live run burned a residential exit.

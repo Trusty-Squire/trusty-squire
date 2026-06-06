@@ -29,6 +29,7 @@ import {
 import { emitProvisionEvent, postCaptchaEvent } from "./signup-telemetry.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
+import { getMachineStatus } from "../api-client.js";
 import { VERSION } from "../version.js";
 import {
   clientFromEnv,
@@ -389,9 +390,52 @@ export const checkProvisionStatusTool = {
           : "Signup still in progress. Poll again in about 30 seconds.",
       };
     }
-    return record.result;
+    return await maybeAppendQuotaNudge(record.result);
   },
 };
+
+// Runway nudge: on a successful free-tier signup, tell the user how many free
+// signups remain so the paywall isn't an ambush. Only fires in the 1..N band —
+// a paid (unlimited) account reports quota_remaining 0, so it's never nudged,
+// and 0 on a free account means the next run hits the wall anyway (the 402
+// handles that). Best-effort: a status hiccup never alters or breaks the result.
+const QUOTA_NUDGE_THRESHOLD = 3;
+
+// Pure band logic: the nudge string when `remaining` is in the runway band
+// (1..threshold), else null. A paid (unlimited) account reports remaining 0 so
+// it's never nudged; 0 on a free account means the next run hits the wall
+// anyway. Exported for testing.
+export function quotaNudge(remaining: number, threshold = QUOTA_NUDGE_THRESHOLD): string | null {
+  if (remaining > 0 && remaining <= threshold) {
+    return (
+      `Heads up: ${remaining} free signup${remaining === 1 ? "" : "s"} left — ` +
+      `you'll be prompted to upgrade to unlimited ($19/mo) when they run out.`
+    );
+  }
+  return null;
+}
+
+async function maybeAppendQuotaNudge(result: unknown): Promise<unknown> {
+  const r = result as { status?: unknown; message?: unknown };
+  if (r === null || typeof r !== "object" || r.status !== "success") return result;
+  try {
+    const session = await (await openSessionStorage()).read();
+    if (session?.machine_token === undefined) return result;
+    const status = await getMachineStatus(session.api_base_url, session.machine_token);
+    const nudge = quotaNudge(status.quota_remaining);
+    if (nudge !== null) {
+      const base = typeof r.message === "string" ? r.message : "";
+      return {
+        ...(result as object),
+        quota_remaining: status.quota_remaining,
+        message: `${base} ${nudge}`.trim(),
+      };
+    }
+  } catch {
+    // best-effort — never let a status lookup change or break a real result
+  }
+  return result;
+}
 
 interface RunContext {
   apiBase: string;
