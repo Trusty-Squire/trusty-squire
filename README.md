@@ -1,5 +1,13 @@
 # trusty squire
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/@trusty-squire/mcp"><img src="https://img.shields.io/npm/v/@trusty-squire/mcp?logo=npm&color=cb3837" alt="npm version" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Trusty-Squire/trusty-squire/ci.yml?branch=main&label=CI&logo=github" alt="CI status" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/stargazers"><img src="https://img.shields.io/github/stars/Trusty-Squire/trusty-squire?logo=github&color=eac54f" alt="GitHub stars" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@trusty-squire/mcp?color=blue" alt="license" /></a>
+  <a href="https://glama.ai/mcp/servers/Trusty-Squire/trusty-squire"><img src="https://glama.ai/mcp/servers/Trusty-Squire/trusty-squire/badges/score.svg" alt="Glama MCP server score" /></a>
+</p>
+
 Your squire handles the rest.
 
 Trusty Squire is a fiduciary agent that signs up for SaaS services on behalf of vibe coders. The agent holds API keys, pays bills within a user-set spending policy, and handles email/SMS verification automatically — so the developer can stay in their editor instead of context-switching to fifteen signup forms per project.

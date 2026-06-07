@@ -1,29 +1,23 @@
 <p align="center">
   <a href="https://trustysquire.ai" target="_blank" rel="noopener noreferrer">
-    <img width="96" src="https://trustysquire.ai/squire.svg" alt="Trusty Squire" />
+    <img width="96" height="96" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire" />
   </a>
 </p>
-<h1 align="center">
-  Trusty Squire MCP
-</h1>
-<h3 align="center">
-  Your AI coding agent's universal signup bot
-</h3>
+
+# Trusty Squire MCP
+
+> **Your AI coding agent's universal signup bot.** Ship faster by letting Claude
+> Code, Cursor, Goose, Codex, Cline, and Continue sign up for the SaaS services
+> they need — and hand you back a working API key.
+
 <p align="center">
-  Ship faster by letting Claude Code, Cursor, Goose, Codex, Cline, and Continue<br/>
-  sign up for the SaaS services they need — and hand you back a working API key.
-</p>
-<p align="center">
-  <a href="https://www.npmjs.com/package/@trusty-squire/mcp">
-    <img src="https://img.shields.io/npm/v/@trusty-squire/mcp.svg" alt="npm version" />
-  </a>
-  <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license" />
-  </a>
-  <a href="https://www.npmjs.com/package/@trusty-squire/mcp">
-    <img src="https://img.shields.io/npm/dm/@trusty-squire/mcp.svg" alt="npm downloads" />
-  </a>
-  <img src="https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg" alt="node >=20" />
+  <a href="https://www.npmjs.com/package/@trusty-squire/mcp"><img src="https://img.shields.io/npm/v/@trusty-squire/mcp?logo=npm&color=cb3837" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@trusty-squire/mcp"><img src="https://img.shields.io/npm/dm/@trusty-squire/mcp?color=cb3837" alt="npm downloads" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@trusty-squire/mcp?color=blue" alt="license" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/stargazers"><img src="https://img.shields.io/github/stars/Trusty-Squire/trusty-squire?logo=github&color=eac54f" alt="GitHub stars" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Trusty-Squire/trusty-squire/ci.yml?branch=main&label=CI&logo=github" alt="CI status" /></a>
+  <img src="https://img.shields.io/node/v/@trusty-squire/mcp?logo=node.js&color=339933" alt="node version" />
+  <a href="https://glama.ai/mcp/servers/Trusty-Squire/trusty-squire"><img src="https://glama.ai/mcp/servers/Trusty-Squire/trusty-squire/badges/score.svg" alt="Glama MCP server score" /></a>
 </p>
 
 ---
