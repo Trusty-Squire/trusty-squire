@@ -284,7 +284,32 @@ describe("GET /skills/:service", () => {
     expect(body.signature).toBe("x".repeat(64));
     expect(body.counters.replays_succeeded).toBe(0);
     expect(body.counters.consecutive_failures).toBe(0);
-    expect(response.headers["cache-control"]).toContain("max-age=300");
+    expect(response.headers["cache-control"]).toContain("max-age=30");
+
+    await server.close();
+  });
+
+  it("by-id status reflects the live row, not the frozen payload status", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    const id = "01HZX9ABCDEFGHJKMNPQRSTVWY";
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: { skill: validSkill({ skill_id: id }), signature: "x".repeat(64) },
+    });
+    // Demote changes the row's status column; the payload's embedded status
+    // stays frozen at store time.
+    await server.inject({
+      method: "POST",
+      url: `/skills/${id}/demote`,
+      headers: { "x-account-id": "acct-1" },
+      payload: { reason: "test" },
+    });
+    const byId = (await server.inject({ method: "GET", url: `/skills/by-id/${id}` })).json();
+    // The bug was by-id surfacing the stale payload status; it must now
+    // match the live row (demoted), the same value GET /skills reports.
+    expect(byId.skill.status).toBe("demoted");
 
     await server.close();
   });

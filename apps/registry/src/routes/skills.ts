@@ -572,10 +572,16 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function sendSkillResponse(reply: FastifyReply, record: SkillStoreRecord) {
-  reply.header("Cache-Control", "public, max-age=300");
+  // Short cache: the status can change (demote/promote) and a 5-min cache
+  // made by-id lag the live state.
+  reply.header("Cache-Control", "public, max-age=30");
   return reply.code(200).send({
     ok: true,
-    skill: record.payload,
+    // The payload embeds a `status` frozen at store time; the row's status
+    // column (record.status) is the live truth that demote/promote update.
+    // Override so by-id agrees with the list (GET /skills) instead of
+    // reporting a stale status.
+    skill: { ...record.payload, status: record.status },
     signature: record.signature,
     signed_at: record.signed_at.toISOString(),
     signed_by: record.signed_by,
