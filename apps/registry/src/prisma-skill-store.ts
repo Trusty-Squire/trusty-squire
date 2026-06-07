@@ -29,6 +29,18 @@ import { triggersHumanReview } from "./skill-store-memory.js";
 
 const DEMOTION_THRESHOLD = 3;
 
+// When a skill becomes the service's active recipe (verifier promote,
+// approveReview, reactivate), collapse every OTHER live row for the same
+// service to `superseded` — not just the prior `active`. Leaving `demoted`
+// and redundant `pending-review` rows behind is what produced the registry
+// clutter (baseten ×4 demoted, railway ×3, ipinfo ×3 pending — all beside a
+// healthy active, 2026-06-06). A demoted row whose service now has a working
+// active is obsolete history; a leftover pending-review capture is a redundant
+// candidate the verifier would otherwise keep replaying through the proxy.
+// `quarantined` is deliberately excluded — it's an explicit route-to-human
+// state an operator owns, not version history.
+const STALE_ON_ACTIVATE_STATUSES = ["active", "demoted", "pending-review"];
+
 export class PrismaSkillStore implements SkillStore {
   private constructor(private readonly client: RegistryPrismaClient) {}
 
@@ -319,13 +331,14 @@ export class PrismaSkillStore implements SkillStore {
           );
         }
         if (!requireOperatorReview) {
-          // Promote and supersede any older active row for the same
-          // service. Mirrors approveReview's invariant maintenance.
+          // Promote and supersede every other live row for the same service
+          // (prior active + lingering demoted + redundant pending-review).
+          // Mirrors approveReview's invariant maintenance.
           await tx.skillRecord.updateMany({
             where: {
               skill_id: { not: skill.skill_id },
               service: skill.service,
-              status: "active",
+              status: { in: STALE_ON_ACTIVATE_STATUSES },
             },
             data: { status: "superseded", superseded_at: now },
           });
@@ -454,9 +467,10 @@ export class PrismaSkillStore implements SkillStore {
   }
 
   async approveReview(skill_id: string): Promise<SkillStoreRecord | null> {
-    // Atomic: flip pending-review → active AND supersede any older
-    // active row for the same service. Wrapped in $transaction so a
-    // crash mid-update doesn't leave two active rows for one service.
+    // Atomic: flip pending-review → active AND supersede every other live
+    // row for the same service (prior active + lingering demoted + redundant
+    // pending-review). Wrapped in $transaction so a crash mid-update doesn't
+    // leave two active rows for one service.
     return this.client.$transaction(async (tx) => {
       const current = (await tx.skillRecord.findUnique({ where: { skill_id } })) as
         | PrismaSkillRow
@@ -469,7 +483,7 @@ export class PrismaSkillStore implements SkillStore {
       await tx.skillRecord.updateMany({
         where: {
           service: current.service,
-          status: "active",
+          status: { in: STALE_ON_ACTIVATE_STATUSES },
           NOT: { skill_id },
         },
         data: { status: "superseded", superseded_at: now },
@@ -496,13 +510,13 @@ export class PrismaSkillStore implements SkillStore {
         // Idempotent — caller sees previously === status.
         return { record: toSkillStoreRecord(current), previously };
       }
-      // Mirror approveReview: supersede any active row for the same
+      // Mirror approveReview: supersede every other live row for the same
       // service before flipping this one to active.
       const now = new Date();
       await tx.skillRecord.updateMany({
         where: {
           service: current.service,
-          status: "active",
+          status: { in: STALE_ON_ACTIVATE_STATUSES },
           NOT: { skill_id },
         },
         data: { status: "superseded", superseded_at: now },
