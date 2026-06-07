@@ -3995,6 +3995,68 @@ export class BrowserController {
     }
   }
 
+  // Read the page's Rails/OmniAuth CSRF token (<meta name="csrf-token">).
+  // Needed to recover OmniAuth 2.0 POST-only OAuth when the provider button is
+  // a GET <a> that page-JS upgrades to a POST.
+  async getMetaCsrfToken(): Promise<string | null> {
+    if (!this.page) return null;
+    try {
+      return await this.page.evaluate(() => {
+        const c = document
+          .querySelector('meta[name="csrf-token"]')
+          ?.getAttribute("content");
+        return c !== null && c !== undefined && c.length > 0 ? c : null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // Read an attribute off the first element matching `selector` (e.g. the href
+  // of an OAuth affordance). null when absent or the selector doesn't resolve.
+  async getElementAttribute(selector: string, attr: string): Promise<string | null> {
+    if (!this.page) return null;
+    try {
+      return await this.page.locator(selector).first().getAttribute(attr);
+    } catch {
+      return null;
+    }
+  }
+
+  // Submit a programmatic POST form to `action` with the given hidden fields,
+  // from the CURRENT page — so the current-origin session cookies ride along.
+  // Recovers OmniAuth 2.0 POST-only OAuth (the GET-click hit "Authentication
+  // passthru"): POST /…/auth/<provider> + authenticity_token → 302 to provider.
+  async submitPostForm(
+    action: string,
+    fields: Record<string, string>,
+  ): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page.evaluate(
+      ({ action, fields }) => {
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = action;
+        form.style.display = "none";
+        for (const [k, v] of Object.entries(fields)) {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = k;
+          input.value = v;
+          form.appendChild(input);
+        }
+        document.body.appendChild(form);
+        form.submit();
+      },
+      { action, fields },
+    );
+    try {
+      await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
+    } catch {
+      // best-effort — the consent loop re-reads state regardless
+    }
+  }
+
   // Does the page sign in with Google via Google Identity Services (GSI)
   // rather than classic OAuth redirect? GSI renders its button in a
   // cross-origin iframe (accounts.google.com/gsi/button) and/or exposes the
