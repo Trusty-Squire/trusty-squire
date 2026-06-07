@@ -1,5 +1,31 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.4 (2026-06-07)
+
+Provision-path fixes for services where you already have an account, plus a
+smarter OAuth provider choice. All of these run on the user-facing `provision`
+flow, not just the housekeeper.
+
+- **Already-authenticated services now produce a real key.** When your bot
+  profile is already signed in to a service (very common — you sign up once,
+  then ask for the key later), the bot used to bail `no_signup_link` ("the
+  service likely has no self-serve signup") because the logged-in dashboard has
+  no signup CTA. It now detects the authenticated state and routes straight to
+  key extraction. Two follow-on guards make that produce a *real* key rather
+  than a false success: the verification-wall detector only polls an inbox alias
+  we actually own (not an operator/docs email shown on the page), and the
+  extractor refuses to read a credential off a documentation page (which renders
+  realistic SAMPLE keys). Live-validated: Anthropic signs in and mints a working
+  `sk-ant-…` key end-to-end.
+- **Google leads OAuth over a non-Google pin when its session is warm.** A
+  service pinned to GitHub would take the GitHub path even when its signin page
+  also offered Google — and hit GitHub's unclearable `/authorize` "Verify 2FA
+  now" wall. Google now leads whenever its session is warm (GitHub stays as the
+  fallback for pages whose Google is One-Tap-only). Measured: deepinfra failed
+  on the GitHub wall, then succeeded immediately via Google.
+- **npm README:** fixed the broken logo URL and the oversized headings; added
+  dynamic badges (npm / CI / stars / license / Glama score).
+
 ## 0.9.3 (2026-06-07)
 
 Graduates the 0.9.3 prerelease line (rc.1–rc.3) to stable and adds the
