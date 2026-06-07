@@ -811,10 +811,28 @@ export class BrowserController {
 
   async goto(url: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    });
+    // Retry transient network/proxy drops. A residential SOCKS tunnel
+    // intermittently resets a connection mid-navigation (Chrome surfaces
+    // net::ERR_SOCKS_CONNECTION_FAILED / ERR_CONNECTION_RESET / ERR_NETWORK_
+    // CHANGED / ERR_TIMED_OUT), especially on heavy onboarding pages that
+    // open many subresource connections at once (algolia's dashboard_setup).
+    // The host is reachable on the next attempt — a single goto failure
+    // shouldn't fail the whole signup. Only retry these connection-level
+    // errors; HTTP statuses and selector/logic errors fall straight through.
+    const TRANSIENT_NET =
+      /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE/i;
+    const MAX_GOTO_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        break;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt >= MAX_GOTO_ATTEMPTS || !TRANSIENT_NET.test(msg)) throw err;
+        // Linear backoff — give the tunnel a moment to recover a slot.
+        await this.sleep(1500 * attempt);
+      }
+    }
     // Post-load dwell. Cloudflare/reCAPTCHA scoring runs JS that
     // collects behavior signals over a window (typically 500-2000ms);
     // landing on a page and immediately interacting reads as bot-like.
