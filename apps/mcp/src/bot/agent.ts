@@ -3207,6 +3207,47 @@ export function isMultiCredBundle(
   return false;
 }
 
+// DOM-label phrase → canonical credential key. Shared by
+// extractFromDomProximity (which harvests VALUES) and
+// countPresentedCredentialLabels (which counts how many distinct
+// credentials a page PRESENTS, masked included). Kept in lockstep with
+// the Phase E LABEL_ALIASES vocabulary.
+const DOM_LABEL_TO_KEY: Record<string, string> = {
+  "api key": "api_key",
+  "api token": "api_key",
+  "api secret": "api_secret",
+  "secret key": "secret_key",
+  "publishable key": "publishable_key",
+  "access key": "access_key_id",
+  "access key id": "access_key_id",
+  "access token": "access_token",
+  "bearer token": "access_token",
+  "personal access token": "access_token",
+  "auth token": "auth_token",
+  "client id": "client_id",
+  "client secret": "client_secret",
+  "client key": "client_id",
+  "cloud name": "cloud_name",
+  cloudname: "cloud_name",
+  "application id": "application_id",
+  "app id": "application_id",
+  "admin api key": "admin_api_key",
+  "search api key": "search_api_key",
+  "search-only api key": "search_api_key",
+  "monitoring api key": "monitoring_api_key",
+  "account sid": "account_sid",
+  "secret access key": "secret_access_key",
+  "consumer key": "consumer_key",
+  "consumer secret": "consumer_secret",
+  "access token secret": "access_token_secret",
+  "project api key": "project_api_key",
+  "personal api key": "personal_api_key",
+  "organization id": "org_id",
+  "org id": "org_id",
+  "app key": "app_key",
+  "app secret": "app_secret",
+};
+
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
@@ -7258,41 +7299,7 @@ ${formatInventory(input.inventory)}`,
   private async extractFromDomProximity(): Promise<Record<string, string>> {
     // Vocabulary matches the LABEL_ALIASES used by Phase E so the
     // canonical keys stay consistent across paths.
-    const LABEL_TO_KEY: Record<string, string> = {
-      "api key": "api_key",
-      "api token": "api_key",
-      "api secret": "api_secret",
-      "secret key": "secret_key",
-      "publishable key": "publishable_key",
-      "access key": "access_key_id",
-      "access key id": "access_key_id",
-      "access token": "access_token",
-      "bearer token": "access_token",
-      "personal access token": "access_token",
-      "auth token": "auth_token",
-      "client id": "client_id",
-      "client secret": "client_secret",
-      "client key": "client_id",
-      "cloud name": "cloud_name",
-      "cloudname": "cloud_name",
-      "application id": "application_id",
-      "app id": "application_id",
-      "admin api key": "admin_api_key",
-      "search api key": "search_api_key",
-      "search-only api key": "search_api_key",
-      "monitoring api key": "monitoring_api_key",
-      "account sid": "account_sid",
-      "secret access key": "secret_access_key",
-      "consumer key": "consumer_key",
-      "consumer secret": "consumer_secret",
-      "access token secret": "access_token_secret",
-      "project api key": "project_api_key",
-      "personal api key": "personal_api_key",
-      "organization id": "org_id",
-      "org id": "org_id",
-      "app key": "app_key",
-      "app secret": "app_secret",
-    };
+    const LABEL_TO_KEY = DOM_LABEL_TO_KEY;
     let labeled: Awaited<
       ReturnType<BrowserController["extractLabeledCredentialCandidates"]>
     > = [];
@@ -7315,6 +7322,28 @@ ${formatInventory(input.inventory)}`,
       out[canonical] = c.value;
     }
     return out;
+  }
+
+  // Count the DISTINCT credentials the current page PRESENTS — masked
+  // ones included. This detects a multi-cred page BEFORE every value is
+  // captured, so the post-verify loop can stay open to harvest the 2nd/
+  // 3rd key instead of exiting the moment the first surfaces ("stops at
+  // one"). Uses the DOM-proximity harvester's labels (which fire even on
+  // masked/bullet'd values) mapped to canonical keys; values are NOT read
+  // here, only the label set. Best-effort → 0 on any browser error.
+  private async countPresentedCredentialLabels(): Promise<number> {
+    try {
+      const cands = await this.browser.extractLabeledCredentialCandidates();
+      const canon = new Set<string>();
+      for (const c of cands) {
+        if (c.label === null) continue;
+        const key = DOM_LABEL_TO_KEY[c.label];
+        if (key !== undefined) canon.add(key);
+      }
+      return canon.size;
+    } catch {
+      return 0;
+    }
   }
 
   // Run every visible-credential extraction tier the post-verify loop
@@ -7727,6 +7756,15 @@ ${formatInventory(input.inventory)}`,
     const seedHadCredential =
       credentials.api_key !== undefined || credentials.username !== undefined;
     let plannerExtractEmitted = false;
+    // 2026-06-07 — "stops at one" fix. The legacy loop-exit treated a run
+    // as single-cred based on what was ALREADY captured (isMultiCredBundle),
+    // so a page with 3 credentials whose 1st surfaced first — siblings still
+    // masked or missed on the first harvest pass — exited before the rest
+    // were caught. Set once the page is observed to PRESENT >=2 distinct
+    // credentials (masked included); the loop-exit then holds open (bounded
+    // by roundsSinceLastNewCredential) so the reveal pass + DOM harvest get
+    // more rounds to capture the siblings.
+    let pageOffersMultiCred = false;
     // Gate URLs we've already polled the operator's gmail for, so a
     // multi-round wait on the same email-OTP page doesn't re-poll.
     const otpPolledUrls = new Set<string>();
@@ -7752,7 +7790,7 @@ ${formatInventory(input.inventory)}`,
       // when the api_key came from the pre-loop seed and the
       // planner hasn't yet emitted an explicit extract step. In
       // that case we let the planner run until extract fires.
-      const inMultiCredMode = isMultiCredBundle(credentials);
+      const inMultiCredMode = isMultiCredBundle(credentials) || pageOffersMultiCred;
       const haveOnlySeedCredentials = seedHadCredential && !plannerExtractEmitted;
       if (
         !inMultiCredMode &&
@@ -8700,6 +8738,21 @@ ${formatInventory(input.inventory)}`,
           } catch {
             // best-effort; never abort an extract pass on DOM-proximity
             // failure (page mid-navigation etc).
+          }
+
+          // "Stops at one" guard: does THIS page present >=2 distinct
+          // credentials (masked included)? If so, hold the loop open past
+          // the first key so the reveal pass + DOM harvest get more rounds
+          // to capture the siblings — even when only one value is in hand
+          // right now. Bounded downstream by roundsSinceLastNewCredential.
+          if (!pageOffersMultiCred) {
+            const presented = await this.countPresentedCredentialLabels();
+            if (presented >= 2) {
+              pageOffersMultiCred = true;
+              args.steps.push(
+                `Post-verify ${round + 1}/${args.maxRounds}: page presents ${presented} distinct credentials — holding the loop open to harvest all (not just the first).`,
+              );
+            }
           }
 
           // Anything found across all tiers? hasMultiCredCredentials
