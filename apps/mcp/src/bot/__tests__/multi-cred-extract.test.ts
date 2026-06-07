@@ -334,3 +334,18 @@ describe("isMultiCredBundle", () => {
     ).toBe(true);
   });
 });
+
+describe("extractAllLabeledTokensFromReason — email local-part guard", () => {
+  it("does NOT extract an email address as a credential (cloudinary email page)", () => {
+    const reason =
+      "The page shows cloud_name='lunchboxfortwo@gmail.com' and api_key='giselle703@gmail.com'.";
+    const page =
+      "Email lunchboxfortwo@gmail.com Recovery email giselle703@gmail.com";
+    expect(extractAllLabeledTokensFromReason(reason, page)).toEqual({});
+  });
+  it("still extracts a real digit-bearing key that is NOT followed by @", () => {
+    const reason = "api_key='1234567890' is shown";
+    const page = "API Key 1234567890";
+    expect(extractAllLabeledTokensFromReason(reason, page)).toEqual({ api_key: "1234567890" });
+  });
+});
