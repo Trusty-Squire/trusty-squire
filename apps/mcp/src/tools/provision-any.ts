@@ -785,6 +785,7 @@ async function runSignupTask(
             ctx.agentSessionToken,
             input.service,
             replayed.credentials,
+            signupObservedHosts(input.signup_url),
           );
         }
         const record = runStore.get(runId);
@@ -964,6 +965,7 @@ async function runSignupTask(
         ctx.agentSessionToken,
         input.service,
         result.credentials,
+        signupObservedHosts(input.signup_url),
       );
     }
 
@@ -1224,6 +1226,25 @@ function parseConsentScopes(
   return { allRequested, unauthorized };
 }
 
+// Best-effort hosts to seed a captured credential's allowlist, from the
+// URL(s) the signup ran against. Returns bare lowercase hostnames; the
+// vault normalises + unions them with its service-name table so the stored
+// credential never lands with an empty allowlist. (A fuller guarantee would
+// echo the bot's RESOLVED signup URL when input.signup_url is omitted —
+// tracked as a follow-up; today this covers the explicit-URL + replay cases.)
+function signupObservedHosts(...urls: Array<string | undefined>): string[] {
+  const out = new Set<string>();
+  for (const u of urls) {
+    if (u === undefined || u.length === 0) continue;
+    try {
+      out.add(new URL(u.includes("://") ? u : `https://${u}`).hostname.toLowerCase());
+    } catch {
+      /* unparseable — skip */
+    }
+  }
+  return [...out];
+}
+
 // Stores the keys a signup yielded into the paired account's vault via
 // POST /v1/vault/credentials (agent-authenticated). Best-effort, one
 // request per credential — a failure logs and is dropped, since the
@@ -1233,6 +1254,10 @@ async function postCredentialsToVault(
   agentSessionToken: string,
   service: string,
   credentials: Record<string, string | undefined>,
+  // Hosts observed during this signup (the signup URL's host). Sent so the
+  // vault unions them into allowed_hosts — a captured credential never lands
+  // with an empty allowlist (which would 403 every use_credential call).
+  observedHosts: string[] = [],
 ): Promise<void> {
   // "Resend" → "RESEND"; used to build an env-var-style key name.
   const prefix = service
@@ -1253,6 +1278,7 @@ async function postCredentialsToVault(
           value,
           env_var_suggestion: `${prefix}_${name.toUpperCase()}`,
           type: "api_key",
+          ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
         }),
       });
     } catch (err) {

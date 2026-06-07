@@ -28,6 +28,13 @@ export interface ProxyHttpRequest {
   url: string;
   headers?: Record<string, string>;
   body?: string;
+  // Query params injected server-side AFTER the host allowlist check. This
+  // is the sanctioned channel for APIs that authenticate via a query-string
+  // key (FRED's `api_key`, some gov/weather APIs) — a `${SECRET}` is allowed
+  // in a query VALUE here but still banned in `url` itself, so the secret
+  // never appears in the agent-supplied URL that gets host-checked + audited.
+  // Values are substituted + appended to the URL's searchParams at dispatch.
+  query?: Record<string, string>;
 }
 
 export interface ProxyResult {
@@ -142,10 +149,24 @@ export function substituteSecret(
     headers[key] = resolved;
   }
 
+  let query: Record<string, string> | undefined;
+  if (http.query !== undefined) {
+    query = {};
+    for (const [key, value] of Object.entries(http.query)) {
+      // A secret in a query KEY makes no sense and would be a smuggling
+      // vector — block it like header keys. Values may carry ${SECRET}.
+      if (hasToken(key)) {
+        throw new ProxyError("secret_in_header_key", "secret placeholder not allowed in a query-param key");
+      }
+      query[key] = substituteAll(value, fields);
+    }
+  }
+
   return {
     method: http.method,
     url: http.url,
     headers,
+    ...(query !== undefined ? { query } : {}),
     ...(http.body !== undefined ? { body: substituteAll(http.body, fields) } : {}),
   };
 }
@@ -260,6 +281,16 @@ export class HttpProxyExecutor {
     }
     if (url.protocol !== "https:" && !(this.allowInsecureHttp && url.protocol === "http:")) {
       throw new ProxyError("not_https", "only https:// targets are permitted");
+    }
+
+    // Inject the substituted query params AFTER the URL is parsed (and after
+    // the caller's host allowlist check, which ran on the secret-free url).
+    // searchParams.set handles encoding; the secret lands only in the
+    // dispatched URL, never the audited/logged one.
+    if (resolved.query !== undefined) {
+      for (const [key, value] of Object.entries(resolved.query)) {
+        url.searchParams.set(key, value);
+      }
     }
 
     const { address, family } = await this.resolveAndPin(url.hostname);

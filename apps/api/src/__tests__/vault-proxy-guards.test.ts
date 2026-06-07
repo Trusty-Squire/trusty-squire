@@ -72,6 +72,17 @@ describe("substituteSecret (single + multi field)", () => {
     expect(syncCode(() => substituteSecret({ ...base, headers: { "x-${SECRET}": "v" } }, ONE))).toBe("secret_in_header_key");
   });
 
+  it("injects ${SECRET} into a query value, leaving the url untouched", () => {
+    const out = substituteSecret({ ...base, query: { api_key: "${SECRET}", series_id: "DFF" } }, ONE);
+    expect(out.query!.api_key).toBe("sk-123");
+    expect(out.query!.series_id).toBe("DFF");
+    expect(out.url).toBe(base.url); // secret never lands in the url
+  });
+
+  it("rejects a placeholder in a query-param KEY", () => {
+    expect(syncCode(() => substituteSecret({ ...base, query: { "${SECRET}": "v" } }, ONE))).toBe("secret_in_header_key");
+  });
+
   it("rejects a field value with CR/LF/NUL", () => {
     expect(syncCode(() => substituteSecret({ ...base, headers: { a: "${SECRET}" } }, { value: "a\r\nevil:1" }))).toBe(
       "secret_unsafe_chars",
@@ -137,6 +148,23 @@ describe("HttpProxyExecutor.execute guards", () => {
     expect(dispatched[0]!.pinnedAddress).toBe("203.0.113.5");
     expect(dispatched[0]!.headers.host).toBe("api.openai.com");
     expect(dispatched[0]!.headers.authorization).toBe("Bearer sk-9");
+  });
+
+  it("injects query params into the dispatched URL (FRED-style), keeping existing ones", async () => {
+    const { executor, dispatched } = exec({ lookup: async () => ({ address: "203.0.113.5", family: 4 }) });
+    await executor.execute({
+      accountId: "a",
+      http: {
+        method: "GET",
+        url: "https://api.stlouisfed.org/fred/series?series_id=DFF",
+        query: { api_key: "${SECRET}", file_type: "json" },
+      },
+      fields: { value: "fred-key" },
+    });
+    const u = dispatched[0]!.url;
+    expect(u.searchParams.get("api_key")).toBe("fred-key");
+    expect(u.searchParams.get("series_id")).toBe("DFF"); // pre-existing query preserved
+    expect(u.searchParams.get("file_type")).toBe("json");
   });
 
   it("strips Set-Cookie", async () => {

@@ -228,8 +228,7 @@ function VaultRow({
   const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [addingField, setAddingField] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
 
   // Fetch + cache the field map once; reveal and copy both need it.
@@ -359,8 +358,7 @@ function VaultRow({
           { key: "reveal", label: shown ? "Hide" : "Reveal", onClick: onReveal },
           { key: "copy", label: "Copy", onClick: onCopy },
           { key: "verify", label: "Verify", onClick: onVerify },
-          { key: "rename", label: "Rename", onClick: () => setRenaming(true) },
-          { key: "add-field", label: "Add field", onClick: () => setAddingField(true) },
+          { key: "edit", label: "Edit", onClick: () => setEditing(true) },
           { key: "delete", label: "Delete", onClick: () => setConfirmDelete(true), danger: true },
         ]}
       />
@@ -376,25 +374,14 @@ function VaultRow({
         />
       )}
 
-      {renaming && (
-        <RenameModal
+      {editing && (
+        <EditModal
           cred={cred}
-          onClose={() => setRenaming(false)}
-          onRenamed={() => {
-            setRenaming(false);
-            onChanged();
-          }}
-        />
-      )}
-
-      {addingField && (
-        <AddFieldModal
-          cred={cred}
-          onClose={() => setAddingField(false)}
-          onAdded={() => {
-            setAddingField(false);
-            // The cached reveal is now missing the new field — drop it so
-            // the next reveal re-fetches the full set.
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            // Fields/label/hosts may have changed — drop the cached reveal
+            // so the next one re-fetches, and reload the list.
             setFields(null);
             setShown(false);
             onChanged();
@@ -515,162 +502,281 @@ function DeleteModal({
   );
 }
 
-// Rename an entry's label (non-secret). Re-store/rotation is unaffected.
-function RenameModal({
-  cred,
-  onClose,
-  onRenamed,
-}: {
-  cred: Cred;
-  onClose: () => void;
-  onRenamed: () => void;
-}) {
-  const [label, setLabel] = useState(cred.label === "default" ? "" : cred.label);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = useCallback(async () => {
-    const next = label.trim();
-    if (next.length === 0) {
-      setError("Enter a name.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: next });
-      onRenamed();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Rename failed.");
-      setBusy(false);
-    }
-  }, [cred.id, label, onRenamed]);
-
-  return (
-    <Modal
-      title={`Rename ${cred.service ?? "entry"}`}
-      subtitle="A name to tell entries of the same service apart. Doesn't change the stored key."
-      onClose={onClose}
-    >
-      <div className="form">
-        {error !== null && <div className="form-err">{error}</div>}
-        <div className="field">
-          <label htmlFor={`rename-${cred.id}`}>Entry name</label>
-          <input
-            id={`rename-${cred.id}`}
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="e.g. prod, staging, personal"
-            maxLength={60}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-            }}
-          />
-        </div>
-        <div className="form-actions">
-          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
-            {busy ? "Saving…" : "Save name"}
-          </button>
-          <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
+// Shallow equality for a field name→value map (skip a needless rotate when
+// the secrets weren't actually changed).
+function sameMap(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  return ak.every((k) => b[k] === a[k]);
 }
 
-// Add a single new field to an entry. The server merges it into the
-// existing encrypted blob — we never see (or send) the existing values.
-function AddFieldModal({
+// One editor for everything mutable on a credential. Mirrors the New
+// credential page, but PRE-POPULATED: the current field name/value pairs
+// are revealed and loaded in, you add/remove fields inline, and the entry
+// name + allowed hosts live under Advanced. Replaces the old Rename /
+// Add field / Edit hosts actions. Saves only what changed.
+function EditModal({
   cred,
   onClose,
-  onAdded,
+  onSaved,
 }: {
   cred: Cred;
   onClose: () => void;
-  onAdded: () => void;
+  onSaved: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [value, setValue] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Field editor — same shape as /vault/new. `single` is the lone-"value"
+  // sugar; otherwise editable name/value rows.
+  const [multi, setMulti] = useState(false);
+  const [single, setSingle] = useState("");
+  const [rows, setRows] = useState<{ name: string; value: string }[]>([]);
+  const [origMap, setOrigMap] = useState<Record<string, string>>({});
+  const [reveal, setReveal] = useState(false);
+  // Advanced: entry name + allowed hosts. Auto-open when there's no
+  // allowlist yet — that's the thing the user came to fix.
+  const [advanced, setAdvanced] = useState(cred.allowed_hosts.length === 0);
+  const [label, setLabel] = useState(cred.label === "default" ? "" : cred.label);
+  const [hostsText, setHostsText] = useState(cred.allowed_hosts.join("\n"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Reveal current values so the form opens pre-populated. Same trust as the
+  // Reveal action (the user's own vault, web-session-authed). Async, so no
+  // synchronous set-state-in-effect.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiPost<{ fields: Record<string, string> }>(
+          `/v1/vault/credentials/${cred.id}/reveal`,
+        );
+        if (cancelled) return;
+        setOrigMap(res.fields);
+        const names = Object.keys(res.fields);
+        if (names.length === 1 && names[0] === "value") {
+          setSingle(res.fields.value ?? "");
+        } else {
+          setMulti(true);
+          setRows(names.map((n) => ({ name: n, value: res.fields[n] ?? "" })));
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setLoadError(err instanceof Error ? err.message : "Couldn't load this credential.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cred.id]);
+
   const save = useCallback(async () => {
-    const fieldName = name.trim();
-    if (fieldName.length === 0 || value.length === 0) {
-      setError("Both a field name and a value are required.");
-      return;
-    }
-    if (cred.field_names.includes(fieldName)) {
-      setError(`This entry already has a "${fieldName}" field.`);
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
-      await apiPost(`/v1/vault/credentials/${cred.id}/fields`, {
-        name: fieldName,
-        value,
-      });
-      onAdded();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setError(`This entry already has a "${fieldName}" field.`);
+      // Build the full field map. PATCH /:id REPLACES the map, so this one
+      // call covers value edits, renames, adds, and removes.
+      let map: Record<string, string>;
+      if (multi) {
+        map = {};
+        for (const r of rows) {
+          const n = r.name.trim();
+          if (n === "") continue;
+          if (r.value === "") {
+            setError(`Field "${n}" needs a value (use ✕ to delete the field).`);
+            setBusy(false);
+            return;
+          }
+          if (map[n] !== undefined) {
+            setError(`Duplicate field name "${n}".`);
+            setBusy(false);
+            return;
+          }
+          map[n] = r.value;
+        }
       } else {
-        setError(err instanceof Error ? err.message : "Add field failed.");
+        if (single === "") {
+          setError("The secret can't be empty.");
+          setBusy(false);
+          return;
+        }
+        map = { value: single };
+      }
+      if (Object.keys(map).length === 0) {
+        setError("Add at least one field with a value.");
+        setBusy(false);
+        return;
+      }
+
+      // 1. Label.
+      const nextLabel = label.trim() === "" ? "default" : label.trim();
+      if (nextLabel !== cred.label) {
+        await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: nextLabel });
+      }
+      // 2. Allowed hosts.
+      const hosts = Array.from(
+        new Set(hostsText.split(/[\n,]/).map((h) => h.trim()).filter((h) => h.length > 0)),
+      );
+      const hostsChanged =
+        hosts.length !== cred.allowed_hosts.length ||
+        hosts.some((h, i) => h !== cred.allowed_hosts[i]);
+      if (hostsChanged) {
+        await apiPatch(`/v1/vault/credentials/${cred.id}/allowed-hosts`, { hosts });
+      }
+      // 3. Fields — only if they actually changed (avoid a needless rotate).
+      if (!sameMap(map, origMap)) {
+        await apiPatch(`/v1/vault/credentials/${cred.id}`, { fields: map });
+      }
+      onSaved();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 400) {
+        setError("One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).");
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't save your changes.");
       }
       setBusy(false);
     }
-  }, [cred.id, cred.field_names, name, value, onAdded]);
+  }, [cred, multi, rows, single, origMap, label, hostsText, onSaved]);
 
   return (
     <Modal
-      title={`Add a field to ${cred.service ?? "entry"}`}
-      subtitle="Stored encrypted alongside the existing fields. Existing values are untouched."
+      title={`Edit ${cred.service ?? "credential"}`}
+      subtitle="The current values are loaded in — change them, add or remove fields, or edit the entry name and allowed hosts under Advanced."
       onClose={onClose}
     >
       <div className="form">
         {error !== null && <div className="form-err">{error}</div>}
-        {cred.field_names.length > 0 && (
-          <p className="hint">
-            Existing fields: <span className="mono">{cred.field_names.join(", ")}</span>
-          </p>
+
+        {loading && <p className="hint">Loading current values…</p>}
+        {!loading && loadError !== null && <div className="form-err">{loadError}</div>}
+        {!loading && loadError === null && (
+          <>
+            {!multi ? (
+              <div className="field">
+                <label htmlFor={`edit-secret-${cred.id}`}>Secret</label>
+                <input
+                  id={`edit-secret-${cred.id}`}
+                  className="mono"
+                  type={reveal ? "text" : "password"}
+                  value={single}
+                  onChange={(e) => setSingle(e.target.value)}
+                  placeholder="sk-…"
+                  autoComplete="off"
+                />
+                <div className="field-row-actions">
+                  <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
+                    {reveal ? "hide" : "show"}
+                  </button>
+                  <button
+                    type="button"
+                    className="linkbtn"
+                    onClick={() => {
+                      setMulti(true);
+                      setRows([{ name: "value", value: single }, { name: "", value: "" }]);
+                    }}
+                  >
+                    + Add field
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="field">
+                <label>Fields</label>
+                {rows.map((f, i) => (
+                  <div className="field-pair" key={i}>
+                    <input
+                      className="mono field-name"
+                      value={f.name}
+                      placeholder="name"
+                      autoComplete="off"
+                      onChange={(e) =>
+                        setRows((prev) => prev.map((p, j) => (j === i ? { ...p, name: e.target.value } : p)))
+                      }
+                    />
+                    <input
+                      className="mono"
+                      type={reveal ? "text" : "password"}
+                      value={f.value}
+                      placeholder="value"
+                      autoComplete="off"
+                      onChange={(e) =>
+                        setRows((prev) => prev.map((p, j) => (j === i ? { ...p, value: e.target.value } : p)))
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="field-remove"
+                      aria-label="Remove field"
+                      onClick={() => setRows((prev) => prev.filter((_, j) => j !== i))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <div className="field-row-actions">
+                  <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
+                    {reveal ? "hide values" : "show values"}
+                  </button>
+                  <button
+                    type="button"
+                    className="linkbtn"
+                    onClick={() => setRows((prev) => [...prev, { name: "", value: "" }])}
+                  >
+                    + Add field
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <button type="button" className="disclose" onClick={() => setAdvanced((a) => !a)}>
+              {advanced ? "▾" : "▸"} Advanced
+            </button>
+            {advanced && (
+              <>
+                <div className="field">
+                  <label htmlFor={`edit-label-${cred.id}`}>Entry name</label>
+                  <input
+                    id={`edit-label-${cred.id}`}
+                    className="mono"
+                    value={label}
+                    onChange={(e) => setLabel(e.target.value)}
+                    placeholder="default"
+                    maxLength={60}
+                    autoComplete="off"
+                  />
+                  <span className="field-hint">Tells entries of the same service apart (prod/dev).</span>
+                </div>
+                <div className="field">
+                  <label htmlFor={`edit-hosts-${cred.id}`}>Allowed hosts</label>
+                  <textarea
+                    id={`edit-hosts-${cred.id}`}
+                    className="mono"
+                    value={hostsText}
+                    onChange={(e) => setHostsText(e.target.value)}
+                    placeholder="api.example.com"
+                    rows={3}
+                    autoComplete="off"
+                  />
+                  <span className="field-hint">
+                    use_credential can only call these hosts. One per line; empty = unusable until you add one.
+                  </span>
+                </div>
+              </>
+            )}
+
+            <div className="form-actions">
+              <button className="btn-primary" type="button" onClick={save} disabled={busy}>
+                {busy ? "Saving…" : "Save changes"}
+              </button>
+              <button className="btn-secondary" type="button" onClick={onClose}>
+                Cancel
+              </button>
+            </div>
+          </>
         )}
-        <div className="field">
-          <label htmlFor={`field-name-${cred.id}`}>Field name</label>
-          <input
-            id={`field-name-${cred.id}`}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. region, account_id"
-            maxLength={120}
-            autoFocus
-          />
-        </div>
-        <div className="field">
-          <label htmlFor={`field-value-${cred.id}`}>Value</label>
-          <input
-            id={`field-value-${cred.id}`}
-            className="mono"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="secret value"
-            maxLength={8192}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-            }}
-          />
-        </div>
-        <div className="form-actions">
-          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
-            {busy ? "Adding…" : "Add field"}
-          </button>
-          <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-        </div>
       </div>
     </Modal>
   );
