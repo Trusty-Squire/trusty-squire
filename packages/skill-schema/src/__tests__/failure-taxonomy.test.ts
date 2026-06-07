@@ -3,6 +3,8 @@ import {
   classifyFailure,
   failureCountsTowardDemotion,
   isWallFailure,
+  isNavNetworkFailure,
+  NAV_TIMEOUT_KIND,
 } from "../failure-taxonomy.js";
 
 describe("classifyFailure", () => {
@@ -71,5 +73,45 @@ describe("classifyFailure", () => {
     expect(isWallFailure("anti_bot_blocked")).toBe(true);
     expect(isWallFailure("step_failed")).toBe(false);
     expect(isWallFailure("verification_not_sent")).toBe(false);
+  });
+
+  it("nav_timeout is transient and never counts toward demotion", () => {
+    // The verifier downgrades a page-never-loaded step_failed to this kind so
+    // a transient proxy/tunnel blip can't retire a skill (render, 2026-06-06).
+    expect(classifyFailure(NAV_TIMEOUT_KIND)).toBe("transient");
+    expect(failureCountsTowardDemotion(NAV_TIMEOUT_KIND)).toBe(false);
+  });
+});
+
+describe("isNavNetworkFailure", () => {
+  it("flags page-never-loaded / network / proxy reasons", () => {
+    for (const reason of [
+      "step_failed step=0 page.goto: Timeout 60000ms exceeded",
+      "page.goto: net::ERR_TIMED_OUT at https://dashboard.render.com/",
+      "net::ERR_PROXY_CONNECTION_FAILED",
+      "net::ERR_CONNECTION_RESET",
+      "Navigation timeout of 30000 ms exceeded",
+      "socket hang up",
+      "connect ECONNREFUSED 127.0.0.1:1080",
+    ]) {
+      expect(isNavNetworkFailure(reason)).toBe(true);
+    }
+  });
+
+  it("does NOT flag genuine selector/validator rot (must still demote)", () => {
+    for (const reason of [
+      "No element matches text_match={\"contains\":\"Sign up\"}.",
+      "No input matches label_hint={\"contains\":\"Email\"}.",
+      "validator_failed step=3 got=\"masked-key\" credential failed shape check",
+      "Walked entire skill graph without producing a credential.",
+    ]) {
+      expect(isNavNetworkFailure(reason)).toBe(false);
+    }
+  });
+
+  it("is null/undefined safe", () => {
+    expect(isNavNetworkFailure(null)).toBe(false);
+    expect(isNavNetworkFailure(undefined)).toBe(false);
+    expect(isNavNetworkFailure("")).toBe(false);
   });
 });

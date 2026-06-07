@@ -83,3 +83,30 @@ export function failureCountsTowardDemotion(
 export function isWallFailure(kind: string | null | undefined): boolean {
   return classifyFailure(kind) === "wall";
 }
+
+// A replay step can fail two very different ways that BOTH surface as the
+// rot kind `step_failed`: the recorded selector/action went stale (genuine
+// rot — SHOULD demote), or the page never loaded at all (a navigation /
+// network / proxy failure — must NOT demote). The outcome kind can't tell
+// them apart, so the producer (the verifier) inspects the failure REASON
+// and downgrades a network failure to the transient `nav_timeout` kind
+// before it reaches the demote counter.
+//
+// Load-bearing: every verifier replay egresses through a shared residential
+// proxy tunnel, which blips. MEASURED 2026-06-06: a 60s page.goto timeout on
+// a transient tunnel stall retired the `render` skill (it was at 2 strikes,
+// the blip was strike 3). `nav_timeout` is NOT in ROT_FAILURE_KINDS, so it
+// classifies transient via the default and records the stat without
+// advancing consecutive_verifier_failures.
+export const NAV_TIMEOUT_KIND = "nav_timeout";
+
+const NAV_NETWORK_REASON_RE =
+  /(page\.goto|net::err|err_timed_out|err_connection|err_network|err_name_not_resolved|err_proxy_connection_failed|err_socks|err_tunnel_connection_failed|ns_error_net|econnreset|econnrefused|etimedout|socket hang up|navigation timeout|timeout \d+ms exceeded)/i;
+
+// True when a failure reason indicates the page never loaded — a network /
+// navigation / proxy failure — rather than a stale selector or a failed
+// validator. Such failures classify as transient, never rot.
+export function isNavNetworkFailure(reason: string | null | undefined): boolean {
+  if (reason === null || reason === undefined) return false;
+  return NAV_NETWORK_REASON_RE.test(reason);
+}

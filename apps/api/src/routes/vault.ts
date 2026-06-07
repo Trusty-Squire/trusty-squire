@@ -66,6 +66,10 @@ const storeBody = z
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
     type: z.string().min(1).max(60).optional(),
+    // Hosts the capture observed (signup URL host, etc.) — unioned with the
+    // service-name table so a new credential never lands with an empty
+    // allowlist. Bare hosts or URLs; normalised server-side. Max 10.
+    observed_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
   })
   .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {
     message: "one of value or fields is required",
@@ -581,6 +585,7 @@ async function storeUpsert(
     fields: fieldsFrom(data),
     ...(data.type !== undefined ? { type: data.type } : {}),
     ...(data.env_var_suggestion !== undefined ? { env_var_suggestion: data.env_var_suggestion } : {}),
+    ...(data.observed_hosts !== undefined ? { observed_hosts: data.observed_hosts } : {}),
     metadata: { source },
   });
   // Notify the user that a key landed in their vault unattended. Only on

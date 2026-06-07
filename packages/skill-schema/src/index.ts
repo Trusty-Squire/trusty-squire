@@ -32,5 +32,7 @@ export {
   classifyFailure,
   failureCountsTowardDemotion,
   isWallFailure,
+  isNavNetworkFailure,
+  NAV_TIMEOUT_KIND,
 } from "./failure-taxonomy.js";
 export type { FailureClass } from "./failure-taxonomy.js";
