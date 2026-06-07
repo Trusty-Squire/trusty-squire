@@ -3967,19 +3967,30 @@ export class SignupAgent {
               e.type === null) &&
             e.visible !== false,
         );
-        // ...and NOT when we're already authenticated. An authenticated
-        // dashboard also has no fillable input, and can carry docs/example
-        // "check your email" copy (Anthropic's console names a sample
-        // address) — false-firing the wall here polls a bogus alias and
-        // returns verification_not_sent. The already-signed-in path below
-        // (detectAlreadySignedIn → already_oauth) routes these to key
-        // extraction instead, which is the correct destination.
+        // Only enter the inbox-poll flow when the named alias is one we can
+        // actually POLL — on our own inbox domain (task.email's domain, which
+        // also covers a prior run's alias). A logged-in dashboard often shows
+        // the operator's real email (e.g. a personal gmail) or a docs sample
+        // next to "check your email" copy; polling those 404s as
+        // unknown_alias and yields a false verification_not_sent. A wall that
+        // names NO address (generic "check your email") still fires and polls
+        // task.email — that's the common legitimate case. (Already-
+        // authenticated dashboards are routed straight to key extraction
+        // before the form-fill loop, so they never reach this detector.)
+        const wallAlias = extractVerifyWallAlias(wallText);
+        const ourInboxDomain = task.email
+          .slice(task.email.indexOf("@") + 1)
+          .toLowerCase();
+        const aliasPollable =
+          wallAlias === null ||
+          wallAlias.slice(wallAlias.indexOf("@") + 1).toLowerCase() ===
+            ourInboxDomain;
         if (
           !hasFillableInput &&
           expectsVerificationEmail(wallText) &&
-          !detectAlreadySignedIn({ inventory, url: state.url })
+          aliasPollable
         ) {
-          const alias = extractVerifyWallAlias(wallText);
+          const alias = wallAlias;
           this.pendingVerificationAlias = alias;
           steps.push(
             `Form: email-verification wall (no fields to fill${alias !== null ? `, check ${alias}` : ""}) — ` +
@@ -5112,6 +5123,15 @@ export class SignupAgent {
       // would otherwise read as "other". (A promoted-skill URL is replay-
       // verified and a guessed URL that's wrong is recovered here too.)
       let needsRecovery = false;
+      // Set when the landing page is an already-authenticated dashboard — we
+      // then route STRAIGHT to key extraction (the already_oauth dispatch
+      // case) and skip the form-fill loop entirely. The loop's own
+      // already-signed-in check runs on a ranked+capped inventory that drops
+      // the low-ranked nav markers detectAlreadySignedIn keys on, so it
+      // unreliably misses dashboards (anthropic) and the verification-wall
+      // detector false-fires first. The full-inventory check below is the
+      // reliable signal; act on it here, not in the loop.
+      let alreadyAuthenticated = false;
       // Before any recovery: are we ALREADY authenticated for this service?
       // The operator's own session can be bound to the service (e.g.
       // Anthropic, where the bot rides the operator's account), so the
@@ -5136,8 +5156,9 @@ export class SignupAgent {
       ) {
         steps.push(
           `${task.service}: already authenticated (dashboard markers, no signup CTA) — ` +
-            `skipping signup, routing to key extraction`,
+            `skipping signup, routing straight to key extraction`,
         );
+        alreadyAuthenticated = true;
       } else if (task.signupUrl === undefined) {
         needsRecovery = !(await this.looksLikeSignupPage());
       } else {
@@ -5274,7 +5295,14 @@ export class SignupAgent {
       // every terminal case (submitted, planning_failed, …) stays in one
       // place. Bounded to a single re-route so a service that keeps
       // bouncing can't spin here.
-      let outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+      // Already authenticated (full-inventory check above): skip the form-fill
+      // loop and hand straight to the already_oauth case, which extracts /
+      // mints the key from the existing session. Going through the loop would
+      // re-detect on a capped inventory (missing the nav markers), false-fire
+      // the verification-wall detector, and never reach key extraction.
+      let outcome: PlanExecOutcome = alreadyAuthenticated
+        ? { kind: "already_oauth" }
+        : await this.planExecuteWithRetry(task, fillValues, steps);
       let oauthFallbackUsed = false;
       // Multi-step signup guard (amplitude: email/name step → a dedicated
       // "Create your password" step). Bounds how many continuation form steps
