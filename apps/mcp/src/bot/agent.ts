@@ -3381,6 +3381,23 @@ export function isCredentialNoiseCandidate(candidate: string): boolean {
   return CREDENTIAL_NOISE_PREFIXES.some((p) => lower.startsWith(p));
 }
 
+// True when a URL is a documentation / help / reference page rather than a
+// product surface. Such pages render REALISTIC sample credentials (Anthropic's
+// platform.claude.com/docs/.../get-started shows ANTHROPIC_API_KEY='sk-ant-
+// api03-...') that match the real key shape but are NOT user credentials. A
+// real minted key lives on the console / settings, never under /docs — so the
+// extractor refuses to read a credential while on a docs page, which keeps the
+// post-verify loop navigating toward the real keys page instead of false-
+// succeeding on a sample. Exported for unit testing.
+export function isDocumentationUrl(url: string): boolean {
+  const u = url.toLowerCase();
+  return (
+    /^https?:\/\/docs?\.[^/]+/.test(u) || // docs.x.com / doc.x.com host
+    /\/docs?\//.test(u) || // /docs/ or /doc/ path
+    /\/(?:help|reference|api-reference|guides?|tutorials?)\//.test(u)
+  );
+}
+
 // Choose which link in a verification email to click. Scores each URL
 // by keyword and picks the best — but only if it scored positive.
 //
@@ -9652,6 +9669,18 @@ ${formatInventory(input.inventory)}${
     const credentials: Record<string, string> = {};
     let apiKey: string | null = null;
     let truncatedHit: string | null = null;
+
+    // Never trust a credential read off a documentation page — it's a
+    // realistic SAMPLE (Anthropic's /docs get-started shows a shape-valid
+    // sk-ant-api03-... example). Returning empty keeps the post-verify loop
+    // navigating to the real keys console instead of false-succeeding here.
+    const curUrl =
+      typeof this.browser.currentUrl === "function"
+        ? this.browser.currentUrl()
+        : "";
+    if (typeof curUrl === "string" && isDocumentationUrl(curUrl)) {
+      return credentials;
+    }
 
     for (const candidate of await this.browser.extractCredentialCandidates()) {
       const hit = extractApiKeyFromText(candidate);

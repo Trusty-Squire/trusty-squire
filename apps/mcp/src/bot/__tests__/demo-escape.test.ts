@@ -65,7 +65,7 @@ describe("findCreateAccountCta", () => {
   });
 });
 
-import { extractVerifyWallAlias } from "../agent.js";
+import { extractVerifyWallAlias, isDocumentationUrl } from "../agent.js";
 
 describe("extractVerifyWallAlias", () => {
   it("extracts the alias an amplitude verify-wall names", () => {
@@ -97,5 +97,31 @@ describe("extractVerifyWallAlias", () => {
   });
   it("returns null when no email is present", () => {
     expect(extractVerifyWallAlias("Verify your email address")).toBeNull();
+  });
+});
+
+describe("isDocumentationUrl", () => {
+  it("flags docs / help / reference pages (sample keys, not real)", () => {
+    for (const u of [
+      "https://platform.claude.com/docs/en/get-started",
+      "https://docs.stripe.com/keys",
+      "https://example.com/doc/quickstart",
+      "https://api.service.com/help/auth",
+      "https://service.com/reference/authentication",
+      "https://service.com/guides/api-keys",
+    ]) {
+      expect(isDocumentationUrl(u)).toBe(true);
+    }
+  });
+  it("does NOT flag real product/console surfaces where keys live", () => {
+    for (const u of [
+      "https://console.anthropic.com/settings/keys",
+      "https://platform.claude.com/settings/keys",
+      "https://dashboard.service.com/api-keys",
+      "https://app.service.com/account/tokens",
+      "https://service.com/settings/developer",
+    ]) {
+      expect(isDocumentationUrl(u)).toBe(false);
+    }
   });
 });
