@@ -600,6 +600,7 @@ function translateStep(
           ...(hintResult.near_text_hint !== undefined
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
+          ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
           provenance,
         },
       };
@@ -699,6 +700,7 @@ function translateStep(
           ...(hintResult.near_text_hint !== undefined
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
+          ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
           provenance,
         },
       };
@@ -754,6 +756,33 @@ interface ClickHintOk {
   // collides with another element in the same round (modal-submit-
   // shares-text-with-listing-trigger; see resolveClickHint).
   near_text_hint?: string;
+  // 2026-06-07 — populated for nav-link targets so the replay engine
+  // can match by href-path tail (slug-tolerant) when the link's text
+  // renders differently on replay. See href_hint in the click schema.
+  href_hint?: string;
+}
+
+// The path of a link element's href (no origin / query / hash), or null
+// when the element isn't a link or has no usable in-app href. Anchors
+// to external/mailto/javascript hrefs are skipped — they aren't the
+// in-app nav links this fallback targets. Exported for unit tests.
+export function pickHrefHint(el: InteractiveElement): string | null {
+  const isLink = el.tag === "a" || el.role === "link";
+  if (!isLink) return null;
+  const raw = (el.href ?? "").trim();
+  if (raw.length === 0) return null;
+  // Skip non-navigational hrefs.
+  if (/^(?:mailto:|tel:|javascript:|#)/i.test(raw)) return null;
+  try {
+    // Resolve against a dummy origin so a relative href ("/acme/settings")
+    // and an absolute one ("https://app.x.co/acme/settings") both reduce
+    // to the same pathname.
+    const path = new URL(raw, "https://x.invalid").pathname;
+    if (path === "/" || path.length === 0) return null;
+    return path;
+  } catch {
+    return null;
+  }
 }
 
 function resolveClickHint(
@@ -803,6 +832,7 @@ function resolveClickHint(
     (e) => pickClickText(e) === hint && e.selector !== selector,
   );
   const role = inferRoleHint(match);
+  const hrefHint = pickHrefHint(match);
   if (duplicates.length > 0) {
     const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
     if (nearTextHint === null) {
@@ -820,11 +850,13 @@ function resolveClickHint(
     }
     const result: ClickHintOk = { kind: "ok", hint, near_text_hint: nearTextHint };
     if (role !== undefined) result.role_hint = role;
+    if (hrefHint !== null) result.href_hint = hrefHint;
     return result;
   }
 
   const result: ClickHintOk = { kind: "ok", hint };
   if (role !== undefined) result.role_hint = role;
+  if (hrefHint !== null) result.href_hint = hrefHint;
   return result;
 }
 

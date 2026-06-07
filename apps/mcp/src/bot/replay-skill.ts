@@ -554,6 +554,14 @@ async function preValidateStep(
         ? matches.filter((el) => matchesRole(el, step.role_hint!))
         : matches;
       if (filtered.length === 0) {
+        // href fallback: a nav-link target whose text rendered as an icon
+        // on replay (or whose URL slug differs) won't match by text but
+        // still resolves by its stable href path tail. Only links carry
+        // href_hint, so this never fires for button/checkbox steps.
+        if (step.href_hint !== undefined) {
+          const byHref = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
+          if (byHref.length === 1) return { ok: true, match: byHref[0]! };
+        }
         if (matches.length > 0) {
           return {
             ok: false,
@@ -564,7 +572,11 @@ async function preValidateStep(
         }
         return {
           ok: false,
-          reason: `No element matches text_match=${JSON.stringify(step.text_match)}.`,
+          reason:
+            `No element matches text_match=${JSON.stringify(step.text_match)}` +
+            (step.href_hint !== undefined
+              ? ` (nor href_hint=${JSON.stringify(step.href_hint)}).`
+              : `.`),
         };
       }
       if (filtered.length > 1) {
@@ -871,7 +883,30 @@ async function executeStep(
         ? matches.filter((el) => matchesRole(el, step.role_hint!))
         : matches;
       if (filtered.length === 0) {
-        throw new Error(`No element matches text_match=${step.text_match}`);
+        // href fallback (mirrors preValidate): resolve a nav link by its
+        // stable href path tail when text matching finds nothing. If even
+        // that fails but we have an href_hint, navigate to it directly —
+        // rebased onto the current origin + workspace slug — so a sidebar
+        // link hidden behind a collapsed menu or absent for a returning
+        // user still reaches its destination.
+        if (step.href_hint !== undefined) {
+          const byHref = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
+          if (byHref.length === 1) {
+            await browser.click(byHref[0]!.selector);
+            await browser.wait(1);
+            return { kind: "clicked" };
+          }
+          const dest = rebaseHrefOntoCurrentUrl(step.href_hint, browser.currentUrl());
+          if (dest !== null) {
+            await browser.goto(dest);
+            await browser.wait(1);
+            return { kind: "clicked" };
+          }
+        }
+        throw new Error(
+          `No element matches text_match=${step.text_match}` +
+            (step.href_hint !== undefined ? ` (nor href_hint=${step.href_hint})` : ""),
+        );
       }
       // 0.8.3-rc.1 — share the disambiguator with preValidate so execute
       // doesn't unilaterally fall back to pickClickPriority's first-button
@@ -1681,6 +1716,88 @@ function matchesClickHint(el: InteractiveElement, hint: string): boolean {
   const id = (el.id ?? "").toLowerCase();
   if (id.length > 0 && id === lowerHint && !isRuntimeId(id)) return true;
   return false;
+}
+
+// 2026-06-07 — href-tail match for nav-link clicks. The synthesizer
+// records a link target's href path (href_hint); on replay the link's
+// visible text may render as an icon and its URL's leading workspace/org
+// slug differs between the capturing account and the replaying one. We
+// match on the path TAIL after dropping a leading slug-like segment, so
+// /ts-6689-z0as/settings (captured) matches /ts-9f3a-bk21/settings
+// (replay). Pure + exported for unit tests.
+//
+// Returns the normalized comparable path: segments with a leading
+// workspace/org-slug segment dropped. A slug segment is one that looks
+// account-specific — contains a digit, or is a long hyphenated token —
+// which the captured/replay org slugs (ts-6689-z0as) both satisfy while
+// real route words (settings, api-tokens, account) do not.
+export function normalizeNavPath(path: string): string[] {
+  const segs = path.split("/").filter((s) => s.length > 0);
+  if (segs.length <= 1) return segs.map((s) => s.toLowerCase());
+  const first = segs[0]!;
+  const looksLikeSlug = /\d/.test(first) || /^[a-z0-9]+(?:-[a-z0-9]+){2,}$/i.test(first);
+  const tail = looksLikeSlug ? segs.slice(1) : segs;
+  return tail.map((s) => s.toLowerCase());
+}
+
+export function matchesHrefHint(el: InteractiveElement, hrefHint: string): boolean {
+  const isLink = el.tag === "a" || el.role === "link";
+  if (!isLink) return false;
+  const raw = (el.href ?? "").trim();
+  if (raw.length === 0) return false;
+  let elPath: string;
+  try {
+    elPath = new URL(raw, "https://x.invalid").pathname;
+  } catch {
+    return false;
+  }
+  const want = normalizeNavPath(hrefHint);
+  const have = normalizeNavPath(elPath);
+  if (want.length === 0 || have.length === 0) return false;
+  // Equal normalized paths, or one is a trailing-suffix of the other
+  // (handles /settings captured vs /settings/api-tokens on replay, and
+  // vice-versa). Require the LAST segment to agree and be meaningful so
+  // we don't match every nav link by an empty/trivial tail.
+  const last = want[want.length - 1]!;
+  if (last.length < 3 || last !== have[have.length - 1]) return false;
+  const shorter = want.length < have.length ? want : have;
+  const longer = want.length < have.length ? have : want;
+  return shorter.every((seg, i) => seg === longer[longer.length - shorter.length + i]);
+}
+
+// True when a path's first segment looks account-specific (a workspace /
+// org slug) rather than a stable route word. Mirrors normalizeNavPath's
+// slug test.
+function firstSegmentIsSlug(seg: string | undefined): boolean {
+  if (seg === undefined) return false;
+  return /\d/.test(seg) || /^[a-z0-9]+(?:-[a-z0-9]+){2,}$/i.test(seg);
+}
+
+// Build an absolute URL to navigate to from a captured href path, rebased
+// onto the current page's origin and workspace slug. /ts-6689-z0as/settings
+// captured + current https://app.axiom.co/ts-9f3a-bk21/x → the replay's own
+// https://app.axiom.co/ts-9f3a-bk21/settings. Returns null when the current
+// URL is unparseable. Exported for unit tests.
+export function rebaseHrefOntoCurrentUrl(
+  hrefHint: string,
+  currentUrl: string,
+): string | null {
+  let cur: URL;
+  try {
+    cur = new URL(currentUrl);
+  } catch {
+    return null;
+  }
+  const capSegs = hrefHint.split("/").filter((s) => s.length > 0);
+  if (capSegs.length === 0) return null;
+  const curSegs = cur.pathname.split("/").filter((s) => s.length > 0);
+  // When both the captured path and the current URL lead with a slug-shaped
+  // segment, swap in the replay account's slug so the destination resolves
+  // under the right workspace. Otherwise navigate the captured path as-is.
+  if (firstSegmentIsSlug(capSegs[0]) && firstSegmentIsSlug(curSegs[0])) {
+    capSegs[0] = curSegs[0]!;
+  }
+  return `${cur.origin}/${capSegs.join("/")}`;
 }
 
 function matchesLabelHint(el: InteractiveElement, hint: string): boolean {

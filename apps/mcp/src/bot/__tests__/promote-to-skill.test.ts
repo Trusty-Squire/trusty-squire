@@ -42,6 +42,7 @@ function inventoryElement(overrides: Partial<InteractiveElement>): InteractiveEl
     inConsentWidget: overrides.inConsentWidget ?? false,
     value: overrides.value ?? null,
     title: overrides.title ?? null,
+    href: overrides.href ?? null,
   };
 }
 
@@ -2438,5 +2439,31 @@ describe("promoteToSkill — consecutive-duplicate dedup", () => {
         s.kind === "extract_via_regex_named",
     );
     expect(namedExtracts).toHaveLength(0);
+  });
+});
+
+describe("pickHrefHint", () => {
+  it("returns the path of a nav link's href (axiom Settings)", async () => {
+    const { pickHrefHint } = await import("../promote-to-skill.js");
+    expect(
+      pickHrefHint(inventoryElement({ tag: "a", ariaLabel: "Settings", href: "/ts-6689-z0as/settings" })),
+    ).toBe("/ts-6689-z0as/settings");
+  });
+  it("reduces an absolute href to its pathname", async () => {
+    const { pickHrefHint } = await import("../promote-to-skill.js");
+    expect(
+      pickHrefHint(inventoryElement({ tag: "a", href: "https://app.axiom.co/ts-x/settings?u=1" })),
+    ).toBe("/ts-x/settings");
+  });
+  it("returns null for non-link elements", async () => {
+    const { pickHrefHint } = await import("../promote-to-skill.js");
+    expect(pickHrefHint(inventoryElement({ tag: "button", href: "/x/settings" }))).toBeNull();
+  });
+  it("returns null for non-navigational hrefs and bare roots", async () => {
+    const { pickHrefHint } = await import("../promote-to-skill.js");
+    expect(pickHrefHint(inventoryElement({ tag: "a", href: "mailto:a@b.com" }))).toBeNull();
+    expect(pickHrefHint(inventoryElement({ tag: "a", href: "#" }))).toBeNull();
+    expect(pickHrefHint(inventoryElement({ tag: "a", href: "/" }))).toBeNull();
+    expect(pickHrefHint(inventoryElement({ tag: "a", href: null }))).toBeNull();
   });
 });
