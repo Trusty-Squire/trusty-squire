@@ -41,6 +41,14 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://platform.claude.com/settings/keys");
   });
 
+  it("returns null on an opaque-origin URL (about:blank → no 'null/settings/keys')", () => {
+    // about:blank / data: serialize origin to the string "null"; composing
+    // "${origin}${path}" would yield an unnavigable "null/settings/keys".
+    expect(pickStuckLoopFallbackUrl("about:blank", new Set())).toBeNull();
+    expect(pickStuckLoopFallbackUrl("", new Set())).toBeNull();
+    expect(pickStuckLoopFallbackUrl("data:text/html,x", new Set())).toBeNull();
+  });
+
   it("skips a path that already matches the current pathname", () => {
     // The bot is stuck AT /settings/keys, so the next fallback must
     // not be the same URL — fall through to the next candidate.
