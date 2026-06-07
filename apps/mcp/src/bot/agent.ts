@@ -5957,6 +5957,23 @@ export class SignupAgent {
           (gsi.ok ? "" : " (no FedCM dialog or popup appeared — the widget may need a different trigger)"),
       );
     }
+    // OmniAuth POST-only recovery prep. Capture the affordance's href + the
+    // page's CSRF token NOW, while we're still on the signin page — the
+    // "Authentication passthru" page a GET-click lands on is bare (no token).
+    // See the typesense root-cause (2026-06-07): Rails/OmniAuth 2.0 is
+    // POST-only; the GitHub button is a GET <a href="/users/auth/github">
+    // upgraded to POST by page JS, and the bot's GET-click hit the passthru.
+    const omniauthHref =
+      typeof this.browser.getElementAttribute === "function"
+        ? await this.browser
+            .getElementAttribute(oauthSelector, "href")
+            .catch(() => null)
+        : null;
+    const omniauthToken =
+      typeof this.browser.getMetaCsrfToken === "function"
+        ? await this.browser.getMetaCsrfToken().catch(() => null)
+        : null;
+    let omniauthPostTried = false;
     if (!gsiHandled) {
       await this.browser.startOAuth(oauthSelector);
     }
@@ -6011,7 +6028,43 @@ export class SignupAgent {
       const authState = provider.classifyAuthState(url, body);
       steps.push(`OAuth: ${provider.label} auth state = ${authState} (url=${url.slice(0, 120)})`);
 
-      if (authState === "not_provider") break; // flow left the provider — back on the service
+      if (authState === "not_provider") {
+        // OmniAuth 2.0 POST-only recovery. The provider button can be a GET
+        // <a href="/.../auth/<provider>"> that page-JS upgrades to a POST; if
+        // the bot's click hit the default GET, Rails/OmniAuth answers
+        // "Not found. Authentication passthru." and OAuth never started — the
+        // bot then misreads it as "signed in" and bails. Detect that bare
+        // passthru page and re-initiate via POST with the signin page's CSRF
+        // token (proven to 302 to the provider). MEASURED 2026-06-07: typesense.
+        const onOmniAuthPassthru =
+          /authentication passthru|not found/i.test(body) &&
+          /\/auth\/[a-z0-9_-]+\/?$/i.test(url);
+        if (
+          onOmniAuthPassthru &&
+          !omniauthPostTried &&
+          omniauthToken !== null &&
+          omniauthHref !== null
+        ) {
+          omniauthPostTried = true;
+          const action = new URL(omniauthHref, url).toString();
+          steps.push(
+            `OAuth: ${provider.label} endpoint is POST-only (OmniAuth GET passthru) — ` +
+              `re-initiating via POST with the page CSRF token`,
+          );
+          try {
+            await this.browser.submitPostForm(action, {
+              authenticity_token: omniauthToken,
+            });
+            await this.browser.wait(3);
+            continue; // re-read state — should now be on the provider's page
+          } catch (err) {
+            steps.push(
+              `OAuth: OmniAuth POST recovery failed (${err instanceof Error ? err.message : String(err)})`,
+            );
+          }
+        }
+        break; // flow left the provider — back on the service
+      }
 
       if (authState === "challenge") {
         // rc.26 — always capture forensic state at the moment the
