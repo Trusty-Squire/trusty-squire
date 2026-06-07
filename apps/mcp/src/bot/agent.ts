@@ -505,6 +505,13 @@ export function pickStuckLoopFallbackUrl(
   } catch {
     return null;
   }
+  // about:blank / data: / chrome-error pages have an opaque origin that
+  // serializes to the literal string "null" — building "${origin}${path}"
+  // then yields an unnavigable "null/settings/keys". Only compose
+  // fallbacks against a real http(s) origin.
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return null;
+  }
   const origin = parsed.origin;
   // Skip a candidate when the current URL's path ALREADY matches it
   // (case-insensitive, trailing-slash tolerant). The planner is stuck
@@ -4116,10 +4123,22 @@ export class SignupAgent {
           wallAlias === null ||
           wallAlias.slice(wallAlias.indexOf("@") + 1).toLowerCase() ===
             ourInboxDomain;
+        // A no-input page that offers an OAuth signup affordance
+        // ("SIGN UP WITH GOOGLE/GITHUB") is a signup-METHOD chooser, not
+        // a post-submit verification wall — nothing has been submitted
+        // yet, so there's no mail to poll. Cloudinary's register page is
+        // exactly this: no fields, three "SIGN UP WITH …" links, and
+        // marketing copy that trips expectsVerificationEmail. Skipping the
+        // wall here lets control fall through to the OAuth-first scan
+        // below, which clicks Google.
+        const offersOAuthSignup =
+          oauthCandidates.length > 0 &&
+          findFirstOAuthButton(inventory, oauthCandidates) !== null;
         if (
           !hasFillableInput &&
           expectsVerificationEmail(wallText) &&
-          aliasPollable
+          aliasPollable &&
+          !offersOAuthSignup
         ) {
           const alias = wallAlias;
           this.pendingVerificationAlias = alias;
