@@ -7809,6 +7809,16 @@ ${formatInventory(input.inventory)}`,
     // and inject a forced "no-progress" hint on the second repeat.
     let prevSignature: string | null = null;
     let prevInventorySize = -1;
+    // Selectors the planner has CLICKED while the inventory count has held
+    // steady. A multi-step onboarding wizard (axiom: role → company-size →
+    // plan) advances by clicking distinct radio-style cards that flip an
+    // aria-checked but add/remove no elements, so inventory.length never
+    // moves — and the kind-level stuck detector below would false-positive
+    // on the 2nd DISTINCT selection. We exempt a brand-new selector (wizard
+    // progress) and only call it stuck once a selector REPEATS (the Railway
+    // Create→Focus→Create cycle). Reset whenever the inventory count changes
+    // (genuine page mutation → fresh wizard step / new page).
+    let clickSelectorsSinceInventoryChange = new Set<string>();
     // rc.39 — wait-loop tracker. Turso's GitHub OAuth handshake
     // succeeds, then the SSO-callback page stays empty (0 elements)
     // while a Cloudflare verification widget runs that never clears
@@ -8424,6 +8434,13 @@ ${formatInventory(input.inventory)}`,
       // the same selector AND the inventory size matches the prior
       // round's — strong evidence the previous step did nothing.
       const repeatableKinds = new Set(["click", "fill", "select", "check", "scroll"]);
+      // An inventory-count change means the page genuinely mutated — a fresh
+      // wizard step or a new page. Reset the per-stable-run click-selector
+      // memory so distinct clicks on the NEW state aren't judged against the
+      // old one.
+      if (inventory.length !== prevInventorySize) {
+        clickSelectorsSinceInventoryChange = new Set<string>();
+      }
       if (repeatableKinds.has(nextStep.kind)) {
         const sel = "selector" in nextStep ? (nextStep.selector ?? "<none>") : "<none>";
         const signature = `${nextStep.kind}|${sel}`;
@@ -8435,11 +8452,23 @@ ${formatInventory(input.inventory)}`,
         // …). When that happens, force a non-click action.
         const sameSelector =
           signature === prevSignature && inventory.length === prevInventorySize;
+        // A brand-new click selector (never clicked since the inventory last
+        // changed) is wizard PROGRESS, not a cycle — selecting role, then
+        // company-size, then a plan flips aria-checked without moving the
+        // element count (axiom). Only treat repeated clicks as stuck: the
+        // selector has already been clicked in this stable-inventory run.
+        const clickSelectorIsRepeat =
+          nextStep.kind === "click" &&
+          clickSelectorsSinceInventoryChange.has(sel);
         const stuckOnKind =
           nextStep.kind === "click" &&
           prevSignature !== null &&
           prevSignature.startsWith("click|") &&
-          inventory.length === prevInventorySize;
+          inventory.length === prevInventorySize &&
+          clickSelectorIsRepeat;
+        if (nextStep.kind === "click") {
+          clickSelectorsSinceInventoryChange.add(sel);
+        }
         if (sameSelector || stuckOnKind) {
           const emptyInputs = inventory
             .filter(
