@@ -1,5 +1,17 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.3-rc.3 (2026-06-07)
+
+- **Verify drives the OAuth handshake deterministically.** Skill replay
+  (verify, no LLM) used to bail to `needs_login` whenever an OAuth recipe
+  hit an account-chooser/consent screen — it clicked "Sign in with X" and
+  only waited for a silent round-trip. Now it walks the chooser + scope-
+  gated consent deterministically (riding the operator's `mcp login`
+  session; it does not log in), aborting to `needs_login` only on a real
+  challenge or a sensitive scope. Live-validated: posthog now clears the
+  chooser and lands authenticated. (Follow-ups: cohere chooser variant,
+  kinde button detection.)
+
 ## 0.9.3-rc.2 (2026-06-07)
 
 Client side of the vault host/auth work (server shipped in the API; this
