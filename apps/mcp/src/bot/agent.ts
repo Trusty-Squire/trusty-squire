@@ -3545,6 +3545,38 @@ export function extractCodeFromEmailBody(email: {
   return null;
 }
 
+// True when the page is an email verification-CODE entry gate: a single
+// code-style input (name/id/placeholder/label ~ code/token/otp/verification),
+// NO email/password/tel field still to fill, and verify/code copy in the body.
+// axiom-class passwordless ("Send Code to Email" lands here). Distinct from the
+// no-fields verification WALL: this page HAS an input, but it's a CODE field,
+// so the form-fill planner would otherwise type an empty literal into it and
+// loop. The caller returns "submitted" to route to the inbox-poll + code-entry
+// path (the code was emailed to our alias). Exported for unit testing.
+export function isVerificationCodeGate(
+  inventory: readonly InteractiveElement[],
+  pageText: string,
+): boolean {
+  const inputs = inventory.filter((e) => e.tag === "input" && e.visible !== false);
+  // Any email/password/tel field still present → still a signup form, not a
+  // pure code gate.
+  if (
+    inputs.some((e) => e.type === "email" || e.type === "password" || e.type === "tel")
+  ) {
+    return false;
+  }
+  const codeRe = /\b(?:code|token|otp|verification|verify|one[\s-]?time|2fa|mfa)\b/i;
+  const hasCodeInput = inputs.some((e) => {
+    const hay = `${e.name ?? ""} ${e.id ?? ""} ${e.placeholder ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`;
+    return codeRe.test(hay);
+  });
+  if (!hasCodeInput) return false;
+  const t = pageText.toLowerCase();
+  return /verification code|enter (?:the |your )?code|code is required|verify and continue|we (?:sent|emailed)|check your email|one[\s-]?time (?:code|password)|sign[\s-]?in code/.test(
+    t,
+  );
+}
+
 // Discriminates LLMPair from LLMClient. LLMPair has `primary` (an
 // LLMClient); LLMClient has `createMessage`. They're mutually exclusive
 // shapes so a structural check is reliable.
@@ -4113,6 +4145,22 @@ export class SignupAgent {
           }
           return { kind: "submitted" };
         }
+      }
+
+      // Email verification-CODE gate (axiom-class passwordless). The no-fields
+      // wall above misses it because this page HAS an input — but it's a CODE
+      // field, not email/password, and the code was emailed to our alias.
+      // Return "submitted" so the post-submit inbox-poll + code-entry path
+      // (extractCodeFromEmailBody → enterEmailVerificationCode) handles it,
+      // instead of the planner typing an empty literal into the code field and
+      // looping. Gated on committedToEmailPath — a code gate only appears after
+      // the email was submitted.
+      if (committedToEmailPath && isVerificationCodeGate(inventory, state.html)) {
+        this.pendingVerificationAlias = this.pendingVerificationAlias ?? task.email;
+        steps.push(
+          "Form: email verification-CODE gate detected — routing to the inbox-poll + code-entry flow.",
+        );
+        return { kind: "submitted" };
       }
 
       // OAuth-first (T6/T13 + auto-prefer): when the page carries a
@@ -8490,8 +8538,15 @@ ${formatInventory(input.inventory)}`,
           const uncheckedBoxes = inventory
             .filter(
               (e) =>
-                e.tag === "input" &&
-                e.type === "checkbox" &&
+                // Native <input type=checkbox> OR a custom ARIA checkbox
+                // (<button role="checkbox">, <div role="checkbox">). The
+                // input-only filter missed meilisearch's required agreement,
+                // which renders as <button role="checkbox"> — so the planner
+                // was never told to tick it and "Next" stayed disabled. The
+                // check() executor already handles role=checkbox (it clicks +
+                // verifies aria-checked).
+                ((e.tag === "input" && e.type === "checkbox") ||
+                  e.role === "checkbox") &&
                 // We can't read the actual `checked` from the inventory
                 // shape, but interactedThisRun is set after a successful
                 // `check` step. Show checkboxes the bot hasn't touched.

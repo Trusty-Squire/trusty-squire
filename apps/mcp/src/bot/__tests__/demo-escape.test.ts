@@ -65,7 +65,12 @@ describe("findCreateAccountCta", () => {
   });
 });
 
-import { extractVerifyWallAlias, isDocumentationUrl, extractCodeFromEmailBody } from "../agent.js";
+import {
+  extractVerifyWallAlias,
+  isDocumentationUrl,
+  extractCodeFromEmailBody,
+  isVerificationCodeGate,
+} from "../agent.js";
 
 describe("extractVerifyWallAlias", () => {
   it("extracts the alias an amplitude verify-wall names", () => {
@@ -125,6 +130,33 @@ describe("extractCodeFromEmailBody", () => {
   it("returns null when there's no code-shaped string (don't type garbage)", () => {
     expect(extractCodeFromEmailBody(mk({ subject: "Welcome to Acme", body_text: "Thanks for signing up in 2026!" }))).toBeNull();
     expect(extractCodeFromEmailBody(mk({}))).toBeNull();
+  });
+});
+
+describe("isVerificationCodeGate", () => {
+  const el = (o: Partial<InteractiveElement>): InteractiveElement => ({
+    index: 0, tag: "input", type: null, id: null, name: null, placeholder: null,
+    ariaLabel: null, role: null, labelText: null, visibleText: null,
+    selector: "#x", visible: true, inViewport: true, inConsentWidget: false, ...o,
+  });
+  it("detects an axiom-class code gate (single code input, verify copy, no email/pw)", () => {
+    const inv = [el({ tag: "input", id: "token", ariaLabel: "Verification Code", selector: "#token" })];
+    expect(isVerificationCodeGate(inv, "Code is required. Verify and Continue")).toBe(true);
+  });
+  it("does NOT fire while an email/password field is still present (still a signup form)", () => {
+    const inv = [
+      el({ tag: "input", type: "email", selector: "#email" }),
+      el({ tag: "input", id: "token", ariaLabel: "Verification Code", selector: "#token" }),
+    ];
+    expect(isVerificationCodeGate(inv, "Enter the code we emailed you")).toBe(false);
+  });
+  it("does NOT fire without verify/code copy (avoid false positives)", () => {
+    const inv = [el({ tag: "input", id: "token", selector: "#token" })];
+    expect(isVerificationCodeGate(inv, "Welcome to the dashboard")).toBe(false);
+  });
+  it("does NOT fire when the only input isn't code-shaped", () => {
+    const inv = [el({ tag: "input", id: "company", ariaLabel: "Company name", selector: "#co" })];
+    expect(isVerificationCodeGate(inv, "Enter your verification code")).toBe(false);
   });
 });
 
