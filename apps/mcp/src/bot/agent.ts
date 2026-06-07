@@ -3123,6 +3123,12 @@ export function extractAllLabeledTokensFromReason(
     const canonical = LABEL_ALIASES[normalized];
     const value = m[2];
     if (canonical === undefined || value === undefined) continue;
+    // Email local-part guard. The value class stops at '@', so an email
+    // ("giselle703@gmail.com") is captured as its local-part ("giselle703")
+    // — a digit-bearing string that passes credential-shape. An email is
+    // never a credential; reject when the captured value is immediately
+    // followed by '@' in the source. (Cloudinary email-settings page.)
+    if (reason.includes(value + "@") || pageText.includes(value + "@")) continue;
     if (!pageText.includes(value)) continue;
     if (out[canonical] === undefined) out[canonical] = value;
   }
@@ -3161,6 +3167,8 @@ export function extractAllLabeledTokensFromReason(
     if (canonical === undefined || value === undefined) continue;
     if (out[canonical] !== undefined) continue; // quoted-form already won
     if (PROSE_BLACKLIST.has(value.toLowerCase())) continue;
+    // Email local-part guard — see the quoted loop above.
+    if (reason.includes(value + "@") || pageText.includes(value + "@")) continue;
     if (!looksCredentialShape(value)) continue;
     if (!pageText.includes(value)) continue;
     out[canonical] = value;
