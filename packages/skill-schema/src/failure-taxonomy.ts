@@ -110,3 +110,32 @@ export function isNavNetworkFailure(reason: string | null | undefined): boolean 
   if (reason === null || reason === undefined) return false;
   return NAV_NETWORK_REASON_RE.test(reason);
 }
+
+// A signup-with-onboarding recipe replayed against an ALREADY-REGISTERED
+// operator account diverges from its fresh-signup capture: OAuth lands on the
+// returning-user dashboard, the onboarding form is absent, and the
+// credential-minting step (a disabled Create button, a vanished "New token"
+// affordance) fails as `step_failed` — the rot kind. But this is NOT rot: the
+// recipe works fine for a real fresh user; the verifier simply can't reproduce
+// the first-run flow with a reused account. We CANNOT tell genuine rot from
+// returning-user divergence here, so the safe default is don't-demote.
+//
+// The replay path tags such failures with this marker (it knows it skipped an
+// absent onboarding fill earlier in the same run); the verifier downgrades the
+// kind to `account_already_registered` (transient → never advances the
+// 3-strike counter). MEASURED 2026-06-06: anthropic-api + planetscale replayed
+// past a skipped onboarding fill, then false-failed `step_failed` at the
+// credential step under the reused operator account.
+export const ACCOUNT_EXISTS_KIND = "account_already_registered";
+
+const RETURNING_USER_MARKER_RE = /returning-user: onboarding fill was absent/i;
+
+// True when a step_failed reason carries the replay path's returning-user
+// marker — the credential step diverged from the fresh-signup capture because
+// the operator account is already registered. Reclassify to transient.
+export function isReturningUserDivergence(
+  reason: string | null | undefined,
+): boolean {
+  if (reason === null || reason === undefined) return false;
+  return RETURNING_USER_MARKER_RE.test(reason);
+}

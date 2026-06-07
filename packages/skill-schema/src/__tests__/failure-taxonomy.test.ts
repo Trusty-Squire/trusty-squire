@@ -5,6 +5,8 @@ import {
   isWallFailure,
   isNavNetworkFailure,
   NAV_TIMEOUT_KIND,
+  isReturningUserDivergence,
+  ACCOUNT_EXISTS_KIND,
 } from "../failure-taxonomy.js";
 
 describe("classifyFailure", () => {
@@ -113,5 +115,35 @@ describe("isNavNetworkFailure", () => {
     expect(isNavNetworkFailure(null)).toBe(false);
     expect(isNavNetworkFailure(undefined)).toBe(false);
     expect(isNavNetworkFailure("")).toBe(false);
+  });
+});
+
+describe("isReturningUserDivergence", () => {
+  it("flags a step_failed tagged with the returning-user marker", () => {
+    const reason =
+      "target is disabled (aria-disabled=true) after 6s " +
+      "[returning-user: onboarding fill was absent; credential step diverged from fresh-signup capture]";
+    expect(isReturningUserDivergence(reason)).toBe(true);
+  });
+
+  it("does NOT flag a plain step_failed (genuine rot must still demote)", () => {
+    for (const reason of [
+      "step_failed step=5 target is disabled (aria-disabled=true) after 6s",
+      'No element matches text_match="Create service token".',
+      "validator_failed got=\"masked\" shape check",
+    ]) {
+      expect(isReturningUserDivergence(reason)).toBe(false);
+    }
+  });
+
+  it("is null/undefined safe", () => {
+    expect(isReturningUserDivergence(null)).toBe(false);
+    expect(isReturningUserDivergence(undefined)).toBe(false);
+    expect(isReturningUserDivergence("")).toBe(false);
+  });
+
+  it("the downgraded kind is transient and never counts toward demotion", () => {
+    expect(classifyFailure(ACCOUNT_EXISTS_KIND)).toBe("transient");
+    expect(failureCountsTowardDemotion(ACCOUNT_EXISTS_KIND)).toBe(false);
   });
 });

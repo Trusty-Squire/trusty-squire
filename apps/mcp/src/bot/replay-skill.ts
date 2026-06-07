@@ -230,6 +230,13 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   const viaBundle: Record<string, "copy_button" | "regex"> = {};
 
   let stepsWalked = 0;
+  // Set once we skip an absent onboarding fill (see isSkippableAbsentFill):
+  // the operator account is already registered, so the fresh-signup flow is
+  // gone. Any DOWNSTREAM credential-step failure is then ambiguous — genuine
+  // rot, or just returning-user divergence we can't reproduce. We tag such
+  // step_failed reasons with RETURNING_USER_MARKER so the verifier downgrades
+  // them off the rot/demote path (failure-taxonomy isReturningUserDivergence).
+  let skippedOnboardingFill = false;
   for (let i = 0; i < skill.steps.length; i++) {
     const step = skill.steps[i]!;
 
@@ -326,11 +333,30 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
             `Reason: ${validation.reason}`,
         );
         continue;
+      } else if (
+        step.kind === "fill" &&
+        isSkippableAbsentFill(step, validation.reason, i, skill.steps)
+      ) {
+        // Account-state-dependent ONBOARDING fill (cohere/deepinfra "First
+        // name" class): the signup form only exists for a brand-new account.
+        // The verifier's operator account is already registered, so the
+        // form is skipped by the service and the input is wholly absent.
+        // That's not rot — a later extract step still reaches the
+        // credential, and the credential validator is the real backstop.
+        // Skip the absent onboarding field rather than false-failing.
+        console.error(
+          `[replay] step ${i} (fill label_hint=${JSON.stringify(step.label_hint)}) ` +
+            `input absent — skipping as account-state-dependent onboarding ` +
+            `(account already registered; signup form gone). A later extract ` +
+            `step still reaches the credential. Reason: ${validation.reason}`,
+        );
+        skippedOnboardingFill = true;
+        continue;
       } else {
         return {
           kind: "step_failed",
           stepIndex: i,
-          reason: validation.reason,
+          reason: markReturningUser(validation.reason, skippedOnboardingFill),
           capturedStep: step,
         };
       }
@@ -404,7 +430,10 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       return {
         kind: "step_failed",
         stepIndex: i,
-        reason: err instanceof Error ? err.message : String(err),
+        reason: markReturningUser(
+          err instanceof Error ? err.message : String(err),
+          skippedOnboardingFill,
+        ),
         capturedStep: step,
       };
     }
@@ -1868,10 +1897,61 @@ function isSkippableAbsentClick(
   steps: SkillStep[],
 ): boolean {
   if (step.kind !== "click") return false;
-  if (matchCount !== 0) return false;
+  if (matchCount !== 0) return false; // present-but-ambiguous = real rot
+  // Never skip the credential-creating click itself.
+  if (stepIndex === creditCreatingClickIndex(steps)) return false;
+  // Only skip if the recipe can still reach a credential afterwards. (Was
+  // gated on creditCreatingClickIndex !== null, which missed extract-via-
+  // copy recipes like deepinfra whose "Finish Sign Up" is an onboarding
+  // click with no create-key click.)
+  return hasLaterCredentialStep(steps, stepIndex);
+}
+
+// Tag a step_failed reason when it fires AFTER we skipped an absent onboarding
+// fill — the operator account is already registered, so the credential step
+// diverged from the fresh-signup capture. The verifier matches this marker
+// (failure-taxonomy isReturningUserDivergence) and downgrades the kind off the
+// rot/demote path. Without the skip, the reason is returned verbatim — a
+// genuine stale selector on a fresh account still counts as rot.
+function markReturningUser(reason: string, skippedOnboardingFill: boolean): string {
+  if (!skippedOnboardingFill) return reason;
+  return `${reason} [returning-user: onboarding fill was absent; credential step diverged from fresh-signup capture]`;
+}
+
+// True when an absent onboarding FILL is safe to skip: the input is wholly
+// absent — the verifier's operator account is already registered, so the
+// service skips the signup form (cohere/deepinfra "First name" class) — and
+// a later step still yields a credential. preValidateStep reports an absent
+// input as "No input matches…"; a present-but-unresolvable input is genuine
+// rot and must NOT skip. The credential validator at the extract step is the
+// real backstop, so skipping here can't turn a broken recipe into a pass.
+function isSkippableAbsentFill(
+  step: SkillStep,
+  validationReason: string,
+  stepIndex: number,
+  steps: SkillStep[],
+): boolean {
+  if (step.kind !== "fill") return false;
+  if (!/no input matches/i.test(validationReason)) return false;
+  return hasLaterCredentialStep(steps, stepIndex);
+}
+
+// Does the recipe still reach a credential after stepIndex — a later
+// extract step, or the credential-creating click still ahead?
+function hasLaterCredentialStep(steps: SkillStep[], stepIndex: number): boolean {
+  for (let j = stepIndex + 1; j < steps.length; j++) {
+    const k = steps[j]!.kind;
+    if (
+      k === "extract_via_copy_button" ||
+      k === "extract_via_regex" ||
+      k === "extract_via_copy_button_named" ||
+      k === "extract_via_regex_named"
+    ) {
+      return true;
+    }
+  }
   const credClickIdx = creditCreatingClickIndex(steps);
-  if (credClickIdx === null) return false;
-  return stepIndex !== credClickIdx;
+  return credClickIdx !== null && credClickIdx > stepIndex;
 }
 
 // Count how many inventory elements a click step's text_match resolves
