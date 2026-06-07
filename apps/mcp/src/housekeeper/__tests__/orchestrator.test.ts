@@ -87,7 +87,12 @@ function recordingClient(opts: {
   fetchThrows?: Error;
   outcomeTransition?: "promoted" | "retired" | "demoted" | "none";
 }) {
-  const outcomes: Array<{ skill_id: string; kind: string; reason: string }> = [];
+  const outcomes: Array<{
+    skill_id: string;
+    kind: string;
+    reason: string;
+    failure_kind?: string;
+  }> = [];
   const client = {
     fetchSkill: async (skill_id: string) => {
       if (opts.fetchThrows !== undefined) throw opts.fetchThrows;
@@ -97,6 +102,7 @@ function recordingClient(opts: {
       skill_id: string;
       kind: string;
       reason: string;
+      failure_kind?: string;
     }) => {
       outcomes.push(input);
       return {
@@ -150,6 +156,34 @@ describe("runOneBatch — replay path", () => {
     });
     expect(outcomes[0]!.kind).toBe("failure");
     expect(outcomes[0]!.reason).toMatch(/step_failed/);
+    // A plain step_failed is genuine rot — must keep the rot kind so the
+    // demote counter advances.
+    expect(outcomes[0]!.failure_kind).toBe("step_failed");
+  });
+
+  it("downgrades a returning-user-divergence step_failed to a non-rot kind", async () => {
+    const { client, outcomes } = recordingClient({});
+    await runOneBatch({
+      queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000002R") }]),
+      client: client as never,
+      replay: async () => ({
+        kind: "step_failed",
+        stepIndex: 5,
+        reason:
+          "target is disabled (aria-disabled=true) after 6s " +
+          "[returning-user: onboarding fill was absent; credential step diverged from fresh-signup capture]",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create service token",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      }),
+      log: () => undefined,
+    });
+    expect(outcomes[0]!.kind).toBe("failure");
+    // The reused-operator-account divergence must NOT count as rot, so it
+    // can't false-demote a skill that works fine for a fresh user.
+    expect(outcomes[0]!.failure_kind).toBe("account_already_registered");
   });
 
   it("skips schema-drift without posting an outcome", async () => {

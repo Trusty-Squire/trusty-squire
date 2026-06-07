@@ -34,5 +34,7 @@ export {
   isWallFailure,
   isNavNetworkFailure,
   NAV_TIMEOUT_KIND,
+  isReturningUserDivergence,
+  ACCOUNT_EXISTS_KIND,
 } from "./failure-taxonomy.js";
 export type { FailureClass } from "./failure-taxonomy.js";

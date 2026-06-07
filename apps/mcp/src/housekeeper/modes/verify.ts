@@ -11,7 +11,13 @@
 //   - handleReplay: the per-task dispatcher the orchestrator invokes
 //     for 'replay' tasks (fetch skill → replay → cleanup → postOutcome).
 
-import { type Skill, isNavNetworkFailure, NAV_TIMEOUT_KIND } from "@trusty-squire/skill-schema";
+import {
+  type Skill,
+  isNavNetworkFailure,
+  NAV_TIMEOUT_KIND,
+  isReturningUserDivergence,
+  ACCOUNT_EXISTS_KIND,
+} from "@trusty-squire/skill-schema";
 import { BrowserController } from "../../bot/browser.js";
 import { replaySkill, type ReplayOutcome } from "../../bot/replay-skill.js";
 import {
@@ -206,6 +212,17 @@ export async function handleReplay(
     // pending-review skill sitting at 2 strikes (MEASURED: render, 2026-06-06).
     if (!isOk && isNavNetworkFailure(outcomeReason)) {
       failureKind = NAV_TIMEOUT_KIND;
+    }
+
+    // A signup-with-onboarding recipe replayed against the already-registered
+    // operator account diverges from its fresh-signup capture: the onboarding
+    // fill is absent (skipped) and the credential step then false-fails
+    // step_failed. We can't tell that from genuine rot with a reused account,
+    // so downgrade it to a transient kind that records the stat WITHOUT
+    // advancing the 3-strike demote counter. The skill still works for a real
+    // fresh user; a fresh-account discover run is the only true re-verification.
+    if (!isOk && isReturningUserDivergence(outcomeReason)) {
+      failureKind = ACCOUNT_EXISTS_KIND;
     }
 
     if (isOk && replay.kind === "ok") {
