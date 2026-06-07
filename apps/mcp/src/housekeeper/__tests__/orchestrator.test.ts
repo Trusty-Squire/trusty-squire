@@ -174,7 +174,7 @@ describe("runOneBatch — replay path", () => {
           "[returning-user: onboarding fill was absent; credential step diverged from fresh-signup capture]",
         capturedStep: {
           kind: "click",
-          text_match: { contains: "Create" },
+          text_match: "Create service token",
           provenance: { run_id: "r1", round_index: 1 },
         },
       }),
