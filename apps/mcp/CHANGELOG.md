@@ -1,5 +1,41 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.5 (2026-06-07)
+
+Closed-loop reliability: a run of post-OAuth navigation + signup-form +
+skill-replay fixes that take services the universal bot could *sign up* but
+not *promote to an active skill* all the way to active. Live-validated on the
+residential housekeeper — axiom and statsig now go signup → auto-promote →
+verify-replay → **active** end-to-end.
+
+- **Onboarding wizards no longer false-stall.** The post-verify stuck
+  detector treated two consecutive clicks with an unchanged element *count*
+  as a stuck loop — but a multi-step wizard (role → company-size → plan)
+  advances by clicking distinct radio cards that flip `aria-checked` without
+  changing the count. A brand-new click selector is now treated as progress;
+  only a repeated selector is a stall. (axiom went from `oauth_onboarding_
+  failed` to a clean signup.)
+- **Nav-link replay matches by stable href, not gloss text.** A synthesized
+  skill could pass corpus checks yet fail live replay with `No element
+  matches text_match="Settings"` — the sidebar link renders as an icon on
+  replay and its URL's org slug differs between accounts. Click steps on
+  links now carry an `href_hint`; replay matches by the href-path tail
+  (ignoring a leading workspace/org slug) and, as a last resort, navigates
+  to it rebased onto the current origin. This was the dominant
+  active-promotion blocker.
+- **Email verification-CODE gates (passwordless).** A "enter the code we
+  emailed you" page with a single code input and no email/password field is
+  now routed to the inbox-poll + code-entry path instead of the form-filler
+  typing an empty literal and looping.
+- **ARIA agreement checkboxes.** The unchecked-box detector now matches
+  custom `<button role="checkbox">` / `<div role="checkbox">` agreements, not
+  just native `<input type=checkbox>`, so wizard "Next" buttons gated on a
+  required agreement get unblocked.
+- **No premature post-verify `done`.** When the planner gives up with zero
+  credentials captured on an authenticated dashboard, the bot now navigates
+  to an unvisited canonical API-keys URL and re-plans (bounded) before
+  honoring `done` — an empty services list is not "no API keys."
+
 ## 0.9.4 (2026-06-07)
 
 Provision-path fixes for services where you already have an account, plus a
