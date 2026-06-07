@@ -2725,34 +2725,42 @@ export function findSignInAdvanceButton(
 // actually has a session for. `findFirstOAuthButton` walks this list in
 // order and uses the first provider the PAGE offers, so order = preference.
 //
-// RULE 1 — respect an explicit pin when its session is warm. The operator
-// pins a provider for a reason the bot can't see from the page: e.g.
-// northflank surfaces Google only as on-demand One-Tap (a FedCM widget the
-// redirect flow can't drive) while its GitHub button is a clean redirect, so
-// the service is pinned github. Leading with the warm pin honors that, with
-// the OTHER warm provider kept as a fallback for pages that only render it.
-// (This became safe once `login` was fixed to establish the session through
-// the bot's egress proxy — a warm GitHub session no longer dies on an IP
-// jump, so it doesn't hit the /authorize 2FA wall the way a stale one did.)
+// RULE 1 — Google leads whenever its session is warm, pin or not. Empirically
+// Google's OAuth blocks far less hard than GitHub's, which hits an UNCLEARABLE
+// forced-2FA "Verify 2FA now" wall on the /authorize step regardless of session
+// warmth or egress IP (MEASURED 2026-06-07: porter + deepinfra were pinned
+// github, hit the wall and aborted, while their own signin pages also offered a
+// clean Google button the bot should have taken). This makes the code match the
+// long-stated intent in resolveOAuthCandidates ("Google blocks less hard, so it
+// leads") — which RULE 1 previously contradicted by leading with the pin.
 //
-// RULE 2 — with NO pin, Google leads when present: empirically its OAuth
-// blocks less hard than a cold GitHub flow.
+// A `github` pin still works for its real purpose: when a service's Google is
+// One-Tap/FedCM-only (no redirect button the flow can drive — northflank),
+// findFirstOAuthButton finds no Google button and falls through to GitHub even
+// though Google leads here. So a pin only decides ORDER when Google is NOT warm.
+//
+// RULE 2 — with no warm Google session, honor an explicit pin, else whatever IS
+// warm.
 export function orderOAuthCandidates(
   pinned: OAuthProviderId | undefined,
   loggedIn: readonly OAuthProviderId[],
 ): OAuthProviderId[] {
-  if (pinned !== undefined) {
-    if (loggedIn.includes(pinned)) {
-      const others = loggedIn
-        .filter((p) => p !== pinned)
-        .sort((a, b) => (a === "google" ? -1 : b === "google" ? 1 : 0));
-      return [pinned, ...others];
+  if (loggedIn.includes("google")) {
+    const rest = loggedIn.filter((p) => p !== "google");
+    // A non-Google pin sits right behind Google. Keep it even when its own
+    // session is cold, as a trailing fallback so a page that only offers that
+    // provider still gets attempted (a cold attempt → needs_login, which tells
+    // the operator to log in — better than silently dropping to form-fill).
+    if (pinned !== undefined && pinned !== "google") {
+      return ["google", pinned, ...rest.filter((p) => p !== pinned)];
     }
-    // Pin's session isn't warm — fall back to whatever IS (Google preferred).
-    if (pinned !== "google" && loggedIn.includes("google")) return ["google", pinned];
+    return ["google", ...rest];
+  }
+  if (pinned !== undefined) {
+    if (loggedIn.includes(pinned)) return [pinned, ...loggedIn.filter((p) => p !== pinned)];
     return [pinned];
   }
-  return [...loggedIn].sort((a, b) => (a === "google" ? -1 : b === "google" ? 1 : 0));
+  return [...loggedIn];
 }
 
 // Parse a post-verify step. When `allowedSelectors` is supplied, a
