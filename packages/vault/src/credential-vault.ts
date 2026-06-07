@@ -24,6 +24,37 @@ import {
 } from "./encryption.js";
 import type { KMSClient } from "./kms-client.js";
 import { deriveAllowedHosts } from "./service-hosts.js";
+
+// Normalise an observed host: accept a bare host ("api.x.com") or a full
+// URL ("https://api.x.com/keys?x=1") and return the lowercase hostname, or
+// null if it can't be parsed into one. Strips scheme/path/port/credentials.
+export function normalizeObservedHost(raw: string): string | null {
+  const s = raw.trim();
+  if (s.length === 0) return null;
+  try {
+    return new URL(s.includes("://") ? s : `https://${s}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+// The allowlist for a freshly-stored credential: hosts observed during the
+// capture, unioned with the static service-name table, deduped in order.
+// Observed hosts come first (they're the ground truth for THIS credential);
+// the table augments. Result is empty only when neither yields a host.
+export function mergeAllowedHosts(service: string, observed?: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (h: string | null): void => {
+    if (h !== null && !seen.has(h)) {
+      seen.add(h);
+      out.push(h);
+    }
+  };
+  for (const raw of observed ?? []) add(normalizeObservedHost(raw));
+  for (const h of deriveAllowedHosts(service)) add(h);
+  return out;
+}
 import type {
   CredentialRecord,
   CredentialStore,
@@ -50,6 +81,12 @@ export interface VaultStoreInput {
   type?: CredentialType | null;
   env_var_suggestion?: string | null;
   metadata?: Record<string, unknown>;
+  // Hosts observed during the capture that produced this credential (e.g.
+  // the signup URL's host, the page the key was extracted from). Unioned
+  // with the static service-name table so a successful capture never lands
+  // with an EMPTY allowlist — which would make use_credential 403 every
+  // call. Accepts bare hosts or full URLs; normalised + deduped.
+  observed_hosts?: string[];
 }
 
 export interface VaultEntry {
@@ -114,6 +151,10 @@ export interface ProxyHttpTemplate {
   url: string;
   headers?: Record<string, string>;
   body?: string;
+  // Query params injected server-side (the sanctioned channel for
+  // query-string-auth APIs — a ${SECRET} is allowed in a value here but
+  // not in `url`). Passed through to the executor; host check uses `url`.
+  query?: Record<string, string>;
 }
 export interface ProxyResponse {
   status: number;
@@ -233,6 +274,18 @@ export class CredentialVault implements VaultClient {
         field_names: fieldNames,
         rotatedAt: now,
       });
+      // Backfill an EMPTY allowlist on re-store, but never clobber a
+      // non-empty one (the user may have curated it). This heals
+      // credentials stored before allowed_hosts existed (or before their
+      // service was in the table) — a re-store now lands a real allowlist.
+      let allowedHosts = existing.allowed_hosts;
+      if (allowedHosts.length === 0) {
+        const backfilled = mergeAllowedHosts(input.service, input.observed_hosts);
+        if (backfilled.length > 0) {
+          await this.deps.store.setAllowedHosts(existing.reference, backfilled);
+          allowedHosts = backfilled;
+        }
+      }
       await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
         reference: existing.reference,
         requester: "user",
@@ -244,7 +297,7 @@ export class CredentialVault implements VaultClient {
         service: input.service,
         label,
         field_names: fieldNames,
-        allowed_hosts: existing.allowed_hosts,
+        allowed_hosts: allowedHosts,
         created_at: existing.created_at.toISOString(),
         updated: true,
       };
@@ -252,7 +305,7 @@ export class CredentialVault implements VaultClient {
 
     const reference = `vault://${input.account_id}/${input.subscription_id}/${ulid()}`;
     const env = await this.encryptFields(reference, input.account_id, input.fields);
-    const allowedHosts = deriveAllowedHosts(input.service);
+    const allowedHosts = mergeAllowedHosts(input.service, input.observed_hosts);
     const record: CredentialRecord = {
       id: ulid(),
       reference,

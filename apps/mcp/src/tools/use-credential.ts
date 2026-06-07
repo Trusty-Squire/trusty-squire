@@ -17,6 +17,7 @@ const inputSchema = z
       url: z.string().min(1).max(2048),
       headers: z.record(z.string()).optional(),
       body: z.string().max(64 * 1024).optional(),
+      query: z.record(z.string()).optional(),
     }),
   })
   .refine((b) => b.reference !== undefined || b.service !== undefined, {
@@ -32,6 +33,10 @@ headers/body use \${SECRET} for a single-field credential, or
 list_credentials to see a credential's field names. Pass \`service\` or
 \`reference\` plus the HTTP fields (method, url, headers, body). This is
 the ONLY way to use a stored secret — there is no raw-value extraction.
+For APIs that authenticate via a query-string key (e.g. FRED's
+\`api_key\`), put the secret in \`query\` — \`query: { api_key: "\${SECRET}" }\`
+— NOT in the url (a \${SECRET} in the url is rejected; the server injects
+query params after the host check so the key never lands in a log).
 The target host must be on the credential's allowed_hosts (editable in
 the web vault) or the call is rejected.`;
 
@@ -53,6 +58,7 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
           url: { type: "string" },
           headers: { type: "object", additionalProperties: { type: "string" } },
           body: { type: "string" },
+          query: { type: "object", additionalProperties: { type: "string" } },
         },
       },
     },
@@ -66,6 +72,7 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       url: args.http.url,
       ...(args.http.headers !== undefined ? { headers: args.http.headers } : {}),
       ...(args.http.body !== undefined ? { body: args.http.body } : {}),
+      ...(args.http.query !== undefined ? { query: args.http.query } : {}),
     };
     const res = await api.useCredential({
       ...(args.reference !== undefined ? { reference: args.reference } : {}),

@@ -9,6 +9,8 @@ import {
   CredentialVault,
   StaleAssertionError,
   VaultRateLimitError,
+  mergeAllowedHosts,
+  normalizeObservedHost,
   type DeviceAssertion,
   type ProxyResponse,
   type VaultStoreInput,
@@ -53,6 +55,55 @@ const okResponse: ProxyResponse = {
   body: '{"ok":true}',
   truncated: false,
 };
+
+describe("allowed-host derivation helpers", () => {
+  it("normalizeObservedHost handles bare hosts and full URLs", () => {
+    expect(normalizeObservedHost("api.x.com")).toBe("api.x.com");
+    expect(normalizeObservedHost("https://API.x.com/keys?a=1")).toBe("api.x.com");
+    expect(normalizeObservedHost("  fred.example.org  ")).toBe("fred.example.org");
+    expect(normalizeObservedHost("")).toBeNull();
+    expect(normalizeObservedHost("not a url at all")).toBeNull();
+  });
+
+  it("mergeAllowedHosts unions observed hosts with the service table, deduped", () => {
+    // openai is in the table → api.openai.com; observed host comes first.
+    expect(mergeAllowedHosts("openai", ["https://dash.openai.com"])).toEqual([
+      "dash.openai.com",
+      "api.openai.com",
+    ]);
+    // unknown service + observed host → never empty.
+    expect(mergeAllowedHosts("totally-unknown-saas", ["api.stlouisfed.org"])).toEqual([
+      "api.stlouisfed.org",
+    ]);
+    // unknown service + no observed host → empty (documents the gap).
+    expect(mergeAllowedHosts("totally-unknown-saas")).toEqual([]);
+    // dedupes when observed equals the table value.
+    expect(mergeAllowedHosts("openai", ["api.openai.com"])).toEqual(["api.openai.com"]);
+  });
+});
+
+describe("store sets allowed_hosts from observed capture hosts", () => {
+  it("a new credential for an unknown service still gets a non-empty allowlist", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(
+      storeInput({ service: "Quirkly", observed_hosts: ["https://api.quirkly.dev/v1"] }),
+    );
+    expect(entry.allowed_hosts).toEqual(["api.quirkly.dev"]);
+  });
+
+  it("re-storing a credential with an EMPTY allowlist backfills it from observed hosts", async () => {
+    const { vault } = makeVault();
+    // First store: unknown service, no observed host → empty allowlist.
+    const a = await vault.store(storeInput({ service: "Quirkly", fields: { value: "sk_1" } }));
+    expect(a.allowed_hosts).toEqual([]);
+    // Re-store with an observed host → backfilled (heals pre-feature creds).
+    const b = await vault.store(
+      storeInput({ service: "Quirkly", fields: { value: "sk_2" }, observed_hosts: ["api.quirkly.dev"] }),
+    );
+    expect(b.reference).toBe(a.reference); // same record
+    expect(b.allowed_hosts).toEqual(["api.quirkly.dev"]);
+  });
+});
 
 describe("store + retrieve (field map)", () => {
   it("round-trips a single-field credential", async () => {

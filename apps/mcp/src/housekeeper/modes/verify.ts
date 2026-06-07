@@ -11,7 +11,7 @@
 //   - handleReplay: the per-task dispatcher the orchestrator invokes
 //     for 'replay' tasks (fetch skill → replay → cleanup → postOutcome).
 
-import type { Skill } from "@trusty-squire/skill-schema";
+import { type Skill, isNavNetworkFailure, NAV_TIMEOUT_KIND } from "@trusty-squire/skill-schema";
 import { BrowserController } from "../../bot/browser.js";
 import { replaySkill, type ReplayOutcome } from "../../bot/replay-skill.js";
 import {
@@ -197,6 +197,16 @@ export async function handleReplay(
     outcomeKind = isOk ? "success" : "failure";
     failureKind = isOk ? undefined : replay.kind;
     outcomeReason = describeReplayOutcome(replay);
+
+    // A page-never-loaded failure (proxy blip / cold tunnel / DNS / TLS /
+    // connection reset) surfaces as step_failed — the same rot kind as a
+    // genuinely stale selector — but it is NOT skill rot. Downgrade it to a
+    // transient kind so the registry records the stat WITHOUT advancing the
+    // 3-strike demote counter. Without this, one tunnel hiccup retires a
+    // pending-review skill sitting at 2 strikes (MEASURED: render, 2026-06-06).
+    if (!isOk && isNavNetworkFailure(outcomeReason)) {
+      failureKind = NAV_TIMEOUT_KIND;
+    }
 
     if (isOk && replay.kind === "ok") {
       const cleanup = await runCleanup({

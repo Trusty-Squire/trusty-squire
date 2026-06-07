@@ -153,7 +153,7 @@ export class ApiClient {
   async useCredential(input: {
     reference?: string;
     service?: string;
-    http: { method: string; url: string; headers?: Record<string, string>; body?: string };
+    http: { method: string; url: string; headers?: Record<string, string>; body?: string; query?: Record<string, string> };
   }): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
     return this.post("/v1/vault/use", input);
   }

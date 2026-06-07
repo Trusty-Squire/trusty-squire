@@ -33,6 +33,9 @@ const useBody = z
       url: z.string().min(1).max(2048),
       headers: z.record(z.string()).optional(),
       body: z.string().max(64 * 1024).optional(),
+      // Query-string auth (FRED etc.): { api_key: "${SECRET}" } — injected
+      // server-side after the host check; secret never appears in `url`.
+      query: z.record(z.string()).optional(),
     }),
   })
   .refine((b) => b.reference !== undefined || b.service !== undefined, {
@@ -112,6 +115,7 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
         url: data.http.url,
         ...(data.http.headers !== undefined ? { headers: data.http.headers } : {}),
         ...(data.http.body !== undefined ? { body: data.http.body } : {}),
+        ...(data.http.query !== undefined ? { query: data.http.query } : {}),
       };
 
       try {
