@@ -148,7 +148,7 @@ export type ReplayOutcome =
   | {
       kind: "ok_multi";
       credentials: Record<string, string>;
-      via: Record<string, "copy_button" | "regex">;
+      via: Record<string, "copy_button" | "regex" | "labeled">;
     }
   | { kind: "step_failed"; stepIndex: number; reason: string; capturedStep: SkillStep }
   | { kind: "validator_failed"; stepIndex: number; got: string; reason: string }
@@ -227,7 +227,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       .map((s) => s.produces),
   );
   const credentialBundle: Record<string, string> = {};
-  const viaBundle: Record<string, "copy_button" | "regex"> = {};
+  const viaBundle: Record<string, "copy_button" | "regex" | "labeled"> = {};
 
   let stepsWalked = 0;
   // Set once we skip an absent onboarding fill (see isSkippableAbsentFill):
@@ -778,7 +778,36 @@ async function preValidateStep(
       }
       return { ok: true };
     }
+
+    case "extract_labeled": {
+      const candidates = await browser.extractLabeledCredentialCandidates();
+      const match = candidates.find((c) => labelMatchesHint(c.label, step.label_hint));
+      if (match === undefined) {
+        return {
+          ok: false,
+          reason:
+            `No labeled credential matches label_hint=${JSON.stringify(step.label_hint)} ` +
+            `(producing ${step.produces}). Labels seen: ` +
+            `${JSON.stringify(candidates.map((c) => c.label).filter(Boolean))}.`,
+        };
+      }
+      // A masked value with a reveal button is fine — execute unmasks it.
+      return { ok: true };
+    }
   }
+}
+
+// Normalize a label and a stored label_hint for comparison: lowercase,
+// strip every non-alphanumeric. "Application ID" / "application_id" /
+// "application id" all collapse to "applicationid". A null candidate
+// label never matches. Exported for unit testing.
+export function labelMatchesHint(label: string | null, hint: string): boolean {
+  if (label === null) return false;
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const a = norm(label);
+  const b = norm(hint);
+  if (a.length === 0 || b.length === 0) return false;
+  return a === b || a.includes(b) || b.includes(a);
 }
 
 // ── Step execution ───────────────────────────────────────────────────
@@ -795,7 +824,7 @@ type ExecutionOutcome =
       kind: "extract_named_ok";
       produces: string;
       value: string;
-      via: "copy_button" | "regex";
+      via: "copy_button" | "regex" | "labeled";
     }
   | { kind: "needs_login"; provider: "google" | "github" };
 
@@ -1398,6 +1427,37 @@ async function executeStep(
       throw new Error(
         `No credential matching pattern ${step.pattern_name} (for ${step.produces}) found on page.`,
       );
+    }
+
+    case "extract_labeled": {
+      // Label-scoped extraction: find the value whose on-page label
+      // matches this step's label_hint. Unmask first if the matched
+      // candidate is masked behind a Reveal button, then re-read.
+      let candidates = await browser.extractLabeledCredentialCandidates();
+      let match = candidates.find((c) => labelMatchesHint(c.label, step.label_hint));
+      if (match !== undefined && match.isMasked) {
+        await browser.revealMaskedCredentials();
+        await browser.wait(1);
+        candidates = await browser.extractLabeledCredentialCandidates();
+        match = candidates.find((c) => labelMatchesHint(c.label, step.label_hint));
+      }
+      if (match === undefined) {
+        throw new Error(
+          `No labeled credential matches label_hint=${step.label_hint} (for ${step.produces}).`,
+        );
+      }
+      if (match.isMasked || /^[•*•●\s]+$/.test(match.value)) {
+        throw new Error(
+          `Labeled credential ${step.produces} (label_hint=${step.label_hint}) is still masked ` +
+            `after the reveal pass — value not recoverable.`,
+        );
+      }
+      return {
+        kind: "extract_named_ok",
+        produces: step.produces,
+        value: match.value,
+        via: "labeled",
+      };
     }
   }
   const _exhaustive: never = step;

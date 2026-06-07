@@ -375,6 +375,38 @@ const ExtractViaRegexNamedStepSchema = z
   })
   .strict();
 
+// Label-scoped multi-credential extract (2026-06-07). The canonical
+// multi-cred primitive for dashboards that show N credentials in a table
+// (Cloudinary cloud_name/api_key/api_secret, Algolia application_id/
+// search_api_key/admin_api_key). The named copy_button/regex kinds can't
+// disambiguate two same-shaped keys (Algolia's search + admin keys are
+// both 32-char hex), so this step finds the value by its on-page LABEL:
+// the replay engine matches `label_hint` against the labeled-credential
+// candidates the bot harvests (value + adjacent label), revealing a
+// masked value if a Reveal button sits in the row.
+const ExtractLabeledStepSchema = z
+  .object({
+    kind: z.literal("extract_labeled"),
+    label_hint: z
+      .string()
+      .min(1)
+      .describe(
+        "The on-page label adjacent to this credential's value (e.g. " +
+          "'Application ID', 'Admin API Key', 'API Secret'). Replay " +
+          "resolves the value by matching this against labeled-credential " +
+          "candidates harvested from the dashboard, not by regex shape — " +
+          "so two same-shaped keys on one page stay distinct.",
+      ),
+    produces: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/, "must be lowercase_snake_case")
+      .describe(
+        "References an entry in the parent Skill's credentials[].name.",
+      ),
+    provenance: ProvenanceSchema,
+  })
+  .strict();
+
 export const SkillStepSchema = z
   .discriminatedUnion("kind", [
     NavigateStepSchema,
@@ -388,6 +420,7 @@ export const SkillStepSchema = z
     // contain these; they're additive at the union level.
     ExtractViaCopyButtonNamedStepSchema,
     ExtractViaRegexNamedStepSchema,
+    ExtractLabeledStepSchema,
   ])
   .describe(
     "One step in a Skill's replay graph. Steps execute in order. A " +

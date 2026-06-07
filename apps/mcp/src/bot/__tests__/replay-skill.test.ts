@@ -2044,3 +2044,21 @@ describe("inferProviderFromUrl", () => {
     expect(inferProviderFromUrl("not-a-url")).toBeNull();
   });
 });
+
+describe("labelMatchesHint", () => {
+  it("matches across separator/case variants", async () => {
+    const { labelMatchesHint } = await import("../replay-skill.js");
+    expect(labelMatchesHint("Application ID", "application id")).toBe(true);
+    expect(labelMatchesHint("application_id", "application id")).toBe(true);
+    expect(labelMatchesHint("Admin API Key", "admin api key")).toBe(true);
+  });
+  it("matches on containment (label includes hint or vice-versa)", async () => {
+    const { labelMatchesHint } = await import("../replay-skill.js");
+    expect(labelMatchesHint("Your Admin API Key", "admin api key")).toBe(true);
+  });
+  it("does not match a different credential or a null label", async () => {
+    const { labelMatchesHint } = await import("../replay-skill.js");
+    expect(labelMatchesHint("Search API Key", "admin api key")).toBe(false);
+    expect(labelMatchesHint(null, "admin api key")).toBe(false);
+  });
+});
