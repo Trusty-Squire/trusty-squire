@@ -1952,6 +1952,76 @@ describe("detectNavigationDrift", () => {
   });
 });
 
+describe("normalizeNavPath", () => {
+  it("drops a leading workspace/org slug segment", async () => {
+    const { normalizeNavPath } = await import("../replay-skill.js");
+    // axiom org slug: digit-bearing, hyphenated.
+    expect(normalizeNavPath("/ts-6689-z0as/settings")).toEqual(["settings"]);
+    expect(normalizeNavPath("/ts-9f3a-bk21/settings/api-tokens")).toEqual([
+      "settings",
+      "api-tokens",
+    ]);
+  });
+  it("keeps a path whose first segment is a real route word", async () => {
+    const { normalizeNavPath } = await import("../replay-skill.js");
+    expect(normalizeNavPath("/settings/api-tokens")).toEqual(["settings", "api-tokens"]);
+    expect(normalizeNavPath("/account/keys")).toEqual(["account", "keys"]);
+  });
+});
+
+describe("matchesHrefHint", () => {
+  const link = (over: Partial<InteractiveElement>): InteractiveElement =>
+    ({
+      index: 0, tag: "a", type: null, id: null, name: null, placeholder: null,
+      ariaLabel: null, role: null, labelText: null, visibleText: null,
+      selector: "#x", visible: true, inViewport: true, inConsentWidget: false,
+      href: null, ...over,
+    }) as InteractiveElement;
+  it("matches a settings link across differing org slugs", async () => {
+    const { matchesHrefHint } = await import("../replay-skill.js");
+    // captured /ts-6689-z0as/settings, replay link under a different slug
+    expect(matchesHrefHint(link({ href: "/ts-9f3a-bk21/settings" }), "/ts-6689-z0as/settings")).toBe(
+      true,
+    );
+    expect(
+      matchesHrefHint(link({ href: "https://app.axiom.co/ts-9f3a-bk21/settings" }), "/ts-6689-z0as/settings"),
+    ).toBe(true);
+  });
+  it("matches a /settings tail against a deeper captured /settings/api-tokens", async () => {
+    const { matchesHrefHint } = await import("../replay-skill.js");
+    expect(matchesHrefHint(link({ href: "/ts-x/settings" }), "/ts-6689-z0as/settings")).toBe(true);
+  });
+  it("does NOT match a different nav link", async () => {
+    const { matchesHrefHint } = await import("../replay-skill.js");
+    expect(matchesHrefHint(link({ href: "/ts-x/datasets" }), "/ts-6689-z0as/settings")).toBe(false);
+  });
+  it("does NOT match a non-link element even with the right href", async () => {
+    const { matchesHrefHint } = await import("../replay-skill.js");
+    expect(
+      matchesHrefHint(link({ tag: "button", role: null, href: "/ts-x/settings" }), "/ts-6689-z0as/settings"),
+    ).toBe(false);
+  });
+});
+
+describe("rebaseHrefOntoCurrentUrl", () => {
+  it("swaps the captured org slug for the replay account's slug", async () => {
+    const { rebaseHrefOntoCurrentUrl } = await import("../replay-skill.js");
+    expect(
+      rebaseHrefOntoCurrentUrl("/ts-6689-z0as/settings", "https://app.axiom.co/ts-9f3a-bk21/getting-started"),
+    ).toBe("https://app.axiom.co/ts-9f3a-bk21/settings");
+  });
+  it("keeps a slug-free captured path as-is on the current origin", async () => {
+    const { rebaseHrefOntoCurrentUrl } = await import("../replay-skill.js");
+    expect(
+      rebaseHrefOntoCurrentUrl("/settings/api-keys", "https://dash.service.com/home"),
+    ).toBe("https://dash.service.com/settings/api-keys");
+  });
+  it("returns null on an unparseable current URL", async () => {
+    const { rebaseHrefOntoCurrentUrl } = await import("../replay-skill.js");
+    expect(rebaseHrefOntoCurrentUrl("/x/settings", "not a url")).toBeNull();
+  });
+});
+
 describe("inferProviderFromUrl", () => {
   it("identifies Google subdomains", async () => {
     const { inferProviderFromUrl } = await import("../replay-skill.js");

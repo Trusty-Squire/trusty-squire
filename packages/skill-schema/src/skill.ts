@@ -153,6 +153,29 @@ const ClickStepSchema = z
           "'has unique nearby visible text containing near_text_hint' " +
           "before failing.",
       ),
+    // 2026-06-07 — href fallback for nav-link clicks. A dashboard's
+    // sidebar link (axiom's "Settings", → /<org>/settings) carries a
+    // STABLE href even when its accessible name renders as an icon on
+    // replay, or the org slug in the URL differs between the capturing
+    // account and the replaying one. text_match="Settings" then resolves
+    // to zero elements and the replay dies. When the captured click
+    // target is a link with an href, the synthesizer records its path
+    // here; the replay engine matches a link by href-path tail
+    // (slug-tolerant) after text fails, and as a last resort navigates
+    // to it (rebased onto the current origin + org slug). Optional +
+    // additive — only emitted for <a>/role=link targets, so non-link
+    // clicks' canonical bytes don't shift.
+    href_hint: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional href path of a nav-link click target (e.g. " +
+          "'/acme/settings'). The replay engine matches a link by its " +
+          "href-path tail (ignoring a leading workspace/org slug) when " +
+          "text_match resolves to nothing, and falls back to navigating " +
+          "to it directly. Only present for link targets.",
+      ),
     provenance: ProvenanceSchema,
   })
   .strict();
