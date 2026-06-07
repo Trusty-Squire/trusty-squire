@@ -3512,6 +3512,39 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
   return best !== null && best.score > 0 ? best.url : null;
 }
 
+// Last-resort verification-CODE extraction from an email body, for the
+// passwordless "we emailed you a code" flow (axiom: "Axiom sign-in
+// verification code") when the inbox parser's parsed_codes came back empty.
+// Without this the bot bailed "no usable verification link" on a code-only
+// email — treating a routine code flow as a dead end. Conservative: prefers a
+// 4-8 digit run next to a code/verify keyword, then a space/dash-grouped code,
+// then a standalone 6-digit number (the most common verification length).
+// Returns null when nothing code-shaped is found so the caller still bails
+// honestly rather than typing garbage. Exported for unit testing.
+export function extractCodeFromEmailBody(email: {
+  subject: string;
+  body_text?: string | null;
+  body_html?: string | null;
+}): string | null {
+  const text = [
+    email.subject ?? "",
+    email.body_text ?? "",
+    (email.body_html ?? "").replace(/<[^>]+>/g, " "),
+  ].join("\n");
+  // 1) A code sitting next to a verification keyword — the strongest signal.
+  const kw = text.match(
+    /(?:verification code|sign[\s-]?in code|one[\s-]?time(?:\s+(?:code|password))?|security code|your code|confirmation code|code is|enter(?:\s+this)?\s+code)\b[^0-9]{0,40}([0-9]{4,8})\b/i,
+  );
+  if (kw?.[1] !== undefined) return kw[1];
+  // 2) A grouped code ("123-456" / "1234 5678").
+  const grouped = text.match(/(?<![0-9])([0-9]{3,4}[ -][0-9]{3,4})(?![0-9])/);
+  if (grouped?.[1] !== undefined) return grouped[1].replace(/[ -]/g, "");
+  // 3) A standalone 6-digit number (most verification codes).
+  const six = text.match(/(?<![0-9])([0-9]{6})(?![0-9])/);
+  if (six?.[1] !== undefined) return six[1];
+  return null;
+}
+
 // Discriminates LLMPair from LLMClient. LLMPair has `primary` (an
 // LLMClient); LLMClient has `createMessage`. They're mutually exclusive
 // shapes so a structural check is reliable.
@@ -5727,7 +5760,23 @@ export class SignupAgent {
                   steps,
                 );
               } else {
-                steps.push("Email had no usable verification link.");
+                // No link and the inbox parser found no code — last-resort
+                // scan the email body ourselves for a verification code
+                // (passwordless "we emailed you a code" flow, e.g. axiom).
+                const bodyCode = extractCodeFromEmailBody(email);
+                if (bodyCode !== null) {
+                  steps.push(
+                    `Email had no link but carried a verification code (…${bodyCode.slice(-2)}) — entering it.`,
+                  );
+                  credentials = await this.enterEmailVerificationCode(
+                    bodyCode,
+                    task,
+                    password,
+                    steps,
+                  );
+                } else {
+                  steps.push("Email had no usable verification link or code.");
+                }
               }
             } else if (email.parsed_codes.length > 0) {
               // No links at all, but the email carries a numeric code

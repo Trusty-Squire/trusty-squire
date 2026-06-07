@@ -65,7 +65,7 @@ describe("findCreateAccountCta", () => {
   });
 });
 
-import { extractVerifyWallAlias, isDocumentationUrl } from "../agent.js";
+import { extractVerifyWallAlias, isDocumentationUrl, extractCodeFromEmailBody } from "../agent.js";
 
 describe("extractVerifyWallAlias", () => {
   it("extracts the alias an amplitude verify-wall names", () => {
@@ -97,6 +97,34 @@ describe("extractVerifyWallAlias", () => {
   });
   it("returns null when no email is present", () => {
     expect(extractVerifyWallAlias("Verify your email address")).toBeNull();
+  });
+});
+
+describe("extractCodeFromEmailBody", () => {
+  const mk = (o: Partial<{ subject: string; body_text: string | null; body_html: string | null }>) => ({
+    subject: o.subject ?? "",
+    body_text: o.body_text ?? null,
+    body_html: o.body_html ?? null,
+  });
+  it("pulls a keyword-proximate code (axiom class)", () => {
+    expect(
+      extractCodeFromEmailBody(mk({ subject: "Axiom sign-in verification code", body_text: "Your verification code is 481920. It expires in 10 minutes." })),
+    ).toBe("481920");
+  });
+  it("handles a grouped code", () => {
+    expect(extractCodeFromEmailBody(mk({ body_text: "Enter 123-456 to continue" }))).toBe("123456");
+  });
+  it("falls back to a standalone 6-digit code", () => {
+    expect(extractCodeFromEmailBody(mk({ body_text: "Welcome!\n\n294107\n\nTeam" }))).toBe("294107");
+  });
+  it("strips HTML and reads the code from body_html", () => {
+    expect(
+      extractCodeFromEmailBody(mk({ body_html: "<p>Your code is <b>550913</b></p>" })),
+    ).toBe("550913");
+  });
+  it("returns null when there's no code-shaped string (don't type garbage)", () => {
+    expect(extractCodeFromEmailBody(mk({ subject: "Welcome to Acme", body_text: "Thanks for signing up in 2026!" }))).toBeNull();
+    expect(extractCodeFromEmailBody(mk({}))).toBeNull();
   });
 });
 
