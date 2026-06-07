@@ -228,9 +228,7 @@ function VaultRow({
   const [shown, setShown] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [addingField, setAddingField] = useState(false);
-  const [editingHosts, setEditingHosts] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
 
   // Fetch + cache the field map once; reveal and copy both need it.
@@ -360,9 +358,7 @@ function VaultRow({
           { key: "reveal", label: shown ? "Hide" : "Reveal", onClick: onReveal },
           { key: "copy", label: "Copy", onClick: onCopy },
           { key: "verify", label: "Verify", onClick: onVerify },
-          { key: "rename", label: "Rename", onClick: () => setRenaming(true) },
-          { key: "add-field", label: "Add field", onClick: () => setAddingField(true) },
-          { key: "hosts", label: "Edit hosts", onClick: () => setEditingHosts(true) },
+          { key: "edit", label: "Edit", onClick: () => setEditing(true) },
           { key: "delete", label: "Delete", onClick: () => setConfirmDelete(true), danger: true },
         ]}
       />
@@ -378,38 +374,16 @@ function VaultRow({
         />
       )}
 
-      {renaming && (
-        <RenameModal
+      {editing && (
+        <EditModal
           cred={cred}
-          onClose={() => setRenaming(false)}
-          onRenamed={() => {
-            setRenaming(false);
-            onChanged();
-          }}
-        />
-      )}
-
-      {addingField && (
-        <AddFieldModal
-          cred={cred}
-          onClose={() => setAddingField(false)}
-          onAdded={() => {
-            setAddingField(false);
-            // The cached reveal is now missing the new field — drop it so
-            // the next reveal re-fetches the full set.
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            // Fields/label/hosts may have changed — drop the cached reveal
+            // so the next one re-fetches, and reload the list.
             setFields(null);
             setShown(false);
-            onChanged();
-          }}
-        />
-      )}
-
-      {editingHosts && (
-        <EditHostsModal
-          cred={cred}
-          onClose={() => setEditingHosts(false)}
-          onSaved={() => {
-            setEditingHosts(false);
             onChanged();
           }}
         />
@@ -529,172 +503,12 @@ function DeleteModal({
 }
 
 // Rename an entry's label (non-secret). Re-store/rotation is unaffected.
-function RenameModal({
-  cred,
-  onClose,
-  onRenamed,
-}: {
-  cred: Cred;
-  onClose: () => void;
-  onRenamed: () => void;
-}) {
-  const [label, setLabel] = useState(cred.label === "default" ? "" : cred.label);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = useCallback(async () => {
-    const next = label.trim();
-    if (next.length === 0) {
-      setError("Enter a name.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: next });
-      onRenamed();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Rename failed.");
-      setBusy(false);
-    }
-  }, [cred.id, label, onRenamed]);
-
-  return (
-    <Modal
-      title={`Rename ${cred.service ?? "entry"}`}
-      subtitle="A name to tell entries of the same service apart. Doesn't change the stored key."
-      onClose={onClose}
-    >
-      <div className="form">
-        {error !== null && <div className="form-err">{error}</div>}
-        <div className="field">
-          <label htmlFor={`rename-${cred.id}`}>Entry name</label>
-          <input
-            id={`rename-${cred.id}`}
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="e.g. prod, staging, personal"
-            maxLength={60}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-            }}
-          />
-        </div>
-        <div className="form-actions">
-          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
-            {busy ? "Saving…" : "Save name"}
-          </button>
-          <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// Add a single new field to an entry. The server merges it into the
-// existing encrypted blob — we never see (or send) the existing values.
-function AddFieldModal({
-  cred,
-  onClose,
-  onAdded,
-}: {
-  cred: Cred;
-  onClose: () => void;
-  onAdded: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const save = useCallback(async () => {
-    const fieldName = name.trim();
-    if (fieldName.length === 0 || value.length === 0) {
-      setError("Both a field name and a value are required.");
-      return;
-    }
-    if (cred.field_names.includes(fieldName)) {
-      setError(`This entry already has a "${fieldName}" field.`);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await apiPost(`/v1/vault/credentials/${cred.id}/fields`, {
-        name: fieldName,
-        value,
-      });
-      onAdded();
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setError(`This entry already has a "${fieldName}" field.`);
-      } else {
-        setError(err instanceof Error ? err.message : "Add field failed.");
-      }
-      setBusy(false);
-    }
-  }, [cred.id, cred.field_names, name, value, onAdded]);
-
-  return (
-    <Modal
-      title={`Add a field to ${cred.service ?? "entry"}`}
-      subtitle="Stored encrypted alongside the existing fields. Existing values are untouched."
-      onClose={onClose}
-    >
-      <div className="form">
-        {error !== null && <div className="form-err">{error}</div>}
-        {cred.field_names.length > 0 && (
-          <p className="hint">
-            Existing fields: <span className="mono">{cred.field_names.join(", ")}</span>
-          </p>
-        )}
-        <div className="field">
-          <label htmlFor={`field-name-${cred.id}`}>Field name</label>
-          <input
-            id={`field-name-${cred.id}`}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. region, account_id"
-            maxLength={120}
-            autoFocus
-          />
-        </div>
-        <div className="field">
-          <label htmlFor={`field-value-${cred.id}`}>Value</label>
-          <input
-            id={`field-value-${cred.id}`}
-            className="mono"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="secret value"
-            maxLength={8192}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-            }}
-          />
-        </div>
-        <div className="form-actions">
-          <button className="btn-primary" type="button" onClick={save} disabled={busy}>
-            {busy ? "Adding…" : "Add field"}
-          </button>
-          <button className="btn-secondary" type="button" onClick={onClose}>
-            Cancel
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// Edit the host allowlist `use_credential` enforces against. The proxy
-// HARD-rejects any off-allowlist host (403), so a credential with an empty
-// list can't be used at all — this is how the user unblocks it. The server
-// normalises + validates each host (bare hostname, no scheme/path); a bad
-// entry comes back 400.
-function EditHostsModal({
+// One editor for everything mutable on a credential: the entry name
+// (label), the host allowlist use_credential enforces, the secret value
+// (single-field keys), and adding a field. Replaces the separate Rename /
+// Add field / Edit hosts actions. Saves only what changed, hitting the
+// matching endpoint per section; blanks are left untouched.
+function EditModal({
   cred,
   onClose,
   onSaved,
@@ -703,63 +517,152 @@ function EditHostsModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  // One host per line — the simplest editor for a 1-3 entry list.
-  const [text, setText] = useState(cred.allowed_hosts.join("\n"));
+  const singleField = cred.field_names.length === 1;
+  const [label, setLabel] = useState(cred.label === "default" ? "" : cred.label);
+  const [hostsText, setHostsText] = useState(cred.allowed_hosts.join("\n"));
+  const [newValue, setNewValue] = useState(""); // replace single-field secret
+  const [fieldName, setFieldName] = useState(""); // add a new field
+  const [fieldValue, setFieldValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const save = useCallback(async () => {
-    // Accept newline- or comma-separated input; trim, drop blanks, dedupe.
-    const hosts = Array.from(
-      new Set(
-        text
-          .split(/[\n,]/)
-          .map((h) => h.trim())
-          .filter((h) => h.length > 0),
-      ),
-    );
     setBusy(true);
     setError(null);
     try {
-      await apiPatch(`/v1/vault/credentials/${cred.id}/allowed-hosts`, { hosts });
+      // 1. Label (rename) — only if changed.
+      const nextLabel = label.trim() === "" ? "default" : label.trim();
+      if (nextLabel !== cred.label) {
+        await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: nextLabel });
+      }
+      // 2. Allowed hosts — newline/comma separated, trimmed + deduped.
+      const hosts = Array.from(
+        new Set(hostsText.split(/[\n,]/).map((h) => h.trim()).filter((h) => h.length > 0)),
+      );
+      const hostsChanged =
+        hosts.length !== cred.allowed_hosts.length ||
+        hosts.some((h, i) => h !== cred.allowed_hosts[i]);
+      if (hostsChanged) {
+        await apiPatch(`/v1/vault/credentials/${cred.id}/allowed-hosts`, { hosts });
+      }
+      // 3. Replace the secret (single-field keys only — multi-field rotation
+      //    goes through the New credential upsert).
+      if (singleField && newValue !== "") {
+        await apiPatch(`/v1/vault/credentials/${cred.id}`, {
+          fields: { [cred.field_names[0]!]: newValue },
+        });
+      }
+      // 4. Add a new field (both name + value, or neither).
+      const fn = fieldName.trim();
+      if (fn !== "" || fieldValue !== "") {
+        if (fn === "" || fieldValue === "") {
+          setError("A new field needs both a name and a value.");
+          setBusy(false);
+          return;
+        }
+        if (cred.field_names.includes(fn)) {
+          setError(`This entry already has a "${fn}" field.`);
+          setBusy(false);
+          return;
+        }
+        await apiPost(`/v1/vault/credentials/${cred.id}/fields`, { name: fn, value: fieldValue });
+      }
       onSaved();
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) {
-        setError("One of those isn't a valid host. Use a bare hostname like api.example.com (no https://, no path).");
+        setError("One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).");
+      } else if (err instanceof ApiError && err.status === 409) {
+        setError(`This entry already has a "${fieldName.trim()}" field.`);
       } else {
-        setError(err instanceof Error ? err.message : "Couldn't save the hosts.");
+        setError(err instanceof Error ? err.message : "Couldn't save your changes.");
       }
       setBusy(false);
     }
-  }, [cred.id, text, onSaved]);
+  }, [cred, label, hostsText, newValue, fieldName, fieldValue, singleField, onSaved]);
 
   return (
     <Modal
-      title={`Allowed hosts for ${cred.service ?? "this key"}`}
-      subtitle="use_credential can only call these hosts — everything else is blocked. One per line, bare hostname (e.g. api.openrouter.ai). Empty = the key can't be used until you add one."
+      title={`Edit ${cred.service ?? "credential"}`}
+      subtitle="Change the entry name, the hosts use_credential may call, the secret, or add a field. Blank fields are left unchanged."
       onClose={onClose}
     >
       <div className="form">
         {error !== null && <div className="form-err">{error}</div>}
+
         <div className="field">
-          <label htmlFor={`hosts-${cred.id}`}>Hosts</label>
-          <textarea
-            id={`hosts-${cred.id}`}
-            className="mono"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={"api.openrouter.ai\npaper-api.alpaca.markets"}
-            rows={4}
-            autoFocus
-            onKeyDown={(e) => {
-              // Cmd/Ctrl+Enter saves; plain Enter inserts a newline (list).
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void save();
-            }}
+          <label htmlFor={`edit-label-${cred.id}`}>Entry name</label>
+          <input
+            id={`edit-label-${cred.id}`}
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="default"
+            maxLength={60}
           />
+          <span className="field-hint">Tells entries of the same service apart (prod/dev).</span>
         </div>
+
+        <div className="field">
+          <label htmlFor={`edit-hosts-${cred.id}`}>Allowed hosts</label>
+          <textarea
+            id={`edit-hosts-${cred.id}`}
+            className="mono"
+            value={hostsText}
+            onChange={(e) => setHostsText(e.target.value)}
+            placeholder={"api.openrouter.ai\npaper-api.alpaca.markets"}
+            rows={3}
+          />
+          <span className="field-hint">
+            use_credential can only call these hosts. One per line; empty = unusable until you add one.
+          </span>
+        </div>
+
+        {singleField ? (
+          <div className="field">
+            <label htmlFor={`edit-secret-${cred.id}`}>Replace secret</label>
+            <input
+              id={`edit-secret-${cred.id}`}
+              className="mono"
+              type="password"
+              value={newValue}
+              onChange={(e) => setNewValue(e.target.value)}
+              placeholder="leave blank to keep current"
+              maxLength={8192}
+              autoComplete="off"
+            />
+          </div>
+        ) : (
+          <p className="hint">
+            Fields: <span className="mono">{cred.field_names.join(", ")}</span> — rotate a
+            multi-field value by re-saving the key from the New credential page.
+          </p>
+        )}
+
+        <div className="field">
+          <label htmlFor={`edit-newfield-${cred.id}`}>Add a field (optional)</label>
+          <div className="field-pair">
+            <input
+              id={`edit-newfield-${cred.id}`}
+              className="mono field-name"
+              value={fieldName}
+              onChange={(e) => setFieldName(e.target.value)}
+              placeholder="name"
+              maxLength={120}
+            />
+            <input
+              className="mono"
+              type="password"
+              value={fieldValue}
+              onChange={(e) => setFieldValue(e.target.value)}
+              placeholder="value"
+              maxLength={8192}
+              autoComplete="off"
+            />
+          </div>
+        </div>
+
         <div className="form-actions">
           <button className="btn-primary" type="button" onClick={save} disabled={busy}>
-            {busy ? "Saving…" : "Save hosts"}
+            {busy ? "Saving…" : "Save changes"}
           </button>
           <button className="btn-secondary" type="button" onClick={onClose}>
             Cancel
