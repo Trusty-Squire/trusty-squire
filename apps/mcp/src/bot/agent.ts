@@ -5088,11 +5088,36 @@ export class SignupAgent {
       // would otherwise read as "other". (A promoted-skill URL is replay-
       // verified and a guessed URL that's wrong is recovered here too.)
       let needsRecovery = false;
-      if (task.signupUrl === undefined) {
+      // Before any recovery: are we ALREADY authenticated for this service?
+      // The operator's own session can be bound to the service (e.g.
+      // Anthropic, where the bot rides the operator's account), so the
+      // landing page is a dashboard with no signup CTA. Recovery would then
+      // chase a non-existent signup page — Tier B finds no CTA, the Google
+      // fallback finds no on-domain match — and bail `no_signup_link`
+      // ("the service likely doesn't have a public self-serve signup"),
+      // which is flatly wrong: we're simply logged in. Skip recovery and let
+      // planExecuteWithRetry's OAuth-first scan detect the authenticated
+      // state (already_oauth) and jump straight to key extraction — the same
+      // post-verify path runOAuthFlow uses after a successful handshake.
+      // detectAlreadySignedIn's precondition (no email/password/tel input
+      // visible) makes this safe: a real signup/login page short-circuits to
+      // false before any dashboard marker is considered.
+      const landed = await this.browser.getState();
+      const landedInventory = await this.browser.extractInteractiveElements();
+      if (
+        detectAlreadySignedIn({
+          inventory: landedInventory,
+          url: landed.url,
+        })
+      ) {
+        steps.push(
+          `${task.service}: already authenticated (dashboard markers, no signup CTA) — ` +
+            `skipping signup, routing to key extraction`,
+        );
+      } else if (task.signupUrl === undefined) {
         needsRecovery = !(await this.looksLikeSignupPage());
       } else {
-        const rendered = (await this.browser.getState()).html;
-        const klass = classifySignupHtml(rendered);
+        const klass = classifySignupHtml(landed.html);
         if (klass !== "signup" && !(await this.looksLikeSignupPage())) {
           needsRecovery = true;
           steps.push(
@@ -5193,9 +5218,12 @@ export class SignupAgent {
             success: false,
             error:
               `no_signup_link: searched for ${task.service}'s signup page and ` +
-              `found no on-domain candidates. The service likely doesn't have ` +
-              `a public self-serve signup, or the bot's domain guard rejected ` +
-              `every match. Sign up manually.`,
+              `found no on-domain candidates. Likely causes: you already have an ` +
+              `account and the bot landed on a logged-in dashboard with no signup ` +
+              `CTA (the already-authenticated detector didn't recognize this ` +
+              `dashboard's markers); the service has no public self-serve signup; ` +
+              `or the bot's domain guard rejected every match. Sign up manually, ` +
+              `or extract the key from the existing session.`,
             steps,
             ...this.resultTail(),
           };
