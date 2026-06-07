@@ -1,0 +1,65 @@
+# Re-capture queue — services whose verify-failing skills were captured from
+# throwaway discovery accounts. Re-run discovery against the persistent operator
+# account so the synthesized recipe matches what verify replays. See the
+# 2026-06-07 verify-pass diagnosis.
+
+- slug: sentry
+  name: Sentry
+  signup_url: https://sentry.io/signup/
+  oauth_provider: google
+  scope_hint: max permissions on every scope dropdown — Admin > Write > Read
+  status: pending
+  notes: "Re-capture: prior skill failed verify on throwaway-account state
+    (hardcoded org/psid/spurious steps). Re-run against the persistent operator
+    account (already-authenticated -> key extraction) to synthesize a replayable
+    recipe."
+- slug: render
+  name: Render
+  signup_url: https://dashboard.render.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: "Re-capture: prior skill failed verify on throwaway-account state
+    (hardcoded org/psid/spurious steps). Re-run against the persistent operator
+    account (already-authenticated -> key extraction) to synthesize a replayable
+    recipe."
+- slug: deepinfra
+  name: DeepInfra
+  signup_url: https://deepinfra.com/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: "Re-capture: prior skill failed verify on throwaway-account state
+    (hardcoded org/psid/spurious steps). Re-run against the persistent operator
+    account (already-authenticated -> key extraction) to synthesize a replayable
+    recipe."
+- slug: kinde
+  name: Kinde
+  signup_url: https://app.kinde.com/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: "Re-capture: prior skill failed verify on throwaway-account state
+    (hardcoded org/psid/spurious steps). Re-run against the persistent operator
+    account (already-authenticated -> key extraction) to synthesize a replayable
+    recipe."
+- slug: replicate
+  name: Replicate
+  signup_url: https://replicate.com/signin
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: "Re-capture: prior skill failed verify on throwaway-account state
+    (hardcoded org/psid/spurious steps). Re-run against the persistent operator
+    account (already-authenticated -> key extraction) to synthesize a replayable
+    recipe."
+- slug: porter
+  name: Porter
+  signup_url: https://dashboard.porter.run/login
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: "Re-capture: prior skill failed verify on throwaway-account state
+    (hardcoded org/psid/spurious steps). Re-run against the persistent operator
+    account (already-authenticated -> key extraction) to synthesize a replayable
+    recipe."
