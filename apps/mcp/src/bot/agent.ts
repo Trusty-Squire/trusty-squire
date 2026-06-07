@@ -7843,6 +7843,25 @@ ${formatInventory(input.inventory)}`,
       // widened (the "API Keys"/"Settings" links must survive ranking).
       // Reading state can still race a navigation — a transient throw
       // burns the round rather than crashing the whole run.
+      // Dismiss any cookie/consent banner BEFORE reading the page or
+      // planning a click. A consent overlay (Google "Accept all", GDPR
+      // banners) intercepts pointer events, so the planner's clicks land
+      // on the banner instead of the dashboard and the loop stalls / loops /
+      // times out. MEASURED 2026-06-07: meilisearch reached /settings/keys
+      // but sat behind an Accept-All overlay and ran out the 600s clock.
+      // The form-fill loop already dismisses banners every round; the
+      // post-verify loop never did. Best-effort — a dismiss failure must
+      // not burn the round.
+      try {
+        const dismissed = await this.browser.dismissConsentBanner();
+        if (dismissed !== null) {
+          args.steps.push(
+            `Post-verify round ${round}: dismissed consent banner ("${dismissed}")`,
+          );
+        }
+      } catch {
+        // best-effort
+      }
       let state: BrowserState;
       let inventory: InteractiveElement[];
       try {
