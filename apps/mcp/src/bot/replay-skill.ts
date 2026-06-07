@@ -58,7 +58,9 @@ import {
   findOAuthButton,
   isCredentialNoiseCandidate,
 } from "./agent.js";
-import type { OAuthProviderId } from "./oauth-providers.js";
+import { type OAuthProviderId, OAUTH_PROVIDERS, extractOAuthScopes } from "./oauth-providers.js";
+import { scrapeGoogleScopePhrases } from "./google-login.js";
+import type { Page } from "playwright";
 import {
   filterByNearTextHint,
   nearTextHintMatches,
@@ -2007,6 +2009,104 @@ export function inferProviderFromUrl(url: string): "google" | "github" | null {
 // consent), the budget will tick down without resolution and we bail
 // to needs_login — that's the "laws of physics" boundary: a verifier
 // process running without a human can't complete a challenge.
+// The underlying Playwright page (same cast the agent uses). The verify
+// path drives a few deterministic clicks the high-level API doesn't expose.
+function pageOf(browser: BrowserController): Page | null {
+  return (browser as unknown as { page: Page | null }).page ?? null;
+}
+
+// Click the Google "Choose an account" card. Deterministic — mirrors the
+// agent's tryClickGoogleChooserCard.
+async function clickGoogleChooserCard(browser: BrowserController): Promise<boolean> {
+  const page = pageOf(browser);
+  if (page === null) return false;
+  for (const sel of ['[data-identifier]:visible', '[role="link"]:has-text("@")', 'div[jsaction]:has-text("@")']) {
+    try {
+      const loc = page.locator(sel).first();
+      await loc.waitFor({ state: "visible", timeout: 2000 });
+      await loc.click({ timeout: 3000 });
+      return true;
+    } catch {
+      /* try the next selector */
+    }
+  }
+  return false;
+}
+
+// Click a consent "Continue / Allow / Authorize" affordance (Google +
+// GitHub render these as a button or link). Deterministic.
+async function clickConsentAffordance(browser: BrowserController): Promise<boolean> {
+  const page = pageOf(browser);
+  if (page === null) return false;
+  const name = /^(continue|allow|authorize|approve|accept|agree|i agree)$/i;
+  for (const role of ["button", "link"] as const) {
+    try {
+      const loc = page.getByRole(role, { name }).first();
+      await loc.waitFor({ state: "visible", timeout: 2000 });
+      await loc.click({ timeout: 3000 });
+      return true;
+    } catch {
+      /* try the next role */
+    }
+  }
+  return false;
+}
+
+// Deterministically walk the provider's account-chooser + consent screens
+// after the OAuth affordance is clicked, so a VERIFY replay can complete
+// the handshake WITHOUT an LLM. Reuses the canonical classifiers
+// (oauth-providers) + scope-gate (google-login). It rides the session the
+// operator already established via `mcp login` — it does NOT log in.
+// Aborts to needs_login on a real challenge (2FA / verify-it's-you) or a
+// sensitive (non-basic) scope grant — both genuinely need a human.
+export async function walkOAuthConsent(
+  browser: BrowserController,
+  providerId: OAuthProviderId,
+): Promise<"ok" | "needs_login"> {
+  const provider = OAUTH_PROVIDERS[providerId];
+  const MAX_NAV = 6;
+  for (let i = 0; i < MAX_NAV; i++) {
+    if (browser.oauthPageClosed()) return "ok"; // popup closed → back on service
+    const url = browser.currentUrl();
+    let body: string;
+    try {
+      body = (await browser.extractText()).slice(0, 4000);
+    } catch {
+      await browser.wait(1); // mid-navigation between provider screens
+      continue;
+    }
+    // Account chooser is a PICKER, not a consent — click the card.
+    if (providerId === "google" && /\/(?:accountchooser|chooseaccount|oauthchooseaccount)/i.test(url)) {
+      const clicked = await clickGoogleChooserCard(browser);
+      console.error(`[replay-oauth] account chooser — ${clicked ? "clicked card" : "no card found"}`);
+      await browser.wait(2);
+      continue;
+    }
+    const state = provider.classifyAuthState(url, body);
+    console.error(`[replay-oauth] state=${state} url=${url.slice(0, 100)}`);
+    if (state === "not_provider") return "ok"; // flow left the provider
+    if (state === "challenge" || state === "needs_login") return "needs_login";
+    // state === "consent": scope-gate it. Only auto-approve identity-basic
+    // scopes — verify must never grant a sensitive scope blind.
+    const scopes = extractOAuthScopes(url);
+    const basic =
+      scopes !== null
+        ? provider.scopesAreBasic(scopes)
+        : // Google hides scopes behind an opaque part= token; fall back to
+          // the visible DOM — basic only when NO scope-grant phrases show.
+          providerId === "google" && scrapeGoogleScopePhrases(body).length === 0;
+    if (!basic) {
+      console.error("[replay-oauth] consent scopes not basic/unreadable — needs_login");
+      return "needs_login";
+    }
+    const clicked = await clickConsentAffordance(browser);
+    console.error(`[replay-oauth] consent (basic) — ${clicked ? "approved" : "no affordance found"}`);
+    if (!clicked) return "needs_login";
+    await browser.wait(2);
+  }
+  return browser.oauthPageClosed() ? "ok" : "needs_login";
+}
+
 async function attemptOAuthRecovery(
   browser: BrowserController,
   expectedUrl: string,
@@ -2017,19 +2117,22 @@ async function attemptOAuthRecovery(
   if (profiles.length === 0) {
     return { kind: "needs_login", provider: "google" };
   }
-  // Inventory once. Look for an OAuth button matching any provider
-  // we have a cached session for. Prefer the first match in profile
-  // order so a Google-first user doesn't end up bound to GitHub on
-  // services that offer both.
-  const inventory = await browser.extractInteractiveElements();
+  // Find an OAuth button matching a provider we have a cached session for.
+  // Retry: SPA login pages (posthog, kinde) render the OAuth buttons a beat
+  // after domcontentloaded, so a single inventory races them → false
+  // "no button" needs_login. Re-inventory a few times before giving up.
   let pickedProvider: OAuthProviderId | null = null;
   let pickedButton: ReturnType<typeof findOAuthButton> | null = null;
-  for (const p of profiles) {
-    const btn = findOAuthButton(inventory, p);
-    if (btn !== null) {
-      pickedProvider = p;
-      pickedButton = btn;
-      break;
+  for (let attempt = 0; attempt < 4 && pickedButton === null; attempt++) {
+    if (attempt > 0) await browser.wait(2);
+    const inventory = await browser.extractInteractiveElements();
+    for (const p of profiles) {
+      const btn = findOAuthButton(inventory, p);
+      if (btn !== null) {
+        pickedProvider = p;
+        pickedButton = btn;
+        break;
+      }
     }
   }
   if (pickedProvider === null || pickedButton === null) {
@@ -2039,11 +2142,17 @@ async function attemptOAuthRecovery(
     const guess = inferProviderFromUrl(browser.currentUrl()) ?? "google";
     return { kind: "needs_login", provider: guess };
   }
-  // Drive the click. startOAuth adopts whichever Chrome target
-  // catches the redirect (popup OR same-tab). After the click, poll
-  // for the round-trip to complete: either the popup closes, OR the
-  // active page's URL returns to the expected service domain.
+  // Drive the click, then deterministically walk the account-chooser +
+  // consent screens (the old code clicked and only WAITED, so any
+  // interstitial stalled it into needs_login).
   await browser.startOAuth(pickedButton.selector);
+  const walk = await walkOAuthConsent(browser, pickedProvider);
+  if (walk === "needs_login") {
+    return { kind: "needs_login", provider: pickedProvider };
+  }
+  // Confirm we're back: poll for the round-trip, then re-navigate to the
+  // exact expected URL so the rest of the skill runs against the captured
+  // page (not a /welcome or /dashboard landing).
   const expectedHost = new URL(expectedUrl).hostname;
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -2057,15 +2166,12 @@ async function attemptOAuthRecovery(
     }
     if (host === expectedHost) break;
   }
-  // Verify we're actually back. Re-navigate to the exact expected URL
-  // so the rest of the skill executes against the page it was
-  // captured against (not, e.g., a /welcome or /dashboard landing).
   await browser.goto(expectedUrl);
   await browser.wait(2);
   const drift = detectNavigationDrift(browser.currentUrl(), expectedUrl);
   if (drift !== null) {
-    // OAuth round-trip didn't unlock the destination — likely
-    // expired cookies. The user needs to re-run `mcp login`.
+    // Round-trip didn't unlock the destination — session genuinely
+    // expired/challenged. The operator needs to re-run `mcp login`.
     return { kind: "needs_login", provider: pickedProvider };
   }
   return { kind: "ok" };
