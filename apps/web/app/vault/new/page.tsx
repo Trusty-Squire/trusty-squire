@@ -19,6 +19,9 @@ const KNOWN_HOSTS: Record<string, string[]> = {
   postmark: ["api.postmarkapp.com"],
   render: ["api.render.com"],
   vercel: ["api.vercel.com"],
+  alpaca: ["paper-api.alpaca.markets", "api.alpaca.markets", "data.alpaca.markets"],
+  fred: ["api.stlouisfed.org"],
+  stlouisfed: ["api.stlouisfed.org"],
 };
 
 function derivedHosts(service: string): string[] {
@@ -39,6 +42,7 @@ export default function NewCredentialPage() {
   const [fields, setFields] = useState<FieldRow[]>([{ name: "", value: "" }]);
   const [advanced, setAdvanced] = useState(false);
   const [label, setLabel] = useState("default");
+  const [allowedHosts, setAllowedHosts] = useState("");
   const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +55,13 @@ export default function NewCredentialPage() {
       if (service.trim() === "") return;
       const payload: Record<string, unknown> = { service: service.trim() };
       if (label.trim() !== "" && label.trim() !== "default") payload.label = label.trim();
+      // Explicit allowed hosts (Advanced) → observed_hosts: the store unions
+      // them into the allowlist, so the key is usable immediately without a
+      // second trip to the Edit modal.
+      const hosts = Array.from(
+        new Set(allowedHosts.split(/[\n,]/).map((h) => h.trim()).filter((h) => h.length > 0)),
+      );
+      if (hosts.length > 0) payload.observed_hosts = hosts;
       if (multi) {
         const map: Record<string, string> = {};
         for (const f of fields) {
@@ -79,7 +90,7 @@ export default function NewCredentialPage() {
         setBusy(false);
       }
     },
-    [service, label, multi, fields, single, router],
+    [service, label, allowedHosts, multi, fields, single, router],
   );
 
   return (
@@ -108,7 +119,7 @@ export default function NewCredentialPage() {
             <span className="field-hint">
               {hosts.length > 0
                 ? `↳ proxy will allow ${hosts.join(", ")}`
-                : "↳ no hosts known — set allowed hosts after saving to enable use_credential"}
+                : "↳ no default known — set Allowed hosts under Advanced to enable use_credential"}
             </span>
           )}
         </div>
@@ -192,21 +203,38 @@ export default function NewCredentialPage() {
           {advanced ? "▾" : "▸"} Advanced
         </button>
         {advanced && (
-          <div className="field">
-            <label htmlFor="label">Label</label>
-            <input
-              id="label"
-              className="mono"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder="default"
-              autoComplete="off"
-            />
-            <span className="field-hint">
-              Keeps prod/dev keys for the same service apart. Allowed hosts are
-              editable from the vault list after saving.
-            </span>
-          </div>
+          <>
+            <div className="field">
+              <label htmlFor="label">Label</label>
+              <input
+                id="label"
+                className="mono"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="default"
+                autoComplete="off"
+              />
+              <span className="field-hint">
+                Keeps prod/dev keys for the same service apart.
+              </span>
+            </div>
+            <div className="field">
+              <label htmlFor="allowed-hosts">Allowed hosts</label>
+              <textarea
+                id="allowed-hosts"
+                className="mono"
+                value={allowedHosts}
+                onChange={(e) => setAllowedHosts(e.target.value)}
+                placeholder={hosts.length > 0 ? hosts.join("\n") : "api.example.com"}
+                rows={3}
+                autoComplete="off"
+              />
+              <span className="field-hint">
+                Hosts use_credential may call. One per line. Leave blank to use the
+                known default for this service (shown above), or set them here.
+              </span>
+            </div>
+          </>
         )}
 
         {error !== null && <div className="form-err">{error}</div>}
