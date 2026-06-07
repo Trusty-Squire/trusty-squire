@@ -472,7 +472,7 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_LLM_TIER` | `cheap` | Primary LLM tier — `cheap`, `premium`, or `free`. `free` routes through OpenRouter's free models with a paid escape-hatch; the closed-loop verifier worker sets this. End-user installs leave it unset. |
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver. When set, runCaptchaGate falls through to 2Captcha after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). |
 | `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15`   | Per-signup circuit breaker |
-| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. |
+| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. **Operator-box egress (the Mac SSH-SOCKS tunnel): see `docs/HOUSEKEEPER-OPERATIONS.md`.** |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID. Required when running `mcp housekeeper --mode=discover` (inbox-alias scoping + auto-promote attribution). End-user installs read this from session.json. |
@@ -481,32 +481,27 @@ extension state on launch and won't reload mid-session.
 
 ### Housekeeper env (`mcp housekeeper`)
 
-The merged verifier + discoverer + harvester. Runs on the operator's
-headless dev server, NOT on end-user laptops, and NOT shipped in the
-npm tarball (`apps/mcp/package.json`'s `files` array excludes
-`dist/housekeeper`). Run from a source checkout:
-`node apps/mcp/dist/bin.js housekeeper [opts]`.
+The merged verifier + discoverer + harvester. Runs from a SOURCE checkout on
+the operator box (`node apps/mcp/dist/bin.js housekeeper`), NOT on end-user
+laptops, and is excluded from the npm tarball (`apps/mcp/package.json` `files`
+omits `dist/housekeeper`).
 
-Three modes share one CLI — `--mode=verify` (skill replay; the default),
-`--mode=discover` (universal bot), and `--mode=heal` (the closed-loop
-self-healing pass). Discover sources from telemetry candidates by
-default, or from a curated YAML when `--from=<path>` is set (the former
-"harvest" case). `--service=<slug>` is an ad-hoc single-service shortcut
-that implies discover. Each requires different auth.
+**→ Full operational runbook: `docs/HOUSEKEEPER-OPERATIONS.md`** — the single
+source of truth for the egress model (datacenter direct vs the Mac SSH-SOCKS
+tunnel), the **autonomous OAuth session model + what NOT to do**, the failure
+taxonomy (`needs_login`/`nav_timeout`/rot/wall), running a verify sweep /
+draining the backlog, and a diagnostic checklist. **Read it before debugging a
+sweep or changing housekeeper behavior — most failures are session state, not
+code.** (Operational narrative lives only there; this file holds values + the
+link.)
 
-**`--mode=heal` (closed loop, `docs/DESIGN-closed-loop-remediation.md`).**
-One scheduled pass chains verify→discover and emits ONE digest. Verify
-demotes skills only on FIXABLE ROT (step/validator/extraction ×3 — walls
-quarantine on the first hit; transient/infra blips never demote, so the
-loop can't thrash a working skill); discover then re-skills the
-freshly-demoted services (sourced regardless of demand) and skips
-quarantined ones. The digest (`verified N · demoted M · quarantined Q ·
-re-skilled K · needs human ~X`) goes to Telegram + the journal — the
-actionable line instead of crawling panels. The operator worklist is
-`mcp skill needs-human` (or `GET /admin/needs-human`); each row carries
-WHY (`demotion_reason` = rot/wall/manual). Run it on a 12h systemd user
-timer — see `tools/systemd/` (service + timer + install README). Needs
-`REGISTRY_ADMIN_BEARER` (both phases are admin-gated).
+Three modes share one CLI: `--mode=verify` (skill replay; default),
+`--mode=discover` (universal bot; needs a machine token + account id),
+`--mode=heal` (scheduled verify→discover→digest, 12h systemd timer in
+`tools/systemd/`; design in `docs/DESIGN-closed-loop-remediation.md`).
+`--from=<path>` sources discover from a curated YAML; `--service=<slug>` is a
+single-service shortcut that implies discover. Each mode requires different
+auth (table below).
 
 | Env var | Required by | Effect |
 |---|---|---|
