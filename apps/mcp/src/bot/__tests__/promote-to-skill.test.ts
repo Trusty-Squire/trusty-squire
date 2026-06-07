@@ -2467,3 +2467,41 @@ describe("pickHrefHint", () => {
     expect(pickHrefHint(inventoryElement({ tag: "a", href: null }))).toBeNull();
   });
 });
+
+describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
+  const prov = { run_id: "r", round_index: 0 };
+  it("emits one extract_labeled step per credential named in the reason", async () => {
+    const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
+    const observed = {
+      kind: "extract" as const,
+      reason:
+        "application_id='86WV27C86H' and search_api_key='4725e44b819e98d508ed7342966d1bdb' " +
+        "and admin_api_key='38a495f92e835361f23473ff12bd0c05'",
+    };
+    // The parser validates each value appears on the page; mirror real use.
+    const pageText =
+      "Application ID 86WV27C86H Search API Key 4725e44b819e98d508ed7342966d1bdb " +
+      "Admin API Key 38a495f92e835361f23473ff12bd0c05";
+    const steps = synthesizeLabeledExtractSteps(observed, pageText, prov);
+    expect(steps).not.toBeNull();
+    expect(steps!.map((s) => (s.kind === "extract_labeled" ? s.produces : s.kind))).toEqual([
+      "application_id",
+      "search_api_key",
+      "admin_api_key",
+    ]);
+    expect(steps!.every((s) => s.kind === "extract_labeled")).toBe(true);
+    // label_hint is the space-separated form the page renders.
+    const appId = steps!.find((s) => s.kind === "extract_labeled" && s.produces === "application_id");
+    expect(appId && appId.kind === "extract_labeled" && appId.label_hint).toBe("application id");
+  });
+  it("returns null for a single-credential reason (legacy path preserved)", async () => {
+    const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
+    const observed = { kind: "extract" as const, reason: "the api_key='re_abc123def456' is shown" };
+    expect(synthesizeLabeledExtractSteps(observed, "", prov)).toBeNull();
+  });
+  it("returns null when the reason names no labeled credentials", async () => {
+    const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
+    const observed = { kind: "extract" as const, reason: "credentials are visible on the page" };
+    expect(synthesizeLabeledExtractSteps(observed, "", prov)).toBeNull();
+  });
+});

@@ -45,6 +45,7 @@ import {
 } from "@trusty-squire/skill-schema";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep } from "./agent.js";
+import { extractAllLabeledTokensFromReason } from "./agent.js";
 import {
   verifyCaptureChain,
   type OnboardingCaseFile,
@@ -208,10 +209,36 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
         s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
     );
   const multiCred = extractStepIndices.length > 1;
+  // Phase-E label-scoped multi-cred: each extract_labeled step already
+  // names the credential it produces (distinct produces guaranteed by
+  // collapseRedundantExtracts). Build one spec per distinct produces —
+  // no upgradeToMultiCred pass (that's for the copy_button/regex shape).
+  const labeledSteps = stepsResult.steps.filter(
+    (s): s is Extract<SkillStep, { kind: "extract_labeled" }> =>
+      s.kind === "extract_labeled",
+  );
   let steps: SkillStep[] = stepsResult.steps;
   let credentials: SkillCredentialSpec[];
 
-  if (multiCred) {
+  if (labeledSteps.length > 0) {
+    // The label-scoped extracts are the authoritative multi-cred surface.
+    // Drop any stray single-cred extract_via_copy_button/regex steps — a
+    // round whose reason named only one credential fell to the legacy
+    // path, but that value is already covered by a labeled step (Algolia's
+    // admin_api_key shows up both ways). Leaving it would orphan an
+    // unnamed extract with no credential spec in the bundle.
+    steps = stepsResult.steps.filter(
+      (s) => s.kind !== "extract_via_copy_button" && s.kind !== "extract_via_regex",
+    );
+    const seen = new Set<string>();
+    const specs: SkillCredentialSpec[] = [];
+    for (const s of labeledSteps) {
+      if (seen.has(s.produces)) continue;
+      seen.add(s.produces);
+      specs.push(buildCredentialSpecForMulti(s.produces, "opaque", input.service));
+    }
+    credentials = specs;
+  } else if (multiCred) {
     const multiResult = upgradeToMultiCred(
       stepsResult.steps,
       verification.rounds,
@@ -351,6 +378,12 @@ function synthesizeSteps(
           steps.push(translated.step);
         }
       }
+      // Multi-cred Phase-E explode emits N label-scoped extract steps for
+      // one round (step is null in that case). collapseRedundantExtracts
+      // dedups the repeats across rounds by `produces`.
+      if (translated.steps !== undefined) {
+        for (const s of translated.steps) steps.push(s);
+      }
       continue;
     }
     // Soft-drop intermediate click/check rounds with text-resolution
@@ -390,7 +423,10 @@ function synthesizeSteps(
   // skill has no credential extraction path and the validator stage
   // below would reject — better to fail here with a precise error.
   const hasExtract = steps.some(
-    (s) => s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
+    (s) =>
+      s.kind === "extract_via_copy_button" ||
+      s.kind === "extract_via_regex" ||
+      s.kind === "extract_labeled",
   );
   if (!hasExtract) {
     if (firstSoftRejection !== null) return firstSoftRejection;
@@ -470,6 +506,11 @@ function collapseRedundantExtracts(steps: SkillStep[]): SkillStep[] {
     }
     if (s.kind === "extract_via_regex") {
       return s.pattern_name.toLowerCase();
+    }
+    if (s.kind === "extract_labeled") {
+      // Phase-E rounds re-list every credential each round, so the same
+      // labeled extract repeats; dedup by the credential it produces.
+      return s.produces;
     }
     return null;
   };
@@ -552,7 +593,7 @@ function translateStep(
   provenance: SkillStepProvenance,
   roundIndex: number,
   roundHtml: string,
-): { kind: "ok"; step: SkillStep | null } | PromoteRejection {
+): { kind: "ok"; step: SkillStep | null; steps?: SkillStep[] } | PromoteRejection {
   switch (observed.kind) {
     case "done":
     case "wait":
@@ -712,8 +753,17 @@ function translateStep(
       // when a subsequent click can't reach its target.
       return { kind: "ok", step: null };
 
-    case "extract":
+    case "extract": {
+      // Multi-cred Phase-E reason ("application_id='…' and admin_api_key='…'")
+      // explodes into N label-scoped extract steps — one per credential —
+      // so each lands as its own named credential. Single-cred captures
+      // keep the legacy copy_button/regex path (byte-equivalence).
+      const labeled = synthesizeLabeledExtractSteps(observed, roundHtml, provenance);
+      if (labeled !== null) {
+        return { kind: "ok", step: null, steps: labeled };
+      }
       return synthesizeExtractStep(observed, inventory, provenance, roundIndex, roundHtml);
+    }
 
     default: {
       // Exhaustiveness check. TypeScript narrows `observed` to `never`
@@ -1176,6 +1226,34 @@ function pickRowDisambiguator(
 }
 
 // ── Extract step + credential spec inference ─────────────────────────
+
+// Phase-E multi-cred explode. When the planner's reason names ≥2 distinct
+// labeled credentials ("application_id='…' and search_api_key='…' and
+// admin_api_key='…'"), emit one label-scoped `extract_labeled` step per
+// credential so each becomes its own named credential — instead of the
+// legacy single copy_button/regex step that can only yield one value (and
+// whose hint mis-resolves to a credential VALUE, the unparseable_credential_
+// label reject). Returns null for a single-cred round so the legacy path
+// (and its byte-equivalence) is preserved. Exported for unit testing.
+export function synthesizeLabeledExtractSteps(
+  observed: Extract<PostVerifyStep, { kind: "extract" }>,
+  roundHtml: string,
+  provenance: SkillStepProvenance,
+): SkillStep[] | null {
+  const labeled = extractAllLabeledTokensFromReason(observed.reason, roundHtml);
+  // Canonical keys only (the parser already whitelists credential labels).
+  const keys = Object.keys(labeled).filter((k) => /^[a-z][a-z0-9_]*$/.test(k));
+  if (keys.length < 2) return null;
+  return keys.map((key) => ({
+    kind: "extract_labeled",
+    // The on-page label the replay engine matches against harvested
+    // labeled-credential candidates: "application_id" → "application id"
+    // (the LABEL_PHRASES form extractLabeledCredentialCandidates emits).
+    label_hint: key.replace(/_/g, " "),
+    produces: key,
+    provenance,
+  }));
+}
 
 function synthesizeExtractStep(
   observed: Extract<PostVerifyStep, { kind: "extract" }>,
