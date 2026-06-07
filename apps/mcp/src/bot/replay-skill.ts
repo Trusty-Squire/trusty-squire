@@ -2078,8 +2078,24 @@ export async function walkOAuthConsent(
     // Account chooser is a PICKER, not a consent — click the card.
     if (providerId === "google" && /\/(?:accountchooser|chooseaccount|oauthchooseaccount)/i.test(url)) {
       const clicked = await clickGoogleChooserCard(browser);
-      console.error(`[replay-oauth] account chooser — ${clicked ? "clicked card" : "no card found"}`);
-      await browser.wait(2);
+      // The card click works, but the navigation off the chooser takes a
+      // beat. Re-reading the URL too soon re-matches the chooser and
+      // re-clicks → a no-op loop (cohere burned all 6 iterations this way).
+      // Wait for the URL to actually leave the chooser before continuing.
+      if (clicked) {
+        for (
+          let w = 0;
+          w < 8 && /\/(?:accountchooser|chooseaccount|oauthchooseaccount)/i.test(browser.currentUrl());
+          w++
+        ) {
+          await browser.wait(1);
+        }
+      } else {
+        await browser.wait(2);
+      }
+      console.error(
+        `[replay-oauth] account chooser — ${clicked ? "clicked card" : "no card found"} → ${browser.currentUrl().slice(0, 70)}`,
+      );
       continue;
     }
     const state = provider.classifyAuthState(url, body);
@@ -2099,10 +2115,16 @@ export async function walkOAuthConsent(
       console.error("[replay-oauth] consent scopes not basic/unreadable — needs_login");
       return "needs_login";
     }
+    const beforeUrl = browser.currentUrl();
     const clicked = await clickConsentAffordance(browser);
-    console.error(`[replay-oauth] consent (basic) — ${clicked ? "approved" : "no affordance found"}`);
     if (!clicked) return "needs_login";
-    await browser.wait(2);
+    // Same race as the chooser: the approve click navigates after a beat.
+    // Wait for the URL to move before re-reading, or the next pass sees the
+    // same consent URL, finds the affordance already consumed, and bails.
+    for (let w = 0; w < 8 && browser.currentUrl() === beforeUrl && !browser.oauthPageClosed(); w++) {
+      await browser.wait(1);
+    }
+    console.error(`[replay-oauth] consent (basic) — approved → ${browser.currentUrl().slice(0, 70)}`);
   }
   return browser.oauthPageClosed() ? "ok" : "needs_login";
 }
