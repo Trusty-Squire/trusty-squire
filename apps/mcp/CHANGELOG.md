@@ -1,5 +1,22 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.3-rc.2 (2026-06-07)
+
+Client side of the vault host/auth work (server shipped in the API; this
+lands the bits that live in the mcp package).
+
+- **`use_credential` query-param auth.** The tool now accepts
+  `http.query` and passes it through, so query-string-auth APIs (FRED's
+  `api_key`, some gov/weather APIs with no header auth) work:
+  `query: { api_key: "${SECRET}" }`. The secret is injected server-side
+  after the host check and never appears in the URL.
+- **Captures seed `allowed_hosts`.** The universal bot now sends the
+  signup host as `observed_hosts` when it writes a captured credential,
+  so a new key lands with a usable allowlist instead of an empty one
+  (which 403'd every `use_credential` call).
+- Carries the `nav_timeout` failure classifier (a navigation/network
+  timeout no longer counts as skill rot).
+
 ## 0.9.3-rc.1 (2026-06-06)
 
 Prerelease cut from `main` to refresh the `next` tag (the prior `next`,
