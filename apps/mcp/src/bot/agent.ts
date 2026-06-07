@@ -1615,6 +1615,19 @@ export function extractVerifyWallAlias(text: string): string | null {
     if (/\.(?:js|mjs|css|map|png|jpe?g|svg|gif|ico|woff2?|ttf|webp)$/i.test(addr)) {
       continue;
     }
+    // Reject RFC 2606 reserved-for-documentation domains. A docs/sample email
+    // like "check amy@example.com" rendered on a dashboard is never a real
+    // verification target — polling it 404s as unknown_alias and yields a
+    // false verification_not_sent. (Anthropic's console shows amy@example.com
+    // in a sample.) Covers example.{com,net,org} + the .example/.test/
+    // .invalid/.localhost reserved suffixes.
+    const domain = addr.slice(addr.indexOf("@") + 1).toLowerCase();
+    if (
+      /^example\.(?:com|net|org)$/.test(domain) ||
+      /\.(?:example|test|invalid|localhost)$/.test(domain)
+    ) {
+      continue;
+    }
     return addr;
   }
   return null;
@@ -3954,7 +3967,18 @@ export class SignupAgent {
               e.type === null) &&
             e.visible !== false,
         );
-        if (!hasFillableInput && expectsVerificationEmail(wallText)) {
+        // ...and NOT when we're already authenticated. An authenticated
+        // dashboard also has no fillable input, and can carry docs/example
+        // "check your email" copy (Anthropic's console names a sample
+        // address) — false-firing the wall here polls a bogus alias and
+        // returns verification_not_sent. The already-signed-in path below
+        // (detectAlreadySignedIn → already_oauth) routes these to key
+        // extraction instead, which is the correct destination.
+        if (
+          !hasFillableInput &&
+          expectsVerificationEmail(wallText) &&
+          !detectAlreadySignedIn({ inventory, url: state.url })
+        ) {
           const alias = extractVerifyWallAlias(wallText);
           this.pendingVerificationAlias = alias;
           steps.push(

@@ -76,7 +76,18 @@ describe("extractVerifyWallAlias", () => {
     ).toBe("amplitude-7cd6ae3d41d8@trustysquire.ai");
   });
   it("handles 'we sent a link to <addr>' phrasing", () => {
-    expect(extractVerifyWallAlias("We sent a verification link to jane@example.com — open it")).toBe("jane@example.com");
+    expect(extractVerifyWallAlias("We sent a verification link to jane-9f2@trustysquire.ai — open it")).toBe("jane-9f2@trustysquire.ai");
+  });
+  it("rejects RFC 2606 documentation/example domains (the amy@example.com false-poll)", () => {
+    // A docs/sample address rendered on a dashboard is never a real
+    // verification target — polling it 404s as unknown_alias.
+    expect(extractVerifyWallAlias("check amy@example.com for your key")).toBeNull();
+    expect(extractVerifyWallAlias("we emailed dev@example.org")).toBeNull();
+    expect(extractVerifyWallAlias("sent to user@foo.test")).toBeNull();
+    // ...but a real alias in the same copy still wins.
+    expect(
+      extractVerifyWallAlias("e.g. amy@example.com — check your real-9f2@trustysquire.ai inbox"),
+    ).toBe("real-9f2@trustysquire.ai");
   });
   it("skips email-shaped asset refs in raw HTML (the amplitude .js false positive)", () => {
     const html =
