@@ -126,8 +126,12 @@ this session (OAuth consent walk + returning-user reclassification, 0.9.3). They
 are NOT in the registry today. So N3's residual is now mostly a RE-PROMOTE: re-run
 plunk + uploadcare so they re-promote and the fixed verifier keeps them, then run
 the never-attempted five (codesandbox/tally/plausible/cronitor/growthbook) +
-replit + cockroachdb. Still data-gathering, not new code. (The current discover
-batch covers some of these.)
+replit + cockroachdb. Still data-gathering, not new code.
+
+**Queued:** all nine are in a focused queue, `tools/housekeeper-n3-repromote.yaml`
+(the main `housekeeper-services.yaml` runs strictly top-of-file + `--limit` with no
+rotation, so these buried entries never get reached by a small batch). Run:
+`node apps/mcp/dist/bin.js housekeeper --mode=discover --from=tools/housekeeper-n3-repromote.yaml --once --limit=9`.
 
 ---
 
