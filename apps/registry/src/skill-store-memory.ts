@@ -29,6 +29,12 @@ import {
 const DEMOTION_THRESHOLD = 3;
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Statuses collapsed to `superseded` when another row becomes the service's
+// active recipe. Mirrors PrismaSkillStore.STALE_ON_ACTIVATE_STATUSES — keep
+// the two in lockstep. Excludes `quarantined` (an operator-owned route-to-
+// human state) and `superseded` (already history).
+const STALE_ON_ACTIVATE_STATUSES = new Set(["active", "demoted", "pending-review"]);
+
 export class InMemorySkillStore implements SkillStore {
   // Explicit per-instance state (declared, not initialised inline).
   // Class-field initialisers (`= new Map()`) compile to definitions
@@ -150,14 +156,14 @@ export class InMemorySkillStore implements SkillStore {
       // Idempotent — already approved or in another state, no change.
       return record;
     }
-    // Promote to active AND supersede any older active row for the
-    // same service (mirrors the natural supersession path).
+    // Promote to active AND supersede every other live row for the same
+    // service — prior active + lingering demoted + redundant pending-review.
     const now = new Date();
     for (const other of this.skills.values()) {
       if (
         other.skill_id !== skill_id &&
         other.service === record.service &&
-        other.status === "active"
+        STALE_ON_ACTIVATE_STATUSES.has(other.status)
       ) {
         other.status = "superseded";
         other.superseded_at = now;
@@ -344,12 +350,12 @@ export class InMemorySkillStore implements SkillStore {
         } else {
           // Promote pending → active. Mirror approveReview's
           // supersession logic so the (service, status='active')
-          // invariant holds.
+          // invariant holds and stale demoted/pending rows collapse.
           for (const other of this.skills.values()) {
             if (
               other.skill_id !== skill.skill_id &&
               other.service === skill.service &&
-              other.status === "active"
+              STALE_ON_ACTIVATE_STATUSES.has(other.status)
             ) {
               other.status = "superseded";
               other.superseded_at = now;
@@ -447,15 +453,15 @@ export class InMemorySkillStore implements SkillStore {
       // Idempotent no-op — caller sees previously === status.
       return { record: skill, previously };
     }
-    // Supersede any other active row for the same service before
-    // flipping this one to active, so the (service, status=active)
-    // invariant doesn't get violated by reactivating a stale version.
+    // Supersede every other live row for the same service before flipping
+    // this one to active, so the (service, status=active) invariant doesn't
+    // get violated and stale demoted/pending rows collapse to history.
     const now = new Date();
     for (const other of this.skills.values()) {
       if (
         other.skill_id !== skill_id &&
         other.service === skill.service &&
-        other.status === "active"
+        STALE_ON_ACTIVATE_STATUSES.has(other.status)
       ) {
         other.status = "superseded";
         other.superseded_at = now;
