@@ -1615,6 +1615,19 @@ export function extractVerifyWallAlias(text: string): string | null {
     if (/\.(?:js|mjs|css|map|png|jpe?g|svg|gif|ico|woff2?|ttf|webp)$/i.test(addr)) {
       continue;
     }
+    // Reject RFC 2606 reserved-for-documentation domains. A docs/sample email
+    // like "check amy@example.com" rendered on a dashboard is never a real
+    // verification target — polling it 404s as unknown_alias and yields a
+    // false verification_not_sent. (Anthropic's console shows amy@example.com
+    // in a sample.) Covers example.{com,net,org} + the .example/.test/
+    // .invalid/.localhost reserved suffixes.
+    const domain = addr.slice(addr.indexOf("@") + 1).toLowerCase();
+    if (
+      /^example\.(?:com|net|org)$/.test(domain) ||
+      /\.(?:example|test|invalid|localhost)$/.test(domain)
+    ) {
+      continue;
+    }
     return addr;
   }
   return null;
@@ -3368,6 +3381,23 @@ export function isCredentialNoiseCandidate(candidate: string): boolean {
   return CREDENTIAL_NOISE_PREFIXES.some((p) => lower.startsWith(p));
 }
 
+// True when a URL is a documentation / help / reference page rather than a
+// product surface. Such pages render REALISTIC sample credentials (Anthropic's
+// platform.claude.com/docs/.../get-started shows ANTHROPIC_API_KEY='sk-ant-
+// api03-...') that match the real key shape but are NOT user credentials. A
+// real minted key lives on the console / settings, never under /docs — so the
+// extractor refuses to read a credential while on a docs page, which keeps the
+// post-verify loop navigating toward the real keys page instead of false-
+// succeeding on a sample. Exported for unit testing.
+export function isDocumentationUrl(url: string): boolean {
+  const u = url.toLowerCase();
+  return (
+    /^https?:\/\/docs?\.[^/]+/.test(u) || // docs.x.com / doc.x.com host
+    /\/docs?\//.test(u) || // /docs/ or /doc/ path
+    /\/(?:help|reference|api-reference|guides?|tutorials?)\//.test(u)
+  );
+}
+
 // Choose which link in a verification email to click. Scores each URL
 // by keyword and picks the best — but only if it scored positive.
 //
@@ -3954,8 +3984,30 @@ export class SignupAgent {
               e.type === null) &&
             e.visible !== false,
         );
-        if (!hasFillableInput && expectsVerificationEmail(wallText)) {
-          const alias = extractVerifyWallAlias(wallText);
+        // Only enter the inbox-poll flow when the named alias is one we can
+        // actually POLL — on our own inbox domain (task.email's domain, which
+        // also covers a prior run's alias). A logged-in dashboard often shows
+        // the operator's real email (e.g. a personal gmail) or a docs sample
+        // next to "check your email" copy; polling those 404s as
+        // unknown_alias and yields a false verification_not_sent. A wall that
+        // names NO address (generic "check your email") still fires and polls
+        // task.email — that's the common legitimate case. (Already-
+        // authenticated dashboards are routed straight to key extraction
+        // before the form-fill loop, so they never reach this detector.)
+        const wallAlias = extractVerifyWallAlias(wallText);
+        const ourInboxDomain = task.email
+          .slice(task.email.indexOf("@") + 1)
+          .toLowerCase();
+        const aliasPollable =
+          wallAlias === null ||
+          wallAlias.slice(wallAlias.indexOf("@") + 1).toLowerCase() ===
+            ourInboxDomain;
+        if (
+          !hasFillableInput &&
+          expectsVerificationEmail(wallText) &&
+          aliasPollable
+        ) {
+          const alias = wallAlias;
           this.pendingVerificationAlias = alias;
           steps.push(
             `Form: email-verification wall (no fields to fill${alias !== null ? `, check ${alias}` : ""}) — ` +
@@ -5088,6 +5140,15 @@ export class SignupAgent {
       // would otherwise read as "other". (A promoted-skill URL is replay-
       // verified and a guessed URL that's wrong is recovered here too.)
       let needsRecovery = false;
+      // Set when the landing page is an already-authenticated dashboard — we
+      // then route STRAIGHT to key extraction (the already_oauth dispatch
+      // case) and skip the form-fill loop entirely. The loop's own
+      // already-signed-in check runs on a ranked+capped inventory that drops
+      // the low-ranked nav markers detectAlreadySignedIn keys on, so it
+      // unreliably misses dashboards (anthropic) and the verification-wall
+      // detector false-fires first. The full-inventory check below is the
+      // reliable signal; act on it here, not in the loop.
+      let alreadyAuthenticated = false;
       // Before any recovery: are we ALREADY authenticated for this service?
       // The operator's own session can be bound to the service (e.g.
       // Anthropic, where the bot rides the operator's account), so the
@@ -5112,8 +5173,9 @@ export class SignupAgent {
       ) {
         steps.push(
           `${task.service}: already authenticated (dashboard markers, no signup CTA) — ` +
-            `skipping signup, routing to key extraction`,
+            `skipping signup, routing straight to key extraction`,
         );
+        alreadyAuthenticated = true;
       } else if (task.signupUrl === undefined) {
         needsRecovery = !(await this.looksLikeSignupPage());
       } else {
@@ -5250,7 +5312,14 @@ export class SignupAgent {
       // every terminal case (submitted, planning_failed, …) stays in one
       // place. Bounded to a single re-route so a service that keeps
       // bouncing can't spin here.
-      let outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+      // Already authenticated (full-inventory check above): skip the form-fill
+      // loop and hand straight to the already_oauth case, which extracts /
+      // mints the key from the existing session. Going through the loop would
+      // re-detect on a capped inventory (missing the nav markers), false-fire
+      // the verification-wall detector, and never reach key extraction.
+      let outcome: PlanExecOutcome = alreadyAuthenticated
+        ? { kind: "already_oauth" }
+        : await this.planExecuteWithRetry(task, fillValues, steps);
       let oauthFallbackUsed = false;
       // Multi-step signup guard (amplitude: email/name step → a dedicated
       // "Create your password" step). Bounds how many continuation form steps
@@ -9600,6 +9669,18 @@ ${formatInventory(input.inventory)}${
     const credentials: Record<string, string> = {};
     let apiKey: string | null = null;
     let truncatedHit: string | null = null;
+
+    // Never trust a credential read off a documentation page — it's a
+    // realistic SAMPLE (Anthropic's /docs get-started shows a shape-valid
+    // sk-ant-api03-... example). Returning empty keeps the post-verify loop
+    // navigating to the real keys console instead of false-succeeding here.
+    const curUrl =
+      typeof this.browser.currentUrl === "function"
+        ? this.browser.currentUrl()
+        : "";
+    if (typeof curUrl === "string" && isDocumentationUrl(curUrl)) {
+      return credentials;
+    }
 
     for (const candidate of await this.browser.extractCredentialCandidates()) {
       const hit = extractApiKeyFromText(candidate);
