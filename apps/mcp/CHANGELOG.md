@@ -1,5 +1,38 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.3 (2026-06-07)
+
+Graduates the 0.9.3 prerelease line (rc.1–rc.3) to stable and adds the
+verify onboarding-skip fix. Everything here that touches `replay-skill.ts`
+also runs on the router/provision replay path users hit, not just the
+housekeeper.
+
+- **Replay drives the OAuth handshake deterministically.** Skill replay
+  used to bail to `needs_login` the moment an OAuth recipe hit an
+  account-chooser / consent screen. It now walks the chooser + scope-gated
+  consent deterministically (riding the operator's existing `mcp login`
+  session — it does not log in), aborting to `needs_login` only on a real
+  challenge or a sensitive scope. Live-validated on posthog/cohere/imagekit.
+- **Replay no longer false-fails recipes against an already-registered
+  account.** A signup-with-onboarding recipe replayed with an account that
+  already exists skips the absent onboarding fill instead of hard-failing
+  the step, and a credential step that then diverges from the fresh-signup
+  capture is reported as `account_already_registered` (transient) rather
+  than skill rot — so a working recipe can't be demoted just because the
+  replaying account isn't brand new.
+- **`use_credential` query-param auth.** The tool accepts `http.query` and
+  passes it through, so query-string-auth APIs (FRED's `api_key`, gov/weather
+  APIs with no header auth) work: `query: { api_key: "${SECRET}" }`. The
+  secret is injected server-side after the host check and never appears in
+  the URL.
+- **Captures seed `allowed_hosts`.** The universal bot sends the signup host
+  as `observed_hosts` when it writes a captured credential, so a new key
+  lands with a usable allowlist instead of an empty one (which 403'd every
+  `use_credential` call).
+- **`nav_timeout` failure classifier.** A navigation / network / proxy
+  timeout no longer counts as skill rot, so a transient tunnel blip can't
+  retire a healthy skill.
+
 ## 0.9.2 (2026-06-06)
 
 - **Quota runway nudge.** On a successful free-tier signup, `check_provision_status`
