@@ -7869,6 +7869,13 @@ ${formatInventory(input.inventory)}`,
     let stuckFiresAtUrl = 0;
     let lastStuckFireUrl: string | null = null;
     const triedFallbackUrls = new Set<string>();
+    // Premature-done guard budget. When the planner gives up (`done`)
+    // with zero credentials captured, we navigate to an unvisited
+    // canonical keys URL and re-plan — bounded so a service that
+    // genuinely has no self-serve key doesn't burn the whole run budget
+    // walking every fallback path.
+    let prematureDoneFallbacks = 0;
+    const MAX_PREMATURE_DONE_FALLBACKS = 3;
     // Dead-URL memory. The planner guesses credential-page URLs
     // (e.g. /user/personal_access_tokens/new) that 404; without memory it
     // re-guesses the same dead URL round after round — xata and fly each
@@ -8790,6 +8797,43 @@ ${formatInventory(input.inventory)}`,
           // Re-loop — next iteration's waitForFormReady + inventory
           // read see the post-challenge dashboard.
           continue;
+        }
+        // Premature-done guard. The planner sometimes concludes "nothing
+        // to extract" on an authenticated dashboard whose API keys live on
+        // a settings/API-keys page it never visited — render's case: an
+        // empty SERVICES list ("no services created yet") is NOT the same
+        // as "no API keys", which sit under Account Settings. Before
+        // accepting `done` with zero credentials captured, navigate to an
+        // unvisited canonical keys URL (same fallback list the stuck-loop
+        // escalation uses). Bounded by triedFallbackUrls — once every
+        // candidate is exhausted, `done` is honored.
+        const capturedCredCount = Object.keys(credentials).filter(
+          (k) => !NON_CREDENTIAL_KEYS.has(k),
+        ).length;
+        if (capturedCredCount === 0 && prematureDoneFallbacks < MAX_PREMATURE_DONE_FALLBACKS) {
+          const fallback = pickStuckLoopFallbackUrl(
+            state.url,
+            triedFallbackUrls,
+            args.service,
+          );
+          if (fallback !== null) {
+            prematureDoneFallbacks += 1;
+            triedFallbackUrls.add(fallback);
+            args.steps.push(
+              `Post-verify: planner emitted done with no credential captured — ` +
+                `navigating to an unvisited API-keys URL before giving up: ${fallback}`,
+            );
+            try {
+              await this.browser.goto(fallback);
+              await this.browser.waitForInteractiveDom(5, 15_000);
+            } catch (err) {
+              args.steps.push(
+                `Post-verify: premature-done fallback navigate failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+              );
+            }
+            hint = undefined;
+            continue;
+          }
         }
         this.lastPostVerifyDoneReason = nextStep.reason;
         break;
