@@ -8,7 +8,21 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ---
 
-## Where we are (2026-06-05, `@trusty-squire/mcp@0.9.0`)
+## Where we are (2026-06-07, `@trusty-squire/mcp@0.9.3`)
+
+**0.9.1 → 0.9.3 shipped to `latest`** since the 0.9.0 note below: housekeeper
+inter-run pacing (cooldown + adaptive backoff + per-IP daily cap, after a live
+run burned a residential exit); AB6 routing known-unwinnable services to manual;
+vault capture-seeded `allowed_hosts` + `use_credential` query-param auth; the
+`nav_timeout` classifier; **verify drives the OAuth consent handshake
+deterministically** instead of bailing to `needs_login`; and **the verify
+false-rot fix** — replay against an already-registered operator account no
+longer demotes a healthy signup-with-onboarding skill (returning-user
+divergence → transient `account_already_registered`). Registry-side: by-id
+returns live status, and promotion now collapses stale demoted/pending rows so
+the skill list stays clean (the duplicate clutter is gone). This consolidates
+the former `todos.md` (a stale 2026-05-30 triage snapshot, now deleted — its
+items are either shipped, in git history, or carried below).
 
 **0.9.0 shipped to `latest`** — the post-OAuth navigation work: a deterministic
 planner (temp 0), the **create-over-extract N1 wall broken** (live-validated:
@@ -94,34 +108,26 @@ email-signup-pending), so the verified-email account ≠ the browser's OAuth
 session. A clean single run on a fresh identity completes; reproducing needs a
 fresh Google identity or deleting the amplitude accounts. Not anti-bot.
 
-### N3 — Re-run the old "impossible-class" services on residential [P2, quick win]
-The services we previously wrote off as datacenter-IP anti-bot walls
-(codesandbox, tally, plausible, cronitor, cockroachdb, growthbook, plunk,
-uploadcare) were graded on a datacenter IP. We now have a residential exit AND
-the 0.8.17 fixes AND a 1.0 score — re-run them; several should fall. plunk,
-replit, uploadcare are already GREEN. This is data-gathering, not new code.
+### N3 — Re-run the old "impossible-class" services on residential [P2, partially run — RE-PROMOTE]
+Run on residential 2026-06-04 (`~/.trusty-squire/logs/round3-*`). Confirmed:
+- **plunk ✅** — signed up, extracted 2 creds (`api_key` + `secret_key`,
+  multi-cred), auto-promoted. (Earlier rounds failed `oauth_session_not_persisted`
+  / nav timeout; the residential exit cleared it.)
+- **uploadcare ✅** — signed up, extracted `api_key` on round 9, auto-promoted.
+  (An earlier round blocked on `oauth_consent_needs_review`.)
+- **replit** — ran, NO clean outcome captured (the prior "GREEN" claim was an
+  overstatement; unconfirmed).
+- **codesandbox / tally / plausible / cronitor / growthbook** — NOT run in that
+  batch. cockroachdb has partial captures, no outcome.
 
----
-
-## Tier 1 — ship next (ungated, clear payoff)
-
-### F12 — User-relayed SMS verification [P1, ~half day]
-Vercel / MailerSend / Twilio / sendgrid all gate API tokens behind a phone +
-SMS-code wall. The bot can't be SMS infrastructure (carrier-lookup rejects VoIP
-numbers). Fix: a relay loop with two new MCP tools.
-1. Bot detects phone-entry → returns `phone_verification_required` +
-   `phone_entry_url` (noVNC if headless) + `run_id`.
-2. Host LLM asks the user for their phone number.
-3. New `provide_phone_number(run_id, phone)` types it via the existing session.
-4. Bot waits for the SMS-code field → returns `phone_code_required`.
-5. User reads the SMS; `provide_sms_code(run_id, code)` types it + verifies.
-
-Doesn't touch the security boundary (the user's phone is the gate). Unblocks
-~3 services in the queue today, many more in the expansion pool. **AB6 now
-routes the `sms_phone` services (vercel/mailersend/twilio/sendgrid) to manual**
-— when F12 lands, drop those entries from `unwinnable-services.ts` so the bot
-clears them via the relay instead. The deep part is the mid-signup pause/resume
-(a session registry + async continuation), not the two MCP tools.
+**The catch:** plunk + uploadcare auto-promoted to pending-review, then the
+verifier RETIRED them — the same OAuth-consent / verify-false-rot failures fixed
+this session (OAuth consent walk + returning-user reclassification, 0.9.3). They
+are NOT in the registry today. So N3's residual is now mostly a RE-PROMOTE: re-run
+plunk + uploadcare so they re-promote and the fixed verifier keeps them, then run
+the never-attempted five (codesandbox/tally/plausible/cronitor/growthbook) +
+replit + cockroachdb. Still data-gathering, not new code. (The current discover
+batch covers some of these.)
 
 ---
 
@@ -142,6 +148,14 @@ against staging, cap of 3 open, rejected-fix memory, auto-resume after fix-rc.
 services.yaml 15 → 200. Route Cloudflare-protected services to a Mac-based
 harvester (real GPU). Central queue coordination via the registry (not FS state).
 
+### ipdata — re-test email-gated signup [P3, carried from todos.md]
+A live run reaches the real `dashboard.ipdata.co/sign-up.html` form and submits
+it, but ipdata gates on email verification and the mail never arrived in 180s
+(`verification_not_sent`) on the old fresh-MX domain. Email deliverability is now
+PROVEN end-to-end via the Workspace `@trustysquire.ai` catch-all → IMAP poll, so
+the original blocker should be gone — re-run and inspect the success-page
+extraction. Single-service data point, low urgency.
+
 ### services.yaml curation pass [~1 hour data curation]
 The queue is ~101 services (`tools/housekeeper-services.yaml`). Remaining work:
 confirm `oauth_provider` / `signup_url` accuracy for the long tail as failure
@@ -155,9 +169,10 @@ Mechanism shipped (`unwinnable-services.ts` + `runSession()` short-circuit to
 denylist: clerk (spa_broken), cloudflare (max_antibot), vercel/mailersend/
 twilio/sendgrid (sms_phone), mailgun/circleci/betterstack (credit_card),
 northflank (github_2fa). **Ongoing:** add services to the denylist as 0%
-prospects surface from housekeeper data; drop the `sms_phone` entries once F12's
-relay can clear them. Override a single re-test with
-`UNIVERSAL_BOT_FORCE_UNWINNABLE=1`. (AB2 real-GPU/WebGL tell is closed by the
+prospects surface from housekeeper data. The `sms_phone` services stay on the
+manual denylist permanently — the user-relayed SMS relay (former F12) was
+dropped, so phone-gated signups are operator-manual by design. Override a single
+re-test with `UNIVERSAL_BOT_FORCE_UNWINNABLE=1`. (AB2 real-GPU/WebGL tell is closed by the
 renderer spoof; AB3–AB5 deprioritized at score 1.0.)
 
 ### F7 — Multi-step / inline-code flows [P2, mostly shipped — verify]
@@ -211,7 +226,7 @@ Was blocked on lacking a residential IP. We now HAVE one (SK-Broadband SOCKS) +
 a 1.0 score, so this is no longer blocked — it folds into **N3** (re-run the
 old impossible-class on residential). The remaining genuine human-gates
 (GitHub install-time sudo-2FA on northflank, SMS, TOTP) still need the operator
-or F12.
+— SMS-relay automation (former F12) was dropped, so these stay manual.
 
 ### VOUCHFLOW_READ_KEY env on `trusty-squire-api` [GATED]
 Wait until the revocation/introspection feature lands (no current caller). Set
