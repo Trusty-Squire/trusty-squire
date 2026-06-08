@@ -4149,8 +4149,14 @@ export class BrowserController {
     try {
       cdp = await this.context.newCDPSession(this.page);
       await cdp.send("FedCm.enable", { disableRejectionDelay: true });
+      console.error("[universal-bot] FedCm.enable ok — listening for dialogShown");
       cdp.on("FedCm.dialogShown", (ev: unknown) => {
-        const e = ev as { dialogId?: string; dialogType?: string };
+        const e = ev as { dialogId?: string; dialogType?: string; accounts?: unknown[] };
+        console.error(
+          `[universal-bot] FedCm.dialogShown type=${e.dialogType ?? "?"} accounts=${
+            Array.isArray(e.accounts) ? e.accounts.length : "?"
+          }`,
+        );
         const dialogId = e.dialogId;
         if (dialogId === undefined) return;
         void (async () => {
@@ -4194,8 +4200,13 @@ export class BrowserController {
           }
         })();
       });
-    } catch {
+    } catch (err) {
       cdp = null; // FedCm domain unavailable — the popup path still works
+      console.error(
+        `[universal-bot] FedCm.enable failed (${
+          err instanceof Error ? err.message : String(err)
+        }) — FedCM path disabled, relying on popup`,
+      );
     }
 
     const popupPromise: Promise<Page | null> = this.context
@@ -4275,6 +4286,10 @@ export class BrowserController {
       }
       return { ok: true, via: "fedcm" };
     }
+    console.error(
+      `[universal-bot] GSI resolved via none — fedcmEnabled=${cdp !== null} ` +
+        `fedcmResolved=${fedcmResolved} pages=${this.context.pages().length}`,
+    );
     return { ok: false, via: "none" };
   }
 
