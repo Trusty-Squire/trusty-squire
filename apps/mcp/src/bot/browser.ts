@@ -4417,19 +4417,77 @@ export class BrowserController {
         // fall through to the approve-button path
       }
     }
-    // Consent screen: the approve control's accessible name is
-    // "Continue" or "Allow". A full-match regex excludes "Cancel".
-    const approve = this.page
-      .getByRole("button", { name: /^(continue|allow)$/i })
-      .first();
+    // Consent screen: the approve control's name varies by Google's
+    // consent layout — "Continue", "Allow", "Allow access" (the
+    // /signin/oauth/consent?part=… variant meilisearch hits). Match on a
+    // startsWith verb set (not exact) so "Allow access" resolves, while
+    // the verbs exclude Cancel/Deny/Back/No. Wait for the button to
+    // render — the consent SPA paints the approve control a beat after
+    // domcontentloaded, and the old exact-match + no-wait returned false
+    // before it appeared.
+    const APPROVE_NAME = /^(?:continue|allow|accept|agree)\b/i;
+    const approve = this.page.getByRole("button", { name: APPROVE_NAME }).first();
+    try {
+      await approve.waitFor({ state: "visible", timeout: 8000 });
+    } catch {
+      // not visible within the window — fall through to the DOM-scan path
+    }
     if ((await approve.count().catch(() => 0)) > 0) {
       try {
         await approve.click({ timeout: 8000 });
         return true;
       } catch {
-        return false;
+        // fall through to the DOM-scan fallback
       }
     }
+    // Fallback: scan the DOM for an approve-like clickable when the ARIA
+    // role query missed it (Google occasionally renders the control as a
+    // <div role>/<span> or an <input type=submit value="Allow access">).
+    // Click the first visible candidate whose text is an approve verb and
+    // is NOT a cancel/deny/back. Log what was visible on failure.
+    const clicked = await this.page
+      .evaluate(() => {
+        const APPROVE = /^(?:continue|allow|accept|agree)\b/i;
+        const DENY = /\b(?:cancel|deny|back|no\b|not now|reject)\b/i;
+        const els = Array.from(
+          document.querySelectorAll(
+            'button, input[type="submit"], [role="button"], a[href]',
+          ),
+        ) as HTMLElement[];
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) continue;
+          const t = (el.textContent || (el as HTMLInputElement).value || "").trim();
+          if (t.length === 0 || t.length > 40) continue;
+          if (DENY.test(t)) continue;
+          if (APPROVE.test(t)) {
+            (el as HTMLElement).click();
+            return t.slice(0, 40);
+          }
+        }
+        return null;
+      })
+      .catch(() => null);
+    if (clicked !== null) return true;
+    const seen = await this.page
+      .evaluate(() => {
+        const els = Array.from(
+          document.querySelectorAll('button, input[type="submit"], [role="button"]'),
+        ) as HTMLElement[];
+        return els
+          .filter((b) => {
+            const r = b.getBoundingClientRect();
+            return r.width > 1 && r.height > 1;
+          })
+          .slice(0, 8)
+          .map((b) => (b.textContent || (b as HTMLInputElement).value || "").trim().slice(0, 40))
+          .filter((t) => t.length > 0);
+      })
+      .catch(() => [] as string[]);
+    console.error(
+      `[universal-bot] Google advanceOAuthConsent failed — visible buttons: ` +
+        `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
+    );
     return false;
   }
 
