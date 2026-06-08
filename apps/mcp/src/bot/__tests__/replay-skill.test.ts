@@ -739,6 +739,61 @@ describe("replaySkill — absent setup-click skip", () => {
   });
 });
 
+// ── Absent onboarding-select skip (porter "Role" / railway "Workspace") ──
+// A captured `select` step can target a wizard dropdown that only exists for
+// a brand-new account. On a returning-user replay the onboarding form is gone
+// and the <select> is wholly absent — the <select> analogue of the absent-fill
+// case. Skip it (a later extract + the credential validator still reach the
+// credential) rather than hard-failing a replay that can still succeed.
+
+describe("replaySkill — absent onboarding-select skip", () => {
+  it("skips a wholly-absent onboarding select and reaches the credential (porter Role / railway Workspace case)", async () => {
+    const b = stubBrowser();
+    // The returning-user account skips the onboarding wizard, so the "Role"
+    // <select> is wholly absent. The credential surface (Copy button) IS present.
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        // Step 0: account-state-dependent onboarding select — ABSENT now.
+        { kind: "select", label_hint: "Role", option_text: "CEO / Founder", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.credential).toBe("db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+    // The absent select was never driven.
+    expect(b.history.some((c) => c.method === "selectOption")).toBe(false);
+  });
+
+  it("does NOT skip an absent select when no later step reaches a credential (genuine rot)", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Unrelated", selector: "button.x" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "navigate", url: "https://example.com/onboarding", provenance },
+        { kind: "select", label_hint: "Role", option_text: "CEO / Founder", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(1);
+  });
+});
+
 // ── needs_login on OAuth without a profile session ──────────────────
 
 describe("replaySkill — OAuth needs_login", () => {

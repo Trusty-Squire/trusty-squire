@@ -352,6 +352,26 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         );
         skippedOnboardingFill = true;
         continue;
+      } else if (
+        step.kind === "select" &&
+        isSkippableAbsentSelect(step, validation.reason, i, skill.steps)
+      ) {
+        // Account-state-dependent ONBOARDING select (porter "Role" /
+        // railway "Workspace" class): the wizard dropdown only exists for a
+        // brand-new account. The verifier's operator account is already
+        // registered, so the service skips the onboarding form and the
+        // <select> is wholly absent — exactly the fill case above, just a
+        // different control. A later extract step still reaches the
+        // credential and the credential validator is the backstop, so skip
+        // rather than false-failing the whole replay.
+        console.error(
+          `[replay] step ${i} (select label_hint=${JSON.stringify(step.label_hint)}) ` +
+            `select absent — skipping as account-state-dependent onboarding ` +
+            `(account already registered; signup form gone). A later extract ` +
+            `step still reaches the credential. Reason: ${validation.reason}`,
+        );
+        skippedOnboardingFill = true;
+        continue;
       } else {
         return {
           kind: "step_failed",
@@ -2113,6 +2133,24 @@ function isSkippableAbsentFill(
   return hasLaterCredentialStep(steps, stepIndex);
 }
 
+// True when an absent onboarding SELECT is safe to skip — the <select> dropdown
+// equivalent of isSkippableAbsentFill. Wizard selects (porter "Role", railway
+// "Workspace") only exist for a brand-new account; on a returning-user replay
+// the onboarding form is gone and preValidateStep reports "No select matches…".
+// A present-but-unresolvable select is genuine rot and must NOT skip; only a
+// wholly-absent one is skippable, and only when a later step still yields a
+// credential (the validator at the extract step is the real backstop).
+function isSkippableAbsentSelect(
+  step: SkillStep,
+  validationReason: string,
+  stepIndex: number,
+  steps: SkillStep[],
+): boolean {
+  if (step.kind !== "select") return false;
+  if (!/no select matches/i.test(validationReason)) return false;
+  return hasLaterCredentialStep(steps, stepIndex);
+}
+
 // Does the recipe still reach a credential after stepIndex — a later
 // extract step, or the credential-creating click still ahead?
 function hasLaterCredentialStep(steps: SkillStep[], stepIndex: number): boolean {
@@ -2122,7 +2160,8 @@ function hasLaterCredentialStep(steps: SkillStep[], stepIndex: number): boolean 
       k === "extract_via_copy_button" ||
       k === "extract_via_regex" ||
       k === "extract_via_copy_button_named" ||
-      k === "extract_via_regex_named"
+      k === "extract_via_regex_named" ||
+      k === "extract_labeled"
     ) {
       return true;
     }
