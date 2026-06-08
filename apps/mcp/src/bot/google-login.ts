@@ -569,7 +569,7 @@ function buildVncWebDir(): string {
 // bot's profile) AND `install` (poll the API for the install claim)
 // share the same browser-launch infrastructure — one Chrome instance,
 // one Google login event for both use cases.
-interface RunInBotChromeOpts {
+export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
   deadline: number;
@@ -597,7 +597,7 @@ interface RunInBotChromeOpts {
   apiBaseUrl?: string;
 }
 
-async function runInBotChrome(
+export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
