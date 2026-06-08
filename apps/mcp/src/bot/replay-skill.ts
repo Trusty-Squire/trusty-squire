@@ -2557,7 +2557,20 @@ export async function walkOAuthConsent(
     const state = provider.classifyAuthState(url, body);
     console.error(`[replay-oauth] state=${state} url=${url.slice(0, 100)}`);
     if (state === "not_provider") return "ok"; // flow left the provider
-    if (state === "challenge" || state === "needs_login") return "needs_login";
+    if (state === "challenge" || state === "needs_login") {
+      if (process.env.REPLAY_DEBUG) {
+        try {
+          writeFileSync(
+            `/tmp/replay-oauth-${providerId}-${state}.txt`,
+            `url=${url}\n\n${body}`,
+          );
+          console.error(`[replay-oauth-debug] dumped /tmp/replay-oauth-${providerId}-${state}.txt`);
+        } catch {
+          // best-effort
+        }
+      }
+      return "needs_login";
+    }
     // state === "consent": scope-gate it. Only auto-approve identity-basic
     // scopes — verify must never grant a sensitive scope blind.
     const scopes = extractOAuthScopes(url);
