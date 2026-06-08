@@ -50,16 +50,27 @@ Env vars per mode live in CLAUDE.md ("Housekeeper env" table) — values only.
 
 - The operator box (Tailscale node `trusty-dev-box`) has a **datacenter** direct
   IP (Miami / ReliableSite).
-- A **residential exit** is available via an SSH dynamic-SOCKS tunnel to the Mac
-  (`macbook-pro-7`, Tailscale `100.104.88.126`, Seoul SK-Broadband home line):
+- A **residential exit** runs on the Mac (`macbook-pro-7`, Tailscale
+  `100.104.88.126`, Seoul SK-Broadband home line). The exit IP (`1.240.236.25`)
+  is a CLEAN consumer-ISP residential IP — measured, zero detector flags.
+- **Egress = native gost SOCKS5 over Tailscale (2026-06-08). DO NOT use
+  `ssh -D` for this — it collapses under load.** Measured: 40 concurrent
+  requests through `ssh -D` → **1 ok / 39 fail** (Chrome's parallel connections
+  contend for one SSH channel's flow-control window → head-of-line blocking →
+  `ERR_SOCKS`); the same 40 through gost → **40 ok / 0 fail**. The whole
+  2026-06-07/08 run of `ERR_SOCKS` "walls" was this, NOT IP reputation.
   ```bash
-  ssh -D 1080 -f -N -o ExitOnForwardFailure=yes dani@100.104.88.126   # → 127.0.0.1:1080
-  ss -tlnp | grep :1080                                               # is it up?
-  curl -s --socks5-hostname 127.0.0.1:1080 https://ipinfo.io/json      # → Seoul, KR (residential)
+  # On the Mac (already set up, launchd-persistent — KeepAlive + RunAtLoad):
+  #   /usr/local/bin/gost -L socks5://100.104.88.126:1081
+  #   ~/Library/LaunchAgents/com.trusty.gost.plist  (launchctl list | grep gost)
+  # From the operator box — verify + screen any proxy:
+  tools/proxy-eval.sh socks5://100.104.88.126:1081     # exit IP, ASN, flags, reachability
   ```
-- Enable with `UNIVERSAL_BOT_PROXY_URL=socks5://127.0.0.1:1080` +
+- Enable with `UNIVERSAL_BOT_PROXY_URL=socks5://100.104.88.126:1081` +
   `UNIVERSAL_BOT_PROXY_ALWAYS=true` (the box's own ASN reads as
   datacenter/unknown, so force it). `harvester.env` carries the current setting.
+  (The legacy `ssh -D 1080` → `127.0.0.1:1080` tunnel still works as a low-
+  concurrency fallback but should not be the primary.)
 - **When egress matters:** captcha / anti-bot signup pages block datacenter IPs,
   so residential egress helps `discover` succeed on those services.
 - **When egress does NOT matter:** `needs_login` on OAuth replays.
