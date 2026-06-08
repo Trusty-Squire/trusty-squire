@@ -248,6 +248,14 @@ export async function runDiscover(
       // / unrelated `.com` pages that didn't have the OAuth button.
       ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
       ...(forceForm ? { forceForm: true } : {}),
+      // The housekeeper is the operator provisioning on their OWN behalf,
+      // so approve a benign OAuth consent (email/profile) blind instead of
+      // pausing oauth_consent_needs_review when the scopes aren't readable
+      // from the URL (Google's opaque part=-token consents — meilisearch,
+      // uploadcare). The DOM danger-phrase scraper still HARD-ABORTS on
+      // sensitive scope-grant verbs (Drive/Gmail/contacts), so this only
+      // auto-approves basic sign-in consent.
+      allowBlindOAuthConsent: true,
     });
   } catch (err) {
     // Dump the step trail before bailing — without it, debugging
