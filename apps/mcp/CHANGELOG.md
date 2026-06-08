@@ -1,5 +1,26 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.8 (2026-06-08)
+
+Post-OAuth onboarding wizards + provider fallback — the bot reaches API keys
+on services it used to stall on.
+
+- **Onboarding wizards with clickable cards now work.** Chakra/React wizards
+  render selectable cards as bare clickable divs (cursor:pointer, no
+  button/a/role), which the inventory missed — so the bot stalled with no
+  target. It now captures them (tightly scoped so clean pages aren't
+  polluted) and the existing card-radio grouping handles the rest.
+  Live-validated: imagekit went from stalled to walking its full 3-step
+  onboarding (role + objective + region + survey) and extracting an API key.
+- **GitHub provider fallback when Google sign-in dead-ends.** Google won't
+  render its FedCM dialog for an automated browser; when the page also offers
+  GitHub (a redirect flow), the bot now retries via GitHub instead of failing.
+- **Honest GSI/FedCM handling.** A Google GSI widget that doesn't complete no
+  longer makes the bot falsely report "signed in"; it falls through to the
+  redirect flow.
+- **Onboarding stalls are now diagnosable** — the bot snapshots the page when
+  the wizard breaker gives up.
+
 ## 0.9.7 (2026-06-08)
 
 - **The CDP-hardened (patchright) browser launcher is now the default.**
