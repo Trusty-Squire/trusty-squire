@@ -590,6 +590,18 @@ async function preValidateStep(
               `but role_hint=${step.role_hint} filtered them all out.`,
           };
         }
+        // Last-resort token-subset fallback: the captured text_match is a
+        // planner gloss ("Create Token") that doesn't substring-match the live
+        // button ("Create API Token"). Resolve by token containment, honoring
+        // role_hint, and accept ONLY a unique match — ambiguity is unsafe for a
+        // click that may mint a credential (the validator is the backstop).
+        const tokenPool = step.role_hint
+          ? inventory.filter((el) => matchesRole(el, step.role_hint!))
+          : inventory;
+        const byTokens = tokenPool.filter((el) =>
+          matchesClickHintTokens(el, step.text_match),
+        );
+        if (byTokens.length === 1) return { ok: true, match: byTokens[0]! };
         return {
           ok: false,
           reason:
@@ -951,6 +963,19 @@ async function executeStep(
             await browser.wait(1);
             return { kind: "clicked" };
           }
+        }
+        // Token-subset fallback — mirrors preValidate so execute clicks the
+        // same gloss-resolved element preValidate approved. Unique match only.
+        const tokenPool = step.role_hint
+          ? inventory.filter((el) => matchesRole(el, step.role_hint!))
+          : inventory;
+        const byTokens = tokenPool.filter((el) =>
+          matchesClickHintTokens(el, step.text_match),
+        );
+        if (byTokens.length === 1) {
+          await browser.click(byTokens[0]!.selector);
+          await browser.wait(1);
+          return { kind: "clicked" };
         }
         throw new Error(
           `No element matches text_match=${step.text_match}` +
@@ -1796,6 +1821,27 @@ function matchesClickHint(el: InteractiveElement, hint: string): boolean {
   const id = (el.id ?? "").toLowerCase();
   if (id.length > 0 && id === lowerHint && !isRuntimeId(id)) return true;
   return false;
+}
+
+// Token-subset fallback for a credential-creating click whose captured
+// text_match is a planner GLOSS that doesn't substring-match the live button
+// ("Create Token" vs the page's "Create API Token" / "+ Create new token").
+// Matches when EVERY meaningful token (len>=3) of the hint appears among the
+// element's text/aria tokens, order-independent. Deliberately looser than
+// matchesClickHint's substring rule, so it is used ONLY as a last resort and
+// ONLY when it resolves to a UNIQUE element (the call site enforces this) —
+// pinning the wrong control on a click that may mint a credential is the risk,
+// and the post-extract credential validator is the backstop if it slips.
+function matchesClickHintTokens(el: InteractiveElement, hint: string): boolean {
+  const tokenize = (s: string): string[] =>
+    (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= 3);
+  const want = tokenize(hint);
+  if (want.length === 0) return false;
+  const have = new Set([
+    ...tokenize(el.visibleText ?? ""),
+    ...tokenize(el.ariaLabel ?? ""),
+  ]);
+  return want.every((t) => have.has(t));
 }
 
 // 2026-06-07 — href-tail match for nav-link clicks. The synthesizer

@@ -794,6 +794,62 @@ describe("replaySkill — absent onboarding-select skip", () => {
   });
 });
 
+// ── Token-subset fallback for a glossed credential-creating click ────
+// The captured text_match is the planner's gloss ("Create Token"); the live
+// returning-user page's button reads "Create API Token". Substring match
+// fails; token containment resolves it, but only when unique.
+
+describe("replaySkill — glossed cred-click token fallback", () => {
+  it("resolves a glossed 'Create Token' to a unique 'Create API Token' button", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "button",
+        visibleText: "Create API Token",
+        role: "button",
+        selector: "button.create-api-token",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    const clicks = b.history.filter((c) => c.method === "click");
+    expect(clicks.some((c) => c.args[0] === "button.create-api-token")).toBe(true);
+  });
+
+  it("does NOT guess when the token match is ambiguous (two candidate buttons)", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Create API Token", role: "button", selector: "button.a" }),
+      inv({ tag: "button", visibleText: "Create Service Token", role: "button", selector: "button.b" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(0);
+  });
+});
+
 // ── needs_login on OAuth without a profile session ──────────────────
 
 describe("replaySkill — OAuth needs_login", () => {
