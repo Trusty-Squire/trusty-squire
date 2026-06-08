@@ -31,7 +31,14 @@ export function pacingFromEnv(env: NodeJS.ProcessEnv = process.env): PacingConfi
   };
   return {
     cooldownSec: num("UNIVERSAL_BOT_RUN_COOLDOWN_SEC", 60),
-    dailyCap: num("UNIVERSAL_BOT_DAILY_SIGNUP_CAP", 30),
+    // 30 was a defensive guess from when sweeps were suspected of flagging
+    // the egress IP for abuse. The 2026-06-08 egress work disproved that —
+    // the wall was SSH-tunnel concurrency (gost runs 40/40 on the clean Seoul
+    // IP, ssh -D managed 1/40), not IP reputation. With a clean static IP and
+    // a concurrency-tolerant proxy there's no abuse signal to throttle for, so
+    // the default is raised to 88 (covers a full sweep of the ~101-service
+    // curated queue across ~1.2 days). Still env-overridable; 0 = unlimited.
+    dailyCap: num("UNIVERSAL_BOT_DAILY_SIGNUP_CAP", 88),
     maxBackoffMult: num("UNIVERSAL_BOT_PACE_MAX_BACKOFF", 5),
   };
 }

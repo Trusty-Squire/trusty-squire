@@ -1,5 +1,27 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.9 (2026-06-08)
+
+Multi-cred loop completion + higher daily sweep budget.
+
+- **Post-verify loop exits on a stable ≥2-cred bundle without `api_key`.**
+  Pusher-class services issue no field literally named `api_key`
+  (`application_id` + `app_key` + `secret`). The loop's stable-bundle exit
+  required `api_key`/`username`, so for pusher it never fired — the loop spun
+  every remaining round re-extracting the same bundle until the 15-call LLM
+  budget tripped, surviving only via the existing-account fallback. A bundle of
+  ≥2 named credentials that's been stable for the await window is now returned
+  directly (mirrors the final success gate).
+- **Daily signup cap default raised 30 → 88.** The 30 cap was a defensive
+  guess from when sweeps were suspected of flagging the egress IP for abuse.
+  That was disproved — the wall was SSH-tunnel concurrency, not IP reputation
+  (gost runs 40/40 on the clean static IP). 88 covers a full sweep of the
+  ~101-service curated queue across ~1.2 days. Still env-overridable via
+  `UNIVERSAL_BOT_DAILY_SIGNUP_CAP`.
+- **CI secret-scan gate.** `tools/secret-scan.sh` blocks credential-shaped
+  values from entering the repo (dependency-free; wired into CI). Scrubbed
+  several real captured values that had already landed in test fixtures.
+
 ## 0.9.8 (2026-06-08)
 
 Post-OAuth onboarding wizards + provider fallback — the bot reaches API keys

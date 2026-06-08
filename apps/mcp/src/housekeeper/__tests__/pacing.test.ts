@@ -35,8 +35,8 @@ describe("isIpRiskOutcome", () => {
 });
 
 describe("pacingFromEnv", () => {
-  it("defaults to 60s / cap 30 / backoff 5", () => {
-    expect(pacingFromEnv({})).toEqual({ cooldownSec: 60, dailyCap: 30, maxBackoffMult: 5 });
+  it("defaults to 60s / cap 88 / backoff 5", () => {
+    expect(pacingFromEnv({})).toEqual({ cooldownSec: 60, dailyCap: 88, maxBackoffMult: 5 });
   });
   it("honors env overrides incl. 0 (disabled)", () => {
     const c = pacingFromEnv({
