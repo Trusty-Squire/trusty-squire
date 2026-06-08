@@ -2494,6 +2494,39 @@ describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
     const appId = steps!.find((s) => s.kind === "extract_labeled" && s.produces === "application_id");
     expect(appId && appId.kind === "extract_labeled" && appId.label_hint).toBe("application id");
   });
+  it("collapses labels that share the same value (pusher secret/api_secret/app_secret → one)", async () => {
+    const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
+    // Synthetic values only. The pusher planner reports the SAME secret token
+    // under three labels; only application_id + app_key + secret are distinct.
+    const observed = {
+      kind: "extract" as const,
+      reason:
+        "app_id='example1000001' and app_key='examplekey1234567890' " +
+        "and secret='examplesecret0001' and api_secret='examplesecret0001' " +
+        "and app_secret='examplesecret0001'",
+    };
+    const pageText =
+      "App ID example1000001 Key examplekey1234567890 Secret examplesecret0001";
+    const steps = synthesizeLabeledExtractSteps(observed, pageText, prov);
+    expect(steps).not.toBeNull();
+    const produces = steps!.map((s) => (s.kind === "extract_labeled" ? s.produces : s.kind));
+    // 3 distinct values → 3 steps; the duplicate-value secret labels collapse.
+    expect(produces).toEqual(["application_id", "app_key", "secret"]);
+    expect(produces).not.toContain("api_secret");
+    expect(produces).not.toContain("app_secret");
+  });
+
+  it("returns null when two labels collapse to a single distinct value", async () => {
+    const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
+    const observed = {
+      kind: "extract" as const,
+      reason: "api_key='examplekey1234567890' and token='examplekey1234567890'",
+    };
+    const pageText = "API key examplekey1234567890";
+    // Both labels carry one value → not genuinely multi-cred → legacy path.
+    expect(synthesizeLabeledExtractSteps(observed, pageText, prov)).toBeNull();
+  });
+
   it("returns null for a single-credential reason (legacy path preserved)", async () => {
     const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
     const observed = { kind: "extract" as const, reason: "the api_key='re_abc123def456' is shown" };
@@ -2503,5 +2536,51 @@ describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
     const { synthesizeLabeledExtractSteps } = await import("../promote-to-skill.js");
     const observed = { kind: "extract" as const, reason: "credentials are visible on the page" };
     expect(synthesizeLabeledExtractSteps(observed, "", prov)).toBeNull();
+  });
+});
+
+describe("collapseConsecutiveDuplicateSteps (porter ×N noise)", () => {
+  const prov = { run_id: "r", round_index: 0 };
+
+  it("collapses a run of byte-identical consecutive clicks to one (porter Create API token ×3)", async () => {
+    const { collapseConsecutiveDuplicateSteps } = await import("../promote-to-skill.js");
+    const click = {
+      kind: "click" as const,
+      text_match: "Create API token",
+      role_hint: "button" as const,
+      provenance: prov,
+    };
+    const steps = [
+      { kind: "navigate" as const, url: "https://x/api-tokens", provenance: prov },
+      { ...click },
+      { ...click },
+      { ...click },
+      { kind: "extract_via_copy_button" as const, near_text_hint: "Your token", provenance: prov },
+    ];
+    const out = collapseConsecutiveDuplicateSteps(steps);
+    const clicks = out.filter((s) => s.kind === "click");
+    expect(clicks.length).toBe(1);
+    expect(out.map((s) => s.kind)).toEqual(["navigate", "click", "extract_via_copy_button"]);
+  });
+
+  it("keeps consecutive clicks that differ in text_match (real flow)", async () => {
+    const { collapseConsecutiveDuplicateSteps } = await import("../promote-to-skill.js");
+    const steps = [
+      { kind: "click" as const, text_match: "Account settings", role_hint: "button" as const, provenance: prov },
+      { kind: "click" as const, text_match: "API tokens", role_hint: "link" as const, provenance: prov },
+      { kind: "click" as const, text_match: "Create Token", role_hint: "button" as const, provenance: prov },
+    ];
+    const out = collapseConsecutiveDuplicateSteps(steps);
+    expect(out.length).toBe(3);
+  });
+
+  it("does NOT collapse consecutive extract steps (multi-cred preserved)", async () => {
+    const { collapseConsecutiveDuplicateSteps } = await import("../promote-to-skill.js");
+    const steps = [
+      { kind: "extract_labeled" as const, label_hint: "app key", produces: "app_key", provenance: prov },
+      { kind: "extract_labeled" as const, label_hint: "app key", produces: "app_key", provenance: prov },
+    ];
+    const out = collapseConsecutiveDuplicateSteps(steps);
+    expect(out.length).toBe(2);
   });
 });

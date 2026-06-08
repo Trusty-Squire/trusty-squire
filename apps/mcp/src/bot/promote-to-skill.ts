@@ -465,9 +465,33 @@ function synthesizeSteps(
   // label_hints ("Password" vs "Confirm password"), so this pass
   // doesn't fire.
   const trimmed = stripRetrySequences(steps);
-  const collapsed = collapseRedundantExtracts(trimmed);
+  // The inline dedup in the build loop only compares each new step to the
+  // last-pushed one, so it can't see duplicates that stripRetrySequences
+  // makes newly-adjacent by splicing out a failed branch between them — nor
+  // duplicates an older capture recorded before the inline dedup existed
+  // (porter: "Create API token" ×3, synthesizer_version=null). Run a final
+  // consecutive-equivalence pass so the output is order-independent. Same
+  // stepsEquivalent semantics (extract kinds exempt), so multi-cred extracts
+  // and legitimately-distinct steps are untouched.
+  const deduped = collapseConsecutiveDuplicateSteps(trimmed);
+  const collapsed = collapseRedundantExtracts(deduped);
 
   return { kind: "ok", steps: collapsed };
+}
+
+// Final-pass consecutive dedup. Drops a step when it's structurally equal
+// (ignoring provenance) to the previous KEPT step. Mirrors the build-loop
+// inline dedup but runs after stripRetrySequences, so adjacencies that pass
+// creates are collapsed too. Extract kinds are exempt (stepsEquivalent returns
+// false for them) — collapseRedundantExtracts owns extract dedup by produces.
+export function collapseConsecutiveDuplicateSteps(steps: SkillStep[]): SkillStep[] {
+  const out: SkillStep[] = [];
+  for (const step of steps) {
+    const prev = out.length > 0 ? out[out.length - 1]! : null;
+    if (prev !== null && stepsEquivalent(prev, step)) continue;
+    out.push(step);
+  }
+  return out;
 }
 
 // 0.8.11 — collapse redundant extract steps that name the same
@@ -1243,8 +1267,28 @@ export function synthesizeLabeledExtractSteps(
   const labeled = extractAllLabeledTokensFromReason(observed.reason, roundHtml);
   // Canonical keys only (the parser already whitelists credential labels).
   const keys = Object.keys(labeled).filter((k) => /^[a-z][a-z0-9_]*$/.test(k));
-  if (keys.length < 2) return null;
-  return keys.map((key) => ({
+  // Collapse labels that point to the SAME underlying value. Pusher's planner
+  // reports one secret three ways (secret / api_secret / app_secret all carry
+  // the identical token), which would synthesize three extract_labeled steps
+  // for a single credential — and then fail replay, since the App Keys page
+  // has ONE "Secret" field, not three. Keep the first label seen for each
+  // distinct value (the planner states the on-page label first, glosses after,
+  // so first-seen tends to be the real one). Genuinely distinct credentials
+  // (algolia's application_id / search_api_key / admin_api_key) carry distinct
+  // high-entropy values and all survive. Deterministic: Object.keys preserves
+  // the reason's insertion order, so the same reason yields the same output.
+  const seenValues = new Set<string>();
+  const distinctKeys = keys.filter((k) => {
+    const value = labeled[k]!;
+    if (seenValues.has(value)) return false;
+    seenValues.add(value);
+    return true;
+  });
+  // Re-apply the multi-cred threshold on DISTINCT values: a reason that named
+  // one credential under two labels (api_key + token, same value) is really
+  // single-cred — return null so the legacy extract path handles it.
+  if (distinctKeys.length < 2) return null;
+  return distinctKeys.map((key) => ({
     kind: "extract_labeled",
     // The on-page label the replay engine matches against harvested
     // labeled-credential candidates: "application_id" → "application id"
