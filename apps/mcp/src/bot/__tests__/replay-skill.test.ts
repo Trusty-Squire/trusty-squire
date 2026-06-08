@@ -2061,6 +2061,34 @@ describe("detectNavigationDrift", () => {
       detectNavigationDrift("https://cdn.example.org/redirect", "https://example.com/dashboard"),
     ).toBeNull();
   });
+
+  it("flags a redirect to the service's own auth subdomain (porter → auth.porter.run)", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift(
+        "https://auth.porter.run/?client_id=x&authorization_session_id=y",
+        "https://dashboard.porter.run/api-tokens",
+      ),
+    ).toMatch(/login host/);
+  });
+
+  it("flags a redirect to a hosted-auth vendor (WorkOS/Clerk tenant)", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    expect(
+      detectNavigationDrift("https://acme.clerk.app/sign-in", "https://app.acme.com/dashboard"),
+    ).toMatch(/login host/);
+    expect(
+      detectNavigationDrift("https://login.acme.com/", "https://app.acme.com/keys"),
+    ).toMatch(/login host/);
+  });
+
+  it("does NOT flag an ordinary app subdomain that merely differs", async () => {
+    const { detectNavigationDrift } = await import("../replay-skill.js");
+    // app → api is a normal cross-subdomain hop, not a login wall.
+    expect(
+      detectNavigationDrift("https://api.example.com/v1/whoami", "https://app.example.com/dashboard"),
+    ).toBeNull();
+  });
 });
 
 describe("normalizeNavPath", () => {

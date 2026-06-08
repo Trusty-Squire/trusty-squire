@@ -2279,6 +2279,21 @@ const OAUTH_PROVIDER_HOSTS = new Set([
   "login.microsoftonline.com",
 ]);
 
+// A service's OWN auth/login host — the FIRST hop when the replay session has
+// expired (porter's dashboard.porter.run → auth.porter.run). Distinct from
+// OAUTH_PROVIDER_HOSTS (the social IdPs): this is the service bouncing us to
+// log in, not the IdP handshake. Matches an auth-shaped subdomain
+// (auth./login./accounts./signin./sso./id.) or a hosted-auth vendor
+// (WorkOS/Auth0/Okta/Clerk/Stytch). Without this, detectNavigationDrift
+// returned null for auth.porter.run, so replay marched through its steps ON
+// the login page and failed at the cred-click with a misleading "nav
+// divergence" reason instead of the real cause (session not present).
+function looksLikeAuthHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  if (/^(auth|login|accounts|signin|sign-in|sso|id)\./.test(h)) return true;
+  return /(^|\.)(workos|auth0|okta|clerk|stytch|onelogin|duosecurity)\.(com|io|dev|app)$/.test(h);
+}
+
 // Returns null when the current URL is consistent with the requested
 // URL (same origin, no login-path redirect). Returns a short reason
 // string when drift is detected. Exported for unit tests.
@@ -2302,6 +2317,14 @@ export function detectNavigationDrift(
     OAUTH_PROVIDER_HOSTS.has(cur.hostname)
   ) {
     return `redirected to OAuth provider ${cur.hostname}`;
+  }
+  // Cross-domain landing on the service's OWN auth host (auth.porter.run,
+  // a WorkOS/Auth0/etc. tenant) — the session expired, so we got bounced to
+  // log in. Classify as drift so attemptOAuthRecovery can re-auth via the
+  // cached provider session (or, failing that, return needs_login) instead of
+  // replaying the skill onto the login page.
+  if (cur.hostname !== exp.hostname && looksLikeAuthHost(cur.hostname)) {
+    return `redirected to login host ${cur.hostname} (session expired / not authenticated)`;
   }
   // Same-origin redirect to a login-shaped path — covers Railway's
   // /login fallback when /account/tokens is hit unauthenticated.
