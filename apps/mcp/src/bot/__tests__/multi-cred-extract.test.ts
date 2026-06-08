@@ -59,15 +59,15 @@ describe("extractAllLabeledTokensFromReason — Algolia (3 creds)", () => {
   it("extracts application_id + admin_api_key + search_api_key", () => {
     const reason =
       "Algolia API Keys page shows: application_id='LATENCY', " +
-      "admin_api_key='bf4e07ce6a3e44d57f9eaad32b8d3df3', " +
-      "search_api_key='6be0576ff61c053d5f9a3225e2a90f76'.";
+      "admin_api_key='exampleadminkey0000000000000001', " +
+      "search_api_key='examplesearchkey000000000000001'.";
     const page =
-      "LATENCY bf4e07ce6a3e44d57f9eaad32b8d3df3 6be0576ff61c053d5f9a3225e2a90f76";
+      "LATENCY exampleadminkey0000000000000001 examplesearchkey000000000000001";
     const out = extractAllLabeledTokensFromReason(reason, page);
     expect(out).toEqual({
       application_id: "LATENCY",
-      admin_api_key: "bf4e07ce6a3e44d57f9eaad32b8d3df3",
-      search_api_key: "6be0576ff61c053d5f9a3225e2a90f76",
+      admin_api_key: "exampleadminkey0000000000000001",
+      search_api_key: "examplesearchkey000000000000001",
     });
   });
 

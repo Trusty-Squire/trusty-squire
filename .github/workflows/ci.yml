@@ -23,6 +23,17 @@ on:
     branches: [main, staging]
 
 jobs:
+  # Block real captured credentials from entering the repo. On 2026-06-08 a
+  # live Pusher key+secret got pasted into a test fixture and GitGuardian
+  # flagged it within hours; this is the mechanical guard against a repeat.
+  # Dependency-free (bash + grep) so it's a fast, always-green-or-real-red gate.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked files for credential-shaped values
+        run: tools/secret-scan.sh
+
   typecheck:
     runs-on: ubuntu-latest
     steps:

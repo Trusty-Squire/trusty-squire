@@ -2475,13 +2475,13 @@ describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
     const observed = {
       kind: "extract" as const,
       reason:
-        "application_id='86WV27C86H' and search_api_key='4725e44b819e98d508ed7342966d1bdb' " +
-        "and admin_api_key='38a495f92e835361f23473ff12bd0c05'",
+        "application_id='EXAMPLEAPPID' and search_api_key='examplesearchkey000000000000002' " +
+        "and admin_api_key='exampleadminkey0000000000000002'",
     };
     // The parser validates each value appears on the page; mirror real use.
     const pageText =
-      "Application ID 86WV27C86H Search API Key 4725e44b819e98d508ed7342966d1bdb " +
-      "Admin API Key 38a495f92e835361f23473ff12bd0c05";
+      "Application ID EXAMPLEAPPID Search API Key examplesearchkey000000000000002 " +
+      "Admin API Key exampleadminkey0000000000000002";
     const steps = synthesizeLabeledExtractSteps(observed, pageText, prov);
     expect(steps).not.toBeNull();
     expect(steps!.map((s) => (s.kind === "extract_labeled" ? s.produces : s.kind))).toEqual([

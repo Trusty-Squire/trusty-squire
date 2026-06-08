@@ -289,15 +289,15 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
 
 describe("isTruncatedCapture — F10 truncation detection", () => {
   it("flags a key directly followed by '...'", () => {
-    const text = "Your key: sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8...";
+    const text = "Your key: sk-or-v1-example000000000000000000000001...";
     // Simulate what the labeled regex would have captured here.
-    const captured = "sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8";
+    const captured = "sk-or-v1-example000000000000000000000001";
     expect(isTruncatedCapture(text, captured)).toBe(true);
   });
 
   it("flags a key followed by the Unicode ellipsis", () => {
-    const text = "sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8…";
-    expect(isTruncatedCapture(text, "sk-or-v1-1687b94c0e589f34ea46ae2c3f4e124a8")).toBe(
+    const text = "sk-or-v1-example000000000000000000000001…";
+    expect(isTruncatedCapture(text, "sk-or-v1-example000000000000000000000001")).toBe(
       true,
     );
   });

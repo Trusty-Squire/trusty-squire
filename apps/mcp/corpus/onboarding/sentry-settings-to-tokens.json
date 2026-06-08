@@ -1283,7 +1283,7 @@
       "visible": true,
       "inViewport": true,
       "inConsentWidget": false,
-      "href": "https://app.codecov.io/login/?state=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo0NTcxNjk1LCJvcmdfaWQiOjQ1MTE0MDgzMDU0NzE0ODh9.R94TF4Nerohj0ouJqH2f293AQfIxxmtX9xdAe1f2muI&utm_medium=referral&utm_source=sentry-app-stacktracelink&utm_campaign=sentry-codecov&utm_department=marketing",
+      "href": "https://app.codecov.io/login/?state=REDACTED_OAUTH_STATE&utm_medium=referral&utm_source=sentry-app-stacktracelink&utm_campaign=sentry-codecov&utm_department=marketing",
       "iconLabel": null,
       "index": 70
     },
