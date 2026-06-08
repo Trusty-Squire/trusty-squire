@@ -7103,7 +7103,17 @@ export class SignupAgent {
       }
       throw err;
     }
-    if (credentials.api_key !== undefined) {
+    // Success on a legacy api_key OR a real multi-cred bundle. Some services
+    // issue NO field literally named api_key — Pusher's keys are
+    // application_id + app_key + app_secret — so an api_key-only gate
+    // wrongly bailed oauth_onboarding_failed while the bot was holding a
+    // complete, usable bundle. Require >=2 named (non-metadata) credentials
+    // so a lone ID (e.g. just application_id) still fails honestly: an ID
+    // without a secret isn't a usable credential.
+    const namedCredCount = Object.keys(credentials).filter(
+      (k) => !NON_CREDENTIAL_KEYS.has(k),
+    ).length;
+    if (credentials.api_key !== undefined || namedCredCount >= 2) {
       return {
         success: true,
         credentials: { ...credentials },
