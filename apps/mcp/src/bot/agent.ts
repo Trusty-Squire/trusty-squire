@@ -6084,6 +6084,15 @@ export class SignupAgent {
     // /consent, etc.) get the soft-advance path instead of an abort —
     // because the scope-grant decision was already made and validated.
     let consentAlreadyApproved = false;
+    // Bounded soft-waits for a consent page whose approve control hasn't
+    // rendered yet. Google's gaia consent SPA paints "Loading" then
+    // hydrates the Allow/Continue button a few seconds later (and for an
+    // already-authorized app it may auto-redirect with no button at all).
+    // Rather than aborting the instant advanceOAuthConsent finds nothing,
+    // wait + re-loop a few times so a slow hydrate / auto-redirect can
+    // complete first.
+    let consentAdvanceWaits = 0;
+    const MAX_CONSENT_ADVANCE_WAITS = 3;
     for (let i = 0; i < MAX_OAUTH_NAV; i++) {
       if (this.browser.oauthPageClosed()) {
         steps.push(
@@ -6530,10 +6539,22 @@ export class SignupAgent {
           );
           const advanced = await this.browser.advanceOAuthConsent(provider.id);
           if (!advanced) {
+            // The approve button may not have hydrated yet, or Google is
+            // auto-redirecting an already-authorized app. Wait + re-loop a
+            // bounded number of times before giving up.
+            if (consentAdvanceWaits < MAX_CONSENT_ADVANCE_WAITS) {
+              consentAdvanceWaits += 1;
+              steps.push(
+                `OAuth: consent approve control not present yet — waiting for hydrate/redirect ` +
+                  `(${consentAdvanceWaits}/${MAX_CONSENT_ADVANCE_WAITS})`,
+              );
+              await this.browser.wait(4);
+              continue;
+            }
             return this.oauthAbort(
               "oauth_consent_needs_review",
               `blind-consent approved but no approve control found on the ` +
-                `${provider.label} consent page — sign up manually.`,
+                `${provider.label} consent page after ${consentAdvanceWaits} waits — sign up manually.`,
               steps,
             );
           }
