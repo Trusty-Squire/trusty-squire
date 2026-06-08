@@ -2494,15 +2494,58 @@ async function clickGoogleChooserCard(browser: BrowserController): Promise<boole
 async function clickConsentAffordance(browser: BrowserController): Promise<boolean> {
   const page = pageOf(browser);
   if (page === null) return false;
-  const name = /^(continue|allow|authorize|approve|accept|agree|i agree)$/i;
+  // Exact-name match first (safest): the approve control's accessible name IS
+  // just the verb.
+  const exact = /^(continue|allow|authorize|approve|accept|agree|i agree)$/i;
   for (const role of ["button", "link"] as const) {
     try {
-      const loc = page.getByRole(role, { name }).first();
-      await loc.waitFor({ state: "visible", timeout: 2000 });
+      const loc = page.getByRole(role, { name: exact }).first();
+      await loc.waitFor({ state: "visible", timeout: 3000 });
       await loc.click({ timeout: 3000 });
       return true;
     } catch {
       /* try the next role */
+    }
+  }
+  // Fallback: Google's modern consent button carries extra accessible-name
+  // text ("Continue", "Continue to kinde", a nested span) that the exact match
+  // misses — so kinde/imagekit reached state=consent but this returned false
+  // and the verifier bailed needs_login. Match an approve verb at the START of
+  // the name, and explicitly skip negatives ("Cancel", "Don't allow", "Back").
+  const approve = /^(continue|allow|authorize|approve|accept|agree)/i;
+  const negative = /(cancel|deny|don'?t\s*allow|no\s*thanks|go\s*back|^back$|reject)/i;
+  for (const role of ["button", "link"] as const) {
+    const loc = page.getByRole(role, { name: approve });
+    const count = await loc.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const el = loc.nth(i);
+      const txt = ((await el.textContent().catch(() => "")) ?? "").trim();
+      if (negative.test(txt)) continue;
+      try {
+        await el.waitFor({ state: "visible", timeout: 2000 });
+        await el.click({ timeout: 3000 });
+        return true;
+      } catch {
+        /* next candidate */
+      }
+    }
+  }
+  if (process.env.REPLAY_DEBUG) {
+    try {
+      const btns = await page
+        .getByRole("button")
+        .all()
+        .then((ls) =>
+          Promise.all(ls.slice(0, 25).map((l) => l.textContent().catch(() => ""))),
+        )
+        .catch(() => []);
+      writeFileSync(
+        `/tmp/replay-consent-buttons.txt`,
+        `url=${page.url()}\nbuttons=${JSON.stringify(btns)}`,
+      );
+      console.error(`[replay-oauth-debug] consent affordance not found — dumped /tmp/replay-consent-buttons.txt`);
+    } catch {
+      /* best-effort */
     }
   }
   return false;
