@@ -6046,10 +6046,17 @@ export class SignupAgent {
     let gsiHandled = false;
     if (provider.id === "google" && (await this.browser.hasGoogleGsiAffordance())) {
       const gsi = await this.browser.tryGoogleGsiLogin(oauthSelector);
-      gsiHandled = true;
+      // Only count GSI as handled when it ACTUALLY resolved. On via:"none"
+      // (FedCM dialog never fired AND no popup) we must fall through to the
+      // classic startOAuth redirect flow rather than skip it and then
+      // falsely conclude "signed in" — the bug that left meilisearch
+      // bouncing to a "create an account" form post-FedCM-miss.
+      gsiHandled = gsi.ok && gsi.via !== "none";
       steps.push(
         `OAuth: Google Identity Services / FedCM widget — resolved via ${gsi.via}` +
-          (gsi.ok ? "" : " (no FedCM dialog or popup appeared — the widget may need a different trigger)"),
+          (gsiHandled
+            ? ""
+            : " (FedCM dialog/popup did not complete — falling back to the redirect OAuth flow)"),
       );
     }
     // OmniAuth POST-only recovery prep. Capture the affordance's href + the
