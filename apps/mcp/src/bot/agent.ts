@@ -4076,6 +4076,13 @@ export class SignupAgent {
     let progressReplans = 0;
     let emptyPlans = 0;
     let oauthScanRetries = 0;
+    // A signup SPA that's STILL a loading shell after all OAuth-scan
+    // retries (getstream's accounts/signup SPA wedged this way → the bot
+    // wrongly bailed oauth_required "no form"). A single reload usually
+    // kicks the stuck hydration loose; bounded so a genuinely empty page
+    // still terminates.
+    let oauthShellReloads = 0;
+    const MAX_OAUTH_SHELL_RELOADS = 1;
     // Bound upstream-proxy blips. The blip carve-out below deliberately
     // does NOT tick errorReplans (a transient 502 isn't a logic failure),
     // but with no cap a SUSTAINED LLM-proxy outage spins this loop until
@@ -4275,6 +4282,24 @@ export class SignupAgent {
               `${oauthScanShell ? ", page still a loading shell" : ""})`,
           );
           await this.browser.wait(3);
+          continue;
+        }
+        // Still a loading shell after every retry — reload once to unstick
+        // a wedged SPA (getstream's signup SPA) before falling through to
+        // the misleading oauth_required "no form" bail.
+        if (oauthScanShell && oauthShellReloads < MAX_OAUTH_SHELL_RELOADS) {
+          oauthShellReloads += 1;
+          steps.push(
+            `OAuth-first: page stuck as a loading shell after ${oauthScanRetries} retries — ` +
+              `reloading once to unstick the SPA (${oauthShellReloads}/${MAX_OAUTH_SHELL_RELOADS})`,
+          );
+          try {
+            await this.browser.goto(this.browser.currentUrl());
+            await this.browser.waitForFormReady();
+          } catch {
+            // reload failed — fall through to the normal terminal handling
+          }
+          oauthScanRetries = 0;
           continue;
         }
         // F17 — already-signed-in detection. If the inventory shows
