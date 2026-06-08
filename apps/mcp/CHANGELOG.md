@@ -1,5 +1,38 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.6 (2026-06-08)
+
+Multi-credential signups + OAuth/proxy resilience. Adds the label-scoped
+multi-cred extraction primitive and a run of fixes that make the bot fail
+fast and navigate consent/credential pages correctly instead of spinning.
+
+- **Multi-credential synthesis.** New `extract_labeled` step kind — the
+  canonical multi-cred primitive. When a planner reason names ≥2 labeled
+  credentials, the synthesizer emits one label-scoped extract per
+  credential and the replay engine resolves each value by its on-page
+  LABEL (revealing a masked value), so two same-shaped keys on one page
+  stay distinct. Single-cred captures keep the legacy path (byte-
+  equivalent). Live-validated: algolia captures application_id +
+  search_api_key + admin_api_key as a 3-credential skill.
+- **Never extract an email address as a credential.** A signup that lands
+  on an email-settings page no longer mistakes `name@host` for a key
+  (the local-part used to slip past the credential-shape gate).
+- **Fail fast on a degraded LLM proxy.** The form-fill loop capped its
+  upstream-blip retries at 8 (mirroring post-verify) — a sustained
+  proxy/credits outage previously spun ~177 planner calls to a 600s
+  timeout; now it bails as `planning_failed (llm_proxy_unavailable)`.
+- **OAuth consent, hardened.** The discover housekeeper approves a benign
+  email/profile consent blind (the operator is provisioning on their own
+  behalf; the DOM danger-phrase scraper still hard-aborts on
+  Drive/Gmail/contacts). The Google approve-button matcher is broader
+  (Allow / Allow access / Continue) with a DOM-scan fallback, and a
+  slow-hydrating consent SPA gets a bounded wait before aborting.
+- **Don't misclassify an OAuth signup-chooser as a verification wall.** A
+  no-input page offering "Sign up with Google/GitHub" now takes the OAuth
+  path instead of polling a phantom inbox.
+- **Retry `page.goto` on transient SOCKS/connection drops** (up to 3×) so
+  a residential-tunnel blip on a heavy page doesn't fail the whole signup.
+
 ## 0.9.5 (2026-06-07)
 
 Closed-loop reliability: a run of post-OAuth navigation + signup-form +
