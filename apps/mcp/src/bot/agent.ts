@@ -3735,6 +3735,24 @@ export function isAuthProcessingText(text: string): boolean {
 // with any SignupResult.error string.
 const OAUTH_FALL_BACK_TO_FORM_FILL = "__fall_back_to_form_fill__" as const;
 
+// Returned by runOAuthFlow when the chosen provider is a dead end for the
+// BOT specifically (Google GSI/FedCM: the dialog never renders for an
+// automated browser — measured) but the page offers ANOTHER provider that
+// uses a classic redirect (GitHub), which the bot can drive. runSignup
+// re-dispatches the oauth outcome with this provider/selector. Has a `kind`
+// discriminant so it's distinguishable from a SignupResult (which has none).
+interface OAuthTryNextProvider {
+  kind: "try_next_provider";
+  selector: string;
+  provider: OAuthProviderId;
+}
+
+function isOAuthTryNextProvider(
+  r: SignupResult | typeof OAUTH_FALL_BACK_TO_FORM_FILL | OAuthTryNextProvider,
+): r is OAuthTryNextProvider {
+  return typeof r !== "string" && "kind" in r && r.kind === "try_next_provider";
+}
+
 export class SignupAgent {
   // Per-run counter so a single SignupAgent (which lives one run) can't
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
@@ -5498,6 +5516,9 @@ export class SignupAgent {
         ? { kind: "already_oauth" }
         : await this.planExecuteWithRetry(task, fillValues, steps);
       let oauthFallbackUsed = false;
+      // Guards the Google-GSI-dead-end → next-provider (GitHub) retry so a
+      // page offering both providers can't ping-pong between them.
+      let oauthProviderFallbackUsed = false;
       // Multi-step signup guard (amplitude: email/name step → a dedicated
       // "Create your password" step). Bounds how many continuation form steps
       // we'll fill after the first submit before treating the signup as done.
@@ -5581,6 +5602,30 @@ export class SignupAgent {
             outcome.provider,
             steps,
           );
+          // Google GSI/FedCM dead end → retry via the alternate provider
+          // (GitHub redirect flow) the page also offers. Once only.
+          if (isOAuthTryNextProvider(oauthResult)) {
+            if (oauthProviderFallbackUsed) {
+              return {
+                success: false,
+                error:
+                  `oauth_required: ${task.service}'s Google sign-in is FedCM-only (the dialog never ` +
+                  `renders for the bot) and the ${oauthResult.provider} fall-back also did not complete.`,
+                steps,
+                ...this.resultTail(),
+              };
+            }
+            oauthProviderFallbackUsed = true;
+            steps.push(
+              `OAuth: retrying via ${oauthResult.provider} after Google GSI/FedCM dead-end.`,
+            );
+            outcome = {
+              kind: "oauth",
+              selector: oauthResult.selector,
+              provider: oauthResult.provider,
+            };
+            continue dispatch;
+          }
           // Google login-only / no-account (plunk): OAuth is a dead end
           // but the email/password form can still create the account.
           // Re-run the form-fill path ONCE with OAuth-first suppressed
@@ -5956,7 +6001,7 @@ export class SignupAgent {
     // the caller re-runs the email/password form-fill path. Returning a
     // sentinel (vs. driving form-fill from in here) keeps the single
     // outcome-dispatch switch in runSignup as the one place that owns it.
-  ): Promise<SignupResult | typeof OAUTH_FALL_BACK_TO_FORM_FILL> {
+  ): Promise<SignupResult | typeof OAUTH_FALL_BACK_TO_FORM_FILL | OAuthTryNextProvider> {
     const provider = OAUTH_PROVIDERS[providerId];
     // `loginCmd` is only ever surfaced from a CHALLENGE / needs_login
     // abort — i.e. the bot HAS a session cookie but the provider is
@@ -6044,7 +6089,9 @@ export class SignupAgent {
     // redirect that never comes, so it falsely concludes "signed in" and the
     // session never persists (northflank). Detect GSI and drive it over CDP.
     let gsiHandled = false;
+    let gsiAttempted = false;
     if (provider.id === "google" && (await this.browser.hasGoogleGsiAffordance())) {
+      gsiAttempted = true;
       const gsi = await this.browser.tryGoogleGsiLogin(oauthSelector);
       // Only count GSI as handled when it ACTUALLY resolved. On via:"none"
       // (FedCM dialog never fired AND no popup) we must fall through to the
@@ -6056,8 +6103,28 @@ export class SignupAgent {
         `OAuth: Google Identity Services / FedCM widget — resolved via ${gsi.via}` +
           (gsiHandled
             ? ""
-            : " (FedCM dialog/popup did not complete — falling back to the redirect OAuth flow)"),
+            : " (FedCM dialog/popup did not complete — looking for another provider)"),
       );
+    }
+    // GSI/FedCM dead end. Google won't render the FedCM dialog for an
+    // automated browser (measured: FedCm.enable ok, dialogShown never fires),
+    // and re-clicking a GSI button only re-triggers FedCM — never a redirect.
+    // If the page ALSO offers a redirect-based provider (GitHub), hand the
+    // caller a TRY_NEXT_PROVIDER signal so it re-dispatches via that provider
+    // instead of dead-ending on Google. meilisearch offers both.
+    if (gsiAttempted && !gsiHandled) {
+      try {
+        const inv = await this.browser.extractInteractiveElements();
+        const alt = findFirstOAuthButton(inv, ["github"]);
+        if (alt !== null) {
+          steps.push(
+            `OAuth: Google GSI/FedCM is a dead end for the bot — falling back to ${alt.provider}.`,
+          );
+          return { kind: "try_next_provider", selector: alt.button.selector, provider: alt.provider };
+        }
+      } catch {
+        // inventory read failed — fall through to the normal redirect path
+      }
     }
     // OmniAuth POST-only recovery prep. Capture the affordance's href + the
     // page's CSRF token NOW, while we're still on the signin page — the
