@@ -45,6 +45,9 @@ import {
   type QueueProvider,
 } from "./queues/index.js";
 import { LogNotifier, type Notifier } from "./notifier.js";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 
@@ -188,6 +191,49 @@ Required env per mode:
 `);
 }
 
+// Load ~/.config/trusty-squire/harvester.env into process.env when running
+// the CLI directly (manual `node dist/bin.js housekeeper`). The systemd heal
+// timer pulls this file in via EnvironmentFile=, but a hand-run shell does
+// NOT — so REGISTRY_ADMIN_BEARER / UNIVERSAL_BOT_PROXY_URL / notifier tokens
+// were silently absent and every manual verify run failed auth unless the
+// operator remembered to `set -a; source harvester.env` first. Auto-load it
+// here so manual runs behave like the timer. Best-effort + NON-overwriting:
+// an already-set env value always wins (hand-exported vars, CI), and a
+// missing/unreadable file is a no-op. Parses simple KEY=VALUE lines: skips
+// blanks + `#` comments, strips one layer of matching single/double quotes,
+// honors XDG_CONFIG_HOME. This reads operator-infra tokens from a file the
+// operator already placed at 600 perms — it does NOT touch the credential
+// vault (which is write-only by design and cannot feed a local process).
+export function loadHarvesterEnvFile(): void {
+  try {
+    const configHome =
+      process.env.XDG_CONFIG_HOME !== undefined && process.env.XDG_CONFIG_HOME !== ""
+        ? process.env.XDG_CONFIG_HOME
+        : join(homedir(), ".config");
+    const path = join(configHome, "trusty-squire", "harvester.env");
+    if (!existsSync(path)) return;
+    for (const raw of readFileSync(path, "utf8").split("\n")) {
+      const line = raw.trim();
+      if (line === "" || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      if (process.env[key] !== undefined) continue; // existing env wins
+      let value = line.slice(eq + 1).trim();
+      if (
+        value.length >= 2 &&
+        ((value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'")))
+      ) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+    }
+  } catch {
+    // best-effort — downstream "not set" guards surface a genuine gap.
+  }
+}
+
 // Fill TRUSTY_SQUIRE_MACHINE_TOKEN / _ACCOUNT_ID / _API_BASE from the
 // session file (keytar or ~/.config/trusty-squire/session.json, whichever
 // the install used) when the env doesn't already carry them. Best-effort
@@ -230,6 +276,14 @@ async function backfillOperatorCredsFromSession(): Promise<void> {
 }
 
 export async function runHousekeeperCli(argv: readonly string[]): Promise<number> {
+  // Auto-load ~/.config/trusty-squire/harvester.env for manual runs (the
+  // systemd timer gets it via EnvironmentFile=; a hand-run shell otherwise
+  // wouldn't, so REGISTRY_ADMIN_BEARER / proxy / notifier tokens were silently
+  // absent). Non-overwriting, so explicit env exports still win. MUST run
+  // before parseArgs — parseArgs snapshots process.env.REGISTRY_ADMIN_BEARER
+  // into args.adminBearer, so loading after it would leave the bearer unseen.
+  loadHarvesterEnvFile();
+
   const args = parseArgs(argv);
 
   // Backfill the operator credentials from the session file when they
