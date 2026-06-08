@@ -414,4 +414,40 @@ describe("/v1/llm/chat", () => {
     const orBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
     expect("temperature" in orBody).toBe(false);
   });
+
+  describe("GET /v1/llm/credits", () => {
+  it("returns the operator's remaining OpenRouter balance", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: { total_credits: 50, total_usage: 12.5 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ) as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/llm/credits",
+      headers: { "x-machine-token": machine_token },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ total_credits: 50, total_usage: 12.5, remaining: 37.5 });
+  });
+
+  it("rejects requests without a machine token", async () => {
+    const res = await app.inject({ method: "GET", url: "/v1/llm/credits" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("returns 502 when OpenRouter's credits endpoint errors", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response("nope", { status: 402 }),
+    ) as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "GET",
+      url: "/v1/llm/credits",
+      headers: { "x-machine-token": machine_token },
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toMatchObject({ error: "upstream_error", upstream_status: 402 });
+  });
+  });
 });

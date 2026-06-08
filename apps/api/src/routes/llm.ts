@@ -288,6 +288,43 @@ export async function registerLLMRoute(
       reply.code(502).send({ error: "upstream_unreachable" });
     }
   });
+
+  // Operator credit gauge. The 0.9.6 incident was OpenRouter hitting zero
+  // credits (402 on cheap+premium) — invisible until signups silently
+  // failed. This surfaces the operator account's remaining balance so a
+  // cron/notifier can alert BEFORE it runs dry. Same auth as the proxy
+  // (machine token or admin); reads the server-side OPENROUTER_API_KEY,
+  // never exposes it.
+  fastify.get("/v1/llm/credits", async (req, reply) => {
+    if (orKey === "") {
+      reply.code(503).send({ error: "llm_proxy_not_configured" });
+      return;
+    }
+    const principal = await authorizeMachineOrAdmin(req, reply, opts.deps.machineTokenStore);
+    if (principal === null) return;
+    try {
+      const resp = await fetch("https://openrouter.ai/api/v1/credits", {
+        headers: { Authorization: `Bearer ${orKey}` },
+      });
+      if (!resp.ok) {
+        reply.code(502).send({ error: "upstream_error", upstream_status: resp.status });
+        return;
+      }
+      const body = (await resp.json()) as {
+        data?: { total_credits?: number; total_usage?: number };
+      };
+      const total = body.data?.total_credits ?? 0;
+      const usage = body.data?.total_usage ?? 0;
+      reply.send({
+        total_credits: total,
+        total_usage: usage,
+        remaining: Math.max(0, total - usage),
+      });
+    } catch (err) {
+      fastify.log.error({ err }, "openrouter credits fetch failed");
+      reply.code(502).send({ error: "upstream_unreachable" });
+    }
+  });
 }
 
 interface OrResponse {
