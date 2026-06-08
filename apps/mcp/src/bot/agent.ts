@@ -8288,6 +8288,11 @@ ${formatInventory(input.inventory)}`,
       }
       prevContentSig = contentSig;
       if (isStalledOnActions(actionEffects)) {
+        // Capture the exact page that defeated the wizard so the N1
+        // onboarding-wizard class is debuggable post-hoc (post-verify pages
+        // weren't being snapshotted — imagekit's step-1/3 role-select stall
+        // had no rendered capture to diagnose). Best-effort.
+        await saveDebugSnapshot(this.browser, "post-verify-stalled").catch(() => undefined);
         args.steps.push(
           `Post-verify: STALLED — the last 3 page-mutating actions left the page ` +
             `identical (${state.url}). An onboarding wizard is re-presenting itself ` +
