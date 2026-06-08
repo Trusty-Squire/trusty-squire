@@ -4049,6 +4049,15 @@ export class SignupAgent {
     let progressReplans = 0;
     let emptyPlans = 0;
     let oauthScanRetries = 0;
+    // Bound upstream-proxy blips. The blip carve-out below deliberately
+    // does NOT tick errorReplans (a transient 502 isn't a logic failure),
+    // but with no cap a SUSTAINED LLM-proxy outage spins this loop until
+    // the 600s run deadline — meilisearch burned 177 planner calls this
+    // way on a degraded `trusty-squire-proxy:cheap` upstream. The
+    // post-verify loop already caps blips at 8; mirror that here so a
+    // sustained outage fails fast as planning_failed instead of timing out.
+    let upstreamBlipRetries = 0;
+    const MAX_UPSTREAM_BLIP_RETRIES = 8;
     // Bounded click-throughs of a generic "Sign In to Continue"
     // interstitial that gates the provider buttons (Qdrant). Capped so
     // an SSO-only page that keeps re-showing a sign-in button (or a
@@ -4392,14 +4401,25 @@ export class SignupAgent {
         if (!isUpstreamBlip && ++errorReplans > MAX_ERROR_REPLANS) {
           return { kind: "planning_failed", reason: `planner output never validated: ${reason}` };
         }
+        if (isUpstreamBlip && ++upstreamBlipRetries > MAX_UPSTREAM_BLIP_RETRIES) {
+          return {
+            kind: "planning_failed",
+            reason: `llm_proxy_unavailable: planner request failed ${upstreamBlipRetries}x on upstream proxy errors (${reason}) — sustained LLM-proxy/upstream outage, not a page problem`,
+          };
+        }
         steps.push(
           isUpstreamBlip
-            ? `⚠ planner request hit a transient upstream blip (${reason}) — retrying`
+            ? `⚠ planner request hit a transient upstream blip (${reason}) — retrying (${upstreamBlipRetries}/${MAX_UPSTREAM_BLIP_RETRIES})`
             : `⚠ plan rejected (${reason}) — re-planning`,
         );
         if (!isUpstreamBlip) {
           hint =
             "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
+        } else {
+          // Brief backoff so a genuinely transient blip can recover
+          // before the next attempt, instead of hammering a degraded
+          // upstream as fast as the proxy can 502.
+          await this.browser.wait(2);
         }
         continue;
       }
