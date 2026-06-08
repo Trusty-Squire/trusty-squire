@@ -352,15 +352,18 @@ describe("extractAllLabeledTokensFromReason — email local-part guard", () => {
 
 describe("extractAllLabeledTokensFromReason — Pusher (app_id/app_key/secret)", () => {
   it("captures app_id + app_key + bare-secret, skips cluster config", () => {
+    // SYNTHETIC values only — never paste real captured credentials into a
+    // committed fixture (a prior version leaked a live Pusher app's key +
+    // secret and tripped GitGuardian). These are obviously-fake placeholders.
     const reason =
-      "The App Keys page shows app_id='2164307', app_key='62d80a2e59609196a8e7', " +
-      "secret='9cec7c4790fdd6bc69e2', and cluster='ap3' for the app.";
+      "The App Keys page shows app_id='example1000001', app_key='examplekey1234567890', " +
+      "secret='examplesecret1234567', and cluster='ap3' for the app.";
     const page =
-      "App Keys app_id 2164307 app_key 62d80a2e59609196a8e7 secret 9cec7c4790fdd6bc69e2 cluster ap3";
+      "App Keys app_id example1000001 app_key examplekey1234567890 secret examplesecret1234567 cluster ap3";
     expect(extractAllLabeledTokensFromReason(reason, page)).toEqual({
-      application_id: "2164307",
-      app_key: "62d80a2e59609196a8e7",
-      secret: "9cec7c4790fdd6bc69e2",
+      application_id: "example1000001",
+      app_key: "examplekey1234567890",
+      secret: "examplesecret1234567",
     });
   });
   it("bare 'secret' does NOT double-capture inside api_secret/client_secret", () => {
