@@ -850,6 +850,89 @@ describe("replaySkill — glossed cred-click token fallback", () => {
   });
 });
 
+// ── role_hint is a soft preference, not a hard gate ──────────────────
+
+describe("replaySkill — soft role_hint fallback", () => {
+  it("clicks a text-matched element whose role differs from the captured role_hint (imagekit 'Next' is an <a>)", async () => {
+    const b = stubBrowser();
+    // The skill captured "Next" as role_hint=button, but on the returning-user
+    // page "Next" renders as a link. role-filtering would drop it; soft
+    // fallback keeps it.
+    b.setInventoryFor("extract", [
+      inv({ tag: "a", visibleText: "Next", role: "link", selector: "a.next" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Next", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    const clicks = b.history.filter((c) => c.method === "click");
+    expect(clicks.some((c) => c.args[0] === "a.next")).toBe(true);
+  });
+});
+
+// ── Fuzzy label fallback for a glossed fill (anthropic "Name your key:") ──
+
+describe("replaySkill — fuzzy fill-label fallback", () => {
+  it("fills a present-but-glossed input by token overlap (\"Name your key:\" → input \"Name\")", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "input", labelText: "Name", selector: "input.keyname" }),
+      inv({ tag: "button", visibleText: "Create", role: "button", selector: "button.create" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "fill", label_hint: "Name your key:", value_template: "${TOKEN_NAME}", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { TOKEN_NAME: "ts-key" },
+    });
+
+    expect(result.kind).toBe("ok");
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.some((c) => c.args[0] === "input.keyname")).toBe(true);
+  });
+
+  it("does NOT fuzzy-match an unrelated input (Search box) — falls through to absent-skip", async () => {
+    const b = stubBrowser();
+    // Returning-user page: only a Search box, no name field. The fill must
+    // NOT grab the search box; it should skip as account-state-dependent and
+    // still reach the credential.
+    b.setInventoryFor("extract", [
+      inv({ tag: "input", labelText: "Search", placeholder: "Search", selector: "input.search" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "fill", label_hint: "Name your key:", value_template: "${TOKEN_NAME}", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { TOKEN_NAME: "ts-key" },
+    });
+
+    expect(result.kind).toBe("ok"); // skipped the absent name fill, reached the credential
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.some((c) => c.args[0] === "input.search")).toBe(false);
+  });
+});
+
 // ── needs_login on OAuth without a profile session ──────────────────
 
 describe("replaySkill — OAuth needs_login", () => {

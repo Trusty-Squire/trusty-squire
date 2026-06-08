@@ -570,9 +570,15 @@ async function preValidateStep(
     case "click": {
       const inventory = await browser.extractInteractiveElements();
       const matches = inventory.filter((el) => matchesClickHint(el, step.text_match));
-      const filtered = step.role_hint
+      // role_hint is a SOFT preference, not a hard gate. When it filters out
+      // every text-match — imagekit's live "Next" renders as an <a>, not the
+      // captured <button> — fall back to the text matches and let the
+      // disambiguator below pick. A genuinely-absent target (no text match at
+      // all) still falls through to the href/token fallbacks.
+      const roleFiltered = step.role_hint
         ? matches.filter((el) => matchesRole(el, step.role_hint!))
         : matches;
+      const filtered = roleFiltered.length > 0 ? roleFiltered : matches;
       if (filtered.length === 0) {
         // href fallback: a nav-link target whose text rendered as an icon
         // on replay (or whose URL slug differs) won't match by text but
@@ -581,14 +587,6 @@ async function preValidateStep(
         if (step.href_hint !== undefined) {
           const byHref = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
           if (byHref.length === 1) return { ok: true, match: byHref[0]! };
-        }
-        if (matches.length > 0) {
-          return {
-            ok: false,
-            reason:
-              `text_match=${JSON.stringify(step.text_match)} matched ${matches.length} elements, ` +
-              `but role_hint=${step.role_hint} filtered them all out.`,
-          };
         }
         // Last-resort token-subset fallback: the captured text_match is a
         // planner gloss ("Create Token") that doesn't substring-match the live
@@ -652,6 +650,16 @@ async function preValidateStep(
       const inventory = await browser.extractInteractiveElements();
       const matches = inventory.filter((el) => isFillable(el) && matchesLabelHint(el, step.label_hint));
       if (matches.length === 0) {
+        // Fuzzy last-resort: the label_hint is a verbose gloss ("Name your
+        // key:") that didn't match the live input labeled "Name". Match on
+        // significant-token overlap, unique only — so a present-but-glossed
+        // field is filled rather than wrongly skipped (which left anthropic's
+        // submit disabled). A genuinely-absent onboarding field still matches
+        // nothing here and falls through to the absent-skip path.
+        const fuzzy = inventory.filter(
+          (el) => isFillable(el) && el.tag !== "select" && matchesLabelHintFuzzy(el, step.label_hint),
+        );
+        if (fuzzy.length === 1) return { ok: true, match: fuzzy[0]! };
         return {
           ok: false,
           reason: `No input matches label_hint=${JSON.stringify(step.label_hint)}.`,
@@ -940,9 +948,12 @@ async function executeStep(
     case "click": {
       const inventory = await browser.extractInteractiveElements();
       const matches = inventory.filter((el) => matchesClickHint(el, step.text_match));
-      const filtered = step.role_hint
+      // role_hint soft-fallback (mirrors preValidate): if it filters out every
+      // text-match, trust the text matches and let the disambiguator pick.
+      const roleFiltered = step.role_hint
         ? matches.filter((el) => matchesRole(el, step.role_hint!))
         : matches;
+      const filtered = roleFiltered.length > 0 ? roleFiltered : matches;
       if (filtered.length === 0) {
         // href fallback (mirrors preValidate): resolve a nav link by its
         // stable href path tail when text matching finds nothing. If even
@@ -1003,6 +1014,16 @@ async function executeStep(
       const inventory = await browser.extractInteractiveElements();
       const matches = inventory.filter((el) => isFillable(el) && matchesLabelHint(el, step.label_hint));
       if (matches.length === 0) {
+        // Fuzzy fallback (mirrors preValidate): fill a present-but-glossed
+        // input matched by significant-token overlap, unique only.
+        const fuzzy = inventory.filter(
+          (el) => isFillable(el) && el.tag !== "select" && matchesLabelHintFuzzy(el, step.label_hint),
+        );
+        if (fuzzy.length === 1) {
+          const value = substituteTemplate(step.value_template, templateValues);
+          await browser.type(fuzzy[0]!.selector, value);
+          return { kind: "filled" };
+        }
         throw new Error(`No input matches label_hint=${step.label_hint}`);
       }
       // rc.25 — share the disambiguator with preValidate so execute
@@ -1940,6 +1961,33 @@ function matchesLabelHint(el: InteractiveElement, hint: string): boolean {
   const id = (el.id ?? "").toLowerCase();
   if (id.length > 0 && id === lowerHint && !isRuntimeId(id)) return true;
   return false;
+}
+
+const LABEL_STOPWORDS = new Set([
+  "your", "the", "for", "and", "please", "enter", "field", "input", "this",
+]);
+
+// Fuzzy label match for a fill/select whose captured label_hint is a verbose
+// gloss that doesn't exact/substring-match the live control. anthropic's skill
+// captured "Name your key:" but the live input is labeled "Name" — the exact
+// matcher missed it, the field was wrongly skipped as absent, and the form's
+// submit stayed disabled (precondition unmet). Matches on SIGNIFICANT-token
+// overlap (len>=3, minus stopwords) between the hint and the element's
+// label/placeholder/aria/name — so "Name your key:" overlaps "Name" / "Key
+// name" but NOT a "Search" box. Last-resort + unique-match-only (call site),
+// so it can't fill the wrong control on a multi-input form.
+function significantTokens(s: string): string[] {
+  return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(
+    (t) => t.length >= 3 && !LABEL_STOPWORDS.has(t),
+  );
+}
+function matchesLabelHintFuzzy(el: InteractiveElement, hint: string): boolean {
+  const want = new Set(significantTokens(hint));
+  if (want.size === 0) return false;
+  const have = significantTokens(
+    `${el.labelText ?? ""} ${el.placeholder ?? ""} ${el.ariaLabel ?? ""} ${el.name ?? ""}`,
+  );
+  return have.some((t) => want.has(t));
 }
 
 function isRuntimeId(id: string): boolean {
