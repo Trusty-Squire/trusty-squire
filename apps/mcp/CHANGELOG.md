@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.7 (2026-06-08)
+
+- **The CDP-hardened (patchright) browser launcher is now the default.**
+  The old default (playwright-extra + stealth) self-inflicted a detectable
+  `navigator.webdriver` via its manual defineProperty patch — strictly
+  worse on the fingerprint. The hardened launcher runs evaluations in an
+  isolated world and is all-green on the rebrowser bot-detector
+  (mainWorldExecution / navigator.webdriver / viewport / runtimeEnableLeak
+  all clean). Live A/B on the residential exit: meilisearch's Google
+  consent-SPA block (approve button never hydrated for the leaky browser)
+  became a FedCM path with the clean browser, and render still signed up +
+  extracted a key — no crash on either (the historical crash was the
+  retired rebrowser fork, not patchright). Opt out with
+  `BOT_CDP_HARDENED=0`; if patchright isn't installed the launcher falls
+  back to the stealth baseline gracefully.
+
 ## 0.9.6 (2026-06-08)
 
 Multi-credential signups + OAuth/proxy resilience. Adds the label-scoped

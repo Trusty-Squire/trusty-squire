@@ -38,14 +38,26 @@ const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
 
-// Whether the operator asked for the CDP-hardened launcher (patchright,
-// which runs evaluations in an isolated world and removes the automation
-// tells — mainWorldExecution, navigator.webdriver — that Turnstile /
-// reCAPTCHA-v3 score on). Flag-gated so it can be A/B'd against the
-// stealth baseline — see docs/DESIGN-antibot-hardening.md.
+// Whether to use the CDP-hardened launcher (patchright, which runs
+// evaluations in an isolated world and removes the automation tells —
+// mainWorldExecution, navigator.webdriver, viewport — that Turnstile /
+// reCAPTCHA-v3 / Google's consent SPA score on). See
+// docs/DESIGN-antibot-hardening.md.
+//
+// 2026-06-08 — DEFAULT FLIPPED ON. The baseline (playwright-extra +
+// stealth) self-inflicts a detectable navigator.webdriver via its manual
+// defineProperty patch, so it is strictly WORSE on the fingerprint. The
+// hardened launcher is all-green on the rebrowser bot-detector and was
+// live-A/B'd: meilisearch's Google consent-SPA block became a (handleable)
+// FedCM path, and render still signed up + extracted a key cleanly — no
+// crash on either (the old crash was the retired rebrowser fork, not
+// patchright). Default to hardened; opt out with BOT_CDP_HARDENED=0 for
+// the baseline. If patchright isn't installed, getChromium() falls back to
+// baseline gracefully.
 function cdpHardeningRequested(): boolean {
   const v = process.env.BOT_CDP_HARDENED;
-  return v === "1" || v === "true" || v === "on";
+  if (v === "0" || v === "false" || v === "off") return false;
+  return true;
 }
 
 let cachedChromium: typeof baseChromium | null = null;
