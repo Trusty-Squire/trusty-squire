@@ -62,7 +62,15 @@ export function classifyGitHubAuthState(url: string, bodyText: string): OAuthAut
     path.includes("/sessions/two-factor") ||
     path.includes("/sessions/verified-device") ||
     path.includes("/two-factor") ||
-    text.includes("two-factor authentication") ||
+    // A GENUINE 2FA interstitial — heading-based ("Verify your two-factor
+    // authentication settings"), not a passing mention. The old bare
+    // text.includes("two-factor authentication") matched GitHub's plain OAuth
+    // /authorize CONSENT screen (its account-security copy mentions 2FA), so a
+    // fully signed-in verifier classified consent as `challenge` and bailed
+    // needs_login instead of clicking Authorize. These helpers fire only on
+    // the real 2FA-settings page (forced wall or dismissible nag).
+    isGitHubForced2faVerification(bodyText) ||
+    isGitHubDismissible2faSetup(bodyText) ||
     text.includes("verify your device") ||
     text.includes("device verification")
   ) {

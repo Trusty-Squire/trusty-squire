@@ -64,6 +64,30 @@ describe("classifyGitHubAuthState (T13)", () => {
     ).toBe("challenge");
   });
 
+  it("treats the /authorize consent screen as consent even when it mentions two-factor in passing", () => {
+    // Regression (2026-06-08): planetscale/replicate verify replays bailed
+    // needs_login because the bare text.includes("two-factor authentication")
+    // matched account-security copy on the plain OAuth authorize screen.
+    expect(
+      classifyGitHubAuthState(
+        "https://github.com/login/oauth/authorize?client_id=d45b8172f2a5e4fcc435&scope=user",
+        "Authorize PlanetScale. PlanetScale wants to access your account. " +
+          "This account is protected with two-factor authentication.",
+      ),
+    ).toBe("consent");
+  });
+
+  it("still flags the real forced 2FA-settings wall on the authorize URL as challenge", () => {
+    expect(
+      classifyGitHubAuthState(
+        "https://github.com/login/oauth/authorize?client_id=x",
+        "Verify your two-factor authentication (2FA) settings. This is a " +
+          "one-time verification of your recently configured 2FA credentials. " +
+          "You can no longer delay this verification.",
+      ),
+    ).toBe("challenge");
+  });
+
   it("returns not_provider off a GitHub host or on a bad URL", () => {
     expect(classifyGitHubAuthState("https://dashboard.render.com/", "Welcome")).toBe(
       "not_provider",
