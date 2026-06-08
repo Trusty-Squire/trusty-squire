@@ -3061,6 +3061,15 @@ export function extractAllLabeledTokensFromReason(
     personal_api_key: "personal_api_key",
     app_key: "app_key",
     appkey: "app_key",
+    app_secret: "app_secret",
+    appsecret: "app_secret",
+    // 2026-06-08 — bare "secret" (Pusher's App Keys page labels its app
+    // secret just "secret"; the bot reached the keys page + saw it but the
+    // parser dropped it because no alias mapped bare "secret"). Maps to a
+    // neutral `secret` credential name. The \bsecret\b match can't fire
+    // inside api_secret/client_secret/app_secret (the preceding "_" kills
+    // the word boundary), so this doesn't double-capture those.
+    secret: "secret",
     // 0.8.3-rc.1 — typeform's planner uses `personal_access_token`
     // and `Personal access token` (the latter when transcribing the
     // page heading verbatim). Both alias to api_key — typeform issues
