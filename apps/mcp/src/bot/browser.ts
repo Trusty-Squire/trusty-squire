@@ -3801,6 +3801,56 @@ export class BrowserController {
         }
       };
 
+      // N1 onboarding-wizard cards (2026-06-08). Chakra/React card pickers
+      // (imagekit's step-1/3 objective cards, axiom/pusher role cards) render
+      // each selectable card as a BARE clickable div — cursor:pointer, but no
+      // button/a/role/input semantics — so the SELECTOR walk above misses
+      // them entirely and the planner has no target → it hallucinates
+      // selectors and the stalled-wizard breaker fires. Collect them so the
+      // existing assignCardRadioGroups can cluster them. Tightly scoped to
+      // avoid flooding the inventory on ordinary pages:
+      //   - cursor:pointer + visible
+      //   - card-sized (not a tiny inline link, not a full-page wrapper)
+      //   - has its OWN short label text
+      //   - does NOT contain an already-collected interactive element (a
+      //     wrapper around a real button isn't a card — we already have it)
+      //   - OUTERMOST clickable in a nest (keep the card, drop its inner <p>)
+      //   - capped
+      {
+        const alreadyMatched = new Set<Element>(collected);
+        const MAX_CARDS = 16;
+        const raw: Element[] = [];
+        const scan = document.querySelectorAll("div,li,article,section,label");
+        for (const el of Array.from(scan)) {
+          if (raw.length >= MAX_CARDS) break;
+          if (alreadyMatched.has(el)) continue;
+          if (!isVisible(el)) continue;
+          if (window.getComputedStyle(el).cursor !== "pointer") continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 40 || r.height < 24 || r.width > 900 || r.height > 600) continue;
+          const txt = clean(el.textContent);
+          if (txt === null || txt.length < 2 || txt.length > 120) continue;
+          try {
+            if (el.querySelector(SELECTOR) !== null) continue;
+          } catch {
+            continue;
+          }
+          raw.push(el);
+        }
+        // Keep only the outermost clickable per nest (Chakra cards wrap an
+        // inner <p>; cursor:pointer inherits, so both match — we want the card).
+        const rawSet = new Set(raw);
+        for (const el of raw) {
+          let p = el.parentElement;
+          let nested = false;
+          while (p !== null) {
+            if (rawSet.has(p)) { nested = true; break; }
+            p = p.parentElement;
+          }
+          if (!nested) collected.push(el);
+        }
+      }
+
       const seen = new Set<Element>();
       // T38 — parent identity + bounding-box dimensions + clickable
       // bit, captured in lockstep with `out` so the Node-side
