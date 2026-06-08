@@ -349,3 +349,25 @@ describe("extractAllLabeledTokensFromReason — email local-part guard", () => {
     expect(extractAllLabeledTokensFromReason(reason, page)).toEqual({ api_key: "1234567890" });
   });
 });
+
+describe("extractAllLabeledTokensFromReason — Pusher (app_id/app_key/secret)", () => {
+  it("captures app_id + app_key + bare-secret, skips cluster config", () => {
+    const reason =
+      "The App Keys page shows app_id='2164307', app_key='62d80a2e59609196a8e7', " +
+      "secret='9cec7c4790fdd6bc69e2', and cluster='ap3' for the app.";
+    const page =
+      "App Keys app_id 2164307 app_key 62d80a2e59609196a8e7 secret 9cec7c4790fdd6bc69e2 cluster ap3";
+    expect(extractAllLabeledTokensFromReason(reason, page)).toEqual({
+      application_id: "2164307",
+      app_key: "62d80a2e59609196a8e7",
+      secret: "9cec7c4790fdd6bc69e2",
+    });
+  });
+  it("bare 'secret' does NOT double-capture inside api_secret/client_secret", () => {
+    const reason = "api_secret='SK_abcdef0123456789abcd' and client_secret='cs_0123456789abcdefghij'";
+    const page = "api_secret SK_abcdef0123456789abcd client_secret cs_0123456789abcdefghij";
+    const out = extractAllLabeledTokensFromReason(reason, page);
+    expect(out).toEqual({ api_secret: "SK_abcdef0123456789abcd", client_secret: "cs_0123456789abcdefghij" });
+    expect(out).not.toHaveProperty("secret");
+  });
+});
