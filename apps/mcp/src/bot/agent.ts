@@ -8170,7 +8170,15 @@ ${formatInventory(input.inventory)}`,
       if (
         inMultiCredMode &&
         roundsSinceLastNewCredential >= MAX_ROUNDS_AWAITING_MORE_CREDENTIALS &&
-        (credentials.api_key !== undefined || credentials.username !== undefined)
+        // Pusher-class bundles have NO field literally named api_key
+        // (application_id + app_key + secret), so an api_key/username-only
+        // exit never fired and the loop spun to the LLM budget before the
+        // existing-account fallback rescued it. A stable bundle of >=2 named
+        // credentials is itself a complete, usable result — mirror the final
+        // success gate's namedCredCount>=2 rule here so the loop returns it.
+        (credentials.api_key !== undefined ||
+          credentials.username !== undefined ||
+          currentCredentialKeyCount >= 2)
       ) {
         const summary = Object.keys(credentials)
           .filter((k) => !NON_CREDENTIAL_KEYS.has(k))
