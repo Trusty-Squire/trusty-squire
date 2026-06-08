@@ -98,6 +98,9 @@ function stubBrowser(): StubBrowser {
     async wait(seconds: number) {
       history.push({ method: "wait", args: [seconds] });
     },
+    async waitForInteractiveDom() {
+      history.push({ method: "waitForInteractiveDom", args: [] });
+    },
     async extractInteractiveElements() {
       history.push({ method: "extractInteractiveElements", args: [] });
       return inventory;

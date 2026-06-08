@@ -43,7 +43,7 @@
 //     the router decides whether to spawn a fresh BrowserController
 //     or reuse one).
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Skill,
@@ -373,6 +373,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         skippedOnboardingFill = true;
         continue;
       } else {
+        await maybeDumpReplayDebug(browser, skill, i, validation.reason);
         return {
           kind: "step_failed",
           stepIndex: i,
@@ -877,10 +878,13 @@ async function executeStep(
   switch (step.kind) {
     case "navigate": {
       await browser.goto(step.url);
-      // Tiny settle for SPA-style apps that fire route handlers
-      // post-DOMContentLoaded. The bot's runPrewarm waits 2s
-      // post-navigate too.
+      // Settle for SPA-style apps that fire route handlers post-
+      // DOMContentLoaded. A fixed 2s under-waits heavy authenticated
+      // dashboards (pusher's App Keys, imagekit's onboarding step rendered
+      // blank → "0 elements" at the next step). Poll for real interactive
+      // content first, with the 2s as a floor for fast/static pages.
       await browser.wait(2);
+      await browser.waitForInteractiveDom().catch(() => undefined);
       // 0.8.2-rc.22 — URL drift detection. When a skill's signup_url
       // assumes the user is authenticated (Railway's /account/tokens
       // captured after OAuth was done in a prior session), the
@@ -1004,9 +1008,11 @@ async function executeStep(
       const target =
         narrowed.length === 1 ? narrowed[0]! : pickClickPriority(narrowed);
       await browser.click(target.selector);
-      // Settle so any post-click navigation finishes before the next
-      // pre-validation reads inventory.
+      // Settle so any post-click navigation/SPA route render finishes before
+      // the next step reads inventory (pusher's App Keys page, imagekit's
+      // onboarding step render a beat after the click → blank "0 elements").
       await browser.wait(1);
+      await browser.waitForInteractiveDom().catch(() => undefined);
       return { kind: "clicked" };
     }
 
@@ -1853,6 +1859,43 @@ function matchesClickHint(el: InteractiveElement, hint: string): boolean {
 // ONLY when it resolves to a UNIQUE element (the call site enforces this) —
 // pinning the wrong control on a click that may mint a credential is the risk,
 // and the post-extract credential validator is the backstop if it slips.
+// REPLAY_DEBUG diagnostic: on a step failure, dump the current URL + visible
+// clickable/fillable inventory to /tmp/replay-debug-<service>-step<N>.json so a
+// returning-user divergence can be diagnosed against the REAL authenticated
+// page (which a standalone trace can't reach — it doesn't walk OAuth consent).
+// No-op unless REPLAY_DEBUG is set; best-effort (never throws into replay).
+async function maybeDumpReplayDebug(
+  browser: BrowserController,
+  skill: { service: string },
+  stepIndex: number,
+  reason: string,
+): Promise<void> {
+  if (!process.env.REPLAY_DEBUG) return;
+  try {
+    const inv = await browser.extractInteractiveElements();
+    const interesting = inv
+      .filter((e) => e.visible)
+      .map((e) => ({
+        tag: e.tag,
+        role: e.role,
+        text: (e.visibleText ?? "").slice(0, 60),
+        aria: e.ariaLabel,
+        label: e.labelText,
+        placeholder: e.placeholder,
+        href: e.href ?? null,
+      }))
+      .filter((e) => e.text || e.aria || e.label || e.placeholder || e.href);
+    const path = `/tmp/replay-debug-${skill.service}-step${stepIndex}.json`;
+    writeFileSync(
+      path,
+      JSON.stringify({ service: skill.service, stepIndex, reason, url: browser.currentUrl(), interesting }, null, 2),
+    );
+    console.error(`[replay-debug] dumped ${path} (${interesting.length} elements)`);
+  } catch {
+    // best-effort diagnostic only
+  }
+}
+
 function matchesClickHintTokens(el: InteractiveElement, hint: string): boolean {
   const tokenize = (s: string): string[] =>
     (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= 3);
