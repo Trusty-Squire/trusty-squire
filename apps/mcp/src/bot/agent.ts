@@ -4928,6 +4928,7 @@ export class SignupAgent {
         this.browser as unknown as { page: import("playwright").Page | null }
       ).page;
       if (page === null || page === undefined) return false;
+      const urlBefore = page.url();
       // First-choice selector: data-identifier on an interactive element.
       const candidates = [
         '[data-identifier]:visible',
@@ -4939,10 +4940,27 @@ export class SignupAgent {
         try {
           await loc.waitFor({ state: "visible", timeout: 2_000 });
           await loc.click({ timeout: 3_000 });
+          if (process.env.BOT_DEBUG_CHOOSER) {
+            await page.waitForTimeout(1500).catch(() => undefined);
+            console.error(
+              `[chooser-debug] matched sel=${JSON.stringify(sel)} urlBefore=${urlBefore} urlAfter=${page.url()}`,
+            );
+          }
           return true;
         } catch {
           continue;
         }
+      }
+      if (process.env.BOT_DEBUG_CHOOSER) {
+        const dump = await page
+          .evaluate(() => ({
+            url: location.href,
+            buttons: Array.from(document.querySelectorAll('[data-identifier],[role="link"],div[jsaction]'))
+              .slice(0, 12)
+              .map((e) => `${e.tagName}|${(e.getAttribute("data-identifier") ?? "").slice(0, 40)}|${(e.textContent ?? "").trim().slice(0, 50)}`),
+          }))
+          .catch(() => null);
+        console.error(`[chooser-debug] NO selector matched. dump=${JSON.stringify(dump)}`);
       }
       return false;
     } catch {
@@ -5411,9 +5429,18 @@ export class SignupAgent {
 
       steps.push(`Navigating to ${signupUrl}`);
       await this.browser.goto(signupUrl);
-      // PERF: goto() awaits domcontentloaded; the subsequent
-      // waitForFormReady in planExecuteWithRetry handles SPA settle.
-      // No need for a blind 2s dwell here.
+      // Clear any anti-bot interstitial BEFORE the landing read below.
+      // goto() only awaits domcontentloaded, so a Cloudflare "Verifying you
+      // are human" / "Just a moment…" page is often still up — and the
+      // already-signed-in / classify / OAuth-affordance decisions a few lines
+      // down would then run against the interstitial's 2-element DOM and
+      // misjudge the page. MEASURED 2026-06-09: perplexity's /settings/api
+      // landed on a CF interstitial (inventory = just [Cloudflare, Privacy]),
+      // so the bot saw no OAuth button, classified "other", and bailed
+      // no_signup_link instead of reaching the real login/dashboard. The
+      // later waitForFormReady in planExecuteWithRetry was too late. Best-
+      // effort: a page with no interstitial returns fast.
+      await this.browser.waitForFormReady().catch(() => undefined);
 
       // After load: does the rendered page look like a signup form?
       // looksLikeSignupPage() can't tell signup from login (both have
@@ -5482,6 +5509,17 @@ export class SignupAgent {
           // residential proxy, and the run dies on a page that would have
           // worked via OAuth.
           const oauthHere = findFirstOAuthButton(landedInventory, ["google", "github"]);
+          if (process.env.BOT_DEBUG_CHOOSER) {
+            console.error(
+              `[login-entry-debug] ${task.service} klass=${klass} oauthHere=${oauthHere?.provider ?? "none"} ` +
+                `inv(${landedInventory.length})=` +
+                JSON.stringify(
+                  landedInventory
+                    .slice(0, 20)
+                    .map((e) => `${e.tag}|${(e.visibleText ?? e.ariaLabel ?? "").slice(0, 36)}`),
+                ),
+            );
+          }
           if (oauthHere !== null) {
             steps.push(
               `curated signup_url for ${task.service} rendered as "${klass}", but it offers ` +
