@@ -6139,6 +6139,27 @@ export class SignupAgent {
             ? ""
             : " (FedCM dialog/popup did not complete — looking for another provider)"),
       );
+      // Classic-redirect-misrouted-as-GSI recovery (MEASURED 2026-06-08:
+      // netlify). hasGoogleGsiAffordance() returns true whenever the GSI
+      // client *script* is loaded — but many pages load that script next to a
+      // CLASSIC redirect "Sign up with Google" button (netlify renders
+      // button[name="google"]). Routing that button through tryGoogleGsiLogin
+      // clicks it, which fires a normal same-tab redirect to
+      // accounts.google.com; GSI then reports via:"none" (no FedCM dialog, no
+      // popup) even though the OAuth redirect IS now in flight. Without this
+      // check the code below would (a) scan the GOOGLE page for a github
+      // fallback (finds none) and then (b) re-run startOAuth on
+      // button[name="google"] — a button that no longer exists on
+      // accounts.google.com → 20s waitFor timeout → the whole signup dies.
+      // If the page has actually navigated onto a Google auth host, the
+      // redirect already fired: treat it as handled and let the consent loop
+      // below drive it, exactly as it would for any classic redirect OAuth.
+      if (!gsiHandled && detectStuckOnGoogleOAuth(this.browser.currentUrl())) {
+        gsiHandled = true;
+        steps.push(
+          "OAuth: the GSI dialog never fired, but the click started a classic Google redirect — continuing the consent flow.",
+        );
+      }
     }
     // GSI/FedCM dead end. Google won't render the FedCM dialog for an
     // automated browser (measured: FedCm.enable ok, dialogShown never fires),
@@ -6147,18 +6168,39 @@ export class SignupAgent {
     // caller a TRY_NEXT_PROVIDER signal so it re-dispatches via that provider
     // instead of dead-ending on Google. meilisearch offers both.
     if (gsiAttempted && !gsiHandled) {
-      try {
-        const inv = await this.browser.extractInteractiveElements();
-        const alt = findFirstOAuthButton(inv, ["github"]);
-        if (alt !== null) {
-          steps.push(
-            `OAuth: Google GSI/FedCM is a dead end for the bot — falling back to ${alt.provider}.`,
-          );
-          return { kind: "try_next_provider", selector: alt.button.selector, provider: alt.provider };
+      // The GSI click commonly leaves the page mid-SPA-transition (netlify:
+      // the button[name="google"] goes invisible, the page hasn't navigated
+      // anywhere useful), so a single inventory read here can THROW or return
+      // empty — and the old code then fell through to startOAuth(google),
+      // which re-clicked the now-hidden button and hung 20s before dying.
+      // Settle + retry the read a few times so the redirect-provider fallback
+      // (github) actually fires — github is the redirect provider whose
+      // session we keep warm.
+      let alt: { provider: OAuthProviderId; button: InteractiveElement } | null = null;
+      for (let attempt = 0; attempt < 3 && alt === null; attempt++) {
+        if (attempt > 0) await this.browser.wait(2);
+        try {
+          const inv = await this.browser.extractInteractiveElements();
+          alt = findFirstOAuthButton(inv, ["github"]);
+        } catch {
+          // page still navigating — retry after the settle
         }
-      } catch {
-        // inventory read failed — fall through to the normal redirect path
       }
+      if (alt !== null) {
+        steps.push(
+          `OAuth: Google GSI/FedCM is a dead end for the bot — falling back to ${alt.provider}.`,
+        );
+        return { kind: "try_next_provider", selector: alt.button.selector, provider: alt.provider };
+      }
+      // No redirect provider to hand off to. Re-clicking the Google affordance
+      // (startOAuth below) is pointless — it only re-raises the same dead GSI
+      // dialog, and on netlify-class pages crashes on the hidden button. Skip
+      // it: fall into the consent loop on the current page, which aborts
+      // cleanly (needs_login) instead of a misleading 20s waitFor timeout.
+      gsiHandled = true;
+      steps.push(
+        "OAuth: Google GSI/FedCM dead-ended with no redirect provider to fall back to.",
+      );
     }
     // OmniAuth POST-only recovery prep. Capture the affordance's href + the
     // page's CSRF token NOW, while we're still on the signin page — the
