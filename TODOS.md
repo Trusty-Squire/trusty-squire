@@ -143,11 +143,20 @@ not one:
    + `pickOnboardingSubmit`, fires on a taken/unavailable signal) now overwrites
    the business NAME (which re-derives a unique subdomain) and creates a FRESH
    org (`tsq######.kinde.com`), clearing business_details → business_stage.
-2. **Tech-stack radio (`p_sdk`)** — BLOCKING. A `kui-` custom-handler radio where
-   synthetic clicks (radio AND label) don't register, so onboarding can't
-   advance to `/admin`. Likely needs `page.check()` for radios, or firing the
-   kui change event, or clicking the card container — an n1-wizard generalizable
-   fix worth its own attempt.
+2. **Tech-stack SDK radio (`p_sdk`)** — HARD WALL (measured 2026-06-09, 8
+   iterations). A `kui-util-hide-visually` radio whose `kui-on-change` gates the
+   Next button. The bot CANNOT register a selection by ANY method tried: native
+   click on the sr-only radio (fails actionability), native click on the
+   `<label for>` (no effect), Playwright `check({force})`, AND a full JS-dispatch
+   (`checked=true` + bubbling input/change/click). The tech step never accepts
+   the selection, so submitting Next re-presents `m:tech`. kinde's kui framework
+   appears to track selection in internal JS state that standard DOM events don't
+   reach. Cracking it would need reverse-engineering kui's event API — low
+   confidence, deeply kinde-specific. The four generalizable radio fixes shipped
+   (check-route, force-advance, full-inventory, JS-dispatch) help OTHER n1 wizards
+   but not kui. **Realistic path: operator completes kinde onboarding ONCE
+   manually** (gets past the SDK picker → reaches `/admin` on the fresh
+   `tsq######.kinde.com` org), THEN a hand-built verify-skill replays step 3.
 3. **M2M credential** — kinde's API key is NOT produced by finishing onboarding;
    it's a **M2M application** created deliberately in Settings → APIs, yielding
    `client_id`+`client_secret` (multi-cred). So even past the radio, the bot must
