@@ -756,11 +756,18 @@ async function preValidateStep(
             `${copyButtons.length} Copy buttons visible; none near text ${JSON.stringify(step.near_text_hint)}.`,
         };
       }
-      return {
-        ok: false,
-        reason:
-          `${copyButtons.length} Copy buttons visible; ${disambiguated.length} match near_text_hint — ambiguous.`,
-      };
+      // Ambiguous (2+ match) on a SINGLE-cred extract: the synthesizer's
+      // near_text_hint was unique at capture, but the returning-user keys page
+      // shows extra copyable values near the same label (planetscale renders a
+      // password + a connection string under one heading). Pick the FIRST
+      // match in DOM order — the credential's own copy button typically leads —
+      // rather than hard-failing a reachable credential. The post-extract
+      // credential validator is the backstop if the first one is wrong.
+      console.error(
+        `[replay] ${copyButtons.length} Copy buttons match near_text_hint=${JSON.stringify(step.near_text_hint)} — ` +
+          `taking the first (validator backstops a wrong pick).`,
+      );
+      return { ok: true, match: disambiguated[0]! };
     }
 
     case "extract_via_regex": {
