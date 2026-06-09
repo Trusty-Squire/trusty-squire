@@ -648,15 +648,13 @@ async function preValidateStep(
         // If still ambiguous, that's an LLM-fallback case (C3).
         const buttons = filtered.filter((el) => el.tag === "button");
         if (buttons.length === 1) return { ok: true, match: buttons[0]! };
-        return {
-          ok: false,
-          reason:
-            `text_match=${JSON.stringify(step.text_match)} matched ${filtered.length} elements; ` +
-            `cannot uniquely identify the click target` +
-            (step.near_text_hint !== undefined
-              ? `; near_text_hint=${JSON.stringify(step.near_text_hint)} did not narrow to one.`
-              : `.`),
-        };
+        // Still ambiguous (imagekit's onboarding renders two "Next" buttons).
+        // preValidate used to hard-fail here while execute would happily
+        // pickClickPriority — an inconsistency that failed the replay before it
+        // even tried. Pick deterministically (first button, else first match),
+        // exactly as execute does; clicking either advances a wizard, and the
+        // downstream credential validator backstops a genuinely wrong pick.
+        return { ok: true, match: pickClickPriority(filtered) };
       }
       return { ok: true, match: filtered[0]! };
     }
