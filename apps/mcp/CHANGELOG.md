@@ -1,5 +1,35 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.12 (2026-06-09)
+
+Single-identity consolidation + the existing-account/onboarding frontier. Closed
+the open frontier: planetscale, replicate, railway, together, imagekit all green.
+
+- **One operator IMAP identity.** The bot signs in as one Google account
+  (`lunchbox@trustysquire.ai` Workspace); the OTP poller reads that one inbox.
+  `gmail-otp-poller` → `operator-otp-poller`; env `OPERATOR_IMAP_USER`/
+  `OPERATOR_IMAP_PASSWORD` (legacy `GMAIL_*` still read as fallback). Surfaces a
+  clear `imap_auth_failed … rotate the app password` instead of opaque
+  `Command failed`.
+- **GitHub session no longer silently dies.** `login`/`connect` now auto-load
+  `harvester.env`, so the interactive login routes through the SAME residential
+  proxy the signups use — without it, the session was minted from the box's IP
+  and the proxied run's IP jump silently killed the auth cookie.
+- **`together` no longer abandons a working session.** `detectGoogleNoAccount`
+  no longer false-fires on a logged-in dashboard that merely has a "create an
+  account" CTA — a body match now only counts on a login/auth route.
+- **`perplexity`/CF-class.** Clear the anti-bot interstitial (waitForFormReady)
+  BEFORE the landing read, so the already-signed-in / OAuth-affordance decisions
+  don't run against a Cloudflare "Verifying you are human" shell.
+- **Bucket-2 `text_match` brittleness.** The synthesizer captures a stable
+  `name=`/`id=` `dom_hint` (filtering React/css-in-js/hash values) and the replay
+  matcher prefers a unique `dom_hint` over drift-prone visible text ("Next" /
+  "Create"). Additive — clicks without a stable attr keep their canonical bytes.
+- **Unique-org-name onboarding recovery.** On a "name taken" stall, overwrite the
+  business/org NAME field (which re-derives a unique subdomain) and resubmit —
+  unblocks re-signups whose org name collides with a prior account (kinde clears
+  `business_details` and creates a fresh org).
+
 ## 0.9.11 (2026-06-09)
 
 Discovery/signup-path hardening (the universal bot's `agent.ts`/`browser.ts` —
