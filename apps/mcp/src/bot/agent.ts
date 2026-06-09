@@ -8319,6 +8319,11 @@ ${formatInventory(input.inventory)}`,
     // prior account already used "tsagent", so the pre-filled name collides
     // and the auto-derived subdomain is rejected, re-presenting the step).
     let uniqueNameRetried = false;
+    // Fired once: force-click an available Next/submit when the stall is the
+    // planner re-selecting an option (kinde's tech-stack SDK radios) while the
+    // Next button is already enabled — the selection registered in the wizard's
+    // JS state but the planner kept clicking the option instead of advancing.
+    let forcedAdvanceTried = false;
     const actionEffects: Array<{
       kind: string;
       pageUnchanged: boolean;
@@ -8695,6 +8700,48 @@ ${formatInventory(input.inventory)}`,
             args.steps.push(
               `Post-verify: unique-name retry failed (${err instanceof Error ? err.message : String(err)}) — falling through.`,
             );
+          }
+        }
+        // Force-advance recovery (fires ONCE). The planner sometimes stalls
+        // re-selecting an option on a wizard step whose Next/submit is ALREADY
+        // enabled — the selection registered in the wizard's JS state (not the
+        // HTML `checked` attr) but the planner kept clicking the option instead
+        // of advancing. MEASURED 2026-06-09 (kinde tech-stack: no checked attr,
+        // Next not disabled, planner clicked "React" 3×). If a submit/Next that
+        // is NOT the just-tried element exists, click it and re-loop.
+        if (!forcedAdvanceTried) {
+          // Read a FULL (uncapped) inventory: a step with many options (kinde's
+          // ~29 SDK radios) crowds the Next button out of the ranked/capped
+          // post-verify inventory, so pickOnboardingSubmit(inventory) misses it.
+          const fullInv = await this.browser
+            .extractInteractiveElements()
+            .catch(() => inventory);
+          const submit = pickOnboardingSubmit(fullInv);
+          if (process.env.BOT_DEBUG_CHOOSER) {
+            console.error(
+              `[force-advance-debug] capped=${inventory.length} full=${fullInv.length} ` +
+                `submit=${submit?.visibleText ?? submit?.ariaLabel ?? submit?.id ?? "null"} ` +
+                `lastSel=${lastActionSelector ?? "?"}`,
+            );
+          }
+          if (submit !== null && submit.selector !== lastActionSelector) {
+            forcedAdvanceTried = true;
+            args.steps.push(
+              `Post-verify: stalled re-selecting an option while a submit/Next is available — clicking ` +
+                `${JSON.stringify((submit.visibleText ?? submit.ariaLabel ?? "Next").slice(0, 24))} to advance.`,
+            );
+            try {
+              await this.browser.click(submit.selector);
+              await this.browser.wait(2);
+              actionEffects.length = 0;
+              prevContentSig = null;
+              hint = undefined;
+              continue;
+            } catch (err) {
+              args.steps.push(
+                `Post-verify: force-advance click failed (${err instanceof Error ? err.message : String(err)}) — falling through.`,
+              );
+            }
           }
         }
         // Capture the exact page that defeated the wizard so the N1
