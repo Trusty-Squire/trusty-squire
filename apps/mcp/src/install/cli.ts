@@ -43,6 +43,7 @@ import { cpSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { loadHarvesterEnvFile } from "../operator-env.js";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
@@ -324,6 +325,15 @@ function resolveServerLaunch(): { command: string; args: string[] } {
 
 export async function runCli(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
+  // Auto-load the operator's harvester.env so a `login`/`connect` here picks
+  // up UNIVERSAL_BOT_PROXY_URL — establishing the provider session through the
+  // SAME residential egress the bot's signups use. Without it, an operator who
+  // forgets `set -a; source harvester.env` creates the session from the box's
+  // datacenter IP; the proxied signups then hit the provider from a residential
+  // IP and the jump silently kills the auth cookie (the GitHub-session-keeps-
+  // getting-wiped bug). No-op for end users (no harvester.env) + non-
+  // overwriting, so an explicitly-set env always wins.
+  loadHarvesterEnvFile();
   switch (args.command) {
     case "connect":
       await connect(args);
