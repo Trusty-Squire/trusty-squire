@@ -135,21 +135,28 @@ rotation, so these buried entries never get reached by a small batch). Run:
 
 ---
 
-### N4 — kinde: extract the M2M-app credential [P2, one flow from green]
-The bot autonomously completes kinde's full onboarding (Google sign-in →
-"start a project" → tech stack → sign-in methods → dashboard at
-`tsagent.kinde.com/admin`) — PROVEN 2026-06-09, no manual setup needed. The
-only remaining mile is the credential: kinde's API access is a **M2M
-application** (`client_id`/`secret`), a create-flow like render's create-key.
-**The snag:** kinde's admin is a client-side-routed SPA — direct URLs
-(`/admin/applications`, `/admin/apis`) don't hydrate, and nav-clicks
-("Add application", "Settings") route a beat after the inventory is read, so the
-probe caught the pre-route dashboard each time. Fix is click-then-settle through
-kinde's app UI to reach "Add application → M2M → create → extract secret"; the
-debug-probe methodology needs a longer post-click settle than the dead-step
-trick provided. This is a bot task, NOT an operator one. See
-[[project_drive_to_green_jun08]] memory. Hand-build like render/imagekit with
-`tools/replay-one.mjs <skill.json>`.
+### N4 — kinde: complete onboarding + extract the M2M-app credential [P2, deep build]
+UPDATE 2026-06-09: re-measured under the fresh workspace identity. Two walls,
+not one:
+1. **Onboarding `business_details`** — FIXED. The operator's prior account took
+   "tsagent"; the unique-org-name stall recovery (agent.ts: `pickUniqueNameField`
+   + `pickOnboardingSubmit`, fires on a taken/unavailable signal) now overwrites
+   the business NAME (which re-derives a unique subdomain) and creates a FRESH
+   org (`tsq######.kinde.com`), clearing business_details → business_stage.
+2. **Tech-stack radio (`p_sdk`)** — BLOCKING. A `kui-` custom-handler radio where
+   synthetic clicks (radio AND label) don't register, so onboarding can't
+   advance to `/admin`. Likely needs `page.check()` for radios, or firing the
+   kui change event, or clicking the card container — an n1-wizard generalizable
+   fix worth its own attempt.
+3. **M2M credential** — kinde's API key is NOT produced by finishing onboarding;
+   it's a **M2M application** created deliberately in Settings → APIs, yielding
+   `client_id`+`client_secret` (multi-cred). So even past the radio, the bot must
+   navigate the admin SPA to Add-application → M2M → create → reveal both creds.
+**Realistic solve: a HAND-BUILT skill** (like render/imagekit via
+`tools/replay-one.mjs <skill.json>`) encoding the create-M2M-app flow — but the
+radio wall (2) must fall first so the bot can reach `/admin` to probe it. This
+is a bot task; account-modifying. See [[project_discovery_signup_hardening_jun09]],
+[[project_drive_to_green_jun08]].
 
 ---
 
