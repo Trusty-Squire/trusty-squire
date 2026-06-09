@@ -106,27 +106,30 @@ export function currentProfileHolderPid(
   return holder.pid;
 }
 
-// Reap a leaked bot Chrome after we've closed our context. context.close()
-// normally terminates the browser, but headed Chrome under Xvfb (and some
-// patchright teardowns) can leave the main process alive — it keeps the
-// SingletonLock held with a LIVE pid, which the next run's waitForProfileFree
-// treats as a genuine concurrent run and waits 120s on before failing with
-// ProfileBusyError. That single leak bricks EVERY subsequent run in a batch.
+// Free the profile after WE are done with it (called from close(), once our
+// own context is closed). context.close() is supposed to terminate the
+// browser, but headed Chrome under Xvfb (and some patchright teardowns) can
+// leave the main process alive holding the SingletonLock with a LIVE pid —
+// which the next run's waitForProfileFree treats as a genuine concurrent run
+// and waits 120s on before failing with ProfileBusyError. One leak bricks
+// EVERY subsequent run in a batch (measured: 4/7 of a discovery batch).
 //
-// Safe because it only kills when the CURRENT lock holder is still the exact
-// pid we recorded at launch on this host — never a different process that
-// legitimately grabbed the profile after us (e.g. a concurrent `mcp login`).
-// Returns true iff it killed a leaked holder. Never throws.
+// We do NOT pid-match here, and deliberately so: Chrome rewrites the
+// SingletonLock asynchronously during startup, so the pid we could read right
+// after launch is often the PREVIOUS holder's — a stale value that would make
+// a pid-matched reap skip the real leak (the bug that left 2253353 alive).
+// Instead: at close() we are definitively finished with the profile and the
+// bot serializes profile access (the cross-process gate), so any holder still
+// on THIS host is our own leaked browser — SIGKILL it and clear the lock. A
+// holder on ANOTHER host (shared profile over a network mount) is left alone.
+// Returns true iff it freed a live/stale local holder. Never throws.
 export function reapLeakedProfileHolder(
-  expectedPid: number,
   profileDir: string = CHROME_PROFILE_DIR,
 ): boolean {
   const holder = readLockHolder(profileDir);
-  if (holder === null || holder.host !== hostname() || holder.pid !== expectedPid) {
-    return false;
-  }
+  if (holder === null || holder.host !== hostname()) return false;
   try {
-    process.kill(expectedPid, "SIGKILL");
+    process.kill(holder.pid, "SIGKILL");
   } catch {
     // already gone between the read and the kill — fall through to cleanup
   }

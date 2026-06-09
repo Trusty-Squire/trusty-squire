@@ -197,22 +197,22 @@ describe("reapLeakedProfileHolder", () => {
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
   it("returns false when there is no lock", () => {
-    expect(reapLeakedProfileHolder(process.pid, dir)).toBe(false);
+    expect(reapLeakedProfileHolder(dir)).toBe(false);
   });
 
-  it("does NOT kill or clear when the current holder is a DIFFERENT pid", () => {
-    // A concurrent run grabbed the profile after us — must be left alone.
-    writeSingletons(dir, `${hostname()}-${process.pid}`);
-    expect(reapLeakedProfileHolder(deadPid(), dir)).toBe(false);
+  it("leaves a holder on ANOTHER host alone (shared profile)", () => {
+    writeSingletons(dir, `some-other-box-${process.pid}`);
+    expect(reapLeakedProfileHolder(dir)).toBe(false);
     expect(lockPresent(dir)).toBe(true);
   });
 
-  it("clears the singletons when our recorded pid still owns the lock", () => {
-    // Use a dead pid as "our" leaked chrome: the SIGKILL no-ops (already
-    // gone) but the lock + sockets are still reaped so the next run is clean.
-    const pid = deadPid();
-    writeSingletons(dir, `${hostname()}-${pid}`);
-    expect(reapLeakedProfileHolder(pid, dir)).toBe(true);
+  it("frees the lock for a local holder (dead pid → SIGKILL no-ops, lock cleared)", () => {
+    // A dead pid stands in for our leaked Chrome: the SIGKILL no-ops (already
+    // gone) but the lock + sockets are reaped so the next run starts clean.
+    // We do NOT pid-match — Chrome rewrites the lock asynchronously, so the
+    // close() caller only knows "we own the profile, free whatever's here".
+    writeSingletons(dir, `${hostname()}-${deadPid()}`);
+    expect(reapLeakedProfileHolder(dir)).toBe(true);
     expect(lockPresent(dir)).toBe(false);
     expect(existsSync(join(dir, "SingletonSocket"))).toBe(false);
     expect(existsSync(join(dir, "SingletonCookie"))).toBe(false);
