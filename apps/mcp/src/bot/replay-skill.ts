@@ -2807,6 +2807,7 @@ async function attemptOAuthRecovery(
   await browser.startOAuth(pickedButton.selector);
   const walk = await walkOAuthConsent(browser, pickedProvider);
   if (walk === "needs_login") {
+    await browser.settleAfterOAuth().catch(() => undefined);
     return { kind: "needs_login", provider: pickedProvider };
   }
   // Confirm we're back: poll for the round-trip, then re-navigate to the
@@ -2825,6 +2826,12 @@ async function attemptOAuthRecovery(
     }
     if (host === expectedHost) break;
   }
+  // Restore this.page to the product page. The GIS popup flow (kinde/imagekit)
+  // closes the OAuth popup on its own; without this, this.page stays the CLOSED
+  // popup and the re-navigate below throws "Target page has been closed". Only
+  // the discovery bot called settleAfterOAuth before — the replay recovery
+  // never did, so every popup-based OAuth crashed here.
+  await browser.settleAfterOAuth().catch(() => undefined);
   await browser.goto(expectedUrl);
   await browser.wait(2);
   const drift = detectNavigationDrift(browser.currentUrl(), expectedUrl);
