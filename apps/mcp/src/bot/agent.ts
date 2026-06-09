@@ -5969,6 +5969,28 @@ export class SignupAgent {
                 await this.browser.wait(1);
                 await saveDebugSnapshot(this.browser, "after-verify");
 
+                // Verify-link SPA bounce (MEASURED 2026-06-09: amplitude). The
+                // emailed link is a click-tracker that redirects to
+                // app.amplitude.com/signup?token=… — the token IS consumed
+                // server-side, but the single-page app still renders the
+                // "check your email" wall until the client re-fetches session
+                // state. The post-verify loop then can't get past it. A single
+                // reload makes the SPA re-read the now-verified session.
+                // Bounded + guarded on the wall still showing, so a service
+                // that verified cleanly pays nothing.
+                try {
+                  const afterText = await this.browser.extractText();
+                  if (expectsVerificationEmail(afterText)) {
+                    steps.push(
+                      "Verification link landed but the page still shows the email-verify wall — reloading so the SPA re-reads the verified session.",
+                    );
+                    await this.browser.reload();
+                    await this.browser.wait(2);
+                  }
+                } catch {
+                  // best-effort — fall through to extraction regardless
+                }
+
                 // Try extracting first — many services drop the API key
                 // straight onto the landing page after verification.
                 credentials = await this.extractCredentials();

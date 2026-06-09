@@ -828,6 +828,19 @@ export class BrowserController {
     return null;
   }
 
+  // Reload the current page. Used by the post-verify flow to make a SPA
+  // re-read a server-side state change (email verified) that the client
+  // hasn't picked up yet. Best-effort: a reload failure is non-fatal — the
+  // caller re-reads the page state regardless.
+  async reload(): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 });
+    } catch {
+      // reload failed (slow SPA / transient) — caller re-inspects anyway
+    }
+  }
+
   async goto(url: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Retry transient network/proxy drops. A residential SOCKS tunnel
