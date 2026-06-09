@@ -2954,8 +2954,14 @@ export class BrowserController {
         });
         direct = direct.trim().toLowerCase();
         if (direct.length === 0 || direct.length > 100) return;
+        // Normalize separators so underscore/hyphen field labels match the
+        // space-form phrases: pusher renders "app_id" / "app_key" / "app_secret"
+        // and "app_id".includes("app id") is false, so every value used to
+        // inherit a far "App keys" heading. With this, each field label matches
+        // its own phrase and wins the proximity match.
+        const directNorm = direct.replace(/[_-]+/g, " ");
         for (const phrase of LABEL_PHRASES) {
-          if (direct.includes(phrase)) {
+          if (directNorm.includes(phrase)) {
             const c = centerOf(el);
             labelHits.push({ phrase, x: c.x, y: c.y, el });
             break; // one label per element is enough

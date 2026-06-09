@@ -400,6 +400,20 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         const credSpec = skill.credentials[0]!;
         const validatorResult = await validateCredential(execOutcome.value, credSpec, input.fetchFn);
         if (!validatorResult.ok) {
+          if (process.env.REPLAY_DEBUG) {
+            try {
+              const cands = await browser.extractCredentialCandidates().catch(() => []);
+              const txt = (await browser.extractText().catch(() => "")).slice(0, 2000);
+              writeFileSync(
+                `/tmp/replay-validator-${skill.service}.txt`,
+                `url=${browser.currentUrl()}\ngot=${execOutcome.value}\nreason=${validatorResult.reason}\n` +
+                  `candidates=${JSON.stringify(cands.slice(0, 20))}\n\nTEXT:\n${txt}`,
+              );
+              console.error(`[replay-debug] dumped /tmp/replay-validator-${skill.service}.txt`);
+            } catch {
+              /* best-effort */
+            }
+          }
           return {
             kind: "validator_failed",
             stepIndex: i,
@@ -831,6 +845,19 @@ async function preValidateStep(
       const candidates = await browser.extractLabeledCredentialCandidates();
       const match = candidates.find((c) => labelMatchesHint(c.label, step.label_hint));
       if (match === undefined) {
+        if (process.env.REPLAY_DEBUG) {
+          try {
+            const txt = (await browser.extractText().catch(() => "")).slice(0, 2500);
+            writeFileSync(
+              `/tmp/replay-labeled-${step.produces}.txt`,
+              `url=${browser.currentUrl()}\nlabel_hint=${step.label_hint}\n` +
+                `candidates=${JSON.stringify(candidates.map((c) => ({ label: c.label, val: (c.value ?? "").slice(0, 6) })))}\n\nTEXT:\n${txt}`,
+            );
+            console.error(`[replay-debug] dumped /tmp/replay-labeled-${step.produces}.txt`);
+          } catch {
+            /* best-effort */
+          }
+        }
         return {
           ok: false,
           reason:
