@@ -135,6 +135,24 @@ rotation, so these buried entries never get reached by a small batch). Run:
 
 ---
 
+### N4 — kinde: extract the M2M-app credential [P2, one flow from green]
+The bot autonomously completes kinde's full onboarding (Google sign-in →
+"start a project" → tech stack → sign-in methods → dashboard at
+`tsagent.kinde.com/admin`) — PROVEN 2026-06-09, no manual setup needed. The
+only remaining mile is the credential: kinde's API access is a **M2M
+application** (`client_id`/`secret`), a create-flow like render's create-key.
+**The snag:** kinde's admin is a client-side-routed SPA — direct URLs
+(`/admin/applications`, `/admin/apis`) don't hydrate, and nav-clicks
+("Add application", "Settings") route a beat after the inventory is read, so the
+probe caught the pre-route dashboard each time. Fix is click-then-settle through
+kinde's app UI to reach "Add application → M2M → create → extract secret"; the
+debug-probe methodology needs a longer post-click settle than the dead-step
+trick provided. This is a bot task, NOT an operator one. See
+[[project_drive_to_green_jun08]] memory. Hand-build like render/imagekit with
+`tools/replay-one.mjs <skill.json>`.
+
+---
+
 ## Tier 2 — known good, no time pressure
 
 ### Harvester subagent Phase 3 — dry-run [from `docs/DESIGN-harvester-subagent.md`]
