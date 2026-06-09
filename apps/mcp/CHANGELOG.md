@@ -1,5 +1,39 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.11 (2026-06-09)
+
+Discovery/signup-path hardening (the universal bot's `agent.ts`/`browser.ts` —
+a separate path from 0.9.10's verifier-replay work). Nine generalizable fixes,
+each diagnosed from a live batch log; 10 fresh services greened via discovery
+(netlify, neon, brevo, qdrant, convex, plunk, mailtrap, chroma, weaviate,
+honeycomb).
+
+- **Profile-leak reap (the dominant fix).** A run whose Chrome leaked held the
+  SingletonLock with a live pid, so the next run waited 120s and crashed with
+  `ProfileBusyError` — one leak bricked every subsequent service in a batch
+  (was ~30–40% of failures, pure infrastructure). Root cause: an un-capped
+  `page.close()` hanging before the reap. Both `page.close()` (5s) and
+  `context.close()` (10s) are now timeout-capped so the SIGKILL reap always
+  runs; the reap kills any same-host lock holder after we're done with the
+  profile (gated on `launchedContext`).
+- **GSI-misroute recovery.** A classic redirect "Sign up with Google" button
+  on a page that merely loads the GSI script no longer crashes — detect the
+  in-flight Google redirect and drive the consent loop, else fall back to a
+  redirect provider without re-clicking a dead button.
+- **OAuth-offering login page = signup entry** (qdrant): a `/login` SPA with
+  Continue-with-GitHub/Google is ridden via OAuth instead of dying on the
+  Google-search fallback.
+- **Login page ≠ dashboard** (fathom): bare "not a signup" no longer pivots a
+  pre-auth login page into key extraction.
+- **hCaptcha on the OAuth-first path**: escalates to the 2Captcha solver like
+  the form-fill gate already did.
+- **Bounded dead-ends**: abort the keys-URL walk after 3 consecutive 404s; cap
+  post-verify navigates at 8 — both convert 600s URL-guessing hangs into
+  prompt, honest failures.
+- **Verify-link reload**: after following an emailed verification link that
+  lands back on the "check your email" wall, reload so the SPA re-reads the
+  now-verified session.
+
 ## 0.9.10 (2026-06-09)
 
 Verifier-replay hardening — drove the verifier queue from 4 to 8 of 9 services
