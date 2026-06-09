@@ -2647,27 +2647,46 @@ export function detectSsoRestriction(pageText: string): boolean {
 // post-login dashboard (which never carries these phrases) must NOT
 // match, or we'd wrongly abandon a working OAuth session.
 export function detectGoogleNoAccount(url: string, bodyText: string): boolean {
-  // Inspect the decoded query string (where plunk parks its message)
-  // plus the page body — both lowercased for case-insensitive matching.
+  // Inspect the decoded query string (where plunk parks its message) and
+  // the URL path (to decide whether a BODY match is trustworthy).
   let query = "";
+  let path = "";
+  let urlParsed = false;
   try {
     const u = new URL(url);
     query = decodeURIComponent(u.search).toLowerCase();
+    path = u.pathname.toLowerCase();
+    urlParsed = true;
   } catch {
     query = "";
+    path = "";
   }
-  const haystack = `${query}\n${bodyText.toLowerCase()}`;
   // MEASURED 2026-06-04 (clerk): after Google OAuth, clerk bounces to its
   // sign-in showing "The External Account was not found" — Google signed
   // in but no clerk account exists for this identity (same class as plunk's
-  // "No account found"). The added "…not found" / "couldn't find an
-  // account" / "no such account" variants below catch clerk's wording.
-  // Every phrase still requires the word "account" (or "external account"),
-  // so a bare 404 "Page not found" does NOT trip this and abandon a working
-  // OAuth session.
+  // "No account found").
   const noAccountPhrase =
     /no account found|external account was not found|account (?:was )?not found|no (?:such )?account (?:found|exists)|account (?:doesn['’]?t|does not) exist|couldn['’]?t find (?:an|your) account|no account associated|sign up (?:first|to continue)|create an account|[?&]google-auth-error|register first/;
-  return noAccountPhrase.test(haystack);
+  // The QUERY string is an unambiguous auth-error redirect param (plunk parks
+  // its message there; some services use ?google-auth-error) — trust it
+  // anywhere.
+  if (noAccountPhrase.test(query)) return true;
+  // The BODY phrases ("create an account", "register first", "sign up to
+  // continue", …) ALSO appear as generic CTAs/links on a LOGGED-IN dashboard.
+  // MEASURED 2026-06-09 (together): after a successful Google sign-in the bot
+  // landed on the app root "/", whose body carried such a CTA — and the old
+  // body match abandoned the working session and dead-ended at oauth_required.
+  // A genuine "no account for this identity" message only renders on a
+  // login/sign-in/auth ROUTE, so only honor a body match there. On a dashboard
+  // or app route we keep the session and let post-OAuth navigation extract.
+  // If the URL couldn't be parsed at all, we have no route context to gate on
+  // — fall back to trusting the body (rare, and the phrases are strong).
+  const onAuthRoute =
+    /(?:^|\/)(?:login|signin|sign-in|sign-up|signup|auth|authenticate|sso)(?:\/|$)/.test(
+      path,
+    );
+  if (urlParsed && !onAuthRoute) return false;
+  return noAccountPhrase.test(bodyText.toLowerCase());
 }
 
 // (d) Stuck-on-Google-OAuth-screens (Upstash class). After

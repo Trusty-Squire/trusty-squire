@@ -858,6 +858,29 @@ describe("detectGoogleNoAccount — Google login-only re-route (plunk)", () => {
     expect(detectGoogleNoAccount("not-a-url", "Welcome to your dashboard")).toBe(false);
   });
 
+  // REGRESSION (2026-06-09, together): after a successful Google sign-in the
+  // bot landed on the app root "/", whose body carried a generic "create an
+  // account" / "sign up" CTA — the old body-anywhere match abandoned the
+  // working session and dead-ended at oauth_required. A body CTA on a NON-auth
+  // route (app root / dashboard) must NOT count as a no-account signal.
+  it("does NOT fire on a logged-in app root carrying a generic 'create an account' CTA", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://api.together.ai/",
+        "Dashboard Models Playground API keys Billing Docs Pricing Create an account Sign up",
+      ),
+    ).toBe(false);
+  });
+
+  it("STILL fires when the no-account phrasing is on an actual /login route", () => {
+    expect(
+      detectGoogleNoAccount(
+        "https://api.together.ai/login",
+        "We couldn't sign you in. Create an account to continue.",
+      ),
+    ).toBe(true);
+  });
+
   // MEASURED 2026-06-04: clerk's post-OAuth sign-in copy + guards against a
   // bare 404 mistakenly abandoning a working OAuth session.
   it("fires on clerk's 'The External Account was not found' copy", () => {
