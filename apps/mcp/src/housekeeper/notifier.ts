@@ -40,6 +40,18 @@ export type NotifierEvent =
       reskilled: number;
       needs_human: number;
       summary: string;
+    }
+  // THE single human-facing escalation. Fired ONLY when the autonomous loop
+  // hits an `unknown` provision state — a DOM/outcome it has never classified —
+  // on the same (service, signature) for UNKNOWN_ESCALATION_THRESHOLD attempts.
+  // Every other state is handled autonomously and never produces this event.
+  | {
+      kind: "unknown_state";
+      service: string;
+      url?: string;
+      failure_kind: string;
+      attempts: number;
+      trace_excerpt?: string;
     };
 
 export interface Notifier {
@@ -58,6 +70,13 @@ export class LogNotifier implements Notifier {
   async notify(event: NotifierEvent): Promise<void> {
     if (event.kind === "heal_digest") {
       this.write(`[heal] ${event.summary}`);
+      return;
+    }
+    if (event.kind === "unknown_state") {
+      this.write(
+        `[ESCALATE] unknown_state service=${event.service} kind=${event.failure_kind} ` +
+          `attempts=${event.attempts} url=${event.url ?? "?"} — never-seen state, needs a human`,
+      );
       return;
     }
     const prefix = event.kind === "replay_outcome" ? "[replay]" : "[discover]";

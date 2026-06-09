@@ -17,6 +17,8 @@
 // produced before the merge.
 
 import type { Skill } from "@trusty-squire/skill-schema";
+import { shouldEscalate, UNKNOWN_ESCALATION_THRESHOLD } from "@trusty-squire/skill-schema";
+import { recordUnknownState, markEscalated } from "./unknown-state-store.js";
 import type { VerifierRegistryClient } from "./registry-client.js";
 import type { QueueProvider } from "./queues/index.js";
 import type { Notifier, NotifierEvent } from "./notifier.js";
@@ -163,6 +165,39 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
           reason: outcome.reason,
           ...(task.meta !== undefined ? { meta: task.meta } : {}),
         });
+
+        // THE single human-facing escalation. The discover_outcome above is
+        // operational telemetry (status tracking); this is the ONE event that
+        // asks a human to act, and it fires ONLY for an `unknown` provision
+        // state — a DOM/outcome the classifier has never seen — after
+        // UNKNOWN_ESCALATION_THRESHOLD attempts on the SAME (service,signature).
+        // Walls auto-skip (blocked), transient/email/rate auto-retry (failed),
+        // rot auto-demotes — none of them ever reach here.
+        if (
+          outcome.kind === "failed" &&
+          outcome.state === "unknown" &&
+          outcome.signature !== undefined
+        ) {
+          const rec = recordUnknownState({
+            service: task.service,
+            signature: outcome.signature,
+            now: new Date().toISOString(),
+          });
+          if (!rec.alreadyEscalated && shouldEscalate("unknown", rec.attempts)) {
+            await fanOutNotifier(notifiers, log, {
+              kind: "unknown_state",
+              service: task.service,
+              failure_kind: outcome.reason,
+              attempts: rec.attempts,
+            });
+            markEscalated(task.service, outcome.signature);
+            log(`ESCALATE: unknown_state ${task.service} after ${rec.attempts} attempt(s)`);
+          } else if (!rec.alreadyEscalated) {
+            log(
+              `unknown_state ${task.service} attempt ${rec.attempts}/${UNKNOWN_ESCALATION_THRESHOLD} — handling autonomously, not escalating yet`,
+            );
+          }
+        }
       }
     } catch (err) {
       summary.failed += 1;

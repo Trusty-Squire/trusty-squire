@@ -70,7 +70,7 @@ export class GithubIssueNotifier implements Notifier {
         "close",
         String(issueNumber),
         "--comment",
-        `Auto-closed by housekeeper: ${event.kind === "replay_outcome" ? "replay" : "discover"} ${event.outcome}`,
+        `Auto-closed by housekeeper: ${event.kind === "replay_outcome" ? "replay" : "discover"} ${"outcome" in event ? event.outcome : ""}`,
       ]);
     }
   }
@@ -215,6 +215,25 @@ function renderBodyAndStatus(event: NotifierEvent): {
   // issue). Guard so the discriminated-union narrowing below is exhaustive.
   if (event.kind === "heal_digest") {
     return { body: event.summary, statusLabel: "status:digest", shouldClose: false };
+  }
+  if (event.kind === "unknown_state") {
+    // THE single human-facing escalation — an open issue per never-seen state.
+    const ts = new Date().toISOString();
+    const body =
+      `**🚨 Unknown provision state** — the autonomous loop hit a DOM/outcome it ` +
+      `has never classified.\n\n` +
+      `**Service**: ${event.service}\n` +
+      `**Failure kind**: \`${event.failure_kind}\`\n` +
+      `**Attempts on this state**: ${event.attempts}\n` +
+      `**URL**: ${event.url ?? "?"}\n` +
+      `**Detected**: ${ts}\n\n` +
+      `## What to do\n\nAdd a classifier branch in \`provision-state.ts\` (or fix the ` +
+      `bot) so this state becomes a known one; the loop then handles it autonomously ` +
+      `and auto-closes this issue.\n` +
+      (event.trace_excerpt !== undefined
+        ? `\n## Trace\n\n\`\`\`\n${event.trace_excerpt.slice(0, 4000)}\n\`\`\`\n`
+        : "");
+    return { body, statusLabel: "status:unknown-state", shouldClose: false };
   }
   if (event.kind === "replay_outcome") {
     const ts = new Date().toISOString();

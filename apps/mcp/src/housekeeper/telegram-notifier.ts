@@ -113,6 +113,19 @@ export async function resolveChatIdFromUpdates(
 // ── Formatting ────────────────────────────────────────────────────
 
 function formatEvent(event: NotifierEvent): string {
+  if (event.kind === "unknown_state") {
+    // THE single escalation. Everything else the loop handles itself.
+    return (
+      `🚨 UNKNOWN STATE — ${event.service}\n` +
+      `The bot hit a DOM/outcome it has never classified, ${event.attempts}× on the same page.\n` +
+      `Kind: ${event.failure_kind}\n` +
+      `URL: ${event.url ?? "?"}\n` +
+      (event.trace_excerpt !== undefined
+        ? `Trace:\n${event.trace_excerpt.slice(0, 500)}`
+        : "") +
+      `\n\nAdd a classifier branch for this state, then the loop handles it autonomously.`
+    );
+  }
   if (event.kind === "heal_digest") {
     return (
       `🩺 Heal pass\n${event.summary}` +
