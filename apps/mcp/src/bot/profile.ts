@@ -93,6 +93,47 @@ export function clearStaleSingletonLock(profileDir: string = CHROME_PROFILE_DIR)
   return true;
 }
 
+// The pid currently holding the profile's SingletonLock, IF it is on this
+// host. Read right after a successful launch, this is unambiguously the
+// Chrome WE just started (it created the lock). Stored by the caller so
+// close() can verify the same process and reap it if it leaks. null when
+// there's no lock or the holder is on another machine.
+export function currentProfileHolderPid(
+  profileDir: string = CHROME_PROFILE_DIR,
+): number | null {
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname()) return null;
+  return holder.pid;
+}
+
+// Reap a leaked bot Chrome after we've closed our context. context.close()
+// normally terminates the browser, but headed Chrome under Xvfb (and some
+// patchright teardowns) can leave the main process alive — it keeps the
+// SingletonLock held with a LIVE pid, which the next run's waitForProfileFree
+// treats as a genuine concurrent run and waits 120s on before failing with
+// ProfileBusyError. That single leak bricks EVERY subsequent run in a batch.
+//
+// Safe because it only kills when the CURRENT lock holder is still the exact
+// pid we recorded at launch on this host — never a different process that
+// legitimately grabbed the profile after us (e.g. a concurrent `mcp login`).
+// Returns true iff it killed a leaked holder. Never throws.
+export function reapLeakedProfileHolder(
+  expectedPid: number,
+  profileDir: string = CHROME_PROFILE_DIR,
+): boolean {
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname() || holder.pid !== expectedPid) {
+    return false;
+  }
+  try {
+    process.kill(expectedPid, "SIGKILL");
+  } catch {
+    // already gone between the read and the kill — fall through to cleanup
+  }
+  removeSingletons(profileDir);
+  return true;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export interface WaitForProfileOptions {
