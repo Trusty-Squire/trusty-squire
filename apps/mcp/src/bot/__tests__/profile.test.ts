@@ -13,7 +13,13 @@ import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { clearStaleSingletonLock, launchWithProfileGate, waitForProfileFree } from "../profile.js";
+import {
+  clearStaleSingletonLock,
+  currentProfileHolderPid,
+  launchWithProfileGate,
+  reapLeakedProfileHolder,
+  waitForProfileFree,
+} from "../profile.js";
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
 // a label, not a real file — so it always reports "missing". Probe the
@@ -159,5 +165,56 @@ describe("launchWithProfileGate (race retry)", () => {
       ),
     ).rejects.toThrow(/SingletonLock/);
     expect(calls).toBe(3); // initial attempt + 2 retries
+  });
+});
+
+// Regression: a leaked bot Chrome (context.close() returned but the browser
+// process stayed alive holding the lock) bricked every subsequent run in a
+// batch with a 120s ProfileBusyError. close() now reaps it by pid.
+describe("currentProfileHolderPid", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("returns null when there is no lock", () => {
+    expect(currentProfileHolderPid(dir)).toBeNull();
+  });
+
+  it("returns the holder pid for a lock on this host", () => {
+    writeSingletons(dir, `${hostname()}-${process.pid}`);
+    expect(currentProfileHolderPid(dir)).toBe(process.pid);
+  });
+
+  it("returns null for a lock held on another host (shared profile)", () => {
+    writeSingletons(dir, `some-other-box-${process.pid}`);
+    expect(currentProfileHolderPid(dir)).toBeNull();
+  });
+});
+
+describe("reapLeakedProfileHolder", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("returns false when there is no lock", () => {
+    expect(reapLeakedProfileHolder(dir)).toBe(false);
+  });
+
+  it("leaves a holder on ANOTHER host alone (shared profile)", () => {
+    writeSingletons(dir, `some-other-box-${process.pid}`);
+    expect(reapLeakedProfileHolder(dir)).toBe(false);
+    expect(lockPresent(dir)).toBe(true);
+  });
+
+  it("frees the lock for a local holder (dead pid → SIGKILL no-ops, lock cleared)", () => {
+    // A dead pid stands in for our leaked Chrome: the SIGKILL no-ops (already
+    // gone) but the lock + sockets are reaped so the next run starts clean.
+    // We do NOT pid-match — Chrome rewrites the lock asynchronously, so the
+    // close() caller only knows "we own the profile, free whatever's here".
+    writeSingletons(dir, `${hostname()}-${deadPid()}`);
+    expect(reapLeakedProfileHolder(dir)).toBe(true);
+    expect(lockPresent(dir)).toBe(false);
+    expect(existsSync(join(dir, "SingletonSocket"))).toBe(false);
+    expect(existsSync(join(dir, "SingletonCookie"))).toBe(false);
   });
 });

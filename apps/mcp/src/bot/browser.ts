@@ -26,7 +26,7 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
+import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, reapLeakedProfileHolder, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
@@ -361,6 +361,11 @@ export class BrowserController {
   // Google session across runs — see profile.ts / google-login.ts.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  // True once launchPersistentContext succeeded this session. close() only
+  // reaps a leaked Chrome when WE launched one — so a ProfileBusyError thrown
+  // BEFORE launch (while waiting on a genuine concurrent holder) never kills
+  // that other run's browser.
+  private launchedContext = false;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -622,6 +627,8 @@ export class BrowserController {
       }),
     );
     this.context = context;
+    // We own the profile now — close() may reap a leaked Chrome.
+    this.launchedContext = true;
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
@@ -819,6 +826,19 @@ export class BrowserController {
         `configured but not needed for this network`,
     );
     return null;
+  }
+
+  // Reload the current page. Used by the post-verify flow to make a SPA
+  // re-read a server-side state change (email verified) that the client
+  // hasn't picked up yet. Best-effort: a reload failure is non-fatal — the
+  // caller re-reads the page state regardless.
+  async reload(): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 });
+    } catch {
+      // reload failed (slow SPA / transient) — caller re-inspects anyway
+    }
   }
 
   async goto(url: string): Promise<void> {
@@ -4633,9 +4653,39 @@ export class BrowserController {
     // display leaks (orphaned Xvfb procs pile up over a long-lived MCP
     // server and, worse, the un-closed Chrome keeps the profile's
     // SingletonLock held — bricking the next signup + `mcp login`).
-    if (this.page) await this.page.close().catch(() => undefined);
-    // Closing the persistent context shuts the browser down too.
-    if (this.context) await this.context.close().catch(() => undefined);
+    //
+    // EVERY close call is timeout-capped. On a wedged headed Chrome (e.g. a
+    // run that crashed mid-captcha-click), BOTH page.close() AND
+    // context.close() can hang INDEFINITELY — and an un-capped page.close()
+    // blocked the reap below from ever running, so the browser leaked for
+    // minutes and bricked the next 3 services (MEASURED 2026-06-09: supabase
+    // crash → cockroachdb/weaviate/honeycomb all "profile held"). The cap
+    // guarantees we always reach the SIGKILL reap.
+    const capped = (p: Promise<unknown>, ms: number): Promise<void> =>
+      Promise.race([
+        Promise.resolve(p).then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((r) => setTimeout(r, ms)),
+      ]);
+    if (this.page) await capped(this.page.close(), 5_000);
+    if (this.context) await capped(this.context.close(), 10_000);
+    // …and context.close() doesn't always kill the browser: headed Chrome
+    // under Xvfb / some patchright teardowns leave the main process alive
+    // holding the SingletonLock. A leaked browser makes the NEXT run wait
+    // 120s and fail with ProfileBusyError — one leak bricks every subsequent
+    // service in a batch. We're done with the profile, so any holder still on
+    // THIS host is our own leaked Chrome: reap it. Gated on launchedContext so
+    // a pre-launch ProfileBusyError never kills the run we were waiting on.
+    if (this.launchedContext) {
+      try {
+        reapLeakedProfileHolder(this.profileDir);
+      } catch {
+        /* best-effort */
+      }
+      this.launchedContext = false;
+    }
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its
     // display until it exits, THEN kill Xvfb.

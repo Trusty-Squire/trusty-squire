@@ -93,6 +93,50 @@ export function clearStaleSingletonLock(profileDir: string = CHROME_PROFILE_DIR)
   return true;
 }
 
+// The pid currently holding the profile's SingletonLock, IF it is on this
+// host. Read right after a successful launch, this is unambiguously the
+// Chrome WE just started (it created the lock). Stored by the caller so
+// close() can verify the same process and reap it if it leaks. null when
+// there's no lock or the holder is on another machine.
+export function currentProfileHolderPid(
+  profileDir: string = CHROME_PROFILE_DIR,
+): number | null {
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname()) return null;
+  return holder.pid;
+}
+
+// Free the profile after WE are done with it (called from close(), once our
+// own context is closed). context.close() is supposed to terminate the
+// browser, but headed Chrome under Xvfb (and some patchright teardowns) can
+// leave the main process alive holding the SingletonLock with a LIVE pid —
+// which the next run's waitForProfileFree treats as a genuine concurrent run
+// and waits 120s on before failing with ProfileBusyError. One leak bricks
+// EVERY subsequent run in a batch (measured: 4/7 of a discovery batch).
+//
+// We do NOT pid-match here, and deliberately so: Chrome rewrites the
+// SingletonLock asynchronously during startup, so the pid we could read right
+// after launch is often the PREVIOUS holder's — a stale value that would make
+// a pid-matched reap skip the real leak (the bug that left 2253353 alive).
+// Instead: at close() we are definitively finished with the profile and the
+// bot serializes profile access (the cross-process gate), so any holder still
+// on THIS host is our own leaked browser — SIGKILL it and clear the lock. A
+// holder on ANOTHER host (shared profile over a network mount) is left alone.
+// Returns true iff it freed a live/stale local holder. Never throws.
+export function reapLeakedProfileHolder(
+  profileDir: string = CHROME_PROFILE_DIR,
+): boolean {
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname()) return false;
+  try {
+    process.kill(holder.pid, "SIGKILL");
+  } catch {
+    // already gone between the read and the kill — fall through to cleanup
+  }
+  removeSingletons(profileDir);
+  return true;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export interface WaitForProfileOptions {

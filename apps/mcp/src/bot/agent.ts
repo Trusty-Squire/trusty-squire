@@ -1522,6 +1522,33 @@ function stripHtmlToText(html: string): string {
     .toLowerCase();
 }
 
+// True when a page is a 404 / route-not-found shell. Used to abort the
+// hardcoded keys-URL walk early: when guessed keys paths keep 404ing, this
+// host's routing convention simply isn't in our list, and continuing the
+// ~25-path walk (each a goto + up-to-15s DOM wait) just burns the run budget.
+// MEASURED 2026-06-09: axiom/fathom/loops each hit the FULL walk with every
+// path a 404 and blew the 600s deadline. Matches the three observed shells:
+// title "Not Found" (fathom), body "404 … page you're looking for doesn't
+// exist" (loops), body "404 page not found" (axiom).
+export function looksLike404(title: string, bodyText: string): boolean {
+  const hay = `${title} ${bodyText}`.toLowerCase().slice(0, 600);
+  const has404Token = /\b404\b/.test(hay);
+  const notFoundPhrase =
+    /page not found|not found|could ?n[o'’]?t be found|could not be found|does ?n[o'’]?t exist|does not exist|page you[''’]?re looking for/.test(
+      hay,
+    );
+  // A bare "404" token, or a clear not-found phrase, is enough — guessed
+  // keys URLs that hit either are dead ends.
+  return has404Token || notFoundPhrase;
+}
+
+// Pull the <title> text out of a raw HTML string (lowercased work is left to
+// the caller). Empty string when absent. Cheap — no DOM round-trip.
+export function titleFromHtml(html: string): string {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  return m?.[1]?.trim() ?? "";
+}
+
 // Classify a fetched page as a signup form, a login form, or neither.
 //
 // WHY this exists: looksLikeSignupPage() answers "does this page have a
@@ -2215,10 +2242,23 @@ export function detectFormFillIsDashboard(plan: {
     .toLowerCase();
 
   // Billing / payment wall — the planner sees a credit-card / billing
-  // form, which is never a signup form.
+  // form, which is never a signup form. (Checked first: a "free trial"
+  // page that ALSO demands a card is a wall, not a path to signup.)
   const BILLING_WALL =
     /\b(?:add (?:a )?(?:credit card|payment method)|enter (?:your )?(?:credit card|payment)|billing (?:information|details)|payment information required)\b/;
   if (BILLING_WALL.test(haystack)) return true;
+
+  // Negative guard — a LOGIN / SIGN-IN page (pre-auth), or a plan that
+  // proposes navigating TO a signup/trial form, is the OPPOSITE of a
+  // logged-in dashboard. MEASURED 2026-06-09: fathom's planner correctly
+  // said "this is a login page, NOT a signup page; click 'Start a free
+  // trial' to reach the actual signup form" — pivoting to key extraction
+  // there is wrong (we're not authenticated; the key page 404s). The
+  // bot must EXECUTE the planner's click toward signup. Runs before the
+  // ambiguous "not a signup" check below so it can't be swallowed.
+  const REACH_SIGNUP =
+    /\blog[\s-]?in page|sign[\s-]?in page|free trial|start a (?:free )?trial|create an? account|navigate to the (?:actual )?sign-?up/;
+  if (REACH_SIGNUP.test(haystack)) return false;
 
   // Product-creation form — the planner describes creating a
   // database / cluster / instance / deployment / app / project /
@@ -2227,10 +2267,13 @@ export function detectFormFillIsDashboard(plan: {
     /\b(?:create(?:s|d)?|creating|provision(?:s|ed|ing)?)\s+(?:(?:the|a|an|new|your|this)\s+){0,3}(?:database|cluster|instance|deployment|app|service|project|workspace|index|environment|tenant)\b/;
   if (PRODUCT_CREATION.test(haystack)) return true;
 
-  // Explicit "not a signup" / "logged in" / "dashboard" statements
-  // from the planner.
+  // Explicit "logged in" / "dashboard" statements from the planner. NB:
+  // bare "not a signup" is deliberately NOT here — it's ambiguous (a
+  // LOGIN page is also "not a signup") and false-pivoted fathom into key
+  // extraction. A genuine dashboard says "already signed in" / "logged-in
+  // dashboard", which the REACH_SIGNUP guard above doesn't touch.
   const EXPLICIT =
-    /\b(?:not\s+(?:a\s+)?(?:sign-?up|signup)|already\s+(?:signed[\s-]?in|logged[\s-]?in|authenticated)|logged[\s-]?in (?:dashboard|user))\b/;
+    /\b(?:already\s+(?:signed[\s-]?in|logged[\s-]?in|authenticated)|logged[\s-]?in (?:dashboard|user))\b/;
   if (EXPLICIT.test(haystack)) return true;
 
   return false;
@@ -5410,10 +5453,27 @@ export class SignupAgent {
       } else {
         const klass = classifySignupHtml(landed.html);
         if (klass !== "signup" && !(await this.looksLikeSignupPage())) {
-          needsRecovery = true;
-          steps.push(
-            `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
-          );
+          // A "login"-classified page is still a valid signup ENTRY when it
+          // offers OAuth: clicking "Continue with GitHub/Google" auto-
+          // provisions the account on first use, and plenty of modern SPAs
+          // (qdrant: cloud.qdrant.io/login) ship ONE unified page for both
+          // login and signup. Only chase a separate signup page when there's
+          // no OAuth affordance to ride — otherwise recovery falls through to
+          // the Google-search fallback, which Google ERR_ABORTs through the
+          // residential proxy, and the run dies on a page that would have
+          // worked via OAuth.
+          const oauthHere = findFirstOAuthButton(landedInventory, ["google", "github"]);
+          if (oauthHere !== null) {
+            steps.push(
+              `curated signup_url for ${task.service} rendered as "${klass}", but it offers ` +
+                `${oauthHere.provider} OAuth — treating the login page as the signup entry`,
+            );
+          } else {
+            needsRecovery = true;
+            steps.push(
+              `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
+            );
+          }
         }
       }
 
@@ -5909,6 +5969,28 @@ export class SignupAgent {
                 await this.browser.wait(1);
                 await saveDebugSnapshot(this.browser, "after-verify");
 
+                // Verify-link SPA bounce (MEASURED 2026-06-09: amplitude). The
+                // emailed link is a click-tracker that redirects to
+                // app.amplitude.com/signup?token=… — the token IS consumed
+                // server-side, but the single-page app still renders the
+                // "check your email" wall until the client re-fetches session
+                // state. The post-verify loop then can't get past it. A single
+                // reload makes the SPA re-read the now-verified session.
+                // Bounded + guarded on the wall still showing, so a service
+                // that verified cleanly pays nothing.
+                try {
+                  const afterText = await this.browser.extractText();
+                  if (expectsVerificationEmail(afterText)) {
+                    steps.push(
+                      "Verification link landed but the page still shows the email-verify wall — reloading so the SPA re-reads the verified session.",
+                    );
+                    await this.browser.reload();
+                    await this.browser.wait(2);
+                  }
+                } catch {
+                  // best-effort — fall through to extraction regardless
+                }
+
                 // Try extracting first — many services drop the API key
                 // straight onto the landing page after verification.
                 credentials = await this.extractCredentials();
@@ -6104,6 +6186,47 @@ export class SignupAgent {
             }
           }
         }
+        // hCaptcha Tier-3 — the OAuth-first path historically only escalated
+        // reCAPTCHA, so an hCaptcha-gated OAuth button (MEASURED 2026-06-09:
+        // supabase) timed out at Tier-2 and the bot then clicked a button
+        // still hidden behind the unsolved widget → 20s waitFor crash. The
+        // form-fill gate (runCaptchaGate) already solves hCaptcha via 2Captcha;
+        // mirror it here. Unlike Turnstile, hCaptcha is a real image challenge
+        // 2Captcha can solve, and its token is NOT IP-scored.
+        if (
+          !solvedViaTier3 &&
+          captcha.kind === "hcaptcha" &&
+          this.captchaSolver?.isAvailable() === true
+        ) {
+          const sitekey = await this.browser.extractHcaptchaSitekey();
+          const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+          if (sitekey !== null && pageUrl !== undefined) {
+            steps.push(
+              `OAuth: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`,
+            );
+            const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+            if (solveRes.kind === "ok") {
+              const injected = await this.browser.injectHcaptchaToken(solveRes.token);
+              if (injected) {
+                solvedViaTier3 = true;
+                steps.push(
+                  `OAuth: Tier 3 solved the hCaptcha in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha — clicking the ${provider.label} affordance`,
+                );
+              } else {
+                steps.push(
+                  `OAuth: Tier 3 hCaptcha token arrived but page injection failed — clicking the ${provider.label} affordance anyway`,
+                );
+              }
+            } else {
+              steps.push(
+                `OAuth: Tier 3 hCaptcha ${solveRes.kind}` +
+                  ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+                  ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : "") +
+                  ` — clicking the ${provider.label} affordance anyway`,
+              );
+            }
+          }
+        }
         if (!solvedViaTier3) {
           steps.push(
             `OAuth: visible ${captcha.kind} present but did not solve in 20s — clicking the ${provider.label} affordance anyway`,
@@ -6139,6 +6262,27 @@ export class SignupAgent {
             ? ""
             : " (FedCM dialog/popup did not complete — looking for another provider)"),
       );
+      // Classic-redirect-misrouted-as-GSI recovery (MEASURED 2026-06-08:
+      // netlify). hasGoogleGsiAffordance() returns true whenever the GSI
+      // client *script* is loaded — but many pages load that script next to a
+      // CLASSIC redirect "Sign up with Google" button (netlify renders
+      // button[name="google"]). Routing that button through tryGoogleGsiLogin
+      // clicks it, which fires a normal same-tab redirect to
+      // accounts.google.com; GSI then reports via:"none" (no FedCM dialog, no
+      // popup) even though the OAuth redirect IS now in flight. Without this
+      // check the code below would (a) scan the GOOGLE page for a github
+      // fallback (finds none) and then (b) re-run startOAuth on
+      // button[name="google"] — a button that no longer exists on
+      // accounts.google.com → 20s waitFor timeout → the whole signup dies.
+      // If the page has actually navigated onto a Google auth host, the
+      // redirect already fired: treat it as handled and let the consent loop
+      // below drive it, exactly as it would for any classic redirect OAuth.
+      if (!gsiHandled && detectStuckOnGoogleOAuth(this.browser.currentUrl())) {
+        gsiHandled = true;
+        steps.push(
+          "OAuth: the GSI dialog never fired, but the click started a classic Google redirect — continuing the consent flow.",
+        );
+      }
     }
     // GSI/FedCM dead end. Google won't render the FedCM dialog for an
     // automated browser (measured: FedCm.enable ok, dialogShown never fires),
@@ -6147,18 +6291,39 @@ export class SignupAgent {
     // caller a TRY_NEXT_PROVIDER signal so it re-dispatches via that provider
     // instead of dead-ending on Google. meilisearch offers both.
     if (gsiAttempted && !gsiHandled) {
-      try {
-        const inv = await this.browser.extractInteractiveElements();
-        const alt = findFirstOAuthButton(inv, ["github"]);
-        if (alt !== null) {
-          steps.push(
-            `OAuth: Google GSI/FedCM is a dead end for the bot — falling back to ${alt.provider}.`,
-          );
-          return { kind: "try_next_provider", selector: alt.button.selector, provider: alt.provider };
+      // The GSI click commonly leaves the page mid-SPA-transition (netlify:
+      // the button[name="google"] goes invisible, the page hasn't navigated
+      // anywhere useful), so a single inventory read here can THROW or return
+      // empty — and the old code then fell through to startOAuth(google),
+      // which re-clicked the now-hidden button and hung 20s before dying.
+      // Settle + retry the read a few times so the redirect-provider fallback
+      // (github) actually fires — github is the redirect provider whose
+      // session we keep warm.
+      let alt: { provider: OAuthProviderId; button: InteractiveElement } | null = null;
+      for (let attempt = 0; attempt < 3 && alt === null; attempt++) {
+        if (attempt > 0) await this.browser.wait(2);
+        try {
+          const inv = await this.browser.extractInteractiveElements();
+          alt = findFirstOAuthButton(inv, ["github"]);
+        } catch {
+          // page still navigating — retry after the settle
         }
-      } catch {
-        // inventory read failed — fall through to the normal redirect path
       }
+      if (alt !== null) {
+        steps.push(
+          `OAuth: Google GSI/FedCM is a dead end for the bot — falling back to ${alt.provider}.`,
+        );
+        return { kind: "try_next_provider", selector: alt.button.selector, provider: alt.provider };
+      }
+      // No redirect provider to hand off to. Re-clicking the Google affordance
+      // (startOAuth below) is pointless — it only re-raises the same dead GSI
+      // dialog, and on netlify-class pages crashes on the hidden button. Skip
+      // it: fall into the consent loop on the current page, which aborts
+      // cleanly (needs_login) instead of a misleading 20s waitFor timeout.
+      gsiHandled = true;
+      steps.push(
+        "OAuth: Google GSI/FedCM dead-ended with no redirect provider to fall back to.",
+      );
     }
     // OmniAuth POST-only recovery prep. Capture the affordance's href + the
     // page's CSRF token NOW, while we're still on the signin page — the
@@ -7868,6 +8033,8 @@ ${formatInventory(input.inventory)}`,
     // ran (current page WAS a keys page but had no affordance), a
     // different keys URL on the same origin may carry the create
     // control (org-scoped vs account-scoped keys pages).
+    let consecutive404 = 0;
+    const MAX_CONSECUTIVE_404 = 3;
     for (let i = 0; i < STUCK_LOOP_FALLBACK_PATHS.length; i++) {
       let currentUrl: string;
       try {
@@ -7883,6 +8050,29 @@ ${formatInventory(input.inventory)}`,
         await this.browser.waitForInteractiveDom(5, 15_000);
       } catch {
         continue;
+      }
+      // Abort the walk once guessed keys paths keep 404ing — this host's
+      // convention isn't in our list, so the remaining ~20 paths would all
+      // 404 too and burn the run's 600s budget (axiom/fathom/loops). A real
+      // (non-404) page resets the counter so a host that mixes 404s with a
+      // live keys page is still fully walked.
+      try {
+        const after = await this.browser.getState();
+        const bodyText = await this.browser.extractText().catch(() => "");
+        if (looksLike404(titleFromHtml(after.html), bodyText)) {
+          consecutive404 += 1;
+          if (consecutive404 >= MAX_CONSECUTIVE_404) {
+            steps.push(
+              `Existing-account recovery: ${consecutive404} consecutive 404s on guessed keys URLs — ` +
+                `this host's keys path isn't in our list; aborting the walk.`,
+            );
+            break;
+          }
+          continue;
+        }
+        consecutive404 = 0;
+      } catch {
+        // best-effort — fall through to the extract attempt
       }
       const here = await tryHere();
       if (here !== null) return here;
@@ -8062,6 +8252,17 @@ ${formatInventory(input.inventory)}`,
     // walking every fallback path.
     let prematureDoneFallbacks = 0;
     const MAX_PREMATURE_DONE_FALLBACKS = 3;
+    // Navigate budget. A planner that can't find the key page (project-
+    // scoped URLs it can't construct — supabase; or an SPA that ignores
+    // direct navs and stays put — last9) keeps emitting `navigate` round
+    // after round, burning the entire 600s deadline (MEASURED 2026-06-09).
+    // `navigate` is exempt from the stuck-loop detector (it's meant to
+    // change the URL), so cap the TOTAL navigates: a legit dashboard is
+    // reachable in a handful, and past the cap the planner is just guessing.
+    // Past the cap we force non-navigate planning and, if still nothing,
+    // break — converting a 600s hang into a prompt, honest failure.
+    let navigateCount = 0;
+    const MAX_POST_VERIFY_NAVIGATES = 8;
     // Dead-URL memory. The planner guesses credential-page URLs
     // (e.g. /user/personal_access_tokens/new) that 404; without memory it
     // re-guesses the same dead URL round after round — xata and fly each
@@ -8624,6 +8825,34 @@ ${formatInventory(input.inventory)}`,
         continue;
       }
       if (nextStep.kind === "navigate") {
+        navigateCount += 1;
+        if (navigateCount > MAX_POST_VERIFY_NAVIGATES) {
+          // Over budget: the planner is URL-guessing (supabase project-scoped
+          // keys it can't address; last9's SPA that ignores direct navs). One
+          // more shot CLICKING the current inventory, then give up — don't
+          // burn the rest of the 600s deadline on more dead navigates.
+          const clickable = inventory.filter(
+            (e) => e.tag === "button" || e.tag === "a",
+          );
+          if (clickable.length > 0 && navigateCount <= MAX_POST_VERIFY_NAVIGATES + 2) {
+            args.steps.push(
+              `Post-verify: navigate budget (${MAX_POST_VERIFY_NAVIGATES}) exhausted — forcing a click on the current page instead of guessing more URLs.`,
+            );
+            hint =
+              `You have navigated ${navigateCount} times without reaching an API-key page. ` +
+              `STOP navigating to guessed URLs. CLICK an element from the inventory below ` +
+              `to advance the onboarding/dashboard, or emit 'done' if there is genuinely no ` +
+              `key affordance here.`;
+            continue;
+          }
+          this.lastPostVerifyDoneReason =
+            `[stuck_loop] post-verify exhausted the navigate budget (${navigateCount} navigates) without ` +
+            `reaching a credential page — the key is behind onboarding/URL the planner can't address.`;
+          args.steps.push(
+            `Post-verify: navigate budget exhausted (${navigateCount}) with no credential — breaking out instead of burning the run deadline.`,
+          );
+          break;
+        }
         prevNavigateFromUrl = state.url;
         // Remember where we're going so the next round can blocklist it
         // if it 404s.
