@@ -142,7 +142,21 @@ export class GmailOtpPoller {
 
     let scanned = 0;
     try {
-      await client.connect();
+      // Connect/auth is wrapped separately so an expired or revoked Gmail app
+      // password surfaces as a CLEAR `imap_auth_failed` reason instead of an
+      // opaque `imap_error:Command failed` (MEASURED 2026-06-09: a cold poll
+      // returned "Command failed" with scanned:0 — the IMAP login was failing
+      // before any search, i.e. the GMAIL_APP_PASSWORD secret was stale, which
+      // silently blocked every Google-OAuth email-OTP signup, e.g. anthropic).
+      try {
+        await client.connect();
+      } catch (connErr) {
+        return {
+          code: null,
+          reason: `imap_auth_failed:${connErr instanceof Error ? connErr.message : String(connErr)} — rotate GMAIL_APP_PASSWORD`,
+          scanned: 0,
+        };
+      }
       const lock = await client.getMailboxLock("INBOX");
       try {
         // Server-side filter: SINCE <date>. Gmail's IMAP search
