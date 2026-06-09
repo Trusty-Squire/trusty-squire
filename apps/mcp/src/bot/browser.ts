@@ -1051,7 +1051,22 @@ export class BrowserController {
         })
         .catch(() => "");
       if (inputKind === "radio" || inputKind === "checkbox") {
-        await this.page.check(selector, { force: true });
+        // check() handles standard inputs; but a custom framework (kinde's kui)
+        // binds its change handler via event delegation, and a force-check on an
+        // sr-only radio may not fire a bubbling change. Belt-and-suspenders:
+        // check(), then JS-ensure checked + dispatch bubbling input/change so the
+        // delegated handler (e.g. enable-the-gated-Next-button) fires AND the
+        // value is included on submit. MEASURED 2026-06-09 (kinde SDK picker).
+        await this.page.check(selector, { force: true }).catch(() => undefined);
+        await this.page
+          .$eval(selector, (el) => {
+            const r = el as HTMLInputElement;
+            if (!r.checked) r.checked = true;
+            r.dispatchEvent(new Event("input", { bubbles: true }));
+            r.dispatchEvent(new Event("change", { bubbles: true }));
+            r.dispatchEvent(new Event("click", { bubbles: true }));
+          })
+          .catch(() => undefined);
         return;
       }
     } catch {
