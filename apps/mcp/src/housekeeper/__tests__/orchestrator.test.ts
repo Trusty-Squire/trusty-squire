@@ -386,3 +386,63 @@ describe("runHealPass — chained verify→discover + digest (T7)", () => {
     expect(digest).toMatchObject({ demoted: 1, verified: 1, needs_human: 1 });
   });
 });
+
+describe("runOneBatch — autonomous loop escalation (the single human surface)", () => {
+  it("a wall NEVER escalates; an unknown state escalates exactly ONCE, at the 3rd attempt", async () => {
+    // Isolate the persistent attempt store to a temp file for this test.
+    process.env.TRUSTY_SQUIRE_UNKNOWN_STATE_FILE = join(
+      tmpdir(),
+      `unknown-orch-test-${process.pid}.json`,
+    );
+    const events: NotifierEvent[] = [];
+    const notifier: Notifier = { name: "rec", notify: async (e) => void events.push(e) };
+    const { client } = recordingClient({});
+
+    const runOnce = (
+      runner: (input: { service: string }) => Promise<{
+        kind: "blocked" | "failed";
+        reason: string;
+        state?: string;
+        signature?: string;
+      }>,
+      service: string,
+    ): Promise<unknown> =>
+      runOneBatch({
+        queue: provider([{ kind: "discover", service }]),
+        client: client as never,
+        discover: runner as never,
+        notifiers: [notifier],
+        log: () => undefined,
+        sleep: async () => undefined,
+      });
+
+    // A WALL: classified blocked, auto-skipped — must never produce an escalation.
+    await runOnce(async () => ({ kind: "blocked", reason: "anti_bot_blocked", state: "wall" }), "wallsvc");
+
+    // An UNKNOWN state, same (service, signature) three times.
+    const unknownRunner = async () => ({
+      kind: "failed" as const,
+      reason: "weird_new_modal_appeared",
+      state: "unknown",
+      signature: "sig-zz",
+    });
+    await runOnce(unknownRunner, "novelsvc");
+    await runOnce(unknownRunner, "novelsvc");
+    let escalations = events.filter((e) => e.kind === "unknown_state");
+    expect(escalations.length).toBe(0); // attempts 1 + 2: handled autonomously
+
+    await runOnce(unknownRunner, "novelsvc"); // attempt 3 → the single ping
+    escalations = events.filter((e) => e.kind === "unknown_state");
+    expect(escalations.length).toBe(1);
+    expect(escalations[0]).toMatchObject({
+      kind: "unknown_state",
+      service: "novelsvc",
+      attempts: 3,
+    });
+
+    await runOnce(unknownRunner, "novelsvc"); // attempt 4 → suppressed, no second ping
+    expect(events.filter((e) => e.kind === "unknown_state").length).toBe(1);
+
+    delete process.env.TRUSTY_SQUIRE_UNKNOWN_STATE_FILE;
+  });
+});
