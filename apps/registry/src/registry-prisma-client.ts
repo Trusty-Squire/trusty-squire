@@ -26,12 +26,19 @@ interface HealRunRow {
   quarantined: number;
   reskilled: number;
   needs_human: number;
+  discover_attempted: number;
+  discover_succeeded: number;
+  skills_active: number;
   mcp_version: string | null;
 }
 
 interface HealRunDelegate {
   create(args: { data: Record<string, unknown> }): Promise<HealRunRow>;
   findFirst(args: { orderBy?: Record<string, unknown> }): Promise<HealRunRow | null>;
+  findMany(args: {
+    orderBy?: Record<string, unknown>;
+    take?: number;
+  }): Promise<HealRunRow[]>;
 }
 
 export type RegistryPrismaTransaction = Omit<
@@ -51,6 +58,7 @@ interface SkillRecordDelegate {
     orderBy?: Record<string, unknown>;
     take?: number;
   }): Promise<unknown[]>;
+  count(args: { where: Record<string, unknown> }): Promise<number>;
   update(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<unknown>;
   updateMany(args: {
     where: Record<string, unknown>;

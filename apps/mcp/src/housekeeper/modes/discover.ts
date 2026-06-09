@@ -29,6 +29,11 @@ import { emitProvisionEvent, postCaptchaEvent } from "../../tools/signup-telemet
 import { clientFromEnv, generateProvisionId } from "../../skill-registry-client.js";
 import type { HousekeeperTask } from "../queues/index.js";
 import type { HousekeeperOpts } from "../orchestrator.js";
+import {
+  classifyProvisionState,
+  unknownStateSignature,
+  type ProvisionState,
+} from "@trusty-squire/skill-schema";
 
 export interface DiscoveryBotConfig {
   // Override env-read defaults — used by tests.
@@ -54,9 +59,13 @@ export type DiscoveryBotOutcome =
       // the discriminated result from runAutoPromote so the
       // batch summary can credit promoted=N accurately.
       auto_promote?: import("../../tools/provision-any.js").AutoPromoteResult;
+      state?: ProvisionState;
     }
-  | { kind: "blocked"; reason: string }
-  | { kind: "failed"; reason: string };
+  // The named provision state drives the orchestrator's per-state policy.
+  // `signature` is set only for `state: "unknown"` — the bucket key the
+  // single-escalation tracker counts attempts against.
+  | { kind: "blocked"; reason: string; state?: ProvisionState }
+  | { kind: "failed"; reason: string; state?: ProvisionState; signature?: string };
 
 // Dumps the bot's step trail to stderr so the housekeeper log shows
 // the full planner/inventory/Plan trace alongside the discover
@@ -328,35 +337,37 @@ export async function runDiscover(
       kind: "ok",
       reason: `signed up via ${result.via ?? "bot"}; extracted ${credCount} credential(s)`,
       ...(promoteOutcome !== undefined ? { auto_promote: promoteOutcome } : {}),
+      state: "success",
     };
   }
 
-  // Map the bot's terminal-error vocabulary to the discovery-loop
-  // outcome kinds. Anything classified as a real-world blocker
-  // (billing, anti-bot, SSO restriction) goes to 'blocked' — the
-  // discovery worker shouldn't keep hammering services that need
-  // human-side action.
+  // Map the bot's terminal-error vocabulary to a named ProvisionState (the
+  // single source of truth — provision-state.ts). The orchestrator then applies
+  // the per-state policy. `wall` → blocked (auto-skip; don't keep hammering a
+  // service that needs human-side action); everything else → failed (the loop's
+  // retryable bucket), tagged with the state. `unknown` additionally carries a
+  // signature so the single-escalation tracker can count attempts.
+  //
+  // email_otp_required / oauth_required stay failed (= fixable, not walls): the
+  // bot polls the operator inbox for the code, and oauth_required is usually a
+  // wrong-URL nav bug. Both classify as transient/email_pending, never wall.
   const error = result.error ?? "unknown_failure";
-  const BLOCKED_PATTERNS = [
-    /^onboarding_blocked/,
-    /^anti_bot_blocked/,
-    /^captcha_blocked/,
-    /^sso_restricted/,
-    /^needs_oauth_provider_session/,
-    /^oauth_consent_needs_review/,
-  ];
-  // Deliberately NOT blocked — these stay `failed` (= fixable, not walls):
-  //   - email_otp_required: the bot already polls the operator inbox/gmail
-  //     for the code (readOperatorOtp → /v1/inbox/poll-operator-otp). A
-  //     terminal email_otp_required means that pipeline FAILED to deliver
-  //     (no machine token, poller timeout, parse miss) — a bug to fix, not
-  //     a human-side wall. Classifying it blocked would mask the real fault.
-  //   - oauth_required: usually a wrong-URL navigation to a parked page with
-  //     no OAuth button — a fixable bot nav bug, not a wall.
-  if (BLOCKED_PATTERNS.some((re) => re.test(error))) {
-    return { kind: "blocked", reason: error };
+  const state = classifyProvisionState({ failure_kind: error, credential_present: false });
+  if (state === "wall") {
+    return { kind: "blocked", reason: error, state };
   }
-  return { kind: "failed", reason: error };
+  if (state === "unknown") {
+    // Bucket by (entry url path + the error's HEAD token) so repeats of the
+    // SAME novel terminal on the SAME service share a 3-attempt count, while a
+    // different novel state is its own fresh count.
+    const headToken = error.trim().split(/[:\s]/, 1)[0] ?? error;
+    const signature = unknownStateSignature({
+      ...(input.signupUrl !== undefined ? { url: input.signupUrl } : {}),
+      element_fingerprints: [headToken],
+    });
+    return { kind: "failed", reason: error, state, signature };
+  }
+  return { kind: "failed", reason: error, state };
 }
 
 export type DiscoveryBotRunner = (input: {

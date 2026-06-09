@@ -396,3 +396,62 @@ You will be tempted to do the same. You will write "✓ published" and then re-r
 If you follow this file's rules, you will not burn version numbers. If you skip them because you're confident, you will burn version numbers. Confidence is not evidence.
 
 Read this file. Follow the rules. Run the verify script. Paste the output. Then claim success.
+
+---
+
+## Skill-Promotion Pipeline (autonomous loop)
+
+How a successful provision becomes a replayable, registry-published **Skill** —
+fully automatically, no human in the path. This is the "maximize skills in the
+registry" half of the autonomous loop; the runtime/retry half is
+[`docs/AUTONOMOUS-LOOP.md`](docs/AUTONOMOUS-LOOP.md).
+
+### Pipeline: capture → synthesize → sign → publish → verify → active
+
+```
+virgin signup succeeds on an UNCOVERED service (no active skill in registry)
+  1. CAPTURE     bot/onboarding-capture.ts — one integrity-chained JSON sidecar
+                 per post-verify round (state + inventory + the planner's chosen
+                 step) under ~/.trusty-squire/corpus/onboarding/. A run-outcome
+                 sidecar records ok + credential field NAMES (never values).
+  2. SYNTHESIZE  bot/promote-to-skill.ts promoteToSkill() — PURE function: verify
+                 the hash chain → PostVerifyStep[]→SkillStep[] → infer signup_url/
+                 oauth_provider/entry_state → multi-cred dispatch → infer
+                 credential spec+validators → Zod-validate. Same captures ⇒ same
+                 skill_id (SHA-256 derived).
+  3. SIGN        tools/provision-any.ts runAutoPromote() — Ed25519 over canonical
+                 bytes (SKILL_SIGNING_PRIVATE_KEY, else an ephemeral key).
+  4. PUBLISH     POST {TRUSTY_SQUIRE_REGISTRY_URL}/skills {skill, signature}.
+                 Idempotent on skill_id (201 new / 200 present).
+  5. VERIFY-GATE signup_url/oauth_provider changes land `pending-review`; the
+                 verifier worker replays; only a clean replay → `active`.
+```
+
+### Trigger rule the loop owns
+
+- The discover queue includes uncovered services; the loop runs a **virgin**
+  provision against each. On `success`, auto-promote fires (default-on;
+  `TRUSTY_SQUIRE_AUTO_PROMOTE`, opt-out `0`/`off`), **fire-and-forget** — a
+  synthesis/network failure is logged `[auto-promote]` and never fails the signup.
+
+### Contracts you MUST keep when touching this pipeline
+
+- **Determinism / idempotency.** Same captures ⇒ byte-identical skill ⇒ same
+  `skill_id`. No `Date.now()`/`Math.random()` in skill bytes. Re-promote = no-op.
+- **Single-cred byte-equivalence.** A new synthesizer feature must not shift the
+  canonical bytes of existing single-cred fixtures (shadow test guards this); ride
+  an **optional** field (`entry_state`, `dom_hint`) emitted only when applicable.
+- **Storage = registry, not git.** "Commit a skill" = `POST /skills`. Do NOT
+  write skill files into the repo.
+- **No real credentials in fixtures** (captures redact to field NAMES). A leaked
+  real key = rotate + delete the account.
+- **Write-only vault** — no path reads a secret back; promotion never needs to.
+- **failure-taxonomy / provision-state are shared** in `@trusty-squire/skill-schema`
+  so the registry and the mcp client agree. Change them there; never fork.
+
+### Reference
+
+- `packages/skill-schema/src/skill.ts` (`SkillSchema`, `entry_state`)
+- `packages/skill-schema/src/provision-state.ts`, `provision-policy.ts`
+- `apps/mcp/src/bot/promote-to-skill.ts`, `apps/mcp/src/bot/onboarding-capture.ts`
+- `apps/mcp/src/tools/provision-any.ts` (`runAutoPromote`)

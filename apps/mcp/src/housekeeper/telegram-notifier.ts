@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { Notifier, NotifierEvent } from "./notifier.js";
+import { formatObjectives } from "./notifier.js";
 
 export const CHAT_ID_PATH = join(
   homedir(),
@@ -113,9 +114,27 @@ export async function resolveChatIdFromUpdates(
 // ── Formatting ────────────────────────────────────────────────────
 
 function formatEvent(event: NotifierEvent): string {
-  if (event.kind === "heal_digest") {
+  if (event.kind === "unknown_state") {
+    // THE single escalation. Everything else the loop handles itself.
     return (
-      `🩺 Heal pass\n${event.summary}` +
+      `🚨 UNKNOWN STATE — ${event.service}\n` +
+      `The bot hit a DOM/outcome it has never classified, ${event.attempts}× on the same page.\n` +
+      `Kind: ${event.failure_kind}\n` +
+      `URL: ${event.url ?? "?"}\n` +
+      (event.trace_excerpt !== undefined
+        ? `Trace:\n${event.trace_excerpt.slice(0, 500)}`
+        : "") +
+      `\n\nAdd a classifier branch for this state, then the loop handles it autonomously.`
+    );
+  }
+  if (event.kind === "heal_digest") {
+    // The two objective functions on their own line so the operator can
+    // eyeball them rising run-over-run: OF#1 skills in the registry, OF#2
+    // discovery success rate this pass.
+    const obj = formatObjectives(event.objectives);
+    const objLine = obj === "" ? "" : `\n📊${obj.replace(/^ · OBJECTIVES:/, "")}`;
+    return (
+      `🩺 Heal pass\n${event.summary}${objLine}` +
       (event.needs_human > 0
         ? `\n\n${event.needs_human} need a human — GET /admin/needs-human`
         : "")

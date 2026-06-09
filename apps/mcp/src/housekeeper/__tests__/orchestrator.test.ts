@@ -86,6 +86,8 @@ function recordingClient(opts: {
   skill?: Skill;
   fetchThrows?: Error;
   outcomeTransition?: "promoted" | "retired" | "demoted" | "none";
+  // The active-skill count the registry "returns" from the heartbeat (OF#1).
+  healSkillsActive?: number;
 }) {
   const outcomes: Array<{
     skill_id: string;
@@ -93,6 +95,7 @@ function recordingClient(opts: {
     reason: string;
     failure_kind?: string;
   }> = [];
+  const heartbeats: Array<Record<string, number | string>> = [];
   const client = {
     fetchSkill: async (skill_id: string) => {
       if (opts.fetchThrows !== undefined) throw opts.fetchThrows;
@@ -114,8 +117,12 @@ function recordingClient(opts: {
         next_freshness_due_at: null,
       };
     },
+    postHealHeartbeat: async (input: Record<string, number | string>) => {
+      heartbeats.push(input);
+      return { skills_active: opts.healSkillsActive ?? 0 };
+    },
   };
-  return { client, outcomes };
+  return { client, outcomes, heartbeats };
 }
 
 describe("runOneBatch — replay path", () => {
@@ -342,8 +349,12 @@ describe("runHealPass — chained verify→discover + digest (T7)", () => {
     const events: NotifierEvent[] = [];
     const notifier: Notifier = { name: "cap", notify: async (e) => { events.push(e); } };
 
-    // verify: one replay that step_fails → demoted (mock client transition)
-    const { client: verifyClient } = recordingClient({ outcomeTransition: "demoted" });
+    // verify: one replay that step_fails → demoted (mock client transition).
+    // The registry reports 7 active skills back from the heartbeat (OF#1).
+    const { client: verifyClient, heartbeats } = recordingClient({
+      outcomeTransition: "demoted",
+      healSkillsActive: 7,
+    });
     // discover: one re-skill that publishes a fresh skill → promoted
     const order: string[] = [];
 
@@ -384,5 +395,74 @@ describe("runHealPass — chained verify→discover + digest (T7)", () => {
     const digest = events.find((e) => e.kind === "heal_digest");
     expect(digest).toBeDefined();
     expect(digest).toMatchObject({ demoted: 1, verified: 1, needs_human: 1 });
+
+    // The two objective functions ride the digest: OF#1 (skills_active) from
+    // the heartbeat, OF#2 (discover counts) from the discover pass.
+    expect(digest).toMatchObject({
+      objectives: { skills_active: 7, discover_attempted: 1, discover_succeeded: 1 },
+    });
+    // The heartbeat fired BEFORE the digest and forwarded OF#2's raw counts.
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]).toMatchObject({ discover_attempted: 1, discover_succeeded: 1 });
+  });
+});
+
+describe("runOneBatch — autonomous loop escalation (the single human surface)", () => {
+  it("a wall NEVER escalates; an unknown state escalates exactly ONCE, at the 3rd attempt", async () => {
+    // Isolate the persistent attempt store to a temp file for this test.
+    process.env.TRUSTY_SQUIRE_UNKNOWN_STATE_FILE = join(
+      tmpdir(),
+      `unknown-orch-test-${process.pid}.json`,
+    );
+    const events: NotifierEvent[] = [];
+    const notifier: Notifier = { name: "rec", notify: async (e) => void events.push(e) };
+    const { client } = recordingClient({});
+
+    const runOnce = (
+      runner: (input: { service: string }) => Promise<{
+        kind: "blocked" | "failed";
+        reason: string;
+        state?: string;
+        signature?: string;
+      }>,
+      service: string,
+    ): Promise<unknown> =>
+      runOneBatch({
+        queue: provider([{ kind: "discover", service }]),
+        client: client as never,
+        discover: runner as never,
+        notifiers: [notifier],
+        log: () => undefined,
+        sleep: async () => undefined,
+      });
+
+    // A WALL: classified blocked, auto-skipped — must never produce an escalation.
+    await runOnce(async () => ({ kind: "blocked", reason: "anti_bot_blocked", state: "wall" }), "wallsvc");
+
+    // An UNKNOWN state, same (service, signature) three times.
+    const unknownRunner = async () => ({
+      kind: "failed" as const,
+      reason: "weird_new_modal_appeared",
+      state: "unknown",
+      signature: "sig-zz",
+    });
+    await runOnce(unknownRunner, "novelsvc");
+    await runOnce(unknownRunner, "novelsvc");
+    let escalations = events.filter((e) => e.kind === "unknown_state");
+    expect(escalations.length).toBe(0); // attempts 1 + 2: handled autonomously
+
+    await runOnce(unknownRunner, "novelsvc"); // attempt 3 → the single ping
+    escalations = events.filter((e) => e.kind === "unknown_state");
+    expect(escalations.length).toBe(1);
+    expect(escalations[0]).toMatchObject({
+      kind: "unknown_state",
+      service: "novelsvc",
+      attempts: 3,
+    });
+
+    await runOnce(unknownRunner, "novelsvc"); // attempt 4 → suppressed, no second ping
+    expect(events.filter((e) => e.kind === "unknown_state").length).toBe(1);
+
+    delete process.env.TRUSTY_SQUIRE_UNKNOWN_STATE_FILE;
   });
 });

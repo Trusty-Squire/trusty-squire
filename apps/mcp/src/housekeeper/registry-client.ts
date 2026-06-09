@@ -179,8 +179,11 @@ export class VerifierRegistryClient {
     quarantined: number;
     reskilled: number;
     needs_human: number;
+    // OF#2 — the discovery success rate this pass saw, as raw counts.
+    discover_attempted?: number;
+    discover_succeeded?: number;
     mcp_version?: string;
-  }): Promise<void> {
+  }): Promise<{ skills_active: number }> {
     const url = `${this.baseUrl}/admin/heal-heartbeat`;
     const res = await this.fetchFn(url, {
       method: "POST",
@@ -193,5 +196,9 @@ export class VerifierRegistryClient {
     if (!res.ok) {
       throw new Error(`postHealHeartbeat: ${res.status} ${res.statusText}`);
     }
+    // The registry stamps + returns OF#1 (active-skill count) at heartbeat
+    // time — the source of truth for "skills in the registry".
+    const body = (await res.json()) as { skills_active?: number };
+    return { skills_active: typeof body.skills_active === "number" ? body.skills_active : 0 };
   }
 }

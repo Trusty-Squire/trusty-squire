@@ -384,6 +384,13 @@ model HealRun {
   quarantined Int
   reskilled   Int
   needs_human Int
+  // Objective functions tracked over time (added later — defaulted 0 so the
+  // db push is non-destructive against existing rows).
+  // OF#2: the discovery success rate this pass saw, as the two raw counts.
+  discover_attempted Int @default(0)
+  discover_succeeded Int @default(0)
+  // OF#1: snapshot of the active-skill count when this pass reported.
+  skills_active      Int @default(0)
   // mcp version of the housekeeper that reported, for drift debugging.
   mcp_version String?
 

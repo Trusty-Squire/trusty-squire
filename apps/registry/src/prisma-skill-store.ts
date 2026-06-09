@@ -419,6 +419,9 @@ export class PrismaSkillStore implements SkillStore {
         quarantined: input.quarantined,
         reskilled: input.reskilled,
         needs_human: input.needs_human,
+        discover_attempted: input.discover_attempted ?? 0,
+        discover_succeeded: input.discover_succeeded ?? 0,
+        skills_active: input.skills_active ?? 0,
         ...(input.now !== undefined ? { ran_at: input.now } : {}),
         ...(input.mcp_version !== undefined ? { mcp_version: input.mcp_version } : {}),
       },
@@ -429,6 +432,20 @@ export class PrismaSkillStore implements SkillStore {
   async latestHealRun(): Promise<HealRunRecord | null> {
     const row = await this.client.healRun.findFirst({ orderBy: { ran_at: "desc" } });
     return row === null ? null : toHealRunRecord(row as PrismaHealRunRow);
+  }
+
+  async listHealRuns(limit: number): Promise<HealRunRecord[]> {
+    const rows = await this.client.healRun.findMany({
+      orderBy: { ran_at: "desc" },
+      take: Math.max(1, Math.min(100, limit)),
+    });
+    return rows.map((row) => toHealRunRecord(row as PrismaHealRunRow));
+  }
+
+  async countActiveSkills(): Promise<number> {
+    return this.client.skillRecord.count({
+      where: { status: "active", deleted_at: null },
+    });
   }
 
   async listReplays(skill_id: string, limit: number): Promise<SkillReplayRecord[]> {
@@ -629,6 +646,9 @@ type PrismaHealRunRow = {
   quarantined: number;
   reskilled: number;
   needs_human: number;
+  discover_attempted: number | null;
+  discover_succeeded: number | null;
+  skills_active: number | null;
   mcp_version: string | null;
 };
 
@@ -641,6 +661,10 @@ function toHealRunRecord(row: PrismaHealRunRow): HealRunRecord {
     quarantined: row.quarantined,
     reskilled: row.reskilled,
     needs_human: row.needs_human,
+    // Defaulted: rows written before these columns existed read back null.
+    discover_attempted: row.discover_attempted ?? 0,
+    discover_succeeded: row.discover_succeeded ?? 0,
+    skills_active: row.skills_active ?? 0,
     mcp_version: row.mcp_version,
   };
 }

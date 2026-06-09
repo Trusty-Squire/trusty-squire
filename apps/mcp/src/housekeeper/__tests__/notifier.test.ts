@@ -3,7 +3,7 @@
 // notifier shells out to `gh` so it's tested via spawnFn injection.
 
 import { describe, expect, it, vi } from "vitest";
-import { LogNotifier } from "../notifier.js";
+import { LogNotifier, formatObjectives } from "../notifier.js";
 import { TelegramNotifier } from "../telegram-notifier.js";
 import { GithubIssueNotifier } from "../github-issue-notifier.js";
 
@@ -42,6 +42,58 @@ describe("LogNotifier", () => {
     expect(lines[0]).toContain("[replay]");
     expect(lines[0]).toContain("transition=promoted");
     expect(lines[0]).toContain("skill_id=01OPENROUTER000000000000XX");
+  });
+});
+
+describe("objective functions in the heal digest", () => {
+  it("formatObjectives renders both OFs, skips discovery rate when nothing was attempted", () => {
+    expect(
+      formatObjectives({ skills_active: 12, discover_attempted: 8, discover_succeeded: 6 }),
+    ).toBe(" · OBJECTIVES: skills 12 · discover 75% (6/8)");
+    // verify-only pass: no discovery attempts → only OF#1.
+    expect(
+      formatObjectives({ skills_active: 12, discover_attempted: 0, discover_succeeded: 0 }),
+    ).toBe(" · OBJECTIVES: skills 12");
+    // nothing to report
+    expect(formatObjectives(undefined)).toBe("");
+  });
+
+  it("LogNotifier appends the OBJECTIVES line to a heal_digest", async () => {
+    const lines: string[] = [];
+    const n = new LogNotifier((l) => lines.push(l));
+    await n.notify({
+      kind: "heal_digest",
+      verified: 5,
+      demoted: 1,
+      quarantined: 0,
+      reskilled: 2,
+      needs_human: 0,
+      summary: "verified 5 · demoted 1",
+      objectives: { skills_active: 30, discover_attempted: 10, discover_succeeded: 4 },
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("[heal]");
+    expect(lines[0]).toContain("skills 30");
+    expect(lines[0]).toContain("discover 40% (4/10)");
+  });
+
+  it("TelegramNotifier renders the 📊 objectives line in a heal digest", async () => {
+    const lines: string[] = [];
+    const n = new TelegramNotifier({ token: "", write: (l) => lines.push(l) });
+    await n.notify({
+      kind: "heal_digest",
+      verified: 5,
+      demoted: 1,
+      quarantined: 0,
+      reskilled: 2,
+      needs_human: 0,
+      summary: "verified 5 · demoted 1",
+      objectives: { skills_active: 30, discover_attempted: 10, discover_succeeded: 4 },
+    });
+    const out = lines.join("\n");
+    expect(out).toMatch(/📊/);
+    expect(out).toMatch(/skills 30/);
+    expect(out).toMatch(/discover 40% \(4\/10\)/);
   });
 });
 

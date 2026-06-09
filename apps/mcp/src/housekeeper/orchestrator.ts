@@ -17,6 +17,8 @@
 // produced before the merge.
 
 import type { Skill } from "@trusty-squire/skill-schema";
+import { shouldEscalate, UNKNOWN_ESCALATION_THRESHOLD } from "@trusty-squire/skill-schema";
+import { recordUnknownState, markEscalated } from "./unknown-state-store.js";
 import type { VerifierRegistryClient } from "./registry-client.js";
 import type { QueueProvider } from "./queues/index.js";
 import type { Notifier, NotifierEvent } from "./notifier.js";
@@ -163,6 +165,39 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
           reason: outcome.reason,
           ...(task.meta !== undefined ? { meta: task.meta } : {}),
         });
+
+        // THE single human-facing escalation. The discover_outcome above is
+        // operational telemetry (status tracking); this is the ONE event that
+        // asks a human to act, and it fires ONLY for an `unknown` provision
+        // state — a DOM/outcome the classifier has never seen — after
+        // UNKNOWN_ESCALATION_THRESHOLD attempts on the SAME (service,signature).
+        // Walls auto-skip (blocked), transient/email/rate auto-retry (failed),
+        // rot auto-demotes — none of them ever reach here.
+        if (
+          outcome.kind === "failed" &&
+          outcome.state === "unknown" &&
+          outcome.signature !== undefined
+        ) {
+          const rec = recordUnknownState({
+            service: task.service,
+            signature: outcome.signature,
+            now: new Date().toISOString(),
+          });
+          if (!rec.alreadyEscalated && shouldEscalate("unknown", rec.attempts)) {
+            await fanOutNotifier(notifiers, log, {
+              kind: "unknown_state",
+              service: task.service,
+              failure_kind: outcome.reason,
+              attempts: rec.attempts,
+            });
+            markEscalated(task.service, outcome.signature);
+            log(`ESCALATE: unknown_state ${task.service} after ${rec.attempts} attempt(s)`);
+          } else if (!rec.alreadyEscalated) {
+            log(
+              `unknown_state ${task.service} attempt ${rec.attempts}/${UNKNOWN_ESCALATION_THRESHOLD} — handling autonomously, not escalating yet`,
+            );
+          }
+        }
       }
     } catch (err) {
       summary.failed += 1;
@@ -216,10 +251,55 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   // The digest: what rotted, what auto-healed, what still needs a human.
   const reskilled = discover.transitions.promoted;
   const needsHuman = verify.transitions.demoted + verify.transitions.quarantined - reskilled;
+  // OF#2 — the raw discovery success rate this pass saw (succeeded / attempted).
+  const discoverAttempted = discover.attempted;
+  const discoverSucceeded = discover.succeeded;
+
+  // Heartbeat the registry FIRST (before the digest) so the admin status
+  // panel knows the timer is alive (T10) AND so we get back OF#1 — the
+  // active-skill count, which the registry owns — to fold into the digest.
+  // Fail-open: a missing method (test doubles) or a network blip must never
+  // break the pass; we just omit OF#1 from the digest in that case.
+  let skillsActive: number | undefined;
+  try {
+    const c = opts.verify.client as {
+      postHealHeartbeat?: (i: {
+        verified: number;
+        demoted: number;
+        quarantined: number;
+        reskilled: number;
+        needs_human: number;
+        discover_attempted: number;
+        discover_succeeded: number;
+      }) => Promise<{ skills_active: number }>;
+    };
+    if (typeof c.postHealHeartbeat === "function") {
+      const res = await c.postHealHeartbeat({
+        verified: verify.attempted,
+        demoted: verify.transitions.demoted,
+        quarantined: verify.transitions.quarantined,
+        reskilled,
+        needs_human: Math.max(0, needsHuman),
+        discover_attempted: discoverAttempted,
+        discover_succeeded: discoverSucceeded,
+      });
+      if (res !== undefined && typeof res.skills_active === "number") {
+        skillsActive = res.skills_active;
+      }
+    }
+  } catch (err) {
+    log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const discoverRate =
+    discoverAttempted > 0
+      ? ` · discover ${Math.round((100 * discoverSucceeded) / discoverAttempted)}% (${discoverSucceeded}/${discoverAttempted})`
+      : "";
+  const skillsLine = skillsActive !== undefined ? ` · skills ${skillsActive}` : "";
   const digest =
     `verified ${verify.attempted} · demoted ${verify.transitions.demoted} · ` +
     `quarantined ${verify.transitions.quarantined} · re-skilled ${reskilled} · ` +
-    `needs human ~${Math.max(0, needsHuman)}`;
+    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}`;
   log(`heal pass done: ${digest}`);
   await fanOutNotifier(opts.notifiers ?? [], log, {
     kind: "heal_digest",
@@ -229,33 +309,13 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
     reskilled,
     needs_human: Math.max(0, needsHuman),
     summary: digest,
+    objectives: {
+      ...(skillsActive !== undefined ? { skills_active: skillsActive } : {}),
+      discover_attempted: discoverAttempted,
+      discover_succeeded: discoverSucceeded,
+    },
   });
 
-  // Heartbeat the registry so the admin status panel knows the timer is
-  // alive (T10). Fail-open: a missing method (test doubles) or a network
-  // blip must never break the pass.
-  try {
-    const c = opts.verify.client as {
-      postHealHeartbeat?: (i: {
-        verified: number;
-        demoted: number;
-        quarantined: number;
-        reskilled: number;
-        needs_human: number;
-      }) => Promise<void>;
-    };
-    if (typeof c.postHealHeartbeat === "function") {
-      await c.postHealHeartbeat({
-        verified: verify.attempted,
-        demoted: verify.transitions.demoted,
-        quarantined: verify.transitions.quarantined,
-        reskilled,
-        needs_human: Math.max(0, needsHuman),
-      });
-    }
-  } catch (err) {
-    log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
-  }
   return { verify, discover };
 }
 
