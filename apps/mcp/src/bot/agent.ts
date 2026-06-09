@@ -2242,10 +2242,23 @@ export function detectFormFillIsDashboard(plan: {
     .toLowerCase();
 
   // Billing / payment wall — the planner sees a credit-card / billing
-  // form, which is never a signup form.
+  // form, which is never a signup form. (Checked first: a "free trial"
+  // page that ALSO demands a card is a wall, not a path to signup.)
   const BILLING_WALL =
     /\b(?:add (?:a )?(?:credit card|payment method)|enter (?:your )?(?:credit card|payment)|billing (?:information|details)|payment information required)\b/;
   if (BILLING_WALL.test(haystack)) return true;
+
+  // Negative guard — a LOGIN / SIGN-IN page (pre-auth), or a plan that
+  // proposes navigating TO a signup/trial form, is the OPPOSITE of a
+  // logged-in dashboard. MEASURED 2026-06-09: fathom's planner correctly
+  // said "this is a login page, NOT a signup page; click 'Start a free
+  // trial' to reach the actual signup form" — pivoting to key extraction
+  // there is wrong (we're not authenticated; the key page 404s). The
+  // bot must EXECUTE the planner's click toward signup. Runs before the
+  // ambiguous "not a signup" check below so it can't be swallowed.
+  const REACH_SIGNUP =
+    /\blog[\s-]?in page|sign[\s-]?in page|free trial|start a (?:free )?trial|create an? account|navigate to the (?:actual )?sign-?up/;
+  if (REACH_SIGNUP.test(haystack)) return false;
 
   // Product-creation form — the planner describes creating a
   // database / cluster / instance / deployment / app / project /
@@ -2254,10 +2267,13 @@ export function detectFormFillIsDashboard(plan: {
     /\b(?:create(?:s|d)?|creating|provision(?:s|ed|ing)?)\s+(?:(?:the|a|an|new|your|this)\s+){0,3}(?:database|cluster|instance|deployment|app|service|project|workspace|index|environment|tenant)\b/;
   if (PRODUCT_CREATION.test(haystack)) return true;
 
-  // Explicit "not a signup" / "logged in" / "dashboard" statements
-  // from the planner.
+  // Explicit "logged in" / "dashboard" statements from the planner. NB:
+  // bare "not a signup" is deliberately NOT here — it's ambiguous (a
+  // LOGIN page is also "not a signup") and false-pivoted fathom into key
+  // extraction. A genuine dashboard says "already signed in" / "logged-in
+  // dashboard", which the REACH_SIGNUP guard above doesn't touch.
   const EXPLICIT =
-    /\b(?:not\s+(?:a\s+)?(?:sign-?up|signup)|already\s+(?:signed[\s-]?in|logged[\s-]?in|authenticated)|logged[\s-]?in (?:dashboard|user))\b/;
+    /\b(?:already\s+(?:signed[\s-]?in|logged[\s-]?in|authenticated)|logged[\s-]?in (?:dashboard|user))\b/;
   if (EXPLICIT.test(haystack)) return true;
 
   return false;

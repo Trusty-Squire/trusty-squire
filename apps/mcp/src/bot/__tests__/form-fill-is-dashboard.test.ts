@@ -85,4 +85,31 @@ describe("detectFormFillIsDashboard — negative", () => {
   it("ignores empty plans", () => {
     expect(detectFormFillIsDashboard({ actions: [] })).toBe(false);
   });
+
+  // MEASURED 2026-06-09: fathom. The planner correctly identified a LOGIN
+  // page (pre-auth) and proposed clicking "Start a free trial" to reach the
+  // real signup form. The old bare "not a signup" branch false-pivoted this
+  // into key extraction (→ 404-walk → 600s timeout). A login page is NOT a
+  // logged-in dashboard; the bot must execute the click toward signup.
+  it("does NOT flag a login page whose plan reaches signup via 'Start a free trial' (fathom)", () => {
+    expect(
+      detectFormFillIsDashboard({
+        notes:
+          "This is a login page, not a signup page. The only path to account " +
+          "creation is the 'Start a free trial' link.",
+        actions: [
+          { reason: "Click 'Start a free trial' to navigate to the actual signup form." },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("does NOT flag a bare 'sign in page, not a signup' note (ambiguous → not dashboard)", () => {
+    expect(
+      detectFormFillIsDashboard({
+        notes: "This looks like a sign-in page, not a signup form.",
+        actions: [{ reason: "Click the link to register." }],
+      }),
+    ).toBe(false);
+  });
 });
