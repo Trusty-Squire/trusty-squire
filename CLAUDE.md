@@ -28,6 +28,34 @@ native adapter for, faster than the manifest work paid for itself.
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
 OpenRouter for LLM, Resend for inbound + outbound mail.
 
+## Objective Functions (what this project optimizes for)
+
+Trusty Squire runs an autonomous self-improving loop. **Two objective
+functions** define "better" — every autonomous run, and most feature work,
+should move at least one of them up and neither down:
+
+1. **OF#1 — maximize the number of skills in the skill registry.** More
+   active skills = more services a user provisions via fast (~30s) replay
+   instead of the ~6min universal bot. Grown by the discover→auto-promote
+   path: a virgin signup success on an uncovered service synthesizes +
+   publishes a skill. Measured as the registry's active-skill count.
+2. **OF#2 — lift the provision success rate the housekeeper sees on
+   discovery runs.** A higher virgin-signup success rate means the bot
+   generalizes to more of the long tail (and feeds OF#1). Measured as
+   `discover_succeeded / discover_attempted` per heal pass.
+
+**How they're driven + monitored:** the daily heal pass (`mcp housekeeper
+--mode=heal`, systemd timer in `tools/systemd/`) verifies skills, discovers
+across the curated ~100-service queue, and emits one digest carrying both
+metrics (Telegram + journal). The registry admin dashboard's **Objective
+functions** panel shows the live numbers + a run-over-run trend (stamped on
+each `HealRun`). See `docs/AUTONOMOUS-LOOP.md` for the loop + state machine
+and `AGENTS.md` for the skill-promotion pipeline.
+
+**Honest tension:** OF#1 and OF#2 can pull against each other — as the bot
+covers the easy services, the residual discovery queue gets harder, so OF#2
+can dip even while OF#1 rises. Read them together, not in isolation.
+
 ## Current State
 
 ### Production, deployed, verified end-to-end

@@ -66,6 +66,9 @@ export class InMemorySkillStore implements SkillStore {
       quarantined: input.quarantined,
       reskilled: input.reskilled,
       needs_human: input.needs_human,
+      discover_attempted: input.discover_attempted ?? 0,
+      discover_succeeded: input.discover_succeeded ?? 0,
+      skills_active: input.skills_active ?? 0,
       mcp_version: input.mcp_version ?? null,
     };
     this.healRuns.push(rec);
@@ -75,6 +78,20 @@ export class InMemorySkillStore implements SkillStore {
   async latestHealRun(): Promise<HealRunRecord | null> {
     if (this.healRuns.length === 0) return null;
     return [...this.healRuns].sort((a, b) => b.ran_at.getTime() - a.ran_at.getTime())[0]!;
+  }
+
+  async listHealRuns(limit: number): Promise<HealRunRecord[]> {
+    return [...this.healRuns]
+      .sort((a, b) => b.ran_at.getTime() - a.ran_at.getTime())
+      .slice(0, Math.max(0, limit));
+  }
+
+  async countActiveSkills(): Promise<number> {
+    let n = 0;
+    for (const rec of this.skills.values()) {
+      if (rec.status === "active" && rec.deleted_at === null) n += 1;
+    }
+    return n;
   }
 
   async insert(input: InsertSkillInput): Promise<SkillStoreRecord> {

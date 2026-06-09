@@ -7,10 +7,33 @@ the loop, the provision state machine, the per-state retry policy, and the singl
 escalation condition. The promotion half (success → registry skill) is in
 [`../AGENTS.md`](../AGENTS.md) → "Skill-Promotion Pipeline".
 
+## Objective functions (what the loop optimizes for)
+
+Two metrics define "better"; every run reports both and the dashboard trends
+them (see `CLAUDE.md` → "Objective Functions"):
+
+1. **OF#1 — skills in the registry** (active-skill count). Grown by
+   discover→auto-promote.
+2. **OF#2 — discovery success rate** the housekeeper sees
+   (`discover_succeeded / discover_attempted` per pass).
+
+**Where they surface:**
+- **Digest** — each heal pass emits one `heal_digest` notifier event whose
+  `objectives` field carries OF#1 (`skills_active`, returned by the registry
+  at heartbeat time) + OF#2 (the pass's discover counts). The Telegram + log
+  notifiers render them on a `📊 OBJECTIVES` line. Daily timer → ~1 digest/day.
+- **Dashboard** — `GET /admin` → the **Objective functions** panel: the live
+  skill count + latest discovery rate, plus a run-over-run trend table. Each
+  `HealRun` row stamps `skills_active` / `discover_attempted` /
+  `discover_succeeded` so the trend is real history, not a single point.
+- **Daily engine** — the systemd timer runs `--mode=heal --once
+  --from=tools/housekeeper-services.yaml --limit=100`: verify + a curated
+  ~100-service discover sweep, daily (`tools/systemd/`).
+
 ## The loop
 
 `mcp housekeeper --mode=heal` (`apps/mcp/src/housekeeper/orchestrator.ts`
-`runHealLoop`) chains, on a 12h systemd timer:
+`runHealLoop`) chains, on a daily systemd timer:
 
 1. **verify** — replay active skills; demote/retire the rotten (see the failure
    taxonomy), keeping the registry honest.

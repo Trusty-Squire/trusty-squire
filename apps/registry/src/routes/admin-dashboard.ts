@@ -219,6 +219,10 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
 
     // T10 — heal-pass heartbeat for the status panel.
     const healRun = await opts.store.latestHealRun();
+    // The objective-function trend: the last ~10 heal runs, so the operator
+    // can watch OF#1 (skills in registry) and OF#2 (discovery success rate)
+    // move over time rather than just the latest point.
+    const healRuns = await opts.store.listHealRuns(10);
 
     const html = renderDashboard({
       activeSkills,
@@ -232,6 +236,7 @@ export const registerAdminDashboardRoute: FastifyPluginAsync<AdminDashboardDeps>
       activeServiceSet,
       funnel,
       healRun,
+      healRuns,
     });
     reply.code(200).type("text/html; charset=utf-8").send(html);
   });
@@ -332,6 +337,7 @@ function renderDashboard(args: {
   activeServiceSet: Set<string>;
   funnel: FunnelPanelData;
   healRun: Awaited<ReturnType<SkillStore["latestHealRun"]>>;
+  healRuns: Awaited<ReturnType<SkillStore["listHealRuns"]>>;
 }): string {
   // Tokens from DESIGN.md (the operator dashboard now follows the
   // product design system: Linear-leaning dark, mono-forward).
@@ -398,6 +404,7 @@ function renderDashboard(args: {
     `  <h1>Registry Admin</h1>`,
     `  <div class="pagesub">trusty-squire-registry · operator view · read-only</div>`,
     `  <nav>`,
+    `    <a href="#objectives">Objectives</a>`,
     `    <a href="#heal">Heal loop</a>`,
     `    <a href="#funnel">Funnel</a>`,
     `    <a href="#cachehit">Cache hit</a>`,
@@ -409,6 +416,7 @@ function renderDashboard(args: {
     `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
     `    <a href="#failures">Recent failures (${args.recentFailures.length})</a>`,
     `  </nav>`,
+    renderObjectivesSection(args.activeSkills.length, args.healRuns),
     renderHealStatusSection(args.healRun),
     renderAcquisitionFunnelSection(args.funnel),
     renderEngagementSection(args.funnel),
@@ -524,6 +532,74 @@ function renderEngagementSection(f: FunnelPanelData): string {
 function pct(n: number, total: number): string {
   if (total === 0) return "0.0%";
   return `${((100 * n) / total).toFixed(1)}%`;
+}
+
+// The two objective functions the whole project optimizes for, surfaced at
+// the top of the dashboard so they're the first thing the operator sees:
+//   OF#1 — skills in the registry (active count). The "now" number is the
+//          live count; the trend column is each heal run's snapshot.
+//   OF#2 — discovery success rate the housekeeper sees on discovery runs
+//          (succeeded / attempted), per heal pass.
+// The trend table (newest first) lets the operator watch both rise over time
+// instead of seeing only the latest point.
+function renderObjectivesSection(
+  liveSkillCount: number,
+  healRuns: Awaited<ReturnType<SkillStore["listHealRuns"]>>,
+): string {
+  const head =
+    `<section id="objectives"><h2>Objective functions</h2>` +
+    `<div class="desc">What this project optimizes for, every autonomous run. ` +
+    `<b>OF#1</b> — maximize skills in the registry. <b>OF#2</b> — lift the ` +
+    `discovery success rate the housekeeper sees. Watch them rise over time.</div>`;
+
+  // Latest discovery rate from the most recent run that actually attempted
+  // discovery (a verify-only pass has attempted 0 and isn't a data point).
+  const latestDiscover = healRuns.find((r) => r.discover_attempted > 0);
+  const latestRate =
+    latestDiscover !== undefined
+      ? pct(latestDiscover.discover_succeeded, latestDiscover.discover_attempted)
+      : "—";
+
+  const kpis =
+    `<div class="northstar"><div class="stats">` +
+    `<div class="stat"><div class="k">OF#1 · skills in registry</div>` +
+    `<div class="v" style="color:var(--accent)">${liveSkillCount}</div></div>` +
+    `<div class="stat"><div class="k">OF#2 · discovery success (latest)</div>` +
+    `<div class="v">${latestRate}</div></div>` +
+    `</div>`;
+
+  if (healRuns.length === 0) {
+    return (
+      head +
+      kpis +
+      `<div class="empty" style="margin-top:8px">No heal runs recorded yet — ` +
+      `the trend appears once the heal pass reports.</div></div></section>`
+    );
+  }
+
+  const rows = healRuns
+    .map((r) => {
+      const rate =
+        r.discover_attempted > 0
+          ? pct(r.discover_succeeded, r.discover_attempted)
+          : "—";
+      const counts =
+        r.discover_attempted > 0
+          ? `${r.discover_succeeded}/${r.discover_attempted}`
+          : "—";
+      return `<tr>
+        <td>${formatDate(r.ran_at)}</td>
+        <td class="num">${r.skills_active}</td>
+        <td class="num">${rate}</td>
+        <td class="num">${counts}</td>
+      </tr>`;
+    })
+    .join("");
+  const trend = `<div class="ruled" style="margin-top:16px"><table>
+      <thead><tr><th>run</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+  return head + kpis + trend + `</div></section>`;
 }
 
 // T10 — at-a-glance status of the closed-loop self-healing pass. The

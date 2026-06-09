@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import type { Notifier, NotifierEvent } from "./notifier.js";
+import { formatObjectives } from "./notifier.js";
 
 export const CHAT_ID_PATH = join(
   homedir(),
@@ -127,8 +128,13 @@ function formatEvent(event: NotifierEvent): string {
     );
   }
   if (event.kind === "heal_digest") {
+    // The two objective functions on their own line so the operator can
+    // eyeball them rising run-over-run: OF#1 skills in the registry, OF#2
+    // discovery success rate this pass.
+    const obj = formatObjectives(event.objectives);
+    const objLine = obj === "" ? "" : `\n📊${obj.replace(/^ · OBJECTIVES:/, "")}`;
     return (
-      `🩺 Heal pass\n${event.summary}` +
+      `🩺 Heal pass\n${event.summary}${objLine}` +
       (event.needs_human > 0
         ? `\n\n${event.needs_human} need a human — GET /admin/needs-human`
         : "")

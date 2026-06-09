@@ -93,4 +93,28 @@ describe("heal heartbeat + status panel (T10)", () => {
     expect(page.body).toContain("verified 0");
     await server.close();
   });
+
+  it("records the discovery objective + echoes the active-skill count, and the dashboard trends both", async () => {
+    const { server } = await setup();
+    // OF#2 — 3 of 10 discover attempts succeeded this pass.
+    const post = await postHeartbeat(server, {
+      verified: 4, demoted: 0, quarantined: 0, reskilled: 1, needs_human: 0,
+      discover_attempted: 10, discover_succeeded: 3,
+    });
+    expect(post.statusCode).toBe(201);
+    // OF#1 — the registry stamps + echoes the active-skill count (0 here, no
+    // skills inserted in this bootstrap).
+    expect(post.json().skills_active).toBe(0);
+
+    const page = await dashboard(server);
+    expect(page.statusCode).toBe(200);
+    const html = page.body;
+    // The Objective functions panel + the OF#2 rate (3/10 = 30%) trend.
+    expect(html).toContain("Objective functions");
+    expect(html).toContain("OF#1");
+    expect(html).toContain("OF#2");
+    expect(html).toContain("30.0%");
+    expect(html).toContain("3/10");
+    await server.close();
+  });
 });

@@ -312,10 +312,17 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       once: args.once,
       ...(args.limit !== undefined ? { limit: args.limit } : {}),
     };
+    // --from=<yaml> → the daily curated sweep (the autonomous engine over
+    // ~100 services). Without it, heal discovers from telemetry candidates +
+    // freshly-demoted services (the on-demand self-healing path).
+    const healDiscoverQueue =
+      args.seedPath !== undefined && args.seedPath.length > 0
+        ? new YamlSeedQueue({ path: args.seedPath })
+        : new RegistryDiscoverQueue(client);
     try {
       await runHealLoop({
         verify: { ...base, queue: new RegistryVerifierQueue(client) },
-        discover: { ...base, queue: new RegistryDiscoverQueue(client) },
+        discover: { ...base, queue: healDiscoverQueue },
         notifiers,
         once: args.once,
         ...(args.intervalSeconds !== undefined

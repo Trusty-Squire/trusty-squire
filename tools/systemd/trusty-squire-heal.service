@@ -21,9 +21,15 @@ WorkingDirectory=%h/proj-ts
 # harvester.env — the CLI auto-reads them from ~/.config/trusty-squire/
 # session.json (an explicit env value still wins if you set one).
 EnvironmentFile=%h/.config/trusty-squire/harvester.env
-ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once --telegram
-# A heal pass drives real browser signups in the discover phase; give it
-# room but don't let a hung run wedge the timer.
-TimeoutStartSec=3h
+# The daily autonomous engine: verify (keep the registry honest) → discover
+# across the curated ~100-service queue (maximize skills) → one digest
+# carrying both objective functions (skills-in-registry + discovery success
+# rate). --from sources the curated sweep; --limit caps how many services one
+# pass attempts. Drop --from to fall back to on-demand telemetry-candidate
+# discovery instead of the curated sweep.
+ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once --telegram --from=tools/housekeeper-services.yaml --limit=100
+# A heal pass drives ~100 real browser signups in the discover phase; give it
+# plenty of room but don't let a hung run wedge the timer.
+TimeoutStartSec=8h
 # Don't thrash on a transient failure — the next timer fire retries.
 Restart=no

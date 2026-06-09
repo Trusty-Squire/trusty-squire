@@ -424,17 +424,26 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
         const v = b[k];
         return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
       };
+      // OF#1 — the registry is the source of truth for the active-skill count;
+      // stamp a snapshot onto this run (the time series the dashboard trends)
+      // and echo it back so the housekeeper's digest can report it.
+      const skillsActive = await opts.store.countActiveSkills();
       const rec = await opts.store.recordHealRun({
         verified: intField("verified"),
         demoted: intField("demoted"),
         quarantined: intField("quarantined"),
         reskilled: intField("reskilled"),
         needs_human: intField("needs_human"),
+        discover_attempted: intField("discover_attempted"),
+        discover_succeeded: intField("discover_succeeded"),
+        skills_active: skillsActive,
         ...(typeof b["mcp_version"] === "string"
           ? { mcp_version: (b["mcp_version"] as string).slice(0, 40) }
           : {}),
       });
-      reply.code(201).send({ ok: true, id: rec.id, ran_at: rec.ran_at.toISOString() });
+      reply
+        .code(201)
+        .send({ ok: true, id: rec.id, ran_at: rec.ran_at.toISOString(), skills_active: skillsActive });
     },
   );
 };

@@ -229,6 +229,20 @@ export interface SkillStore {
   latestHealRun(): Promise<HealRunRecord | null>;
 
   /**
+   * The last N heal runs, newest first — backs the objective-function
+   * trend on the admin dashboard (skills-in-registry + discovery success
+   * rate over time). The dashboard reads a short window (~10).
+   */
+  listHealRuns(limit: number): Promise<HealRunRecord[]>;
+
+  /**
+   * Count of currently-active skills — objective function #1 (maximize
+   * skills in the registry). Stamped onto each heal run as a time series,
+   * and read directly for the dashboard's headline number.
+   */
+  countActiveSkills(): Promise<number>;
+
+  /**
    * Count replay-outcome writes for an account in a recent window.
    * Backs the 60/min rate limit on POST /skills/:id/replay-outcome
    * (C9). Returns the count; the route layer decides whether to 429.
@@ -287,6 +301,16 @@ export interface HealRunInput {
   quarantined: number;
   reskilled: number;
   needs_human: number;
+  // Objective function #2 — the raw discovery success rate this pass saw
+  // (succeeded / attempted). Stored as the two counts so the dashboard can
+  // re-derive the rate and aggregate across runs. The client (housekeeper)
+  // sends these.
+  discover_attempted?: number;
+  discover_succeeded?: number;
+  // Objective function #1 — snapshot of the active-skill count at heartbeat
+  // time, stamped server-side by the route (the registry is the source of
+  // truth). Optional on the input so older callers/tests can omit it.
+  skills_active?: number;
   mcp_version?: string;
   now?: Date;
 }
@@ -299,6 +323,11 @@ export interface HealRunRecord {
   quarantined: number;
   reskilled: number;
   needs_human: number;
+  // The two objective functions, as of this run (see HealRunInput). Default
+  // 0 for runs recorded before the columns existed.
+  discover_attempted: number;
+  discover_succeeded: number;
+  skills_active: number;
   mcp_version: string | null;
 }
 

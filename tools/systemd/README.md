@@ -1,18 +1,26 @@
-# Closed-loop heal pass — systemd user timer (T9)
+# Autonomous heal pass — systemd user timer (T9)
 
-Runs `mcp housekeeper --mode=heal --once` every 12h on the operator's
-headless dev box. Each fire does ONE self-healing pass:
+Runs `mcp housekeeper --mode=heal --once --from=tools/housekeeper-services.yaml
+--limit=100` **daily** on the operator's headless dev box — the autonomous
+engine that drives the project's two objective functions. Each fire does ONE
+pass:
 
 1. **verify** — replay active + freshness-due skills. Rot (step/validator/
    extraction failures ×3) → demoted; a wall (captcha/anti-bot) →
    quarantined on the first hit. Transient/infra blips never demote.
-2. **discover** — re-skill the freshly-demoted services (sourced regardless
-   of demand) + demand candidates. Quarantined services are skipped.
-3. **digest** — one notification: `verified N · demoted M · quarantined Q ·
-   re-skilled K · needs human ~X` (Telegram if `TELEGRAM_BOT_TOKEN` is set,
-   always to the journal).
+2. **discover** — run a virgin provision against the curated ~100-service
+   queue (`tools/housekeeper-services.yaml`); each success auto-promotes a new
+   skill. (Drop `--from` to fall back to on-demand telemetry-candidate +
+   freshly-demoted discovery instead of the curated sweep.)
+3. **digest** — one notification carrying both **objective functions**:
+   `verified N · demoted M · quarantined Q · re-skilled K · needs human ~X ·
+   discover P% (s/a) · skills T` — OF#1 = skills in the registry, OF#2 =
+   discovery success rate this pass (Telegram if `TELEGRAM_BOT_TOKEN` is set,
+   always to the journal). The same two metrics land on the registry admin
+   dashboard's **Objective functions** panel with a run-over-run trend.
 
-See `docs/DESIGN-closed-loop-remediation.md` for the full design.
+See `docs/AUTONOMOUS-LOOP.md` for the loop + objective functions and
+`docs/DESIGN-closed-loop-remediation.md` for the closed-loop design.
 
 ## Install (one-time, as the operator)
 

@@ -86,6 +86,8 @@ function recordingClient(opts: {
   skill?: Skill;
   fetchThrows?: Error;
   outcomeTransition?: "promoted" | "retired" | "demoted" | "none";
+  // The active-skill count the registry "returns" from the heartbeat (OF#1).
+  healSkillsActive?: number;
 }) {
   const outcomes: Array<{
     skill_id: string;
@@ -93,6 +95,7 @@ function recordingClient(opts: {
     reason: string;
     failure_kind?: string;
   }> = [];
+  const heartbeats: Array<Record<string, number | string>> = [];
   const client = {
     fetchSkill: async (skill_id: string) => {
       if (opts.fetchThrows !== undefined) throw opts.fetchThrows;
@@ -114,8 +117,12 @@ function recordingClient(opts: {
         next_freshness_due_at: null,
       };
     },
+    postHealHeartbeat: async (input: Record<string, number | string>) => {
+      heartbeats.push(input);
+      return { skills_active: opts.healSkillsActive ?? 0 };
+    },
   };
-  return { client, outcomes };
+  return { client, outcomes, heartbeats };
 }
 
 describe("runOneBatch — replay path", () => {
@@ -342,8 +349,12 @@ describe("runHealPass — chained verify→discover + digest (T7)", () => {
     const events: NotifierEvent[] = [];
     const notifier: Notifier = { name: "cap", notify: async (e) => { events.push(e); } };
 
-    // verify: one replay that step_fails → demoted (mock client transition)
-    const { client: verifyClient } = recordingClient({ outcomeTransition: "demoted" });
+    // verify: one replay that step_fails → demoted (mock client transition).
+    // The registry reports 7 active skills back from the heartbeat (OF#1).
+    const { client: verifyClient, heartbeats } = recordingClient({
+      outcomeTransition: "demoted",
+      healSkillsActive: 7,
+    });
     // discover: one re-skill that publishes a fresh skill → promoted
     const order: string[] = [];
 
@@ -384,6 +395,15 @@ describe("runHealPass — chained verify→discover + digest (T7)", () => {
     const digest = events.find((e) => e.kind === "heal_digest");
     expect(digest).toBeDefined();
     expect(digest).toMatchObject({ demoted: 1, verified: 1, needs_human: 1 });
+
+    // The two objective functions ride the digest: OF#1 (skills_active) from
+    // the heartbeat, OF#2 (discover counts) from the discover pass.
+    expect(digest).toMatchObject({
+      objectives: { skills_active: 7, discover_attempted: 1, discover_succeeded: 1 },
+    });
+    // The heartbeat fired BEFORE the digest and forwarded OF#2's raw counts.
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]).toMatchObject({ discover_attempted: 1, discover_succeeded: 1 });
   });
 });
 

@@ -251,10 +251,55 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   // The digest: what rotted, what auto-healed, what still needs a human.
   const reskilled = discover.transitions.promoted;
   const needsHuman = verify.transitions.demoted + verify.transitions.quarantined - reskilled;
+  // OF#2 — the raw discovery success rate this pass saw (succeeded / attempted).
+  const discoverAttempted = discover.attempted;
+  const discoverSucceeded = discover.succeeded;
+
+  // Heartbeat the registry FIRST (before the digest) so the admin status
+  // panel knows the timer is alive (T10) AND so we get back OF#1 — the
+  // active-skill count, which the registry owns — to fold into the digest.
+  // Fail-open: a missing method (test doubles) or a network blip must never
+  // break the pass; we just omit OF#1 from the digest in that case.
+  let skillsActive: number | undefined;
+  try {
+    const c = opts.verify.client as {
+      postHealHeartbeat?: (i: {
+        verified: number;
+        demoted: number;
+        quarantined: number;
+        reskilled: number;
+        needs_human: number;
+        discover_attempted: number;
+        discover_succeeded: number;
+      }) => Promise<{ skills_active: number }>;
+    };
+    if (typeof c.postHealHeartbeat === "function") {
+      const res = await c.postHealHeartbeat({
+        verified: verify.attempted,
+        demoted: verify.transitions.demoted,
+        quarantined: verify.transitions.quarantined,
+        reskilled,
+        needs_human: Math.max(0, needsHuman),
+        discover_attempted: discoverAttempted,
+        discover_succeeded: discoverSucceeded,
+      });
+      if (res !== undefined && typeof res.skills_active === "number") {
+        skillsActive = res.skills_active;
+      }
+    }
+  } catch (err) {
+    log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const discoverRate =
+    discoverAttempted > 0
+      ? ` · discover ${Math.round((100 * discoverSucceeded) / discoverAttempted)}% (${discoverSucceeded}/${discoverAttempted})`
+      : "";
+  const skillsLine = skillsActive !== undefined ? ` · skills ${skillsActive}` : "";
   const digest =
     `verified ${verify.attempted} · demoted ${verify.transitions.demoted} · ` +
     `quarantined ${verify.transitions.quarantined} · re-skilled ${reskilled} · ` +
-    `needs human ~${Math.max(0, needsHuman)}`;
+    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}`;
   log(`heal pass done: ${digest}`);
   await fanOutNotifier(opts.notifiers ?? [], log, {
     kind: "heal_digest",
@@ -264,33 +309,13 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
     reskilled,
     needs_human: Math.max(0, needsHuman),
     summary: digest,
+    objectives: {
+      ...(skillsActive !== undefined ? { skills_active: skillsActive } : {}),
+      discover_attempted: discoverAttempted,
+      discover_succeeded: discoverSucceeded,
+    },
   });
 
-  // Heartbeat the registry so the admin status panel knows the timer is
-  // alive (T10). Fail-open: a missing method (test doubles) or a network
-  // blip must never break the pass.
-  try {
-    const c = opts.verify.client as {
-      postHealHeartbeat?: (i: {
-        verified: number;
-        demoted: number;
-        quarantined: number;
-        reskilled: number;
-        needs_human: number;
-      }) => Promise<void>;
-    };
-    if (typeof c.postHealHeartbeat === "function") {
-      await c.postHealHeartbeat({
-        verified: verify.attempted,
-        demoted: verify.transitions.demoted,
-        quarantined: verify.transitions.quarantined,
-        reskilled,
-        needs_human: Math.max(0, needsHuman),
-      });
-    }
-  } catch (err) {
-    log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
-  }
   return { verify, discover };
 }
 
