@@ -2062,8 +2062,11 @@ function buildCredentialSpecForMulti(
     // a per-credential visibility flag added by the visibility-
     // inference pass only when show-once phrasing was detected for
     // that specific credential.
+    // ID fields (application_id, org_id, account_id) are short — often a
+    // numeric handle (pusher's app_id is 7 digits) — so a 16-char floor wrongly
+    // rejects them. Use a low floor for *_id; keep 16 for key/secret/token.
     post_extract_validator: {
-      min_length: shape === "uuid" ? 36 : 16,
+      min_length: shape === "uuid" ? 36 : /(?:^|_)id$/.test(name) ? 4 : 16,
       max_length: shape === "uuid" ? 36 : 512,
     },
   };
