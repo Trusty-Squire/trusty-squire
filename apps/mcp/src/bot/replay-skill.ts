@@ -2672,7 +2672,19 @@ export async function walkOAuthConsent(
     }
     const beforeUrl = browser.currentUrl();
     const clicked = await clickConsentAffordance(browser);
-    if (!clicked) return "needs_login";
+    if (!clicked) {
+      // The consent may be auto-completing and navigating away before we can
+      // click — Google's GIS flow (kinde/imagekit) redirects the consent to
+      // /gsi/transform on its own for basic, previously-seen scopes, and the
+      // popup then closes. Don't bail needs_login on a flow that's finishing:
+      // wait a beat, then let the loop re-evaluate (oauthPageClosed /
+      // not_provider → ok). If it's genuinely stuck on the consent, the loop
+      // retries the click, bounded by MAX_NAV before the final needs_login.
+      for (let w = 0; w < 6 && browser.currentUrl() === beforeUrl && !browser.oauthPageClosed(); w++) {
+        await browser.wait(1);
+      }
+      continue;
+    }
     // Same race as the chooser: the approve click navigates after a beat.
     // Wait for the URL to move before re-reading, or the next pass sees the
     // same consent URL, finds the affordance already consumed, and bails.

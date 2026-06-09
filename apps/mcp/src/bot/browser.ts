@@ -2902,6 +2902,10 @@ export class BrowserController {
         // Misc
         "project api key", "personal api key", "organization id", "org id",
         "app key", "app secret",
+        // Pusher (and other keys tables) label fields bare: key / secret /
+        // cluster. Without these the value inherits the nearest recognized
+        // label (the app_id field), mislabeling key + secret as "app id".
+        "cluster", "key", "secret",
       ];
 
       const isVisible = (el: Element): boolean => {
@@ -2922,6 +2926,11 @@ export class BrowserController {
         if (/^https?:\/\//i.test(s)) return false;
         // Reject simple words / capitalized phrases
         if (/^[A-Za-z]+$/.test(s) && s.length < 12) return false;
+        // Reject label-text masquerading as a value: a short token of only
+        // letters + separators with NO digit (e.g. the literal "app_id" /
+        // "secret" label text pusher renders next to the real value). Real
+        // credentials carry a digit or are long; field labels don't.
+        if (!hasDigit && /^[a-z][a-z_-]*$/i.test(s) && s.length < 16) return false;
         return true;
       };
       const isMaskedShape = (s: string): boolean => {
