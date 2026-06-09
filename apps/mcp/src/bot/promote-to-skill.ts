@@ -666,6 +666,7 @@ function translateStep(
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
           ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
+          ...(hintResult.dom_hint !== undefined ? { dom_hint: hintResult.dom_hint } : {}),
           provenance,
         },
       };
@@ -766,6 +767,7 @@ function translateStep(
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
           ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
+          ...(hintResult.dom_hint !== undefined ? { dom_hint: hintResult.dom_hint } : {}),
           provenance,
         },
       };
@@ -834,6 +836,41 @@ interface ClickHintOk {
   // can match by href-path tail (slug-tolerant) when the link's text
   // renders differently on replay. See href_hint in the click schema.
   href_hint?: string;
+  // 2026-06-09 — stable name=/id= anchor, captured only when the value
+  // looks human-authored. Replay prefers a unique dom_hint match over the
+  // drift-prone text_match. See dom_hint in the click schema.
+  dom_hint?: { name?: string; id?: string };
+}
+
+// A name/id attribute value is a useful replay anchor ONLY when it's a
+// human-authored, stable identifier — not a framework-generated hash that
+// changes every render (React useId ":r3:", emotion "css-1a2b3c",
+// styled-components "sc-xy12", MUI "MuiButton-root-42", uuids, long hex/digit
+// runs). Those would make the hint MORE brittle than the visible text, which
+// is the opposite of the point. Accept short, word/dash/underscore-shaped
+// tokens; reject anything that smells generated. Exported for unit tests.
+export function isStableDomAttr(value: string | null): value is string {
+  if (value === null) return false;
+  const v = value.trim();
+  if (v.length === 0 || v.length > 40) return false;
+  if (/:r[0-9a-z]+:/i.test(v)) return false; // React useId (whole or radix-embedded)
+  if (/^(?:css|sc|emotion)-[0-9a-z]{4,}/i.test(v)) return false; // css-in-js
+  if (/[0-9a-f]{8,}/i.test(v)) return false; // hash / uuid chunk
+  if (/\d{5,}/.test(v)) return false; // long digit run (generated index)
+  // Must read as a semantic identifier: letters, with optional -, _, ., digits.
+  return /^[a-z][a-z0-9._-]*$/i.test(v);
+}
+
+// Capture the element's stable name/id attributes for a replay anchor, or
+// undefined when neither is stable (so the click step keeps its canonical
+// bytes — same additive contract as href_hint).
+export function pickStableDomHint(
+  el: InteractiveElement,
+): { name?: string; id?: string } | undefined {
+  const hint: { name?: string; id?: string } = {};
+  if (isStableDomAttr(el.name)) hint.name = el.name;
+  if (isStableDomAttr(el.id)) hint.id = el.id;
+  return hint.name !== undefined || hint.id !== undefined ? hint : undefined;
 }
 
 // The path of a link element's href (no origin / query / hash), or null
@@ -925,12 +962,16 @@ function resolveClickHint(
     const result: ClickHintOk = { kind: "ok", hint, near_text_hint: nearTextHint };
     if (role !== undefined) result.role_hint = role;
     if (hrefHint !== null) result.href_hint = hrefHint;
+    const domHint = pickStableDomHint(match);
+    if (domHint !== undefined) result.dom_hint = domHint;
     return result;
   }
 
   const result: ClickHintOk = { kind: "ok", hint };
   if (role !== undefined) result.role_hint = role;
   if (hrefHint !== null) result.href_hint = hrefHint;
+  const domHint = pickStableDomHint(match);
+  if (domHint !== undefined) result.dom_hint = domHint;
   return result;
 }
 

@@ -176,6 +176,29 @@ const ClickStepSchema = z
           "text_match resolves to nothing, and falls back to navigating " +
           "to it directly. Only present for link targets.",
       ),
+    // 2026-06-09 — stable-attribute anchor. visible text drifts ("Create" →
+    // "Create token") and goes ambiguous on a fresh user's page ("Next"
+    // matching two wizard buttons), which is what made the verifier-sweep
+    // skills fail under a fresh identity. A `name=`/`id=` attribute is the
+    // redesign-surviving anchor the schema's text hints were reaching for —
+    // unlike a brittle nth-child CSS path (which Theme 1 bans), a SEMANTIC
+    // name/id is stable. The replay engine prefers a UNIQUE dom_hint match
+    // over text_match. Optional + additive: only emitted when the captured
+    // element carried a stable (non-framework-generated) name or id, so
+    // clicks without one keep their canonical bytes.
+    dom_hint: z
+      .object({
+        name: z.string().min(1).optional(),
+        id: z.string().min(1).optional(),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Optional stable attribute anchor — the target's name= and/or id= " +
+          "attribute, captured only when it looks human-authored (not a " +
+          "React/emotion-generated hash). Preferred over text_match when it " +
+          "uniquely matches.",
+      ),
     provenance: ProvenanceSchema,
   })
   .strict();

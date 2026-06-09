@@ -591,6 +591,15 @@ async function preValidateStep(
 
     case "click": {
       const inventory = await browser.extractInteractiveElements();
+      // Stable-attribute anchor FIRST. A unique name=/id= match is the most
+      // drift-resistant target — it survives the visible-text changes
+      // ("Create" → "Create token") and fresh-user ambiguity ("Next" matching
+      // two wizard buttons) that failed the verifier sweep under a fresh
+      // identity. Only honored when it resolves to exactly one element.
+      if (step.dom_hint !== undefined) {
+        const byDom = inventory.filter((el) => matchesDomHint(el, step.dom_hint!));
+        if (byDom.length === 1) return { ok: true, match: byDom[0]! };
+      }
       const matches = inventory.filter((el) => matchesClickHint(el, step.text_match));
       // role_hint is a SOFT preference, not a hard gate. When it filters out
       // every text-match — imagekit's live "Next" renders as an <a>, not the
@@ -1009,6 +1018,16 @@ async function executeStep(
 
     case "click": {
       const inventory = await browser.extractInteractiveElements();
+      // Stable-attribute anchor FIRST (mirrors preValidate) — a unique
+      // name=/id= match is the most drift-resistant target.
+      if (step.dom_hint !== undefined) {
+        const byDom = inventory.filter((el) => matchesDomHint(el, step.dom_hint!));
+        if (byDom.length === 1) {
+          await browser.click(byDom[0]!.selector);
+          await browser.wait(1);
+          return { kind: "clicked" };
+        }
+      }
       const matches = inventory.filter((el) => matchesClickHint(el, step.text_match));
       // role_hint soft-fallback (mirrors preValidate): if it filters out every
       // text-match, trust the text matches and let the disambiguator pick.
@@ -2007,6 +2026,20 @@ export function normalizeNavPath(path: string): string[] {
   const looksLikeSlug = /\d/.test(first) || /^[a-z0-9]+(?:-[a-z0-9]+){2,}$/i.test(first);
   const tail = looksLikeSlug ? segs.slice(1) : segs;
   return tail.map((s) => s.toLowerCase());
+}
+
+// True when the element carries the captured stable name/id anchor. A hint
+// may specify name, id, or both; an element matches when it equals EVERY
+// specified attribute (case-sensitive — these are exact attribute values, not
+// display text). The caller requires a UNIQUE match before trusting it.
+export function matchesDomHint(
+  el: InteractiveElement,
+  hint: { name?: string | undefined; id?: string | undefined },
+): boolean {
+  if (hint.name === undefined && hint.id === undefined) return false;
+  if (hint.name !== undefined && el.name !== hint.name) return false;
+  if (hint.id !== undefined && el.id !== hint.id) return false;
+  return true;
 }
 
 export function matchesHrefHint(el: InteractiveElement, hrefHint: string): boolean {
