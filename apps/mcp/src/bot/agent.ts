@@ -1522,6 +1522,33 @@ function stripHtmlToText(html: string): string {
     .toLowerCase();
 }
 
+// True when a page is a 404 / route-not-found shell. Used to abort the
+// hardcoded keys-URL walk early: when guessed keys paths keep 404ing, this
+// host's routing convention simply isn't in our list, and continuing the
+// ~25-path walk (each a goto + up-to-15s DOM wait) just burns the run budget.
+// MEASURED 2026-06-09: axiom/fathom/loops each hit the FULL walk with every
+// path a 404 and blew the 600s deadline. Matches the three observed shells:
+// title "Not Found" (fathom), body "404 … page you're looking for doesn't
+// exist" (loops), body "404 page not found" (axiom).
+export function looksLike404(title: string, bodyText: string): boolean {
+  const hay = `${title} ${bodyText}`.toLowerCase().slice(0, 600);
+  const has404Token = /\b404\b/.test(hay);
+  const notFoundPhrase =
+    /page not found|not found|could ?n[o'’]?t be found|could not be found|does ?n[o'’]?t exist|does not exist|page you[''’]?re looking for/.test(
+      hay,
+    );
+  // A bare "404" token, or a clear not-found phrase, is enough — guessed
+  // keys URLs that hit either are dead ends.
+  return has404Token || notFoundPhrase;
+}
+
+// Pull the <title> text out of a raw HTML string (lowercased work is left to
+// the caller). Empty string when absent. Cheap — no DOM round-trip.
+export function titleFromHtml(html: string): string {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+  return m?.[1]?.trim() ?? "";
+}
+
 // Classify a fetched page as a signup form, a login form, or neither.
 //
 // WHY this exists: looksLikeSignupPage() answers "does this page have a
@@ -7927,6 +7954,8 @@ ${formatInventory(input.inventory)}`,
     // ran (current page WAS a keys page but had no affordance), a
     // different keys URL on the same origin may carry the create
     // control (org-scoped vs account-scoped keys pages).
+    let consecutive404 = 0;
+    const MAX_CONSECUTIVE_404 = 3;
     for (let i = 0; i < STUCK_LOOP_FALLBACK_PATHS.length; i++) {
       let currentUrl: string;
       try {
@@ -7942,6 +7971,29 @@ ${formatInventory(input.inventory)}`,
         await this.browser.waitForInteractiveDom(5, 15_000);
       } catch {
         continue;
+      }
+      // Abort the walk once guessed keys paths keep 404ing — this host's
+      // convention isn't in our list, so the remaining ~20 paths would all
+      // 404 too and burn the run's 600s budget (axiom/fathom/loops). A real
+      // (non-404) page resets the counter so a host that mixes 404s with a
+      // live keys page is still fully walked.
+      try {
+        const after = await this.browser.getState();
+        const bodyText = await this.browser.extractText().catch(() => "");
+        if (looksLike404(titleFromHtml(after.html), bodyText)) {
+          consecutive404 += 1;
+          if (consecutive404 >= MAX_CONSECUTIVE_404) {
+            steps.push(
+              `Existing-account recovery: ${consecutive404} consecutive 404s on guessed keys URLs — ` +
+                `this host's keys path isn't in our list; aborting the walk.`,
+            );
+            break;
+          }
+          continue;
+        }
+        consecutive404 = 0;
+      } catch {
+        // best-effort — fall through to the extract attempt
       }
       const here = await tryHere();
       if (here !== null) return here;
