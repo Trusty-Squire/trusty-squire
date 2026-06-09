@@ -3680,6 +3680,43 @@ function isLLMPair(x: LLMClient | LLMPair): x is LLMPair {
 // Navigates / waits / extracts are excluded — they legitimately don't
 // change the current DOM (navigate changes URL, wait pauses). Pure +
 // exported for unit tests.
+// Pick the onboarding field to overwrite with a unique value when a "name
+// taken" collision stalls the wizard. Prefer a business/org/workspace NAME
+// field (which commonly drives a derived subdomain — editing the domain
+// directly gets re-derived away), falling back to a bare subdomain/slug field.
+// Returns null when no such field is present (then the stall is a genuine
+// click-not-registering case, not a name collision). Exported for tests.
+export function pickUniqueNameField(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const textInputs = inventory.filter(
+    (e) => e.tag === "input" && (e.type === null || e.type === "text"),
+  );
+  const hay = (e: InteractiveElement): string =>
+    `${e.name ?? ""} ${e.id ?? ""} ${e.placeholder ?? ""} ${e.labelText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+  const NAME_RE =
+    /business[_ -]?name|company[_ -]?name|organi[sz]ation|\borg\b|workspace[_ -]?name|team[_ -]?name|account[_ -]?name|site[_ -]?name|project[_ -]?name|tenant/;
+  const byName = textInputs.find((e) => NAME_RE.test(hay(e)));
+  if (byName !== undefined) return byName;
+  const DOMAIN_RE = /subdomain|\bdomain\b|\bslug\b|workspace[_ ]?url|handle/;
+  const byDomain = textInputs.find((e) => DOMAIN_RE.test(hay(e)));
+  return byDomain ?? null;
+}
+
+// Pick the submit/advance control for an onboarding form. Matches a
+// type=submit button or the conventional advance verbs. Returns null when no
+// obvious submit affordance is present.
+export function pickOnboardingSubmit(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const buttons = inventory.filter((e) => e.tag === "button" || e.role === "button");
+  const ADVANCE_RE = /^(?:next|continue|submit|create|register|get started|finish|done|save)\b/i;
+  const byText = buttons.find((e) => ADVANCE_RE.test((e.visibleText ?? e.ariaLabel ?? "").trim()));
+  if (byText !== undefined) return byText;
+  const bySubmit = buttons.find((e) => e.type === "submit");
+  return bySubmit ?? buttons[0] ?? null;
+}
+
 export function isStalledOnActions(
   effects: ReadonlyArray<{ kind: string; pageUnchanged: boolean; selector?: string | null }>,
   threshold = 3,
@@ -8277,6 +8314,11 @@ ${formatInventory(input.inventory)}`,
     let prevContentSig: string | null = null;
     let lastActionKind: string | null = null;
     let lastActionSelector: string | null = null;
+    // Fired once: the unique-org-name recovery on a stall whose real cause is
+    // a "name taken" validation (kinde's business_details — the operator's
+    // prior account already used "tsagent", so the pre-filled name collides
+    // and the auto-derived subdomain is rejected, re-presenting the step).
+    let uniqueNameRetried = false;
     const actionEffects: Array<{
       kind: string;
       pageUnchanged: boolean;
@@ -8598,6 +8640,48 @@ ${formatInventory(input.inventory)}`,
       }
       prevContentSig = contentSig;
       if (isStalledOnActions(actionEffects)) {
+        // Unique-name-collision recovery (fires ONCE, before giving up). The
+        // stall is often NOT "clicks not registering" but a server-side
+        // validation: an org/business/workspace NAME the operator's prior
+        // account already took, which on many forms drives a derived subdomain
+        // — so editing the domain directly doesn't stick; the NAME field must
+        // change. MEASURED 2026-06-09 (kinde): the pre-filled "tsagent" was
+        // taken, the domain went aria-invalid, and Next re-presented the step.
+        // Detect a taken/unavailable signal, overwrite the name field with a
+        // unique value (which re-derives a unique subdomain), resubmit, re-loop.
+        const bodyLow = (await this.browser.extractText().catch(() => "")).toLowerCase();
+        const takenSignal =
+          /\b(?:taken|already (?:in use|exists|registered|taken)|not available|unavailable|already exists|choose another|try another)\b/.test(
+            bodyLow,
+          );
+        const nameField = takenSignal ? pickUniqueNameField(inventory) : null;
+        if (!uniqueNameRetried && nameField !== null) {
+          uniqueNameRetried = true;
+          const unique = `tsq${Math.floor(100000 + Math.random() * 900000)}`;
+          args.steps.push(
+            `Post-verify: stall is a name-taken collision — overwriting ${JSON.stringify(
+              nameField.name ?? nameField.id ?? "name field",
+            )} with a unique value and resubmitting.`,
+          );
+          try {
+            await this.browser.type(nameField.selector, unique);
+            await this.browser.wait(1);
+            const submit = pickOnboardingSubmit(inventory);
+            if (submit !== null) {
+              await this.browser.click(submit.selector);
+              await this.browser.wait(2);
+            }
+            // Reset the stall window so the resubmit gets a fair shot.
+            actionEffects.length = 0;
+            prevContentSig = null;
+            hint = undefined;
+            continue;
+          } catch (err) {
+            args.steps.push(
+              `Post-verify: unique-name retry failed (${err instanceof Error ? err.message : String(err)}) — falling through.`,
+            );
+          }
+        }
         // Capture the exact page that defeated the wizard so the N1
         // onboarding-wizard class is debuggable post-hoc (post-verify pages
         // weren't being snapshotted — imagekit's step-1/3 role-select stall
