@@ -2689,12 +2689,24 @@ export async function walkOAuthConsent(
     // state === "consent": scope-gate it. Only auto-approve identity-basic
     // scopes — verify must never grant a sensitive scope blind.
     const scopes = extractOAuthScopes(url);
+    // GitHub sensitive-scope phrases — repo/org/write/admin access. A consent
+    // showing NONE is identity-basic (login). pusher's 2nd github consent
+    // screen carries no scope= param (extractOAuthScopes → null), so without a
+    // DOM fallback github fell straight to "not basic" and bailed.
+    const githubSensitive =
+      /\b(repositor|organization|act on your behalf|write|delete|admin|workflow|manage|gist|webhook|deploy)/i.test(
+        body,
+      );
     const basic =
       scopes !== null
         ? provider.scopesAreBasic(scopes)
-        : // Google hides scopes behind an opaque part= token; fall back to
-          // the visible DOM — basic only when NO scope-grant phrases show.
-          providerId === "google" && scrapeGoogleScopePhrases(body).length === 0;
+        : // Scopes unreadable from the URL → fall back to the visible DOM.
+          // Basic only when NO scope-grant phrases show (mirrors per-provider).
+          providerId === "google"
+          ? scrapeGoogleScopePhrases(body).length === 0
+          : providerId === "github"
+            ? !githubSensitive
+            : false;
     if (!basic) {
       console.error("[replay-oauth] consent scopes not basic/unreadable — needs_login");
       return "needs_login";
