@@ -143,6 +143,13 @@ OpenRouter for LLM, Resend for inbound + outbound mail.
 
 ## Active Sprint/Task
 
+**Autonomous self-improving loop:** the provision bot's named-state machine,
+per-state retry policy, and single escalation condition live in
+`docs/AUTONOMOUS-LOOP.md`; the skill-promotion pipeline (virgin success →
+registry skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`. State
+classifier + policy: `packages/skill-schema/src/provision-state.ts` +
+`provision-policy.ts`.
+
 **0.7.0 closed loop shipped (rc.9).** Skill Promoter end-to-end:
 universal-bot success → captured signup → synthesizer-produced
 skill → registry → replay on subsequent provisions. Phases 1-8 +
