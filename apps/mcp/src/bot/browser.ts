@@ -4640,18 +4640,24 @@ export class BrowserController {
     // display leaks (orphaned Xvfb procs pile up over a long-lived MCP
     // server and, worse, the un-closed Chrome keeps the profile's
     // SingletonLock held — bricking the next signup + `mcp login`).
-    if (this.page) await this.page.close().catch(() => undefined);
-    // Closing the persistent context shuts the browser down too — but
-    // context.close() can HANG on a wedged headed Chrome under Xvfb, which is
-    // exactly the case that leaks. Cap it: if it doesn't return in 10s, we
-    // SIGKILL the browser below anyway. Without the cap, close() would block
-    // past the next run's 120s gate and brick it.
-    if (this.context) {
-      await Promise.race([
-        this.context.close().catch(() => undefined),
-        new Promise<void>((r) => setTimeout(r, 10_000)),
+    //
+    // EVERY close call is timeout-capped. On a wedged headed Chrome (e.g. a
+    // run that crashed mid-captcha-click), BOTH page.close() AND
+    // context.close() can hang INDEFINITELY — and an un-capped page.close()
+    // blocked the reap below from ever running, so the browser leaked for
+    // minutes and bricked the next 3 services (MEASURED 2026-06-09: supabase
+    // crash → cockroachdb/weaviate/honeycomb all "profile held"). The cap
+    // guarantees we always reach the SIGKILL reap.
+    const capped = (p: Promise<unknown>, ms: number): Promise<void> =>
+      Promise.race([
+        Promise.resolve(p).then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((r) => setTimeout(r, ms)),
       ]);
-    }
+    if (this.page) await capped(this.page.close(), 5_000);
+    if (this.context) await capped(this.context.close(), 10_000);
     // …and context.close() doesn't always kill the browser: headed Chrome
     // under Xvfb / some patchright teardowns leave the main process alive
     // holding the SingletonLock. A leaked browser makes the NEXT run wait
