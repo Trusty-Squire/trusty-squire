@@ -1882,11 +1882,32 @@ function writeSkillUpdateCandidate(
 
 // ── Inventory matching helpers ──────────────────────────────────────
 
+// Substring match that requires the needle to sit at a WORD boundary — the
+// adjacent characters must not be alphanumeric or a dot. Without this, a short
+// hint like "Next" matched "Next.js" (imagekit's dashboard footer), so a stale
+// onboarding "Next" step false-matched framework chrome instead of being
+// skipped as absent. Multi-word hints still match across internal whitespace.
+function includesAtWordBoundary(haystack: string, needle: string): boolean {
+  if (needle.length === 0) return false;
+  const isWordChar = (c: string): boolean => /[a-z0-9.]/i.test(c);
+  let idx = haystack.indexOf(needle);
+  while (idx !== -1) {
+    const before = idx === 0 ? "" : haystack[idx - 1]!;
+    const afterIdx = idx + needle.length;
+    const after = afterIdx >= haystack.length ? "" : haystack[afterIdx]!;
+    if (!isWordChar(before) && !isWordChar(after)) return true;
+    idx = haystack.indexOf(needle, idx + 1);
+  }
+  return false;
+}
+
 function matchesClickHint(el: InteractiveElement, hint: string): boolean {
   const lowerHint = hint.toLowerCase();
   const text = (el.visibleText ?? "").toLowerCase();
   const aria = (el.ariaLabel ?? "").toLowerCase();
-  if (text.includes(lowerHint) || aria.includes(lowerHint)) return true;
+  if (includesAtWordBoundary(text, lowerHint) || includesAtWordBoundary(aria, lowerHint)) {
+    return true;
+  }
   // 0.8.3-rc.1 — stable-attribute fallback. Form-control elements
   // routinely have a stable `name` attribute (mistral's ToS checkbox
   // ships as `<input name="terms">`) even when their visible text is
@@ -2736,6 +2757,21 @@ async function attemptOAuthRecovery(
     // The page may genuinely be a non-OAuth login form (some services
     // also offer password auth). The replay can't synthesize a
     // password; surface needs_login with a guess based on the URL.
+    if (process.env.REPLAY_DEBUG) {
+      try {
+        const inv = await browser.extractInteractiveElements();
+        const clickable = inv
+          .filter((e) => e.visible && (e.tag === "button" || e.tag === "a" || e.role === "button"))
+          .map((e) => ({ tag: e.tag, text: (e.visibleText ?? "").slice(0, 40), aria: e.ariaLabel, href: (e.href ?? "").slice(0, 60) }));
+        writeFileSync(
+          `/tmp/replay-nobutton-${browser.currentUrl().replace(/[^a-z0-9]+/gi, "_").slice(-30)}.txt`,
+          `url=${browser.currentUrl()}\nprofiles=${JSON.stringify(profiles)}\nclickable=${JSON.stringify(clickable, null, 1)}`,
+        );
+        console.error(`[replay-oauth-debug] no OAuth button — dumped page affordances`);
+      } catch {
+        /* best-effort */
+      }
+    }
     const guess = inferProviderFromUrl(browser.currentUrl()) ?? "google";
     return { kind: "needs_login", provider: guess };
   }
