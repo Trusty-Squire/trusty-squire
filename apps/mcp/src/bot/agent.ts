@@ -8650,11 +8650,26 @@ ${formatInventory(input.inventory)}`,
         // Detect a taken/unavailable signal, overwrite the name field with a
         // unique value (which re-derives a unique subdomain), resubmit, re-loop.
         const bodyLow = (await this.browser.extractText().catch(() => "")).toLowerCase();
+        // NB: leading \b only, NO trailing \b — extractText() glues adjacent
+        // elements without whitespace ("…already taken" + "region" →
+        // "takenregion"), so a trailing boundary made this miss (MEASURED:
+        // kinde, takenSignal=false while the body clearly contained "taken").
+        // The leading \b still rejects mid-word hits like "mistaken"/"overtaken".
         const takenSignal =
-          /\b(?:taken|already (?:in use|exists|registered|taken)|not available|unavailable|already exists|choose another|try another)\b/.test(
+          /\b(?:taken|already (?:in use|exists|registered|taken)|not available|unavailable|already exists|choose another|try another)/.test(
             bodyLow,
           );
         const nameField = takenSignal ? pickUniqueNameField(inventory) : null;
+        if (process.env.BOT_DEBUG_CHOOSER) {
+          console.error(
+            `[uniquename-debug] takenSignal=${takenSignal} nameField=${nameField?.name ?? nameField?.id ?? "null"} ` +
+              `textInputs=${JSON.stringify(
+                inventory
+                  .filter((e) => e.tag === "input")
+                  .map((e) => `${e.type}|${e.name ?? e.id ?? "?"}`),
+              )} bodyHas_taken=${bodyLow.includes("taken")}`,
+          );
+        }
         if (!uniqueNameRetried && nameField !== null) {
           uniqueNameRetried = true;
           const unique = `tsq${Math.floor(100000 + Math.random() * 900000)}`;
