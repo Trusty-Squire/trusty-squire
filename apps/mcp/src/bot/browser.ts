@@ -3078,6 +3078,27 @@ export class BrowserController {
         });
       };
 
+      // 0. Inline config snippets: a credential block listing multiple
+      //    label = "value" pairs in one text run (pusher's App Keys page:
+      //    app_id = "2164307" key = "..." secret = "..." cluster = "ap3").
+      //    No separate label ELEMENTS exist, so the proximity matcher mislabels
+      //    every value with whatever heading is nearest. Parse the label-value
+      //    pairs straight from the page text — each pair's own label is
+      //    authoritative. Runs FIRST so its correctly-labeled candidates win
+      //    the `seen` dedup over the proximity passes. Noise pairs are harmless:
+      //    a skill only matches the labels it asks for.
+      const bodyText = document.body?.innerText ?? "";
+      const INLINE_PAIR =
+        /\b([A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._-]{6,256})["']?/g;
+      for (const m of bodyText.matchAll(INLINE_PAIR)) {
+        const label = (m[1] ?? "").toLowerCase();
+        const value = m[2] ?? "";
+        if (!isCredentialShape(value)) continue;
+        if (seen.has(value)) continue;
+        seen.add(value);
+        out.push({ value, label, isMasked: false, hasRevealButton: false });
+      }
+
       // 1. <input> / <textarea> values (visible only).
       document.querySelectorAll("input, textarea").forEach((el) => {
         if (
