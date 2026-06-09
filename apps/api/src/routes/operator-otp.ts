@@ -15,10 +15,10 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { extractMachineToken } from "./install.js";
 import {
-  GmailOtpPoller,
+  OperatorOtpPoller,
   type OtpPollInput,
   type OtpPollResult,
-} from "../services/gmail-otp-poller.js";
+} from "../services/operator-otp-poller.js";
 import type { MachineTokenStore } from "../services/machine-tokens.js";
 
 export interface OperatorOtpRouteDeps {
@@ -41,11 +41,11 @@ export async function registerOperatorOtpRoute(
       return;
     }
 
-    const cfg = readGmailConfig();
+    const cfg = readOperatorImapConfig();
     if (cfg === null) {
       reply.code(503).send({
         code: null,
-        reason: "gmail_not_configured",
+        reason: "operator_imap_not_configured",
         scanned: 0,
       } satisfies OtpPollResult);
       return;
@@ -57,18 +57,22 @@ export async function registerOperatorOtpRoute(
       return;
     }
 
-    const poller = new GmailOtpPoller(cfg);
+    const poller = new OperatorOtpPoller(cfg);
     const result = await poller.poll(input);
     reply.code(200).send(result);
   });
 }
 
-function readGmailConfig(): { gmailUser: string; gmailAppPassword: string } | null {
-  const u = process.env.GMAIL_USER;
-  const p = process.env.GMAIL_APP_PASSWORD;
+// The operator's single IMAP identity. Prefers the OPERATOR_IMAP_* names;
+// falls back to the legacy GMAIL_* names so a deploy that still has the old
+// secret keeps working through the migration (the consolidation onto one
+// Workspace inbox, lunchbox@trustysquire.ai).
+function readOperatorImapConfig(): { imapUser: string; imapAppPassword: string } | null {
+  const u = process.env.OPERATOR_IMAP_USER ?? process.env.GMAIL_USER;
+  const p = process.env.OPERATOR_IMAP_PASSWORD ?? process.env.GMAIL_APP_PASSWORD;
   if (typeof u !== "string" || u.length === 0) return null;
   if (typeof p !== "string" || p.length === 0) return null;
-  return { gmailUser: u, gmailAppPassword: p };
+  return { imapUser: u, imapAppPassword: p };
 }
 
 function parseBody(req: FastifyRequest): OtpPollInput | null {

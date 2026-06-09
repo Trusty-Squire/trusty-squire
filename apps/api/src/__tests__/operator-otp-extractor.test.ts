@@ -5,7 +5,7 @@
 // near the digits.
 
 import { describe, it, expect } from "vitest";
-import { decodeMimeBody, extractOtp } from "../services/gmail-otp-poller.js";
+import { decodeMimeBody, extractOtp } from "../services/operator-otp-poller.js";
 
 describe("extractOtp — strict keyword-anchored pass", () => {
   it("returns the OTP after 'verification code:'", () => {

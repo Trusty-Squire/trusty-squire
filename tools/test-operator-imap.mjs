@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// Independent Gmail IMAP credential check — isolates "is the app password
-// valid?" from "is the Fly secret set?" and from any signup flow.
+// Independent operator-IMAP credential check — isolates "is the app password
+// valid?" from "is the Fly secret set?" and from any signup flow. The operator
+// IMAP identity is a Google account (Workspace lunchbox@trustysquire.ai),
+// served by imap.gmail.com.
 //
 // Usage (creds never touch disk/git — pass them inline):
-//   GMAIL_USER=lunchboxfortwo@gmail.com \
-//   GMAIL_APP_PASSWORD='xxxx xxxx xxxx xxxx' \
-//   node tools/test-gmail-imap.mjs
+//   OPERATOR_IMAP_USER=lunchbox@trustysquire.ai \
+//   OPERATOR_IMAP_PASSWORD='xxxx xxxx xxxx xxxx' \
+//   node tools/test-operator-imap.mjs
+//   (legacy GMAIL_USER / GMAIL_APP_PASSWORD are also accepted)
 //
 // Reads imapflow from apps/api's node_modules (already a dependency there).
 // Exit 0 + "OK" means the password is valid and IMAP works. Any other output
-// prints Gmail's EXACT rejection (auth failed / app-password invalid / IP
+// prints Google's EXACT rejection (auth failed / app-password invalid / IP
 // blocked) instead of the opaque "Command failed" the API surfaces.
 
 import { createRequire } from "node:module";
@@ -19,10 +22,10 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(join(__dirname, "..", "apps", "api", "package.json"));
 
-const user = process.env.GMAIL_USER;
-const pass = process.env.GMAIL_APP_PASSWORD;
+const user = process.env.OPERATOR_IMAP_USER ?? process.env.GMAIL_USER;
+const pass = process.env.OPERATOR_IMAP_PASSWORD ?? process.env.GMAIL_APP_PASSWORD;
 if (!user || !pass) {
-  console.error("Set GMAIL_USER and GMAIL_APP_PASSWORD in the environment.");
+  console.error("Set OPERATOR_IMAP_USER and OPERATOR_IMAP_PASSWORD (or legacy GMAIL_USER / GMAIL_APP_PASSWORD).");
   process.exit(2);
 }
 

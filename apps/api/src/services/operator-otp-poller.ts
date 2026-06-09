@@ -1,19 +1,20 @@
-// Gmail OTP poller — reads OTP codes from the operator's gmail
+// Operator OTP poller — reads OTP codes from the operator's IMAP
 // inbox for the bot's email_otp_required gate (rc.24).
 //
-// Background: services like Porter, Koyeb (both WorkOS-backed) send
-// a 6-8 digit verification code to the OAuth-bound email — which on
-// the harvester's setup is lunchboxfortwo@gmail.com (the operator
-// gmail). The bot previously aborted at this gate because it had no
-// way to read user-bound mail. This poller closes the loop: an
-// authenticated IMAP session over the existing GMAIL_USER /
-// GMAIL_APP_PASSWORD secret extracts the code, the bot fills it,
-// the signup proceeds.
+// Background: services like Porter, Koyeb, anthropic (WorkOS-backed)
+// send a 6-8 digit verification code to the OAuth-bound email — the
+// inbox of whatever Google account the bot signs in as. That is the
+// operator's single IMAP identity (the trustysquire.ai Workspace
+// account, lunchbox@trustysquire.ai). The bot previously aborted at
+// this gate because it had no way to read user-bound mail. This poller
+// closes the loop: an authenticated IMAP session over the operator-IMAP
+// credentials (OPERATOR_IMAP_USER / OPERATOR_IMAP_PASSWORD, falling back
+// to the legacy GMAIL_USER / GMAIL_APP_PASSWORD names) extracts the
+// code, the bot fills it, the signup proceeds.
 //
-// Auth: Gmail still supports IMAP via app passwords when 2FA is on
-// (Aug 2025 — they deprecated basic-auth for less-secure-apps but
-// kept it for app-password flows). Same credential the nodemailer
-// SMTP path used; no extra setup needed.
+// Auth: Google IMAP (imap.gmail.com serves Workspace too) supports app
+// passwords when 2FA is on (Aug 2025 — basic-auth for less-secure-apps
+// was deprecated, app-password flows kept). One identity, one inbox.
 //
 // Scope: bot-internal. Endpoint authenticates with a machine token;
 // the operator never invokes it directly. Best-effort — failures
@@ -22,8 +23,8 @@
 import { ImapFlow } from "imapflow";
 
 export interface OtpPollerConfig {
-  gmailUser: string;
-  gmailAppPassword: string;
+  imapUser: string;
+  imapAppPassword: string;
 }
 
 export interface OtpPollInput {
@@ -114,7 +115,7 @@ export function extractOtp(
 const MIN_SINCE = 10;
 const MAX_SINCE = 600;
 
-export class GmailOtpPoller {
+export class OperatorOtpPoller {
   constructor(private readonly cfg: OtpPollerConfig) {}
 
   async poll(input: OtpPollInput): Promise<OtpPollResult> {
@@ -133,8 +134,8 @@ export class GmailOtpPoller {
       port: 993,
       secure: true,
       auth: {
-        user: this.cfg.gmailUser,
-        pass: this.cfg.gmailAppPassword,
+        user: this.cfg.imapUser,
+        pass: this.cfg.imapAppPassword,
       },
       // Keep noisy info-level logs off — failures still go through.
       logger: false,
@@ -142,18 +143,20 @@ export class GmailOtpPoller {
 
     let scanned = 0;
     try {
-      // Connect/auth is wrapped separately so an expired or revoked Gmail app
+      // Connect/auth is wrapped separately so an expired or revoked app
       // password surfaces as a CLEAR `imap_auth_failed` reason instead of an
       // opaque `imap_error:Command failed` (MEASURED 2026-06-09: a cold poll
       // returned "Command failed" with scanned:0 — the IMAP login was failing
-      // before any search, i.e. the GMAIL_APP_PASSWORD secret was stale, which
-      // silently blocked every Google-OAuth email-OTP signup, e.g. anthropic).
+      // before any search, i.e. the operator-IMAP app password was stale,
+      // which silently blocked every Google-OAuth email-OTP signup, e.g.
+      // anthropic. A Google account password change silently invalidates all
+      // app passwords with no revocation notice).
       try {
         await client.connect();
       } catch (connErr) {
         return {
           code: null,
-          reason: `imap_auth_failed:${connErr instanceof Error ? connErr.message : String(connErr)} — rotate GMAIL_APP_PASSWORD`,
+          reason: `imap_auth_failed:${connErr instanceof Error ? connErr.message : String(connErr)} — rotate the operator IMAP app password (OPERATOR_IMAP_PASSWORD / GMAIL_APP_PASSWORD)`,
           scanned: 0,
         };
       }

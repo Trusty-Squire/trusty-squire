@@ -6663,7 +6663,7 @@ export class SignupAgent {
           task.machineToken.length > 0
         ) {
           steps.push(
-            "GitHub: verify-it's-you challenge — polling operator gmail for a device-confirmation link (up to 60s)",
+            "GitHub: verify-it's-you challenge — polling operator inbox for a device-confirmation link (up to 60s)",
           );
           try {
             const { readGitHubChallengeLink } = await import("./read-otp.js");
@@ -7201,7 +7201,7 @@ export class SignupAgent {
           otpResult = { code: null, reason: "no_machine_token" };
         } else {
           steps.push(
-            `Email-OTP gate detected (${pathOf(gateState.url)}) — polling operator gmail for the code` +
+            `Email-OTP gate detected (${pathOf(gateState.url)}) — polling operator inbox for the code` +
               (domain !== null ? ` (from_domain=${domain})` : ""),
           );
           otpResult = await readOperatorOtp({
@@ -8656,7 +8656,7 @@ ${formatInventory(input.inventory)}`,
         otpPolledUrls.add(state.url);
         const domain = fromDomainFromUrl(state.url);
         args.steps.push(
-          `Post-verify round ${round}: post-OAuth email-OTP gate (${pathOf(state.url)}) — polling operator gmail for the code` +
+          `Post-verify round ${round}: post-OAuth email-OTP gate (${pathOf(state.url)}) — polling operator inbox for the code` +
             (domain !== null ? ` (from_domain=${domain})` : ""),
         );
         const otp = await readOperatorOtp({

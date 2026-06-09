@@ -11,7 +11,7 @@
 // inbox. We poll that inbox by IMAP, searching for messages whose TO
 // header matches the bot's per-signup alias.
 //
-// The shape mirrors gmail-otp-poller's IMAP setup; the search and
+// The shape mirrors operator-otp-poller's IMAP setup; the search and
 // extraction differ:
 //   - search filters by TO header (specific alias), not by FROM
 //     domain
@@ -189,7 +189,7 @@ function clamp(n: number, lo: number, hi: number): number {
 }
 
 // Decode the MIME body and return text + html + extracted links.
-// Same quoted-printable / base64-chunk decoding as gmail-otp-poller,
+// Same quoted-printable / base64-chunk decoding as operator-otp-poller,
 // kept separate so this poller can return the html part as-is for
 // callers that want to render it.
 function decodeMimeForVerification(body: string): {
@@ -205,7 +205,7 @@ function decodeMimeForVerification(body: string): {
   const htmlMatch = out.match(/<html[\s\S]*?<\/html>/i);
   const html = htmlMatch !== null ? htmlMatch[0] : "";
   // Collect URLs from href attributes BEFORE stripping tags (same
-  // fix as the gmail-otp-poller href-extraction patch).
+  // fix as the operator-otp-poller href-extraction patch).
   const hrefLinks = new Set<string>();
   for (const m of out.matchAll(/\bhref\s*=\s*["']([^"']+)["']/gi)) {
     if (m[1] !== undefined && m[1].startsWith("http")) hrefLinks.add(m[1]);

@@ -55,12 +55,11 @@ export async function registerWorkspaceInboxRoute(
     const poller = new WorkspaceInboxPoller(cfg);
     const result = await poller.poll(input);
     // Diagnostic: when no mail was found AND the alias domain differs
-    // from the mailbox the poller is actually reading, the workspace IMAP
-    // is almost certainly mis-pointed — WORKSPACE_IMAP_USER is unset so
-    // the poll fell back to GMAIL_USER (the OTP poller's personal gmail),
-    // which never receives the alias-domain catch-all. Surface it in the
-    // reason so the operator sees the misconfig in the bot's step trail
-    // instead of a silent "no_recent_messages".
+    // from the mailbox the poller is actually reading, the operator IMAP
+    // is almost certainly mis-pointed — the configured mailbox isn't the
+    // one receiving the alias-domain catch-all. Surface it in the reason
+    // so the operator sees the misconfig in the bot's step trail instead
+    // of a silent "no_recent_messages".
     if (result.email === null) {
       const aliasDomain = input.to_address.split("@")[1]?.toLowerCase() ?? "";
       const mailboxDomain = cfg.imapUser.split("@")[1]?.toLowerCase() ?? "";
@@ -78,19 +77,21 @@ export async function registerWorkspaceInboxRoute(
   });
 }
 
-// Workspace IMAP credentials. Reuses GMAIL_USER/GMAIL_APP_PASSWORD
-// when those are pointing at a Workspace mailbox (Workspace IMAP is
-// served by imap.gmail.com), so a single env switch on the API
-// (`GMAIL_USER=lunchbox@trustysquire.ai` plus the matching Workspace
-// app password) covers both pollers. An optional dedicated pair
-// (`WORKSPACE_IMAP_USER` / `WORKSPACE_IMAP_PASSWORD`) takes
-// precedence when set — useful when the two paths need different
-// accounts.
+// Operator IMAP credentials — ONE inbox now serves both pollers (the
+// trustysquire.ai Workspace account, served by imap.gmail.com). Preference
+// order: the canonical OPERATOR_IMAP_* names, then the dedicated
+// WORKSPACE_IMAP_* pair (kept for the case where the alias-catch-all path
+// needs a different account), then the legacy GMAIL_* names so an
+// un-migrated deploy keeps working.
 function readImapConfig(): { imapUser: string; imapAppPassword: string } | null {
   const u =
-    process.env.WORKSPACE_IMAP_USER ?? process.env.GMAIL_USER;
+    process.env.OPERATOR_IMAP_USER ??
+    process.env.WORKSPACE_IMAP_USER ??
+    process.env.GMAIL_USER;
   const p =
-    process.env.WORKSPACE_IMAP_PASSWORD ?? process.env.GMAIL_APP_PASSWORD;
+    process.env.OPERATOR_IMAP_PASSWORD ??
+    process.env.WORKSPACE_IMAP_PASSWORD ??
+    process.env.GMAIL_APP_PASSWORD;
   if (typeof u !== "string" || u.length === 0) return null;
   if (typeof p !== "string" || p.length === 0) return null;
   return { imapUser: u, imapAppPassword: p };
