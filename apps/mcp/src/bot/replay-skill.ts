@@ -2743,10 +2743,17 @@ async function attemptOAuthRecovery(
 ): Promise<
   { kind: "ok" } | { kind: "needs_login"; provider: OAuthProviderId }
 > {
-  const profiles = loggedInProviders();
-  if (profiles.length === 0) {
+  const rawProfiles = loggedInProviders();
+  if (rawProfiles.length === 0) {
     return { kind: "needs_login", provider: "google" };
   }
+  // Prefer Google over GitHub when a service offers both. GitHub OAuth
+  // callbacks are rejected by more anti-bot services (pusher bounces a
+  // github sign-in back to /accounts/sign_in with no session, while the
+  // google round-trip completes). Try the more-reliable provider first.
+  const profiles = [...rawProfiles].sort((a, b) =>
+    a === "google" ? -1 : b === "google" ? 1 : 0,
+  );
   // Find an OAuth button matching a provider we have a cached session for.
   // Retry: SPA login pages (posthog, kinde) render the OAuth buttons a beat
   // after domcontentloaded, so a single inventory races them → false
