@@ -8252,6 +8252,17 @@ ${formatInventory(input.inventory)}`,
     // walking every fallback path.
     let prematureDoneFallbacks = 0;
     const MAX_PREMATURE_DONE_FALLBACKS = 3;
+    // Navigate budget. A planner that can't find the key page (project-
+    // scoped URLs it can't construct — supabase; or an SPA that ignores
+    // direct navs and stays put — last9) keeps emitting `navigate` round
+    // after round, burning the entire 600s deadline (MEASURED 2026-06-09).
+    // `navigate` is exempt from the stuck-loop detector (it's meant to
+    // change the URL), so cap the TOTAL navigates: a legit dashboard is
+    // reachable in a handful, and past the cap the planner is just guessing.
+    // Past the cap we force non-navigate planning and, if still nothing,
+    // break — converting a 600s hang into a prompt, honest failure.
+    let navigateCount = 0;
+    const MAX_POST_VERIFY_NAVIGATES = 8;
     // Dead-URL memory. The planner guesses credential-page URLs
     // (e.g. /user/personal_access_tokens/new) that 404; without memory it
     // re-guesses the same dead URL round after round — xata and fly each
@@ -8814,6 +8825,34 @@ ${formatInventory(input.inventory)}`,
         continue;
       }
       if (nextStep.kind === "navigate") {
+        navigateCount += 1;
+        if (navigateCount > MAX_POST_VERIFY_NAVIGATES) {
+          // Over budget: the planner is URL-guessing (supabase project-scoped
+          // keys it can't address; last9's SPA that ignores direct navs). One
+          // more shot CLICKING the current inventory, then give up — don't
+          // burn the rest of the 600s deadline on more dead navigates.
+          const clickable = inventory.filter(
+            (e) => e.tag === "button" || e.tag === "a",
+          );
+          if (clickable.length > 0 && navigateCount <= MAX_POST_VERIFY_NAVIGATES + 2) {
+            args.steps.push(
+              `Post-verify: navigate budget (${MAX_POST_VERIFY_NAVIGATES}) exhausted — forcing a click on the current page instead of guessing more URLs.`,
+            );
+            hint =
+              `You have navigated ${navigateCount} times without reaching an API-key page. ` +
+              `STOP navigating to guessed URLs. CLICK an element from the inventory below ` +
+              `to advance the onboarding/dashboard, or emit 'done' if there is genuinely no ` +
+              `key affordance here.`;
+            continue;
+          }
+          this.lastPostVerifyDoneReason =
+            `[stuck_loop] post-verify exhausted the navigate budget (${navigateCount} navigates) without ` +
+            `reaching a credential page — the key is behind onboarding/URL the planner can't address.`;
+          args.steps.push(
+            `Post-verify: navigate budget exhausted (${navigateCount}) with no credential — breaking out instead of burning the run deadline.`,
+          );
+          break;
+        }
         prevNavigateFromUrl = state.url;
         // Remember where we're going so the next round can blocklist it
         // if it 404s.
