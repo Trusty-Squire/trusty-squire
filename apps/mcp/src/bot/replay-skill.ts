@@ -879,12 +879,15 @@ async function preValidateStep(
 export function labelMatchesHint(label: string | null, hint: string): boolean {
   if (label === null) return false;
   // Collapse common credential-label synonyms so a skill's hint matches the
-  // page's variant: pusher renders "app_id" (→ "app id") while the skill asks
-  // for "application id". Normalize application→app, identifier→id.
-  const synonyms = (s: string): string =>
-    s.replace(/\bapplication\b/g, "app").replace(/\bidentifier\b/g, "id");
+  // page's variant: pusher renders "app_id" while the skill asks for
+  // "application id". Apply on the already-stripped alphanumeric string so
+  // underscores ("application_id") don't defeat a word boundary.
   const norm = (s: string): string =>
-    synonyms(s.toLowerCase()).replace(/[^a-z0-9]+/g, "");
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "")
+      .replace(/application/g, "app")
+      .replace(/identifier/g, "id");
   const a = norm(label);
   const b = norm(hint);
   if (a.length === 0 || b.length === 0) return false;
