@@ -1033,6 +1033,30 @@ export class BrowserController {
 
   async click(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    // Radio/checkbox inputs — especially the visually-hidden kind behind a
+    // styled label (kinde's `kui-util-hide-visually` SDK-picker radios) — don't
+    // respond to a positional click: Playwright can't click an invisible
+    // element, and even a label click may not fire the `change` handler a gated
+    // control depends on (kinde's radio `kui-on-change` enables the otherwise-
+    // disabled Next button). Playwright's check() toggles the control AND
+    // dispatches input/change; `force` bypasses the visibility actionability
+    // gate for the sr-only pattern. MEASURED 2026-06-09 (kinde tech-stack step).
+    try {
+      const inputKind = await this.page
+        .$eval(selector, (el) => {
+          const t = el as HTMLInputElement;
+          return t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox")
+            ? t.type
+            : "";
+        })
+        .catch(() => "");
+      if (inputKind === "radio" || inputKind === "checkbox") {
+        await this.page.check(selector, { force: true });
+        return;
+      }
+    } catch {
+      // element vanished / selector didn't resolve — fall through to a click
+    }
     if (!this.humanize) {
       await this.page.click(selector);
       return;
