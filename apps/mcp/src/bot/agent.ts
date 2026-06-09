@@ -6186,6 +6186,47 @@ export class SignupAgent {
             }
           }
         }
+        // hCaptcha Tier-3 — the OAuth-first path historically only escalated
+        // reCAPTCHA, so an hCaptcha-gated OAuth button (MEASURED 2026-06-09:
+        // supabase) timed out at Tier-2 and the bot then clicked a button
+        // still hidden behind the unsolved widget → 20s waitFor crash. The
+        // form-fill gate (runCaptchaGate) already solves hCaptcha via 2Captcha;
+        // mirror it here. Unlike Turnstile, hCaptcha is a real image challenge
+        // 2Captcha can solve, and its token is NOT IP-scored.
+        if (
+          !solvedViaTier3 &&
+          captcha.kind === "hcaptcha" &&
+          this.captchaSolver?.isAvailable() === true
+        ) {
+          const sitekey = await this.browser.extractHcaptchaSitekey();
+          const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+          if (sitekey !== null && pageUrl !== undefined) {
+            steps.push(
+              `OAuth: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`,
+            );
+            const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+            if (solveRes.kind === "ok") {
+              const injected = await this.browser.injectHcaptchaToken(solveRes.token);
+              if (injected) {
+                solvedViaTier3 = true;
+                steps.push(
+                  `OAuth: Tier 3 solved the hCaptcha in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha — clicking the ${provider.label} affordance`,
+                );
+              } else {
+                steps.push(
+                  `OAuth: Tier 3 hCaptcha token arrived but page injection failed — clicking the ${provider.label} affordance anyway`,
+                );
+              }
+            } else {
+              steps.push(
+                `OAuth: Tier 3 hCaptcha ${solveRes.kind}` +
+                  ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+                  ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : "") +
+                  ` — clicking the ${provider.label} affordance anyway`,
+              );
+            }
+          }
+        }
         if (!solvedViaTier3) {
           steps.push(
             `OAuth: visible ${captcha.kind} present but did not solve in 20s — clicking the ${provider.label} affordance anyway`,
