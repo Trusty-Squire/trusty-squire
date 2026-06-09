@@ -1,5 +1,28 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.10 (2026-06-09)
+
+Verifier-replay hardening — drove the verifier queue from 4 to 8 of 9 services
+green. ~35 generalizable replay/synth fixes; the standouts:
+
+- **OAuth recovery, end to end.** Detect a service's OWN auth-host redirect
+  (`auth.porter.run`), not just social-IdP hosts. `settleAfterOAuth` in the
+  replay path so Google GIS popup flows (imagekit/kinde) stop crashing on a
+  closed popup tab. Prefer Google over GitHub in recovery (GitHub callbacks are
+  rejected by more anti-bot services). GitHub `/authorize` consent is no longer
+  misclassified as a 2FA challenge, and a DOM scope-fallback handles consent
+  screens with no `scope=` param.
+- **Returning-user replay.** Skip absent onboarding clicks/fills/selects; a
+  glossed credential-creating click resolves by token-subset; `role_hint` is a
+  soft preference; word-boundary click matching (so "Next" no longer matches
+  "Next.js"); copy-button tie-break picks the first on a single-cred page.
+- **Credential extraction.** Inline `label="value"` config-snippet parser
+  (pusher's App Keys), `extract_labeled` counts toward multi-cred bundle
+  completion, `app`↔`application` label synonym, low min-length floor for
+  `*_id` fields, fuzzy fill-label match.
+- **Ops.** `mcp housekeeper` auto-loads `~/.config/trusty-squire/harvester.env`
+  on manual runs; CI secret-scan gate (`tools/secret-scan.sh`).
+
 ## 0.9.9 (2026-06-08)
 
 Multi-cred loop completion + higher daily sweep budget.
