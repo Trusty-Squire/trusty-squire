@@ -5410,10 +5410,27 @@ export class SignupAgent {
       } else {
         const klass = classifySignupHtml(landed.html);
         if (klass !== "signup" && !(await this.looksLikeSignupPage())) {
-          needsRecovery = true;
-          steps.push(
-            `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
-          );
+          // A "login"-classified page is still a valid signup ENTRY when it
+          // offers OAuth: clicking "Continue with GitHub/Google" auto-
+          // provisions the account on first use, and plenty of modern SPAs
+          // (qdrant: cloud.qdrant.io/login) ship ONE unified page for both
+          // login and signup. Only chase a separate signup page when there's
+          // no OAuth affordance to ride — otherwise recovery falls through to
+          // the Google-search fallback, which Google ERR_ABORTs through the
+          // residential proxy, and the run dies on a page that would have
+          // worked via OAuth.
+          const oauthHere = findFirstOAuthButton(landedInventory, ["google", "github"]);
+          if (oauthHere !== null) {
+            steps.push(
+              `curated signup_url for ${task.service} rendered as "${klass}", but it offers ` +
+                `${oauthHere.provider} OAuth — treating the login page as the signup entry`,
+            );
+          } else {
+            needsRecovery = true;
+            steps.push(
+              `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
+            );
+          }
         }
       }
 
