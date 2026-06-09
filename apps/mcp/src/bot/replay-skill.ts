@@ -212,17 +212,24 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // once every named extract has run successfully — not on the first
   // extract like the single-cred path. Detected by skill content:
   // any *_named step → multi mode, else → single.
+  // extract_labeled is ALSO a multi-cred extract (pusher: application_id /
+  // app_key / secret) — it returns extract_named_ok and accumulates into the
+  // bundle just like the *_named kinds. Omitting it here left isMultiCred false,
+  // so a pusher skill accumulated all 3 values but never returned ok_multi and
+  // fell through to "walked entire graph without producing a credential."
   const isMultiCred = skill.steps.some(
     (s) =>
       s.kind === "extract_via_copy_button_named" ||
-      s.kind === "extract_via_regex_named",
+      s.kind === "extract_via_regex_named" ||
+      s.kind === "extract_labeled",
   );
   const expectedProduces = new Set<string>(
     skill.steps
       .filter(
         (s): s is Extract<SkillStep, { produces: string }> =>
           s.kind === "extract_via_copy_button_named" ||
-          s.kind === "extract_via_regex_named",
+          s.kind === "extract_via_regex_named" ||
+          s.kind === "extract_labeled",
       )
       .map((s) => s.produces),
   );
