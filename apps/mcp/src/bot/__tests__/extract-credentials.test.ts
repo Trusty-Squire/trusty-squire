@@ -51,6 +51,13 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(`checkout uses ${pubKey} here`)).toBeNull();
   });
 
+  it("extracts a Plunk pk_<hex> API key (hex body distinguishes it from Stripe pk_live_)", () => {
+    const key = "pk_" + "e063df9b5a1c2d3e4f5a6b7c8d9e0f1a";
+    expect(extractApiKeyFromText(`Your API Key: ${key}`)).toBe(key);
+    // and the Stripe publishable key on the SAME page is still ignored
+    expect(extractApiKeyFromText("checkout pk_live_examplePUBkey0000000000abcd")).toBeNull();
+  });
+
   it("ignores a PostHog project key — public analytics key, not a credential", () => {
     // phc_ project keys ship in client-side analytics JS on every
     // PostHog-using site; matching one surfaced Mistral's embedded

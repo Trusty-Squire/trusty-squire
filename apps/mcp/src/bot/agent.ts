@@ -3345,6 +3345,13 @@ export function extractApiKeyFromText(text: string): string | null {
     // embeds Stripe/PostHog", not "here is the user's credential".
     // Each produced a false success on Mistral (its billing pk_live_,
     // then its analytics phc_, surfaced as the api_key).
+    // Plunk is the EXCEPTION: its API key is `pk_<hex>` (e.g.
+    // pk_e063df9b5…) and IS the user's credential, shown in plaintext on
+    // the dashboard under an "API Key" label. The pure-hex body after the
+    // prefix distinguishes it from Stripe publishable keys (pk_live_/
+    // pk_test_ — a "live"/"test" segment, not hex), so this can't re-open
+    // the embedded-public-key false-positive the note above warns about.
+    /\bpk_[a-f0-9]{24,}\b/, // Plunk (hex public/API key — NOT Stripe pk_live_/pk_test_)
     /\bkey-[a-f0-9]{32}\b/, // Mailgun
     /\bSG\.[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]{20,}\b/, // SendGrid
     /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
