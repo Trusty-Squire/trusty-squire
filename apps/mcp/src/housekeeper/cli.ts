@@ -348,11 +348,17 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       ...(args.limit !== undefined ? { limit: args.limit } : {}),
     };
     // --from=<yaml> → the daily curated sweep (the autonomous engine over
-    // ~100 services). Without it, heal discovers from telemetry candidates +
-    // freshly-demoted services (the on-demand self-healing path).
+    // ~100 services). Skip services that already have an ACTIVE skill — they're
+    // served by replay, so re-discovering them burns signup budget and piles up
+    // duplicate pending-review skills; the freed slots go to net-new coverage
+    // (OF#1). Without --from, heal discovers from telemetry candidates +
+    // freshly-demoted services (the candidates endpoint already excludes active).
     const healDiscoverQueue =
       args.seedPath !== undefined && args.seedPath.length > 0
-        ? new YamlSeedQueue({ path: args.seedPath })
+        ? new YamlSeedQueue({
+            path: args.seedPath,
+            excludeActiveFn: () => client.fetchActiveServices(),
+          })
         : new RegistryDiscoverQueue(client);
     try {
       await runHealLoop({

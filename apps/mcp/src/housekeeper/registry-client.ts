@@ -141,6 +141,28 @@ export class VerifierRegistryClient {
     return body.items;
   }
 
+  // The set of services with an ACTIVE skill — already served by replay, so
+  // the curated discovery sweep should skip them (every re-cover slot is a
+  // net-new skill it didn't get). Public GET /skills?status=active; no bearer
+  // needed. Returns lowercase slugs.
+  async fetchActiveServices(): Promise<Set<string>> {
+    const url = new URL("/skills", this.baseUrl);
+    url.searchParams.set("status", "active");
+    url.searchParams.set("limit", "500");
+    const res = await this.fetchFn(url.toString(), {});
+    if (!res.ok) {
+      throw new Error(`fetchActiveServices: ${res.status} ${res.statusText}`);
+    }
+    const body = (await res.json()) as { ok?: boolean; skills?: Array<{ service?: string }> };
+    const out = new Set<string>();
+    for (const s of body.skills ?? []) {
+      if (typeof s.service === "string" && s.service.length > 0) {
+        out.add(s.service.toLowerCase());
+      }
+    }
+    return out;
+  }
+
   async postOutcome(input: {
     skill_id: string;
     kind: "success" | "failure";

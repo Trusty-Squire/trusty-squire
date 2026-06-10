@@ -150,6 +150,13 @@ export class YamlSeedQueue implements QueueProvider {
       // known to require human action (phone gate, fresh-MX silent
       // drop, etc.) — we don't want them eating bot time every run.
       excludeStatuses?: ReadonlySet<string>;
+      // Skip services that already have an ACTIVE skill — they're served by
+      // replay, so re-discovering them just burns a signup slot and piles up
+      // duplicate pending-review skills. Resolved per fetch (the active set
+      // grows as the sweep succeeds). Absent → no coverage filter (tests,
+      // offline). Best-effort: a lookup failure falls back to no filtering
+      // rather than starving the batch.
+      excludeActiveFn?: () => Promise<ReadonlySet<string>>;
       // Read function injection for tests.
       readFn?: (path: string) => Promise<string>;
     },
@@ -159,7 +166,18 @@ export class YamlSeedQueue implements QueueProvider {
     if (this.cache === null) {
       this.cache = await this.load();
     }
-    return this.cache.slice(0, limit).map((e) => {
+    let pool = this.cache;
+    if (this.opts.excludeActiveFn !== undefined) {
+      try {
+        const active = await this.opts.excludeActiveFn();
+        if (active.size > 0) {
+          pool = pool.filter((e) => !active.has(e.slug.toLowerCase()));
+        }
+      } catch {
+        // best-effort: keep the full pool rather than starve the batch.
+      }
+    }
+    return pool.slice(0, limit).map((e) => {
       const oauthProvider =
         e.oauth_provider === "google" || e.oauth_provider === "github"
           ? e.oauth_provider
