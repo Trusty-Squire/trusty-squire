@@ -2539,6 +2539,26 @@ export function detectNavigationDrift(
   return null;
 }
 
+// True when the URL is back on the product host AND no longer on an auth
+// intermediary — i.e. a same-domain hosted login (weaviate's
+// console.weaviate.cloud/signin?code=…) has finished exchanging its code and
+// redirected to the real app. Used to gate OAuth-recovery success so we don't
+// re-navigate while still mid-handshake. Exported for tests.
+export function settledOnProductPage(currentUrl: string, expectedHost: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(currentUrl);
+  } catch {
+    return false;
+  }
+  if (u.hostname !== expectedHost) return false;
+  // Still on the service's own login/handoff path, or carrying an unconsumed
+  // OAuth-callback param → the session isn't established yet.
+  if (LOGIN_PATH_RE.test(u.pathname)) return false;
+  if (u.searchParams.has("code") || u.searchParams.has("state")) return false;
+  return true;
+}
+
 export function inferProviderFromUrl(url: string): "google" | "github" | null {
   try {
     const u = new URL(url);
@@ -2851,13 +2871,14 @@ async function attemptOAuthRecovery(
   while (Date.now() < deadline) {
     await browser.wait(1);
     if (browser.oauthPageClosed()) break;
-    let host: string;
-    try {
-      host = new URL(browser.currentUrl()).hostname;
-    } catch {
-      continue;
-    }
-    if (host === expectedHost) break;
+    // Wait until we're back on the product host AND clear of the auth
+    // intermediary. Services that broker OAuth through their OWN domain
+    // (weaviate: console.weaviate.cloud/signin?code=… → exchanges the code →
+    // /overview) land back on expectedHost while still mid-handshake. Breaking
+    // on hostname alone re-navigates before the session exists, bouncing right
+    // back to /signin → needs_login. Require the login path to clear and no
+    // lingering ?code=/?state= auth-callback param before declaring success.
+    if (settledOnProductPage(browser.currentUrl(), expectedHost)) break;
   }
   // Restore this.page to the product page. The GIS popup flow (kinde/imagekit)
   // closes the OAuth popup on its own; without this, this.page stays the CLOSED
