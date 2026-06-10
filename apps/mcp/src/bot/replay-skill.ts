@@ -955,7 +955,13 @@ async function executeStep(
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
     case "navigate": {
-      await browser.goto(step.url);
+      // Rebase a captured per-account subdomain onto the live session's
+      // subdomain (kinde class): the prior step left us on the current
+      // account's host, so a captured deep-nav URL with a stale subdomain
+      // gets rewritten to the current one. No-op for same-host / cross-product
+      // / first-navigate (about:blank) cases.
+      const targetUrl = rebaseSubdomain(step.url, browser.currentUrl());
+      await browser.goto(targetUrl);
       // Settle for SPA-style apps that fire route handlers post-
       // DOMContentLoaded. A fixed 2s under-waits heavy authenticated
       // dashboards (pusher's App Keys, imagekit's onboarding step rendered
@@ -976,7 +982,7 @@ async function executeStep(
       // step 0 so the verifier reports the real cause: this skill
       // needs an OAuth step it doesn't have.
       const landedUrl = browser.currentUrl();
-      const driftReason = detectNavigationDrift(landedUrl, step.url);
+      const driftReason = detectNavigationDrift(landedUrl, targetUrl);
       if (driftReason !== null) {
         // 0.8.2-rc.22 — drive the OAuth handshake. Captured skills
         // for OAuth-protected services (Railway, Sentry, etc.) often
@@ -989,7 +995,7 @@ async function executeStep(
         // the expected URL, and continue. Only bail to needs_login
         // when no OAuth path is recoverable (no provider session, no
         // OAuth button on the page).
-        const recovered = await attemptOAuthRecovery(browser, step.url);
+        const recovered = await attemptOAuthRecovery(browser, targetUrl);
         if (recovered.kind === "ok") {
           return { kind: "navigated" };
         }
@@ -2561,11 +2567,46 @@ export function detectNavigationDrift(
   return null;
 }
 
+// Registrable domain (eTLD+1 approximation): the last two dot-labels. Good
+// enough for the single-label TLDs these services use (kinde.com, algolia.com,
+// weaviate.cloud). NOT public-suffix-aware — it would treat foo.co.uk as co.uk,
+// but no target service uses a multi-label TLD. Exported for tests.
+export function registrableDomain(hostname: string): string {
+  const parts = hostname.split(".").filter((p) => p.length > 0);
+  if (parts.length <= 2) return hostname.toLowerCase();
+  return parts.slice(-2).join(".").toLowerCase();
+}
+
+// Rebase a captured URL onto the live session's per-account subdomain. Services
+// like kinde give every account its own subdomain (tsq688378.kinde.com); a
+// skill captured under one account bakes that subdomain into its deep-nav URLs,
+// so on replay (a different account → different subdomain) the navigate would
+// hit the WRONG account. When the captured host and the live host share a
+// registrable domain but differ — i.e. it's a per-account subdomain — rewrite
+// the captured URL's host to the live one. Unchanged otherwise (same account,
+// different product, or no live host yet). Exported for tests.
+export function rebaseSubdomain(capturedUrl: string, liveUrl: string): string {
+  let cap: URL;
+  let live: URL;
+  try {
+    cap = new URL(capturedUrl);
+    live = new URL(liveUrl);
+  } catch {
+    return capturedUrl;
+  }
+  if (cap.hostname === live.hostname) return capturedUrl;
+  if (registrableDomain(cap.hostname) !== registrableDomain(live.hostname)) return capturedUrl;
+  cap.hostname = live.hostname;
+  return cap.toString();
+}
+
 // True when the URL is back on the product host AND no longer on an auth
 // intermediary — i.e. a same-domain hosted login (weaviate's
 // console.weaviate.cloud/signin?code=…) has finished exchanging its code and
-// redirected to the real app. Used to gate OAuth-recovery success so we don't
-// re-navigate while still mid-handshake. Exported for tests.
+// redirected to the real app. Compares by registrable domain so a per-account
+// subdomain redirect (kinde's app.kinde.com → tsqNNN.kinde.com) still settles.
+// Used to gate OAuth-recovery success so we don't re-navigate mid-handshake.
+// Exported for tests.
 export function settledOnProductPage(currentUrl: string, expectedHost: string): boolean {
   let u: URL;
   try {
@@ -2573,7 +2614,7 @@ export function settledOnProductPage(currentUrl: string, expectedHost: string): 
   } catch {
     return false;
   }
-  if (u.hostname !== expectedHost) return false;
+  if (registrableDomain(u.hostname) !== registrableDomain(expectedHost)) return false;
   // Still on the service's own login/handoff path, or carrying an unconsumed
   // OAuth-callback param → the session isn't established yet.
   if (LOGIN_PATH_RE.test(u.pathname)) return false;
