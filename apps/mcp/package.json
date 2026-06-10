@@ -12,7 +12,11 @@
     "dist",
     "assets",
     "!dist/housekeeper",
-    "!dist/housekeeper/**"
+    "!dist/housekeeper/**",
+    "!dist/bot/eval-*",
+    "!dist/bot/build-corpus.*",
+    "!dist/bot/label-target.*",
+    "!dist/bot/failure-stats.*"
   ],
   "publishConfig": {
     "access": "public"

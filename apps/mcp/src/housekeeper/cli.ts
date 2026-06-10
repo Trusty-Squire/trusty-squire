@@ -53,7 +53,10 @@ const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 // (--from); the YAML feed is the former "harvest" path.
 // 'heal' (T7) chains verify→discover in one scheduled pass and emits a
 // single digest — the self-healing loop.
-type Mode = "verify" | "discover" | "heal";
+// 'fix' (C2) is the output-side step: read the failure batch from the capture
+// dir, drive the holistic fix-agent against the eval gate, commit RCs to the
+// `next` channel. See docs/DESIGN-autonomous-output-loop.md.
+type Mode = "verify" | "discover" | "heal" | "fix";
 
 interface ParsedArgs {
   once: boolean;
@@ -93,6 +96,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--mode=verify") args.mode = "verify";
     else if (arg === "--mode=discover") args.mode = "discover";
     else if (arg === "--mode=heal") args.mode = "heal";
+    else if (arg === "--mode=fix") args.mode = "fix";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
@@ -147,6 +151,14 @@ Modes (pick one — default: verify):
                             --from=PATH to source from a curated
                             YAML list instead (former harvester
                             services.yaml — status:skip excluded).
+  --mode=fix                Output-side loop (C2). Reads the failure
+                            batch from the capture dir, drives the
+                            holistic fix-agent against the planner
+                            eval gate, and commits surviving fixes to
+                            staging (the next/RC channel). Needs git
+                            + a local coding CLI (TRUSTY_SQUIRE_FIX_
+                            AGENT_CLI, default 'claude -p'); set
+                            TRUSTY_SQUIRE_FIX_AGENT_PUSH=1 to push.
   --service=SLUG            Ad-hoc single-service mode. Implies
                             discover. Bot runs once against SLUG.
   --oauth-provider=google|github
@@ -268,6 +280,29 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   if (args.enableGithubIssues) {
     const { GithubIssueNotifier } = await import("./github-issue-notifier.js");
     notifiers.push(new GithubIssueNotifier());
+  }
+
+  // C2 — fix mode: the output-side step. Reads the failure batch from the
+  // capture dir and drives the fix-agent against the eval gate; commits RCs to
+  // staging (the `next` channel). Needs no registry bearer — it's git + the
+  // local coding CLI + the local eval corpus. Handle it before the
+  // bearer-required guard below.
+  if (args.mode === "fix") {
+    const { runFixMode } = await import("./modes/fix.js");
+    try {
+      const res = await runFixMode({});
+      if (res !== null) {
+        console.log(
+          `[fix] committed=${res.committed.length} walls=${res.walls.length} parked=${res.parked.length}`,
+        );
+      }
+      return 0;
+    } catch (err) {
+      console.error(
+        `housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
   }
 
   // Registry client always constructed; queues that don't need it

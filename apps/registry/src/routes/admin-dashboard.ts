@@ -550,7 +550,9 @@ function renderObjectivesSection(
     `<section id="objectives"><h2>Objective functions</h2>` +
     `<div class="desc">What this project optimizes for, every autonomous run. ` +
     `<b>OF#1</b> — maximize skills in the registry. <b>OF#2</b> — lift the ` +
-    `discovery success rate the housekeeper sees. Watch them rise over time.</div>`;
+    `discovery success rate the housekeeper sees. Watch them rise over time. ` +
+    `The <b>RC</b> column is the release candidate that ran: promote ` +
+    `next&rarr;latest once OF#2 holds across runs on a given RC.</div>`;
 
   // Latest discovery rate from the most recent run that actually attempted
   // discovery (a verify-only pass has attempted 0 and isn't a data point).
@@ -589,6 +591,7 @@ function renderObjectivesSection(
           : "—";
       return `<tr>
         <td>${formatDate(r.ran_at)}</td>
+        <td>${r.mcp_version ?? "—"}</td>
         <td class="num">${r.skills_active}</td>
         <td class="num">${rate}</td>
         <td class="num">${counts}</td>
@@ -596,7 +599,7 @@ function renderObjectivesSection(
     })
     .join("");
   const trend = `<div class="ruled" style="margin-top:16px"><table>
-      <thead><tr><th>run</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th></tr></thead>
+      <thead><tr><th>run</th><th>RC</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
   return head + kpis + trend + `</div></section>`;

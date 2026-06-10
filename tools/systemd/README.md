@@ -19,7 +19,20 @@ pass:
    always to the journal). The same two metrics land on the registry admin
    dashboard's **Objective functions** panel with a run-over-run trend.
 
-See `docs/AUTONOMOUS-LOOP.md` for the loop + objective functions and
+4. **fix** (the output side, `ExecStartPost`) — after the run measures, the
+   holistic fix-agent reads the failure batch from the capture dir, clusters by
+   root cause, proposes a generalizing fix per cluster, reconciles it against
+   the planner eval gate, and commits surviving fixes to `staging` (the `next`
+   / RC channel). Best-effort; never fails the timer. **Push is opt-in** —
+   without `TRUSTY_SQUIRE_FIX_AGENT_PUSH=1` it commits RCs locally but does not
+   push, so nothing reaches npm until you push. `next`→`latest` stays a human
+   promote (read the per-RC OF#2 trend on the dashboard, then `/ship` to main).
+
+**Dogfood the RC:** keep this checkout on `staging` so the daily run executes
+the latest release candidate — the run becomes the live test of yesterday's RC.
+
+See `docs/AUTONOMOUS-LOOP.md` for the loop + objective functions,
+`docs/DESIGN-autonomous-output-loop.md` for the fix-agent + RC channel, and
 `docs/DESIGN-closed-loop-remediation.md` for the closed-loop design.
 
 ## Install (one-time, as the operator)
