@@ -18,7 +18,7 @@
 # --from=tools/discovery-candidates.yaml.
 
 # ── LLM / AI inference APIs ──────────────────────────────────────────
-- { slug: groq, name: Groq, signup_url: https://console.groq.com/login, oauth_provider: google }
+- { slug: groq, name: Groq, signup_url: https://console.groq.com, oauth_provider: google }
 - { slug: mistral, name: Mistral AI, signup_url: https://console.mistral.ai/, oauth_provider: google }
 - { slug: deepseek, name: DeepSeek, signup_url: https://platform.deepseek.com/sign_up, oauth_provider: google }
 - { slug: fireworks-ai, name: Fireworks AI, signup_url: https://fireworks.ai/login, oauth_provider: google }
@@ -95,7 +95,6 @@
 - { slug: vercel, name: Vercel, signup_url: https://vercel.com/signup, oauth_provider: github, status: needs-manual }
 - { slug: netlify, name: Netlify, signup_url: https://app.netlify.com/signup, oauth_provider: github }
 - { slug: cloudflare, name: Cloudflare, signup_url: https://dash.cloudflare.com/sign-up, oauth_provider: google, status: needs-manual }
-- { slug: railway-app, name: Railway, signup_url: https://railway.com/login, oauth_provider: github }
 - { slug: heroku, name: Heroku, signup_url: https://signup.heroku.com/, oauth_provider: github, status: needs-manual }
 - { slug: glitch, name: Glitch, signup_url: https://glitch.com/signin, oauth_provider: github }
 - { slug: replit, name: Replit, signup_url: https://replit.com/signup, oauth_provider: google }
@@ -105,7 +104,6 @@
 - { slug: cyclic, name: Cyclic, signup_url: https://app.cyclic.sh/, oauth_provider: github }
 - { slug: railpack, name: Sevalla, signup_url: https://app.sevalla.com/signup, oauth_provider: google }
 - { slug: zerops, name: Zerops, signup_url: https://app.zerops.io/registration, oauth_provider: github }
-- { slug: render-app, name: Render, signup_url: https://dashboard.render.com/register, oauth_provider: github }
 - { slug: cloud66, name: Cloud 66, signup_url: https://app.cloud66.com/users/sign_up, oauth_provider: github }
 - { slug: platformsh, name: Platform.sh, signup_url: https://auth.api.platform.sh/register, oauth_provider: github, status: needs-manual }
 - { slug: qovery, name: Qovery, signup_url: https://console.qovery.com/, oauth_provider: github }
