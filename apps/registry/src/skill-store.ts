@@ -311,6 +311,10 @@ export interface HealRunInput {
   // time, stamped server-side by the route (the registry is the source of
   // truth). Optional on the input so older callers/tests can omit it.
   skills_active?: number;
+  // Objective function #3 — registry hit rate over the trailing window, as the
+  // two raw counts (served-by-skill / total). Stamped server-side.
+  hit_served?: number;
+  hit_total?: number;
   mcp_version?: string;
   now?: Date;
 }
@@ -323,11 +327,13 @@ export interface HealRunRecord {
   quarantined: number;
   reskilled: number;
   needs_human: number;
-  // The two objective functions, as of this run (see HealRunInput). Default
-  // 0 for runs recorded before the columns existed.
+  // The objective functions, as of this run (see HealRunInput). Default 0 for
+  // runs recorded before the columns existed.
   discover_attempted: number;
   discover_succeeded: number;
   skills_active: number;
+  hit_served: number;
+  hit_total: number;
   mcp_version: string | null;
 }
 

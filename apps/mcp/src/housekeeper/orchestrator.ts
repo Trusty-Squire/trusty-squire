@@ -262,6 +262,8 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   // Fail-open: a missing method (test doubles) or a network blip must never
   // break the pass; we just omit OF#1 from the digest in that case.
   let skillsActive: number | undefined;
+  let hitServed: number | undefined;
+  let hitTotal: number | undefined;
   try {
     const c = opts.verify.client as {
       postHealHeartbeat?: (i: {
@@ -273,7 +275,7 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
         discover_attempted: number;
         discover_succeeded: number;
         mcp_version?: string;
-      }) => Promise<{ skills_active: number }>;
+      }) => Promise<{ skills_active: number; hit_served?: number; hit_total?: number }>;
     };
     if (typeof c.postHealHeartbeat === "function") {
       const res = await c.postHealHeartbeat({
@@ -292,6 +294,11 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
       if (res !== undefined && typeof res.skills_active === "number") {
         skillsActive = res.skills_active;
       }
+      // OF#3 — the registry hit rate, server-stamped + echoed back for the digest.
+      if (res !== undefined && typeof res.hit_total === "number") {
+        hitServed = res.hit_served ?? 0;
+        hitTotal = res.hit_total;
+      }
     }
   } catch (err) {
     log(`heal heartbeat failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
@@ -302,10 +309,14 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
       ? ` · discover ${Math.round((100 * discoverSucceeded) / discoverAttempted)}% (${discoverSucceeded}/${discoverAttempted})`
       : "";
   const skillsLine = skillsActive !== undefined ? ` · skills ${skillsActive}` : "";
+  const hitLine =
+    hitTotal !== undefined && hitTotal > 0
+      ? ` · hit ${Math.round((100 * (hitServed ?? 0)) / hitTotal)}% (${hitServed ?? 0}/${hitTotal})`
+      : "";
   const digest =
     `verified ${verify.attempted} · demoted ${verify.transitions.demoted} · ` +
     `quarantined ${verify.transitions.quarantined} · re-skilled ${reskilled} · ` +
-    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}`;
+    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}${hitLine}`;
   log(`heal pass done: ${digest}`);
   await fanOutNotifier(opts.notifiers ?? [], log, {
     kind: "heal_digest",
@@ -319,6 +330,7 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
       ...(skillsActive !== undefined ? { skills_active: skillsActive } : {}),
       discover_attempted: discoverAttempted,
       discover_succeeded: discoverSucceeded,
+      ...(hitTotal !== undefined ? { hit_served: hitServed ?? 0, hit_total: hitTotal } : {}),
     },
   });
 

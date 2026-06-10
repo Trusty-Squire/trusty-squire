@@ -50,6 +50,9 @@ export type NotifierEvent =
         skills_active?: number;
         discover_attempted: number;
         discover_succeeded: number;
+        // OF#3 — registry hit rate (served-by-skill / total) over the window.
+        hit_served?: number;
+        hit_total?: number;
       };
     }
   // THE single human-facing escalation. Fired ONLY when the autonomous loop
@@ -76,16 +79,27 @@ export interface Notifier {
 // to report (e.g. a verify-only pass with no discovery attempts).
 export function formatObjectives(
   objectives:
-    | { skills_active?: number; discover_attempted: number; discover_succeeded: number }
+    | {
+        skills_active?: number;
+        discover_attempted: number;
+        discover_succeeded: number;
+        hit_served?: number;
+        hit_total?: number;
+      }
     | undefined,
 ): string {
   if (objectives === undefined) return "";
-  const { skills_active, discover_attempted, discover_succeeded } = objectives;
+  const { skills_active, discover_attempted, discover_succeeded, hit_served, hit_total } =
+    objectives;
   const parts: string[] = [];
   if (skills_active !== undefined) parts.push(`skills ${skills_active}`);
   if (discover_attempted > 0) {
     const rate = Math.round((100 * discover_succeeded) / discover_attempted);
     parts.push(`discover ${rate}% (${discover_succeeded}/${discover_attempted})`);
+  }
+  if (hit_total !== undefined && hit_total > 0) {
+    const rate = Math.round((100 * (hit_served ?? 0)) / hit_total);
+    parts.push(`hit ${rate}% (${hit_served ?? 0}/${hit_total})`);
   }
   return parts.length > 0 ? ` · OBJECTIVES: ${parts.join(" · ")}` : "";
 }
