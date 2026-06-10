@@ -19,8 +19,52 @@ import {
   captureOnboardingRound,
   type OnboardingRoundCapture,
 } from "../onboarding-capture.js";
-import { promoteToSkill } from "../promote-to-skill.js";
+import {
+  promoteToSkill,
+  pickHrefHint,
+  hasEphemeralPathSegment,
+  generalizeCapturedUrl,
+} from "../promote-to-skill.js";
 import type { InteractiveElement } from "../browser.js";
+
+describe("ephemeral-identifier generalization (stuck-pending class)", () => {
+  function link(href: string): InteractiveElement {
+    return {
+      index: 0, tag: "a", type: null, id: null, name: null, placeholder: null,
+      ariaLabel: null, role: "link", labelText: null, visibleText: "open",
+      selector: "a", visible: true, inViewport: true, inConsentWidget: false,
+      href,
+    } as InteractiveElement;
+  }
+
+  it("hasEphemeralPathSegment flags UUID / long-hex segments, not normal slugs", () => {
+    expect(hasEphemeralPathSegment("/database/36f231a7-e459-4061-a1b2-c3d4e5f6a7b8")).toBe(true);
+    expect(hasEphemeralPathSegment("/o/9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c")).toBe(true);
+    expect(hasEphemeralPathSegment("/dashboard/api-keys")).toBe(false);
+    expect(hasEphemeralPathSegment("/settings")).toBe(false);
+  });
+
+  it("pickHrefHint drops a created-resource href (weaviate class), keeps a stable route", () => {
+    expect(pickHrefHint(link("/database/36f231a7-e459-4061-a1b2-c3d4e5f6a7b8"))).toBeNull();
+    expect(pickHrefHint(link("/dashboard/settings"))).toBe("/dashboard/settings");
+  });
+
+  it("generalizeCapturedUrl strips per-run session params (kinde class)", () => {
+    expect(generalizeCapturedUrl("https://app.kinde.com/register?psid=019e89eac2ca34fd&intent=business")).toBe(
+      "https://app.kinde.com/register?intent=business",
+    );
+    expect(generalizeCapturedUrl("https://x.co/signup?redirect_to=%2Fsetup%2Fabc&plan=free")).toBe(
+      "https://x.co/signup?plan=free",
+    );
+  });
+
+  it("generalizeCapturedUrl is byte-identical for a clean URL (byte-equivalence guard)", () => {
+    const clean = "https://ipinfo.io/signup";
+    expect(generalizeCapturedUrl(clean)).toBe(clean);
+    const cleanWithParam = "https://x.co/signup?plan=free";
+    expect(generalizeCapturedUrl(cleanWithParam)).toBe(cleanWithParam);
+  });
+});
 
 // ── Test fixtures ────────────────────────────────────────────────────
 
