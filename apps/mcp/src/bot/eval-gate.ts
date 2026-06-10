@@ -66,33 +66,61 @@ function printFailures(label: string, bucket: GateBucketResult): void {
   }
 }
 
-async function main(): Promise<void> {
+// The structured gate verdict. The autonomous fix-agent (C2,
+// housekeeper/fix-agent.ts) calls runEvalGate() and gates a fix on
+// `regressPassed` (hard) + `targetHoldout` not dropping (the lift signal).
+export interface EvalGateResult {
+  regress: GateBucketResult;
+  targetTune: GateBucketResult;
+  targetHoldout: GateBucketResult;
+  // The merge verdict: the regress bucket is perfect.
+  regressPassed: boolean;
+  // No captures yet — a vacuous pass the caller should treat as "gate not
+  // meaningful" rather than "green" (CI flags this separately).
+  emptyRegress: boolean;
+}
+
+// Run the gate over the committed corpus and return the verdict. `plan`
+// defaults to the real temp-0 planner; callers (and tests) may inject a
+// deterministic fake. Pure given its plan function.
+export async function runEvalGate(
+  plan: (c: EvalCaseFile) => Promise<PostVerifyStep> = makePlanner(),
+): Promise<EvalGateResult> {
   const { regress, targetTune, targetHoldout } = loadEvalCorpus();
-  if (regress.length === 0) {
-    console.error(
-      "[eval-gate] regress set is empty — run build-corpus first (no captures yet?)",
-    );
-  }
-  const plan = makePlanner();
   // Regress is REJECT-driven (R1): fail only on a known-wrong action, never on
   // differing from the one historical accept kind. Target is accept+reject.
   const r = await scoreBucket(regress, plan, scoreRegress);
   const tt = await scoreBucket(targetTune, plan);
   const th = await scoreBucket(targetHoldout, plan);
+  return {
+    regress: r,
+    targetTune: tt,
+    targetHoldout: th,
+    regressPassed: regressGatePassed(r),
+    emptyRegress: regress.length === 0,
+  };
+}
 
+async function main(): Promise<void> {
+  const res = await runEvalGate();
+  if (res.emptyRegress) {
+    console.error(
+      "[eval-gate] regress set is empty — run build-corpus first (no captures yet?)",
+    );
+  }
   console.log(
-    `regress: ${r.passed}/${r.total} · ` +
-      `target-tune: ${tt.passed}/${tt.total} · ` +
-      `target-holdout: ${th.passed}/${th.total}`,
+    `regress: ${res.regress.passed}/${res.regress.total} · ` +
+      `target-tune: ${res.targetTune.passed}/${res.targetTune.total} · ` +
+      `target-holdout: ${res.targetHoldout.passed}/${res.targetHoldout.total}`,
   );
-  printFailures("REGRESS", r);
-  printFailures("target", tt);
-  printFailures("target", th);
+  printFailures("REGRESS", res.regress);
+  printFailures("target", res.targetTune);
+  printFailures("target", res.targetHoldout);
 
   // Only the regress bucket gates. An empty regress set passes vacuously but
   // we warned above — CI (A6) treats an empty corpus as a configuration error
   // separately.
-  process.exitCode = regressGatePassed(r) ? 0 : 1;
+  process.exitCode = res.regressPassed ? 0 : 1;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
