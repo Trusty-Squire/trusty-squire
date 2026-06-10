@@ -2113,6 +2113,23 @@ describe("settledOnProductPage (same-domain hosted-login settle)", () => {
   });
 });
 
+describe("pathHasOpaqueResourceId (current-account resource resolution)", () => {
+  it("flags an algolia app-id path segment", async () => {
+    const { pathHasOpaqueResourceId } = await import("../replay-skill.js");
+    expect(pathHasOpaqueResourceId("/apps/86WV27C86H/dashboard")).toBe(true);
+  });
+  it("flags a UUID path segment", async () => {
+    const { pathHasOpaqueResourceId } = await import("../replay-skill.js");
+    expect(pathHasOpaqueResourceId("/o/9f8e7d6c-1111-2222-3333-444455556666/keys")).toBe(true);
+  });
+  it("does NOT flag normal route slugs", async () => {
+    const { pathHasOpaqueResourceId } = await import("../replay-skill.js");
+    expect(pathHasOpaqueResourceId("/dashboard/api-keys")).toBe(false);
+    expect(pathHasOpaqueResourceId("/account/settings")).toBe(false);
+    expect(pathHasOpaqueResourceId("/apps")).toBe(false);
+  });
+});
+
 describe("detectNavigationDrift", () => {
   it("returns null when URLs match exactly", async () => {
     const { detectNavigationDrift } = await import("../replay-skill.js");
