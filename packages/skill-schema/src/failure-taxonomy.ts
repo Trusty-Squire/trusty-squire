@@ -128,7 +128,10 @@ export function isNavNetworkFailure(reason: string | null | undefined): boolean 
 // credential step under the reused operator account.
 export const ACCOUNT_EXISTS_KIND = "account_already_registered";
 
-const RETURNING_USER_MARKER_RE = /returning-user: onboarding fill was absent/i;
+// Matches both the original onboarding-fill marker and the broadened
+// authenticated-session marker (an element absent on an authenticated
+// returning-user replay — likely UI divergence, not rot).
+const RETURNING_USER_MARKER_RE = /returning-user: (?:onboarding fill was absent|authenticated session diverged)/i;
 
 // True when a step_failed reason carries the replay path's returning-user
 // marker — the credential step diverged from the fresh-signup capture because

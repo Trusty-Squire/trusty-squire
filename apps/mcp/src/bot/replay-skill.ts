@@ -244,6 +244,14 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // step_failed reasons with RETURNING_USER_MARKER so the verifier downgrades
   // them off the rot/demote path (failure-taxonomy isReturningUserDivergence).
   let skippedOnboardingFill = false;
+  // Set once we successfully complete an OAuth click — from that point the
+  // replay is in an AUTHENTICATED returning-user session, so a later
+  // "element absent" failure (e.g. brevo's "SMTP & API" nav link that the
+  // returning-user dashboard renders differently) is far more likely UI
+  // divergence than genuine rot. We tag such failures with the returning-user
+  // marker too, so the verifier doesn't DEMOTE an active skill over it (which
+  // was eroding OF#1 — measured: brevo demoted on a returning-user nav click).
+  let authedViaOAuth = false;
   for (let i = 0; i < skill.steps.length; i++) {
     const step = skill.steps[i]!;
 
@@ -384,7 +392,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         return {
           kind: "step_failed",
           stepIndex: i,
-          reason: markReturningUser(validation.reason, skippedOnboardingFill),
+          reason: markReturningUser(validation.reason, skippedOnboardingFill || authedViaOAuth),
           capturedStep: step,
         };
       }
@@ -399,6 +407,9 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       if (execOutcome.kind === "needs_login") {
         return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
       }
+      // OAuth click succeeded (needs_login already returned above) → we're in
+      // an authenticated returning-user session for the rest of the replay.
+      if (stepToExecute.kind === "click_oauth_button") authedViaOAuth = true;
       if (execOutcome.kind === "extract_ok") {
         // We extracted a credential successfully. Validate it before
         // declaring victory — the synthesizer's shape inference is a
@@ -474,7 +485,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         stepIndex: i,
         reason: markReturningUser(
           err instanceof Error ? err.message : String(err),
-          skippedOnboardingFill,
+          skippedOnboardingFill || authedViaOAuth,
         ),
         capturedStep: step,
       };
@@ -2370,9 +2381,9 @@ function isSkippableAbsentClick(
 // (failure-taxonomy isReturningUserDivergence) and downgrades the kind off the
 // rot/demote path. Without the skip, the reason is returned verbatim — a
 // genuine stale selector on a fresh account still counts as rot.
-function markReturningUser(reason: string, skippedOnboardingFill: boolean): string {
-  if (!skippedOnboardingFill) return reason;
-  return `${reason} [returning-user: onboarding fill was absent; credential step diverged from fresh-signup capture]`;
+function markReturningUser(reason: string, divergent: boolean): string {
+  if (!divergent) return reason;
+  return `${reason} [returning-user: authenticated session diverged from fresh-signup capture (onboarding/nav element absent — not rot)]`;
 }
 
 // True when an absent onboarding FILL is safe to skip: the input is wholly

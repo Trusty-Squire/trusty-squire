@@ -126,6 +126,13 @@ describe("isReturningUserDivergence", () => {
     expect(isReturningUserDivergence(reason)).toBe(true);
   });
 
+  it("flags the broadened authenticated-session marker (brevo nav-click class)", () => {
+    const reason =
+      'No element matches text_match="SMTP & API". ' +
+      "[returning-user: authenticated session diverged from fresh-signup capture (onboarding/nav element absent — not rot)]";
+    expect(isReturningUserDivergence(reason)).toBe(true);
+  });
+
   it("does NOT flag a plain step_failed (genuine rot must still demote)", () => {
     for (const reason of [
       "step_failed step=5 target is disabled (aria-disabled=true) after 6s",
