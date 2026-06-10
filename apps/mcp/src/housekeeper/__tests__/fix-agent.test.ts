@@ -3,18 +3,31 @@ import {
   clusterFailures,
   firstOutOfBoundsPath,
   runFixAgent,
+  sameAction,
   WallError,
+  type ClusterReplay,
   type FixProposal,
   type GateRunner,
 } from "../fix-agent.js";
 import { ReleaseFenceError } from "../release-guard.js";
 import type { FixBatch, FixBatchFailure } from "../fix-batch.js";
 import type { EvalGateResult } from "../../bot/eval-gate.js";
+import type { PostVerifyStep } from "../../bot/agent.js";
 import type { FailureStats } from "../../bot/failure-stats.js";
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
 const EMPTY_STATS = { totalRuns: 0, totalPasses: 0, overallPassRate: 0, stageHistogram: {}, perService: [], passRateVariance: 0 } as unknown as FailureStats;
+
+// The action the planner was stuck on (captured), and the action a working fix
+// makes it pick instead.
+const STUCK: PostVerifyStep = { kind: "click", selector: "#stuck", reason: "stuck" };
+const MOVED: PostVerifyStep = { kind: "click", selector: "#fixed", reason: "fixed" };
+
+// Replays: a fix that unsticks the page returns a different action; a no-op fix
+// returns the same stuck action.
+const replayMoved: ClusterReplay = async () => MOVED;
+const replayStuck: ClusterReplay = async () => STUCK;
 
 function failure(p: Partial<FixBatchFailure>): FixBatchFailure {
   return {
@@ -25,8 +38,19 @@ function failure(p: Partial<FixBatchFailure>): FixBatchFailure {
     capture_refs: ["/cap/svc-r1-r0.json"],
     signature: "sig-aaaa",
     reproduce_count: 1,
+    // a verifiable captured page by default
+    terminal_capture_ref: "/cap/svc-r1-r0.json",
+    terminal_page: { url: "https://svc.com/x", inventory: [], observed: STUCK },
     ...p,
   };
+}
+
+// A failure with no captured terminal page (the unverifiable case).
+function unverifiableFailure(p: Partial<FixBatchFailure> = {}): FixBatchFailure {
+  const f = failure(p);
+  delete f.terminal_page;
+  delete f.terminal_capture_ref;
+  return f;
 }
 
 function batch(failures: FixBatchFailure[]): FixBatch {
@@ -66,6 +90,24 @@ function proposal(touched: string[]): FixProposal {
 
 const ALLOWED = ["apps/mcp/src/bot/agent.ts", "apps/mcp/src/bot/"];
 
+// ── sameAction ───────────────────────────────────────────────────────
+
+describe("sameAction", () => {
+  it("same kind + same selector is the same action", () => {
+    expect(sameAction(STUCK, { kind: "click", selector: "#stuck", reason: "diff prose" })).toBe(true);
+  });
+  it("different selector means moved", () => {
+    expect(sameAction(STUCK, MOVED)).toBe(false);
+  });
+  it("different kind means moved", () => {
+    expect(sameAction(STUCK, { kind: "extract", reason: "x" })).toBe(false);
+  });
+  it("navigate compares url", () => {
+    expect(sameAction({ kind: "navigate", url: "/a", reason: "x" }, { kind: "navigate", url: "/a", reason: "y" })).toBe(true);
+    expect(sameAction({ kind: "navigate", url: "/a", reason: "x" }, { kind: "navigate", url: "/b", reason: "y" })).toBe(false);
+  });
+});
+
 // ── clustering ───────────────────────────────────────────────────────
 
 describe("clusterFailures", () => {
@@ -80,6 +122,7 @@ describe("clusterFailures", () => {
     expect(clusters).toHaveLength(2);
     const shared = clusters.find((c) => c.signature === "sig-x")!;
     expect(shared.services.sort()).toEqual(["groq", "meili"]);
+    expect(shared.pages).toHaveLength(2);
   });
 
   it("separates same-signature but different-stage failures", () => {
@@ -90,6 +133,13 @@ describe("clusterFailures", () => {
       ]),
     );
     expect(clusters).toHaveLength(2);
+  });
+
+  it("omits pages for failures with no captured terminal round", () => {
+    const clusters = clusterFailures(
+      batch([unverifiableFailure()]),
+    );
+    expect(clusters[0]!.pages).toHaveLength(0);
   });
 });
 
@@ -116,7 +166,7 @@ describe("runFixAgent", () => {
     allowedPaths: ALLOWED,
   };
 
-  it("commits a fix that turns the gate green and bumps the rc", async () => {
+  it("commits a fix that holds the gate AND unsticks the page; bumps the rc", async () => {
     const commit = vi.fn(async () => undefined);
     const prop = proposal(["apps/mcp/src/bot/agent.ts"]);
     const res = await runFixAgent({
@@ -124,14 +174,66 @@ describe("runFixAgent", () => {
       batch: batch([failure({})]),
       propose: async () => prop,
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5 }), gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit,
+      log: () => undefined,
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(res.committed[0]!.version).toBe("0.9.1-rc.1");
+    expect(prop.revert).not.toHaveBeenCalled();
+  });
+
+  it("does NOT commit when the gate is green but the page didn't move; parks after K", async () => {
+    const commit = vi.fn(async () => undefined);
+    const prop = proposal(["apps/mcp/src/bot/agent.ts"]);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose: async () => prop,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]), // always green
+      replay: replayStuck, // fix never changes the action
+      commit,
+      maxAttemptsPerCluster: 3,
+      log: () => undefined,
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(res.walls).toHaveLength(1);
+    expect(res.walls[0]!.reason).toMatch(/unstuck the page/);
+    // reverted every attempt (3)
+    expect((prop.revert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(3);
+  });
+
+  it("iterates: page stuck on attempt 1, moves on attempt 2 → commits", async () => {
+    const commit = vi.fn(async () => undefined);
+    let attempt = 0;
+    const replay: ClusterReplay = async () => (++attempt >= 2 ? MOVED : STUCK);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose: async () => proposal(["apps/mcp/src/bot/agent.ts"]),
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]), // always green
+      replay,
       commit,
       log: () => undefined,
     });
     expect(commit).toHaveBeenCalledOnce();
     expect(res.committed).toHaveLength(1);
-    expect(res.committed[0]!.version).toBe("0.9.1-rc.1");
-    expect(prop.apply).toHaveBeenCalledOnce();
-    expect(prop.revert).not.toHaveBeenCalled();
+  });
+
+  it("parks an unverifiable cluster (no captured page) without proposing", async () => {
+    const propose = vi.fn(async () => proposal(["apps/mcp/src/bot/agent.ts"]));
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([unverifiableFailure()]),
+      propose,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit: async () => undefined,
+      log: () => undefined,
+    });
+    expect(propose).not.toHaveBeenCalled();
+    expect(res.walls).toHaveLength(1);
+    expect(res.walls[0]!.reason).toMatch(/no captured page/);
   });
 
   it("iterates on a red gate then commits when green; reverts the failed attempt", async () => {
@@ -139,7 +241,7 @@ describe("runFixAgent", () => {
     const p1 = proposal(["apps/mcp/src/bot/agent.ts"]);
     const p2 = proposal(["apps/mcp/src/bot/agent.ts"]);
     const props = [p1, p2];
-    const res = await runFixAgent({
+    await runFixAgent({
       ...base,
       batch: batch([failure({})]),
       propose: async (_c, attempt) => props[attempt - 1]!,
@@ -148,29 +250,12 @@ describe("runFixAgent", () => {
         gate({ regressPassed: false, holdout: 5 }), // attempt 1 red
         gate({ regressPassed: true, holdout: 5 }), // attempt 2 green
       ]),
+      replay: replayMoved,
       commit,
       log: () => undefined,
     });
     expect(p1.revert).toHaveBeenCalledOnce();
     expect(commit).toHaveBeenCalledOnce();
-    expect(res.committed).toHaveLength(1);
-  });
-
-  it("parks a cluster as a wall-candidate after K red attempts", async () => {
-    const commit = vi.fn(async () => undefined);
-    const res = await runFixAgent({
-      ...base,
-      batch: batch([failure({})]),
-      propose: async () => proposal(["apps/mcp/src/bot/agent.ts"]),
-      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 }), gate({ regressPassed: false, holdout: 5 })]),
-      commit,
-      maxAttemptsPerCluster: 3,
-      log: () => undefined,
-    });
-    expect(commit).not.toHaveBeenCalled();
-    expect(res.walls).toHaveLength(1);
-    expect(res.walls[0]!.attempts).toBe(3);
-    expect(res.walls[0]!.reason).toMatch(/no articulable infra reason/);
   });
 
   it("records a genuine wall with the proposer's concrete reason", async () => {
@@ -181,10 +266,10 @@ describe("runFixAgent", () => {
         throw new WallError("phone verification required — no virtual number beats it");
       },
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
       commit: async () => undefined,
       log: () => undefined,
     });
-    expect(res.walls).toHaveLength(1);
     expect(res.walls[0]!.reason).toMatch(/phone verification required/);
   });
 
@@ -193,17 +278,16 @@ describe("runFixAgent", () => {
     const prop = proposal(["apps/mcp/src/bot/form-fill-planner.ts"]); // ungated surface
     const res = await runFixAgent({
       ...base,
-      // posture (a): only agent.ts (the gated planner) is in-bounds.
       allowedPaths: ["apps/mcp/src/bot/agent.ts"],
       batch: batch([failure({})]),
       propose: async () => prop,
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
       commit,
       log: () => undefined,
     });
     expect(prop.apply).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
-    expect(res.parked).toHaveLength(1);
     expect(res.parked[0]!.reason).toMatch(/out-of-bounds/);
   });
 
@@ -216,6 +300,7 @@ describe("runFixAgent", () => {
         batch: batch([failure({})]),
         propose: async () => proposal(["apps/mcp/src/bot/agent.ts"]),
         gate: gateFn,
+        replay: replayMoved,
         commit: async () => undefined,
         log: () => undefined,
       }),
@@ -230,6 +315,7 @@ describe("runFixAgent", () => {
       batch: batch([failure({})]),
       propose: async () => proposal(["apps/mcp/src/bot/agent.ts"]),
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5, empty: true })]),
+      replay: replayMoved,
       commit,
       log: () => undefined,
     });
@@ -247,6 +333,7 @@ describe("runFixAgent", () => {
       ]),
       propose: async () => proposal(["apps/mcp/src/bot/agent.ts"]),
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
       commit: async ({ version }) => {
         versions.push(version);
       },

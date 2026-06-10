@@ -17,15 +17,26 @@
 //   2. A fix may only touch `allowedPaths` (posture a: the gated post-OAuth-nav
 //      surface). corpus/eval is ALWAYS forbidden — the agent can't grade its own
 //      homework.
-//   3. A fix commits ONLY when the gate's regress bucket stays 100% AND the
-//      target-holdout didn't drop below the pre-fix baseline.
-//   4. After maxAttemptsPerCluster (K=3) gate-red iterations, the cluster is
-//      parked as a wall-candidate — the residual, never a pre-judged category.
+//   3. A fix commits ONLY when (a) the gate's regress bucket stays 100% AND the
+//      target-holdout didn't drop below baseline (didn't break known-good), AND
+//      (b) the cluster's own captured stuck pages now MOVE — the planner picks a
+//      different action than the one that left them stuck (the fix demonstrably
+//      unstuck the thing it was written for). "Iterate-to-green": keep
+//      re-proposing until every verifiable page in the cluster moves, or K/wall.
+//   4. After maxAttemptsPerCluster (K=3) attempts without a verified-green fix,
+//      the cluster is parked as a wall-candidate — the residual, never a
+//      pre-judged category.
+//
+// The live end-to-end confirmation (does the WHOLE signup now complete) stays
+// for the next dogfood run — re-driving live signups in-loop is slow, flaky, and
+// stateful (the reason the offline eval exists). The captured-page verify is the
+// most we can prove today; the next-day OF#2 confirms end-to-end.
 //
 // Operator-only (housekeeper/, excluded from the npm tarball).
 
 import type { FailureStage } from "../bot/failure-stage.js";
 import type { EvalGateResult } from "../bot/eval-gate.js";
+import type { PostVerifyStep } from "../bot/agent.js";
 import { assertStagingPrerelease, computeNextRc } from "./release-guard.js";
 import type { FixBatch, FixBatchFailure } from "./fix-batch.js";
 
@@ -47,6 +58,11 @@ export interface FixCluster {
   failures: FixBatchFailure[];
   // Union of capture refs across the cluster — the fix-agent's evidence.
   capture_refs: string[];
+  // The captured stuck pages this cluster must un-stick. The verifier replays
+  // the planner against each capture file AFTER a fix and requires the chosen
+  // action to differ from `observed`. Failures without a captured terminal
+  // round contribute nothing here.
+  pages: Array<{ service: string; captureRef: string; observed: PostVerifyStep }>;
 }
 
 // A proposed fix for a cluster. The orchestrator only needs the touched paths
@@ -79,6 +95,12 @@ export type FixProposer = (
 // Run the eval gate and return the verdict.
 export type GateRunner = () => Promise<EvalGateResult>;
 
+// Replay the planner against a captured page FILE and return the action it now
+// picks. MUST reflect the just-applied fix — the real impl runs in a fresh
+// process so it sees the edited source (an in-process import would use the stale
+// planner). `captureRef` is the path to the terminal round's capture JSON.
+export type ClusterReplay = (captureRef: string) => Promise<PostVerifyStep>;
+
 // Commit a green fix to staging with the bumped RC version.
 export type Committer = (input: {
   cluster: FixCluster;
@@ -90,6 +112,9 @@ export interface FixAgentOpts {
   batch: FixBatch;
   propose: FixProposer;
   gate: GateRunner;
+  // Replays a captured page through the (freshly-edited) planner so the loop can
+  // verify the fix actually moved the stuck page before committing.
+  replay: ClusterReplay;
   commit: Committer;
   branch: string;
   currentVersion: string;
@@ -125,6 +150,10 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
   const byKey = new Map<string, FixCluster>();
   for (const f of batch.failures) {
     const key = `${f.failure_stage}:${f.signature}`;
+    const page =
+      f.terminal_capture_ref !== undefined && f.terminal_page !== undefined
+        ? { service: f.service, captureRef: f.terminal_capture_ref, observed: f.terminal_page.observed }
+        : undefined;
     const existing = byKey.get(key);
     if (existing === undefined) {
       byKey.set(key, {
@@ -134,6 +163,7 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
         services: [f.service],
         failures: [f],
         capture_refs: [...f.capture_refs],
+        pages: page !== undefined ? [page] : [],
       });
     } else {
       if (!existing.services.includes(f.service)) existing.services.push(f.service);
@@ -141,6 +171,7 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
       for (const r of f.capture_refs) {
         if (!existing.capture_refs.includes(r)) existing.capture_refs.push(r);
       }
+      if (page !== undefined) existing.pages.push(page);
     }
   }
   // Biggest blast radius first: most services, then most failures.
@@ -177,6 +208,53 @@ function holdoutHeld(verdict: EvalGateResult, baseline: EvalGateResult): boolean
   return verdict.targetHoldout.passed >= baseline.targetHoldout.passed;
 }
 
+// ── Fix verification (did the fix actually unstick the page?) ────────
+
+function actionLocator(s: PostVerifyStep): string {
+  if ("selector" in s && typeof s.selector === "string") return `sel:${s.selector}`;
+  if (s.kind === "navigate") return `url:${s.url}`;
+  return "";
+}
+
+// Two planner actions are "the same" iff same kind AND same locator. A fix that
+// leaves the planner picking the identical action on a stuck page did nothing
+// for that page — it hasn't moved.
+export function sameAction(a: PostVerifyStep, b: PostVerifyStep): boolean {
+  return a.kind === b.kind && actionLocator(a) === actionLocator(b);
+}
+
+export interface ClusterVerify {
+  verifiable: number; // captured pages we could replay
+  moved: number; // verifiable pages whose action changed post-fix
+  allMoved: boolean; // verifiable >= 1 AND moved === verifiable
+  stuckServices: string[]; // services whose page did NOT move
+}
+
+// Replay each captured stuck page through the (freshly-edited) planner; a page
+// "moved" if the planner now picks a different action than the one that left it
+// stuck. The fix is verified iff every verifiable page moved (and there's at
+// least one). This proves "the fix changed behavior on the exact page that was
+// stuck" — the most we can confirm today; live end-to-end is the next-day run.
+export async function verifyClusterMoved(
+  cluster: FixCluster,
+  replay: ClusterReplay,
+): Promise<ClusterVerify> {
+  let moved = 0;
+  const stuck: string[] = [];
+  for (const { service, captureRef, observed } of cluster.pages) {
+    const chosen = await replay(captureRef);
+    if (sameAction(chosen, observed)) stuck.push(service);
+    else moved += 1;
+  }
+  const verifiable = cluster.pages.length;
+  return {
+    verifiable,
+    moved,
+    allMoved: verifiable >= 1 && moved === verifiable,
+    stuckServices: stuck,
+  };
+}
+
 // ── The orchestration ───────────────────────────────────────────────
 
 export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
@@ -201,6 +279,17 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
   }
 
   for (const cluster of clusters) {
+    // Can't verify a fix with no captured page — don't commit blind. Park as a
+    // wall-candidate (the honest "we can't confirm a fix here today"), and skip
+    // burning the coding agent on something we couldn't prove either way.
+    if (cluster.pages.length === 0) {
+      result.walls.push(
+        wallWith(cluster, 0, "no captured page to verify a fix against — cannot confirm a fix today"),
+      );
+      log(`cluster ${cluster.id}: WALL-candidate — unverifiable (no captured page)`);
+      continue;
+    }
+
     let committed = false;
     let priorFeedback: string | undefined;
     let wallReason: string | undefined;
@@ -235,22 +324,36 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
       }
 
       await proposal.apply();
-      const verdict = await opts.gate();
 
-      // The empty-regress gate is vacuously green; refuse to commit against a
-      // meaningless gate (don't ship a "fix" nothing guarded).
+      // Guard 1 — didn't break known-good. The empty-regress gate is vacuously
+      // green; refuse to commit against a meaningless gate.
+      const verdict = await opts.gate();
       const regressOk = verdict.regressPassed && !verdict.emptyRegress;
-      if (regressOk && holdoutHeld(verdict, baseline)) {
-        await opts.commit({ cluster, proposal, version: nextVersion });
-        result.committed.push({ cluster_id: cluster.id, version: nextVersion, summary: proposal.summary });
-        log(`cluster ${cluster.id}: committed ${nextVersion} — ${proposal.summary}`);
-        nextVersion = computeNextRc(nextVersion);
-        committed = true;
-      } else {
+      if (!regressOk || !holdoutHeld(verdict, baseline)) {
         await proposal.revert();
         priorFeedback = gateFeedback(verdict, baseline);
-        log(`cluster ${cluster.id}: attempt ${attempt}/${K} red — ${priorFeedback}`);
+        log(`cluster ${cluster.id}: attempt ${attempt}/${K} red (regression) — ${priorFeedback}`);
+        continue;
       }
+
+      // Guard 2 — the fix actually unstuck THIS cluster's pages (iterate-to-green).
+      const verify = await verifyClusterMoved(cluster, opts.replay);
+      if (!verify.allMoved) {
+        await proposal.revert();
+        priorFeedback =
+          `gate stayed green but the fix did not change the planner's action on ` +
+          `stuck page(s): ${verify.stuckServices.join(", ")}. Make the planner pick ` +
+          `a different action on those pages.`;
+        log(`cluster ${cluster.id}: attempt ${attempt}/${K} not-unstuck (${verify.moved}/${verify.verifiable} moved)`);
+        continue;
+      }
+
+      // Verified: no regression AND every stuck page moved.
+      await opts.commit({ cluster, proposal, version: nextVersion });
+      result.committed.push({ cluster_id: cluster.id, version: nextVersion, summary: proposal.summary });
+      log(`cluster ${cluster.id}: committed ${nextVersion} (${verify.moved}/${verify.verifiable} pages unstuck) — ${proposal.summary}`);
+      nextVersion = computeNextRc(nextVersion);
+      committed = true;
     }
 
     if (!committed) {
@@ -258,7 +361,7 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
         result.walls.push(wallWith(cluster, K, wallReason));
         log(`cluster ${cluster.id}: WALL — ${wallReason}`);
       } else if (!result.parked.some((p) => p.cluster_id === cluster.id)) {
-        const reason = `no fix passed the gate after ${K} attempt(s); no articulable infra reason`;
+        const reason = `no fix both held the gate AND unstuck the page after ${K} attempt(s); no articulable infra reason`;
         result.walls.push(wallWith(cluster, K, reason));
         log(`cluster ${cluster.id}: WALL-candidate — ${reason}`);
       }
