@@ -1590,6 +1590,17 @@ async function executeStep(
         candidates = await browser.extractLabeledCredentialCandidates();
         match = candidates.find((c) => labelMatchesHint(c.label, step.label_hint));
       }
+      // Current-account resource resolution (algolia class): the skill captured
+      // a POST-redirect URL with the original account's resource id
+      // (/apps/86WV27C86H/dashboard), so on replay it points at someone else's
+      // app → no labels at all. Re-enter at the host root; a logged-in service
+      // redirects to the CURRENT account's equivalent, where the creds render.
+      // Only fires when the page yielded ZERO labeled candidates, so a
+      // successfully-extracting skill never takes this path.
+      if (match === undefined && candidates.length === 0 && (await reEnterAtAccountRoot(browser))) {
+        candidates = await browser.extractLabeledCredentialCandidates();
+        match = candidates.find((c) => labelMatchesHint(c.label, step.label_hint));
+      }
       if (match === undefined) {
         throw new Error(
           `No labeled credential matches label_hint=${step.label_hint} (for ${step.produces}).`,
@@ -2556,6 +2567,39 @@ export function settledOnProductPage(currentUrl: string, expectedHost: string): 
   // OAuth-callback param → the session isn't established yet.
   if (LOGIN_PATH_RE.test(u.pathname)) return false;
   if (u.searchParams.has("code") || u.searchParams.has("state")) return false;
+  return true;
+}
+
+// A path segment that's an account/run-specific opaque resource id — a UUID, a
+// long hex blob, or an uppercase-alphanumeric id like algolia's app id
+// (86WV27C86H). A captured URL bearing one points at the ORIGINAL account's
+// resource on replay. Exported for tests.
+export function pathHasOpaqueResourceId(path: string): boolean {
+  return path.split("/").some((seg) => {
+    if (seg.length < 8) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return true; // uuid
+    if (/^[0-9a-f]{16,}$/i.test(seg)) return true; // long hex blob
+    // uppercase-heavy alphanumeric id (algolia app id): has a digit, no
+    // lowercase, ≥8 chars — distinguishes an opaque id from a route slug.
+    if (/^[A-Z0-9]{8,}$/.test(seg) && /[0-9]/.test(seg)) return true;
+    return false;
+  });
+}
+
+// Re-enter at the product's host root so a logged-in service redirects to the
+// CURRENT account's resource (instead of the captured account's). Returns true
+// when it re-navigated (the caller should re-extract). No-op when the URL has
+// no opaque resource id, so it can't perturb normal extracts.
+async function reEnterAtAccountRoot(browser: BrowserController): Promise<boolean> {
+  let u: URL;
+  try {
+    u = new URL(browser.currentUrl());
+  } catch {
+    return false;
+  }
+  if (!pathHasOpaqueResourceId(u.pathname)) return false;
+  await browser.goto(`${u.protocol}//${u.host}/`);
+  await browser.wait(2);
   return true;
 }
 
