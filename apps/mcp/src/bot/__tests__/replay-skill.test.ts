@@ -2113,6 +2113,43 @@ describe("settledOnProductPage (same-domain hosted-login settle)", () => {
   });
 });
 
+describe("rebaseSubdomain (per-account subdomain, kinde class)", () => {
+  it("rewrites a captured account subdomain to the live session's subdomain", async () => {
+    const { rebaseSubdomain } = await import("../replay-skill.js");
+    expect(
+      rebaseSubdomain("https://tsq688378.kinde.com/admin/cx/apis", "https://tsq999111.kinde.com/admin"),
+    ).toBe("https://tsq999111.kinde.com/admin/cx/apis");
+  });
+  it("is a no-op when the host already matches (same account)", async () => {
+    const { rebaseSubdomain } = await import("../replay-skill.js");
+    expect(rebaseSubdomain("https://tsq999.kinde.com/x", "https://tsq999.kinde.com/y")).toBe(
+      "https://tsq999.kinde.com/x",
+    );
+  });
+  it("is a no-op across different products (won't hijack an OAuth redirect)", async () => {
+    const { rebaseSubdomain } = await import("../replay-skill.js");
+    expect(rebaseSubdomain("https://app.kinde.com/x", "https://accounts.google.com/o")).toBe(
+      "https://app.kinde.com/x",
+    );
+  });
+  it("is a no-op when there is no live host yet (about:blank, first navigate)", async () => {
+    const { rebaseSubdomain } = await import("../replay-skill.js");
+    expect(rebaseSubdomain("https://tsq688378.kinde.com/x", "about:blank")).toBe(
+      "https://tsq688378.kinde.com/x",
+    );
+  });
+});
+
+describe("registrableDomain", () => {
+  it("collapses per-account subdomains to the registrable domain", async () => {
+    const { registrableDomain } = await import("../replay-skill.js");
+    expect(registrableDomain("tsq688378.kinde.com")).toBe("kinde.com");
+    expect(registrableDomain("app.kinde.com")).toBe("kinde.com");
+    expect(registrableDomain("dashboard.algolia.com")).toBe("algolia.com");
+    expect(registrableDomain("kinde.com")).toBe("kinde.com");
+  });
+});
+
 describe("pathHasOpaqueResourceId (current-account resource resolution)", () => {
   it("flags an algolia app-id path segment", async () => {
     const { pathHasOpaqueResourceId } = await import("../replay-skill.js");
