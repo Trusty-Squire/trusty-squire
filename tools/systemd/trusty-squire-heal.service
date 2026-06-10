@@ -27,12 +27,14 @@ WorkingDirectory=%h/proj-ts
 # session.json (an explicit env value still wins if you set one).
 EnvironmentFile=%h/.config/trusty-squire/harvester.env
 # The daily autonomous engine: verify (keep the registry honest) → discover
-# across the curated ~100-service queue (maximize skills) → one digest
+# across the curated ~300-service candidate queue (maximize skills) → one digest
 # carrying both objective functions (skills-in-registry + discovery success
 # rate). --from sources the curated sweep; --limit caps how many services one
-# pass attempts. Drop --from to fall back to on-demand telemetry-candidate
-# discovery instead of the curated sweep.
-ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once --telegram --from=tools/housekeeper-services.yaml --limit=100
+# pass attempts (kept well under what fits the 8h timeout at ~6min/signup).
+# skip-active drops already-skilled services at runtime, so the freed budget
+# always goes to net-new coverage. Drop --from to fall back to on-demand
+# telemetry-candidate discovery instead of the curated sweep.
+ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once --telegram --from=tools/discovery-candidates.yaml --limit=80
 # C2 — the OUTPUT side of the loop. After the run measures, the holistic
 # fix-agent reads the failure batch from the capture dir, clusters by root
 # cause, proposes a generalizing fix per cluster, reconciles it against the
