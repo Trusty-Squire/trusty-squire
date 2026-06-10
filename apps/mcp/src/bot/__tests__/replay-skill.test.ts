@@ -2092,6 +2092,27 @@ describe("replaySkill — rc.8 fallback fixes", () => {
 
 // ── URL drift detection + OAuth recovery (0.8.2-rc.22) ───────────────
 
+describe("settledOnProductPage (same-domain hosted-login settle)", () => {
+  it("is NOT settled while still on the service's own /signin?code= handoff (weaviate)", async () => {
+    const { settledOnProductPage } = await import("../replay-skill.js");
+    expect(
+      settledOnProductPage("https://console.weaviate.cloud/signin?code=54e6b449ef71", "console.weaviate.cloud"),
+    ).toBe(false);
+  });
+  it("is NOT settled on a lingering ?code= callback param even off the login path", async () => {
+    const { settledOnProductPage } = await import("../replay-skill.js");
+    expect(settledOnProductPage("https://app.x.co/overview?code=abc", "app.x.co")).toBe(false);
+  });
+  it("IS settled once on the product host and clear of the auth intermediary", async () => {
+    const { settledOnProductPage } = await import("../replay-skill.js");
+    expect(settledOnProductPage("https://console.weaviate.cloud/overview", "console.weaviate.cloud")).toBe(true);
+  });
+  it("is NOT settled on a different host", async () => {
+    const { settledOnProductPage } = await import("../replay-skill.js");
+    expect(settledOnProductPage("https://accounts.google.com/o/oauth2", "console.weaviate.cloud")).toBe(false);
+  });
+});
+
 describe("detectNavigationDrift", () => {
   it("returns null when URLs match exactly", async () => {
     const { detectNavigationDrift } = await import("../replay-skill.js");
