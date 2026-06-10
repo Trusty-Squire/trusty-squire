@@ -155,8 +155,11 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   if (stepsResult.kind !== "ok") return stepsResult;
 
   // Stage 1.c — infer signup_url + oauth_provider from round 0 + steps.
+  // Generalize per-run session params out of the captured entry URL so a stale
+  // session token (kinde-class psid=, redirect_to=) doesn't make replay's first
+  // navigation dead.
   const firstRound = verification.rounds[0]!;
-  const signupUrl = firstRound.state.url;
+  const signupUrl = generalizeCapturedUrl(firstRound.state.url);
   const oauthProvider = inferOAuthProvider(stepsResult.steps);
 
   // rc.24 — guarantee the first step is a navigate. When the captured
@@ -631,7 +634,7 @@ function translateStep(
     case "navigate":
       return {
         kind: "ok",
-        step: { kind: "navigate", url: observed.url, provenance },
+        step: { kind: "navigate", url: generalizeCapturedUrl(observed.url), provenance },
       };
 
     case "click": {
@@ -873,6 +876,44 @@ export function pickStableDomHint(
   return hint.name !== undefined || hint.id !== undefined ? hint : undefined;
 }
 
+// A URL path segment that can't be reproduced on a fresh account: a UUID or a
+// long opaque/hex token (a created-resource id, a session id baked into a
+// path). Such a segment makes an href_hint or navigate url run-specific —
+// replay lands nowhere — so we generalize it out. A normal route slug
+// ("dashboard", "api-keys") is NOT ephemeral and is kept. Exported for tests.
+export function hasEphemeralPathSegment(path: string): boolean {
+  return path.split("/").some((seg) => {
+    if (seg.length === 0) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return true; // uuid
+    if (/^[0-9a-f]{24,}$/i.test(seg)) return true; // long hex blob
+    return false;
+  });
+}
+
+// Query params whose VALUE is a per-run session/auth token. Stripping them
+// turns a captured deep link back into a stable entry replay can reproduce.
+const EPHEMERAL_URL_PARAM =
+  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce)$/i;
+
+// Strip per-run session params from a captured URL, byte-preserving any URL
+// that has none. Used for navigate steps + the inferred signup_url so a stale
+// session token doesn't make the entry navigation dead on replay.
+export function generalizeCapturedUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    let changed = false;
+    for (const key of [...u.searchParams.keys()]) {
+      if (EPHEMERAL_URL_PARAM.test(key)) {
+        u.searchParams.delete(key);
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : url;
+  } catch {
+    return url; // relative / malformed — leave it; the prepended navigate covers entry
+  }
+}
+
 // The path of a link element's href (no origin / query / hash), or null
 // when the element isn't a link or has no usable in-app href. Anchors
 // to external/mailto/javascript hrefs are skipped — they aren't the
@@ -890,6 +931,11 @@ export function pickHrefHint(el: InteractiveElement): string | null {
     // to the same pathname.
     const path = new URL(raw, "https://x.invalid").pathname;
     if (path === "/" || path.length === 0) return null;
+    // Drop hrefs that carry a run-specific resource id (a created-resource
+    // UUID, a session blob). They can't be reproduced on a fresh account, and
+    // a stale href_hint biases replay toward a dead link; the click's
+    // text_match carries it instead.
+    if (hasEphemeralPathSegment(path)) return null;
     return path;
   } catch {
     return null;
