@@ -69,6 +69,8 @@ export class InMemorySkillStore implements SkillStore {
       discover_attempted: input.discover_attempted ?? 0,
       discover_succeeded: input.discover_succeeded ?? 0,
       skills_active: input.skills_active ?? 0,
+      hit_served: input.hit_served ?? 0,
+      hit_total: input.hit_total ?? 0,
       mcp_version: input.mcp_version ?? null,
     };
     this.healRuns.push(rec);

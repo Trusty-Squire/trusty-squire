@@ -391,6 +391,12 @@ model HealRun {
   discover_succeeded Int @default(0)
   // OF#1: snapshot of the active-skill count when this pass reported.
   skills_active      Int @default(0)
+  // OF#3: registry hit-rate snapshot — of all provisions in the trailing
+  // window, how many were served by a skill (replay) vs needed the bot.
+  // hit_served / hit_total = the probability a user's provision already had a
+  // skill. Stamped server-side at heartbeat (the registry owns the events).
+  hit_served         Int @default(0)
+  hit_total          Int @default(0)
   // mcp version of the housekeeper that reported, for drift debugging.
   mcp_version String?
 

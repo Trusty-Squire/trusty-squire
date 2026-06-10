@@ -422,6 +422,8 @@ export class PrismaSkillStore implements SkillStore {
         discover_attempted: input.discover_attempted ?? 0,
         discover_succeeded: input.discover_succeeded ?? 0,
         skills_active: input.skills_active ?? 0,
+        hit_served: input.hit_served ?? 0,
+        hit_total: input.hit_total ?? 0,
         ...(input.now !== undefined ? { ran_at: input.now } : {}),
         ...(input.mcp_version !== undefined ? { mcp_version: input.mcp_version } : {}),
       },
@@ -649,6 +651,8 @@ type PrismaHealRunRow = {
   discover_attempted: number | null;
   discover_succeeded: number | null;
   skills_active: number | null;
+  hit_served: number | null;
+  hit_total: number | null;
   mcp_version: string | null;
 };
 
@@ -665,6 +669,8 @@ function toHealRunRecord(row: PrismaHealRunRow): HealRunRecord {
     discover_attempted: row.discover_attempted ?? 0,
     discover_succeeded: row.discover_succeeded ?? 0,
     skills_active: row.skills_active ?? 0,
+    hit_served: row.hit_served ?? 0,
+    hit_total: row.hit_total ?? 0,
     mcp_version: row.mcp_version,
   };
 }

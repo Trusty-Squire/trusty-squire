@@ -29,6 +29,8 @@ interface HealRunRow {
   discover_attempted: number;
   discover_succeeded: number;
   skills_active: number;
+  hit_served: number;
+  hit_total: number;
   mcp_version: string | null;
 }
 

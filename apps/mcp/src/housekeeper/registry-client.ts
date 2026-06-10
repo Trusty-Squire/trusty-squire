@@ -183,7 +183,7 @@ export class VerifierRegistryClient {
     discover_attempted?: number;
     discover_succeeded?: number;
     mcp_version?: string;
-  }): Promise<{ skills_active: number }> {
+  }): Promise<{ skills_active: number; hit_served: number; hit_total: number }> {
     const url = `${this.baseUrl}/admin/heal-heartbeat`;
     const res = await this.fetchFn(url, {
       method: "POST",
@@ -196,9 +196,18 @@ export class VerifierRegistryClient {
     if (!res.ok) {
       throw new Error(`postHealHeartbeat: ${res.status} ${res.statusText}`);
     }
-    // The registry stamps + returns OF#1 (active-skill count) at heartbeat
-    // time — the source of truth for "skills in the registry".
-    const body = (await res.json()) as { skills_active?: number };
-    return { skills_active: typeof body.skills_active === "number" ? body.skills_active : 0 };
+    // The registry stamps + returns the server-owned objectives at heartbeat
+    // time: OF#1 (active-skill count) and OF#3 (registry hit rate, served/total).
+    const body = (await res.json()) as {
+      skills_active?: number;
+      hit_served?: number;
+      hit_total?: number;
+    };
+    const num = (v: unknown): number => (typeof v === "number" ? v : 0);
+    return {
+      skills_active: num(body.skills_active),
+      hit_served: num(body.hit_served),
+      hit_total: num(body.hit_total),
+    };
   }
 }

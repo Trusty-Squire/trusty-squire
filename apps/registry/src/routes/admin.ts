@@ -428,6 +428,17 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       // stamp a snapshot onto this run (the time series the dashboard trends)
       // and echo it back so the housekeeper's digest can report it.
       const skillsActive = await opts.store.countActiveSkills();
+      // OF#3 — registry hit rate over the trailing 30d, from the provision
+      // event store (server-owned, like OF#1). replay_served / total = the
+      // probability a user's provision already had a skill. Omitted when the
+      // event store isn't wired (in-memory/test bootstraps), leaving 0/0.
+      let hitServed = 0;
+      let hitTotal = 0;
+      if (opts.provisionEventStore !== undefined) {
+        const hb = await opts.provisionEventStore.cacheHitBreakdown(30 * 86_400_000);
+        hitServed = hb.replay_served;
+        hitTotal = hb.total;
+      }
       const rec = await opts.store.recordHealRun({
         verified: intField("verified"),
         demoted: intField("demoted"),
@@ -437,13 +448,20 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
         discover_attempted: intField("discover_attempted"),
         discover_succeeded: intField("discover_succeeded"),
         skills_active: skillsActive,
+        hit_served: hitServed,
+        hit_total: hitTotal,
         ...(typeof b["mcp_version"] === "string"
           ? { mcp_version: (b["mcp_version"] as string).slice(0, 40) }
           : {}),
       });
-      reply
-        .code(201)
-        .send({ ok: true, id: rec.id, ran_at: rec.ran_at.toISOString(), skills_active: skillsActive });
+      reply.code(201).send({
+        ok: true,
+        id: rec.id,
+        ran_at: rec.ran_at.toISOString(),
+        skills_active: skillsActive,
+        hit_served: hitServed,
+        hit_total: hitTotal,
+      });
     },
   );
 };

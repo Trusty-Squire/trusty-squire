@@ -550,9 +550,10 @@ function renderObjectivesSection(
     `<section id="objectives"><h2>Objective functions</h2>` +
     `<div class="desc">What this project optimizes for, every autonomous run. ` +
     `<b>OF#1</b> — maximize skills in the registry. <b>OF#2</b> — lift the ` +
-    `discovery success rate the housekeeper sees. Watch them rise over time. ` +
-    `The <b>RC</b> column is the release candidate that ran: promote ` +
-    `next&rarr;latest once OF#2 holds across runs on a given RC.</div>`;
+    `discovery success rate the housekeeper sees. <b>OF#3</b> — registry hit ` +
+    `rate: when a user provisions, the chance a skill already exists. Watch ` +
+    `them rise over time. The <b>RC</b> column is the release candidate that ` +
+    `ran: promote next&rarr;latest once OF#2 holds across runs on a given RC.</div>`;
 
   // Latest discovery rate from the most recent run that actually attempted
   // discovery (a verify-only pass has attempted 0 and isn't a data point).
@@ -561,6 +562,10 @@ function renderObjectivesSection(
     latestDiscover !== undefined
       ? pct(latestDiscover.discover_succeeded, latestDiscover.discover_attempted)
       : "—";
+  // Latest hit rate from the most recent run that saw any provisions.
+  const latestHit = healRuns.find((r) => r.hit_total > 0);
+  const latestHitRate =
+    latestHit !== undefined ? pct(latestHit.hit_served, latestHit.hit_total) : "—";
 
   const kpis =
     `<div class="northstar"><div class="stats">` +
@@ -568,6 +573,8 @@ function renderObjectivesSection(
     `<div class="v" style="color:var(--accent)">${liveSkillCount}</div></div>` +
     `<div class="stat"><div class="k">OF#2 · discovery success (latest)</div>` +
     `<div class="v">${latestRate}</div></div>` +
+    `<div class="stat"><div class="k">OF#3 · registry hit rate (latest)</div>` +
+    `<div class="v">${latestHitRate}</div></div>` +
     `</div>`;
 
   if (healRuns.length === 0) {
@@ -589,17 +596,19 @@ function renderObjectivesSection(
         r.discover_attempted > 0
           ? `${r.discover_succeeded}/${r.discover_attempted}`
           : "—";
+      const hit = r.hit_total > 0 ? pct(r.hit_served, r.hit_total) : "—";
       return `<tr>
         <td>${formatDate(r.ran_at)}</td>
         <td>${r.mcp_version ?? "—"}</td>
         <td class="num">${r.skills_active}</td>
         <td class="num">${rate}</td>
         <td class="num">${counts}</td>
+        <td class="num">${hit}</td>
       </tr>`;
     })
     .join("");
   const trend = `<div class="ruled" style="margin-top:16px"><table>
-      <thead><tr><th>run</th><th>RC</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th></tr></thead>
+      <thead><tr><th>run</th><th>RC</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th><th class="num">OF#3 hit</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
   return head + kpis + trend + `</div></section>`;
