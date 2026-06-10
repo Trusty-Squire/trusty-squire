@@ -155,6 +155,38 @@ describe("YamlSeedQueue", () => {
     expect(tasks[0]).toMatchObject({ service: "c" });
   });
 
+  it("skips services that already have an active skill (excludeActiveFn)", async () => {
+    const yamlText = `services:
+  - { slug: ipinfo }
+  - { slug: weaviate }
+  - { slug: resend }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+      // ipinfo + resend already active → only the uncovered weaviate remains.
+      excludeActiveFn: async () => new Set(["ipinfo", "resend"]),
+    });
+    const tasks = await queue.fetch(10);
+    expect(tasks.map((t) => (t.kind === "discover" ? t.service : ""))).toEqual(["weaviate"]);
+  });
+
+  it("falls back to the full pool when the active lookup fails", async () => {
+    const yamlText = `services:
+  - { slug: a }
+  - { slug: b }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+      excludeActiveFn: async () => {
+        throw new Error("registry down");
+      },
+    });
+    const tasks = await queue.fetch(10);
+    expect(tasks).toHaveLength(2);
+  });
+
   it("caps results to the requested limit", async () => {
     const yamlText = `services:
 ${Array.from({ length: 30 }, (_, i) => `  - { slug: svc${i} }`).join("\n")}
