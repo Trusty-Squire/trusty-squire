@@ -117,4 +117,21 @@ describe("heal heartbeat + status panel (T10)", () => {
     expect(html).toContain("3/10");
     await server.close();
   });
+
+  it("stamps the RC (mcp_version) on the run and surfaces it as the promote signal", async () => {
+    const { server } = await setup();
+    // C5 — the housekeeper stamps the release candidate it ran on each pass.
+    const post = await postHeartbeat(server, {
+      verified: 4, demoted: 0, quarantined: 0, reskilled: 1, needs_human: 0,
+      discover_attempted: 10, discover_succeeded: 6, mcp_version: "0.9.13-rc.2",
+    });
+    expect(post.statusCode).toBe(201);
+
+    const page = await dashboard(server);
+    const html = page.body;
+    // The objectives trend carries the RC column so OF#2 can be read per-RC.
+    expect(html).toContain("0.9.13-rc.2");
+    expect(html).toContain(">RC<");
+    await server.close();
+  });
 });

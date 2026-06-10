@@ -26,6 +26,7 @@ import type { CleanupOutcome } from "./cleanup.js";
 import { handleReplay, type ReplayMode, type ReplayRunner } from "./modes/verify.js";
 import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
+import { VERSION } from "../version.js";
 
 export type { ReplayMode, ReplayRunner } from "./modes/verify.js";
 export type { DiscoveryBotRunner } from "./modes/discover.js";
@@ -271,6 +272,7 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
         needs_human: number;
         discover_attempted: number;
         discover_succeeded: number;
+        mcp_version?: string;
       }) => Promise<{ skills_active: number }>;
     };
     if (typeof c.postHealHeartbeat === "function") {
@@ -282,6 +284,10 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
         needs_human: Math.max(0, needsHuman),
         discover_attempted: discoverAttempted,
         discover_succeeded: discoverSucceeded,
+        // Stamp the RC the run executed (C5). Dogfooding `next` means each
+        // HealRun records which release candidate produced its OF#2 — that's
+        // the per-RC promote signal on the dashboard.
+        mcp_version: VERSION,
       });
       if (res !== undefined && typeof res.skills_active === "number") {
         skillsActive = res.skills_active;
