@@ -13,8 +13,9 @@ import { readFixBatch } from "../fix-batch.js";
 import { runFixAgent, type FixAgentResult } from "../fix-agent.js";
 import {
   codingAgentProposer,
-  evalGateRunner,
   gitCommitter,
+  makeClusterReplayRunner,
+  makeEvalGateRunner,
 } from "../fix-agent-runtime.js";
 
 // Posture (a): the fix-agent may only touch the gated post-OAuth navigation
@@ -102,7 +103,8 @@ export async function runFixMode(opts: {
     currentVersion: botVersion,
     allowedPaths: DEFAULT_ALLOWED_PATHS,
     propose: codingAgentProposer({ repoRoot, cliCommand, log }),
-    gate: evalGateRunner,
+    gate: makeEvalGateRunner({ repoRoot }),
+    replay: makeClusterReplayRunner({ repoRoot }),
     commit: gitCommitter({ repoRoot, push, log }),
     log,
   });

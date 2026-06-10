@@ -10,13 +10,108 @@ import { execFile } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { runEvalGate, type EvalGateResult } from "../bot/eval-gate.js";
-import type { Committer, FixCluster, FixProposal, FixProposer, GateRunner } from "./fix-agent.js";
+import type { PostVerifyStep } from "../bot/agent.js";
+import type { EvalGateResult } from "../bot/eval-gate.js";
+import type { GateBucketResult } from "../bot/eval-corpus.js";
+import type {
+  ClusterReplay,
+  Committer,
+  FixCluster,
+  FixProposal,
+  FixProposer,
+  GateRunner,
+} from "./fix-agent.js";
 
 const exec = promisify(execFile);
 
-// The real gate: run the temp-0 eval gate over the committed corpus.
-export const evalGateRunner: GateRunner = (): Promise<EvalGateResult> => runEvalGate();
+// Both the gate and the page replay must run in a FRESH process so they reflect
+// the coding agent's just-applied edits — an in-process import of the planner
+// would use the stale module. We shell out to the tsx dev-harnesses (eval-gate /
+// eval-page), which compile from current source on each run. cwd is apps/mcp so
+// the relative harness paths + corpus resolution work.
+function mcpDir(repoRoot: string): string {
+  return join(repoRoot, "apps/mcp");
+}
+
+interface ExecResult {
+  stdout: string;
+  code: number;
+}
+
+// Run a command, capturing stdout + exit code even on non-zero exit (the gate
+// exits 1 when regress < 100% — that's data, not an error).
+async function runCapturing(
+  cmd: string,
+  args: string[],
+  cwd: string,
+): Promise<ExecResult> {
+  try {
+    const { stdout } = await exec(cmd, args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+    return { stdout, code: 0 };
+  } catch (err) {
+    const e = err as { stdout?: string; code?: number };
+    if (typeof e.stdout === "string") {
+      return { stdout: e.stdout, code: typeof e.code === "number" ? e.code : 1 };
+    }
+    throw err;
+  }
+}
+
+// Parse the eval-gate's stdout into a structured verdict. The harness prints
+//   regress: X/X · target-tune: a/b · target-holdout: c/d
+// plus "REGRESS FAIL <service> <id> — <detail>" lines, and warns to stderr when
+// the corpus is empty (exit 0 but vacuous).
+export function parseGateOutput(stdout: string, code: number): EvalGateResult {
+  const m =
+    /regress:\s*(\d+)\/(\d+)\s*·\s*target-tune:\s*(\d+)\/(\d+)\s*·\s*target-holdout:\s*(\d+)\/(\d+)/.exec(
+      stdout,
+    );
+  const n = (i: number): number => (m !== null ? Number(m[i]) : 0);
+  const failures = [...stdout.matchAll(/REGRESS FAIL\s+(\S+)\s+(\S+)\s+—\s+(.*)/g)].map((x) => ({
+    service: x[1] ?? "",
+    id: x[2] ?? "",
+    detail: (x[3] ?? "").trim(),
+  }));
+  const bucket = (passed: number, total: number, fails: GateBucketResult["failures"] = []): GateBucketResult => ({
+    passed,
+    total,
+    failures: fails,
+  });
+  const regress = bucket(n(1), n(2), failures);
+  const emptyRegress = regress.total === 0;
+  return {
+    regress,
+    targetTune: bucket(n(3), n(4)),
+    targetHoldout: bucket(n(5), n(6)),
+    // exit 0 AND a non-empty regress bucket that's perfect.
+    regressPassed: code === 0 && !emptyRegress && regress.passed === regress.total,
+    emptyRegress,
+  };
+}
+
+// The real gate: shell the temp-0 eval gate over the committed corpus.
+export function makeEvalGateRunner(config: { repoRoot: string }): GateRunner {
+  return async (): Promise<EvalGateResult> => {
+    const r = await runCapturing("npx", ["tsx", "src/bot/eval-gate.ts"], mcpDir(config.repoRoot));
+    return parseGateOutput(r.stdout, r.code);
+  };
+}
+
+// The real replay: shell eval-page over the capture file and parse the STEP line.
+export function makeClusterReplayRunner(config: { repoRoot: string }): ClusterReplay {
+  return async (captureRef: string): Promise<PostVerifyStep> => {
+    const r = await runCapturing(
+      "npx",
+      ["tsx", "src/bot/eval-page.ts", captureRef],
+      mcpDir(config.repoRoot),
+    );
+    const m = /^STEP (.*)$/m.exec(r.stdout);
+    if (m === null || m[1] === undefined) {
+      throw new Error(`eval-page produced no STEP line for ${captureRef}`);
+    }
+    return JSON.parse(m[1]) as PostVerifyStep;
+  };
+}
 
 async function git(repoRoot: string, args: string[]): Promise<string> {
   const { stdout } = await exec("git", args, { cwd: repoRoot, maxBuffer: 32 * 1024 * 1024 });

@@ -11,6 +11,7 @@
     "src/bot/eval-onboarding.ts",
     "src/bot/eval-corpus.ts",
     "src/bot/eval-gate.ts",
+    "src/bot/eval-page.ts",
     "src/bot/build-corpus.ts",
     "src/bot/label-target.ts",
     "src/bot/failure-stats.ts",
