@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { resolveCaptureDir } from "../../bot/onboarding-capture.js";
 import { readFixBatch } from "../fix-batch.js";
 import { runFixAgent, type FixAgentResult } from "../fix-agent.js";
+import { appendFixAttempts } from "../fix-ledger.js";
 import {
   codingAgentProposer,
   gitCommitter,
@@ -97,7 +98,7 @@ export async function runFixMode(opts: {
     `fix pass: ${batch.failures.length} failure(s), bot=${botVersion}, branch=${branch}, push=${push}`,
   );
 
-  return runFixAgent({
+  const result = await runFixAgent({
     batch,
     branch,
     currentVersion: botVersion,
@@ -108,4 +109,26 @@ export async function runFixMode(opts: {
     commit: gitCommitter({ repoRoot, push, log }),
     log,
   });
+
+  // Close-the-loop (#1): record each committed fix as an OPEN attempt. A later
+  // heal pass grades it once that RC has re-run discovery on the targeted
+  // services (orchestrator → gradeLedgerAgainstPass → digest). A fix isn't
+  // "done" when it commits — it's done when the next run proves the rate moved.
+  if (result.committed.length > 0) {
+    const now = new Date().toISOString();
+    appendFixAttempts(
+      result.committed.map((c) => ({
+        rc_version: c.version,
+        cluster_id: c.cluster_id,
+        services: c.services,
+        signature: c.signature,
+        summary: c.summary,
+        committed_at: now,
+        status: "open" as const,
+      })),
+    );
+    log(`recorded ${result.committed.length} fix attempt(s) to the grading ledger`);
+  }
+
+  return result;
 }
