@@ -3885,6 +3885,11 @@ export class SignupAgent {
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
   // because each signup gets a fresh SignupAgent in index.ts.
   private llmCallCount = 0;
+  // Capture-chain round counter shared across the signup-form-fill phase
+  // (captureSignupFormRounds) and the post-verify loop so they form ONE
+  // contiguous chain. Stays 0 on the OAuth path (no form-fill capture), so
+  // post-verify starts at 0 exactly as before. Per-run instance → no reset.
+  private captureChainRound = 0;
   // Tracks which backend handled each call, for debugging cost/quality.
   // backends_used[i] is the .name string of the LLMClient that produced
   // the i-th reply this run.
@@ -4878,7 +4883,61 @@ export class SignupAgent {
         hint = `The previous submit produced validation errors. Visible page text: ${afterText.slice(0, 600)}`;
         continue;
       }
+      // Capture the signup-form preamble (email + password fills + the
+      // submit click) as the FIRST rounds of the chain, so a synthesized
+      // email-OTP skill's graph DISPATCHES the verification email before
+      // its await_email_code step. Without it the capture begins post-
+      // verify and the skill can never replay (zilliz). Only the email-form
+      // path reaches here (OAuth returns `already_oauth` earlier), so OAuth
+      // skills keep starting their chain at round 0.
+      await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
       return { kind: "submitted" };
+    }
+  }
+
+  // Emit the signup-form-fill rounds (email + password + submit) into the
+  // capture chain. Shares this.captureChainRound with the post-verify loop
+  // so the two phases form one contiguous 0..N chain. The captured email
+  // value is templatized to ${EMAIL_ALIAS} by the synthesizer; the
+  // generated throwaway password is baked literally (a fresh account each
+  // replay, so reuse is harmless). Best-effort — capture must never fail a
+  // signup.
+  private async captureSignupFormRounds(
+    service: string,
+    plan: SignupPlan,
+    inventory: InteractiveElement[],
+    fillValues: Record<FillValueKind, string>,
+  ): Promise<void> {
+    try {
+      const state = await this.browser.getState();
+      const emit = (observed: PostVerifyStep): void => {
+        captureOnboardingRound({
+          service,
+          round: this.captureChainRound,
+          oauth: false,
+          state,
+          inventory,
+          observed,
+        });
+        this.captureChainRound += 1;
+      };
+      for (const action of plan.actions) {
+        if (action.kind !== "fill") continue;
+        if (action.value_kind !== "email" && action.value_kind !== "password") continue;
+        emit({
+          kind: "fill",
+          selector: action.selector,
+          value: fillValues[action.value_kind],
+          reason: `Fill the signup ${action.value_kind}`,
+        });
+      }
+      emit({
+        kind: "click",
+        selector: plan.submit_selector,
+        reason: "Submit the signup form to dispatch the verification email",
+      });
+    } catch {
+      // Capture is a synthesis input + forensic aid; never fatal.
     }
   }
 
@@ -8426,8 +8485,10 @@ ${formatInventory(input.inventory)}`,
     // rejected the run as `missing_round`, and auto-promote silently
     // dropped it. By tracking `capturedRound` separately we get a
     // contiguous 0..N-1 chain regardless of how many planner re-plans
-    // happen mid-run.
-    let capturedRound = 0;
+    // happen mid-run. Continues from any signup-form preamble rounds the
+    // form-fill phase already captured (captureSignupFormRounds); 0 on the
+    // OAuth path, so this is unchanged for OAuth skills.
+    let capturedRound = this.captureChainRound;
     // 0.8.2-rc.12 — multi-cred-aware loop exit. Track the number of
     // distinct credential keys we've accumulated; if we're in a
     // multi-cred bundle (cloud_name, api_secret, application_id, …)
