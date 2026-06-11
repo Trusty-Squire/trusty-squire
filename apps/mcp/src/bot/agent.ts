@@ -3890,6 +3890,12 @@ export class SignupAgent {
   // contiguous chain. Stays 0 on the OAuth path (no form-fill capture), so
   // post-verify starts at 0 exactly as before. Per-run instance → no reset.
   private captureChainRound = 0;
+  // The stable signup-form entry URL the bot navigated to (e.g.
+  // cloud.zilliz.com/signup). captureSignupFormRounds stamps it as the
+  // preamble rounds' URL instead of the transient SPA URL getState() reads
+  // mid-fill (zilliz settles to /login/loading) — so the synthesized
+  // signup_url points a fresh replay at the real form, not a loading shell.
+  private resolvedSignupUrl: string | undefined;
   // Tracks which backend handled each call, for debugging cost/quality.
   // backends_used[i] is the .name string of the LLMClient that produced
   // the i-th reply this run.
@@ -4909,7 +4915,14 @@ export class SignupAgent {
     fillValues: Record<FillValueKind, string>,
   ): Promise<void> {
     try {
-      const state = await this.browser.getState();
+      const live = await this.browser.getState();
+      // Stamp the STABLE signup-form URL (not the transient SPA URL the SPA
+      // may have settled to mid-fill); the synthesizer derives signup_url
+      // from round 0's url, and a fresh replay must land on the real form.
+      const state = {
+        ...live,
+        url: this.resolvedSignupUrl ?? live.url,
+      };
       const emit = (observed: PostVerifyStep): void => {
         captureOnboardingRound({
           service,
@@ -5543,6 +5556,7 @@ export class SignupAgent {
       }
 
       steps.push(`Navigating to ${signupUrl}`);
+      this.resolvedSignupUrl = signupUrl;
       await this.browser.goto(signupUrl);
       // Clear any anti-bot interstitial BEFORE the landing read below.
       // goto() only awaits domcontentloaded, so a Cloudflare "Verifying you

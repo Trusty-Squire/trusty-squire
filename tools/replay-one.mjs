@@ -7,7 +7,28 @@
 //   node tools/replay-one.mjs <skill_id> [<skill_id> ...]
 import { createReplayRunner } from "../apps/mcp/dist/housekeeper/modes/verify.js";
 import { parseSkill } from "../packages/skill-schema/dist/skill.js";
+import { openSessionStorage } from "../apps/mcp/dist/session.js";
 import { readFileSync } from "node:fs";
+
+// Backfill the operator creds from the install session (same as the
+// housekeeper CLI). createReplayRunner wires the await_email_code inbox
+// poller ONLY when TRUSTY_SQUIRE_MACHINE_TOKEN is present — without this an
+// OTP skill's await_email_code step has no inbox and times out silently.
+if (
+  process.env.TRUSTY_SQUIRE_MACHINE_TOKEN === undefined ||
+  process.env.TRUSTY_SQUIRE_ACCOUNT_ID === undefined
+) {
+  try {
+    const session = await (await openSessionStorage()).read();
+    if (session !== null) {
+      process.env.TRUSTY_SQUIRE_MACHINE_TOKEN ??= session.machine_token;
+      process.env.TRUSTY_SQUIRE_ACCOUNT_ID ??= session.account_id;
+      process.env.TRUSTY_SQUIRE_API_BASE ??= session.api_base_url;
+    }
+  } catch {
+    // best-effort — a missing inbox token surfaces as a clean step failure
+  }
+}
 
 const base = (process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? "https://registry.trustysquire.ai").replace(/\/$/, "");
 const bearer = process.env.REGISTRY_ADMIN_BEARER ?? "";
