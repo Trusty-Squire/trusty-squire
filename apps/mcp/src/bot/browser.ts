@@ -1292,7 +1292,17 @@ export class BrowserController {
       // fall through — click() below will produce the canonical error
     }
     const locator = this.page.locator(selector);
-    const count = await locator.count();
+    // The count can throw "Execution context was destroyed" when an
+    // earlier fill already triggered a navigation/auto-submit (zilliz:
+    // typing email+password redirects before we reach the submit click).
+    // That race must NOT crash the whole signup — the page is already
+    // moving on, so treat the submit as effectively done and let the
+    // caller inspect the new page. MEASURED 2026-06-11 (zilliz /signup).
+    const count = await locator.count().catch(() => -1);
+    if (count < 0) {
+      await this.page.waitForLoadState("domcontentloaded").catch(() => {});
+      return;
+    }
     // A disabled submit means a required field or agreement checkbox
     // wasn't satisfied — throw a distinct `submit_disabled` so the
     // caller can re-plan to fix it, rather than wait out a generic
