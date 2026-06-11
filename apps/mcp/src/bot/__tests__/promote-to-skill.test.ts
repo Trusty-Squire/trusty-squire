@@ -66,6 +66,17 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     expect(generalizeCapturedUrl(cleanWithParam)).toBe(cleanWithParam);
   });
 
+  it("generalizeCapturedUrl strips a per-run email param (zilliz verify URL)", () => {
+    expect(
+      generalizeCapturedUrl(
+        "https://cloud.zilliz.com/signup/verify?&email=ghall284%40trustysquire.ai",
+      ),
+    ).toBe("https://cloud.zilliz.com/signup/verify");
+    expect(generalizeCapturedUrl("https://x.co/signup?email=a@b.co&plan=pro")).toBe(
+      "https://x.co/signup?plan=pro",
+    );
+  });
+
   it("isIdentityProviderUrl flags IdP domains, not service domains", () => {
     // The deepseek-N26 bug: round 0 landed on a Google domain mid-OAuth,
     // and the synthesizer adopted it as signup_url.
@@ -2651,10 +2662,64 @@ describe("collapseConsecutiveDuplicateSteps (porter ×N noise)", () => {
 
 describe("promoteToSkill — email verification (await_email_code)", () => {
   function otpRounds(service: string): OnboardingRoundCapture[] {
+    const signupForm = [
+      inventoryElement({
+        index: 0,
+        tag: "input",
+        type: "email",
+        name: "email",
+        placeholder: "Email",
+        selector: "input[name='email']",
+      }),
+      inventoryElement({
+        index: 1,
+        tag: "button",
+        visibleText: "Send code",
+        selector: "button.send-code",
+        role: "button",
+      }),
+    ];
     return [
+      // The signup-form preamble — captured so the replay graph is
+      // self-sufficient (email entered + code dispatched before the wait).
       {
         service,
         round: 0,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/signup",
+          title: "Sign up",
+          html: "<html><body>Sign up</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: signupForm,
+        observed: {
+          kind: "fill",
+          selector: "input[name='email']",
+          value: "jane.doe482@trustysquire.ai",
+          reason: "Fill the signup email",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/signup",
+          title: "Sign up",
+          html: "<html><body>Sign up</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: signupForm,
+        observed: {
+          kind: "click",
+          selector: "button.send-code",
+          reason: "Click Send code to dispatch the verification email",
+        },
+      },
+      {
+        service,
+        round: 2,
         oauth: false,
         state: {
           url: "https://cloud.example.com/signup/verify",
@@ -2681,7 +2746,7 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
       },
       {
         service,
-        round: 1,
+        round: 3,
         oauth: false,
         state: {
           url: "https://cloud.example.com/dashboard/keys",
@@ -2710,7 +2775,7 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
     ];
   }
 
-  it("synthesizes an OTP-code fill as an await_email_code step (not a baked literal)", () => {
+  it("synthesizes an OTP-code fill as await_email_code + an ${EMAIL_ALIAS} preamble", () => {
     const service = uniqueService();
     const { dir, runId } = setupCaptures(otpRounds(service));
     const result = promoteToSkill({ dir, service, run_id: runId });
@@ -2718,11 +2783,29 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
     if (result.kind !== "ok") return;
     const kinds = result.skill.steps.map((s) => s.kind);
     expect(kinds).toContain("await_email_code");
+    // The signup email is templatized so replay fills a fresh alias.
+    const emailFill = result.skill.steps.find(
+      (s) => s.kind === "fill" && s.value_template === "${EMAIL_ALIAS}",
+    );
+    expect(emailFill).toBeDefined();
     // The stale code must NOT be baked into a fill step.
     const baked = result.skill.steps.some(
       (s) => s.kind === "fill" && s.value_template.includes("482913"),
     );
     expect(baked).toBe(false);
+  });
+
+  it("REJECTS an OTP skill whose capture lacks the signup-form preamble", () => {
+    // The original zilliz bug: capture began on the verify page, so there's
+    // no ${EMAIL_ALIAS} fill before await_email_code → nothing dispatches a
+    // code. The replay-graph gate must catch it at synthesis.
+    const service = uniqueService();
+    const rounds = otpRounds(service).slice(2).map((r, i) => ({ ...r, round: i }));
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") return;
+    expect(result.error_kind).toBe("incomplete_replay_graph");
   });
 });
 

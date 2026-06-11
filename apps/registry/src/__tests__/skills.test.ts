@@ -118,6 +118,48 @@ describe("POST /skills", () => {
     await server.close();
   });
 
+  it("rejects a structurally-unreplayable skill with incomplete_replay_graph", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+
+    // Schema-valid, but await_email_code with no preceding ${EMAIL_ALIAS}
+    // fill — nothing dispatches a code on replay (the zilliz capture-began-
+    // on-the-verify-page bug). The static gate must reject it at publish.
+    const response = await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          oauth_provider: null,
+          steps: [
+            {
+              kind: "navigate",
+              url: "https://x.co/signup/verify",
+              provenance: { run_id: "r", round_index: 0 },
+            },
+            {
+              kind: "await_email_code",
+              provenance: { run_id: "r", round_index: 1 },
+            },
+            {
+              kind: "extract_via_copy_button",
+              near_text_hint: "API key",
+              provenance: { run_id: "r", round_index: 2 },
+            },
+          ],
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json();
+    expect(body.error).toBe("incomplete_replay_graph");
+    expect(body.code).toBe("await_code_without_email_dispatch");
+
+    await server.close();
+  });
+
   it("rejects a skill payload that fails Zod schema validation", async () => {
     const { skillStore, signer } = buildTestServer();
     const server = await buildServer({ skillStore, signer });

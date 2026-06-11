@@ -37,6 +37,7 @@
 import { createHash } from "node:crypto";
 import {
   parseSkill,
+  validateReplayGraph,
   SKILL_SCHEMA_VERSION,
   type Skill,
   type SkillCredentialSpec,
@@ -112,7 +113,11 @@ export interface PromoteRejection {
     // `unparseable_credential_label`: an extract round's hint reduced
     // to an empty `produces` after normalization (just "Copy", say).
     | "duplicate_credential_produces"
-    | "unparseable_credential_label";
+    | "unparseable_credential_label"
+    // The synthesized graph is schema-valid but can't replay (mirrors the
+    // registry's POST /skills gate): an await_email_code with no preceding
+    // ${EMAIL_ALIAS} fill + send-code, or a per-run param in signup_url.
+    | "incomplete_replay_graph";
   message: string;
   offending_round?: number;
   offending_step?: number;
@@ -304,9 +309,9 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   const skillId = deriveSkillId(candidate);
   const full: Skill = { ...candidate, skill_id: skillId };
 
+  let parsed: Skill;
   try {
-    const parsed = parseSkill(full);
-    return { kind: "ok", skill: parsed };
+    parsed = parseSkill(full);
   } catch (err) {
     return {
       kind: "rejected",
@@ -320,6 +325,23 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
       synthesizer_version: SYNTHESIZER_VERSION,
     };
   }
+
+  // Stage 1.f — fail fast on a structurally-unreplayable graph, BEFORE we
+  // sign + POST it (the registry enforces the same contract, but catching
+  // it here turns a 400 round-trip into a clear local rejection). zilliz-
+  // class: a capture that began on the post-signup verify page yields an
+  // await_email_code with no preceding email dispatch.
+  const graphCheck = validateReplayGraph(parsed);
+  if (!graphCheck.ok) {
+    return {
+      kind: "rejected",
+      stage: "synthesis",
+      error_kind: "incomplete_replay_graph",
+      message: graphCheck.reason,
+      synthesizer_version: SYNTHESIZER_VERSION,
+    };
+  }
+  return { kind: "ok", skill: parsed };
 }
 
 // ── Step synthesis ───────────────────────────────────────────────────
@@ -742,11 +764,20 @@ function translateStep(
       // ("API key name", "production-api-key") closes that gap.
       const literal = observed.value;
       const looksGenerated = /^[a-z]{3,15}-[a-z0-9]{4,12}$/.test(literal);
+      // An email value is the run's signup alias — templatize it to
+      // ${EMAIL_ALIAS} so replay fills a FRESH alias (and so the await_-
+      // email_code dispatch + poll target the same inbox). Baking the
+      // literal would replay the original run's email and, for OTP flows,
+      // dispatch the code to an inbox the replay doesn't own.
+      const looksLikeEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(literal.trim());
       const matchedInput = inventory.find((e) => e.selector === observed.selector);
       const inputLooksLikeTokenName =
         matchedInput !== undefined && looksLikeTokenNameInput(matchedInput);
-      const valueTemplate =
-        looksGenerated || inputLooksLikeTokenName ? "${TOKEN_NAME}" : literal;
+      const valueTemplate = looksLikeEmail
+        ? "${EMAIL_ALIAS}"
+        : looksGenerated || inputLooksLikeTokenName
+          ? "${TOKEN_NAME}"
+          : literal;
       return {
         kind: "ok",
         step: {
@@ -936,7 +967,7 @@ export function hasEphemeralPathSegment(path: string): boolean {
 // Query params whose VALUE is a per-run session/auth token. Stripping them
 // turns a captured deep link back into a stable entry replay can reproduce.
 const EPHEMERAL_URL_PARAM =
-  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce)$/i;
+  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email)$/i;
 
 // Strip per-run session params from a captured URL, byte-preserving any URL
 // that has none. Used for navigate steps + the inferred signup_url so a stale

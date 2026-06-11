@@ -21,6 +21,7 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import {
   parseSkill,
+  validateReplayGraph,
   SkillStatusSchema,
   type Skill,
   type SkillStatus,
@@ -92,6 +93,23 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
         ok: false,
         error: "schema_validation_failed",
         detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // 1b. Static replay-completeness gate. The verifier validates skills
+    //     BEHAVIORALLY (live replay → active); this rejects graphs that can
+    //     NEVER replay regardless of the live site — an await_email_code
+    //     with nothing to dispatch its code, a signup_url carrying a per-run
+    //     email. Catching it here (milliseconds, structural) saves a doomed
+    //     3-4 min verifier run and keeps pending-review free of skills that
+    //     can only rot. See validateReplayGraph.
+    const graphCheck = validateReplayGraph(skill);
+    if (!graphCheck.ok) {
+      return reply.code(400).send({
+        ok: false,
+        error: "incomplete_replay_graph",
+        code: graphCheck.code,
+        detail: graphCheck.reason,
       });
     }
 

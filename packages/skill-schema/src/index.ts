@@ -25,6 +25,8 @@ export type {
   SkillCredentialSpec,
   SkillStatus,
 } from "./skill.js";
+export { validateReplayGraph } from "./replay-graph.js";
+export type { ReplayGraphCheck, ReplayGraphErrorCode } from "./replay-graph.js";
 export {
   WALL_FAILURE_KINDS,
   INFRA_FAILURE_KINDS,
