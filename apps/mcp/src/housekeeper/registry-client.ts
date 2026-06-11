@@ -204,6 +204,10 @@ export class VerifierRegistryClient {
     // OF#2 — the discovery success rate this pass saw, as raw counts.
     discover_attempted?: number;
     discover_succeeded?: number;
+    // Output-loop (#1) fix grades from the local ledger, for the dashboard.
+    fixes_graded?: number;
+    fixes_improved?: number;
+    fixes_regressed?: number;
     mcp_version?: string;
   }): Promise<{ skills_active: number; hit_served: number; hit_total: number }> {
     const url = `${this.baseUrl}/admin/heal-heartbeat`;
