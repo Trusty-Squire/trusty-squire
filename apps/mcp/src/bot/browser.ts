@@ -535,15 +535,36 @@ export class BrowserController {
     // SingletonLock from a killed run, or wait our turn behind a live
     // `mcp login` / another signup. Without this, launchPersistentContext
     // aborts with "Failed to create a ProcessSingleton" and bricks the run.
-    const free = await waitForProfileFree(this.profileDir, {
+    let free = await waitForProfileFree(this.profileDir, {
       deadlineMs: 120_000,
       onWait: () =>
         console.error("[universal-bot] bot Chrome profile is busy with another run — waiting…"),
     });
     if (!free) {
-      throw new ProfileBusyError(
-        "bot Chrome profile is held by another run (a login or signup); retry shortly",
-      );
+      // A live-pid holder that never released within the deadline. The
+      // signup/discover loop is strictly serial (one run at a time), so a
+      // local holder that outlasts 120s is NOT a legitimate concurrent run —
+      // it's a leaked Chrome from a previously EXTERNALLY-killed run
+      // (run_timeout SIGKILL, OOM, reboot) whose JS `finally`/close() never
+      // executed, so reapLeakedProfileHolder never ran. waitForProfileFree
+      // only reclaims dead-pid / null locks, so this live orphan otherwise
+      // crashes every subsequent run with ProfileBusyError (MEASURED
+      // 2026-06-11: cyclic, railpack). A genuine concurrent `mcp login` would
+      // have released within the 120s wait — so by here, reaping the LOCAL
+      // holder (SIGKILL + clear singletons; no-ops on a remote-host holder)
+      // and retrying once is safe and recovers the run instead of failing it.
+      const reaped = reapLeakedProfileHolder(this.profileDir);
+      if (reaped) {
+        console.error(
+          "[universal-bot] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
+        );
+        free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
+      }
+      if (!free) {
+        throw new ProfileBusyError(
+          "bot Chrome profile is held by another run (a login or signup); retry shortly",
+        );
+      }
     }
 
     // T3: a PERSISTENT context. The profile dir carries the user's

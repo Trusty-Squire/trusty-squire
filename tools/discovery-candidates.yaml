@@ -59,7 +59,7 @@
 - { slug: playht, name: PlayHT, signup_url: https://play.ht/signup/, oauth_provider: google }
 - { slug: gladia, name: Gladia, signup_url: https://app.gladia.io/auth/signup, oauth_provider: google }
 - { slug: sieve, name: Sieve, signup_url: https://www.sievedata.com/, oauth_provider: google }
-- { slug: octoai, name: OctoAI, signup_url: https://octoai.cloud/, oauth_provider: google }
+- { slug: octoai, name: OctoAI, signup_url: https://octoai.cloud/, oauth_provider: google, status: needs-manual }  # dead: OctoAI acquired by NVIDIA; octoai.cloud serves an nvidia.com cert (ERR_CERT_COMMON_NAME_INVALID) + redirects to nvidia.com — no self-serve signup (discover 2026-06-11)
 - { slug: galileo, name: Galileo, signup_url: https://app.galileo.ai/sign-up, oauth_provider: google }
 - { slug: arize, name: Arize Phoenix, signup_url: https://app.arize.com/auth/join, oauth_provider: google }
 - { slug: pinecone-assistant, name: Pinecone Assistant, signup_url: https://app.pinecone.io/?sessionType=signup, oauth_provider: google }

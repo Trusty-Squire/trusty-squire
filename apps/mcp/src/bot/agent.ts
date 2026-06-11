@@ -2108,10 +2108,22 @@ export function detectAlreadySignedIn(args: {
     // /redis, /kafka, /vector, /cluster, /databases?, /instances?,
     // /apps?, /deployments?, /services? — all common product-name
     // routes that almost always indicate authenticated state.
+    // An /organizations/<…> or /orgs/<…> prefix is an authenticated-only
+    // marker: a logged-OUT visitor never has an organization-scoped route.
+    // pinecone's post-OAuth plan-chooser sits at
+    // app.pinecone.io/organizations/registration — the trailing
+    // "registration" tripped the register-exclusion below and the bot, fully
+    // signed in via the operator's existing Google-linked account, bailed
+    // no_signup_link instead of routing to key-extraction (MEASURED
+    // 2026-06-11: pinecone account was created May 25, so every later run
+    // lands here authenticated). An org-prefixed path forces dashboardy and
+    // bypasses the auth-route exclusion.
+    const hasOrgPrefix = /\/(?:organizations?|orgs?)\//i.test(parsed.pathname);
     dashboardyPath =
-      /\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
+      hasOrgPrefix ||
+      (/\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
         parsed.pathname,
-      ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname);
+      ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname));
   } catch {
     // Malformed URL — skip URL signal.
   }
@@ -8442,6 +8454,18 @@ ${formatInventory(input.inventory)}`,
     // rounds with no inventory change and break out with the proper
     // status before burning the post-verify budget.
     let consecutiveWaits = 0;
+    // Writer-class hung-redirect tracker. A post-OAuth interstitial
+    // (app.writer.com/redirect-auth?…&registered=true) renders a spinner
+    // SHELL — non-zero interactive elements — that never resolves because the
+    // new account's bootstrap (workspace/org provisioning) hangs. The planner
+    // correctly emits `wait`, but the 0-element guard above never fires (the
+    // shell has elements), so it waits out the entire 600s budget (MEASURED
+    // 2026-06-11: writer). Track consecutive waits on the SAME url regardless
+    // of element count; reload once (the redirect usually completes on a fresh
+    // load), then break with a clean terminal reason.
+    let consecutiveSameUrlWaits = 0;
+    let lastWaitUrl: string | null = null;
+    let waitReloadTried = false;
     // rc.39 — navigate-loop tracker. Perplexity / Koyeb / Porter all
     // had post-verify loops where the planner emitted `navigate`
     // 5-6 rounds in a row and the URL never changed — the service
@@ -9674,6 +9698,42 @@ ${formatInventory(input.inventory)}`,
         }
       } else {
         consecutiveWaits = 0;
+      }
+      // Writer-class hung post-OAuth redirect: consecutive waits on the SAME
+      // url even though the page has elements (a spinner shell). Reload once
+      // at the 4th, break at the 6th — don't burn the whole budget waiting.
+      if (nextStep.kind === "wait") {
+        if (state.url === lastWaitUrl) {
+          consecutiveSameUrlWaits += 1;
+        } else {
+          consecutiveSameUrlWaits = 1;
+          lastWaitUrl = state.url;
+        }
+        if (consecutiveSameUrlWaits === 4 && !waitReloadTried) {
+          waitReloadTried = true;
+          args.steps.push(
+            `Post-verify: ${consecutiveSameUrlWaits} consecutive waits on ${state.url} — reloading once to unstick a hung post-OAuth redirect.`,
+          );
+          try {
+            await this.browser.goto(state.url);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch {
+            // reload failed — next round's wait will reach the break below
+          }
+          continue;
+        }
+        if (consecutiveSameUrlWaits >= 6) {
+          this.lastPostVerifyDoneReason =
+            `post-OAuth interstitial (${state.url}) never resolved after ${consecutiveSameUrlWaits} waits — ` +
+            `likely a hung redirect or onboarding bootstrap for a freshly-created account`;
+          args.steps.push(
+            `Post-verify: wait-loop on ${state.url} (${consecutiveSameUrlWaits} rounds, page has elements but never advances) — breaking out.`,
+          );
+          break;
+        }
+      } else {
+        consecutiveSameUrlWaits = 0;
+        lastWaitUrl = null;
       }
       hint = undefined;
       try {

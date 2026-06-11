@@ -245,6 +245,35 @@ describe("detectAlreadySignedIn (F17)", () => {
     ).toBe(true);
   });
 
+  it("fires on a pinecone-class /organizations/registration plan-chooser (returning user)", () => {
+    // The operator already has a Pinecone account, so every later run rides
+    // the Google session past OAuth and lands on the org plan-chooser at
+    // app.pinecone.io/organizations/registration — a path whose trailing
+    // "registration" used to trip the register-exclusion → no_signup_link.
+    // An /organizations/ prefix is authenticated-only; the "Get Started"
+    // post-auth affordance then confirms it.
+    expect(
+      detectAlreadySignedIn({
+        url: "https://app.pinecone.io/organizations/registration",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "I'm building a small or personal project" }),
+          mkEl({ tag: "button", visibleText: "Start for free" }),
+          mkEl({ tag: "button", visibleText: "Get Started" }),
+          mkEl({ tag: "button", visibleText: "Skip" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("does NOT fire on an /organizations/registration page that still presents a credential input", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://app.pinecone.io/organizations/registration",
+        inventory: [mkEl({ tag: "input", type: "email" })],
+      }),
+    ).toBe(false);
+  });
+
   it("a getting-started URL with a credential input is NOT signed-in (precondition wins)", () => {
     expect(
       detectAlreadySignedIn({
