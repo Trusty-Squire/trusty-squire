@@ -9398,6 +9398,17 @@ ${formatInventory(input.inventory)}`,
               ? `Post-verify: no-progress detected — same ${nextStep.kind} on same selector, inventory unchanged. Re-planning instead of re-running.`
               : `Post-verify: no-progress detected — successive click steps with no inventory change. Forcing a non-click action.`,
           );
+          // A click that changed nothing often means an INLINE validation
+          // error is gating submit (e.g. deepseek's "Please enter the
+          // verification code" — red text, not a toast). Surface it + a
+          // forensic snapshot so the stall is diagnosable instead of silent.
+          const stallError = await this.browser.captureTransientAlert(0);
+          let stallHint = "";
+          if (stallError.length > 0) {
+            args.steps.push(`Post-verify: page shows an inline message: "${stallError}"`);
+            stallHint = ` The page currently shows this message: "${stallError}" — it explains the block; address it (the named field is likely empty/invalid to the form despite looking filled).`;
+          }
+          await saveDebugSnapshot(this.browser, "post-verify-stuck");
           hint =
             `Your previous ${sameSelector ? `'${nextStep.kind}' on ${JSON.stringify(sel)}` : "click steps"} had NO observable effect — the inventory ` +
             `count is unchanged. The element you targeted is either disabled or gated on ` +
@@ -9409,7 +9420,8 @@ ${formatInventory(input.inventory)}`,
             emptyInputHint +
             defaultedSelectHint +
             customComboboxHint +
-            uncheckedBoxHint;
+            uncheckedBoxHint +
+            stallHint;
           prevSignature = signature;
           prevInventorySize = inventory.length;
           continue;

@@ -1131,6 +1131,28 @@ export class BrowserController {
             if (t.length >= 2 && t.length <= 240) return t;
           }
         }
+        // Second pass: INLINE field-validation errors (not a transient
+        // toast). Many SPAs render "Please enter the verification code" /
+        // "Invalid code" as a small element with an error-ish class or an
+        // aria-invalid node rather than a toast — so the first pass misses
+        // them and a failed submit reads as a silent no-op.
+        // MEASURED 2026-06-11 (deepseek post-OTP submit).
+        const errSels = [
+          "[class*='error' i]",
+          "[class*='invalid' i]",
+          "[class*='danger' i]",
+          "[class*='explain' i]", // antd/ds-form-item-explain
+          "[aria-invalid='true']",
+        ];
+        for (const sel of errSels) {
+          for (const el of Array.from(document.querySelectorAll(sel))) {
+            if (!vis(el)) continue;
+            // Leaf-ish only — skip containers that wrap the whole form.
+            if (el.querySelector("input, button, form")) continue;
+            const t = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+            if (t.length >= 3 && t.length <= 160) return t;
+          }
+        }
         return "";
       });
     } catch {
