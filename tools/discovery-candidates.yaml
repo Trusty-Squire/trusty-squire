@@ -33,7 +33,7 @@
 - { slug: lepton-ai, name: Lepton AI, signup_url: https://www.lepton.ai/, oauth_provider: google }
 - { slug: anyscale, name: Anyscale, signup_url: https://console.anyscale.com/register, oauth_provider: google }
 - { slug: runpod, name: RunPod, signup_url: https://www.runpod.io/console/signup, oauth_provider: google }
-- { slug: lambda-labs, name: Lambda, signup_url: https://cloud.lambdalabs.com/sign-up, oauth_provider: google }
+- { slug: lambda-labs, name: Lambda, signup_url: https://cloud.lambdalabs.com/sign-up, oauth_provider: google, status: needs-manual }  # unservable: payment method required before API keys (discover 2026-06-11)
 - { slug: predibase, name: Predibase, signup_url: https://app.predibase.com/, oauth_provider: google }
 - { slug: clarifai, name: Clarifai, signup_url: https://clarifai.com/signup, oauth_provider: google }
 - { slug: ai21, name: AI21 Labs, signup_url: https://studio.ai21.com/sign-up, oauth_provider: google }
@@ -70,10 +70,10 @@
 # ── Vector DB / search ───────────────────────────────────────────────
 - { slug: pinecone, name: Pinecone, signup_url: https://app.pinecone.io/?sessionType=signup, oauth_provider: google }
 - { slug: zilliz, name: Zilliz Cloud, signup_url: https://cloud.zilliz.com/signup, oauth_provider: google }
-- { slug: typesense, name: Typesense Cloud, signup_url: https://cloud.typesense.org/, oauth_provider: github }
+- { slug: typesense, name: Typesense Cloud, signup_url: https://cloud.typesense.org/, oauth_provider: github, status: needs-manual }  # unservable: GitHub sudo-mode 2FA gate to mint a PAT (discover 2026-06-11)
 - { slug: meilisearch, name: Meilisearch Cloud, signup_url: https://cloud.meilisearch.com/register, oauth_provider: github }
 - { slug: turbopuffer, name: Turbopuffer, signup_url: https://turbopuffer.com/join, oauth_provider: google }
-- { slug: marqo, name: Marqo, signup_url: https://cloud.marqo.ai/, oauth_provider: google }
+- { slug: marqo, name: Marqo, signup_url: https://cloud.marqo.ai/, oauth_provider: google, status: needs-manual }  # unservable: demo-gated ("request a demo for access") (discover 2026-06-11)
 - { slug: lancedb, name: LanceDB, signup_url: https://accounts.lancedb.com/sign-up, oauth_provider: google }
 - { slug: vectorize, name: Vectorize, signup_url: https://platform.vectorize.io/, oauth_provider: google }
 - { slug: superlinked, name: Superlinked, signup_url: https://superlinked.com/, oauth_provider: google }
@@ -87,7 +87,7 @@
 
 # ── Infra / compute / hosting ────────────────────────────────────────
 - { slug: fly-io, name: Fly.io, signup_url: https://fly.io/app/sign-up, oauth_provider: github }
-- { slug: koyeb, name: Koyeb, signup_url: https://app.koyeb.com/auth/signup, oauth_provider: github }
+- { slug: koyeb, name: Koyeb, signup_url: https://app.koyeb.com/auth/signup, oauth_provider: github, status: needs-manual }  # unservable: $30/mo Pro plan + card required before API keys (discover 2026-06-11)
 - { slug: northflank, name: Northflank, signup_url: https://app.northflank.com/signup, oauth_provider: github }
 - { slug: deno-deploy, name: Deno Deploy, signup_url: https://dash.deno.com/signin, oauth_provider: github }
 - { slug: scaleway, name: Scaleway, signup_url: https://console.scaleway.com/register, oauth_provider: google, status: needs-manual }
@@ -98,7 +98,7 @@
 - { slug: heroku, name: Heroku, signup_url: https://signup.heroku.com/, oauth_provider: github, status: needs-manual }
 - { slug: glitch, name: Glitch, signup_url: https://glitch.com/signin, oauth_provider: github }
 - { slug: replit, name: Replit, signup_url: https://replit.com/signup, oauth_provider: google }
-- { slug: stackblitz, name: StackBlitz, signup_url: https://stackblitz.com/, oauth_provider: github }
+- { slug: stackblitz, name: StackBlitz, signup_url: https://stackblitz.com/, oauth_provider: github, status: needs-manual }  # unservable: no user API key exposed via the web UI (discover 2026-06-11)
 - { slug: gitpod, name: Gitpod, signup_url: https://gitpod.io/login/, oauth_provider: github }
 - { slug: daytona, name: Daytona, signup_url: https://app.daytona.io/, oauth_provider: github }
 - { slug: cyclic, name: Cyclic, signup_url: https://app.cyclic.sh/, oauth_provider: github }
