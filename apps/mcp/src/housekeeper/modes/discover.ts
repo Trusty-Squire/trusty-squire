@@ -160,6 +160,16 @@ export async function runDiscover(
      * UNIVERSAL_BOT_FORCE_FORM env (ad-hoc A/B runs).
      */
     forceForm?: boolean;
+    /**
+     * Extra OAuth scopes the operator pre-approves for THIS service (curated
+     * YAML `allow_extra_oauth_scopes`). Without it the bot aborts
+     * oauth_consent_needs_review on any non-basic scope — correct for an
+     * end-user, but the operator's own discovery run for a service that
+     * legitimately needs e.g. GitHub `read:org` (defang) should proceed.
+     * Opt-in per service; the DOM danger-phrase scraper still hard-aborts on
+     * sensitive grants (Drive/Gmail/contacts) regardless.
+     */
+    allowExtraOAuthScopes?: readonly string[];
   },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
@@ -257,6 +267,9 @@ export async function runDiscover(
       // / unrelated `.com` pages that didn't have the OAuth button.
       ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
       ...(forceForm ? { forceForm: true } : {}),
+      ...(input.allowExtraOAuthScopes !== undefined && input.allowExtraOAuthScopes.length > 0
+        ? { allowExtraOAuthScopes: input.allowExtraOAuthScopes }
+        : {}),
       // The housekeeper is the operator provisioning on their OWN behalf,
       // so approve a benign OAuth consent (email/profile) blind instead of
       // pausing oauth_consent_needs_review when the scopes aren't readable
@@ -374,6 +387,7 @@ export type DiscoveryBotRunner = (input: {
   service: string;
   oauthProvider?: "google" | "github";
   signupUrl?: string;
+  allowExtraOAuthScopes?: readonly string[];
 }) => Promise<DiscoveryBotOutcome>;
 
 // Per-task dispatcher the orchestrator invokes for 'discover' tasks.
@@ -400,6 +414,9 @@ export async function handleDiscover(
       : {}),
     ...(task.signupUrl !== undefined ? { signupUrl: task.signupUrl } : {}),
     ...(task.forceForm === true ? { forceForm: true } : {}),
+    ...(task.allowExtraOAuthScopes !== undefined
+      ? { allowExtraOAuthScopes: task.allowExtraOAuthScopes }
+      : {}),
   });
   log(`discover end:   ${task.service} → ${outcome.kind} (${outcome.reason.slice(0, 120)})`);
   return outcome;

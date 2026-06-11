@@ -337,6 +337,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       service: string;
       oauthProvider?: "google" | "github";
       signupUrl?: string;
+      allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
     const base = {
       client,
@@ -393,6 +394,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     // slug-only if the YAML doesn't have the slug or can't be parsed.
     let signupUrl: string | undefined;
     let oauthProvider = args.oauthProvider;
+    let allowExtraOAuthScopes: readonly string[] | undefined;
     if (args.seedPath !== undefined && args.seedPath.length > 0) {
       const yamlEntry = await lookupServiceInYaml(args.seedPath, args.service);
       if (yamlEntry !== null) {
@@ -409,9 +411,15 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         ) {
           oauthProvider = yamlEntry.oauth_provider;
         }
+        if (
+          Array.isArray(yamlEntry.allow_extra_oauth_scopes) &&
+          yamlEntry.allow_extra_oauth_scopes.length > 0
+        ) {
+          allowExtraOAuthScopes = yamlEntry.allow_extra_oauth_scopes;
+        }
       }
     }
-    queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl);
+    queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl, allowExtraOAuthScopes);
   } else if (args.mode === "verify") {
     queue = new RegistryVerifierQueue(client);
   } else if (args.seedPath === undefined || args.seedPath.length === 0) {
@@ -441,6 +449,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       service: string;
       oauthProvider?: "google" | "github";
       signupUrl?: string;
+      allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
   }
 

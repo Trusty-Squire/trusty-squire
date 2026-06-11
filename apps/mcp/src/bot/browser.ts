@@ -1408,13 +1408,58 @@ export class BrowserController {
       // Verify it actually became checked; some checkboxes need the
       // explicit `check()` call to flip state (e.g., styled labels
       // that swallow the click event).
-      const isChecked = await this.page.locator(selector).isChecked();
+      let isChecked = await this.page.locator(selector).isChecked();
       if (!isChecked) {
         await this.page.check(selector, { force: true });
+        isChecked = await this.page.locator(selector).isChecked().catch(() => false);
+      }
+      // Mantine / Radix styled checkboxes: the hidden <input> can read
+      // checked in the DOM while the library's React onChange never fired —
+      // so the form's controlled state stays false and the gated submit
+      // stays disabled even though isChecked() is true (MEASURED 2026-06-11:
+      // friendliai's #agreedToServiceTerms cost a wasted round because the
+      // first check didn't register the form state). Clicking the ASSOCIATED
+      // LABEL fires the real onChange the library listens for. Best-effort.
+      if (!isChecked) {
+        const labelClicked = await this.clickAssociatedLabel(selector);
+        if (!labelClicked) await this.page.check(selector, { force: true });
       }
     } catch {
       await this.page.check(selector, { force: true });
     }
+  }
+
+  // Click the <label> associated with a checkbox/radio input — either a
+  // `<label for="<id>">` or the wrapping `<label>` ancestor. Mantine/Radix
+  // render the real input visually-hidden inside a styled label; clicking the
+  // label is what fires the library's onChange (a direct input check can
+  // leave React's controlled state stale). Returns true if a label was
+  // found + clicked. Best-effort — never throws.
+  private async clickAssociatedLabel(selector: string): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      const id = await this.page
+        .locator(selector)
+        .first()
+        .evaluate((el) => (el instanceof HTMLElement ? el.id : ""))
+        .catch(() => "");
+      if (id) {
+        const forLabel = this.page.locator(`label[for="${id}"]`).first();
+        if ((await forLabel.count()) > 0) {
+          await forLabel.click({ timeout: 4000 });
+          return true;
+        }
+      }
+      // No `for=` label — try the wrapping <label> ancestor.
+      const wrapping = this.page.locator(selector).locator("xpath=ancestor::label[1]").first();
+      if ((await wrapping.count()) > 0) {
+        await wrapping.click({ timeout: 4000 });
+        return true;
+      }
+    } catch {
+      // best-effort
+    }
+    return false;
   }
 
   // Deterministic pre-submit guard: tick every visible, unchecked,

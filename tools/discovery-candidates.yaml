@@ -107,7 +107,7 @@
 - { slug: cloud66, name: Cloud 66, signup_url: https://app.cloud66.com/users/sign_up, oauth_provider: github }
 - { slug: platformsh, name: Platform.sh, signup_url: https://auth.api.platform.sh/register, oauth_provider: github, status: needs-manual }
 - { slug: qovery, name: Qovery, signup_url: https://console.qovery.com/, oauth_provider: github }
-- { slug: defang, name: Defang, signup_url: https://portal.defang.io/, oauth_provider: github }
+- { slug: defang, name: Defang, signup_url: https://portal.defang.io/, oauth_provider: github, allow_extra_oauth_scopes: [read:org] }  # defang's GitHub consent requests read:org; operator pre-approves it so discovery doesn't abort oauth_consent_needs_review (2026-06-11)
 - { slug: aptible, name: Aptible, signup_url: https://app.aptible.com/signup, oauth_provider: google, status: needs-manual }
 - { slug: vultr, name: Vultr, signup_url: https://www.vultr.com/register/, oauth_provider: google, status: needs-manual }
 - { slug: linode, name: Akamai Linode, signup_url: https://login.linode.com/signup, oauth_provider: github, status: needs-manual }
