@@ -93,10 +93,14 @@ export function humanLocalPart(): string {
   const r = randomBytesArray(5);
   const first = FIRST_NAMES[r[0]! % FIRST_NAMES.length]!;
   const last = LAST_NAMES[r[1]! % LAST_NAMES.length]!;
-  // 3–5 digit suffix from the remaining entropy.
-  const num = ((r[2]! << 16) | (r[3]! << 8) | r[4]!) % 90000 + 100;
+  // A 2–3 digit suffix only. DELIBERATELY capped below OTP length (codes
+  // are 4–8 digits): a longer run in the recipient address gets mistaken
+  // for the emailed code by the OTP scanners (parsed_codes / body regex /
+  // IMAP poller), which made a `…13526@` alias fill 13526 as the code.
+  // Name variety (≈1900) × 900 keeps catch-all collisions negligible.
+  const num = (((r[2]! << 8) | r[3]!) % 900) + 100; // 100–999
   // Vary the shape so the addresses aren't all `first.last`.
-  const shape = r[2]! % 4;
+  const shape = r[4]! % 4;
   if (shape === 0) return `${first}.${last}${num}`;
   if (shape === 1) return `${first}${last}${num}`;
   if (shape === 2) return `${first[0]!}${last}${num}`;

@@ -3614,16 +3614,28 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
 // then a standalone 6-digit number (the most common verification length).
 // Returns null when nothing code-shaped is found so the caller still bails
 // honestly rather than typing garbage. Exported for unit testing.
-export function extractCodeFromEmailBody(email: {
-  subject: string;
-  body_text?: string | null;
-  body_html?: string | null;
-}): string | null {
-  const text = [
+export function extractCodeFromEmailBody(
+  email: {
+    subject: string;
+    body_text?: string | null;
+    body_html?: string | null;
+  },
+  // The recipient address, when known. Verification emails routinely echo
+  // the recipient ("sent to sandra.young487@…"); if its local part carries
+  // digits they can be mistaken for the code. Strip the address out before
+  // scanning so a human-looking alias never poisons the extraction.
+  recipient?: string,
+): string | null {
+  let text = [
     email.subject ?? "",
     email.body_text ?? "",
     (email.body_html ?? "").replace(/<[^>]+>/g, " "),
   ].join("\n");
+  if (recipient !== undefined && recipient.length > 0) {
+    text = text.split(recipient).join(" ");
+    const local = recipient.split("@")[0];
+    if (local !== undefined && local.length > 0) text = text.split(local).join(" ");
+  }
   // 1) A code sitting next to a verification keyword — the strongest signal.
   const kw = text.match(
     /(?:verification code|sign[\s-]?in code|one[\s-]?time(?:\s+(?:code|password))?|security code|your code|confirmation code|code is|enter(?:\s+this)?\s+code)\b[^0-9]{0,40}([0-9]{4,8})\b/i,
@@ -6120,7 +6132,7 @@ export class SignupAgent {
                 // No link and the inbox parser found no code — last-resort
                 // scan the email body ourselves for a verification code
                 // (passwordless "we emailed you a code" flow, e.g. axiom).
-                const bodyCode = extractCodeFromEmailBody(email);
+                const bodyCode = extractCodeFromEmailBody(email, task.email);
                 if (bodyCode !== null) {
                   steps.push(
                     `Email had no link but carried a verification code (…${bodyCode.slice(-2)}) — entering it.`,
