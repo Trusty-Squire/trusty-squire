@@ -76,7 +76,7 @@
 - { slug: marqo, name: Marqo, signup_url: https://cloud.marqo.ai/, oauth_provider: google, status: needs-manual }  # unservable: demo-gated ("request a demo for access") (discover 2026-06-11)
 - { slug: lancedb, name: LanceDB, signup_url: https://accounts.lancedb.com/sign-up, oauth_provider: google }
 - { slug: vectorize, name: Vectorize, signup_url: https://platform.vectorize.io/, oauth_provider: google }
-- { slug: superlinked, name: Superlinked, signup_url: https://superlinked.com/, oauth_provider: google }
+- { slug: superlinked, name: Superlinked, signup_url: https://superlinked.com/, oauth_provider: google, status: needs-manual }  # unservable: no self-serve signup — self-hosted SIE (github.com/superlinked/sie) + sales "Contact us" only; no app/cloud console, no API-key issuance (discover 2026-06-11)
 - { slug: activeloop, name: Activeloop, signup_url: https://app.activeloop.ai/register, oauth_provider: google }
 - { slug: trieve, name: Trieve, signup_url: https://dashboard.trieve.ai/, oauth_provider: github }
 - { slug: meorphis, name: SearchAPI, signup_url: https://www.searchapi.io/, oauth_provider: google }
