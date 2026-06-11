@@ -624,6 +624,18 @@ function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
   return JSON.stringify(stripped(a)) === JSON.stringify(stripped(b));
 }
 
+// True when a captured `fill` is an email-verification CODE entry: the
+// value is a short numeric code AND the planner's reason describes a
+// verification/OTP step. Both signals are required — a 4-8 digit value
+// alone could be a postal code or an all-numeric project name, and a
+// "code"-mentioning reason alone could be a coupon field.
+function isOtpCodeFill(observed: PostVerifyStep): boolean {
+  if (observed.kind !== "fill") return false;
+  const value = observed.value.trim();
+  if (!/^\d{4,8}$/.test(value)) return false;
+  return /\b(verif|otp|one[\s-]?time|code|2fa|mfa)\b/i.test(observed.reason);
+}
+
 // Returns { step: null } for kinds the synthesizer intentionally drops
 // (done, wait, login). Returns a rejection for kinds we can't translate.
 function translateStep(
@@ -688,6 +700,25 @@ function translateStep(
     }
 
     case "fill": {
+      // Email-verification (OTP) entry → an `await_email_code` step, NOT a
+      // `fill`. The captured value is a 4-8 digit code the bot fetched from
+      // the inbox: baking it as a literal would replay a STALE code, and the
+      // OTP input is frequently unlabeled, so resolveLabelHint would
+      // hard-reject `missing_text_hint` (exactly what blocked zilliz from
+      // synthesizing). The await_email_code step re-fetches a fresh code at
+      // replay time and finds the input heuristically. label_hint is
+      // best-effort — included only when the field happens to be labeled.
+      if (isOtpCodeFill(observed)) {
+        const otpHint = resolveLabelHint(observed.selector, inventory, roundIndex);
+        return {
+          kind: "ok",
+          step: {
+            kind: "await_email_code",
+            ...(otpHint.kind === "ok" ? { label_hint: otpHint.hint } : {}),
+            provenance,
+          },
+        };
+      }
       const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex);
       if (hintResult.kind !== "ok") return hintResult;
       // rc.17 — if the captured value looks like the unique-name

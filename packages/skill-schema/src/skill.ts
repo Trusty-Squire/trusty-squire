@@ -430,6 +430,33 @@ const ExtractLabeledStepSchema = z
   })
   .strict();
 
+// Email-verification (OTP) gate. Many signups email a 4-8 digit code that
+// must be entered before the account is created (zilliz, deepseek, axiom).
+// The code is DYNAMIC — a recorded value is useless on replay — and the OTP
+// input frequently has no stable label/name (single-digit boxes, headless
+// inputs), so a `fill` step can't represent it. This step tells the replay
+// engine: poll the run's inbox alias for the verification email, extract the
+// code, and type it into the page's code input (found heuristically, or via
+// the optional label_hint when the field is labeled). The subsequent
+// Verify/Continue click is a separate `click` step.
+const AwaitEmailCodeStepSchema = z
+  .object({
+    kind: z.literal("await_email_code"),
+    label_hint: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional label/placeholder/aria-label of the code input. Usually " +
+          "ABSENT — OTP boxes are commonly unlabeled single-digit inputs — " +
+          "so the replay engine falls back to a heuristic (a visible, short " +
+          "code-shaped input near verification copy). Present only when the " +
+          "captured field carried a stable label.",
+      ),
+    provenance: ProvenanceSchema,
+  })
+  .strict();
+
 export const SkillStepSchema = z
   .discriminatedUnion("kind", [
     NavigateStepSchema,
@@ -437,6 +464,7 @@ export const SkillStepSchema = z
     ClickStepSchema,
     FillStepSchema,
     SelectStepSchema,
+    AwaitEmailCodeStepSchema,
     ExtractViaCopyButtonStepSchema,
     ExtractViaRegexStepSchema,
     // Multi-credential extract steps. Single-credential skills never

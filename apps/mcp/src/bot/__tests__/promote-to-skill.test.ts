@@ -2646,3 +2646,82 @@ describe("collapseConsecutiveDuplicateSteps (porter ×N noise)", () => {
     expect(out.length).toBe(2);
   });
 });
+
+// ── Email-OTP signups → await_email_code step ───────────────────────
+
+describe("promoteToSkill — email verification (await_email_code)", () => {
+  function otpRounds(service: string): OnboardingRoundCapture[] {
+    return [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/signup/verify",
+          title: "Verify Your Email",
+          html: "<html><body>Enter the verification code we emailed you</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "input",
+            type: "tel",
+            // Deliberately attribute-less — the zilliz OTP box. A `fill`
+            // step would hard-reject missing_text_hint here.
+            selector: "div > div > div > input",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "div > div > div > input",
+          value: "482913",
+          reason: "Fill the verification code into the first OTP input box",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/dashboard/keys",
+          title: "API Keys",
+          html:
+            "<html><body>Your API key db3a32ea-dd1b-4e28-9680-db2991c81e3e " +
+            "<button>Copy</button></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+            ariaLabel: "Copy API key",
+          }),
+        ],
+        observed: {
+          kind: "extract",
+          reason:
+            "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible on the page.",
+        },
+      },
+    ];
+  }
+
+  it("synthesizes an OTP-code fill as an await_email_code step (not a baked literal)", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(otpRounds(service));
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const kinds = result.skill.steps.map((s) => s.kind);
+    expect(kinds).toContain("await_email_code");
+    // The stale code must NOT be baked into a fill step.
+    const baked = result.skill.steps.some(
+      (s) => s.kind === "fill" && s.value_template.includes("482913"),
+    );
+    expect(baked).toBe(false);
+  });
+});

@@ -111,6 +111,18 @@ export interface ReplayInput {
    */
   fetchFn?: typeof globalThis.fetch;
   /**
+   * Fetches the email verification code for an `await_email_code` step.
+   * The replay engine has no inbox transport of its own (same separation
+   * as `llmFallback` / `templateValues`): the caller — verify mode or the
+   * live-provision router — wires this to an InboxClient poll + code
+   * extraction against the run's alias (`templateValues.EMAIL_ALIAS`).
+   * Resolves to the code, or null when no verification email arrived in
+   * time. A skill containing an `await_email_code` step that is replayed
+   * WITHOUT this callback fails that step cleanly (the caller forgot to
+   * provide inbox access).
+   */
+  fetchEmailCode?: (input: { alias: string }) => Promise<string | null>;
+  /**
    * 0.8.2-rc.19 — bypass the "skill must be active" guard. The verifier
    * loop NEEDS to replay pending-review skills (and sometimes demoted
    * ones) to gather the outcome data that drives promote/demote
@@ -403,7 +415,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
     // the router can decide whether to retry or fall through to the
     // universal bot.
     try {
-      const execOutcome = await executeStep(stepToExecute, browser, templateValues, skill);
+      const execOutcome = await executeStep(stepToExecute, browser, templateValues, skill, input.fetchEmailCode);
       if (execOutcome.kind === "needs_login") {
         return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
       }
@@ -580,6 +592,16 @@ async function preValidateStep(
       } catch {
         return { ok: false, reason: `Invalid URL in navigate step: ${step.url}` };
       }
+    }
+
+    case "await_email_code": {
+      // No meaningful DOM pre-check: the code input is found heuristically
+      // at execute time (it may be unlabeled), and the email may not have
+      // arrived yet. Accept; the executor polls the inbox and fails cleanly
+      // if no code arrives or no input is found. No useful LLM fallback
+      // exists for this step (there's no captured selector to substitute).
+      void templateValues;
+      return { ok: true };
     }
 
     case "click_oauth_button": {
@@ -952,6 +974,7 @@ async function executeStep(
   browser: BrowserController,
   templateValues: Record<string, string>,
   skill: Skill,
+  fetchEmailCode?: (input: { alias: string }) => Promise<string | null>,
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
     case "navigate": {
@@ -1149,6 +1172,40 @@ async function executeStep(
       }
       const value = substituteTemplate(step.value_template, templateValues);
       await browser.type(match.selector, value);
+      return { kind: "filled" };
+    }
+
+    case "await_email_code": {
+      if (fetchEmailCode === undefined) {
+        throw new Error(
+          "await_email_code step requires a fetchEmailCode callback, but the " +
+            "caller did not wire inbox access into the replay.",
+        );
+      }
+      const alias = templateValues.EMAIL_ALIAS;
+      if (alias === undefined || alias.length === 0) {
+        throw new Error(
+          "await_email_code step requires templateValues.EMAIL_ALIAS (the run's " +
+            "inbox alias) to poll for the verification email.",
+        );
+      }
+      const code = await fetchEmailCode({ alias });
+      if (code === null || code.length === 0) {
+        throw new Error(
+          `No email verification code arrived for ${alias} within the poll window.`,
+        );
+      }
+      const inventory = await browser.extractInteractiveElements();
+      const target = findCodeInput(inventory, step.label_hint);
+      if (target === null) {
+        throw new Error(
+          "await_email_code: could not find a verification-code input on the page.",
+        );
+      }
+      // browser.type clicks-then-pressSequentially, which auto-distributes
+      // across multi-box single-digit OTP inputs (Porter/Koyeb class) as
+      // well as a single combined box.
+      await browser.type(target.selector, code);
       return { kind: "filled" };
     }
 
@@ -2192,6 +2249,48 @@ function isRuntimeId(id: string): boolean {
 // select for the SELECT case which also matches by labelText.
 function isFillable(el: InteractiveElement): boolean {
   return el.tag === "input" || el.tag === "textarea" || el.tag === "select";
+}
+
+// Locate the verification-code input for an `await_email_code` step.
+// OTP inputs are frequently UNLABELED (single-digit boxes, headless
+// inputs) — that's exactly why a `fill` step can't carry them — so the
+// resolution order is: (1) explicit label_hint when present, (2) an input
+// whose attributes name it a code field, (3) the first code-shaped input
+// on the page. (3) is safe because this step only runs at the
+// verification gate the synthesizer placed it at, where the page is just
+// the code input(s) + a Verify button. Returns null when no plausible
+// input exists. Exported for unit tests.
+export function findCodeInput(
+  inventory: readonly InteractiveElement[],
+  labelHint?: string,
+): InteractiveElement | null {
+  // Code-shaped: a visible text-entry input that is NOT an email/password/
+  // checkbox/radio/etc. (type null/"" covers headless OTP boxes).
+  const TEXT_ENTRY = new Set(["text", "tel", "number", "", "search"]);
+  const candidates = inventory.filter(
+    (el) =>
+      el.tag === "input" &&
+      el.visible !== false &&
+      (el.type === null || TEXT_ENTRY.has(el.type)) &&
+      el.type !== "email" &&
+      el.type !== "password",
+  );
+  if (candidates.length === 0) return null;
+  if (labelHint !== undefined && labelHint.length > 0) {
+    const byLabel = candidates.filter((el) => matchesLabelHint(el, labelHint));
+    if (byLabel.length >= 1) return byLabel[0]!;
+  }
+  // Word-START boundary only (no trailing \b): "verif" must prefix-match
+  // "verificationCode" / "verification_code", which a trailing \b would
+  // break (it'd require "verif" to be a whole word).
+  const codeRe = /\b(code|otp|verif|pin|one[\s-]?time|2fa|mfa)/i;
+  const byAttr = candidates.filter((el) =>
+    codeRe.test(
+      `${el.name ?? ""} ${el.id ?? ""} ${el.placeholder ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`,
+    ),
+  );
+  if (byAttr.length >= 1) return byAttr[0]!;
+  return candidates[0]!;
 }
 
 // rc.24/rc.25 — cascading fill-target disambiguator. Shared by

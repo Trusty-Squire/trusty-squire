@@ -2362,3 +2362,99 @@ describe("labelMatchesHint", () => {
     expect(labelMatchesHint(null, "admin api key")).toBe(false);
   });
 });
+
+// ── await_email_code (email-OTP replay) ─────────────────────────────
+
+describe("replaySkill — await_email_code", () => {
+  it("polls fetchEmailCode and types the code into an unlabeled OTP input", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      // An attribute-less OTP box (the zilliz case) + a Copy button for
+      // the subsequent extract.
+      inv({ tag: "input", type: "tel", selector: "input.otp" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+    const fetchEmailCode = vi.fn(async () => "482913");
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "await_email_code", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "jane.doe482@trustysquire.ai" },
+      fetchEmailCode,
+    });
+
+    expect(fetchEmailCode).toHaveBeenCalledWith({ alias: "jane.doe482@trustysquire.ai" });
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.some((c) => c.args[0] === "input.otp" && c.args[1] === "482913")).toBe(true);
+    expect(result.kind).toBe("ok");
+  });
+
+  it("fails the step cleanly when no code arrives", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [inv({ tag: "input", type: "tel", selector: "input.otp" })]);
+    const result = await replaySkill({
+      skill: skillWith([{ kind: "await_email_code", provenance }]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "x@trustysquire.ai" },
+      fetchEmailCode: async () => null,
+    });
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.reason).toMatch(/no email verification code/i);
+  });
+
+  it("fails cleanly when the caller wired no fetchEmailCode callback", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [inv({ tag: "input", type: "tel", selector: "input.otp" })]);
+    const result = await replaySkill({
+      skill: skillWith([{ kind: "await_email_code", provenance }]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "x@trustysquire.ai" },
+    });
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.reason).toMatch(/fetchEmailCode/i);
+  });
+});
+
+describe("findCodeInput", () => {
+  it("prefers an explicit label_hint, then a code-named attr, then the first code-shaped input", async () => {
+    const { findCodeInput } = await import("../replay-skill.js");
+    // attribute-less single box → the only candidate wins (zilliz).
+    expect(
+      findCodeInput([inv({ tag: "input", type: "tel", selector: "input.otp" })])?.selector,
+    ).toBe("input.otp");
+    // a code-named field is preferred over a bare text input.
+    const picked = findCodeInput([
+      inv({ tag: "input", type: "text", selector: "input.first" }),
+      inv({ tag: "input", type: "text", name: "verificationCode", selector: "input.code" }),
+    ]);
+    expect(picked?.selector).toBe("input.code");
+    // label_hint pins it.
+    const byLabel = findCodeInput(
+      [
+        inv({ tag: "input", type: "text", selector: "input.a" }),
+        inv({ tag: "input", type: "text", ariaLabel: "Verification code", selector: "input.b" }),
+      ],
+      "Verification code",
+    );
+    expect(byLabel?.selector).toBe("input.b");
+  });
+
+  it("never targets email/password inputs and returns null when there's nothing code-shaped", async () => {
+    const { findCodeInput } = await import("../replay-skill.js");
+    expect(
+      findCodeInput([
+        inv({ tag: "input", type: "email", selector: "input.email" }),
+        inv({ tag: "input", type: "password", selector: "input.pw" }),
+      ]),
+    ).toBeNull();
+  });
+});
