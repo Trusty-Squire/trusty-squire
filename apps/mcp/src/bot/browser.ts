@@ -1111,21 +1111,32 @@ export class BrowserController {
           const t = el as HTMLInputElement;
           const inputKind =
             t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") ? t.type : "";
-          return { inputKind, role: el.getAttribute("role") ?? "" };
+          return {
+            inputKind,
+            role: el.getAttribute("role") ?? "",
+            text: (el.textContent ?? "").trim().slice(0, 80),
+          };
         })
-        .catch(() => ({ inputKind: "", role: "" }));
+        .catch(() => ({ inputKind: "", role: "", text: "" }));
       const inputKind = probe.inputKind;
       // Custom-combobox / listbox options (role=option|menuitem) — react-select,
-      // Radix, downshift, MUI. A humanized RAW-COORDINATE mouse click frequently
-      // fails to COMMIT the selection on these: the menu is a portal that can
-      // reposition between coordinate-capture and click, options bind onMouseDown
-      // (not click), and virtualized lists re-render. MEASURED 2026-06-11
-      // (meilisearch — clicking "Keyword Search" left aria-selected unset and the
-      // menu open, looping the planner). Route options through Playwright's
-      // actionability-checked locator click (re-resolves + scrolls + full event
-      // sequence). Options are post-load interactions, NOT the anti-bot-scored
-      // signup gate, so they don't need the humanized path.
+      // Radix, downshift, MUI. Two failure modes the humanized RAW-COORDINATE
+      // click hits: (1) the menu is a PORTAL that re-renders/repositions, so the
+      // captured POSITIONAL selector (e.g. `div…>> nth=42`) resolves to the wrong
+      // element at click time — nothing selects, planner loops (MEASURED
+      // 2026-06-11, meilisearch Radix combobox); (2) options bind pointer/select
+      // handlers a raw coordinate click misses. Fix: re-resolve by role+accessible
+      // name (robust to portal/positional drift), and use the actionability-checked
+      // locator click. Options are post-load, NOT the anti-bot-scored gate.
       if (probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio") {
+        const role = probe.role as "option" | "menuitem" | "menuitemradio";
+        if (probe.text.length > 0) {
+          const byName = this.page.getByRole(role, { name: probe.text, exact: false }).first();
+          if ((await byName.count().catch(() => 0)) > 0) {
+            await byName.click({ timeout: 8000 });
+            return;
+          }
+        }
         await this.page.locator(selector).first().click({ timeout: 8000 });
         return;
       }
