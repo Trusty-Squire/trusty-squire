@@ -2059,16 +2059,44 @@ export class BrowserController {
     options: Locator,
     matcher?: string,
   ): Promise<void> {
+    let target = options.first();
     if (matcher !== undefined) {
       const filtered = options.filter({ hasText: matcher });
-      const filteredCount = await filtered.count();
-      if (filteredCount > 0) {
-        await this.humanClickLocator(filtered.first());
-        await this.wait(0.5);
-        return;
-      }
+      if ((await filtered.count()) > 0) target = filtered.first();
     }
-    await this.humanClickLocator(options.first());
+    // cmdk (the command-menu library) does NOT commit a selection from the
+    // bot's humanized page.mouse.click(x, y): cmdk re-renders + re-orders its
+    // list as the search filters, so the cached click coordinates land on the
+    // wrong row (or empty space), and cmdk's onSelect — bound to a real
+    // pointer/click event ON the item, or Enter on the highlighted item —
+    // never fires. The trigger keeps its placeholder and the gated submit
+    // stays disabled (MEASURED 2026-06-11: meilisearch's /welcome-informations
+    // "reasons" + "SDK" comboboxes looped the whole run). Detect cmdk/Radix
+    // option items and commit via a real, re-resolved actionable click (plus a
+    // pointer-event sequence as backup) instead of raw mouse coordinates.
+    const isCmdkItem = await target
+      .evaluate(
+        (el) =>
+          el.hasAttribute("cmdk-item") ||
+          el.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null,
+      )
+      .catch(() => false);
+    if (isCmdkItem) {
+      await target.scrollIntoViewIfNeeded().catch(() => {});
+      // Playwright's locator.click() re-resolves geometry and dispatches the
+      // full trusted pointer/mouse sequence at the element's center — what
+      // cmdk's onSelect actually listens for.
+      await target.click({ timeout: 5000 }).catch(async () => {
+        // Backup: dispatch the pointer pair directly, then Enter (the cmdk
+        // input is focused after type-to-filter and highlights this item).
+        await target.dispatchEvent("pointerdown").catch(() => {});
+        await target.dispatchEvent("pointerup").catch(() => {});
+        await this.page?.keyboard.press("Enter").catch(() => {});
+      });
+      await this.wait(0.5);
+      return;
+    }
+    await this.humanClickLocator(target);
     await this.wait(0.5);
   }
 
