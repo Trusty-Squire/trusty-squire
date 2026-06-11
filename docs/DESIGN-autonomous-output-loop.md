@@ -300,3 +300,31 @@ Two deltas from the plan, both deliberate:
 3. **K = 3.** Three gate-red iterations per cluster, then the fix-agent parks a
    `wall-candidate` for human review. Mirrors the loop's existing 3-strike
    conventions.
+
+## Loop closure (#1) — fix grading (2026-06-11)
+
+The fix-agent committed RCs but nothing closed the feedback: "did the fix
+actually lift the rate on the services it targeted?" That half is now the
+**fix-grading ledger** (`apps/mcp/src/housekeeper/fix-ledger.ts`):
+
+1. **Record (write side).** When `--mode=fix` commits a cluster fix, it appends
+   an OPEN attempt to `~/.config/trusty-squire/fix-ledger.json`: the RC version,
+   the targeted `services`, the page `signature`, and the fix summary. (The
+   fix-agent now exposes `services`/`signature` on each committed entry.)
+2. **Grade (read side).** Every heal pass records per-service discovery
+   outcomes (`HousekeeperBatchSummary.serviceOutcomes`). After discovery,
+   `runHealPass` calls `gradeLedgerAgainstPass`: for each open attempt whose
+   targeted services were re-tested this pass, it grades
+   `improved` / `partial` / `regressed`, or leaves it `no_data` (not re-tested
+   yet) to grade on a later pass. The verdict is recorded once.
+3. **Surface.** Newly-graded attempts go into the heal digest
+   (`… · fixes graded N (X✓/Y✗)`) and the per-attempt line via `describeGrade`.
+
+Grading is pure (`gradeAttempt` / `applyGrades`) and unit-tested without the
+filesystem. A blocked wall is not a fix signal, so it's excluded from the
+per-service map. State is operator-only (next to the unknown-state store),
+excluded from the npm tarball with the rest of `housekeeper/`.
+
+**Still open (next slice):** auto-revert/flag a `regressed` fix, and surface
+the ledger on the admin dashboard (a "fix outcomes" readout) so the operator
+sees the loop's output quality over time, not just per-digest.

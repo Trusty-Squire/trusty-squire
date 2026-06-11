@@ -13,6 +13,7 @@ const TOKEN = "funnel-metrics-test-token-123456";
 const stubStore: FunnelStatsStore = {
   apiCounts: async () => ({
     tokens_issued: 12,
+    residential_installs: 4,
     accounts_created: 8,
     new_accounts_series: [{ date: "2026-05-30", count: 3 }],
   }),
@@ -83,9 +84,10 @@ describe("GET /v1/admin/funnel — response contract", () => {
     const body = res.json();
     // The cross-package contract the registry client will parse:
     expect(Object.keys(body).sort()).toEqual(
-      ["accounts_created", "as_of", "new_accounts_series", "npm_downloads", "tokens_issued", "window_end", "window_start"].sort(),
+      ["accounts_created", "as_of", "new_accounts_series", "npm_downloads", "residential_installs", "tokens_issued", "window_end", "window_start"].sort(),
     );
     expect(body.tokens_issued).toBe(12);
+    expect(body.residential_installs).toBe(4);
     expect(body.accounts_created).toBe(8);
     expect(body.new_accounts_series).toEqual([{ date: "2026-05-30", count: 3 }]);
     expect(body.npm_downloads).toBe(42);

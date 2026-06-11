@@ -1,5 +1,40 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.13 (2026-06-11)
+
+The autonomous self-improving loop, promoted to `latest`. Two objective
+functions + the daily heal engine, the holistic fix-agent (`--mode=fix`), the
+provision state machine with a single unknown-state escalation, the OF#3
+registry hit-rate scoreboard, and the discovery-hardening arc that drove the
+verifier queue to green — subdomain rebasing (kinde class), the returning-user
+false-demotion fix, ephemeral-identifier generalization, and Plunk extraction.
+
+- chore(discovery): smoke-test cleanup — drop active-dups, fix groq signup url
+- feat(discovery): 300-service candidate queue + point the sweep at it
+- feat(replay): subdomain rebasing for per-account-subdomain services (kinde class)
+- fix(verify): don't demote active skills on authenticated returning-user divergence
+- fix(replay): re-enter at host root when an extract finds nothing on a resource-id URL
+- fix(extract): recognize Plunk pk_<hex> API keys (plaintext, no copy button)
+- fix(replay): settle same-domain hosted-login before declaring OAuth recovery done
+- fix(synth): generalize ephemeral identifiers (UUID hrefs, session-param URLs)
+- feat(housekeeper): skip already-active services in the curated sweep
+- feat(registry): OF#3 registry hit-rate scoreboard on the objectives panel
+- feat(housekeeper): iterate-to-green — verify a fix unsticks the page before committing
+- chore(housekeeper): dogfood next + tarball fence + output-loop spec (C4)
+- feat(registry): stamp RC version on HealRun + dashboard RC column (C5)
+- feat(housekeeper): holistic fix-agent + --mode=fix (C2)
+- feat(housekeeper): failure-batch assembler + release fence + runEvalGate (C1/C3)
+- feat(registry): migration for HealRun objective-function columns
+- feat(loop): two objective functions — daily engine, dashboard, digest, CLAUDE.md
+- test(housekeeper): end-to-end escalation dry-run
+- docs: autonomous loop spec + skill-promotion pipeline
+- feat(housekeeper): wire provision state machine + single unknown-state escalation
+- feat(skill-schema): provision state machine + per-state policy + entry_state
+- docs(todo): kinde N4 — kui SDK radio is a hard wall (4 methods fail); operator-assisted hand-build path
+- fix(bot): JS-dispatch radio change as kui fallback (n1 wizards)
+- fix(bot): force-advance reads full inventory; isolate kinde kui-radio wall
+- fix(bot): route radio/checkbox clicks through check({force}) — fire change
+
 ## 0.9.12 (2026-06-09)
 
 Single-identity consolidation + the existing-account/onboarding frontier. Closed
