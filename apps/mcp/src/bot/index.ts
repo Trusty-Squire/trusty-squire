@@ -3,6 +3,7 @@
 
 import { randomBytes } from "crypto";
 import { BrowserController } from "./browser.js";
+import { humanLocalPart } from "./inbox-client.js";
 import {
   SignupAgent,
   type SignupResult,
@@ -112,8 +113,10 @@ export interface UniversalSignupRequest {
 
 export class UniversalSignupBot {
   private generateEmail(): string {
-    const random = randomBytes(8).toString("hex");
-    return `bot-${random}@trustysquire.ai`;
+    // Human-looking personal address — never a `bot-…`/service-named local
+    // part (an obvious signup-form bot tell). Shared with the inbox-alias
+    // generator. Only a fallback: discover/CLI pass an explicit inbox alias.
+    return `${humanLocalPart()}@trustysquire.ai`;
   }
 
   private generatePassword(): string {

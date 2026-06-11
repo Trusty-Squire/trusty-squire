@@ -53,19 +53,54 @@ function pickWorkspaceDomain(explicit?: string): string | null {
   return null;
 }
 
-function randomLocalPart(): string {
-  // Six bytes → 12 hex chars. Enough entropy that two parallel
-  // signups never collide; short enough that services with strict
-  // local-part length limits don't reject.
-  const bytes = new Uint8Array(6);
+function randomBytesArray(n: number): Uint8Array {
+  const bytes = new Uint8Array(n);
   if (typeof globalThis.crypto !== "undefined" && globalThis.crypto.getRandomValues !== undefined) {
     globalThis.crypto.getRandomValues(bytes);
   } else {
     for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
   }
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return bytes;
+}
+
+// Common given/family names. Kept short and ordinary on purpose — the
+// local part must read like a real person's personal address, not a
+// generated handle.
+const FIRST_NAMES = [
+  "james", "mary", "john", "patricia", "robert", "jennifer", "michael",
+  "linda", "david", "elizabeth", "william", "susan", "richard", "jessica",
+  "joseph", "sarah", "thomas", "karen", "daniel", "nancy", "matthew", "lisa",
+  "mark", "sandra", "paul", "ashley", "steven", "emily", "andrew", "laura",
+  "kenneth", "anna", "kevin", "olivia", "brian", "grace", "george", "julia",
+  "ryan", "chloe", "jason", "hannah", "eric", "rachel", "adam", "natalie",
+];
+const LAST_NAMES = [
+  "smith", "johnson", "williams", "brown", "jones", "garcia", "miller",
+  "davis", "rodriguez", "martinez", "lopez", "wilson", "anderson", "taylor",
+  "moore", "jackson", "martin", "lee", "clark", "lewis", "walker", "hall",
+  "allen", "young", "king", "wright", "scott", "green", "baker", "adams",
+  "nelson", "carter", "mitchell", "roberts", "turner", "phillips", "campbell",
+  "parker", "evans", "edwards", "collins", "stewart", "morris", "murphy",
+];
+
+// A realistic personal email local part: `first.last4821`, `mlee93`, etc.
+// Replaces the prior `${service}-${hex}` shape, which leaked the target
+// service's own name into the signup address (e.g. `deepseek-852847…`) —
+// an obvious bot tell no real signup would carry. Random name + a short
+// numeric suffix (the "my handle was taken" digits real people append)
+// keeps catch-all collisions negligible while reading as human.
+export function humanLocalPart(): string {
+  const r = randomBytesArray(5);
+  const first = FIRST_NAMES[r[0]! % FIRST_NAMES.length]!;
+  const last = LAST_NAMES[r[1]! % LAST_NAMES.length]!;
+  // 3–5 digit suffix from the remaining entropy.
+  const num = ((r[2]! << 16) | (r[3]! << 8) | r[4]!) % 90000 + 100;
+  // Vary the shape so the addresses aren't all `first.last`.
+  const shape = r[2]! % 4;
+  if (shape === 0) return `${first}.${last}${num}`;
+  if (shape === 1) return `${first}${last}${num}`;
+  if (shape === 2) return `${first[0]!}${last}${num}`;
+  return `${first}.${last}.${num}`;
 }
 
 export class InboxClient {
@@ -87,13 +122,13 @@ export class InboxClient {
     // mailbox; the API's poll-workspace-mail endpoint finds the
     // message by its TO header.
     if (this.workspaceDomain !== null) {
-      // Include the service slug so an inbox glance disambiguates
-      // mail from concurrent signups, plus a per-run random suffix.
-      const slug = (input.service ?? "svc")
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .slice(0, 18);
-      return `${slug}-${randomLocalPart()}@${this.workspaceDomain}`;
+      // A human-looking personal address. We deliberately DON'T embed the
+      // service slug here — `deepseek-…@` style locals are an obvious bot
+      // tell that some signup forms score against. Delivery is by exact
+      // TO-header match on the catch-all, so the local part only needs to
+      // be unique, not descriptive; the service is logged separately for
+      // operator debugging.
+      return `${humanLocalPart()}@${this.workspaceDomain}`;
     }
 
     const resp = await this.fetchImpl(`${this.baseUrl}/v1/inbox/aliases`, {

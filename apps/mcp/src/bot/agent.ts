@@ -9815,6 +9815,12 @@ ${formatInventory(input.inventory)}`,
             args.steps.push(
               `Post-verify: the page showed a notification after the click: "${alertSeen}"`,
             );
+            // Forensic snapshot of the page in its post-click error state.
+            // The before-fill/after-submit snapshots only cover the FIRST
+            // submit; a failure on a post-verify re-submit (e.g. deepseek's
+            // "Submitted failed. Please try again." after the OTP is filled)
+            // was otherwise unobservable. Non-fatal by contract.
+            await saveDebugSnapshot(this.browser, "post-verify-alert");
             hint =
               `After your last click the page showed this notification: "${alertSeen}". ` +
               `It likely explains why the page did not advance — address it (fix the named ` +
