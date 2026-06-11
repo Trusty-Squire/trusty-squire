@@ -3600,6 +3600,61 @@ export class BrowserController {
       // No interactive element appeared in time — let the planner run
       // anyway; it fails cleanly rather than hanging.
     }
+    // The generic wait above is satisfied by ANY interactive element —
+    // on a signup page with marketing chrome (links, marketplace badges)
+    // that fires while the actual auth widget is still an async spinner.
+    // The bot then snapshots a form-less inventory and bails
+    // `oauth_required` ("no email/password form"). MEASURED 2026-06-11
+    // (zilliz /signup: right-panel spinner, marketing copy on the left).
+    // So: if a loading spinner is visible AND no auth-form signal exists
+    // yet, give the widget a bounded extra wait to hydrate.
+    await this.waitForAuthWidgetHydration();
+  }
+
+  // Bounded poll for an auth-form signal when the page is still showing a
+  // loading spinner. Strictly additive: returns immediately unless a
+  // spinner is visible AND no auth signal (email/password input or a
+  // provider/sign-up button) is present yet. Best-effort — never throws.
+  private async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
+    if (!this.page) return;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const state = await this.page.evaluate(() => {
+          const vis = (el: Element): boolean => {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          const anyVis = (sel: string): boolean =>
+            Array.from(document.querySelectorAll(sel)).some(vis);
+          // Auth signal: a real form input or a recognizable provider /
+          // signup affordance.
+          const hasAuthInput = anyVis(
+            'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
+          );
+          let hasAuthButton = false;
+          const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
+          for (const el of Array.from(
+            document.querySelectorAll('button,a[href],[role="button"]'),
+          )) {
+            if (!vis(el)) continue;
+            if (re.test((el.textContent ?? "").trim())) { hasAuthButton = true; break; }
+          }
+          const spinnerVisible = anyVis(
+            '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
+          );
+          return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
+        });
+        // Done the moment an auth signal appears, or once nothing is
+        // spinning anymore (no point waiting on a page that simply has
+        // no auth widget — a true OAuth-less/blank page bails honestly).
+        if (state.hasAuth) return;
+        if (!state.spinnerVisible) return;
+      } catch {
+        return; // navigation / context teardown — let the caller proceed
+      }
+      await this.sleep(500);
+    }
   }
 
   // rc.33 — wait for the DOM to grow past a minimum interactive-

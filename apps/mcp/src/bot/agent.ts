@@ -6110,7 +6110,9 @@ export class SignupAgent {
 
                 // If no creds yet, run the Claude-planned navigation loop.
                 if (credentials.api_key === undefined && credentials.username === undefined) {
-                  const maxRounds = task.postVerifyMaxRounds ?? 6;
+                  // 24 (not 6) — same multi-step onboarding wizard the OAuth
+                  // path budgets for; see the enterEmailVerificationCode note.
+                  const maxRounds = task.postVerifyMaxRounds ?? 24;
                   credentials = await this.postVerifyLoop({
                     service: task.service,
                     credentials: { email: task.email, password },
@@ -7819,7 +7821,13 @@ ${formatInventory(input.inventory)}`,
     return this.postVerifyLoop({
       service: task.service,
       credentials: { email: task.email, password },
-      maxRounds: task.postVerifyMaxRounds ?? 6,
+      // Match the OAuth post-verify budget (24). The onboarding form
+      // reached after EMAIL verification is the same multi-step wizard the
+      // OAuth path hits — a profile form (name, country, company, role) +
+      // a "create your first project" step can need 8-10 rounds alone.
+      // The old 6 starved zilliz's "Set up your account" form: the planner
+      // had filled only name+jobTitle when the budget ran out.
+      maxRounds: task.postVerifyMaxRounds ?? 24,
       steps,
       initialHint: hint,
       ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
@@ -10386,6 +10394,23 @@ Strategy:
   ALSO shows preset choice buttons for the same step (e.g. "Optimize assets",
   "Transform images", "Next"). That input is a placeholder, not a field to
   complete — click a preset option button or "Next" instead.
+- **MULTI-FIELD PROFILE / ONBOARDING FORM ("Set up your account",
+  "Tell us about yourself").** When the page is a form with SEVERAL fields
+  (first/last name, country/region, company, job title, phone, use-case,
+  cloud region) gating a "Continue" / "Next" / "Submit" button, you must
+  fill EVERY visible empty text input and pick an option for EVERY
+  unselected dropdown — across your one-action-per-turn budget — BEFORE
+  clicking the gating button. Clicking it while ANY required field is
+  empty just re-renders the same page with red "X is required" errors and
+  wastes a round. Consult STEPS ALREADY TAKEN to see which fields you've
+  done and fill a REMAINING empty one each turn; only click Continue once
+  nothing is left empty.
+- When choosing a dropdown/select option for a profile field (job title,
+  role, use-case, company size, "how did you hear"), prefer a CONCRETE
+  real option (e.g. "Software Engineer", "Startup") — NEVER pick
+  "Other" / "None" / "Prefer not to say". Selecting "Other" SPAWNS an
+  extra required free-text field ("Please specify") that you then also
+  have to fill, costing rounds for no benefit.
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - **EMPTY DASHBOARD — create the first resource.** Many services do NOT expose
