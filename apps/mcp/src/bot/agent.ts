@@ -8384,6 +8384,13 @@ ${formatInventory(input.inventory)}`,
     // persisted (anti-bot/IP rejection) ⇒ oauth_session_not_persisted, not
     // a navigation bug. Generalizes without per-service URLs.
     let consecutiveOauthLoginPageRounds = 0;
+    // Fired once: before declaring the OAuth session dead, reload the page —
+    // an authenticated session whose cookie IS set often shows a transient
+    // login screen (Auth0/WorkOS silent re-auth round-trip, or a slow SPA that
+    // renders the login shell before hydrating the dashboard). A reload lands
+    // the dashboard for those; a genuine callback rejection stays on login
+    // even after reload, so this never masks a real wall.
+    let oauthBounceReloadTried = false;
     let planFailures = 0;
     // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
     // gate planFailures (so a transient 502 won't push us into the
@@ -8938,10 +8945,30 @@ ${formatInventory(input.inventory)}`,
       // without-residential-egress) oauth_session_not_persisted wall.
       if (args.credentials === undefined && isLoginPageUrl(state.url)) {
         consecutiveOauthLoginPageRounds += 1;
+        if (consecutiveOauthLoginPageRounds >= 3 && !oauthBounceReloadTried) {
+          // One reload before giving up. A set session cookie + a transient
+          // login shell (silent re-auth bounce / slow hydration — measured on
+          // the activeloop/galileo/turbopuffer class) lands the dashboard on a
+          // fresh load; a genuine rejection stays on login and bails below.
+          oauthBounceReloadTried = true;
+          args.steps.push(
+            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
+              `${consecutiveOauthLoginPageRounds} rounds — reloading once before bailing ` +
+              `(a set session cookie often lands the dashboard on reload).`,
+          );
+          try {
+            await this.browser.goto(originRoot(state.url) ?? state.url);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch {
+            // reload failed — next login-page round bails below
+          }
+          consecutiveOauthLoginPageRounds = 0;
+          continue;
+        }
         if (consecutiveOauthLoginPageRounds >= 3) {
           args.steps.push(
             `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
-              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback never persisted; bailing.`,
+              `${consecutiveOauthLoginPageRounds} rounds (incl. a reload) — the OAuth callback never persisted; bailing.`,
           );
           throw new OAuthSessionNotPersistedError(
             `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
