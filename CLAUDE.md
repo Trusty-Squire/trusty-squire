@@ -313,14 +313,17 @@ and cuts a GitHub release `v<version>`. It is idempotent: if tag `v<version>`
 already exists it's a no-op, so re-pushing `main` without a version bump does
 NOT republish.
 
-The release SOP (this is exactly what `/ship` automates — bump + CHANGELOG +
-PR; the merge does the rest):
+The release SOP — `pnpm release:mcp <version>` automates steps 1-2 (bump +
+CHANGELOG seed + branch + PR to the right channel):
 1. Bump `apps/mcp/package.json` `version` (the **source of truth**).
    - `main`  → a **stable** semver (e.g. `0.8.17`) → publishes the `latest` tag.
    - `staging` → a **prerelease** (e.g. `0.8.18-rc.1`) → publishes the `next` tag.
    (A branch↔shape mismatch fails the workflow loudly.)
-2. Open a `release-<version>` PR → `main` (or push the bump straight to
-   `main`/`staging`).
+2. Open a `release-<version>` PR → `main` (stable) or `staging` (prerelease).
+   **`main` is branch-protected** — no direct pushes; the PR must pass CI
+   (`secret-scan` + `typecheck` + `test`) before it can merge (0 approvals
+   required, so a solo maintainer is never blocked). `staging` is unprotected,
+   so RC bumps may still be pushed straight to it.
 3. Merge it. The release workflow publishes to npm + creates the GitHub
    release automatically. Confirm with `gh run watch` / `npm view
    @trusty-squire/mcp dist-tags`.
