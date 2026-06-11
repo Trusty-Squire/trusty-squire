@@ -450,6 +450,10 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
         skills_active: skillsActive,
         hit_served: hitServed,
         hit_total: hitTotal,
+        // Output-loop (#1) fix grades — client-supplied from its local ledger.
+        fixes_graded: intField("fixes_graded"),
+        fixes_improved: intField("fixes_improved"),
+        fixes_regressed: intField("fixes_regressed"),
         ...(typeof b["mcp_version"] === "string"
           ? { mcp_version: (b["mcp_version"] as string).slice(0, 40) }
           : {}),

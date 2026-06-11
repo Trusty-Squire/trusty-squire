@@ -315,6 +315,12 @@ export interface HealRunInput {
   // two raw counts (served-by-skill / total). Stamped server-side.
   hit_served?: number;
   hit_total?: number;
+  // Output-loop (#1) fix grading — how many committed fixes this pass graded,
+  // and the verdict split. The client (housekeeper) sends these from its local
+  // grading ledger. Optional so older callers/tests can omit them.
+  fixes_graded?: number;
+  fixes_improved?: number;
+  fixes_regressed?: number;
   mcp_version?: string;
   now?: Date;
 }
@@ -334,6 +340,9 @@ export interface HealRunRecord {
   skills_active: number;
   hit_served: number;
   hit_total: number;
+  fixes_graded: number;
+  fixes_improved: number;
+  fixes_regressed: number;
   mcp_version: string | null;
 }
 

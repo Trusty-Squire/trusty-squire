@@ -397,6 +397,12 @@ model HealRun {
   // skill. Stamped server-side at heartbeat (the registry owns the events).
   hit_served         Int @default(0)
   hit_total          Int @default(0)
+  // Output-loop (#1) fix grading: of the fix-agent's committed fixes that this
+  // pass re-tested, how many were graded and with what verdict. Lets the
+  // dashboard trend whether the self-fixing loop is producing good fixes.
+  fixes_graded    Int @default(0)
+  fixes_improved  Int @default(0)
+  fixes_regressed Int @default(0)
   // mcp version of the housekeeper that reported, for drift debugging.
   mcp_version String?
 
