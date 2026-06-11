@@ -2,6 +2,13 @@
 
 ## 0.9.13 (2026-06-11)
 
+The autonomous self-improving loop, promoted to `latest`. Two objective
+functions + the daily heal engine, the holistic fix-agent (`--mode=fix`), the
+provision state machine with a single unknown-state escalation, the OF#3
+registry hit-rate scoreboard, and the discovery-hardening arc that drove the
+verifier queue to green — subdomain rebasing (kinde class), the returning-user
+false-demotion fix, ephemeral-identifier generalization, and Plunk extraction.
+
 - chore(discovery): smoke-test cleanup — drop active-dups, fix groq signup url
 - feat(discovery): 300-service candidate queue + point the sweep at it
 - feat(replay): subdomain rebasing for per-account-subdomain services (kinde class)
