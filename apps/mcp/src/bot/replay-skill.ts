@@ -992,6 +992,13 @@ async function executeStep(
       // content first, with the 2s as a floor for fast/static pages.
       await browser.wait(2);
       await browser.waitForInteractiveDom().catch(() => undefined);
+      // Parity with the live bot's waitForFormReady: an SPA signup page can
+      // render marketing chrome (so waitForInteractiveDom is satisfied)
+      // while the actual auth form is still an async spinner. Without this
+      // the replay reads a form-less inventory and skips the email/password
+      // fills as "absent" (zilliz /signup). Bounded; no-op once the form
+      // is present.
+      await browser.waitForAuthWidgetHydration().catch(() => undefined);
       // 0.8.2-rc.22 — URL drift detection. When a skill's signup_url
       // assumes the user is authenticated (Railway's /account/tokens
       // captured after OAuth was done in a prior session), the

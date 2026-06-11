@@ -3615,7 +3615,7 @@ export class BrowserController {
   // loading spinner. Strictly additive: returns immediately unless a
   // spinner is visible AND no auth signal (email/password input or a
   // provider/sign-up button) is present yet. Best-effort — never throws.
-  private async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
+  async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
     if (!this.page) return;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
