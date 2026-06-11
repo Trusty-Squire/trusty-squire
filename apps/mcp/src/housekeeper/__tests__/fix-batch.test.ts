@@ -63,17 +63,20 @@ describe("computeSignature", () => {
   it("is stable across inventory reordering (sorted descriptors)", () => {
     const a = [el({ role: "button", ariaLabel: "Create key" }), el({ role: "link", visibleText: "Docs" })];
     const b = [el({ role: "link", visibleText: "Docs" }), el({ role: "button", ariaLabel: "Create key" })];
-    expect(computeSignature("https://x.com/dash", a)).toBe(computeSignature("https://x.com/dash", b));
+    expect(computeSignature(a)).toBe(computeSignature(b));
   });
-  it("ignores host + query, keys on path + identity", () => {
-    const inv = [el({ role: "button", ariaLabel: "Create key" })];
-    expect(computeSignature("https://x.com/dash?token=abc", inv)).toBe(
-      computeSignature("https://x.com/dash?token=zzz", inv),
-    );
+  it("ignores element names — the same role shape across services collides", () => {
+    // groq's "Create key" button and render's "Generate token" button are the
+    // same structural shape; the signature must not split them by wording, or
+    // shared-root-cause failures shatter into per-service singletons.
+    const groq = [el({ role: "button", ariaLabel: "Create key" }), el({ role: "textbox", ariaLabel: "Email" })];
+    const render = [el({ role: "button", ariaLabel: "Generate token" }), el({ role: "textbox", ariaLabel: "Work email" })];
+    expect(computeSignature(groq)).toBe(computeSignature(render));
   });
-  it("differs when the page path differs", () => {
-    const inv = [el({ role: "button", ariaLabel: "Create key" })];
-    expect(computeSignature("https://x.com/a", inv)).not.toBe(computeSignature("https://x.com/b", inv));
+  it("differs when the structural role shape differs", () => {
+    const oneButton = [el({ role: "button", ariaLabel: "Go" })];
+    const twoButtons = [el({ role: "button", ariaLabel: "Go" }), el({ role: "button", ariaLabel: "Back" })];
+    expect(computeSignature(oneButton)).not.toBe(computeSignature(twoButtons));
   });
 });
 
