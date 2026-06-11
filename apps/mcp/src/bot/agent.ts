@@ -9121,6 +9121,36 @@ ${formatInventory(input.inventory)}`,
         }
         lastNavigatedTo = null;
       }
+      // Credential-domain grounding. The OAuth provider (GitHub/GitLab) is
+      // the LOGIN method, never the API-key source — but the planner, told to
+      // "find an API token", sometimes navigates to the provider's own
+      // token-minting settings and tries to create a GitHub PAT as if it were
+      // the service's key (MEASURED 2026-06-11: typesense — the bot went
+      // straight to github.com/settings/tokens and walked into GitHub's
+      // sudo-2FA gate, then mislabeled it the typesense wall). A PAT for
+      // GitHub has nothing to do with the service. Block it and point the
+      // planner back to the service's own dashboard.
+      if (
+        nextStep.kind === "navigate" &&
+        /^https?:\/\/(?:github\.com\/settings\/(?:tokens|personal-access-tokens|apps)|gitlab\.com\/-\/(?:profile\/personal_access_tokens|user_settings))/i.test(
+          nextStep.url,
+        ) &&
+        args.service.toLowerCase() !== "github" &&
+        args.service.toLowerCase() !== "gitlab"
+      ) {
+        args.steps.push(
+          `Post-verify: planner tried to mint a third-party token at ${nextStep.url} — blocked (provider is the login method, not the key source).`,
+        );
+        hint =
+          `STOP — ${nextStep.url} is the OAuth PROVIDER's own token page. You signed in ` +
+          `THROUGH that provider, but the ${args.service} API key lives on ${args.service}'s ` +
+          `OWN dashboard, NOT in a GitHub/GitLab personal access token. Do NOT create a ` +
+          `provider PAT. Navigate back to the ${args.service} dashboard and find its API-keys / ` +
+          `tokens / credentials page there (it is often per-project or per-cluster — create the ` +
+          `project/cluster first if none exists).`;
+        continue;
+      }
+
       // Refuse to re-navigate to a URL already known to 404 — force a
       // click-based re-plan instead of letting the planner re-guess it.
       if (nextStep.kind === "navigate" && deadUrls.has(nextStep.url)) {

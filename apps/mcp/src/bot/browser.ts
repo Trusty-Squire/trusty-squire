@@ -857,6 +857,24 @@ export class BrowserController {
     for (let attempt = 1; ; attempt++) {
       try {
         await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        // A SOCKS/connection drop does NOT always throw: Chrome resolves
+        // domcontentloaded on its own `chrome-error://chromewebdata/`
+        // interstitial and goto returns cleanly. The bot then ran the whole
+        // planner on a dead error page and gave up after one round (MEASURED
+        // 2026-06-11: galileo/lancedb landed on chrome-error with the app
+        // host as the title, never retried). Treat a chrome-error landing as
+        // the same transient class and retry it like a thrown net error.
+        const landed = this.page.url();
+        if (landed.startsWith("chrome-error://")) {
+          if (attempt >= MAX_GOTO_ATTEMPTS) {
+            throw new Error(
+              `net::navigation landed on a Chrome error page for ${url} ` +
+                `after ${attempt} attempts (transient proxy/host failure)`,
+            );
+          }
+          await this.sleep(1500 * attempt);
+          continue;
+        }
         break;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
