@@ -26,6 +26,7 @@ import type { CleanupOutcome } from "./cleanup.js";
 import { handleReplay, type ReplayMode, type ReplayRunner } from "./modes/verify.js";
 import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
+import { gradeLedgerAgainstPass, describeGrade } from "./fix-ledger.js";
 import { VERSION } from "../version.js";
 
 export type { ReplayMode, ReplayRunner } from "./modes/verify.js";
@@ -81,6 +82,10 @@ export interface HousekeeperBatchSummary {
     quarantined: number;
     none: number;
   };
+  // Per-service discovery outcomes (discover tasks only) — feeds the
+  // fix-grading ledger so a later pass can check whether the services a fix
+  // targeted now succeed (#1, fix-ledger.ts).
+  serviceOutcomes: Array<{ service: string; succeeded: boolean }>;
 }
 
 export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBatchSummary> {
@@ -96,6 +101,7 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     blocked: 0,
     skipped: 0,
     transitions: { promoted: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
+    serviceOutcomes: [],
   };
   // Inter-run pacing for live (discover) signups — keeps a clean residential
   // exit clean (see pacing.ts). Replay tasks don't launch the bot, so they're
@@ -142,6 +148,12 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
         if (outcome.kind === "ok") summary.succeeded += 1;
         else if (outcome.kind === "blocked") summary.blocked += 1;
         else summary.failed += 1;
+        // Per-service result for the fix-grading ledger (#1). A blocked wall is
+        // not a "did the fix work" signal, so it's excluded; everything else
+        // records succeeded = (ok), mirroring the aggregate counters above.
+        if (outcome.kind !== "blocked") {
+          summary.serviceOutcomes.push({ service: task.service, succeeded: outcome.kind === "ok" });
+        }
         // 0.8.2-rc.4 — credit `promoted` accurately. Pre-fix this
         // always bumped `none` even when auto-promote published a
         // skill to the registry, so the batch summary said
@@ -249,6 +261,24 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   log("heal pass — phase 2/2: discover (re-skill freshly-demoted + demand)");
   const discover = await runOneBatch(opts.discover);
 
+  // Close-the-loop (#1): grade open fix attempts whose targeted services were
+  // re-tested in THIS pass's discovery. A fix committed by a prior --mode=fix
+  // run is proven (or refuted) here — the feedback half of the output loop.
+  const serviceSucceeded = new Map<string, boolean>();
+  for (const o of discover.serviceOutcomes) serviceSucceeded.set(o.service, o.succeeded);
+  let gradedLine = "";
+  try {
+    const graded = gradeLedgerAgainstPass(serviceSucceeded, new Date().toISOString());
+    for (const g of graded) log(`fix grade: ${describeGrade(g)}`);
+    if (graded.length > 0) {
+      const improved = graded.filter((g) => g.grade === "improved").length;
+      const regressed = graded.filter((g) => g.grade === "regressed").length;
+      gradedLine = ` · fixes graded ${graded.length} (${improved}✓/${regressed}✗)`;
+    }
+  } catch (err) {
+    log(`fix grading failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // The digest: what rotted, what auto-healed, what still needs a human.
   const reskilled = discover.transitions.promoted;
   const needsHuman = verify.transitions.demoted + verify.transitions.quarantined - reskilled;
@@ -316,7 +346,7 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   const digest =
     `verified ${verify.attempted} · demoted ${verify.transitions.demoted} · ` +
     `quarantined ${verify.transitions.quarantined} · re-skilled ${reskilled} · ` +
-    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}${hitLine}`;
+    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}${hitLine}${gradedLine}`;
   log(`heal pass done: ${digest}`);
   await fanOutNotifier(opts.notifiers ?? [], log, {
     kind: "heal_digest",

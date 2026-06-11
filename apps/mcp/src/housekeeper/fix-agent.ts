@@ -135,7 +135,15 @@ export interface WallCandidate {
 }
 
 export interface FixAgentResult {
-  committed: Array<{ cluster_id: string; version: string; summary: string }>;
+  committed: Array<{
+    cluster_id: string;
+    version: string;
+    summary: string;
+    // The services + signature this fix targeted — what the grading ledger
+    // checks on the next pass (fix-ledger.ts). See docs/DESIGN-autonomous-output-loop.md.
+    services: string[];
+    signature: string;
+  }>;
   walls: WallCandidate[];
   parked: Array<{ cluster_id: string; reason: string; touched_paths: string[] }>;
 }
@@ -350,7 +358,13 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
 
       // Verified: no regression AND every stuck page moved.
       await opts.commit({ cluster, proposal, version: nextVersion });
-      result.committed.push({ cluster_id: cluster.id, version: nextVersion, summary: proposal.summary });
+      result.committed.push({
+        cluster_id: cluster.id,
+        version: nextVersion,
+        summary: proposal.summary,
+        services: cluster.services,
+        signature: cluster.signature,
+      });
       log(`cluster ${cluster.id}: committed ${nextVersion} (${verify.moved}/${verify.verifiable} pages unstuck) — ${proposal.summary}`);
       nextVersion = computeNextRc(nextVersion);
       committed = true;
