@@ -235,6 +235,13 @@ can be tuned against real data.
    PostHog SPA wait, billing surface, per-account quota
    aggregation — all still queued but not blocking the
    closed-loop work.
+8. **Egress Grants (roadmap, `docs/DESIGN-egress-grants.md`).**
+   `use_credential` generalized to a standing workload identity: the agent
+   mints a scoped, revocable token so a *deployed app* can call providers
+   through the injecting proxy — raw key still never leaves Squire. Reuses
+   `HttpProxyExecutor` (`/v1/vault/use`) + the `/v1/llm/chat` token+rate-limit
+   pattern; turns the vault into a revoke/rotate/spend-cap control plane.
+   Not started; v1 scope cut + milestones in the doc.
 
 ## Environment Details
 
