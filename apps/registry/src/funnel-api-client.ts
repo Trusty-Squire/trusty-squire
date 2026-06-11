@@ -14,6 +14,9 @@ export interface ApiFunnelData {
   window_end: string;
   as_of: string;
   tokens_issued: number;
+  // Real external installs (asn_class='residential'). Defaults to 0 when an
+  // older API predates the field — backward-compatible (see parse below).
+  residential_installs: number;
   accounts_created: number;
   new_accounts_series: Array<{ date: string; count: number }>;
   npm_downloads: number | null;
@@ -52,7 +55,13 @@ export async function fetchApiFunnel(opts: {
     ) {
       return null;
     }
-    return json as ApiFunnelData;
+    // residential_installs is newer than the rest of the contract; tolerate an
+    // older API that omits it by defaulting to 0 rather than failing the panel.
+    return {
+      ...(json as ApiFunnelData),
+      residential_installs:
+        typeof json.residential_installs === "number" ? json.residential_installs : 0,
+    };
   } catch {
     return null; // timeout / network / parse — fail-soft
   } finally {

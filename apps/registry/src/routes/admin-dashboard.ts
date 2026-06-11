@@ -481,11 +481,11 @@ const MOBILE_CSS = `
 // succeeded) come from ProvisionEvent.
 function renderAcquisitionFunnelSection(f: FunnelPanelData): string {
   const desc =
-    "New users in the window (30d), top to bottom. Downloads are anonymous (npm, ~1d delayed). API-sourced rows show 'unavailable' if the metrics API is unreachable.";
+    "New users in the window (30d), top to bottom. 'installs' counts residential machine tokens — the honest external signal; datacenter/infra tokens (housekeeper, CI, dev) are excluded. Downloads are anonymous npm (~1d delayed, mostly mirror/bot traffic).";
   const api = f.apiData;
   const rows: Array<{ label: string; sub?: string; value: number | null }> = [
     { label: "downloads", sub: "npm", value: api !== null ? api.npm_downloads : null },
-    { label: "tokens issued", value: api !== null ? api.tokens_issued : null },
+    { label: "installs", sub: "residential", value: api !== null ? api.residential_installs : null },
     { label: "accounts created", value: api !== null ? api.accounts_created : null },
     { label: "activated", value: f.hasRegistryData ? f.activated : null },
     { label: "succeeded", value: f.hasRegistryData ? f.succeeded : null },
@@ -508,7 +508,7 @@ function renderAcquisitionFunnelSection(f: FunnelPanelData): string {
   const note =
     api === null
       ? `<div class="lowN">API metrics unavailable — showing registry-side stages only.</div>`
-      : "";
+      : `<div class="lowN">tokens issued (incl. datacenter/infra): ${api.tokens_issued.toLocaleString("en-US")} — not a user count; our own housekeeper/CI/dev tokens dominate it.</div>`;
   return section("funnel", "Acquisition funnel", desc, `<div class="northstar">${bars}${note}</div>`);
 }
 
