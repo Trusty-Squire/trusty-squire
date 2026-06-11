@@ -86,7 +86,17 @@ can dip even while OF#1 rises. Read them together, not in isolation.
   → delete at 30d. Structured JSON log per run.
 - **Universal signup bot** (`apps/mcp/src/bot/` — bundled into the mcp
   package, no longer a separate npm package):
-  - Stealth (`playwright-extra` + stealth plugin)
+  - Stealth (`playwright-extra` + stealth plugin) patches ~17
+    client-side tells (navigator.webdriver, etc.).
+  - **Browser-automation fingerprinting is mitigated by `patchright`**
+    (a maintained Playwright fork that closes the CDP-level tells the
+    stealth plugin can't — `Runtime.enable`/mainWorld/webdriver/viewport).
+    **Default-ON since 2026-06-08** (`BOT_CDP_HARDENED`, opt out with
+    `=0`); `getChromium()` in `browser.ts` loads it and falls back to the
+    baseline only if patchright isn't installed. `stealthProfile` reports
+    `cdp_hardened` vs `baseline`. So **do NOT re-diagnose a block as
+    "automation fingerprinting" without first confirming patchright did
+    NOT load** — that class of tell is already addressed.
   - **Tier 1 captcha bypass: behavior simulation** (bezier mouse,
     variable typing with thinking pauses, post-load dwell, hover
     hesitation). No model, no per-solve cost. Handles invisible-mode
