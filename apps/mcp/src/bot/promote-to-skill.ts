@@ -159,7 +159,19 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // session token (kinde-class psid=, redirect_to=) doesn't make replay's first
   // navigation dead.
   const firstRound = verification.rounds[0]!;
-  const signupUrl = generalizeCapturedUrl(firstRound.state.url);
+  // Pick the entry URL for signup_url. When the capture passed through an
+  // OAuth identity provider, round 0's URL can land on the provider's own
+  // domain (e.g. accounts.google.com / myaccount.google.com — the bot
+  // deliberately navigates to the Google app root so the service routes
+  // it back to the dashboard). That domain is NOT a valid signup entry:
+  // replay's first navigation would dead-end on Google instead of the
+  // service. Prefer the first captured round whose host is the service's
+  // own (a non-IdP domain); fall back to round 0 only if every round is on
+  // an IdP domain (shouldn't happen for a real signup).
+  const entryRound =
+    verification.rounds.find((r) => !isIdentityProviderUrl(r.state.url)) ??
+    firstRound;
+  const signupUrl = generalizeCapturedUrl(entryRound.state.url);
   const oauthProvider = inferOAuthProvider(stepsResult.steps);
 
   // rc.24 — guarantee the first step is a navigate. When the captured
@@ -898,6 +910,31 @@ const EPHEMERAL_URL_PARAM =
 // Strip per-run session params from a captured URL, byte-preserving any URL
 // that has none. Used for navigate steps + the inferred signup_url so a stale
 // session token doesn't make the entry navigation dead on replay.
+// Hosts that belong to an OAuth identity provider, never a service's own
+// signup page. A capture that passes through one mid-OAuth must not adopt
+// it as signup_url — replay would navigate to the IdP instead of the
+// service. Matches the host exactly or any subdomain of it.
+const IDENTITY_PROVIDER_HOSTS = [
+  "google.com",
+  "github.com",
+  "microsoftonline.com",
+  "appleid.apple.com",
+  "facebook.com",
+  "okta.com",
+  "auth0.com",
+] as const;
+
+export function isIdentityProviderUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return IDENTITY_PROVIDER_HOSTS.some(
+      (idp) => host === idp || host.endsWith(`.${idp}`),
+    );
+  } catch {
+    return false; // relative / malformed — not an IdP entry
+  }
+}
+
 export function generalizeCapturedUrl(url: string): string {
   try {
     const u = new URL(url);

@@ -24,6 +24,7 @@ import {
   pickHrefHint,
   hasEphemeralPathSegment,
   generalizeCapturedUrl,
+  isIdentityProviderUrl,
 } from "../promote-to-skill.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -63,6 +64,23 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     expect(generalizeCapturedUrl(clean)).toBe(clean);
     const cleanWithParam = "https://x.co/signup?plan=free";
     expect(generalizeCapturedUrl(cleanWithParam)).toBe(cleanWithParam);
+  });
+
+  it("isIdentityProviderUrl flags IdP domains, not service domains", () => {
+    // The deepseek-N26 bug: round 0 landed on a Google domain mid-OAuth,
+    // and the synthesizer adopted it as signup_url.
+    expect(isIdentityProviderUrl("https://myaccount.google.com/")).toBe(true);
+    expect(isIdentityProviderUrl("https://accounts.google.com/o/oauth2/v2/auth")).toBe(true);
+    expect(isIdentityProviderUrl("https://github.com/login/oauth/authorize")).toBe(true);
+    expect(isIdentityProviderUrl("https://login.microsoftonline.com/common")).toBe(true);
+    // Service domains must NOT be flagged.
+    expect(isIdentityProviderUrl("https://platform.deepseek.com/sign_up")).toBe(false);
+    expect(isIdentityProviderUrl("https://platform.deepseek.com/api_keys")).toBe(false);
+    expect(isIdentityProviderUrl("https://ipinfo.io/signup")).toBe(false);
+    // Don't false-positive on a service whose name merely contains an IdP token.
+    expect(isIdentityProviderUrl("https://mygoogle.com.evil.io/x")).toBe(false);
+    // Malformed / relative → not an IdP entry.
+    expect(isIdentityProviderUrl("/signup")).toBe(false);
   });
 });
 

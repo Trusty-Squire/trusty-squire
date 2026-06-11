@@ -7671,6 +7671,16 @@ Output rules:
   modify a selector. A selector not in the inventory is rejected and
   you will be asked to re-plan.
 - Include the TOS/agree checkbox ONLY if the inventory has a real input of type=checkbox for it. If there is no such checkbox, OMIT the check action entirely — never substitute a link or a button.
+- Email verification-CODE buttons: if the inventory has a button like
+  "Send code", "Send verification code", "Get code", or "Email me a
+  code" beside an OTP / verification-code field, you MUST include a
+  click action on it, ORDERED AFTER the email fill. The bot operates a
+  live email inbox: clicking it dispatches the code to the filled
+  email, and the bot fetches the emailed code and fills the code field
+  itself in a later step. NEVER skip this button or treat the code as
+  un-automatable / manual — if you omit it, the service never sends the
+  email and the signup stalls. Do NOT fill the code field yourself (you
+  don't have the code yet); just click the send-code button.
 - Skip elements marked [cookie-consent — avoid], and skip optional
   marketing-opt-in checkboxes.
 - Do NOT add a separate password-confirmation fill unless the
