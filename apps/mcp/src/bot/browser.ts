@@ -3512,9 +3512,15 @@ export class BrowserController {
         return r.width > 2 && r.height > 2;
       };
       document.querySelectorAll("input, textarea").forEach((el) => {
+        // Only text-shaped inputs can RENDER a credential. A checkbox/
+        // radio/button's `value` is a markup constant, not page content —
+        // zilliz's CookieScript banner ships `<input type="checkbox"
+        // value="personalization">` and those words sit earlier in DOM
+        // order than the real key, so the validator-shaped scan tier was
+        // returning them as the "credential".
         if (
           el instanceof HTMLInputElement &&
-          (el.type === "hidden" || el.type === "password")
+          !["text", "search", "url", "tel", "number", "email", ""].includes(el.type)
         ) {
           return;
         }

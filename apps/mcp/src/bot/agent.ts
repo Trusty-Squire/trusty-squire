@@ -3498,6 +3498,26 @@ const CREDENTIAL_NOISE_TOKENS: readonly string[] = [
   "protonpass",
   "autofill",
   "passwords",
+  // Cookie-consent widget vocabulary (CookieScript/OneTrust-class banners
+  // render these as checkbox values and category labels on EVERY page,
+  // earlier in DOM order than any credential — zilliz's banner fed
+  // "personalization" to the validator-shaped scan tier as the "key").
+  // Whole-token equality with a generic English word is never a real
+  // credential, so rejecting these costs nothing.
+  "necessary",
+  "analytics",
+  "personalization",
+  "personalisation",
+  "advertising",
+  "advertisement",
+  "marketing",
+  "functional",
+  "preferences",
+  "statistics",
+  "performance",
+  "targeting",
+  "unclassified",
+  "security",
 ];
 
 // Verb-prefixed UI affordances ("Save to 1Password", "Copy to

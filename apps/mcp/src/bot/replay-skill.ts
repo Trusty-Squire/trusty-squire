@@ -271,6 +271,16 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // before treating it as skippable. Once a form control succeeds the form is
   // present, and from then on absent fields keep the account-state skip.
   let reachedForm = false;
+  // Post-click settle parity with the live bot. A click can kick off server
+  // work BEFORE the SPA navigates (zilliz's onboarding Continue provisions a
+  // default org/project/cluster, then routes to the dashboard — several
+  // seconds). The live bot's LLM round-trip gave that window for free; the
+  // replay engine reads the next inventory ~2s after the click, sees the OLD
+  // page, and wrongly skips/fails subsequent steps as "absent". When a step
+  // doesn't resolve and the most recent EXECUTED step was a click/navigate,
+  // poll re-validation before the skip/fail cascade decides. Iteration-
+  // bounded (not wall-clock) so stubbed tests don't spin.
+  let lastExecutedWasClick = false;
   for (let i = 0; i < skill.steps.length; i++) {
     const step = skill.steps[i]!;
 
@@ -342,6 +352,17 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       (step.kind === "fill" || step.kind === "select")
     ) {
       validation = await waitForFormThenRevalidate(step, browser, templateValues);
+    }
+    if (!validation.ok && lastExecutedWasClick) {
+      for (let poll = 0; poll < 6 && !validation.ok; poll++) {
+        await browser.wait(2);
+        validation = await preValidateStep(step, browser, templateValues);
+      }
+      // One settle window per click. If the page didn't produce this step's
+      // target within it, later steps shouldn't each re-pay the wait — a
+      // genuinely-diverged page (returning-user skips) would otherwise
+      // crawl through every remaining step at +12s apiece.
+      if (!validation.ok) lastExecutedWasClick = false;
     }
     let stepToExecute = step;
     if (!validation.ok) {
@@ -451,8 +472,12 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       // eagerly skipped as "already registered".
       if (execOutcome.kind === "filled" || execOutcome.kind === "selected") {
         reachedForm = true;
+        lastExecutedWasClick = false;
       } else if (execOutcome.kind === "clicked" || execOutcome.kind === "navigated") {
         reachedForm = false;
+        // Stays true across SKIPPED steps (they don't execute), so a step
+        // two slots after the click still gets the settle grace.
+        lastExecutedWasClick = true;
       }
       if (execOutcome.kind === "extract_ok") {
         // We extracted a credential successfully. Validate it before
@@ -839,7 +864,7 @@ async function preValidateStep(
 
     case "select": {
       const inventory = await browser.extractInteractiveElements();
-      const matches = inventory.filter((el) => isFillable(el) && matchesLabelHint(el, step.label_hint));
+      const matches = inventory.filter((el) => isSelectTarget(el) && matchesLabelHint(el, step.label_hint));
       if (matches.length === 0) {
         return {
           ok: false,
@@ -1279,7 +1304,14 @@ async function executeStep(
       // browser.type clicks-then-pressSequentially, which auto-distributes
       // across multi-box single-digit OTP inputs (Porter/Koyeb class) as
       // well as a single combined box.
+      const otpPageUrl = browser.currentUrl();
       await browser.type(target.selector, code);
+      // Auto-advance is racy: a keystroke landing during the widget's focus
+      // transition gets dropped by the controlled input, leaving N-1 boxes
+      // filled and the submit disabled (zilliz Verify, observed 2026-06-11).
+      // Read the boxes back and re-type per-box — explicit targeting, no
+      // auto-advance dependency — anything that didn't stick.
+      await fixupOtpDistribution(browser, code, otpPageUrl);
       return { kind: "filled" };
     }
 
@@ -1289,16 +1321,16 @@ async function executeStep(
       // Sentry-grid rows land on the right <select>. The original
       // `inventory.find` would unilaterally pick the first match.
       //
-      // 0.8.2-rc.21 — also restrict to fillable elements (input /
-      // textarea / select). Without this, a Railway-class form where
-      // a `<label for="select-X">` shares labelText with its
+      // 0.8.2-rc.21 — also restrict to select targets (input /
+      // textarea / select / role=combobox). Without this, a Railway-class
+      // form where a `<label for="select-X">` shares labelText with its
       // `<select id="select-X">` would silently pick the label —
       // and selectOption(label, …) would then route into the
       // combobox path and fail because native selects don't reveal
       // options via DOM patterns. Pre-validation already filters
       // this way; the executor was lagging.
       const allMatches = inventory.filter(
-        (el) => isFillable(el) && matchesLabelHint(el, step.label_hint),
+        (el) => isSelectTarget(el) && matchesLabelHint(el, step.label_hint),
       );
       if (allMatches.length === 0) {
         throw new Error(`No select matches label_hint=${step.label_hint}`);
@@ -1836,6 +1868,10 @@ async function findValidatedCandidate(
   try {
     const candidates = await browser.extractCredentialCandidates();
     for (const cand of candidates) {
+      // Same noise gate the heuristic tiers apply — a password-manager
+      // affordance or consent-widget word that happens to satisfy a
+      // length-only validator must not shadow the real key.
+      if (isCredentialNoiseCandidate(cand)) continue;
       if (candidateSatisfiesValidatorShape(cand, validator)) return cand;
     }
   } catch {
@@ -2134,18 +2170,30 @@ async function maybeDumpReplayDebug(
       .filter((e) => e.visible)
       .map((e) => ({
         tag: e.tag,
+        type: e.type,
         role: e.role,
         text: (e.visibleText ?? "").slice(0, 60),
         aria: e.ariaLabel,
         label: e.labelText,
         placeholder: e.placeholder,
         href: e.href ?? null,
+        selector: e.selector,
+        // Field state is the diagnostic for "submit stays disabled" failures
+        // (which box is actually empty?). Password values stay redacted.
+        value: e.type === "password" ? (e.value ? "<redacted>" : "") : (e.value ?? null),
       }))
-      .filter((e) => e.text || e.aria || e.label || e.placeholder || e.href);
+      .filter((e) => e.text || e.aria || e.label || e.placeholder || e.href || e.value);
+    // Visible page text (toasts, validation errors, "code expired" banners)
+    // — interactive inventory alone can't show WHY a page refused to move.
+    const pageText = (await browser.extractText().catch(() => "")).slice(0, 1500);
     const path = `/tmp/replay-debug-${skill.service}-step${stepIndex}.json`;
     writeFileSync(
       path,
-      JSON.stringify({ service: skill.service, stepIndex, reason, url: browser.currentUrl(), interesting }, null, 2),
+      JSON.stringify(
+        { service: skill.service, stepIndex, reason, url: browser.currentUrl(), pageText, interesting },
+        null,
+        2,
+      ),
     );
     console.error(`[replay-debug] dumped ${path} (${interesting.length} elements)`);
   } catch {
@@ -2325,6 +2373,20 @@ function isFillable(el: InteractiveElement): boolean {
   return el.tag === "input" || el.tag === "textarea" || el.tag === "select";
 }
 
+// A `select` step's target is broader than isFillable: MUI/Radix-class
+// dropdowns render as a non-input element with role="combobox" (zilliz's
+// Job Title is a <div id="mui-component-select-jobTitle" role="combobox">).
+// browser.selectOption already drives those (click + pick option from the
+// popup — the capture-time path); the replay matcher was the only place
+// still requiring a native form tag, which made every MUI select look
+// "absent" and get skipped as account-state onboarding (measured live
+// 2026-06-11: zilliz replay left Job Title unselected, Continue no-opped,
+// and the failure surfaced 5 steps later as a bogus returning-user
+// divergence on "API Keys").
+function isSelectTarget(el: InteractiveElement): boolean {
+  return isFillable(el) || el.role === "combobox";
+}
+
 // Locate the verification-code input for an `await_email_code` step.
 // OTP inputs are frequently UNLABELED (single-digit boxes, headless
 // inputs) — that's exactly why a `fill` step can't carry them — so the
@@ -2334,14 +2396,13 @@ function isFillable(el: InteractiveElement): boolean {
 // verification gate the synthesizer placed it at, where the page is just
 // the code input(s) + a Verify button. Returns null when no plausible
 // input exists. Exported for unit tests.
-export function findCodeInput(
+export function codeInputCandidates(
   inventory: readonly InteractiveElement[],
-  labelHint?: string,
-): InteractiveElement | null {
+): InteractiveElement[] {
   // Code-shaped: a visible text-entry input that is NOT an email/password/
   // checkbox/radio/etc. (type null/"" covers headless OTP boxes).
   const TEXT_ENTRY = new Set(["text", "tel", "number", "", "search"]);
-  const candidates = inventory.filter(
+  return inventory.filter(
     (el) =>
       el.tag === "input" &&
       el.visible !== false &&
@@ -2349,6 +2410,50 @@ export function findCodeInput(
       el.type !== "email" &&
       el.type !== "password",
   );
+}
+
+// Post-typing readback for an `await_email_code` step. browser.type relies
+// on the widget's auto-advance to distribute digits across multi-box OTP
+// inputs; a keystroke that fires during the focus transition is silently
+// dropped by the controlled input (React setState hasn't moved focus yet),
+// leaving a box empty and the submit button disabled. Re-read the boxes and
+// re-type any digit that didn't stick — per-box explicit targeting, so the
+// corrective pass has no auto-advance dependency. No-ops when the mapping
+// boxes↔digits isn't unambiguous (extra unrelated inputs on the page) or
+// when the widget auto-submitted on the last digit (URL changed — the new
+// page's inputs are NOT OTP boxes). Exported for unit tests.
+export async function fixupOtpDistribution(
+  browser: BrowserController,
+  code: string,
+  otpPageUrl: string,
+): Promise<void> {
+  // Let the widget's controlled-input state settle before reading back.
+  await browser.wait(1);
+  if (browser.currentUrl() !== otpPageUrl) return;
+  const boxes = codeInputCandidates(await browser.extractInteractiveElements());
+  if (boxes.length === 1) {
+    // Single combined input: its value should be the whole code.
+    if ((boxes[0]!.value ?? "") !== code) {
+      await browser.type(boxes[0]!.selector, code);
+    }
+    return;
+  }
+  if (boxes.length !== code.length) return;
+  for (let i = 0; i < boxes.length; i++) {
+    if ((boxes[i]!.value ?? "") === code.charAt(i)) continue;
+    console.error(
+      `[replay] await_email_code: OTP box ${i + 1}/${boxes.length} holds ` +
+        `${JSON.stringify(boxes[i]!.value ?? "")} after auto-advance typing — re-typing it directly.`,
+    );
+    await browser.type(boxes[i]!.selector, code.charAt(i));
+  }
+}
+
+export function findCodeInput(
+  inventory: readonly InteractiveElement[],
+  labelHint?: string,
+): InteractiveElement | null {
+  const candidates = codeInputCandidates(inventory);
   if (candidates.length === 0) return null;
   if (labelHint !== undefined && labelHint.length > 0) {
     const byLabel = candidates.filter((el) => matchesLabelHint(el, labelHint));
