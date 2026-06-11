@@ -264,6 +264,13 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // marker too, so the verifier doesn't DEMOTE an active skill over it (which
   // was eroding OF#1 — measured: brevo demoted on a returning-user nav click).
   let authedViaOAuth = false;
+  // Form-readiness parity with the live bot. Until the FIRST form control
+  // fills/selects successfully, an "input absent" on a fill/select is far
+  // more likely the SPA signup form still hydrating than a genuinely-absent
+  // (already-registered) onboarding field — so we wait + reload + re-validate
+  // before treating it as skippable. Once a form control succeeds the form is
+  // present, and from then on absent fields keep the account-state skip.
+  let reachedForm = false;
   for (let i = 0; i < skill.steps.length; i++) {
     const step = skill.steps[i]!;
 
@@ -321,7 +328,21 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
 
     // Pre-validate: would this step resolve cleanly against the
     // current page? If not, hand to the LLM fallback.
-    const validation = await preValidateStep(step, browser, templateValues);
+    let validation = await preValidateStep(step, browser, templateValues);
+    // Form-readiness parity: a fill/select that doesn't resolve BEFORE we've
+    // reached the form is usually the SPA still hydrating (zilliz /signup
+    // renders marketing chrome then the form). Wait for hydration + reload
+    // once + re-validate — mirroring the live bot's waitForFormReady +
+    // reload-on-shell loop — before the skip/fail cascade decides it's a
+    // genuinely-absent (already-registered) field. A fresh signup's form
+    // appears; an already-registered one never does and the skip still fires.
+    if (
+      !validation.ok &&
+      !reachedForm &&
+      (step.kind === "fill" || step.kind === "select")
+    ) {
+      validation = await waitForFormThenRevalidate(step, browser, templateValues);
+    }
     let stepToExecute = step;
     if (!validation.ok) {
       const fallbackResult = await tryFallback(
@@ -422,6 +443,17 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       // OAuth click succeeded (needs_login already returned above) → we're in
       // an authenticated returning-user session for the rest of the replay.
       if (stepToExecute.kind === "click_oauth_button") authedViaOAuth = true;
+      // Track form-readiness across DISTINCT forms. A successful fill/select
+      // means the CURRENT form is present; a click/navigate may move us to a
+      // NEW page whose form (zilliz's /information onboarding after the OTP)
+      // can itself still be hydrating — so re-arm the retry. Without the
+      // re-arm, the signup form hydrates but the next form's fields get
+      // eagerly skipped as "already registered".
+      if (execOutcome.kind === "filled" || execOutcome.kind === "selected") {
+        reachedForm = true;
+      } else if (execOutcome.kind === "clicked" || execOutcome.kind === "navigated") {
+        reachedForm = false;
+      }
       if (execOutcome.kind === "extract_ok") {
         // We extracted a credential successfully. Validate it before
         // declaring victory — the synthesizer's shape inference is a
@@ -573,6 +605,41 @@ interface ValidationOk {
 interface ValidationFail {
   ok: false;
   reason: string;
+}
+
+// Wait for an SPA signup form to hydrate, then re-validate the step — the
+// replay-engine analogue of the live bot's waitForFormReady + reload-on-
+// shell loop. A flaky hydrating SPA (zilliz /signup) renders marketing
+// chrome first, so the one-shot post-navigate validation reads a form-less
+// inventory; the bot retries/reloads until the form appears, and so must
+// replay before it concludes a form control is genuinely absent. Bounded:
+// at most three short attempts with one mid-loop reload. Returns the first
+// passing validation, else the last failure (caller then runs its skip/fail
+// cascade). On an already-registered account the form never appears, so
+// this is a bounded no-op and the account-state skip still fires.
+async function waitForFormThenRevalidate(
+  step: SkillStep,
+  browser: BrowserController,
+  templateValues: Record<string, string>,
+): Promise<ValidationOk | ValidationFail> {
+  let v: ValidationOk | ValidationFail = { ok: false, reason: "form not ready" };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await browser.waitForAuthWidgetHydration?.().catch(() => undefined);
+    await browser.wait(1.5);
+    if (attempt === 1) {
+      // One reload to unstick a wedged loading shell (oauthShellReloads).
+      try {
+        await browser.goto(browser.currentUrl());
+        await browser.wait(2);
+        await browser.waitForInteractiveDom?.().catch(() => undefined);
+      } catch {
+        // navigation hiccup — the next attempt re-validates regardless
+      }
+    }
+    v = await preValidateStep(step, browser, templateValues);
+    if (v.ok) return v;
+  }
+  return v;
 }
 
 async function preValidateStep(
