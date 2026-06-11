@@ -2725,3 +2725,100 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
     expect(baked).toBe(false);
   });
 });
+
+// ── Duplicate generic placeholder → unique stable name/id ───────────
+
+describe("promoteToSkill — duplicate placeholder disambiguated by name", () => {
+  function dupPlaceholderRounds(service: string): OnboardingRoundCapture[] {
+    // MUI/antd form: two visible inputs share the generic placeholder
+    // "Please input"; each has a distinct `name`. The synthesizer must
+    // resolve the fill target by its unique name, not reject ambiguous.
+    const formInventory = [
+      inventoryElement({
+        index: 0,
+        tag: "input",
+        type: "text",
+        name: "firstName",
+        placeholder: "Please input",
+        selector: "input[name='firstName']",
+      }),
+      inventoryElement({
+        index: 1,
+        tag: "input",
+        type: "text",
+        name: "company",
+        placeholder: "Please input",
+        selector: "input[name='company']",
+      }),
+      inventoryElement({
+        index: 2,
+        tag: "button",
+        visibleText: "Copy",
+        selector: "button.copy",
+        role: "button",
+        ariaLabel: "Copy API key",
+      }),
+    ];
+    return [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/information",
+          title: "Set up your account",
+          html: "<html><body>Set up your account</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: formInventory,
+        observed: {
+          kind: "fill",
+          selector: "input[name='company']",
+          value: "Acme Inc",
+          reason: "Fill the required Company field",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/keys",
+          title: "API Keys",
+          html:
+            "<html><body>Key db3a32ea-dd1b-4e28-9680-db2991c81e3e " +
+            "<button>Copy</button></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+            ariaLabel: "Copy API key",
+          }),
+        ],
+        observed: {
+          kind: "extract",
+          reason:
+            "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible.",
+        },
+      },
+    ];
+  }
+
+  it("resolves the fill to the unique name instead of rejecting ambiguous", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(dupPlaceholderRounds(service));
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const fill = result.skill.steps.find((s) => s.kind === "fill");
+    expect(fill).toBeDefined();
+    if (fill?.kind !== "fill") return;
+    // Hint is the unique name "company", NOT the duplicated placeholder.
+    expect(fill.label_hint).toBe("company");
+  });
+});

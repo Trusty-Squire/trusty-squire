@@ -1288,6 +1288,27 @@ function resolveLabelHint(
   if (duplicates.length === 0) {
     return { kind: "ok", hint };
   }
+  // The label/placeholder hint is shared by sibling fields — the MUI/antd
+  // pattern where every input carries the same generic "Please input" /
+  // "Please select" placeholder and no <label for=> (zilliz's onboarding
+  // form). Before reaching for a positional near-text hint, prefer a
+  // UNIQUE stable attribute the target itself carries: firstName/lastName/
+  // company each have a distinct `name`, and matchesLabelHint matches
+  // name/id exactly at replay. pickStableAttribute already rejects
+  // React-runtime ids (`:r3:`), so a field whose only id is runtime-
+  // generated correctly falls through to the disambiguator below.
+  const stable = pickStableAttribute(match);
+  if (stable !== null && stable !== hint) {
+    const stableDupes = inventory.filter(
+      (e) =>
+        e.selector !== selector &&
+        (e.tag === "input" || e.tag === "textarea" || e.tag === "select") &&
+        (e.name?.trim() === stable || e.id?.trim() === stable),
+    );
+    if (stableDupes.length === 0) {
+      return { kind: "ok", hint: stable };
+    }
+  }
   // 0.8.2-rc.3 — schema-level disambiguator. Look for a unique
   // visible-text element near `match` (Sentry's grid: each row has
   // its name like "Project" / "Team" / "Member" as a heading near the
