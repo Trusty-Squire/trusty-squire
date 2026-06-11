@@ -998,7 +998,7 @@ async function executeStep(
       // the replay reads a form-less inventory and skips the email/password
       // fills as "absent" (zilliz /signup). Bounded; no-op once the form
       // is present.
-      await browser.waitForAuthWidgetHydration().catch(() => undefined);
+      await browser.waitForAuthWidgetHydration?.().catch(() => undefined);
       // 0.8.2-rc.22 — URL drift detection. When a skill's signup_url
       // assumes the user is authenticated (Railway's /account/tokens
       // captured after OAuth was done in a prior session), the
