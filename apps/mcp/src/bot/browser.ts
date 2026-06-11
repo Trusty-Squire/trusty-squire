@@ -1031,6 +1031,70 @@ export class BrowserController {
     await locator.pressSequentially(text, { delay: rand(40, 110) });
   }
 
+  // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
+  // disabled submit. Returns a " Unfilled required field(s) — …" suffix for the
+  // disabled-click error so the planner fills the right field instead of
+  // re-clicking the dead button. Pure observation — never throws, never mutates.
+  private async unfilledRequiredHint(): Promise<string> {
+    if (!this.page) return "";
+    try {
+      const fields = await this.page.evaluate(() => {
+        const out: string[] = [];
+        const vis = (el: Element): boolean => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const label = (el: Element): string => {
+          const al = el.getAttribute("aria-label");
+          if (al && al.trim()) return al.trim().slice(0, 40);
+          const id = (el as HTMLElement).id;
+          if (id) {
+            const esc = window.CSS && CSS.escape ? CSS.escape(id) : id;
+            const lab = document.querySelector(`label[for="${esc}"]`);
+            if (lab && lab.textContent && lab.textContent.trim()) return lab.textContent.trim().slice(0, 40);
+          }
+          const ph = el.getAttribute("placeholder");
+          if (ph && ph.trim()) return ph.trim().slice(0, 40);
+          return (el.getAttribute("name") ?? el.tagName.toLowerCase()).slice(0, 40);
+        };
+        for (const el of Array.from(
+          document.querySelectorAll(
+            "input[required],textarea[required],input[aria-required='true'],textarea[aria-required='true']",
+          ),
+        )) {
+          if (!vis(el)) continue;
+          const inp = el as HTMLInputElement;
+          if (inp.type === "checkbox" || inp.type === "radio") {
+            if (!inp.checked) out.push(`unchecked: ${label(el)}`);
+          } else if (!inp.value || !inp.value.trim()) {
+            out.push(`empty: ${label(el)}`);
+          }
+        }
+        for (const el of Array.from(document.querySelectorAll("select"))) {
+          if (vis(el) && !(el as HTMLSelectElement).value) out.push(`unselected: ${label(el)}`);
+        }
+        for (const el of Array.from(document.querySelectorAll("[role='combobox'],[role='listbox']"))) {
+          if (!vis(el)) continue;
+          const txt = (el.textContent ?? "").trim();
+          if (txt.length === 0 || /^(select|choose|please|pick)\b/i.test(txt)) out.push(`unselected: ${label(el)}`);
+        }
+        for (const grp of Array.from(document.querySelectorAll("[role='radiogroup']"))) {
+          if (!vis(grp)) continue;
+          const chosen = grp.querySelector(
+            "[role='radio'][aria-checked='true'],input[type='radio']:checked",
+          );
+          if (!chosen) out.push(`nothing chosen: ${label(grp)}`);
+        }
+        return Array.from(new Set(out)).slice(0, 5);
+      });
+      return fields.length > 0
+        ? ` Unfilled required field(s) — fill/select these first: ${fields.join("; ")}.`
+        : "";
+    } catch {
+      return "";
+    }
+  }
+
   async click(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
@@ -1042,14 +1106,29 @@ export class BrowserController {
     // dispatches input/change; `force` bypasses the visibility actionability
     // gate for the sr-only pattern. MEASURED 2026-06-09 (kinde tech-stack step).
     try {
-      const inputKind = await this.page
+      const probe = await this.page
         .$eval(selector, (el) => {
           const t = el as HTMLInputElement;
-          return t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox")
-            ? t.type
-            : "";
+          const inputKind =
+            t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") ? t.type : "";
+          return { inputKind, role: el.getAttribute("role") ?? "" };
         })
-        .catch(() => "");
+        .catch(() => ({ inputKind: "", role: "" }));
+      const inputKind = probe.inputKind;
+      // Custom-combobox / listbox options (role=option|menuitem) — react-select,
+      // Radix, downshift, MUI. A humanized RAW-COORDINATE mouse click frequently
+      // fails to COMMIT the selection on these: the menu is a portal that can
+      // reposition between coordinate-capture and click, options bind onMouseDown
+      // (not click), and virtualized lists re-render. MEASURED 2026-06-11
+      // (meilisearch — clicking "Keyword Search" left aria-selected unset and the
+      // menu open, looping the planner). Route options through Playwright's
+      // actionability-checked locator click (re-resolves + scrolls + full event
+      // sequence). Options are post-load interactions, NOT the anti-bot-scored
+      // signup gate, so they don't need the humanized path.
+      if (probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio") {
+        await this.page.locator(selector).first().click({ timeout: 8000 });
+        return;
+      }
       if (inputKind === "radio" || inputKind === "checkbox") {
         // check() handles standard inputs; but a custom framework (kinde's kui)
         // binds its change handler via event delegation, and a force-check on an
@@ -1970,12 +2049,18 @@ export class BrowserController {
         await this.sleep(150);
       }
       if (isDisabled) {
+        // Name the SPECIFIC unfilled required field(s) so the planner fills the
+        // right one instead of re-clicking the dead submit. MEASURED 2026-06-11
+        // (meilisearch/zilliz: planner clicked a disabled Next 4+ times because
+        // the generic hint didn't say WHICH field blocked it). Feedback only.
+        const hint = await this.unfilledRequiredHint();
         throw new Error(
           "target is disabled (HTML disabled or aria-disabled=true) after 6s — " +
             "the click would no-op. A required precondition is unmet: an empty " +
             "input, an unselected dropdown, an unchecked agreement checkbox, or " +
             "a missing preset/permission choice. Do NOT retry this click — pick a " +
-            "different action that fills the missing field first.",
+            "different action that fills the missing field first." +
+            hint,
         );
       }
     }
