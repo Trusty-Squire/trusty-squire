@@ -4005,7 +4005,21 @@ export class SignupAgent {
       steps.push(`${label} captcha gate skipped — session already captcha-blocked (${kind}).`);
       return { found: true, solved: false, blocked: true, kind };
     }
-    let result = await this.browser.solveVisibleCaptcha();
+    // Best-effort: captcha DETECTION must never abort a signup. A bounded
+    // boundingBox / detect race inside solveVisibleCaptcha that throws is
+    // treated as "no widget here, proceed" — the OAuth-first path already
+    // wraps this call (browser.ts ~6351); the form-fill path didn't, so an
+    // invisible-mode Turnstile (which patchright + residential pass) crashed
+    // the run instead of falling through to submit.
+    let result: Awaited<ReturnType<typeof this.browser.solveVisibleCaptcha>>;
+    try {
+      result = await this.browser.solveVisibleCaptcha();
+    } catch (err) {
+      steps.push(
+        `${label} captcha gate: detection error (${err instanceof Error ? err.message : String(err)}) — treating as no widget, continuing`,
+      );
+      return { found: false, solved: false, blocked: false, kind: "turnstile" };
+    }
     if (!result.found) {
       // No VISIBLE widget — but an invisible Turnstile / reCAPTCHA-v3 may
       // be present and scoring silently. Record its presence once (a

@@ -2502,7 +2502,15 @@ export class BrowserController {
         if (count === 0) continue;
         for (let i = 0; i < count; i++) {
           const el = locator.nth(i);
-          const box = await el.boundingBox();
+          // Bounded + best-effort. boundingBox() carries Playwright's default
+          // 30s actionability wait; an invisible-mode Turnstile (the kind
+          // patchright + a residential IP pass silently) never stabilises into
+          // a visible box, so the unguarded call burned the full 30s and THREW
+          // — and because the form-fill runCaptchaGate path didn't catch it,
+          // it aborted the whole signup (measured: cartesia, cron-job.org).
+          // A short timeout + catch turns "no clickable widget here" into a
+          // skip, matching the Phase-2 host walk-up's `.catch(() => null)`.
+          const box = await el.boundingBox({ timeout: 1500 }).catch(() => null);
           if (box === null) continue;
           if (box.width < 50 || box.height < 30) continue;
           return { kind, box };
