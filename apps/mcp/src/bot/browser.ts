@@ -1095,6 +1095,49 @@ export class BrowserController {
     }
   }
 
+  // Read any visible transient toast / alert / notification text. Validation
+  // errors, rate-limits, and "operation failed" messages frequently appear as a
+  // toast that auto-dismisses BEFORE the next round's capture — so a failed
+  // submit looks like a SILENT no-op to the planner. Surfacing it turns the
+  // no-op into a diagnosable reason. MEASURED 2026-06-11 (deepseek Sign-up
+  // no-ops; the error is a ds-toast the round-start capture never sees).
+  // `settleMs` lets the caller reuse a wait it was already going to do.
+  async captureTransientAlert(settleMs = 600): Promise<string> {
+    if (!this.page) return "";
+    if (settleMs > 0) await this.sleep(settleMs);
+    try {
+      return await this.page.evaluate(() => {
+        const sels = [
+          "[role='alert']",
+          "[aria-live='assertive']",
+          ".ds-toast-container",
+          ".ds-notification-container",
+          ".Toastify__toast",
+          ".ant-message-notice",
+          ".ant-notification-notice",
+          ".sonner-toast",
+          "[data-sonner-toast]",
+          ".toast",
+          ".Toaster",
+        ];
+        const vis = (el: Element): boolean => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        for (const sel of sels) {
+          for (const el of Array.from(document.querySelectorAll(sel))) {
+            if (!vis(el)) continue;
+            const t = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+            if (t.length >= 2 && t.length <= 240) return t;
+          }
+        }
+        return "";
+      });
+    } catch {
+      return "";
+    }
+  }
+
   async click(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a

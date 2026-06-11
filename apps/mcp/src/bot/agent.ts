@@ -9762,8 +9762,18 @@ ${formatInventory(input.inventory)}`,
           // shaped regex, so a multi-cred reveal landed nothing
           // unless the explicit extract round re-fired afterward.
           const credentialDeadline = Date.now() + 8000;
+          let alertSeen = "";
+          let alertChecked = false;
           while (Date.now() < credentialDeadline) {
             await this.browser.wait(0.5);
+            // Reuse the first 0.5s settle to grab any transient toast/notification
+            // a submit-like click raised (validation error, rate-limit, "operation
+            // failed") before it auto-dismisses — otherwise a failed submit reads
+            // as a SILENT no-op. MEASURED 2026-06-11 (deepseek Sign-up).
+            if (!alertChecked) {
+              alertChecked = true;
+              alertSeen = await this.browser.captureTransientAlert(0);
+            }
             try {
               const pollExtract = await this.extractCredentials();
               for (const [k, v] of Object.entries(pollExtract)) {
@@ -9787,6 +9797,18 @@ ${formatInventory(input.inventory)}`,
             } catch {
               // Page mid-render — keep polling; next tick may settle.
             }
+          }
+          // A click that raised a notification but yielded no key — surface the
+          // toast text so the planner addresses the real error instead of
+          // re-clicking the same dead button into a stuck-loop.
+          if (credentials.api_key === undefined && alertSeen.length > 0) {
+            args.steps.push(
+              `Post-verify: the page showed a notification after the click: "${alertSeen}"`,
+            );
+            hint =
+              `After your last click the page showed this notification: "${alertSeen}". ` +
+              `It likely explains why the page did not advance — address it (fix the named ` +
+              `field, wait, or choose a different action) rather than repeating the same click.`;
           }
         } else if (nextStep.kind === "fill") {
           await this.browser.type(nextStep.selector, nextStep.value);
