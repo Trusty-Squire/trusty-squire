@@ -641,6 +641,12 @@ function renderObjectivesSection(
           ? `${r.discover_succeeded}/${r.discover_attempted}`
           : "—";
       const hit = r.hit_total > 0 ? pct(r.hit_served, r.hit_total) : "—";
+      // Output-loop (#1): fixes the self-fixing loop graded this run, improved/
+      // regressed. A regressed count renders red — the loop shipped a bad RC.
+      const fixes =
+        r.fixes_graded > 0
+          ? `${r.fixes_improved}✓/<span${r.fixes_regressed > 0 ? ' style="color:var(--err)"' : ""}>${r.fixes_regressed}✗</span>`
+          : "—";
       return `<tr>
         <td>${formatDate(r.ran_at)}</td>
         <td>${r.mcp_version ?? "—"}</td>
@@ -648,11 +654,12 @@ function renderObjectivesSection(
         <td class="num">${rate}</td>
         <td class="num">${counts}</td>
         <td class="num">${hit}</td>
+        <td class="num">${fixes}</td>
       </tr>`;
     })
     .join("");
   const trend = `<div class="ruled" style="margin-top:16px"><table>
-      <thead><tr><th>run</th><th>RC</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th><th class="num">OF#3 hit</th></tr></thead>
+      <thead><tr><th>run</th><th>RC</th><th class="num">OF#1 skills</th><th class="num">OF#2 rate</th><th class="num">discover s/a</th><th class="num">OF#3 hit</th><th class="num">fixes ✓/✗</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
   return head + kpis + trend + `</div></section>`;
@@ -692,9 +699,15 @@ function renderHealStatusSection(
     healRun.needs_human > 0
       ? `<div style="margin-top:10px;color:var(--err);font-weight:600" title="Unknown-state escalations — the only outcomes the loop cannot resolve on its own.">⚠ ${healRun.needs_human} need${healRun.needs_human === 1 ? "s" : ""} human attention</div>`
       : "";
+  // Output-loop (#1): a regressed fix is an RC the self-fixing loop shipped that
+  // did NOT fix its target — worth a human revert. Surface it like needs-human.
+  const regressed =
+    healRun.fixes_regressed > 0
+      ? `<div style="margin-top:6px;color:var(--err);font-weight:600" title="Fixes the loop committed that did not lift the rate on their target services. Review/revert the RC.">⚠ ${healRun.fixes_regressed} fix${healRun.fixes_regressed === 1 ? "" : "es"} regressed — review RC(s)</div>`
+      : "";
   return (
     head +
-    `<div class="northstar">${dot}${note}${needsHuman}` +
+    `<div class="northstar">${dot}${note}${needsHuman}${regressed}` +
     `<div class="mono" style="margin-top:10px;color:var(--muted);font-size:13px">` +
     `verified ${healRun.verified} · demoted ${healRun.demoted} · ` +
     `quarantined ${healRun.quarantined} · re-skilled ${healRun.reskilled} · ` +

@@ -267,13 +267,27 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   const serviceSucceeded = new Map<string, boolean>();
   for (const o of discover.serviceOutcomes) serviceSucceeded.set(o.service, o.succeeded);
   let gradedLine = "";
+  let fixesGraded = 0;
+  let fixesImproved = 0;
+  let fixesRegressed = 0;
   try {
     const graded = gradeLedgerAgainstPass(serviceSucceeded, new Date().toISOString());
     for (const g of graded) log(`fix grade: ${describeGrade(g)}`);
-    if (graded.length > 0) {
-      const improved = graded.filter((g) => g.grade === "improved").length;
-      const regressed = graded.filter((g) => g.grade === "regressed").length;
-      gradedLine = ` · fixes graded ${graded.length} (${improved}✓/${regressed}✗)`;
+    fixesGraded = graded.length;
+    fixesImproved = graded.filter((g) => g.grade === "improved").length;
+    fixesRegressed = graded.filter((g) => g.grade === "regressed").length;
+    if (fixesGraded > 0) {
+      gradedLine = ` · fixes graded ${fixesGraded} (${fixesImproved}✓/${fixesRegressed}✗)`;
+    }
+    // #1 Part B — a regressed fix is the one output-loop outcome that warrants a
+    // human look: the loop shipped an RC that did NOT fix its target (or hurt
+    // it). Flag each loudly in the digest + log so the operator can revert that
+    // RC; the dashboard Status zone surfaces the count too.
+    if (fixesRegressed > 0) {
+      gradedLine += ` ⚠ ${fixesRegressed} REGRESSED — review RC(s)`;
+      for (const g of graded.filter((x) => x.grade === "regressed")) {
+        log(`REGRESSED FIX: ${describeGrade(g)} — review/revert RC ${g.rc_version}`);
+      }
     }
   } catch (err) {
     log(`fix grading failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
@@ -304,6 +318,9 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
         needs_human: number;
         discover_attempted: number;
         discover_succeeded: number;
+        fixes_graded?: number;
+        fixes_improved?: number;
+        fixes_regressed?: number;
         mcp_version?: string;
       }) => Promise<{ skills_active: number; hit_served?: number; hit_total?: number }>;
     };
@@ -316,6 +333,10 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
         needs_human: Math.max(0, needsHuman),
         discover_attempted: discoverAttempted,
         discover_succeeded: discoverSucceeded,
+        // Output-loop (#1) fix grades from this pass — the dashboard trends them.
+        fixes_graded: fixesGraded,
+        fixes_improved: fixesImproved,
+        fixes_regressed: fixesRegressed,
         // Stamp the RC the run executed (C5). Dogfooding `next` means each
         // HealRun records which release candidate produced its OF#2 — that's
         // the per-RC promote signal on the dashboard.
