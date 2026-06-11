@@ -77,6 +77,7 @@ export async function registerAdminFunnelRoute(
         window_end: end.toISOString(),
         as_of: now().toISOString(),
         tokens_issued: counts.tokens_issued,
+        residential_installs: counts.residential_installs,
         accounts_created: counts.accounts_created,
         new_accounts_series: counts.new_accounts_series,
         // null when npm is unreachable + no cached value (fail-soft).

@@ -17,6 +17,10 @@ export interface NewAccountsDay {
 
 export interface FunnelApiCounts {
   tokens_issued: number; // MachineToken.created_at in window (NOT "installs")
+  // Real external installs: MachineToken with asn_class='residential' in the
+  // window. tokens_issued is dominated by our own datacenter/infra tokens
+  // (housekeeper, CI, dev re-installs), so this is the honest adoption signal.
+  residential_installs: number;
   accounts_created: number; // Account.created_at in window
   new_accounts_series: NewAccountsDay[];
 }
@@ -55,15 +59,22 @@ export class PrismaFunnelStatsStore implements FunnelStatsStore {
 
   async apiCounts(window: FunnelWindow, excludeAccountIds: readonly string[]): Promise<FunnelApiCounts> {
     const where = accountWhere(window, excludeAccountIds);
-    const [tokens_issued, accounts_created, rows] = await Promise.all([
+    const [tokens_issued, residential_installs, accounts_created, rows] = await Promise.all([
       this.prisma.machineToken.count({
         where: { created_at: { gte: window.start, lte: window.end } },
+      }),
+      this.prisma.machineToken.count({
+        where: {
+          created_at: { gte: window.start, lte: window.end },
+          asn_class: "residential",
+        },
       }),
       this.prisma.account.count({ where }),
       this.prisma.account.findMany({ where, orderBy: { created_at: "asc" } }),
     ]);
     return {
       tokens_issued,
+      residential_installs,
       accounts_created,
       new_accounts_series: bucketByDay(rows.map((r) => r.created_at)),
     };
@@ -75,6 +86,6 @@ export class PrismaFunnelStatsStore implements FunnelStatsStore {
 // zeros rather than failing the endpoint.
 export class ZeroFunnelStatsStore implements FunnelStatsStore {
   async apiCounts(): Promise<FunnelApiCounts> {
-    return { tokens_issued: 0, accounts_created: 0, new_accounts_series: [] };
+    return { tokens_issued: 0, residential_installs: 0, accounts_created: 0, new_accounts_series: [] };
   }
 }
