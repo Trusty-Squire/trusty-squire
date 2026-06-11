@@ -404,30 +404,35 @@ function renderDashboard(args: {
     `  <h1>Registry Admin</h1>`,
     `  <div class="pagesub">trusty-squire-registry · operator view · read-only</div>`,
     `  <nav>`,
+    `    <a href="#heal">Status</a>`,
     `    <a href="#objectives">Objectives</a>`,
-    `    <a href="#heal">Heal loop</a>`,
-    `    <a href="#funnel">Funnel</a>`,
-    `    <a href="#cachehit">Cache hit</a>`,
+    `    <a href="#cachehit">Hit rate</a>`,
+    `    <a href="#funnel">Adoption</a>`,
+    `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
+    `    <a href="#pending">Pending (${args.verifierQueue.filter((s) => s.status === "pending-review").length})</a>`,
+    `    <a href="#freshness">Freshness (${args.verifierQueue.filter((s) => s.status === "active").length})</a>`,
+    `    <a href="#discovery">Discovery (${args.discoveryCandidates.length})</a>`,
+    `    <a href="#failures">Failures (${args.recentFailures.length})</a>`,
     `    <a href="#demand">Demand</a>`,
     `    <a href="#active">Active (${args.activeSkills.length})</a>`,
-    `    <a href="#pending">Pending review (${args.verifierQueue.filter((s) => s.status === "pending-review").length})</a>`,
-    `    <a href="#freshness">Freshness due (${args.verifierQueue.filter((s) => s.status === "active").length})</a>`,
-    `    <a href="#discovery">Discovery candidates (${args.discoveryCandidates.length})</a>`,
-    `    <a href="#demoted">Demoted (${args.demotedSkills.length})</a>`,
-    `    <a href="#failures">Recent failures (${args.recentFailures.length})</a>`,
     `  </nav>`,
-    renderObjectivesSection(args.activeSkills.length, args.healRuns),
+    // Zone 1 — Status: is the loop alive, and is anything escalated to me?
     renderHealStatusSection(args.healRun),
+    // Zone 2 — Scoreboard: are the objective functions trending the right way?
+    // (Hit-rate / dispatch split sits with OF#3 — same concept, more detail.)
+    renderObjectivesSection(args.activeSkills.length, args.healRuns),
+    renderCacheHitSection(args.cacheHit),
+    // Zone 3 — Adoption: is anyone actually using it?
     renderAcquisitionFunnelSection(args.funnel),
     renderEngagementSection(args.funnel),
-    renderCacheHitSection(args.cacheHit),
-    renderDemandSection(args.demandRows, args.activeServiceSet),
-    renderActiveSection(args.activeSkills),
+    // Zone 4 — Action queue: what needs attention, most urgent first.
+    renderDemotedSection(args.demotedSkills),
     renderPendingSection(args.verifierQueue),
     renderFreshnessSection(args.verifierQueue),
     renderDiscoverySection(args.discoveryCandidates),
-    renderDemotedSection(args.demotedSkills),
     renderRecentFailuresSection(args.recentFailures, args.failureArtifacts),
+    renderDemandSection(args.demandRows, args.activeServiceSet),
+    renderActiveSection(args.activeSkills),
     "</body>",
     "</html>",
     `<!-- cacheHit total=${cacheCount} -->`,
@@ -542,6 +547,20 @@ function pct(n: number, total: number): string {
 //          (succeeded / attempted), per heal pass.
 // The trend table (newest first) lets the operator watch both rise over time
 // instead of seeing only the latest point.
+// Run-over-run trend chip for an OF KPI. `pp` renders the delta in percentage
+// points (rates) vs a raw integer (counts). Flat or no-prior-run renders a
+// muted mark so the absence of a trend reads as neutral, never as a drop.
+function trendArrow(curr: number | null, prev: number | null, pp: boolean): string {
+  if (curr === null || prev === null) {
+    return ` <span style="font-size:12px;color:var(--faint)" title="no prior run">·</span>`;
+  }
+  const d = curr - prev;
+  const mag = pp ? `${Math.abs(d).toFixed(0)}pp` : `${Math.abs(d)}`;
+  if (d > 0) return ` <span style="font-size:12px;color:var(--ok)" title="up ${mag} vs prior run">▲ ${mag}</span>`;
+  if (d < 0) return ` <span style="font-size:12px;color:var(--err)" title="down ${mag} vs prior run">▼ ${mag}</span>`;
+  return ` <span style="font-size:12px;color:var(--faint)" title="flat vs prior run">→</span>`;
+}
+
 function renderObjectivesSection(
   liveSkillCount: number,
   healRuns: Awaited<ReturnType<SkillStore["listHealRuns"]>>,
@@ -567,14 +586,39 @@ function renderObjectivesSection(
   const latestHitRate =
     latestHit !== undefined ? pct(latestHit.hit_served, latestHit.hit_total) : "—";
 
+  // Run-over-run deltas → trend chips. Use the two most recent runs that
+  // actually carry each metric (verify-only passes have no discovery/hit data,
+  // so they don't count as a data point for OF#2/OF#3).
+  const discoverRuns = healRuns.filter((r) => r.discover_attempted > 0);
+  const hitRuns = healRuns.filter((r) => r.hit_total > 0);
+  const of1Arrow = trendArrow(
+    healRuns[0]?.skills_active ?? null,
+    healRuns[1]?.skills_active ?? null,
+    false,
+  );
+  const of2Arrow = trendArrow(
+    discoverRuns[0] !== undefined
+      ? (100 * discoverRuns[0].discover_succeeded) / discoverRuns[0].discover_attempted
+      : null,
+    discoverRuns[1] !== undefined
+      ? (100 * discoverRuns[1].discover_succeeded) / discoverRuns[1].discover_attempted
+      : null,
+    true,
+  );
+  const of3Arrow = trendArrow(
+    hitRuns[0] !== undefined ? (100 * hitRuns[0].hit_served) / hitRuns[0].hit_total : null,
+    hitRuns[1] !== undefined ? (100 * hitRuns[1].hit_served) / hitRuns[1].hit_total : null,
+    true,
+  );
+
   const kpis =
     `<div class="northstar"><div class="stats">` +
     `<div class="stat"><div class="k">OF#1 · skills in registry</div>` +
-    `<div class="v" style="color:var(--accent)">${liveSkillCount}</div></div>` +
+    `<div class="v" style="color:var(--accent)">${liveSkillCount}${of1Arrow}</div></div>` +
     `<div class="stat"><div class="k">OF#2 · discovery success (latest)</div>` +
-    `<div class="v">${latestRate}</div></div>` +
+    `<div class="v">${latestRate}${of2Arrow}</div></div>` +
     `<div class="stat"><div class="k">OF#3 · registry hit rate (latest)</div>` +
-    `<div class="v">${latestHitRate}</div></div>` +
+    `<div class="v">${latestHitRate}${of3Arrow}</div></div>` +
     `</div>`;
 
   if (healRuns.length === 0) {
@@ -643,9 +687,14 @@ function renderHealStatusSection(
   const note = down
     ? ` — last run ${ageH}h ago, past the 12h cadence. Check the timer on the operator box.`
     : ` — last run ${ageH}h ago.`;
+  // The one thing the loop can't resolve itself — surface it loudly when > 0.
+  const needsHuman =
+    healRun.needs_human > 0
+      ? `<div style="margin-top:10px;color:var(--err);font-weight:600" title="Unknown-state escalations — the only outcomes the loop cannot resolve on its own.">⚠ ${healRun.needs_human} need${healRun.needs_human === 1 ? "s" : ""} human attention</div>`
+      : "";
   return (
     head +
-    `<div class="northstar">${dot}${note}` +
+    `<div class="northstar">${dot}${note}${needsHuman}` +
     `<div class="mono" style="margin-top:10px;color:var(--muted);font-size:13px">` +
     `verified ${healRun.verified} · demoted ${healRun.demoted} · ` +
     `quarantined ${healRun.quarantined} · re-skilled ${healRun.reskilled} · ` +
@@ -659,7 +708,7 @@ function renderCacheHitSection(cacheHit: CacheHitBreakdown | null): string {
   if (cacheHit === null || cacheHit.total === 0) {
     return section(
       "cachehit",
-      "Cache hit",
+      "Registry hit rate (OF#3)",
       desc,
       `<div class="empty">No provisions recorded yet — the bar appears once events arrive.</div>`,
     );
@@ -687,7 +736,7 @@ function renderCacheHitSection(cacheHit: CacheHitBreakdown | null): string {
       </div>
       ${lowN ? `<div class="lowN">low sample (N=${total}) — percentages are noisy until N ≥ ${CACHE_HIT_MIN_SAMPLE}</div>` : ""}
     </div>`;
-  return section("cachehit", "Cache hit", desc, body);
+  return section("cachehit", "Registry hit rate (OF#3)", desc, body);
 }
 
 function renderDemandSection(demandRows: DemandRow[], activeServiceSet: Set<string>): string {
