@@ -507,7 +507,13 @@ export class BrowserController {
       this.launchedMode = "display";
     } else if (xvfbAvailable()) {
       try {
-        this.xvfb = await startXvfb({ width: 1280, height: 720 });
+        // 1920×1080 — the most common real desktop resolution. The old
+        // 1280×720 here was exactly Playwright's emulated-device viewport
+        // default (the code's own comments flag that as an anti-bot tell),
+        // and with viewport:null the page read it straight back. A 720p
+        // screen whose availHeight==height (no taskbar) is a headless
+        // signature strict Turnstiles (exa/cartesia) score against.
+        this.xvfb = await startXvfb({ width: 1920, height: 1080 });
         chromeEnv = { ...process.env, DISPLAY: this.xvfb.display };
         chromeHeadless = false;
         this.launchedMode = "xvfb";
@@ -731,6 +737,22 @@ export class BrowserController {
             get: () => 8,
             configurable: true,
           });
+          // Screen availHeight tell: a headless Xvfb screen reports
+          // availHeight == height (no OS taskbar), whereas a real Windows
+          // desktop reserves ~40px for the taskbar (availHeight = height-40,
+          // availWidth = width). Reinstate that gap so the screen reads like
+          // an ordinary desktop, not a bare framebuffer. Guarded so it only
+          // applies when the two are currently equal (i.e. headless).
+          try {
+            if (screen.availHeight === screen.height) {
+              Object.defineProperty(Screen.prototype, "availHeight", {
+                get: () => screen.height - 40,
+                configurable: true,
+              });
+            }
+          } catch {
+            // leave it
+          }
           navProto.__tsDevicePatched = true;
         } catch {
           // descriptor already locked by something else — leave it.
