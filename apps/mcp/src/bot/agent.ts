@@ -5708,14 +5708,50 @@ export class SignupAgent {
       // detectAlreadySignedIn's precondition (no email/password/tel input
       // visible) makes this safe: a real signup/login page short-circuits to
       // false before any dashboard marker is considered.
-      const landed = await this.browser.getState();
-      const landedInventory = await this.browser.extractInteractiveElements();
-      if (
-        detectAlreadySignedIn({
-          inventory: landedInventory,
-          url: landed.url,
-        })
-      ) {
+      let landed = await this.browser.getState();
+      let landedInventory = await this.browser.extractInteractiveElements();
+      let signedIn = detectAlreadySignedIn({
+        inventory: landedInventory,
+        url: landed.url,
+      });
+      // SPA-settle re-check (returning-user cluster). An authenticated SPA
+      // redirects the session AFTER the first read — pinecone's
+      // `/?sessionType=signup` routes to `/organizations/registration` once
+      // React hydrates — so a returning-user landing is initially captured as
+      // an un-hydrated shell (no dashboard markers, no credential input yet)
+      // and missed → no_signup_link. When the first detect is false, the page
+      // is shell-like (few elements), AND there's no credential form rendered,
+      // dwell once and re-read before classifying. Safe: a real login/signup
+      // page renders its credential input or signup affordance, so
+      // detectAlreadySignedIn stays false on the re-check (no false positive).
+      if (!signedIn && landedInventory.length <= 4) {
+        const hasCredInput = landedInventory.some(
+          (e) =>
+            e.tag === "input" &&
+            (e.type === "email" || e.type === "password" || e.type === "tel"),
+        );
+        // Only a BARE shell (no credential form AND no OAuth/signup button)
+        // is a returning-user-redirect candidate. A page that already shows a
+        // provider button is a usable signup entry — take it as-is (and don't
+        // perturb the OAuth-first flow with an extra settle).
+        const hasOAuthHere =
+          findFirstOAuthButton(landedInventory, ["google", "github"]) !== null;
+        if (!hasCredInput && !hasOAuthHere) {
+          await this.browser.wait(3);
+          await this.browser.waitForInteractiveDom(5, 12_000).catch(() => undefined);
+          const reLanded = await this.browser.getState();
+          const reInv = await this.browser.extractInteractiveElements();
+          if (detectAlreadySignedIn({ inventory: reInv, url: reLanded.url })) {
+            landed = reLanded;
+            landedInventory = reInv;
+            signedIn = true;
+            steps.push(
+              `${task.service}: returning-user dashboard surfaced after SPA settle (${pathOf(reLanded.url)})`,
+            );
+          }
+        }
+      }
+      if (signedIn) {
         steps.push(
           `${task.service}: already authenticated (dashboard markers, no signup CTA) — ` +
             `skipping signup, routing straight to key extraction`,
