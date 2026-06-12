@@ -7264,6 +7264,44 @@ export class SignupAgent {
       }
     }
     await saveDebugSnapshot(this.browser, "oauth-post-consent");
+
+    // Captcha-gated OAuth detection (truthful failure, not a false "signed in").
+    // exa's login lives at auth.exa.ai/?callbackUrl=… (path "/"), which
+    // isLoginPageUrl doesn't recognise, so the settle loop above declares
+    // "redirected to the app" even when we never left the gated login page.
+    // If we're STILL showing a provider OAuth button AND a Turnstile/verify
+    // challenge, the sign-in click was INERT — the unsolved captcha gated the
+    // button, the URL never reached the provider, and we are NOT signed in.
+    // MEASURED 2026-06-12: exa fails identically on a real laptop + fresh
+    // direct residential IP (so it is the Turnstile/automation layer, NOT
+    // IP/fingerprint — see STATE.md). Bail captcha_blocked instead of burning
+    // the whole post-verify budget flailing on the login page.
+    {
+      const postText = (await this.browser.extractText().catch(() => "")).toLowerCase();
+      const captchaChallenge =
+        /complete the verification challenge|verify you are human|are you human|please complete the (?:captcha|challenge|verification)/i.test(
+          postText,
+        );
+      if (captchaChallenge) {
+        const postInv = await this.browser
+          .extractInteractiveElements()
+          .catch(() => [] as InteractiveElement[]);
+        const stillGatedByProviderButton =
+          findFirstOAuthButton(postInv, [provider.id]) !== null;
+        if (stillGatedByProviderButton) {
+          return this.oauthAbort(
+            "captcha_blocked",
+            `${task.service}'s ${provider.label} sign-in is gated by an unsolved ` +
+              `Turnstile/verification challenge — the OAuth click was inert (still on the ` +
+              `pre-auth login page). Not IP/fingerprint (a real browser + fresh direct IP ` +
+              `fails identically); this service runs a strict Turnstile our automated solve ` +
+              `can't clear.`,
+            steps,
+          );
+        }
+      }
+    }
+
     steps.push(
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
     );

@@ -50,26 +50,44 @@ environment hypotheses are all falsified; the invariant is the BOT itself.**
   Chrome + the signup flow. So the real cause is in the **automation / behavior
   layer, not the environment.**
 
-- **IMPORTANT reframe (2026-06-12):** on the laptop, exa reached
-  `oauth-after-click` and `oauth-post-consent` snapshots — i.e. it got **past**
-  the login-page Turnstile and **completed Google OAuth**, and *then* failed.
-  So "exa = CF Turnstile wall" may itself be **partly wrong**: the persistent
-  failure may be **post-OAuth** (onboarding / session / reaching the API key),
-  with the Turnstile being an intermittent, passable hurdle — not the wall.
-  **Next session: get the laptop's full step trail + the post-consent snapshot
-  and find where it ACTUALLY dies, before touching anti-bot code again.**
+- **✓ CONFIRMED root cause (2026-06-12, full laptop step trail).** The wall IS
+  the Turnstile — but via the AUTOMATION layer, not the environment. On the
+  laptop (real GPU, real display, `proxy=direct` fresh Singapore IP):
+  `visible turnstile present but did not solve in 20s`; after clicking
+  "Continue with Google" the auth state is `not_provider` and the URL stays
+  `auth.exa.ai` (the click was **inert** — the unsolved Turnstile gates the
+  OAuth button); the page then shows literally **"Please complete the
+  verification challenge."** So the Turnstile's `failure_retry` happens even on
+  a pristine real browser+IP → the residual is the **CDP/automation signature
+  of a Playwright/patchright-driven session**, which patchright does NOT fully
+  hide and which exa's STRICT Turnstile config scores below threshold (lenient
+  Turnstiles — 2captcha demo, plausible — still pass). My earlier "likely
+  post-OAuth" reframe was ALSO wrong; the trace falsified it. The
+  `oauth_onboarding_failed` label is a downstream symptom (see the bug below),
+  not the cause.
 
-- **? OPEN — untested hypotheses, in priority order:**
-  1. **Post-OAuth onboarding/session failure** (exa got past OAuth on the
-     laptop). Likely the real blocker. Test: read the laptop's post-consent
-     trail.
-  2. **patchright CDP-connection residual tell** — the one thing constant
-     across all environments. Test: run exa with a *plain* Playwright/Chrome
-     (no patchright, no bot flow) from the same laptop; if a vanilla browser
-     passes where the bot fails, the tell is in patchright or our launch args.
-  3. **Automation behavioral/timing pattern** (prewarm + fast form-fill + the
-     OAuth click cadence). Test: A/B the prewarm + a slower humanized cadence.
-  4. **`trustysquire.com` email-domain reputation** on the signup form.
+- **🐛 SEPARATE FIXABLE BUG (false-positive OAuth success).** When the Google
+  click is inert (URL unchanged, `auth state = not_provider`, a "verification
+  challenge" still on the page), the bot concludes `waited for the callback to
+  settle — redirected to the app → signed in via Google` and burns the whole
+  post-verify budget flailing on the login page. It should detect "still on the
+  pre-auth login page + Turnstile/verification text present + URL never left the
+  provider-callback origin" and bail `captcha_blocked` clearly. This won't get
+  exa into the registry (the Turnstile still blocks) but stops the wasted budget
+  and gives a truthful status. Fix is in `runOAuthFlow`'s post-`startOAuth`
+  settle check (agent.ts ~7154 "waited for the callback to settle").
+
+- **? OPEN — the only remaining levers for the strict-Turnstile cluster:**
+  1. **2Captcha Tier-3 for Turnstile.** Currently DISABLED for Turnstile on the
+     (now-falsified) belief that "Cloudflare scores at the IP layer so a
+     solver token is rejected." Since IP-binding is falsified, a 2Captcha-issued
+     Turnstile token MIGHT be accepted. Concrete test: set TWOCAPTCHA_API_KEY,
+     enable the Turnstile escalation, run exa. ~$0.003/solve. **This is the
+     highest-value untested experiment.**
+  2. **A non-Playwright/non-CDP browser driver** (the automation signature is
+     the invariant). Heavy lift; only if (1) fails.
+  3. Accept the CF cluster (exa, cartesia, render-cron, replit, runpod, turso)
+     as captcha-walled and focus elsewhere.
 
 ---
 
