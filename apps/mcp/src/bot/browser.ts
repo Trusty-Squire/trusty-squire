@@ -872,8 +872,13 @@ export class BrowserController {
     // The host is reachable on the next attempt — a single goto failure
     // shouldn't fail the whole signup. Only retry these connection-level
     // errors; HTTP statuses and selector/logic errors fall straight through.
+    // net::ERR_ABORTED — a navigation superseded by a redirect/JS-nav during
+    // the domcontentloaded wait. Usually transient (a redirect race on the
+    // first hit of an auth-gated portal — MEASURED 2026-06-11: defang's
+    // portal.defang.io aborted on the initial goto); a retry lands the
+    // settled page. Distinct from ERR_CONNECTION_ABORTED (a dropped socket).
     const TRANSIENT_NET =
-      /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE/i;
+      /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE|net::ERR_ABORTED/i;
     const MAX_GOTO_ATTEMPTS = 3;
     for (let attempt = 1; ; attempt++) {
       try {
