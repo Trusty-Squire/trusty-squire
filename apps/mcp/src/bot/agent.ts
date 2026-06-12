@@ -4445,9 +4445,17 @@ export class SignupAgent {
         // default 2 retries (otherwise the bot gives up at ~6s and wrongly
         // falls back to the email-signup path before the GitHub button
         // even exists).
-        const oauthScanShell = isLoadingShellText(
-          await this.browser.extractText().catch(() => ""),
-        );
+        // An almost-empty inventory is itself a strong unhydrated-SPA signal,
+        // even when the page TEXT doesn't match the loading-shell phrases
+        // (lancedb's accounts.lancedb.com/sign-up renders its Google button
+        // late and shows 0 interactive candidates meanwhile — MEASURED
+        // 2026-06-11: it bailed oauth_required after only 2 retries because
+        // the text heuristic missed it). Treat ≤1 interactive elements as a
+        // loading shell so the late-rendering provider button gets the patient
+        // 8-retry budget instead of a premature email-fallback bail.
+        const oauthScanShell =
+          inventory.length <= 1 ||
+          isLoadingShellText(await this.browser.extractText().catch(() => ""));
         const maxOauthScanRetries = oauthScanShell ? 8 : 2;
         if (oauthScanRetries < maxOauthScanRetries) {
           oauthScanRetries += 1;
