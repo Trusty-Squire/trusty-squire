@@ -708,6 +708,34 @@ export class BrowserController {
       if (typeof WebGL2RenderingContext !== "undefined") {
         spoof(WebGL2RenderingContext.prototype);
       }
+      // Device-tell normalization. The headless harvester box reports 20
+      // logical cores (navigator.hardwareConcurrency) — a consumer residential
+      // device is 4-16. A 20-core Linux machine behind a "residential" IP is
+      // an internal inconsistency Cloudflare Turnstile scores against
+      // (MEASURED 2026-06-11: exa/cartesia Turnstile won't issue a token on a
+      // clean-fingerprint click; hwConcurrency=20 + Linux is the standout
+      // anomaly). Normalize to a common consumer profile. Same per-nav main-
+      // world application as the WebGL spoof — patchright denies init-world
+      // reach, and Turnstile reads these after the challenge script loads
+      // (seconds in), so the framenavigated re-apply wins the race. Defined on
+      // Navigator.prototype (where the native getters live) so there's no own-
+      // property tell on the instance.
+      const navProto = Navigator.prototype as Navigator & { __tsDevicePatched?: boolean };
+      if (navProto.__tsDevicePatched !== true) {
+        try {
+          Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
+            get: () => 8,
+            configurable: true,
+          });
+          Object.defineProperty(Navigator.prototype, "deviceMemory", {
+            get: () => 8,
+            configurable: true,
+          });
+          navProto.__tsDevicePatched = true;
+        } catch {
+          // descriptor already locked by something else — leave it.
+        }
+      }
     };
     await context.addInitScript(installWebglSpoof);
     this.page = context.pages()[0] ?? (await context.newPage());
