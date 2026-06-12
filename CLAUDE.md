@@ -619,6 +619,15 @@ out-of-band** — a DB restore is useless without it):
   shape.
 - **Tests live in `__tests__/` next to source.** Use `vitest`.
 - **Never assume.** If you don't know, ask or test.
+- **Read `STATE.md` (repo root) BEFORE diagnosing a discovery-service
+  failure.** It is the graveyard of FALSIFIED hypotheses (we keep
+  re-deriving "it's the IP / fingerprint" and keep getting proven wrong by
+  experiment) plus the confirmed-real fixes and the genuinely-unservable
+  dequeues. Form a hypothesis, name the experiment that would falsify it,
+  run it, record the result there. The CF-Turnstile "wall" is the standing
+  example: IP-reputation and GPU/fingerprint hypotheses are both falsified
+  (a fresh-IP, real-GPU laptop still fails) — the cause is the bot/automation
+  layer, likely post-OAuth, NOT the environment.
 
 ## Skill routing
 
