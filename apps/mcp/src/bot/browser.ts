@@ -25,6 +25,7 @@
 import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
+import { Socket } from "node:net";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, reapLeakedProfileHolder, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -886,6 +887,22 @@ export class BrowserController {
     const asn = await detectAsn();
     const asnClass: AsnClass = asn?.class ?? "unknown";
     if (shouldRouteThroughProxy(asnClass, forceAlways)) {
+      // Proxy liveness probe. A dead proxy (gost crashed, Tailscale down) makes
+      // EVERY navigation time out for 60s and silently breaks the whole heal
+      // pass — MEASURED 2026-06-12: the Mac gost SOCKS5 went down and every
+      // discover died on page.goto Timeout. A cheap TCP connect to the SOCKS
+      // host tells us it's reachable; if not, fall back to DIRECT (the box's own
+      // datacenter egress) so the run still serves the services that don't block
+      // datacenter IPs, instead of dying entirely. Self-healing > silent stall.
+      const reachable = await isProxyReachable(proxy.server);
+      if (!reachable) {
+        console.error(
+          `[universal-bot] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
+            `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
+            `better than every navigation timing out)`,
+        );
+        return null;
+      }
       console.error(
         `[universal-bot] routing through residential proxy ` +
           `(asn=${asnClass}${forceAlways ? ", forced" : ""})`,
@@ -5353,6 +5370,45 @@ export interface ProxySettings {
 // and falls back to a direct connection.
 //
 // Exported for unit testing — URL parsing is the error-prone bit.
+// Cheap TCP liveness probe for a proxy `server` string ("socks5://host:port").
+// A SOCKS5 proxy listens on TCP; if a connect succeeds within the timeout the
+// proxy is up. Resolves false on connect error / timeout / a malformed server.
+// Pure (no class state) so resolveProxy can call it before launching Chrome.
+export async function isProxyReachable(
+  server: string,
+  timeoutMs = 4000,
+): Promise<boolean> {
+  let host: string;
+  let port: number;
+  try {
+    const u = new URL(server);
+    host = u.hostname;
+    port = Number(u.port) || (u.protocol.startsWith("socks") ? 1080 : 8080);
+  } catch {
+    return false;
+  }
+  if (host.length === 0 || !Number.isFinite(port)) return false;
+  return await new Promise<boolean>((resolve) => {
+    const sock = new Socket();
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+        // already closed
+      }
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+    sock.connect(port, host);
+  });
+}
+
 export function parseProxyUrl(raw: string): ProxySettings {
   const u = new URL(raw.trim());
   if (u.hostname.length === 0) {
