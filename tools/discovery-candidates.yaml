@@ -101,7 +101,7 @@
 - { slug: stackblitz, name: StackBlitz, signup_url: https://stackblitz.com/, oauth_provider: github, status: needs-manual }  # unservable: no user API key exposed via the web UI (discover 2026-06-11)
 - { slug: gitpod, name: Gitpod, signup_url: https://gitpod.io/login/, oauth_provider: github }
 - { slug: daytona, name: Daytona, signup_url: https://app.daytona.io/, oauth_provider: github }
-- { slug: cyclic, name: Cyclic, signup_url: https://app.cyclic.sh/, oauth_provider: github }
+- { slug: cyclic, name: Cyclic, signup_url: https://app.cyclic.sh/, oauth_provider: github, status: needs-manual }  # dead: Cyclic.sh acquired by AWS + shut down (2024); app.cyclic.sh unreachable (ERR_SOCKS_CONNECTION_FAILED, host gone) — no signup (discover 2026-06-11)
 - { slug: railpack, name: Sevalla, signup_url: https://app.sevalla.com/signup, oauth_provider: google }
 - { slug: zerops, name: Zerops, signup_url: https://app.zerops.io/registration, oauth_provider: github }
 - { slug: cloud66, name: Cloud 66, signup_url: https://app.cloud66.com/users/sign_up, oauth_provider: github }
