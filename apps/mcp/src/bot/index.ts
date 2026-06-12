@@ -12,7 +12,7 @@ import {
   LLMCallBudgetExceeded,
 } from "./agent.js";
 import type { AgentInbox } from "./agent.js";
-import { withOAuthLock } from "./oauth-lock.js";
+import { withSignupLock } from "./signup-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 import { capturedAnyRound, captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
@@ -25,7 +25,6 @@ export {
   type RoundUploader,
   LLMCallBudgetExceeded,
 };
-export { withOAuthLock } from "./oauth-lock.js";
 export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export { BrowserController } from "./browser.js";
 export type { CaptchaVariant, CaptchaKind } from "./browser.js";
@@ -152,14 +151,16 @@ export class UniversalSignupBot {
   }
 
   async signup(request: UniversalSignupRequest): Promise<SignupResult> {
-    // T8/D2 — OAuth runs all launch Chrome from the one shared
-    // persistent profile, which Chrome single-instances. Serialize
-    // them so a second concurrent run queues rather than corrupting
-    // the profile lock. Form-fill runs are unaffected.
-    if (request.oauthProvider !== undefined) {
-      return withOAuthLock(() => this.runSession(request));
-    }
-    return this.runSession(request);
+    // Every signup run (OAuth AND form-fill) launches Chrome from the ONE
+    // shared persistent profile, which Chrome single-instances — so they must
+    // serialize. withSignupLock is the explicit CROSS-process locked queue:
+    // it queues same-process callers, serializes across processes via a file
+    // lock that RECLAIMS a dead/hung holder, and arms a watchdog that
+    // hard-exits a run overrunning the hold cap — so a stuck run can never
+    // accumulate as a lock-starving orphan (the 2026-06-12 failure: ~26
+    // hung discover processes). Subsumes the in-process-only withOAuthLock.
+    const label = `${request.service}:${request.oauthProvider ?? "form"}`;
+    return withSignupLock(label, () => this.runSession(request));
   }
 
   private async runSession(request: UniversalSignupRequest): Promise<SignupResult> {
