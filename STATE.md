@@ -77,6 +77,31 @@ environment hypotheses are all falsified; the invariant is the BOT itself.**
   and gives a truthful status. Fix is in `runOAuthFlow`'s post-`startOAuth`
   settle check (agent.ts ~7154 "waited for the callback to settle").
 
+- **✓ REFINED (2026-06-12): exa serves THREE responses by context** — the
+  earlier confusion was conflating them:
+  1. **Google session present** → logged-in dashboard, no challenge (the
+     operator's account exists from this session's runs).
+  2. **Fresh profile + DATACENTER IP** (harvester box, proxy down → direct) →
+     Cloudflare **managed interstitial / IUAM soft-block** ("would not clear,
+     no challenge to solve"). This one *is* IP-driven — a datacenter IP risk
+     score with no widget. Residential egress clears it.
+  3. **Fresh profile + RESIDENTIAL IP** (laptop) → **Turnstile WIDGET** (sitekey
+     in the iframe path). This is the automation-layer wall — the widget won't
+     solve on an automated click. **This is the 2Captcha-solvable case.**
+  So both a (real, IP-driven) datacenter soft-block AND a (residential-only)
+  automation-layer Turnstile widget exist; they're just exposed in different
+  contexts. The widget is the one worth solving — and it ONLY appears on
+  RESIDENTIAL egress. The datacenter box CANNOT reproduce it (it gets the IUAM
+  soft-block instead), so the 2Captcha-widget test REQUIRES residential egress:
+  restart gost (then run on the box through the proxy) OR run on the laptop.
+- **2Captcha Turnstile escalation: WIRED + ready** (both OAuth-precheck and
+  form-submit paths; robust sitekey extractor; watchdog + locked queue so test
+  runs can't orphan). Confirmed firing live (cartesia) — only blocked on getting
+  residential egress to reproduce the solvable WIDGET. Managed-IUAM challenges
+  (cartesia, exa-on-datacenter) are NOT 2Captcha-Turnstile-solvable (no DOM
+  sitekey; would need the cData/chlPageData Cloudflare-Challenge flow — separate
+  bigger lift).
+
 - **? OPEN — the only remaining levers for the strict-Turnstile cluster:**
   1. **2Captcha Tier-3 for Turnstile.** Currently DISABLED for Turnstile on the
      (now-falsified) belief that "Cloudflare scores at the IP layer so a
