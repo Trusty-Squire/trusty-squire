@@ -120,14 +120,35 @@ export class UniversalSignupBot {
   }
 
   private generatePassword(): string {
-    // Generate secure random password
-    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
-    let password = "";
-    const bytes = randomBytes(16);
-    for (const byte of bytes) {
-      password += chars[byte % chars.length];
+    // Secure random password with GUARANTEED class coverage. Sampling 16
+    // chars uniformly from one big set can (and did) emit a password missing
+    // an uppercase or digit, which complexity-gated signups reject client-side
+    // — the submit silently fails, no account is created, and the bot
+    // mis-reports verification_not_sent (MEASURED 2026-06-12: huggingface's
+    // "must contain uppercase, lowercase letters, and numbers"). Force one of
+    // each class, fill the rest randomly, then shuffle — deterministically
+    // satisfies lower+upper+digit+symbol policies.
+    const lower = "abcdefghijklmnopqrstuvwxyz";
+    const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const digit = "0123456789";
+    const symbol = "!@#$%^&*";
+    const all = lower + upper + digit + symbol;
+    const bytes = randomBytes(20);
+    const pick = (set: string, b: number): string => set[b % set.length]!;
+    const chars: string[] = [
+      pick(lower, bytes[0]!),
+      pick(upper, bytes[1]!),
+      pick(digit, bytes[2]!),
+      pick(symbol, bytes[3]!),
+    ];
+    for (let i = 4; i < bytes.length; i++) chars.push(pick(all, bytes[i]!));
+    // Fisher-Yates shuffle so the guaranteed leading classes aren't positional.
+    const shuf = randomBytes(chars.length);
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = shuf[i]! % (i + 1);
+      [chars[i], chars[j]] = [chars[j]!, chars[i]!];
     }
-    return password;
+    return chars.join("");
   }
 
   async signup(request: UniversalSignupRequest): Promise<SignupResult> {
