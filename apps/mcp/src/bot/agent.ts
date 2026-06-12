@@ -4478,8 +4478,22 @@ export class SignupAgent {
         // the text heuristic missed it). Treat ≤1 interactive elements as a
         // loading shell so the late-rendering provider button gets the patient
         // 8-retry budget instead of a premature email-fallback bail.
+        //
+        // Also patient when the page has NO provider button (we're in this
+        // branch because the scan found none) AND no email/password form yet:
+        // the auth surface simply hasn't hydrated. An OAuth-ONLY signup
+        // (replit: "Continue with Google/GitHub", no credential input) renders
+        // its provider buttons a beat late, and with >1 element it otherwise
+        // got only 2 retries and bailed oauth_required. If a form IS present,
+        // it's a genuine form-signup → fall back to form-fill without waiting.
+        const hasCredentialInput = inventory.some(
+          (e) =>
+            e.tag === "input" &&
+            (e.type === "email" || e.type === "password" || e.type === "tel"),
+        );
         const oauthScanShell =
           inventory.length <= 1 ||
+          !hasCredentialInput ||
           isLoadingShellText(await this.browser.extractText().catch(() => ""));
         const maxOauthScanRetries = oauthScanShell ? 8 : 2;
         if (oauthScanRetries < maxOauthScanRetries) {
