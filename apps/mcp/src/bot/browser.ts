@@ -4887,6 +4887,29 @@ export class BrowserController {
         const btn = this.page.getByRole("button", { name: re }).first();
         const count = await btn.count().catch(() => 0);
         if (count === 0) continue;
+        // GitHub disables the Authorize button with a clickjacking-protection
+        // COUNTDOWN (~3-8s) the first time you authorize an OAuth app that
+        // requests org scopes (read:org). Clicking while disabled silently
+        // no-ops and the URL never changes, so the whole consent bails
+        // "no approve control" even though the button is right there
+        // (MEASURED 2026-06-11: defang's "Authorize DefangLabs"). Poll up to
+        // 12s for it to enable before clicking.
+        {
+          const deadline = Date.now() + 12_000;
+          while (Date.now() < deadline) {
+            const disabled = await btn
+              .evaluate((el) => {
+                if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement) {
+                  if (el.disabled) return true;
+                }
+                const aria = el.getAttribute("aria-disabled");
+                return aria === "true" || aria === "";
+              })
+              .catch(() => false);
+            if (!disabled) break;
+            await this.sleep(400);
+          }
+        }
         try {
           await btn.click({ timeout: 8000 });
         } catch {
