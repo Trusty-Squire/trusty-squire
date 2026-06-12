@@ -4176,6 +4176,43 @@ export class SignupAgent {
         steps.push(`${label} captcha: hCaptcha widget detected but no sitekey found — cannot Tier-3 solve`);
       }
     }
+    // Turnstile Tier 3 (2026-06-12). Mirrors the hCaptcha path; the "Cloudflare
+    // IP-scores Turnstile so a solver token is rejected" belief that kept this
+    // off is FALSIFIED (exa fails on a fresh direct residential IP + real GPU
+    // — not IP-bound; STATE.md). The 2Captcha key is configured. Covers the
+    // post-SUBMIT form Turnstile (cartesia-class), complementing the
+    // OAuth-precheck branch in runOAuthFlow.
+    if (
+      !result.solved &&
+      result.kind === "turnstile" &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
+      const sitekey = await this.browser.extractTurnstileSitekey();
+      const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+      if (sitekey !== null && pageUrl !== undefined) {
+        steps.push(`${label} captcha: Tier 3 — submitting Turnstile sitekey to 2Captcha (${sitekey.slice(0, 12)}…)`);
+        const solveRes = await this.captchaSolver.solveTurnstile({ sitekey, pageUrl });
+        if (solveRes.kind === "ok") {
+          const injected = await this.browser.injectTurnstileToken(solveRes.token);
+          if (injected) {
+            steps.push(
+              `${label} captcha: Tier 3 Turnstile solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+            );
+            result = { ...result, solved: true };
+          } else {
+            steps.push(
+              `${label} captcha: Tier 3 Turnstile token arrived but page injection failed — captcha stays blocked`,
+            );
+          }
+        } else {
+          steps.push(`${label} captcha: Tier 3 Turnstile ${solveRes.kind}` +
+            ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+            ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : ""));
+        }
+      } else if (sitekey === null) {
+        steps.push(`${label} captcha: Turnstile widget detected but no sitekey found — cannot Tier-3 solve`);
+      }
+    }
     // rc.32 — forensic snapshot after the captcha attempt. Without
     // this, the only snapshot near the captcha is the pre-fill one
     // taken BEFORE the click, so when a Turnstile fails to solve we
