@@ -2709,6 +2709,31 @@ export function detectGoogleNoAccount(url: string, bodyText: string): boolean {
 // post-verify planner can't reliably target, and the bot loops
 // trying. Defining trait: hostname accounts.google.com (or
 // accounts.googleusercontent.com) at the post-OAuth gate.
+// Is this URL on an OAuth PROVIDER's own domain (github.com, accounts.google.com,
+// gitlab.com, …)? Such a URL is mid-handshake — its `/login/oauth/authorize`
+// path reads as a "login route", but navigating to the provider's ROOT abandons
+// the handshake on the provider's domain instead of returning to the service
+// (MEASURED 2026-06-11: typesense's GitHub OAuth landed on
+// github.com/login/oauth/authorize and the dead-route escape navigated to
+// github.com/, breaking the flow). The dead-route escape must skip these.
+export function isOAuthProviderHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return (
+      h === "github.com" ||
+      h === "gitlab.com" ||
+      h === "bitbucket.org" ||
+      h === "accounts.google.com" ||
+      h === "accounts.googleusercontent.com" ||
+      h.endsWith(".accounts.google.com") ||
+      h === "login.microsoftonline.com" ||
+      h === "appleid.apple.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function detectStuckOnGoogleOAuth(url: string): boolean {
   try {
     const h = new URL(url).hostname.toLowerCase();
@@ -7165,7 +7190,10 @@ export class SignupAgent {
     // ORIGIN ROOT lets the service redirect an authenticated user to its
     // real dashboard. Generalizes: a service already on its dashboard has a
     // non-auth path here and is left alone.
-    if (isSignupOrLoginRoute(this.browser.currentUrl())) {
+    if (
+      isSignupOrLoginRoute(this.browser.currentUrl()) &&
+      !isOAuthProviderHost(this.browser.currentUrl())
+    ) {
       const root = originRoot(this.browser.currentUrl());
       if (root !== null) {
         steps.push(
