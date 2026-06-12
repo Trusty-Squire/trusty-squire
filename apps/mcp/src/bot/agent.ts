@@ -6549,6 +6549,49 @@ export class SignupAgent {
             }
           }
         }
+        // Turnstile Tier-3 (2026-06-12). The "Cloudflare IP-scores Turnstile
+        // so a solver token is rejected" belief that kept this OFF was
+        // FALSIFIED — exa fails on a fresh direct residential IP + real GPU, so
+        // its Turnstile is NOT IP-bound (STATE.md). The 2Captcha key is
+        // configured (harvester.env). Try the solver token; if Cloudflare still
+        // rejects it the step trail says so and we fall through to the
+        // inert-click path (which now bails captcha_blocked truthfully).
+        if (
+          !solvedViaTier3 &&
+          captcha.kind === "turnstile" &&
+          this.captchaSolver?.isAvailable() === true
+        ) {
+          const sitekey = await this.browser.extractTurnstileSitekey();
+          const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+          if (sitekey !== null && pageUrl !== undefined) {
+            steps.push(
+              `OAuth: Tier 3 — submitting Turnstile sitekey to 2Captcha (${sitekey.slice(0, 12)}…)`,
+            );
+            const solveRes = await this.captchaSolver.solveTurnstile({ sitekey, pageUrl });
+            if (solveRes.kind === "ok") {
+              const injected = await this.browser.injectTurnstileToken(solveRes.token);
+              if (injected) {
+                solvedViaTier3 = true;
+                steps.push(
+                  `OAuth: Tier 3 solved the Turnstile in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha — clicking the ${provider.label} affordance`,
+                );
+              } else {
+                steps.push(
+                  `OAuth: Tier 3 Turnstile token arrived but page injection failed — clicking the ${provider.label} affordance anyway`,
+                );
+              }
+            } else {
+              steps.push(
+                `OAuth: Tier 3 Turnstile ${solveRes.kind}` +
+                  ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+                  ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : "") +
+                  ` — clicking the ${provider.label} affordance anyway`,
+              );
+            }
+          } else {
+            steps.push(`OAuth: Tier 3 Turnstile — no sitekey found on page, skipping solver`);
+          }
+        }
         if (!solvedViaTier3) {
           steps.push(
             `OAuth: visible ${captcha.kind} present but did not solve in 20s — clicking the ${provider.label} affordance anyway`,

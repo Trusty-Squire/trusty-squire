@@ -2924,6 +2924,64 @@ export class BrowserController {
     }
   }
 
+  // Cloudflare Turnstile sitekey. On the `.cf-turnstile` widget's
+  // data-sitekey, or as the `0x…` path segment in the challenge iframe src
+  // (challenges.cloudflare.com/.../0x4AAAAA…/…). Returns null when absent.
+  async extractTurnstileSitekey(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        const isKey = (k: string | null): k is string =>
+          k !== null && /^0x[A-Za-z0-9_-]{10,}$/.test(k);
+        for (const el of Array.from(
+          document.querySelectorAll<HTMLElement>(".cf-turnstile[data-sitekey], [data-sitekey]"),
+        )) {
+          const k = el.getAttribute("data-sitekey");
+          if (isKey(k)) return k;
+        }
+        for (const ifr of Array.from(
+          document.querySelectorAll<HTMLIFrameElement>(
+            'iframe[src*="challenges.cloudflare.com"]',
+          ),
+        )) {
+          const m = ifr.src.match(/\/(0x[A-Za-z0-9_-]{10,})\//);
+          if (m !== null && isKey(m[1] ?? null)) return m[1] ?? null;
+        }
+        return null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // Inject a 2Captcha-resolved Turnstile token into the page's
+  // cf-turnstile-response input(s) + dispatch input/change so the form's
+  // submit handler sees it. Turnstile exposes no public callback-read API
+  // (unlike grecaptcha), so DOM injection + events is the reliable path; the
+  // server-side validation reads the input value. Returns true if an input
+  // was populated.
+  async injectTurnstileToken(token: string): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate((tok: string) => {
+        const inputs = Array.from(
+          document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+            '[name="cf-turnstile-response"], [name^="cf-turnstile-response"], input[id^="cf-chl-widget"]',
+          ),
+        );
+        if (inputs.length === 0) return false;
+        for (const input of inputs) {
+          (input as HTMLInputElement).value = tok;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return true;
+      }, token);
+    } catch {
+      return false;
+    }
+  }
+
   // Mint the score token for an INVISIBLE reCAPTCHA by calling
   // grecaptcha.execute() ourselves, then wait for g-recaptcha-response to
   // populate. MEASURED on amplitude (2026-06-04): an invisible reCAPTCHA's

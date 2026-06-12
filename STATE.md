@@ -155,6 +155,29 @@ novita-ai → `/user/register`; nebius-ai → `tokenfactory.nebius.com`; voyage-
 
 ---
 
+## Configured secrets / env — CHECK HERE before asking for a key
+
+Agents keep re-asking for keys that are **already configured**. They live in
+`~/.config/trusty-squire/harvester.env` (loaded by the heal systemd unit via
+`EnvironmentFile=`). Before asking the operator for any of these, `grep` that
+file. Currently set (names only):
+
+- `TWOCAPTCHA_API_KEY` — **SET.** The 2Captcha Tier-3 solver is funded and
+  available in heal runs. (Turnstile escalation to it was historically *code*-
+  gated off — that's a code switch, not a missing key.)
+- `UNIVERSAL_BOT_PROXY_URL` (`socks5://100.104.88.126:1081`, the Mac gost),
+  `UNIVERSAL_BOT_PROXY_ALWAYS`, `REGISTRY_ADMIN_BEARER`,
+  `TRUSTY_SQUIRE_REGISTRY_URL`, `TELEGRAM_BOT_TOKEN`, `GH_REPO`,
+  `BOT_INBOX_DOMAIN`, `TRUSTY_SQUIRE_FIX_AGENT_PUSH`,
+  `UNIVERSAL_BOT_DAILY_SIGNUP_CAP`, `UNIVERSAL_BOT_MAX_LLM_CALLS` — all SET.
+- Machine token + account id: from the install session
+  (`~/.config/trusty-squire/session.json`), backfilled by the CLI.
+- Provider/API secrets the bot calls through the proxy live in the **vault**
+  (`mcp__squire__list_credentials`) — never paste their values into this file.
+
+Rule: a key in `harvester.env` or the vault is CONFIGURED. Don't ask for it;
+read it.
+
 ## Recurring meta-lesson
 
 **Stop concluding "IP" or "fingerprint" from a single observation.** Every time
