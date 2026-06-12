@@ -2948,22 +2948,39 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     try {
       return await this.page.evaluate(() => {
-        const isKey = (k: string | null): k is string =>
-          k !== null && /^0x[A-Za-z0-9_-]{10,}$/.test(k);
-        for (const el of Array.from(
-          document.querySelectorAll<HTMLElement>(".cf-turnstile[data-sitekey], [data-sitekey]"),
-        )) {
+        // Turnstile sitekeys are `0x` + ~22 base64url chars (e.g.
+        // 0x4AAAAAADSpJWQOnICEKAwx). A site-embedded WIDGET exposes it; a
+        // Cloudflare-MANAGED interstitial does not (it's injected, not in the
+        // DOM) — those return null and the caller can't Tier-3 solve them.
+        const isKey = (k: string | null | undefined): k is string =>
+          k != null && /^0x[A-Za-z0-9_-]{18,}$/.test(k);
+        // 1. data-sitekey on any element.
+        for (const el of Array.from(document.querySelectorAll<HTMLElement>("[data-sitekey]"))) {
           const k = el.getAttribute("data-sitekey");
           if (isKey(k)) return k;
         }
-        for (const ifr of Array.from(
-          document.querySelectorAll<HTMLIFrameElement>(
-            'iframe[src*="challenges.cloudflare.com"]',
-          ),
-        )) {
-          const m = ifr.src.match(/\/(0x[A-Za-z0-9_-]{10,})\//);
-          if (m !== null && isKey(m[1] ?? null)) return m[1] ?? null;
+        // 2. ANY iframe src carrying a 0x… sitekey (the challenge iframe path,
+        //    or a query param). Not just challenges.cloudflare.com — some
+        //    embeds proxy it.
+        for (const ifr of Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe"))) {
+          const src = ifr.src || "";
+          const path = src.match(/\/(0x[A-Za-z0-9_-]{18,})(?:\/|$)/);
+          if (path !== null && isKey(path[1])) return path[1] ?? null;
+          try {
+            const q = new URL(src).searchParams.get("sitekey");
+            if (isKey(q)) return q;
+          } catch {
+            /* relative/blank src */
+          }
         }
+        // 3. Inline HTML: `sitekey: '0x…'`, `data-sitekey="0x…"`,
+        //    `turnstile.render(el, { sitekey: '0x…' })`. Covers JS-config
+        //    widgets that never set a DOM attribute.
+        const html = document.documentElement.outerHTML;
+        const m =
+          html.match(/data-sitekey=["'](0x[A-Za-z0-9_-]{18,})/i) ??
+          html.match(/sitekey["'\s:=]{1,4}["'](0x[A-Za-z0-9_-]{18,})/i);
+        if (m !== null && isKey(m[1])) return m[1] ?? null;
         return null;
       });
     } catch {
