@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.14 (2026-06-13)
+
+Stable promotion of 0.9.14-rc.1 + rc.2. Two headlines: **Cloudflare Turnstile is
+beaten** (self-launch Chrome + `connectOverCDP` — the wall was Playwright's
+`launchPersistentContext`, not IP/GPU/fingerprint), and **fresh-verify no longer
+loses skills to per-run variance** (transient OAuth-callback flakes retry toward
+the 2-of-N bar; deterministic walls short-circuit — rescued 4/5 held OAuth services
+live). Plus a session of discovery-bot hardening, an explicit cross-process signup
+queue, replay fixes, and two Egress Grant increments (Prisma persistence + non-bearer
+`auth_shape`). Full per-commit notes under the rc.1 / rc.2 sections below.
+
 ## 0.9.14-rc.2 (2026-06-13)
 
 **Headline: fresh-verify no longer loses skills to per-run variance.** A sweep held
