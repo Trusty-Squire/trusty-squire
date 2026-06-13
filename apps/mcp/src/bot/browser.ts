@@ -147,6 +147,12 @@ export interface BrowserControllerOptions {
   // profile so an OAuth signup reuses the Google session google-login.ts
   // established. Defaults to CHROME_PROFILE_DIR.
   profileDir?: string;
+  // Per-launch egress override. When set, this run routes through this proxy
+  // instead of the env-global UNIVERSAL_BOT_PROXY_URL — so a fleet of verify
+  // identities can each egress from a distinct residential IP in ONE process
+  // (no containers). Subject to the same ASN-class gating + liveness probe as
+  // the env proxy. Unset → fall back to the env behavior.
+  proxyUrl?: string;
 }
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
@@ -499,7 +505,15 @@ export class BrowserController {
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
     this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
+    this.proxyOverride =
+      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0
+        ? opts.proxyUrl.trim()
+        : null;
   }
+
+  // Per-launch egress override (verify-fleet identities each get their own IP).
+  // null → use the env-global proxy. See resolveProxy().
+  private readonly proxyOverride: string | null;
 
   // Which browser channel the most recent .start() actually used.
   // `null` means bundled Chromium; a string like "chrome" means a
@@ -1048,7 +1062,8 @@ export class BrowserController {
   // that misclassify as "unknown". A malformed URL never aborts the
   // run — we log and fall back to a direct connection.
   private async resolveProxy(): Promise<ProxySettings | null> {
-    const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
+    // Per-launch override (verify fleet) wins over the env-global proxy.
+    const raw = this.proxyOverride ?? process.env.UNIVERSAL_BOT_PROXY_URL;
     if (raw === undefined || raw.trim().length === 0) return null;
 
     let proxy: ProxySettings;
