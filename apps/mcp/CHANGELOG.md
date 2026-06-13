@@ -1,5 +1,19 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.14-rc.2 (2026-06-13)
+
+**Headline: fresh-verify no longer loses skills to per-run variance.** A sweep held
+5 of 12 OAuth services at exactly 1/2 agreement — one robot passed, one flaked on a
+non-deterministic OAuth-callback failure. fresh-verify now retries TRANSIENT flakes
+with extra identities toward the 2-of-N bar while short-circuiting deterministic
+walls, so a reproducible recipe promotes instead of stalling (proven: clarifai
+1/2-hold → 2/2 PROMOTE across 3 attempts). Plus two Egress Grant increments:
+grants survive an API redeploy, and non-bearer providers work end to end.
+
+- feat(fresh-verify): retry transient flakes toward agreement, short-circuit hard walls (`retryBudget`, default 2 in the runner; `--retry-budget=` override)
+- feat(egress): Prisma-persist egress grants — new EgressGrant table + store, wired through the deps layer (survives API redeploy)
+- feat(egress): store_credential sets auth_shape (`bearer | header:<name> | query:<param>`) so an egress grant injects non-bearer keys with no per-service code
+
 ## 0.9.14-rc.1 (2026-06-13)
 
 **Headline: Cloudflare Turnstile is beaten.** The Turnstile wall (exa, cartesia,
