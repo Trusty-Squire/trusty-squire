@@ -7303,6 +7303,24 @@ export class SignupAgent {
           await this.browser.wait(3);
           continue;
         }
+        // Defense-in-depth (MEASURED 2026-06-13: clarifai/daytona/gladia hit
+        // this on the OAuth-popup path even after the post-verify consent fix).
+        // Even without blind-consent, auto-approve a provably BASIC GIS consent
+        // (name/email/profile only). googleGisConsentIsBasic hard-fails on ANY
+        // sensitive scope phrase, so this only recovers the identity-only case
+        // Google now hides behind an opaque part= token (no URL-readable scopes).
+        const consentDom = await this.browser.extractText().catch(() => "");
+        if (googleGisConsentIsBasic(consentDom)) {
+          steps.push(
+            "OAuth: consent DOM is basic identity-only (GIS; scopes not URL-readable) — auto-approving",
+          );
+          const advanced = await this.browser.advanceOAuthConsent(provider.id);
+          if (advanced) {
+            consentAlreadyApproved = true;
+            await this.browser.wait(3);
+            continue;
+          }
+        }
         return this.oauthAbort(
           "oauth_consent_needs_review",
           `reached a ${provider.label} consent screen but could not read its requested scopes ` +

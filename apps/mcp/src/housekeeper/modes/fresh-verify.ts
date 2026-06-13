@@ -103,6 +103,11 @@ export async function runFreshVerify(
       oauthProvider: provider,
       machineToken,
       apiBase,
+      // The robots are the operator's own identities — approve a benign
+      // (identity-only) OAuth consent blind, exactly like the discover path.
+      // The DOM danger-phrase scraper still HARD-ABORTS on sensitive scope
+      // grants (Drive/Gmail/contacts), so this only auto-approves name/email.
+      allowBlindOAuthConsent: true,
       // The identity binding — THE point of fresh-verify.
       profileDir: identity.profileDir,
       ...(identity.proxyUrl !== undefined ? { proxyUrl: identity.proxyUrl } : {}),
