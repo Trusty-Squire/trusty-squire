@@ -4392,10 +4392,23 @@ export class SignupAgent {
     // F14 — selectors the planner clicked WITHOUT advancing the page.
     // Each no-progress plan records its click selectors here; the next
     // plan that picks ONLY selectors in this set is failed as stuck
-    // instead of looping. Cleared on any progress (fill action). The
-    // Railway run that motivated F14 spun the same footer "Email" link
-    // 5 times before timing out; this loop now bails after 2.
+    // instead of looping. Cleared on ANY real progress between two
+    // clicks of the same selector — a fill/select/check action OR a
+    // page change (inventory/url moved). The Railway run that motivated
+    // F14 spun the same footer "Email" link 5 times before timing out;
+    // this loop now bails after 2.
     let lastNoProgressClickSelectors: Set<string> = new Set();
+    // Page-state fingerprint from the END of the previous round, used to
+    // decide whether the page actually moved between rounds. A
+    // "fill field → submit → (validation error) → fix field → submit
+    // again" cycle is legitimate progress, NOT a loop: kinde's post-OAuth
+    // register form has a globally-unique "domain" field, so the first
+    // guess collides ("taken") and the bot must edit the field and
+    // re-click the SAME "Next" button. Without this, re-clicking the same
+    // selector after a genuine field edit (or any inventory/url change)
+    // false-bailed as planner_loop even though the intervening fill was
+    // real progress. (MEASURED 2026-06-13, kinde, terminal_round 3.)
+    let lastRoundPageSig: string | null = null;
     // rc.31 — once the bot has explicitly clicked an email-flow
     // button (e.g. Railway's "Log in using email" two-stage chooser),
     // stay on the email path. Without this, the auto-OAuth-first
@@ -4808,16 +4821,44 @@ export class SignupAgent {
         return { kind: "already_oauth" };
       }
 
+      // The page moved since the previous round if the URL changed or the
+      // set of interactive selectors changed (a field gained/lost, a
+      // validation message toggled an element, a wizard step advanced).
+      // ANY such change means whatever the planner did last round was real
+      // progress — clear the no-progress memory so a re-click of a
+      // previously-"dead" selector on the now-changed page isn't judged a
+      // loop. This is the unique-value-retry case (kinde domain field):
+      // edit field → page re-renders → re-click "Next" is legitimate.
+      const pageSig =
+        state.url +
+        "§" +
+        inventory
+          .map((e) => e.selector)
+          .sort()
+          .join("|");
+      if (lastRoundPageSig !== null && pageSig !== lastRoundPageSig) {
+        lastNoProgressClickSelectors = new Set();
+      }
+      lastRoundPageSig = pageSig;
+
       // F14 — stuck-detection: if the plan picks ONLY click selectors
       // we already tried in the previous round without page progress,
       // it's a planner loop. Fail planning_failed with the offending
       // selector(s) so the operator sees what stalled. Doesn't fire
       // when the plan adds at least one new selector (legitimate
-      // exploration). Doesn't fire on fill plans (forward progress).
+      // exploration). Doesn't fire on fill plans (forward progress),
+      // nor on a plan that ALSO edits a field this round (a fill/check
+      // alongside the re-click is real progress — kinde's "tick the
+      // required box + re-click Next" advances the form even though the
+      // Next selector repeats).
       const planClickSelectors = plan.actions
         .filter((a) => a.kind === "click")
         .map((a) => a.selector);
+      const planEditsAField = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check",
+      );
       if (
+        !planEditsAField &&
         planClickSelectors.length > 0 &&
         lastNoProgressClickSelectors.size > 0 &&
         planClickSelectors.every((s) => lastNoProgressClickSelectors.has(s))
@@ -4881,6 +4922,18 @@ export class SignupAgent {
       // static page won't help, so a second consecutive empty plan is
       // a dead end. (The 0.1.12 loop spun this 4x on Axiom.)
       const hadFill = plan.actions.some((a) => a.kind === "fill");
+      // A check is ALSO a field edit = real progress, even though (unlike
+      // a fill) it doesn't promote the plan to the submit path below.
+      // (The form-fill plan vocabulary is fill/check/click — `select`
+      // belongs to the post-verify loop.) Treat a check as progress for
+      // the no-progress tracker only: a plan that ticked a box advanced
+      // the form, so its click selectors must NOT be recorded as "dead"
+      // (and any prior dead record is cleared). Without this, a "click
+      // Next (no advance) → tick a required box + re-click Next" cycle
+      // false-bailed as a loop even though the check was progress.
+      const hadFieldEdit = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check",
+      );
       if (!hadFill) {
         if (plan.actions.length === 0) {
           emptyPlans += 1;
@@ -4905,8 +4958,12 @@ export class SignupAgent {
         // F14 — record the click selectors that didn't advance the
         // page. The next plan's stuck-detection check (above) bails
         // if it picks the same ones again. Hint also tells the
-        // planner which selectors NOT to re-pick.
-        lastNoProgressClickSelectors = new Set(planClickSelectors);
+        // planner which selectors NOT to re-pick. A plan that ALSO made
+        // a field edit (select/check) made real progress, so clear the
+        // tracker instead of recording its clicks as dead.
+        lastNoProgressClickSelectors = hadFieldEdit
+          ? new Set()
+          : new Set(planClickSelectors);
         const avoidHint =
           planClickSelectors.length > 0
             ? ` AVOID these selectors — they were clicked but the page did NOT advance: ${planClickSelectors.map((s) => JSON.stringify(s)).join(", ")}.`
