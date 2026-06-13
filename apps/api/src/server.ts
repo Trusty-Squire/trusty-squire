@@ -22,6 +22,8 @@ import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerVaultRoute } from "./routes/vault.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
+import { registerEgressRoutes } from "./routes/egress.js";
+import { InMemoryEgressGrantStore, type EgressGrantStore } from "./services/egress-grant.js";
 import type { HttpProxyExecutor } from "./services/http-proxy.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
@@ -44,6 +46,7 @@ export interface BuildServerOpts {
   // network dispatch faked, so use_credential tests don't fight the
   // loopback block. Production leaves this undefined → real executor.
   proxyExecutor?: HttpProxyExecutor;
+  egressGrantStore?: EgressGrantStore;
   // Test seam — injects a stub EmailForwarder into the notify
   // route. Production builds leave this undefined and the route
   // builds its own forwarder from GMAIL_USER / GMAIL_APP_PASSWORD.
@@ -220,6 +223,15 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerVaultAccessRoute, {
     deps,
+    requireAgent: auth.requireAgent,
+    ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
+  });
+  // Egress Grants v1a (buffered): a deployed machine calls a provider through the
+  // injecting proxy with a revocable grant token. In-memory store for now —
+  // grants are re-mintable; Prisma persistence is a follow-up.
+  await fastify.register(registerEgressRoutes, {
+    deps,
+    egressGrantStore: opts.egressGrantStore ?? new InMemoryEgressGrantStore(),
     requireAgent: auth.requireAgent,
     ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
   });
