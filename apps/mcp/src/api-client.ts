@@ -136,6 +136,7 @@ export class ApiClient {
     fields?: Record<string, string>;
     env_var_suggestion?: string;
     type?: string;
+    auth_shape?: string;
   }): Promise<{
     reference: string;
     service: string;

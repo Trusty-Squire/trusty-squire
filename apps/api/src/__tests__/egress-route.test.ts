@@ -15,12 +15,17 @@ import { HttpProxyExecutor } from "../services/http-proxy.js";
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 const CUSTOMER_ID = "ts-test";
 
-const seen: Array<{ url: string; auth: string | undefined; method: string }> = [];
+const seen: Array<{ url: string; auth: string | undefined; method: string; headers: Record<string, string> }> = [];
 function fakeExecutor(): HttpProxyExecutor {
   return new HttpProxyExecutor({
     lookup: async () => ({ address: "203.0.113.9", family: 4 }),
     dispatch: async (input) => {
-      seen.push({ url: input.url.toString(), auth: input.headers.authorization, method: input.method });
+      seen.push({
+        url: input.url.toString(),
+        auth: input.headers.authorization,
+        method: input.method,
+        headers: { ...input.headers },
+      });
       return { status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ ok: true }), truncated: false };
     },
   });
@@ -133,6 +138,48 @@ describe("Egress Grants — /v1/egress", () => {
     });
     expect((await call()).statusCode).toBe(200);
     expect((await call()).statusCode).toBe(429);
+  });
+
+  it("injects the secret per the credential's stored auth_shape (header, not bearer)", async () => {
+    const account = await h.deps.accountStore.createAccount("hdr@example.test", "H");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    // A non-bearer provider: the key rides in x-api-key, NOT Authorization.
+    const store = await h.server.inject({
+      method: "POST", url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "Anthropic",
+        value: "sk-the-real-secret",
+        type: "api_key",
+        auth_shape: "header:x-api-key",
+        observed_hosts: ["api.anthropic.com"],
+      },
+    });
+    expect(store.statusCode).toBe(201);
+
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "Anthropic" });
+    const res = await h.server.inject({
+      method: "POST", url: `/v1/egress/${grant_id}/v1/messages`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: { model: "claude", messages: [] },
+    });
+    expect(res.statusCode).toBe(200);
+    const last = seen.at(-1)!;
+    // Secret injected into x-api-key; Authorization NOT set to the secret.
+    expect(last.headers["x-api-key"]).toBe("sk-the-real-secret");
+    expect(last.auth).toBeUndefined();
+  });
+
+  it("rejects an invalid auth_shape at store time (400)", async () => {
+    const account = await h.deps.accountStore.createAccount("bad@example.test", "B");
+    const cookie = await webCookie(h.deps, account.id);
+    const res = await h.server.inject({
+      method: "POST", url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: { service: "OpenAI", value: "sk-x", auth_shape: "cookie:foo" },
+    });
+    expect(res.statusCode).toBe(400);
   });
 
   it("the grant list never leaks the token hash", async () => {
