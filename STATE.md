@@ -268,6 +268,16 @@ Dead / acquired / sales-gated — confirmed via WebFetch/WebSearch, marked
   surface — authenticated DOM proven), **cyclic** (AWS-acquired, dead),
   **northflank** (GitHub-app + sudo-2FA, operator-only), **koyeb** ($30/mo +
   card before keys).
+- **baseten** (2026-06-13) — Google OAuth succeeds, but new accounts land in
+  `app.baseten.co/waiting_room`: a MANUAL account-review/approval gate. The API
+  key does not exist until a human approves the account. The bot fills the
+  approval form then the planner correctly reads "account review waiting room,
+  not approved" — but the run falls through to the generic `oauth_onboarding_failed`
+  (a MISCLASSIFICATION; should be `onboarding_blocked`). NOT a wizard/budget bug.
+  Marked `needs-manual` in `tools/housekeeper-services.yaml`. FOLLOW-UP (deferred
+  to avoid colliding with the in-flight kinde stuck-detector edit): add a
+  "waiting room / account review pending" classifier near `isAtPaywall` in
+  agent.ts so these report `onboarding_blocked` and stop counting as bot failures.
 
 ---
 

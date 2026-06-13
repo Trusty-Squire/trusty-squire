@@ -321,10 +321,20 @@
   signup_url: https://app.baseten.co/login
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: 'Model serving. Google + GitHub OAuth. Workspace creation step
+  status: needs-manual
+  notes: 'Model serving. Google OAuth works, but new accounts land in
 
-    post-OAuth may trip the "looking for API key" planner — watch.
+    app.baseten.co/waiting_room — a MANUAL account-review/approval gate. No API
+
+    key exists until a human approves the account, so the bot cannot self-serve
+
+    it (UNSERVABLE, not a wizard/planner bug). Measured 2026-06-13: bot fills
+
+    the approval form, then the planner correctly reports "account review
+
+    waiting room, not approved". Falls through to oauth_onboarding_failed today
+
+    (should be onboarding_blocked). Dequeued — needs a human or an approved acct.
 
     '
 - slug: netlify
