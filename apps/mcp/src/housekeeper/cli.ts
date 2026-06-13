@@ -56,7 +56,7 @@ const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 // 'fix' (C2) is the output-side step: read the failure batch from the capture
 // dir, drive the holistic fix-agent against the eval gate, commit RCs to the
 // `next` channel. See docs/DESIGN-autonomous-output-loop.md.
-type Mode = "verify" | "discover" | "heal" | "fix";
+type Mode = "verify" | "discover" | "heal" | "fix" | "fresh-verify";
 
 interface ParsedArgs {
   once: boolean;
@@ -97,6 +97,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--mode=discover") args.mode = "discover";
     else if (arg === "--mode=heal") args.mode = "heal";
     else if (arg === "--mode=fix") args.mode = "fix";
+    else if (arg === "--mode=fresh-verify") args.mode = "fresh-verify";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
@@ -333,6 +334,33 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       console.error(
         `housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return 1;
+    }
+  }
+
+  // fresh-verify mode: verify a service by fresh-signing-up as N robot
+  // identities (2-of-N agreement) instead of replaying as a returning user.
+  // Needs a configured identity pool + operator machine token + account id.
+  if (args.mode === "fresh-verify") {
+    if (args.service === undefined) {
+      console.error("housekeeper --mode=fresh-verify needs --service=<slug>");
+      return 2;
+    }
+    const { runFreshVerify } = await import("./modes/fresh-verify.js");
+    try {
+      const res = await runFreshVerify({ service: args.service });
+      if (res.kind === "not_configured") {
+        console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
+        return 1;
+      }
+      if (res.kind === "insufficient_identities") {
+        console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available}/${res.agreement} unspent) — mint more robots`);
+        return 1;
+      }
+      console.log(`[fresh-verify] ${args.service}: ${res.promoted ? "PROMOTE" : "hold"} (${res.outcomes.filter((o) => o.success).length}/${res.agreement} agreed)`);
+      return res.promoted ? 0 : 1;
+    } catch (err) {
+      console.error(`housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }

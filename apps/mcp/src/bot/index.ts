@@ -108,6 +108,13 @@ export interface UniversalSignupRequest {
   // tools/provision-any.ts (rc.13).
   machineToken?: string | undefined;
   apiBase?: string | undefined;
+  // Verify-fleet identity binding. When the housekeeper runs a fresh-signup
+  // verification AS a specific robot identity, these route the run through that
+  // identity's Chrome profile (its logged-in Google session) and its egress —
+  // so the bot signs up as a genuinely fresh user instead of the shared
+  // returning-user profile. Omitted → the default shared profile + env proxy.
+  profileDir?: string | undefined;
+  proxyUrl?: string | undefined;
 }
 
 export class UniversalSignupBot {
@@ -195,6 +202,10 @@ export class UniversalSignupBot {
     // to skip the behavior-simulation overhead.
     const browser = new BrowserController({
       humanize: request.humanize ?? true,
+      // Verify-fleet identity binding (per-identity profile + egress); omitted
+      // fields fall back to the shared profile + env proxy.
+      ...(request.profileDir !== undefined ? { profileDir: request.profileDir } : {}),
+      ...(request.proxyUrl !== undefined ? { proxyUrl: request.proxyUrl } : {}),
     });
     // request.llm is `LLMClient | LLMPair | undefined`; SignupAgent's
     // constructor handles all three shapes.
