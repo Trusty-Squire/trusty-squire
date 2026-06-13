@@ -16,8 +16,59 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ## Cloudflare-Turnstile "wall" (exa, cartesia, render-cron, replit, runpod, turso)
 
-The recurring tar pit. Current honest status: **cause NOT yet identified; the
-environment hypotheses are all falsified; the invariant is the BOT itself.**
+### ✅✅ ROOT CAUSE FOUND + FIXED (2026-06-12) — it was the Playwright LAUNCH, not the environment
+
+**The tell is `launchPersistentContext` itself.** Cloudflare Turnstile detects the
+flags/instrumentation Playwright/patchright inject when they *launch* Chrome — NOT
+the IP, NOT the fingerprint, NOT the live CDP attachment, NOT the click mechanism.
+
+**The decisive experiment (every variable held constant — same harvester box, same
+datacenter IP `172.93.111.86`, same Xvfb display, same Chrome 148 binary, same
+software-WebGL, same humanized click; fresh profile so the challenge renders).**
+Loaded `dashboard.exa.ai/login`, which serves a **visible interactive Turnstile
+checkbox** (sitekey `0x4AAAAAADSpJWQOnICEKAwx`), and clicked it:
+
+| Launch | CDP attached | Click | Result |
+|---|---|---|---|
+| Playwright `launchPersistentContext` | yes | CDP `page.mouse` | ❌ "Verification failed" |
+| Playwright `launchPersistentContext` | yes | OS-level `xdotool` | ❌ "Verification failed" |
+| plain `google-chrome` (no automation) | no | OS-level `xdotool` | ✅ **"Success!"** |
+| plain `google-chrome` + `connectOverCDP` | **yes** | OS-level `xdotool` | ✅ Success (token len816) |
+| plain `google-chrome` + `connectOverCDP` | yes | **`page.mouse`** | ✅ token len816 |
+
+Reading the matrix: row 3 vs row 1/2 isolates the variable to **how Chrome is
+launched**. Row 4 proves the **live CDP attachment is NOT the tell** (it's attached
+and passes). Row 5 proves the **click mechanism is NOT the tell** (normal page.mouse
+passes once the browser was self-launched). All screenshots captured.
+
+**THE FIX (shipped, `browser.ts`):** the bot now **self-launches the Chrome binary**
+(`google-chrome --remote-debugging-port=…`, NO `--enable-automation` etc.) and
+**attaches via `connectOverCDP`** instead of `launchPersistentContext`. Same shared
+profile (OAuth session carries over). Validated **end-to-end through the real
+`BrowserController.start()`**: spawned its own Xvfb, self-launch + connectOverCDP,
+navigated to `auth.exa.ai`, **Turnstile issued a token (len837), green "Success!"**.
+Gated `BOT_SELF_LAUNCH` (default-ON; `=0` for the old path). Credentialed proxies
+fall back to the old path (self-launch can't carry SOCKS auth); auth-less proxies +
+direct use self-launch. Helpers: `resolveChannelBinary`, `selfLaunchEnabled`,
+`findFreePort`, `waitForDevtools`; teardown kills the child + disconnects the browser.
+
+**Also corrected:** exa serves a real **interactive checkbox Turnstile** from the
+**datacenter box, direct, no residential IP needed** — the old note that "the box
+only ever gets the unsolvable IUAM soft-block; the widget needs residential" is
+FALSIFIED. (The dashboard host is **Vercel** — `x-vercel-mitigated: challenge`,
+429 to curl, passes for a real browser → redirects to `auth.exa.ai` which is
+Cloudflare. Two vendors; the wall that matters is the Cloudflare Turnstile.)
+
+**Why every prior environment hypothesis below was right to be falsified:** they
+were all looking in the wrong layer. The cause was upstream of all of them — the
+launcher. The hypotheses are kept as the historical record (and because they're
+still true claims: e.g. the proxy IP really does score human — see the score probe).
+
+---
+
+The recurring tar pit. Historical status (pre-fix): **cause NOT yet identified; the
+environment hypotheses are all falsified; the invariant is the BOT itself.** ☑ The
+"invariant is the bot" conclusion was CORRECT — now pinned to the launcher.
 
 - **H: residential-IP reputation** (the harvester Mac's reused Korean proxy IP
   is flagged). **✗ FALSIFIED, twice:**
@@ -107,6 +158,25 @@ environment hypotheses are all falsified; the invariant is the BOT itself.**
   → IUAM (no widget). The 2Captcha-widget test therefore needs a FRESH, DIRECT
   residential IP — i.e. the LAPTOP, not the box. Don't keep re-running exa from
   the box; it deterministically gives IUAM now.
+- **✓ MEASURED (2026-06-12): the proxy IP scores HUMAN; it is NOT degraded.**
+  Ran a score probe (`/tmp/score-probe.mjs`) THROUGH the residential proxy —
+  the *same* egress (`1.240.236.25`) that gets exa's IUAM — and got:
+  - **reCAPTCHA v3 score = 0.9** (1.0 = certain human; 0.9 is a clean, very-human
+    score).
+  - **Lenient Turnstile SOLVED** (the automated session cleared it; token len 21).
+  This **partially falsifies hypothesis (a)** above ("the Mac's residential IP is
+  now DEGRADED from this session's traffic"): the IP still scores 0.9 on
+  reCAPTCHA v3 and still clears a lenient Turnstile. A genuinely
+  reputation-degraded IP would tank the v3 score and fail the lenient widget. So
+  exa's IUAM is **NOT** a general bot-score / blanket-IP problem — it is
+  **exa-specific Cloudflare strictness** (a per-site config + Cloudflare's own
+  per-IP/per-site intelligence) that the proxied datacenter→residential hop trips
+  while generic reCAPTCHA/lenient-Turnstile checks do not. The remaining real
+  variable between "gets the solvable WIDGET" (laptop) and "gets IUAM" (box) is
+  therefore **the SOCKS proxy hop itself** (laptop was proxy=direct), not IP
+  reputation. Net update to (a)/(b): **(b) — proxy-hop detectability — is now the
+  leading explanation; (a) — IP degradation — is largely falsified by the 0.9
+  score.**
 - **2Captcha Turnstile escalation: WIRED + ready** (both OAuth-precheck and
   form-submit paths; robust sitekey extractor; watchdog + locked queue so test
   runs can't orphan). Confirmed firing live (cartesia) — only blocked on getting

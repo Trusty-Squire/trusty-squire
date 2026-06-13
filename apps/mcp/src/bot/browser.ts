@@ -25,7 +25,9 @@
 import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
-import { Socket } from "node:net";
+import { Socket, createServer } from "node:net";
+import { existsSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, reapLeakedProfileHolder, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -303,6 +305,86 @@ async function detectChromiumChannel(): Promise<string | null> {
   return null;
 }
 
+// Resolve the on-disk Chrome binary for a detected channel, for the
+// self-launch path (see launchSelfManagedContext). Playwright launches a
+// channel by name; we have to spawn the binary ourselves, so we need the
+// path. Returns null when the channel is unknown / not found on disk
+// (caller falls back to launchPersistentContext).
+export function resolveChannelBinary(channel: string | null): string | null {
+  if (channel === null) return null; // bundled Chromium — no self-launch
+  const explicit = process.env.UNIVERSAL_BOT_CHROME_BINARY;
+  if (explicit !== undefined && explicit.length > 0) {
+    return existsSync(explicit) ? explicit : null;
+  }
+  const candidates = CHANNEL_PATHS[channel] ?? [];
+  for (const c of candidates) {
+    try {
+      if (existsSync(c)) return c;
+    } catch {
+      // skip unreadable candidate
+    }
+  }
+  return null;
+}
+
+// Whether to launch Chrome ourselves and attach over CDP, instead of
+// Playwright's launchPersistentContext.
+//
+// WHY THIS EXISTS — the single decisive finding (2026-06-12, fully
+// reproduced + falsifiable; see STATE.md "Cloudflare-Turnstile wall").
+// Cloudflare Turnstile's interactive challenge FAILS a Playwright/patchright
+// launchPersistentContext-driven Chrome and PASSES a Chrome the operator
+// launches itself and then attaches to over CDP — every other variable held
+// constant (same box, same datacenter IP, same Xvfb display, same Chrome 148
+// binary, same software-WebGL, same humanized click). The discriminator
+// matrix:
+//   launchPersistentContext + CDP click   → "Verification failed"
+//   launchPersistentContext + OS click     → "Verification failed"
+//   plain google-chrome      + OS click     → "Success!"
+//   plain google-chrome + connectOverCDP + page.mouse → token issued (len816)
+// So the tell is NEITHER the live CDP attachment NOR the click mechanism —
+// it is specifically the launch flags/instrumentation Playwright injects at
+// launchPersistentContext time. Self-launching the binary (no
+// --enable-automation et al.) and attaching with connectOverCDP avoids it.
+// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the old path. Exported for tests.
+export function selfLaunchEnabled(): boolean {
+  const v = process.env.BOT_SELF_LAUNCH;
+  return v !== "0" && v !== "false" && v !== "off";
+}
+
+// Find an ephemeral TCP port for Chrome's --remote-debugging-port.
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      srv.close(() => (port > 0 ? resolve(port) : reject(new Error("no port"))));
+    });
+  });
+}
+
+// Poll Chrome's DevTools HTTP endpoint until it answers (the browser is up
+// and accepting CDP), or the deadline passes. Returns the base endpoint URL
+// connectOverCDP accepts.
+async function waitForDevtools(port: number, deadlineMs: number): Promise<string> {
+  const base = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + deadlineMs;
+  let lastErr = "";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) });
+      if (res.ok) return base;
+      lastErr = `HTTP ${res.status}`;
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
+}
+
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -362,6 +444,11 @@ export class BrowserController {
   // Google session across runs — see profile.ts / google-login.ts.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
+  // Chrome ourselves and attach over CDP, these hold the child process and
+  // the connected Browser so close() can tear both down.
+  private childChrome: ChildProcess | null = null;
+  private cdpBrowser: Browser | null = null;
   // True once launchPersistentContext succeeded this session. close() only
   // reaps a leaked Chrome when WE launched one — so a ProfileBusyError thrown
   // BEFORE launch (while waiting on a genuine concurrent holder) never kills
@@ -445,6 +532,69 @@ export class BrowserController {
       throw new Error("BrowserController.stealthProfile read before .start()");
     }
     return activeStealthProfileValue();
+  }
+
+  // Launch Chrome ourselves and attach over CDP — the Turnstile-safe launch
+  // (see selfLaunchEnabled for the proof). The profile dir is the SAME shared
+  // profile launchPersistentContext would use, so the OAuth session carries
+  // over. Options that launchPersistentContext takes at creation but a default
+  // (connectOverCDP) context can't are applied differently:
+  //   • timezone  → TZ env on the child (more authentic than a CDP override)
+  //   • proxy     → --proxy-server flag (auth-less only; the caller routes
+  //                 credentialed proxies to the old path)
+  //   • viewport  → --window-size (with viewport:null-equivalent: we never set
+  //                 an emulated viewport on the connected context)
+  //   • locale/geo/permissions → applied post-connect by start()
+  private async launchSelfManagedContext(params: {
+    binary: string;
+    headless: boolean;
+    args: readonly string[];
+    proxy: ProxySettings | null;
+    env: NodeJS.ProcessEnv;
+    window: { width: number; height: number };
+  }): Promise<BrowserContext> {
+    const port = await findFreePort();
+    const argv = [
+      `--remote-debugging-port=${port}`,
+      "--remote-debugging-address=127.0.0.1",
+      `--user-data-dir=${this.profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--password-store=basic",
+      "--window-position=0,0",
+      `--window-size=${params.window.width},${params.window.height}`,
+      "--lang=en-US",
+      ...params.args,
+      ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+      ...(params.headless ? ["--headless=new"] : []),
+      "about:blank",
+    ];
+    const child = spawn(params.binary, argv, { env: params.env, stdio: "ignore" });
+    this.childChrome = child;
+    let endpoint: string;
+    try {
+      endpoint = await waitForDevtools(port, 30_000);
+    } catch (err) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      this.childChrome = null;
+      throw err;
+    }
+    // Use the patchright launcher's connectOverCDP — it's the exact path the
+    // falsification experiment validated (its connect avoids Runtime.enable,
+    // which a plain attach would emit). The anti-detection that matters here
+    // is the LAUNCH (which we now own), not the connect.
+    const launcher = getChromium();
+    const browser = await launcher.connectOverCDP(endpoint);
+    this.cdpBrowser = browser;
+    const ctx = browser.contexts()[0];
+    if (ctx === undefined) {
+      throw new Error("self-launched Chrome exposed no default browser context");
+    }
+    return ctx;
   }
 
   async start(): Promise<void> {
@@ -590,70 +740,100 @@ export class BrowserController {
     // rebrowser fork required (the pin is what crashed the OAuth flow and
     // confounded the A/B). One binary for both arms.
     this.launchedChannel = channel;
-    const context = await launchWithProfileGate(this.profileDir, () =>
-      launcher.launchPersistentContext(this.profileDir, {
-      headless: chromeHeadless,
-      ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-      // `channel:` selects a real installed browser over the bundled
-      // binary (omitted when channel detection found nothing).
-      ...(channel !== null ? { channel } : {}),
-      // `proxy:` routes egress through a residential proxy — only for
-      // datacenter-class egress (see resolveProxy()).
-      ...(proxy !== null ? { proxy } : {}),
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        // Enable software WebGL on the GPU-less Xvfb host. Without this,
-        // Chrome 120+ disables WebGL entirely (getContext("webgl") → null),
-        // which MEASURED (2026-06-04) as the bot's one real fingerprint gap:
-        // a browser with NO WebGL is itself an anti-bot tell (reCAPTCHA
-        // Enterprise / device-fingerprinting weight it). SwiftShader gives a
-        // real WebGL context. MEASURED 2026-06-04: with this on, WebGL reports
-        // a Mesa/llvmpipe software renderer and the reCAPTCHA v3 score stays
-        // 1.0 — a strict improvement over "no WebGL at all", which more
-        // fingerprint libs treat as suspicious than a software renderer. The
-        // rc.33 init-script below TRIES to spoof the renderer string to a real
-        // Intel GPU, but it is INERT under patchright (hardened) — see its
-        // comment. A clean GPU-string spoof under patchright needs binary-level
-        // support; tracked as a follow-up, not blocking (score is already 1.0).
-        "--enable-unsafe-swiftshader",
-        "--ignore-gpu-blocklist",
-      ],
-      // `viewport: null` makes the page use the REAL OS window size
-      // instead of a hardcoded value. The old fixed 1280×720 is exactly
-      // Playwright's device-emulation default and is flagged by anti-bot
-      // detectors as "default Playwright viewport"; the real window
-      // (sized by the Xvfb display) reads as an ordinary browser.
-      viewport: null,
-      // No `userAgent` override: a real Chrome (channel) supplies a UA
-      // that AGREES with navigator.userAgentData + the binary version.
-      // The old hardcoded "Chrome/131" string mismatched the actual
-      // binary (148) — a UA-vs-userAgentData inconsistency that is itself
-      // a fingerprint tell. Let the browser report its own coherent UA.
-      // locale stays en-US deliberately: matching it to the proxy
-      // country would render signup pages in that language, and the
-      // Claude vision form-planner expects English.
-      locale: "en-US",
-      // timezone + geolocation track the real egress (T3.1); a fixed
-      // default when the probe failed.
-      timezoneId: geo?.timezoneId ?? "America/New_York",
-      // F10: `clipboard-read` is what makes `navigator.clipboard.readText()`
-      // return the user's just-clicked Copy-button value, which is how
-      // every modern API-key modal (OpenRouter, Anthropic, OpenAI,
-      // Stripe) reveals the full secret — the visible display is
-      // masked / truncated and only the clipboard has the whole key.
-      // `clipboard-write` is a freebie; some Copy buttons no-op without
-      // it. Granting both at context-creation time so we don't have to
-      // re-grant on every nav.
-      permissions: [
-        ...(geo?.geolocation !== undefined ? ["geolocation"] : []),
-        "clipboard-read",
-        "clipboard-write",
-      ],
-      ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-      }),
-    );
+    // Launch args shared by BOTH paths (launchPersistentContext and the
+    // self-launch). See the per-flag rationale: swiftshader gives a real
+    // (software) WebGL context on the GPU-less Xvfb box; the others are the
+    // standard headless/sandbox flags. NOTE we deliberately do NOT include
+    // Playwright's automation flags (--enable-automation et al.) — on the
+    // self-launch path their ABSENCE is the whole fix.
+    const launchArgs: readonly string[] = [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--enable-unsafe-swiftshader",
+      "--ignore-gpu-blocklist",
+    ];
+    // F10 clipboard + egress-matched geolocation permission, built once for
+    // either path. Typed as string[] (Playwright's grantPermissions /
+    // permissions option both accept it).
+    const grantedPermissions: string[] = [
+      ...(geo?.geolocation !== undefined ? ["geolocation"] : []),
+      "clipboard-read",
+      "clipboard-write",
+    ];
+    // Decide the launch path. Self-launch (Turnstile-safe) requires a real
+    // Chrome binary on disk AND an auth-less proxy (a credentialed proxy needs
+    // Playwright's native proxy auth, which only the launchPersistentContext
+    // path provides — so route those there).
+    const selfLaunchBinary = selfLaunchEnabled() ? resolveChannelBinary(channel) : null;
+    const proxyHasAuth =
+      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
+    const useSelfLaunch = selfLaunchBinary !== null && !proxyHasAuth;
+
+    let context: BrowserContext;
+    if (useSelfLaunch && selfLaunchBinary !== null) {
+      console.error(
+        `[universal-bot] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
+      );
+      // Window size matches the display surface so viewport reads as a real
+      // window (no emulated-viewport tell). TZ on the child makes Chrome
+      // report the egress timezone natively.
+      const window =
+        this.launchedMode === "xvfb"
+          ? { width: 1920, height: 1080 }
+          : { width: 1280, height: 1024 };
+      const selfEnv: NodeJS.ProcessEnv = {
+        ...(chromeEnv ?? process.env),
+        TZ: geo?.timezoneId ?? "America/New_York",
+      };
+      context = await launchWithProfileGate(this.profileDir, () =>
+        this.launchSelfManagedContext({
+          binary: selfLaunchBinary,
+          headless: chromeHeadless,
+          args: launchArgs,
+          proxy,
+          env: selfEnv,
+          window,
+        }),
+      );
+      // Options the default (connectOverCDP) context can't take at creation —
+      // applied post-connect. Best-effort: a failure here is non-fatal (the
+      // signup proceeds; only clipboard-key-extraction / geo degrade).
+      try {
+        await context.grantPermissions(grantedPermissions);
+        if (geo?.geolocation !== undefined) {
+          await context.setGeolocation(geo.geolocation);
+        }
+      } catch (err) {
+        console.error(
+          `[universal-bot] post-connect context setup partial: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    } else {
+      if (selfLaunchEnabled() && selfLaunchBinary !== null && proxyHasAuth) {
+        console.error(
+          "[universal-bot] credentialed proxy → launchPersistentContext (self-launch can't carry proxy auth)",
+        );
+      }
+      // T3: a PERSISTENT context (the legacy path). The profile dir carries the
+      // user's Google session so the OAuth-first path reuses it.
+      context = await launchWithProfileGate(this.profileDir, () =>
+        launcher.launchPersistentContext(this.profileDir, {
+          headless: chromeHeadless,
+          ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+          ...(channel !== null ? { channel } : {}),
+          ...(proxy !== null ? { proxy } : {}),
+          args: [...launchArgs],
+          viewport: null,
+          locale: "en-US",
+          timezoneId: geo?.timezoneId ?? "America/New_York",
+          permissions: grantedPermissions,
+          ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+        }),
+      );
+    }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
@@ -5232,6 +5412,23 @@ export class BrowserController {
       ]);
     if (this.page) await capped(this.page.close(), 5_000);
     if (this.context) await capped(this.context.close(), 10_000);
+    // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
+    // spawned. context.close() on a connectOverCDP context only disconnects —
+    // it does NOT necessarily exit the browser process, which would leak the
+    // SingletonLock and brick the next run (the reap below is the backstop, but
+    // killing our own child directly is cleaner and faster).
+    if (this.cdpBrowser) {
+      await capped(this.cdpBrowser.close(), 5_000);
+      this.cdpBrowser = null;
+    }
+    if (this.childChrome) {
+      try {
+        this.childChrome.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      this.childChrome = null;
+    }
     // …and context.close() doesn't always kill the browser: headed Chrome
     // under Xvfb / some patchright teardowns leave the main process alive
     // holding the SingletonLock. A leaked browser makes the NEXT run wait
