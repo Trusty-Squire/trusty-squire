@@ -114,6 +114,9 @@ export async function runFreshVerify(
       // The DOM danger-phrase scraper still HARD-ABORTS on sensitive scope
       // grants (Drive/Gmail/contacts), so this only auto-approves name/email.
       allowBlindOAuthConsent: true,
+      // Sign up AS this robot's own Google account if its profile ever shows a
+      // chooser (robot profiles are single-account, so this is belt-and-braces).
+      oauthAccountEmail: identity.email,
       // The identity binding — THE point of fresh-verify.
       profileDir: identity.profileDir,
       ...(identity.proxyUrl !== undefined ? { proxyUrl: identity.proxyUrl } : {}),

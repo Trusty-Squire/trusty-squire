@@ -1175,6 +1175,19 @@ async function executeStep(
       // popup-vs-redirect normalization is consistent with the
       // universal bot path.
       await browser.startOAuth(match.selector);
+      // Generalize the skill across ACCOUNT COUNT. Skills are distilled on a
+      // single-account profile, where Google auto-proceeds through OAuth (cached
+      // cookies, no chooser) — so the capture never RECORDS the account-chooser
+      // step. A replaying user with more than one Google account hits the chooser
+      // as an unrecorded interstitial; without walking it here the next recorded
+      // step runs against accounts.google.com and the replay breaks. Walk the
+      // chooser + basic consent out of band so a one-account capture replays for
+      // an N-account user. Fast no-op when the round-trip already auto-completed
+      // (single account → first state is not_provider / popup-closed → "ok").
+      const walk = await walkOAuthConsent(browser, step.provider);
+      if (walk === "needs_login") {
+        return { kind: "needs_login", provider: step.provider };
+      }
       return { kind: "clicked" };
     }
 

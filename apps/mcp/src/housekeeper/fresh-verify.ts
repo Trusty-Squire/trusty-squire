@@ -159,6 +159,15 @@ const HARD_FAILURE_CODES = [
   "captcha_blocked",
   "verification_not_sent",
   "unservable",
+  // Signed in via OAuth but the post-OAuth onboarding WIZARD can't reach the API
+  // key — a deterministic nav wall (the bot can't traverse this service's wizard),
+  // identical for every fresh identity. Measured 0% rescue across baseten/langfuse
+  // + 28 hits in the heal-run distribution. Fixable only by improving post-OAuth
+  // nav, never by spending more robots. NOTE: deliberately NOT including the
+  // look-alikes oauth_loop_detected (gladia promoted on retry) and
+  // oauth_session_not_persisted (clarifai promoted on retry) — those are genuine
+  // per-run variance and MUST keep retrying.
+  "oauth_onboarding_failed",
 ];
 export function isHardFailure(reason: string | undefined): boolean {
   if (reason === undefined) return false;

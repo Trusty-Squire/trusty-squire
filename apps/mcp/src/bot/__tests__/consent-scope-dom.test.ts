@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { googleConsentIsBasicFromDom, googleGisConsentIsBasic } from "../agent.js";
+import {
+  googleConsentIsBasicFromDom,
+  googleGisConsentIsBasic,
+  pickChooserAccount,
+} from "../agent.js";
 
 // The MODERN "Sign in with Google" (GIS) consent screen — "Allow <App> to
 // access this info about you: Name and profile picture / Email address" with a
@@ -88,5 +92,38 @@ describe("googleConsentIsBasicFromDom", () => {
       "Manage your contacts",
     ].join("\n");
     expect(googleConsentIsBasicFromDom(dom)).toBe(false);
+  });
+});
+
+// On a multi-account profile Google's chooser shows N cards; the bot must sign
+// up AS the intended account, not whichever renders first. This is what lets a
+// one-account capture generalize to an N-account user.
+describe("pickChooserAccount", () => {
+  const cards = ["a@trustysquire.ai", "verify-03@trustysquire.ai", "z@gmail.com"];
+
+  it("returns the card matching the intended email", () => {
+    expect(pickChooserAccount("verify-03@trustysquire.ai", cards)).toBe(
+      "verify-03@trustysquire.ai",
+    );
+  });
+
+  it("matches case-insensitively and trims whitespace", () => {
+    expect(pickChooserAccount("  Verify-03@TrustySquire.ai ", cards)).toBe(
+      "verify-03@trustysquire.ai",
+    );
+  });
+
+  it("returns null with no hint — caller falls back to the first card (single-account case)", () => {
+    expect(pickChooserAccount(undefined, cards)).toBeNull();
+    expect(pickChooserAccount("", cards)).toBeNull();
+    expect(pickChooserAccount("   ", cards)).toBeNull();
+  });
+
+  it("returns null when the intended account isn't on the chooser", () => {
+    expect(pickChooserAccount("nobody@trustysquire.ai", cards)).toBeNull();
+  });
+
+  it("returns null against an empty chooser", () => {
+    expect(pickChooserAccount("verify-03@trustysquire.ai", [])).toBeNull();
   });
 });
