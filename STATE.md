@@ -94,6 +94,19 @@ environment hypotheses are all falsified; the invariant is the BOT itself.**
   RESIDENTIAL egress. The datacenter box CANNOT reproduce it (it gets the IUAM
   soft-block instead), so the 2Captcha-widget test REQUIRES residential egress:
   restart gost (then run on the box through the proxy) OR run on the laptop.
+- **✗ FALSIFIED that the BOX can reproduce the solvable widget (2026-06-13).**
+  With gost live, ran exa fresh-profile + force-form THROUGH the residential
+  proxy → still the IUAM soft-block, NOT the widget. So the widget is NOT
+  reproducible from the harvester box. Cause is one of: (a) the Mac's
+  residential IP is now DEGRADED — this session pushed many signups through
+  1.240.236.25, dropping its Cloudflare risk score, so it gets the harder IUAM
+  (a FRESH residential IP — the laptop's Singapore IP earlier — got the lighter
+  widget); or (b) the SOCKS proxy hop itself is detectable (the laptop was
+  proxy=direct). Net: IP REPUTATION modulates WHICH challenge exa serves —
+  fresh residential → widget (automation-layer, 2Captcha-able); degraded/proxied
+  → IUAM (no widget). The 2Captcha-widget test therefore needs a FRESH, DIRECT
+  residential IP — i.e. the LAPTOP, not the box. Don't keep re-running exa from
+  the box; it deterministically gives IUAM now.
 - **2Captcha Turnstile escalation: WIRED + ready** (both OAuth-precheck and
   form-submit paths; robust sitekey extractor; watchdog + locked queue so test
   runs can't orphan). Confirmed firing live (cartesia) — only blocked on getting
