@@ -199,6 +199,38 @@ environment hypotheses are all falsified; the invariant is the BOT itself.** ☑
 
 ---
 
+## Egress / residential proxy — barely needed (2026-06-13)
+
+### ✗ FALSIFIED — H: "the datacenter box IP gets blocked, so we need the residential proxy"
+
+The housekeeper forced all egress through a residential proxy (the operator's Mac
+gost SOCKS5 over Tailscale, `UNIVERSAL_BOT_PROXY_ALWAYS=true`) on the premise that
+its datacenter IP would be blocked. Two independent measurements falsify that the
+proxy is load-bearing post-Turnstile-fix:
+
+1. **Live door-check (`tools/egress-doorcheck.mjs`, DIRECT datacenter IP, Miami).**
+   Loaded 24 curated Google-OAuth signup pages on the raw datacenter IP and
+   classified the anti-bot door (`classifyInterstitialText`). **23/24 cleared** —
+   sentry, openai, anthropic, neon, render, posthog, cockroachdb, weaviate, etc.
+   The only block was **`together`** (Cloudflare error 1020 — an explicit IP
+   access rule). A **4% door-block rate.**
+2. **Retrospective on the heal-run failure distribution (~180 failures).** The
+   IP-addressable classes (`oauth_session_not_persisted` ≈ 4) are ~2%. The rest is
+   nav/OAuth/session/planner bugs a proxy cannot touch: no_signup_link (36),
+   loading-shell (36), oauth_stuck_on_chooser (28, now fixed), oauth_onboarding_failed
+   (28), run_timeout (24), oauth_required (22), planning_failed (12), needs_login (8).
+
+**Why the premise was ever true and isn't now:** the self-launch Turnstile fix
+(2026-06-12, above) retired the IP-sensitive captcha wall. What's left rarely cares
+about the IP. → **Action taken:** flipped `harvester.env` to direct-first
+(`UNIVERSAL_BOT_PROXY_URL=` empty, `PROXY_ALWAYS=false`). The Mac SPOF is retired.
+For the thin tail (`together` + post-OAuth-callback IP rejections) either dequeue or
+wire a MANAGED per-GB pool as a narrow fallback — never a personal laptop, never the
+default path. **Do NOT re-introduce "force the proxy" without re-running the
+door-check and showing a direct-block rate that justifies it.**
+
+---
+
 ## Confirmed-real fixes (green, reproduced)
 
 These produced full signups (extracted credentials) and several reproduced

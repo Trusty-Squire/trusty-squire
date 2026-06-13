@@ -48,31 +48,29 @@ Env vars per mode live in CLAUDE.md ("Housekeeper env" table) — values only.
 
 ## Egress model
 
+**Direct-first since 2026-06-13. The residential proxy is retired as the default.**
+A door-check (`tools/egress-doorcheck.mjs`) loaded 24 curated Google-OAuth signup
+pages on the raw datacenter IP: **23/24 cleared the anti-bot door** (only `together`
+blocks — CF 1020). Combined with the heal-run failure distribution (~95%+ of failures
+are nav/OAuth/session/planner bugs, ~2% IP-class), the proxy's entire upside is a
+~4% door-tail. The self-launch Turnstile fix (2026-06-12) already retired the
+IP-sensitive captcha wall the proxy was bought for. Full reasoning + numbers:
+`STATE.md` → "Egress / residential proxy — barely needed". **Do NOT re-introduce
+'force the proxy' without re-running the door-check and showing a direct-block rate
+that justifies it.**
+
 - The operator box (Tailscale node `trusty-dev-box`) has a **datacenter** direct
-  IP (Miami / ReliableSite).
-- A **residential exit** runs on the Mac (`macbook-pro-7`, Tailscale
-  `100.104.88.126`, Seoul SK-Broadband home line). The exit IP (`1.240.236.25`)
-  is a CLEAN consumer-ISP residential IP — measured, zero detector flags.
-- **Egress = native gost SOCKS5 over Tailscale (2026-06-08). DO NOT use
-  `ssh -D` for this — it collapses under load.** Measured: 40 concurrent
-  requests through `ssh -D` → **1 ok / 39 fail** (Chrome's parallel connections
-  contend for one SSH channel's flow-control window → head-of-line blocking →
-  `ERR_SOCKS`); the same 40 through gost → **40 ok / 0 fail**. The whole
-  2026-06-07/08 run of `ERR_SOCKS` "walls" was this, NOT IP reputation.
-  ```bash
-  # On the Mac (already set up, launchd-persistent — KeepAlive + RunAtLoad):
-  #   /usr/local/bin/gost -L socks5://100.104.88.126:1081
-  #   ~/Library/LaunchAgents/com.trusty.gost.plist  (launchctl list | grep gost)
-  # From the operator box — verify + screen any proxy:
-  tools/proxy-eval.sh socks5://100.104.88.126:1081     # exit IP, ASN, flags, reachability
-  ```
-- Enable with `UNIVERSAL_BOT_PROXY_URL=socks5://100.104.88.126:1081` +
-  `UNIVERSAL_BOT_PROXY_ALWAYS=true` (the box's own ASN reads as
-  datacenter/unknown, so force it). `harvester.env` carries the current setting.
-  (The legacy `ssh -D 1080` → `127.0.0.1:1080` tunnel still works as a low-
-  concurrency fallback but should not be the primary.)
-- **When egress matters:** captcha / anti-bot signup pages block datacenter IPs,
-  so residential egress helps `discover` succeed on those services.
+  IP (Miami / ReliableSite). This is now the default egress.
+- `harvester.env` ships `UNIVERSAL_BOT_PROXY_URL=` (empty) + `PROXY_ALWAYS=false`.
+- **For the thin tail** (`together` + post-OAuth-callback IP rejections), if it's
+  worth servicing at all: wire a MANAGED rotating residential/mobile pool (IPRoyal
+  / SOAX / Bright Data, per-GB) into `UNIVERSAL_BOT_PROXY_URL` as a NARROW fallback.
+  Screen any candidate with `tools/proxy-eval.sh '<url>'` first. **Never a personal
+  laptop** — the old Mac gost-over-Tailscale exit (`100.104.88.126`) was a single
+  point of failure that halted the pipeline when the lid closed (2026-06-13).
+- Historical note (why `ssh -D` is banned if a proxy ever returns): 40 concurrent
+  requests through `ssh -D` → 1 ok / 39 fail (one SSH channel's flow-control window
+  head-of-line-blocks Chrome's parallel connections → `ERR_SOCKS`); gost → 40/40.
 - **When egress does NOT matter:** `needs_login` on OAuth replays.
   **Measured 2026-06-06: posthog returns `needs_login` identically on direct
   (Miami) and proxy (Seoul).** Egress is NOT the cause of OAuth `needs_login` —
