@@ -181,13 +181,47 @@ forces them:
 
 ## v1 scope cut / milestones
 
-1. `EgressGrant` model + `grant_app_access` MCP tool (mint/return base_url +
-   token).
-2. Generic streaming egress endpoint (SSE + multipart first; WS second).
-3. `auth_shape` field + recipe table for the launch providers
-   (bearer / `xi-api-key` / `x-api-key` / query).
-4. Mandatory per-grant rate-limit (reuse the LLM usage tracker) + revoke path.
-5. Spend cap + per-grant audit ledger (the control-plane payoff).
+**The honest cut is buffered-vs-streaming, NOT by-provider** (2026-06-13 review).
+Provider generality is nearly free: `HttpProxyExecutor` already injects `${SECRET}`
+into arbitrary headers/query AND already does the SSRF hardening (DNS pin, rebind
+guard, allowed-hosts). The `auth_shape` table (bearer / `xi-api-key` / `x-api-key`
+/ query) is a handful of lines. So "OpenRouter-first" was a mis-statement — it's
+really "OpenRouter is the first *streaming* consumer." The only thing legitimately
+phased is **streaming**, because it's the one genuinely-new, hard piece (the
+executor buffers today: 10KB cap, JSON/text-only; SSRF hardening has to be
+re-established on a streaming path).
+
+### v1a — standing grant over the EXISTING buffered injection (ANY provider)
+
+Generalize `use_credential` (agent-initiated, request-scoped) into a **revocable
+standing grant** a deployed machine holds. Reuses the built, SSRF-hardened
+`HttpProxyExecutor` — so it works for **every vaulted credential, any auth shape,
+day one**, for non-streaming calls.
+
+1. `EgressGrant` model — child of a vault credential: `{ id, account_id,
+   credential_ref, token_hash, rate_limit, spend_cap_usd?, revoked_at? }`;
+   `allowed_hosts` INHERITED from the credential (a grant can never widen reach).
+2. `grant_app_access(service, hosts?)` MCP tool → mints + returns
+   `{ base_url: "…/v1/egress/g_<id>", token: "sqr_egress_<…>" }`. Token is hashed
+   at rest; non-secret-shaped; revocable.
+3. Buffered egress endpoint `ANY /v1/egress/:grant/*` → resolve grant → load the
+   credential → inject via `HttpProxyExecutor` (the same executor `/v1/vault/use`
+   uses) → return. Host validated against the inherited `allowed_hosts`.
+4. Mandatory per-grant **rate-limit** (reuse the LLM usage tracker) + **revoke**
+   path; optional **spend_cap_usd** + per-grant audit ledger.
+5. `auth_shape` on the credential (default `bearer`; `header:<name>`,
+   `query:<param>`) — the small recipe table, so non-Bearer providers
+   (ElevenLabs/Anthropic) work without per-service code.
+
+### v1b — streaming pass-through (the separable hard part)
+
+The genuinely-new engineering: true zero-buffer SSE/chunked (and later WS)
+pass-through, with the SSRF pin + allowed-hosts + a byte-ceiling + idle-timeout
+re-established on the streaming path (the buffered executor's caps don't carry
+over). The auth/grant layer from v1a is shared unchanged. Its **first consumer**
+is an LLM loop (Castellan/`ser`) → first streaming target is an LLM provider
+(OpenRouter), but that's "first streaming consumer," not a provider restriction.
+
 6. Dashboard: list grants, per-grant spend, one-click revoke.
 
 ## Local proxy front-door for CLI loop runtimes (Castellan / `ser`) — v0.3 candidate
