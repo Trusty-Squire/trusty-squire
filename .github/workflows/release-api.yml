@@ -1,0 +1,119 @@
+name: Release api
+
+# Tests + (on main) deploys `@trusty-squire/api` to Fly.
+#
+# The API has no version semantics — it's a service, not a library.
+# Lifecycle (mirrors release-registry.yml):
+#   - push to main:    run tests, then `flyctl deploy` to
+#                      `trusty-squire-api` on Fly (release_command runs
+#                      `prisma db push` for the api schema).
+#   - push to staging: run tests only (no deploy).
+#
+# WHY THIS EXISTS: the API deploy used to be a MANUAL `flyctl deploy` from
+# a laptop, decoupled from the npm release. So the mcp client could ship a
+# feature (egress grants, 0.9.15) whose server route was never deployed —
+# `POST /v1/egress/grants` 404'd in prod while the client called it. CI-
+# integrating the deploy keeps server + client shipping together.
+#
+# Path filter: only fires on changes that could affect the API image
+# (apps/api + the workspace packages it bundles + the root lockfile).
+# Unrelated commits to mcp/web skip it.
+
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - "apps/api/**"
+      - "packages/inbox/**"
+      - "packages/vault/**"
+      - "packages/skill-schema/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/release-api.yml"
+
+# One release run per branch at a time; don't cancel an in-flight deploy
+# mid-rollout.
+concurrency:
+  group: release-api-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Free ~25GB by removing preinstalled toolchains we don't use — the
+      # monorepo's Next.js apps blow past the runner's inode quota even with
+      # a filtered install (lockfile resolution still touches them).
+      - name: Free disk space on runner
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
+          sudo docker system prune -af --volumes || true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+
+      # Install only the API's dep tree (api + transitive workspace deps),
+      # not the whole monorepo — same inode-quota reason as the registry/mcp
+      # release workflows.
+      - name: Install (api dep tree only)
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/api...'
+
+      # The API has no prisma CLI of its own; it uses the inbox package's,
+      # generating BOTH the inbox client (default output) and the api client
+      # (custom .prisma/api-client output) — exactly as Dockerfile.fly does.
+      # Absolute --schema paths because `pnpm -F inbox exec` runs in the
+      # inbox package dir, so a relative path wouldn't resolve.
+      - name: Prisma generate (inbox + api schemas)
+        run: |
+          set -euo pipefail
+          pnpm -F @trusty-squire/inbox exec prisma generate --schema="$GITHUB_WORKSPACE/packages/inbox/prisma/schema.prisma"
+          pnpm -F @trusty-squire/inbox exec prisma generate --schema="$GITHUB_WORKSPACE/apps/api/prisma/schema.prisma"
+
+      # tsc resolves the workspace deps (inbox/vault/skill-schema) via their
+      # `types` → dist/index.d.ts, so build them before the API's typecheck.
+      - name: Build workspace deps (inbox/vault/skill-schema dist)
+        run: pnpm --filter '@trusty-squire/api^...' build
+
+      - name: Typecheck
+        run: pnpm --filter '@trusty-squire/api' typecheck
+
+      - name: Test
+        run: pnpm --filter '@trusty-squire/api' test
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Deploy from the monorepo root (same as the operator's local
+      # `flyctl deploy --config apps/api/fly.toml ...`). The Dockerfile.fly
+      # path is relative to the build context, which must be the repo root
+      # because the Dockerfile copies workspace deps from packages/ + apps/.
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${FLY_API_TOKEN:-}" ]]; then
+            echo "::error::FLY_API_TOKEN is not set. Add it as a repo secret before merging this workflow."
+            exit 1
+          fi
+          # --wait-timeout 600: Fly's default 5-min wait on the release_command
+          # (prisma db push) machine sometimes reports `stopped` late even when
+          # the push succeeded. Give it 10 min so a flaky state report doesn't
+          # abort an otherwise-good deploy.
+          flyctl deploy --config apps/api/fly.toml --dockerfile apps/api/Dockerfile.fly --remote-only --wait-timeout 600
