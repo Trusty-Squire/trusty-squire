@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.16 (2026-06-13)
+
+Stable release. Promotes the staging post-OAuth navigation work to `latest`,
+plus the egress + CI increments already cherry-picked onto `main`.
+
+- fix(oauth): generalize the multi-account chooser across account count — replay walks the Google account-chooser as a dynamic interstitial and picks the card matching the intended account (no longer assumes a single-account flow)
+- fix(fresh-verify): fail fast on `oauth_onboarding_failed` — a deterministic post-OAuth wizard wall short-circuits instead of burning the retry budget
+- fix(bot): post-verify planner skips optional setup wizards and beelines to the API key (no more stalling on "invite your team" / "name your project" interstitials)
+- fix(egress): decompress upstream gzip/br/deflate bodies + make grant limits opt-in (already on `main` via cherry-pick; listed for completeness)
+- ci(api): deploy the API to Fly on release to close the client/server skew (already on `main` via cherry-pick; listed for completeness)
+
 ## 0.9.15 (2026-06-13)
 
 **HOTFIX: 0.9.14 could not start the MCP server.** 0.9.14 pinned
