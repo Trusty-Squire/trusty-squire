@@ -190,6 +190,123 @@ forces them:
 5. Spend cap + per-grant audit ledger (the control-plane payoff).
 6. Dashboard: list grants, per-grant spend, one-click revoke.
 
+## Local proxy front-door for CLI loop runtimes (Castellan / `ser`) — v0.3 candidate
+
+A neighboring project (Castellan's `ser`, a standing-loop CLI runtime) surfaced a
+use case the cloud egress endpoint above serves awkwardly: a **loop runtime
+running on the same machine as the Squire MCP** that needs to make LLM calls every
+iteration without ever holding the provider key. `ser` already honors
+`OPENROUTER_BASE_URL`, so the integration is `squire proxy openrouter →
+http://127.0.0.1:PORT/v1`: point the runtime at a localhost shim, and it never sees
+a credential.
+
+**This directly answers the "vending is brittle" objection.** We previously balked
+at vending/rotating provider keys to a consumer because rotation is fragile. The
+proxy sidesteps it entirely: the runtime holds **no credential**, so there is
+nothing to vend or rotate at the consumer. The key stays in Squire; the runtime
+holds at most a downgraded, revocable `EgressGrant` token.
+
+**The reframe that promotes the deferred sidecar.** The "Deferred" section below
+parks the local sidecar as anti-vibecoder because it "adds an install step." That
+objection **evaporates for a CLI runtime**: the Squire MCP is already installed on
+that machine, so `squire proxy` is zero marginal install. The thing we deferred is
+the *natural* fit for this consumer class.
+
+### The one architecture decision (with the honest tradeoff)
+
+"Injected at the boundary" has two non-equivalent realizations:
+
+- **A. Local shim, SERVER-SIDE injection** — `ser → localhost shim → Squire API →
+  provider`. The shim is a dumb forwarder that attaches the `EgressGrant` token;
+  the real key is injected at the API (exactly `/v1/llm/chat` today). Key never
+  materializes locally (invariant held). Cost: one extra hop
+  (localhost→Fly→provider) and the loop's hot path now depends on Squire API
+  uptime — if Fly is down, the loop's LLM calls fail, and there is **no clean
+  fallback** (a fallback would have to hold the key). For an LLM loop the hop is
+  negligible against token-generation latency; the availability coupling is the
+  real cost and must be accepted on purpose.
+- **B. Local sidecar, LOCAL injection** — the proxy holds the decrypted key in RAM
+  (fetched once at start) and injects on localhost; provider call goes direct, zero
+  added hop. This **materializes the key locally** — a real downgrade of the
+  write-only-vault model. Justified only by latency-critical paths (voice). Stays
+  the deferred power tier.
+
+**Decision: A for v0.3.** LLM loops are not latency-critical at the network layer,
+and keeping the key server-side is the whole point. B remains deferred for voice.
+
+### v0.3 milestones (this front-door specifically)
+
+1. **Streaming egress route** — generalize `/v1/llm/chat` into a transparent,
+   **zero-buffer** SSE/chunked pass-through (`/v1/egress/*`): machine-token *or*
+   `EgressGrant`-token auth, server-side injection per `auth_shape`, allowed-hosts
+   enforced, reusing the rate-limit tracker + `LLMUsageEvent` metering. The
+   non-buffering stream is the principal engineering risk (note: `HttpProxyExecutor`
+   today buffers with a 10KB cap + JSON/text-only allowlist — it is NOT reusable for
+   streaming; this path is a new build). For a fixed provider (OpenRouter) the
+   upstream host is hard-coded, so the SSRF surface is trivial vs the general case.
+2. **`squire proxy <service>` CLI subcommand** — loopback-only (127.0.0.1, never
+   0.0.0.0) HTTP server speaking the provider's native wire format, forwarding to
+   (1) with a minted `EgressGrant` token (not the machine token — so the runtime's
+   blast radius is one revocable, capped grant). Prints
+   `export OPENROUTER_BASE_URL=http://127.0.0.1:PORT/v1`.
+3. **Per-loop metering** — runtime (or proxy) sets `X-Squire-Loop-Id`; API tags each
+   `LLMUsageEvent`; dashboard groups spend by loop and enforces `spend_cap_usd`
+   (429 on breach). This is the control-substrate payoff.
+4. **Generalize past OpenRouter** — wire the `EgressGrant` + `auth_shape` recipe
+   table (ElevenLabs / Anthropic / query-param providers) so the local front-door
+   rejoins the full design above.
+
+**Sequencing:** v0.3 candidate, alongside the standing-loop runtime, AFTER the
+current closed-loop stabilization. Not built now.
+
+### Eng-review findings (2026-06-12) — resolve before build
+
+Two **blocking** holes and several strong-recommends, from a `/plan-eng-review`
+pass on this section:
+
+- **[BLOCKING] The loopback shim endpoint is unauthenticated.** "ser holds no
+  credential + the shim holds the token" makes `http://127.0.0.1:PORT/v1` a local
+  spend endpoint any process on the box can hit (loopback ≠ private on a multi-user
+  host). Fix: **ser holds the `EgressGrant` token** (the *downgraded, capped,
+  revocable* token — NOT the provider key; that's the real "holds no credential"
+  claim) and presents it to the shim; or bind a **unix domain socket with 0600
+  perms** instead of TCP loopback. Relax the "ser holds literally nothing" wording
+  accordingly.
+- **[BLOCKING] Cap semantics: per-grant vs per-loop.** `X-Squire-Loop-Id` is a
+  client header — forgeable. It works for **attribution** (per-grant cap, header is
+  a dashboard tag) but NOT for **enforcement** (per-loop cap — a loop rotates its id
+  to evade). If the cap is per-loop, mint **one `EgressGrant` per loop** (id + cap
+  server-side) and drop the header. Recommendation: start **per-grant**.
+- **[STRONG] Streaming defeats the response-size cap + inverts timeouts.**
+  `HttpProxyExecutor`'s `maxResponseBytes` pre/mid-stream check and 5s body timeout
+  do not survive a pass-through. Add a **byte-ceiling that kills the stream at N MB**
+  + an **idle-timeout** (no bytes for ~30s), replacing the total-body timeout. Cost
+  metering also becomes a **streaming parse** — `usage` arrives only in the final
+  SSE chunk (needs `stream_options.include_usage`), so "metering for free" isn't
+  free on the streaming path.
+- **[STRONG] Error wire-format translation is load-bearing for "drop-in."** When the
+  cap/rate-limit trips, the shim must emit **OpenAI/OpenRouter-compatible error
+  JSON**, not a raw Squire 402/429 — otherwise the SDK's error handling breaks
+  mid-loop.
+- **[NAME IT] Arch A means Squire (Fly) sees every prompt + completion in
+  plaintext.** Sold as metering; it's also full-traffic visibility. Desirable for the
+  enterprise audit story, but state it as a trust property, not a free win.
+- **[NAME IT] Availability + volume coupling.** A standing loop is *unbounded*
+  volume, unlike `/v1/llm/chat`'s bounded ≤15-calls/signup precedent. Every token
+  traverses Fly → real bandwidth bill + a new scaling axis (N concurrent multi-minute
+  streams vs. the 4-in-flight buffered-call cap). Cost it before this is a product
+  feature vs. operator-only.
+- **[MISSING] Model allowlist.** An unbounded loop on the operator's OpenRouter key
+  can pick expensive models. Scope allowed models on the grant, or rely solely on
+  `spend_cap_usd` — decide which.
+
+**Revised milestone order (M1 was prematurely generic):** (1) **OpenRouter-only**
+streaming passthrough — fixed host = no SSRF, no `auth_shape` registry; reuse
+`/v1/llm/chat`'s injection — **with metering folded in**; (2) `squire proxy` CLI
+shim (shim-auth resolved per the blocking item); (3) **generalize** — build the
+generic `/v1/egress/*` + `EgressGrant` + `auth_shape` + SSRF pin/allowlist once a
+second provider justifies the heavy machinery.
+
 ## Open questions
 
 - **WebSocket providers** (ElevenLabs streaming TTS): WS pass-through with

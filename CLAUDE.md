@@ -252,6 +252,14 @@ can be tuned against real data.
    `HttpProxyExecutor` (`/v1/vault/use`) + the `/v1/llm/chat` token+rate-limit
    pattern; turns the vault into a revoke/rotate/spend-cap control plane.
    Not started; v1 scope cut + milestones in the doc.
+   - **v0.3 candidate — `squire proxy` local front-door (Castellan/`ser`).** A
+     loopback-only shim (`OPENROUTER_BASE_URL=http://127.0.0.1:PORT/v1`) that lets a
+     CLI loop runtime on the same box make LLM calls holding NO credential — the key
+     is injected server-side (the `/v1/llm/chat` path), metered per-loop. Answers the
+     "vending is brittle" objection (nothing to vend). Decision: server-side
+     injection over a local sidecar (key stays in Squire; accepts a Squire-API
+     hot-path dependency). Section + milestones in the doc. After closed-loop
+     stabilization; not now.
 
 ## Environment Details
 
