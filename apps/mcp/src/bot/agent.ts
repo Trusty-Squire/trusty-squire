@@ -8894,6 +8894,30 @@ ${formatInventory(input.inventory)}`,
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
     for (let round = 0; round < args.maxRounds; round++) {
+      // Top-of-round credential sweep (MEASURED 2026-06-13: langfuse). The
+      // credential can become visible on the page BETWEEN planner actions —
+      // the keys render in the dashboard after onboarding while the planner
+      // gets distracted re-clicking a promo banner it mis-reads as an error
+      // toast. Re-reading the page every round makes extraction independent of
+      // the planner choosing the right click, so an on-screen key is never
+      // missed into a maxRounds bail. Merge-only (never overwrites a prior
+      // capture); both extractors are best-effort.
+      try {
+        const sweep = await this.extractCredentials();
+        for (const [k, v] of Object.entries(sweep)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
+      } catch {
+        // page mid-render — the early-exit below just won't fire this round
+      }
+      try {
+        const sweepLabeled = await this.extractFromDomProximity();
+        for (const [k, v] of Object.entries(sweepLabeled)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
+      } catch {
+        // DOM-proximity miss is non-fatal
+      }
       const currentCredentialKeyCount = Object.keys(credentials).filter(
         (k) => !NON_CREDENTIAL_KEYS.has(k),
       ).length;
