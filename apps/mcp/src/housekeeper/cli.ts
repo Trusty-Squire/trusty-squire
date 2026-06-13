@@ -259,6 +259,38 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
 
   const args = parseArgs(argv);
 
+  // Reap stale sibling housekeeper runs before we touch the shared Chrome
+  // profile / proxy. The signup-lock watchdog is in-process + self-policing, so
+  // it can't kill a zombie on an older dist or one hung in teardown (outside the
+  // lock window) — MEASURED 2026-06-12: 6h+ --service= discover zombies on the CF
+  // cluster pinned Chrome+Xvfb+proxy and skewed every concurrent verify replay.
+  // A fresh run on the current dist is the only actor that can reliably clean
+  // them up. Best-effort, never throws.
+  try {
+    const { reapStaleHousekeepers } = await import("./reaper.js");
+    reapStaleHousekeepers();
+  } catch {
+    // reaper unavailable / non-linux — proceed
+  }
+
+  // Process-level self-deadline (defense-in-depth above the in-run signup-lock
+  // watchdog). The watchdog only covers the lock window; a hang in browser
+  // teardown / auto-promote / telemetry — AFTER the lock released — has no
+  // guard, and bin.ts only process.exit()s once the run RETURNS. This absolute
+  // wall guarantees the process dies even if it wedges outside the lock. unref()
+  // so it never itself keeps the loop alive. Single-service/discover runs get a
+  // tight ceiling; a full heal pass gets a loose backstop.
+  const selfDeadlineS = args.mode === "heal" ? 4 * 60 * 60 : 25 * 60;
+  const selfDeadline = setTimeout(() => {
+    console.error(
+      `[housekeeper] SELF-DEADLINE: process exceeded ${Math.round(
+        selfDeadlineS / 60,
+      )}min — hard-exiting to avoid a lock-starving zombie (mode=${args.mode ?? "?"})`,
+    );
+    process.exit(2);
+  }, selfDeadlineS * 1000);
+  selfDeadline.unref();
+
   // Backfill the operator credentials from the session file when they
   // aren't already in the env. The machine token + account id live in
   // session.json (the same file the MCP server + install flow read), NOT
