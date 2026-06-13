@@ -1,5 +1,22 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.15 (2026-06-13)
+
+**HOTFIX: 0.9.14 could not start the MCP server.** 0.9.14 pinned
+`@trusty-squire/skill-schema@0.1.2-rc.2`, but that published version predates the
+`replay-graph` module — so the `validateReplayGraph` import on the server's eager
+boot path (`server.js → tools/index.js → provision-any.js → promote-to-skill.js`)
+threw a missing-export error and the server died on launch. CI missed it because the
+monorepo resolves skill-schema via `workspace:*` (source has the module); only the
+npm-published pin was stale. Fix: republish `@trusty-squire/skill-schema@0.1.2`
+(stable, with `replay-graph`) and pin it here. Also folds in the staging work since
+0.9.14:
+
+- fix(skill-schema): publish 0.1.2 with the replay-graph module (validateReplayGraph) — unbreaks server boot
+- fix(oauth): generalize skills across account count — replay walks the Google account-chooser as a dynamic interstitial; bot picks the card matching the intended account
+- fix(fresh-verify): fail fast on oauth_onboarding_failed (deterministic post-OAuth wizard wall)
+- chore(egress): direct-first — datacenter IP clears 23/24 anti-bot doors; residential proxy retired as the default
+
 ## 0.9.14-rc.2 (2026-06-13)
 
 **Headline: fresh-verify no longer loses skills to per-run variance.** A sweep held
