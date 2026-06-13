@@ -140,6 +140,29 @@ describe("Egress Grants — /v1/egress", () => {
     expect((await call()).statusCode).toBe(429);
   });
 
+  it("limits are OPT-IN: no rate_limit → unlimited (never 429), response shows null", async () => {
+    const account = await h.deps.accountStore.createAccount("ul@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const res = await h.server.inject({
+      method: "POST", url: "/v1/egress/grants",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: { service: "OpenAI" }, // no rate_limit_per_hour, no spend_cap_usd
+    });
+    const j = res.json() as { grant_id: string; token: string; rate_limit_per_hour: number | null; spend_cap_usd: number | null };
+    // Unlimited surfaces as null, not a default cap.
+    expect(j.rate_limit_per_hour).toBeNull();
+    expect(j.spend_cap_usd).toBeNull();
+
+    const call = () => h.server.inject({
+      method: "POST", url: `/v1/egress/${j.grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${j.token}`, "content-type": "application/json" }, payload: {},
+    });
+    // Many calls, never rate-limited.
+    for (let i = 0; i < 5; i++) expect((await call()).statusCode).toBe(200);
+  });
+
   it("injects the secret per the credential's stored auth_shape (header, not bearer)", async () => {
     const account = await h.deps.accountStore.createAccount("hdr@example.test", "H");
     const cookie = await webCookie(h.deps, account.id);

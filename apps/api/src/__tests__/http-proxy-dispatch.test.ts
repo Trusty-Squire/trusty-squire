@@ -11,6 +11,7 @@
 
 import { describe, it, expect } from "vitest";
 import { createServer, type IncomingMessage } from "node:http";
+import { gzipSync, brotliCompressSync } from "node:zlib";
 import { HttpProxyExecutor, substituteSecret } from "../services/http-proxy.js";
 
 interface Captured {
@@ -53,6 +54,60 @@ describe("HttpProxyExecutor — real defaultDispatch", () => {
       });
       expect(res.status).toBe(200);
       expect(JSON.parse(res.body)).toEqual({ ok: true });
+    });
+  });
+
+  // Regression: a gzipped upstream JSON body was read as UTF-8 (mangling 0x8b
+  // → U+FFFD) and forwarded with a stale `content-encoding: gzip`, so the
+  // client's JSON.parse died on the leading 0x1f. The proxy must decompress and
+  // drop the encoding header, returning clean text.
+  async function withEncodedServer(
+    encoding: "gzip" | "br",
+    payload: unknown,
+    run: (port: number) => Promise<void>,
+  ): Promise<void> {
+    const json = Buffer.from(JSON.stringify(payload), "utf8");
+    const body = encoding === "gzip" ? gzipSync(json) : brotliCompressSync(json);
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json", "content-encoding": encoding });
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    try {
+      await run(port);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("decompresses a gzipped upstream body and drops content-encoding", async () => {
+    await withEncodedServer("gzip", { ok: true, msg: "héllo €" }, async (port) => {
+      const res = await realProxy().execute({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/v1/chat`, headers: {} },
+        fields: {},
+      });
+      expect(res.status).toBe(200);
+      // Body is clean JSON, not gzip bytes read as text (no leading 0x1f / U+FFFD).
+      expect(res.body.charCodeAt(0)).not.toBe(0x1f);
+      expect(res.body).not.toContain("�");
+      expect(JSON.parse(res.body)).toEqual({ ok: true, msg: "héllo €" });
+      // Stale encoding header removed (body is now plaintext).
+      expect(res.headers["content-encoding"]).toBeUndefined();
+    });
+  });
+
+  it("decompresses a brotli upstream body too", async () => {
+    await withEncodedServer("br", { ok: true, n: 42 }, async (port) => {
+      const res = await realProxy().execute({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/v1/chat`, headers: {} },
+        fields: {},
+      });
+      expect(JSON.parse(res.body)).toEqual({ ok: true, n: 42 });
+      expect(res.headers["content-encoding"]).toBeUndefined();
     });
   });
 
