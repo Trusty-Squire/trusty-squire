@@ -11008,6 +11008,26 @@ Strategy:
   ALSO shows preset choice buttons for the same step (e.g. "Optimize assets",
   "Transform images", "Next"). That input is a placeholder, not a field to
   complete — click a preset option button or "Next" instead.
+- **OPTIONAL SETUP / INTEGRATION WIZARD STEPS — SKIP them, do NOT complete.**
+  Some post-signup wizards ask you to CONFIGURE the product, not to create the
+  account: "What's your tech stack / framework / language?" (a grid of SDK or
+  language logos), "Configure your sign-in methods", "Connect a repo / data
+  source", "Invite your team", "Take a tour". None of these are required to
+  reach an API key — engaging them only burns your limited turns. SKIP: click
+  "Skip", "Skip for now", "I'll do this later", "Maybe later", "Not now", or a
+  bare "Next"/"Continue" to advance WITHOUT selecting anything; if no such
+  control exists, {"kind":"navigate"} straight to the app dashboard root or a
+  settings / API-keys URL. Do NOT pick a framework/SDK card or fill integration
+  config on these steps. (This is the OPPOSITE of a card-radio ACCOUNT-TYPE
+  choice like "personal vs business" or a REQUIRED profile form, which you DO
+  complete — the distinction is whether the step configures the PRODUCT/SDK
+  rather than your account.)
+- **BEELINE TO THE KEY — you have a limited turn budget.** Your turns are
+  finite, so do not wander the onboarding flow. The moment a "Settings",
+  "API Keys", "Tokens", or "Developer" link is in the inventory, GO THERE — do
+  not detour through optional setup first. If you reach the authenticated
+  dashboard, your very next step should head for the API-keys/settings area, not
+  re-engage any setup wizard.
 - **MULTI-FIELD PROFILE / ONBOARDING FORM ("Set up your account",
   "Tell us about yourself").** When the page is a form with SEVERAL fields
   (first/last name, country/region, company, job title, phone, use-case,
