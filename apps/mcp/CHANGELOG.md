@@ -1,5 +1,75 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.14-rc.1 (2026-06-13)
+
+**Headline: Cloudflare Turnstile is beaten.** The Turnstile wall (exa, cartesia,
+render-cron, replit, runpod, turso) was never the IP, GPU, or fingerprint — it was
+Playwright's `launchPersistentContext`. The bot now self-launches the Chrome binary
+(no `--enable-automation`) and attaches via `connectOverCDP`; Turnstile treats it as
+a real browser (proven end-to-end: exa issues a token). Gated `BOT_SELF_LAUNCH`
+(default-on). Plus a session's worth of discovery-bot hardening, a 2Captcha
+Turnstile escalation, an explicit cross-process signup queue, and replay fixes.
+
+- fix(bot): self-launch Chrome + connectOverCDP to beat Cloudflare Turnstile
+- docs(STATE): box can't reproduce exa's solvable Turnstile widget — IP reputation gates which challenge
+- docs(STATE): exa serves 3 responses by context — datacenter IUAM soft-block (IP-driven) vs residential Turnstile widget (automation-layer, 2Captcha-solvable)
+- fix(bot): more robust Turnstile sitekey extraction (widget variants)
+- feat(bot): 2Captcha Turnstile escalation on the form-submit gate too (cartesia-class)
+- feat(bot): explicit cross-process signup queue with expiry + watchdog (orphan/starvation fix)
+- feat(bot): proxy liveness probe — fall back to DIRECT when the proxy is unreachable
+- feat(bot): wire 2Captcha Turnstile escalation (TWOCAPTCHA_API_KEY already configured)
+- fix(bot): bail captcha_blocked on inert (Turnstile-gated) OAuth click instead of false 'signed in'
+- docs: add STATE.md — falsified-hypothesis ledger for discovery failures
+- fix(bot): settle-then-recheck detectAlreadySignedIn for returning-user SPA redirects
+- fix(bot): dotted-token extraction + guaranteed password class coverage (zerops, huggingface)
+- chore(discovery): queue hygiene from heal-run diagnosis (URLs + dead-service dequeues)
+- fix(bot): realistic screen geometry + availHeight (strict-Turnstile score)
+- fix(bot): normalize device tells (hardwareConcurrency/deviceMemory) for Cloudflare Turnstile
+- fix(bot): patient OAuth-scan when no provider button AND no credential form (replit)
+- chore(discovery): dequeue cyclic (dead — acquired by AWS, shut down 2024)
+- fix(bot): wait out GitHub's Authorize-button clickjacking countdown (defang)
+- fix(bot): retry net::ERR_ABORTED on goto (defang)
+- fix(bot): dead-route escape must skip OAuth-provider domains (typesense)
+- fix(bot): treat an empty inventory as an unhydrated SPA shell in the OAuth-first scan (lancedb)
+- fix(bot): reload once before declaring an OAuth session dead (galileo/turbopuffer/activeloop class)
+- fix(bot): Mantine/Radix checkbox label-click + per-service allow_extra_oauth_scopes (friendliai, defang)
+- fix(bot): profile-lock reap, hung-redirect wait cap, returning-user detect, octoai dequeue
+- chore(discovery): dequeue superlinked (no self-serve signup)
+- fix(bot): commit cmdk/Radix combobox selections via real pointer/click (meilisearch)
+- fix(bot): chrome-error nav retry + credential-domain grounding (galileo/lancedb/typesense)
+- fix(bot): captcha detection must never abort a signup (cartesia/cron-job.org/exa)
+- fix(replay): zilliz-class replay hardening — MUI selects, OTP readback, post-click settle, consent-noise guard
+- feat(replay): form-readiness parity — reach hydrating SPA forms before skipping
+- fix(replay): guard waitForAuthWidgetHydration call (optional chaining)
+- fix(replay): wait for SPA auth-widget hydration in the navigate step
+- fix(bot): stamp stable signup_url on preamble rounds + replay-one session load
+- feat(bot): capture the signup-form preamble (email-OTP skills replay end to end)
+- feat(registry): static replay-completeness gate + email/URL generalization
+- fix(synth): prefer a unique stable name/id over a duplicated placeholder
+- feat: await_email_code step — email-OTP signups become replayable skills
+- fix(bot): crack multi-wall onboarding signups (zilliz end-to-end)
+- fix(bot): clickSubmit tolerates a navigation destroying the context
+- feat(bot): capture inline validation errors + snapshot the post-verify stall
+- fix(bot): OTP extraction must not grab recipient-address digits
+- fix(bot): human-looking signup email (drop service-name leak) + snapshot failing re-submit
+- docs(CLAUDE): document patchright CDP-hardening as the fingerprinting fix
+- fix(bot): planner clicks Send-code buttons; synthesizer rejects IdP signup_url
+- feat(bot): surface transient toasts after post-verify clicks
+- fix(bot): resolve combobox options by role+accessible-name, not position
+- fix(bot): combobox-option locator-click + name the unfilled required field
+- docs(systemd): recommend UNIVERSAL_BOT_MAX_LLM_CALLS=25 for discovery
+- chore(discovery): dequeue 5 unservable services (goal: servable OF#2)
+- fix(housekeeper): cluster fixes by (stage, action-kind), not page signature
+- feat(loop): surface fix outcomes on the dashboard + flag regressions (#1 slice 2)
+- feat(housekeeper): close the output loop — fix grading (#1)
+- feat(dashboard): 4-zone restructure + OF trend chips
+- fix(dashboard): real-installs (residential) replaces inflated tokens-issued headline
+- chore(release): release:mcp helper + branch-protection SOP
+- fix(web): vault Copy works on first click (clipboard activation)
+- docs: egress-grants design doc + roadmap pointer
+- chore(skill-schema): cut 0.1.2-rc.2 — align next with main's code
+- chore(mcp): cut 0.9.13-rc.1 — revive the next channel on main's code
+
 ## 0.9.13 (2026-06-11)
 
 The autonomous self-improving loop, promoted to `latest`. Two objective
