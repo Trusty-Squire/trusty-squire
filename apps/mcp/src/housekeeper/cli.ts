@@ -66,6 +66,8 @@ interface ParsedArgs {
   mode: Mode;
   service: string | undefined;
   oauthProvider: "google" | "github" | undefined;
+  signupUrl: string | undefined; // fresh-verify: override the bot's URL guess
+  skillId: string | undefined; // fresh-verify: report the 2-of-N verdict to this skill
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
@@ -82,6 +84,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     mode: "verify",
     service: undefined,
     oauthProvider: undefined,
+    signupUrl: undefined,
+    skillId: undefined,
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
@@ -102,6 +106,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
       args.service = arg.slice("--service=".length);
+    } else if (arg.startsWith("--signup-url=")) {
+      args.signupUrl = arg.slice("--signup-url=".length);
+    } else if (arg.startsWith("--skill-id=")) {
+      args.skillId = arg.slice("--skill-id=".length);
     } else if (arg.startsWith("--oauth-provider=")) {
       const v = arg.slice("--oauth-provider=".length);
       if (v !== "google" && v !== "github") {
@@ -348,7 +356,11 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     }
     const { runFreshVerify } = await import("./modes/fresh-verify.js");
     try {
-      const res = await runFreshVerify({ service: args.service });
+      const res = await runFreshVerify({
+        service: args.service,
+        ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
+        ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
+      });
       if (res.kind === "not_configured") {
         console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
         return 1;
