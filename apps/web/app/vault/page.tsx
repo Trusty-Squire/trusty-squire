@@ -211,7 +211,7 @@ function ServiceIcon({ cred }: { cred: Cred }) {
 // One transient status chip per tile. Verify and copy share it, so their
 // labels are mutually exclusive — copying clears a prior "decrypts", and
 // verifying clears a prior "copied".
-type Status = "idle" | "checking" | "ok" | "bad" | "copied";
+type Status = "idle" | "checking" | "ok" | "bad" | "copied" | "copyfail";
 
 function VaultRow({
   cred,
@@ -258,21 +258,35 @@ function VaultRow({
   }, [shown, ensureFields]);
 
   const onCopy = useCallback(async () => {
-    const f = await ensureFields();
-    if (f === null) return;
     // A lone key copies its value; a multi-field cred copies env-style
     // `name=value` lines so nothing is silently dropped.
-    const keys = Object.keys(f);
-    const text =
-      keys.length === 1 ? f[keys[0]!]! : keys.map((k) => `${k}=${f[k]!}`).join("\n");
+    const buildText = async (): Promise<string> => {
+      const f = await ensureFields();
+      if (f === null) throw new Error("reveal failed");
+      const keys = Object.keys(f);
+      return keys.length === 1 ? f[keys[0]!]! : keys.map((k) => `${k}=${f[k]!}`).join("\n");
+    };
+    // `writeText` AFTER awaiting the reveal loses the click's transient user
+    // activation, so Safari/Firefox (and Chrome past the activation window)
+    // silently reject the write — that's why Copy did nothing on first use
+    // (revealing first cached the fields, masking it). The ClipboardItem
+    // Promise form registers the write synchronously in the gesture and fills
+    // it from the async reveal, so activation holds.
     try {
-      await navigator.clipboard.writeText(text);
+      if (typeof ClipboardItem !== "undefined") {
+        const blob = buildText().then((t) => new Blob([t], { type: "text/plain" }));
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+      } else {
+        await navigator.clipboard.writeText(await buildText());
+      }
       setStatus("copied");
       // Clear only if still "copied" — don't clobber a verify that ran
       // in the meantime.
       setTimeout(() => setStatus((s) => (s === "copied" ? "idle" : s)), 1400);
     } catch {
-      /* clipboard unavailable */
+      // Surface the failure — the old silent catch is exactly what hid this.
+      setStatus("copyfail");
+      setTimeout(() => setStatus((s) => (s === "copyfail" ? "idle" : s)), 1800);
     }
   }, [ensureFields]);
 
@@ -349,6 +363,9 @@ function VaultRow({
           )}
           {status === "checking" && <span className="health-ok">checking…</span>}
           {status === "copied" && <span className="health-ok">copied ✓</span>}
+          {status === "copyfail" && (
+            <span className="health-bad" title="Clipboard write was blocked by the browser.">copy failed</span>
+          )}
         </div>
       </div>
 

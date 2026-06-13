@@ -45,6 +45,11 @@ import { PrismaAgentSessionStore } from "../auth/prisma-agent-session-store.js";
 import { PrismaAccountStore } from "./prisma-account-store.js";
 import { PrismaCredentialStore } from "./prisma-credential-store.js";
 import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
+import { PrismaEgressGrantStore } from "./prisma-egress-grant-store.js";
+import {
+  InMemoryEgressGrantStore,
+  type EgressGrantStore,
+} from "./egress-grant.js";
 import {
   InMemoryOAuthIdentityStore,
   PrismaOAuthIdentityStore,
@@ -95,6 +100,7 @@ export interface ApiDeps {
   // Credentials + inbound mail
   credentialStore: CredentialStore;
   vault: CredentialVault;
+  egressGrantStore: EgressGrantStore;
   inbox: InboxService;
   mailgunHandler: MailgunHandler;
   resendHandler: ResendHandler;
@@ -168,6 +174,14 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaFunnelStatsStore(authPrisma)
       : new ZeroFunnelStatsStore();
+
+  // Egress grants: Prisma-backed when the auth DB is wired, else in-memory.
+  // Grants are re-mintable, so in-memory loss on restart is tolerable in dev;
+  // production persists so a deployed workload's grant survives an API redeploy.
+  const egressGrantStore: EgressGrantStore =
+    authPrisma !== null
+      ? new PrismaEgressGrantStore(authPrisma)
+      : new InMemoryEgressGrantStore();
 
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
   const vault = new CredentialVault({
@@ -248,6 +262,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     oauthIdentityStore,
     credentialStore,
     vault,
+    egressGrantStore,
     inbox,
     mailgunHandler,
     resendHandler,

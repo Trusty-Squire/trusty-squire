@@ -70,6 +70,15 @@ const storeBody = z
     // service-name table so a new credential never lands with an empty
     // allowlist. Bare hosts or URLs; normalised server-side. Max 10.
     observed_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
+    // How the provider expects the secret — drives the egress-grant proxy's
+    // auto-injection. "bearer" (default) | "header:<name>" | "query:<param>".
+    // Lets a non-bearer provider (ElevenLabs xi-api-key, query-param keys) work
+    // with no per-service code — parseAuthShape reads it off metadata.
+    auth_shape: z
+      .string()
+      .max(120)
+      .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+      .optional(),
   })
   .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {
     message: "one of value or fields is required",
@@ -586,7 +595,7 @@ async function storeUpsert(
     ...(data.type !== undefined ? { type: data.type } : {}),
     ...(data.env_var_suggestion !== undefined ? { env_var_suggestion: data.env_var_suggestion } : {}),
     ...(data.observed_hosts !== undefined ? { observed_hosts: data.observed_hosts } : {}),
-    metadata: { source },
+    metadata: { source, ...(data.auth_shape !== undefined ? { auth_shape: data.auth_shape } : {}) },
   });
   // Notify the user that a key landed in their vault unattended. Only on
   // a fresh create (not a rotation), and never fatal to the store —

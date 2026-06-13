@@ -107,6 +107,17 @@ describe("SkillStepSchema — discriminated union", () => {
         provenance: provenance(),
       }),
     ).toBeTruthy();
+    // await_email_code — label_hint optional (OTP boxes are often unlabeled).
+    expect(
+      SkillStepSchema.parse({ kind: "await_email_code", provenance: provenance() }),
+    ).toBeTruthy();
+    expect(
+      SkillStepSchema.parse({
+        kind: "await_email_code",
+        label_hint: "Verification code",
+        provenance: provenance(),
+      }),
+    ).toBeTruthy();
   });
 
   it("rejects an unknown kind", () => {

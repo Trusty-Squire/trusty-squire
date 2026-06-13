@@ -106,6 +106,33 @@ export class TwoCaptchaSolver {
     });
   }
 
+  /**
+   * Submit a Cloudflare Turnstile sitekey + page URL to 2Captcha
+   * (method=turnstile) and poll for the token. The returned token goes into
+   * the page's `cf-turnstile-response` input + the widget's success callback.
+   *
+   * Historically NOT wired, on the belief that "Cloudflare IP-scores Turnstile
+   * so a solver token is rejected." That belief was FALSIFIED 2026-06-12 (exa
+   * fails on a fresh direct residential IP + real GPU — it is NOT IP-bound; see
+   * STATE.md), so a 2Captcha token may actually be accepted. Optional
+   * `action`/`data` fields carry through for the managed-challenge variants
+   * that bind a cData/chlPageData blob.
+   */
+  async solveTurnstile(input: {
+    sitekey: string;
+    pageUrl: string;
+    action?: string;
+    data?: string;
+  }): Promise<TwoCaptchaResult> {
+    return this.submitAndPoll({
+      method: "turnstile",
+      sitekey: input.sitekey,
+      pageurl: input.pageUrl,
+      ...(input.action !== undefined ? { action: input.action } : {}),
+      ...(input.data !== undefined ? { data: input.data } : {}),
+    });
+  }
+
   // Shared in.php submit + res.php poll. `params` carries the
   // provider-specific fields (method + sitekey param name); everything
   // else (auth, json, the polling loop, timeouts) is identical across

@@ -131,6 +131,18 @@ describe("extractCodeFromEmailBody", () => {
     expect(extractCodeFromEmailBody(mk({ subject: "Welcome to Acme", body_text: "Thanks for signing up in 2026!" }))).toBeNull();
     expect(extractCodeFromEmailBody(mk({}))).toBeNull();
   });
+  it("ignores digits in the recipient address, not the real code", () => {
+    // The deepseek-run-3 bug: a `…13526@` alias made the scanner return
+    // 13526 (the address suffix) instead of the emailed code.
+    const email = mk({
+      subject: "Your verification code for DeepSeek",
+      body_text: "Hi sandra.young13526@trustysquire.ai,\n\nYour verification code is 638817.",
+    });
+    expect(extractCodeFromEmailBody(email, "sandra.young13526@trustysquire.ai")).toBe("638817");
+    // Without the recipient hint the address digits win (the actual bug) —
+    // documents WHY passing the recipient matters.
+    expect(extractCodeFromEmailBody(email)).toBe("13526");
+  });
 });
 
 describe("isVerificationCodeGate", () => {

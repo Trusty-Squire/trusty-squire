@@ -26,6 +26,7 @@ import {
   replaySkill,
   type LLMPair,
 } from "../bot/index.js";
+import { makeEmailCodeFetcher } from "../bot/email-code-fetcher.js";
 import { emitProvisionEvent, postCaptchaEvent } from "./signup-telemetry.js";
 import { openSessionStorage } from "../session.js";
 import type { ApiClient } from "../api-client.js";
@@ -589,22 +590,35 @@ async function tryReplayLearnedSkill(
     return null;
   }
 
+  // await_email_code skills (email-OTP signups) are ONE-SHOT: a dry walk
+  // would consume the verification code and create the account, leaving the
+  // full pass nothing to replay. Skip the dry pre-flight for them.
+  const hasEmailCode = skill.steps.some((s) => s.kind === "await_email_code");
+  const emailCodeFetcher = makeEmailCodeFetcher(ctx.inboxClient);
+
   const browser = new BrowserController({ humanize: true });
   let dryOutcome: Awaited<ReturnType<typeof replaySkill>>;
   try {
     await browser.start();
-    // Dry first — D3 default. Walks every step except the
-    // credential-creating click, so if the page diverged we abort
-    // cheaply before touching the user's account.
-    dryOutcome = await replaySkill({
-      skill,
-      browser,
-      mode: "dry",
-      templateValues: {
-        EMAIL_ALIAS: ctx.alias,
-        TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
-      },
-    });
+    if (hasEmailCode) {
+      ctx.stepsSink.push(
+        `[skill-promoter] await_email_code skill — skipping dry pre-flight (signup is one-shot)`,
+      );
+      dryOutcome = { kind: "dry_pass", stepsWalked: 0 };
+    } else {
+      // Dry first — D3 default. Walks every step except the
+      // credential-creating click, so if the page diverged we abort
+      // cheaply before touching the user's account.
+      dryOutcome = await replaySkill({
+        skill,
+        browser,
+        mode: "dry",
+        templateValues: {
+          EMAIL_ALIAS: ctx.alias,
+          TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
+        },
+      });
+    }
   } catch (err) {
     ctx.stepsSink.push(`[skill-promoter] replay crashed: ${err instanceof Error ? err.message : String(err)}`);
     void client.postReplayOutcome({
@@ -651,6 +665,7 @@ async function tryReplayLearnedSkill(
         EMAIL_ALIAS: ctx.alias,
         TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
       },
+      fetchEmailCode: emailCodeFetcher,
     });
   } catch (err) {
     ctx.stepsSink.push(`[skill-promoter] full replay crashed: ${err instanceof Error ? err.message : String(err)}`);

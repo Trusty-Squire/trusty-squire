@@ -157,7 +157,17 @@ export interface FixAgentResult {
 export function clusterFailures(batch: FixBatch): FixCluster[] {
   const byKey = new Map<string, FixCluster>();
   for (const f of batch.failures) {
-    const key = `${f.failure_stage}:${f.signature}`;
+    // Cluster by SEMANTIC failure shape: failure_stage + the planner's terminal
+    // action kind. This groups "the planner kept clicking and looped" or "the
+    // planner gave up (done) too early" across services — the shared-root-cause
+    // case the holistic pass exists for. The page signature is deliberately NOT
+    // in the key: even a structural (role-only) signature is per-page, so it
+    // shatters same-root-cause failures back into per-service singletons
+    // (measured 2026-06-11: stage+kind → 11 clusters, +signature → 22). The
+    // eval gate + per-cluster replay are the safety net against an over-merge —
+    // a fix that can't satisfy the whole cluster fails the gate and walls.
+    const observedKind = f.terminal_page?.observed.kind ?? "none";
+    const key = `${f.failure_stage}:${observedKind}`;
     const page =
       f.terminal_capture_ref !== undefined && f.terminal_page !== undefined
         ? { service: f.service, captureRef: f.terminal_capture_ref, observed: f.terminal_page.observed }

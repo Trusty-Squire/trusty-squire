@@ -56,7 +56,7 @@ const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 // 'fix' (C2) is the output-side step: read the failure batch from the capture
 // dir, drive the holistic fix-agent against the eval gate, commit RCs to the
 // `next` channel. See docs/DESIGN-autonomous-output-loop.md.
-type Mode = "verify" | "discover" | "heal" | "fix";
+type Mode = "verify" | "discover" | "heal" | "fix" | "fresh-verify";
 
 interface ParsedArgs {
   once: boolean;
@@ -66,6 +66,9 @@ interface ParsedArgs {
   mode: Mode;
   service: string | undefined;
   oauthProvider: "google" | "github" | undefined;
+  signupUrl: string | undefined; // fresh-verify: override the bot's URL guess
+  skillId: string | undefined; // fresh-verify: report the 2-of-N verdict to this skill
+  retryBudget: number | undefined; // fresh-verify: extra identities to retry transient flakes
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
@@ -82,6 +85,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     mode: "verify",
     service: undefined,
     oauthProvider: undefined,
+    signupUrl: undefined,
+    skillId: undefined,
+    retryBudget: undefined,
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
@@ -97,10 +103,18 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--mode=discover") args.mode = "discover";
     else if (arg === "--mode=heal") args.mode = "heal";
     else if (arg === "--mode=fix") args.mode = "fix";
+    else if (arg === "--mode=fresh-verify") args.mode = "fresh-verify";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
       args.service = arg.slice("--service=".length);
+    } else if (arg.startsWith("--signup-url=")) {
+      args.signupUrl = arg.slice("--signup-url=".length);
+    } else if (arg.startsWith("--skill-id=")) {
+      args.skillId = arg.slice("--skill-id=".length);
+    } else if (arg.startsWith("--retry-budget=")) {
+      const n = Number(arg.slice("--retry-budget=".length));
+      if (Number.isFinite(n) && n >= 0) args.retryBudget = Math.floor(n);
     } else if (arg.startsWith("--oauth-provider=")) {
       const v = arg.slice("--oauth-provider=".length);
       if (v !== "google" && v !== "github") {
@@ -259,6 +273,38 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
 
   const args = parseArgs(argv);
 
+  // Reap stale sibling housekeeper runs before we touch the shared Chrome
+  // profile / proxy. The signup-lock watchdog is in-process + self-policing, so
+  // it can't kill a zombie on an older dist or one hung in teardown (outside the
+  // lock window) — MEASURED 2026-06-12: 6h+ --service= discover zombies on the CF
+  // cluster pinned Chrome+Xvfb+proxy and skewed every concurrent verify replay.
+  // A fresh run on the current dist is the only actor that can reliably clean
+  // them up. Best-effort, never throws.
+  try {
+    const { reapStaleHousekeepers } = await import("./reaper.js");
+    reapStaleHousekeepers();
+  } catch {
+    // reaper unavailable / non-linux — proceed
+  }
+
+  // Process-level self-deadline (defense-in-depth above the in-run signup-lock
+  // watchdog). The watchdog only covers the lock window; a hang in browser
+  // teardown / auto-promote / telemetry — AFTER the lock released — has no
+  // guard, and bin.ts only process.exit()s once the run RETURNS. This absolute
+  // wall guarantees the process dies even if it wedges outside the lock. unref()
+  // so it never itself keeps the loop alive. Single-service/discover runs get a
+  // tight ceiling; a full heal pass gets a loose backstop.
+  const selfDeadlineS = args.mode === "heal" ? 4 * 60 * 60 : 25 * 60;
+  const selfDeadline = setTimeout(() => {
+    console.error(
+      `[housekeeper] SELF-DEADLINE: process exceeded ${Math.round(
+        selfDeadlineS / 60,
+      )}min — hard-exiting to avoid a lock-starving zombie (mode=${args.mode ?? "?"})`,
+    );
+    process.exit(2);
+  }, selfDeadlineS * 1000);
+  selfDeadline.unref();
+
   // Backfill the operator credentials from the session file when they
   // aren't already in the env. The machine token + account id live in
   // session.json (the same file the MCP server + install flow read), NOT
@@ -305,6 +351,38 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     }
   }
 
+  // fresh-verify mode: verify a service by fresh-signing-up as N robot
+  // identities (2-of-N agreement) instead of replaying as a returning user.
+  // Needs a configured identity pool + operator machine token + account id.
+  if (args.mode === "fresh-verify") {
+    if (args.service === undefined) {
+      console.error("housekeeper --mode=fresh-verify needs --service=<slug>");
+      return 2;
+    }
+    const { runFreshVerify } = await import("./modes/fresh-verify.js");
+    try {
+      const res = await runFreshVerify({
+        service: args.service,
+        ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
+        ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
+        ...(args.retryBudget !== undefined ? { retryBudget: args.retryBudget } : {}),
+      });
+      if (res.kind === "not_configured") {
+        console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
+        return 1;
+      }
+      if (res.kind === "insufficient_identities") {
+        console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available}/${res.agreement} unspent) — mint more robots`);
+        return 1;
+      }
+      console.log(`[fresh-verify] ${args.service}: ${res.promoted ? "PROMOTE" : "hold"} (${res.outcomes.filter((o) => o.success).length}/${res.agreement} agreed)`);
+      return res.promoted ? 0 : 1;
+    } catch (err) {
+      console.error(`housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+
   // Registry client always constructed; queues that don't need it
   // (YAML seed, ad-hoc) just don't call it. Verifier replay POST
   // does require it — fail fast if missing for verify mode and for
@@ -337,6 +415,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       service: string;
       oauthProvider?: "google" | "github";
       signupUrl?: string;
+      allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
     const base = {
       client,
@@ -393,6 +472,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     // slug-only if the YAML doesn't have the slug or can't be parsed.
     let signupUrl: string | undefined;
     let oauthProvider = args.oauthProvider;
+    let allowExtraOAuthScopes: readonly string[] | undefined;
     if (args.seedPath !== undefined && args.seedPath.length > 0) {
       const yamlEntry = await lookupServiceInYaml(args.seedPath, args.service);
       if (yamlEntry !== null) {
@@ -409,9 +489,15 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         ) {
           oauthProvider = yamlEntry.oauth_provider;
         }
+        if (
+          Array.isArray(yamlEntry.allow_extra_oauth_scopes) &&
+          yamlEntry.allow_extra_oauth_scopes.length > 0
+        ) {
+          allowExtraOAuthScopes = yamlEntry.allow_extra_oauth_scopes;
+        }
       }
     }
-    queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl);
+    queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl, allowExtraOAuthScopes);
   } else if (args.mode === "verify") {
     queue = new RegistryVerifierQueue(client);
   } else if (args.seedPath === undefined || args.seedPath.length === 0) {
@@ -441,6 +527,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       service: string;
       oauthProvider?: "google" | "github";
       signupUrl?: string;
+      allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
   }
 

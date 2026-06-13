@@ -58,13 +58,15 @@ describe("list_credentials", () => {
 describe("TOOLS registry", () => {
   it("exposes the post-0.8 public surface incl. the credential lifecycle tools", () => {
     // 5 surviving post-0.8 tools + 2 credential write tools (store/use —
-    // write-only sink; rotation = re-store, delete is web-only). The
-    // read-back get_credential tool was removed: in the sink model an
+    // write-only sink; rotation = re-store, delete is web-only) + grant_app_access
+    // (egress grants: a deployed app uses a vaulted credential via the proxy).
+    // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    expect(TOOLS).toHaveLength(7);
+    expect(TOOLS).toHaveLength(8);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "check_provision_status",
       "get_extract_failure",
+      "grant_app_access",
       "list_credentials",
       "list_extract_failures",
       "provision",

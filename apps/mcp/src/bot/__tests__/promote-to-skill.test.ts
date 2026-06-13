@@ -24,6 +24,7 @@ import {
   pickHrefHint,
   hasEphemeralPathSegment,
   generalizeCapturedUrl,
+  isIdentityProviderUrl,
 } from "../promote-to-skill.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -63,6 +64,34 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     expect(generalizeCapturedUrl(clean)).toBe(clean);
     const cleanWithParam = "https://x.co/signup?plan=free";
     expect(generalizeCapturedUrl(cleanWithParam)).toBe(cleanWithParam);
+  });
+
+  it("generalizeCapturedUrl strips a per-run email param (zilliz verify URL)", () => {
+    expect(
+      generalizeCapturedUrl(
+        "https://cloud.zilliz.com/signup/verify?&email=ghall284%40trustysquire.ai",
+      ),
+    ).toBe("https://cloud.zilliz.com/signup/verify");
+    expect(generalizeCapturedUrl("https://x.co/signup?email=a@b.co&plan=pro")).toBe(
+      "https://x.co/signup?plan=pro",
+    );
+  });
+
+  it("isIdentityProviderUrl flags IdP domains, not service domains", () => {
+    // The deepseek-N26 bug: round 0 landed on a Google domain mid-OAuth,
+    // and the synthesizer adopted it as signup_url.
+    expect(isIdentityProviderUrl("https://myaccount.google.com/")).toBe(true);
+    expect(isIdentityProviderUrl("https://accounts.google.com/o/oauth2/v2/auth")).toBe(true);
+    expect(isIdentityProviderUrl("https://github.com/login/oauth/authorize")).toBe(true);
+    expect(isIdentityProviderUrl("https://login.microsoftonline.com/common")).toBe(true);
+    // Service domains must NOT be flagged.
+    expect(isIdentityProviderUrl("https://platform.deepseek.com/sign_up")).toBe(false);
+    expect(isIdentityProviderUrl("https://platform.deepseek.com/api_keys")).toBe(false);
+    expect(isIdentityProviderUrl("https://ipinfo.io/signup")).toBe(false);
+    // Don't false-positive on a service whose name merely contains an IdP token.
+    expect(isIdentityProviderUrl("https://mygoogle.com.evil.io/x")).toBe(false);
+    // Malformed / relative → not an IdP entry.
+    expect(isIdentityProviderUrl("/signup")).toBe(false);
   });
 });
 
@@ -2626,5 +2655,253 @@ describe("collapseConsecutiveDuplicateSteps (porter ×N noise)", () => {
     ];
     const out = collapseConsecutiveDuplicateSteps(steps);
     expect(out.length).toBe(2);
+  });
+});
+
+// ── Email-OTP signups → await_email_code step ───────────────────────
+
+describe("promoteToSkill — email verification (await_email_code)", () => {
+  function otpRounds(service: string): OnboardingRoundCapture[] {
+    const signupForm = [
+      inventoryElement({
+        index: 0,
+        tag: "input",
+        type: "email",
+        name: "email",
+        placeholder: "Email",
+        selector: "input[name='email']",
+      }),
+      inventoryElement({
+        index: 1,
+        tag: "button",
+        visibleText: "Send code",
+        selector: "button.send-code",
+        role: "button",
+      }),
+    ];
+    return [
+      // The signup-form preamble — captured so the replay graph is
+      // self-sufficient (email entered + code dispatched before the wait).
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/signup",
+          title: "Sign up",
+          html: "<html><body>Sign up</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: signupForm,
+        observed: {
+          kind: "fill",
+          selector: "input[name='email']",
+          value: "jane.doe482@trustysquire.ai",
+          reason: "Fill the signup email",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/signup",
+          title: "Sign up",
+          html: "<html><body>Sign up</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: signupForm,
+        observed: {
+          kind: "click",
+          selector: "button.send-code",
+          reason: "Click Send code to dispatch the verification email",
+        },
+      },
+      {
+        service,
+        round: 2,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/signup/verify",
+          title: "Verify Your Email",
+          html: "<html><body>Enter the verification code we emailed you</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "input",
+            type: "tel",
+            // Deliberately attribute-less — the zilliz OTP box. A `fill`
+            // step would hard-reject missing_text_hint here.
+            selector: "div > div > div > input",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "div > div > div > input",
+          value: "482913",
+          reason: "Fill the verification code into the first OTP input box",
+        },
+      },
+      {
+        service,
+        round: 3,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/dashboard/keys",
+          title: "API Keys",
+          html:
+            "<html><body>Your API key db3a32ea-dd1b-4e28-9680-db2991c81e3e " +
+            "<button>Copy</button></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+            ariaLabel: "Copy API key",
+          }),
+        ],
+        observed: {
+          kind: "extract",
+          reason:
+            "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible on the page.",
+        },
+      },
+    ];
+  }
+
+  it("synthesizes an OTP-code fill as await_email_code + an ${EMAIL_ALIAS} preamble", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(otpRounds(service));
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const kinds = result.skill.steps.map((s) => s.kind);
+    expect(kinds).toContain("await_email_code");
+    // The signup email is templatized so replay fills a fresh alias.
+    const emailFill = result.skill.steps.find(
+      (s) => s.kind === "fill" && s.value_template === "${EMAIL_ALIAS}",
+    );
+    expect(emailFill).toBeDefined();
+    // The stale code must NOT be baked into a fill step.
+    const baked = result.skill.steps.some(
+      (s) => s.kind === "fill" && s.value_template.includes("482913"),
+    );
+    expect(baked).toBe(false);
+  });
+
+  it("REJECTS an OTP skill whose capture lacks the signup-form preamble", () => {
+    // The original zilliz bug: capture began on the verify page, so there's
+    // no ${EMAIL_ALIAS} fill before await_email_code → nothing dispatches a
+    // code. The replay-graph gate must catch it at synthesis.
+    const service = uniqueService();
+    const rounds = otpRounds(service).slice(2).map((r, i) => ({ ...r, round: i }));
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") return;
+    expect(result.error_kind).toBe("incomplete_replay_graph");
+  });
+});
+
+// ── Duplicate generic placeholder → unique stable name/id ───────────
+
+describe("promoteToSkill — duplicate placeholder disambiguated by name", () => {
+  function dupPlaceholderRounds(service: string): OnboardingRoundCapture[] {
+    // MUI/antd form: two visible inputs share the generic placeholder
+    // "Please input"; each has a distinct `name`. The synthesizer must
+    // resolve the fill target by its unique name, not reject ambiguous.
+    const formInventory = [
+      inventoryElement({
+        index: 0,
+        tag: "input",
+        type: "text",
+        name: "firstName",
+        placeholder: "Please input",
+        selector: "input[name='firstName']",
+      }),
+      inventoryElement({
+        index: 1,
+        tag: "input",
+        type: "text",
+        name: "company",
+        placeholder: "Please input",
+        selector: "input[name='company']",
+      }),
+      inventoryElement({
+        index: 2,
+        tag: "button",
+        visibleText: "Copy",
+        selector: "button.copy",
+        role: "button",
+        ariaLabel: "Copy API key",
+      }),
+    ];
+    return [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/information",
+          title: "Set up your account",
+          html: "<html><body>Set up your account</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: formInventory,
+        observed: {
+          kind: "fill",
+          selector: "input[name='company']",
+          value: "Acme Inc",
+          reason: "Fill the required Company field",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://cloud.example.com/keys",
+          title: "API Keys",
+          html:
+            "<html><body>Key db3a32ea-dd1b-4e28-9680-db2991c81e3e " +
+            "<button>Copy</button></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+            ariaLabel: "Copy API key",
+          }),
+        ],
+        observed: {
+          kind: "extract",
+          reason:
+            "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible.",
+        },
+      },
+    ];
+  }
+
+  it("resolves the fill to the unique name instead of rejecting ambiguous", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(dupPlaceholderRounds(service));
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const fill = result.skill.steps.find((s) => s.kind === "fill");
+    expect(fill).toBeDefined();
+    if (fill?.kind !== "fill") return;
+    // Hint is the unique name "company", NOT the duplicated placeholder.
+    expect(fill.label_hint).toBe("company");
   });
 });

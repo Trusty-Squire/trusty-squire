@@ -136,6 +136,7 @@ export class ApiClient {
     fields?: Record<string, string>;
     env_var_suggestion?: string;
     type?: string;
+    auth_shape?: string;
   }): Promise<{
     reference: string;
     service: string;
@@ -156,6 +157,48 @@ export class ApiClient {
     http: { method: string; url: string; headers?: Record<string, string>; body?: string; query?: Record<string, string> };
   }): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
     return this.post("/v1/vault/use", input);
+  }
+
+  // ── Egress grants: a deployed app uses a vaulted credential via the proxy ──
+
+  async grantAppAccess(input: {
+    reference?: string;
+    service?: string;
+    rate_limit_per_hour?: number;
+    spend_cap_usd?: number;
+  }): Promise<{
+    grant_id: string;
+    base_url: string;
+    token: string;
+    rate_limit_per_hour: number;
+    spend_cap_usd: number | null;
+    hint: string;
+  }> {
+    return this.post("/v1/egress/grants", input);
+  }
+
+  async listEgressGrants(): Promise<{
+    grants: Array<{
+      grant_id: string;
+      credential_ref: string;
+      rate_limit_per_hour: number;
+      spend_cap_usd: number | null;
+      created_at: string;
+      revoked_at: string | null;
+    }>;
+  }> {
+    return this.get("/v1/egress/grants");
+  }
+
+  async revokeEgressGrant(grantId: string): Promise<{ revoked: boolean; grant_id: string }> {
+    const res = await this.fetchImpl(
+      `${this.config.apiBaseUrl}/v1/egress/grants/${encodeURIComponent(grantId)}`,
+      { method: "DELETE", headers: this.headers() },
+    );
+    return this.handleResponse(res, "DELETE", `/v1/egress/grants/${grantId}`) as Promise<{
+      revoked: boolean;
+      grant_id: string;
+    }>;
   }
 
   // ── Subscriptions ─────────────────────────────────────────

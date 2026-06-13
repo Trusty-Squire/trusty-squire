@@ -86,7 +86,17 @@ can dip even while OF#1 rises. Read them together, not in isolation.
   → delete at 30d. Structured JSON log per run.
 - **Universal signup bot** (`apps/mcp/src/bot/` — bundled into the mcp
   package, no longer a separate npm package):
-  - Stealth (`playwright-extra` + stealth plugin)
+  - Stealth (`playwright-extra` + stealth plugin) patches ~17
+    client-side tells (navigator.webdriver, etc.).
+  - **Browser-automation fingerprinting is mitigated by `patchright`**
+    (a maintained Playwright fork that closes the CDP-level tells the
+    stealth plugin can't — `Runtime.enable`/mainWorld/webdriver/viewport).
+    **Default-ON since 2026-06-08** (`BOT_CDP_HARDENED`, opt out with
+    `=0`); `getChromium()` in `browser.ts` loads it and falls back to the
+    baseline only if patchright isn't installed. `stealthProfile` reports
+    `cdp_hardened` vs `baseline`. So **do NOT re-diagnose a block as
+    "automation fingerprinting" without first confirming patchright did
+    NOT load** — that class of tell is already addressed.
   - **Tier 1 captcha bypass: behavior simulation** (bezier mouse,
     variable typing with thinking pauses, post-load dwell, hover
     hesitation). No model, no per-solve cost. Handles invisible-mode
@@ -235,6 +245,21 @@ can be tuned against real data.
    PostHog SPA wait, billing surface, per-account quota
    aggregation — all still queued but not blocking the
    closed-loop work.
+8. **Egress Grants (roadmap, `docs/DESIGN-egress-grants.md`).**
+   `use_credential` generalized to a standing workload identity: the agent
+   mints a scoped, revocable token so a *deployed app* can call providers
+   through the injecting proxy — raw key still never leaves Squire. Reuses
+   `HttpProxyExecutor` (`/v1/vault/use`) + the `/v1/llm/chat` token+rate-limit
+   pattern; turns the vault into a revoke/rotate/spend-cap control plane.
+   Not started; v1 scope cut + milestones in the doc.
+   - **v0.3 candidate — `squire proxy` local front-door (Castellan/`ser`).** A
+     loopback-only shim (`OPENROUTER_BASE_URL=http://127.0.0.1:PORT/v1`) that lets a
+     CLI loop runtime on the same box make LLM calls holding NO credential — the key
+     is injected server-side (the `/v1/llm/chat` path), metered per-loop. Answers the
+     "vending is brittle" objection (nothing to vend). Decision: server-side
+     injection over a local sidecar (key stays in Squire; accepts a Squire-API
+     hot-path dependency). Section + milestones in the doc. After closed-loop
+     stabilization; not now.
 
 ## Environment Details
 
@@ -306,14 +331,17 @@ and cuts a GitHub release `v<version>`. It is idempotent: if tag `v<version>`
 already exists it's a no-op, so re-pushing `main` without a version bump does
 NOT republish.
 
-The release SOP (this is exactly what `/ship` automates — bump + CHANGELOG +
-PR; the merge does the rest):
+The release SOP — `pnpm release:mcp <version>` automates steps 1-2 (bump +
+CHANGELOG seed + branch + PR to the right channel):
 1. Bump `apps/mcp/package.json` `version` (the **source of truth**).
    - `main`  → a **stable** semver (e.g. `0.8.17`) → publishes the `latest` tag.
    - `staging` → a **prerelease** (e.g. `0.8.18-rc.1`) → publishes the `next` tag.
    (A branch↔shape mismatch fails the workflow loudly.)
-2. Open a `release-<version>` PR → `main` (or push the bump straight to
-   `main`/`staging`).
+2. Open a `release-<version>` PR → `main` (stable) or `staging` (prerelease).
+   **`main` is branch-protected** — no direct pushes; the PR must pass CI
+   (`secret-scan` + `typecheck` + `test`) before it can merge (0 approvals
+   required, so a solo maintainer is never blocked). `staging` is unprotected,
+   so RC bumps may still be pushed straight to it.
 3. Merge it. The release workflow publishes to npm + creates the GitHub
    release automatically. Confirm with `gh run watch` / `npm view
    @trusty-squire/mcp dist-tags`.
@@ -599,6 +627,15 @@ out-of-band** — a DB restore is useless without it):
   shape.
 - **Tests live in `__tests__/` next to source.** Use `vitest`.
 - **Never assume.** If you don't know, ask or test.
+- **Read `STATE.md` (repo root) BEFORE diagnosing a discovery-service
+  failure.** It is the graveyard of FALSIFIED hypotheses (we keep
+  re-deriving "it's the IP / fingerprint" and keep getting proven wrong by
+  experiment) plus the confirmed-real fixes and the genuinely-unservable
+  dequeues. Form a hypothesis, name the experiment that would falsify it,
+  run it, record the result there. The CF-Turnstile "wall" is the standing
+  example: IP-reputation and GPU/fingerprint hypotheses are both falsified
+  (a fresh-IP, real-GPU laptop still fails) — the cause is the bot/automation
+  layer, likely post-OAuth, NOT the environment.
 
 ## Skill routing
 

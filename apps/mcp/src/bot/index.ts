@@ -3,6 +3,7 @@
 
 import { randomBytes } from "crypto";
 import { BrowserController } from "./browser.js";
+import { humanLocalPart } from "./inbox-client.js";
 import {
   SignupAgent,
   type SignupResult,
@@ -11,7 +12,7 @@ import {
   LLMCallBudgetExceeded,
 } from "./agent.js";
 import type { AgentInbox } from "./agent.js";
-import { withOAuthLock } from "./oauth-lock.js";
+import { withSignupLock } from "./signup-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
 import { capturedAnyRound, captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
@@ -24,7 +25,6 @@ export {
   type RoundUploader,
   LLMCallBudgetExceeded,
 };
-export { withOAuthLock } from "./oauth-lock.js";
 export { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 export { BrowserController } from "./browser.js";
 export type { CaptchaVariant, CaptchaKind } from "./browser.js";
@@ -108,34 +108,66 @@ export interface UniversalSignupRequest {
   // tools/provision-any.ts (rc.13).
   machineToken?: string | undefined;
   apiBase?: string | undefined;
+  // Verify-fleet identity binding. When the housekeeper runs a fresh-signup
+  // verification AS a specific robot identity, these route the run through that
+  // identity's Chrome profile (its logged-in Google session) and its egress —
+  // so the bot signs up as a genuinely fresh user instead of the shared
+  // returning-user profile. Omitted → the default shared profile + env proxy.
+  profileDir?: string | undefined;
+  proxyUrl?: string | undefined;
 }
 
 export class UniversalSignupBot {
   private generateEmail(): string {
-    const random = randomBytes(8).toString("hex");
-    return `bot-${random}@trustysquire.ai`;
+    // Human-looking personal address — never a `bot-…`/service-named local
+    // part (an obvious signup-form bot tell). Shared with the inbox-alias
+    // generator. Only a fallback: discover/CLI pass an explicit inbox alias.
+    return `${humanLocalPart()}@trustysquire.ai`;
   }
 
   private generatePassword(): string {
-    // Generate secure random password
-    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*";
-    let password = "";
-    const bytes = randomBytes(16);
-    for (const byte of bytes) {
-      password += chars[byte % chars.length];
+    // Secure random password with GUARANTEED class coverage. Sampling 16
+    // chars uniformly from one big set can (and did) emit a password missing
+    // an uppercase or digit, which complexity-gated signups reject client-side
+    // — the submit silently fails, no account is created, and the bot
+    // mis-reports verification_not_sent (MEASURED 2026-06-12: huggingface's
+    // "must contain uppercase, lowercase letters, and numbers"). Force one of
+    // each class, fill the rest randomly, then shuffle — deterministically
+    // satisfies lower+upper+digit+symbol policies.
+    const lower = "abcdefghijklmnopqrstuvwxyz";
+    const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const digit = "0123456789";
+    const symbol = "!@#$%^&*";
+    const all = lower + upper + digit + symbol;
+    const bytes = randomBytes(20);
+    const pick = (set: string, b: number): string => set[b % set.length]!;
+    const chars: string[] = [
+      pick(lower, bytes[0]!),
+      pick(upper, bytes[1]!),
+      pick(digit, bytes[2]!),
+      pick(symbol, bytes[3]!),
+    ];
+    for (let i = 4; i < bytes.length; i++) chars.push(pick(all, bytes[i]!));
+    // Fisher-Yates shuffle so the guaranteed leading classes aren't positional.
+    const shuf = randomBytes(chars.length);
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = shuf[i]! % (i + 1);
+      [chars[i], chars[j]] = [chars[j]!, chars[i]!];
     }
-    return password;
+    return chars.join("");
   }
 
   async signup(request: UniversalSignupRequest): Promise<SignupResult> {
-    // T8/D2 — OAuth runs all launch Chrome from the one shared
-    // persistent profile, which Chrome single-instances. Serialize
-    // them so a second concurrent run queues rather than corrupting
-    // the profile lock. Form-fill runs are unaffected.
-    if (request.oauthProvider !== undefined) {
-      return withOAuthLock(() => this.runSession(request));
-    }
-    return this.runSession(request);
+    // Every signup run (OAuth AND form-fill) launches Chrome from the ONE
+    // shared persistent profile, which Chrome single-instances — so they must
+    // serialize. withSignupLock is the explicit CROSS-process locked queue:
+    // it queues same-process callers, serializes across processes via a file
+    // lock that RECLAIMS a dead/hung holder, and arms a watchdog that
+    // hard-exits a run overrunning the hold cap — so a stuck run can never
+    // accumulate as a lock-starving orphan (the 2026-06-12 failure: ~26
+    // hung discover processes). Subsumes the in-process-only withOAuthLock.
+    const label = `${request.service}:${request.oauthProvider ?? "form"}`;
+    return withSignupLock(label, () => this.runSession(request));
   }
 
   private async runSession(request: UniversalSignupRequest): Promise<SignupResult> {
@@ -170,6 +202,10 @@ export class UniversalSignupBot {
     // to skip the behavior-simulation overhead.
     const browser = new BrowserController({
       humanize: request.humanize ?? true,
+      // Verify-fleet identity binding (per-identity profile + egress); omitted
+      // fields fall back to the shared profile + env proxy.
+      ...(request.profileDir !== undefined ? { profileDir: request.profileDir } : {}),
+      ...(request.proxyUrl !== undefined ? { proxyUrl: request.proxyUrl } : {}),
     });
     // request.llm is `LLMClient | LLMPair | undefined`; SignupAgent's
     // constructor handles all three shapes.

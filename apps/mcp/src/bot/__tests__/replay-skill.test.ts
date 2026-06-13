@@ -2362,3 +2362,241 @@ describe("labelMatchesHint", () => {
     expect(labelMatchesHint(null, "admin api key")).toBe(false);
   });
 });
+
+// ── await_email_code (email-OTP replay) ─────────────────────────────
+
+describe("replaySkill — await_email_code", () => {
+  it("polls fetchEmailCode and types the code into an unlabeled OTP input", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      // An attribute-less OTP box (the zilliz case) + a Copy button for
+      // the subsequent extract.
+      inv({ tag: "input", type: "tel", selector: "input.otp" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+    const fetchEmailCode = vi.fn(async () => "482913");
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "await_email_code", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "jane.doe482@trustysquire.ai" },
+      fetchEmailCode,
+    });
+
+    expect(fetchEmailCode).toHaveBeenCalledWith({ alias: "jane.doe482@trustysquire.ai" });
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.some((c) => c.args[0] === "input.otp" && c.args[1] === "482913")).toBe(true);
+    expect(result.kind).toBe("ok");
+  });
+
+  it("fails the step cleanly when no code arrives", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [inv({ tag: "input", type: "tel", selector: "input.otp" })]);
+    const result = await replaySkill({
+      skill: skillWith([{ kind: "await_email_code", provenance }]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "x@trustysquire.ai" },
+      fetchEmailCode: async () => null,
+    });
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.reason).toMatch(/no email verification code/i);
+  });
+
+  it("fails cleanly when the caller wired no fetchEmailCode callback", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [inv({ tag: "input", type: "tel", selector: "input.otp" })]);
+    const result = await replaySkill({
+      skill: skillWith([{ kind: "await_email_code", provenance }]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "x@trustysquire.ai" },
+    });
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.reason).toMatch(/fetchEmailCode/i);
+  });
+});
+
+describe("replaySkill — MUI div-combobox select (zilliz Job Title)", () => {
+  it("matches a non-native role=combobox select target by id label_hint and drives it", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      // zilliz /information: MUI renders the Job Title dropdown as a DIV,
+      // not a native <select>. The replay matcher must still see it.
+      inv({
+        tag: "div",
+        role: "combobox",
+        id: "mui-component-select-jobTitle",
+        visibleText: "Please select",
+        selector: "#mui-component-select-jobTitle",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "select",
+          label_hint: "mui-component-select-jobTitle",
+          option_text: "Software Engineer",
+          provenance,
+        },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    const selects = b.history.filter((c) => c.method === "selectOption");
+    expect(selects).toHaveLength(1);
+    expect(selects[0]?.args).toEqual(["#mui-component-select-jobTitle", "Software Engineer"]);
+  });
+});
+
+describe("replaySkill — post-click settle parity", () => {
+  it("polls re-validation when the next step's target appears only after the clicked page settles (zilliz Continue)", async () => {
+    const b = stubBrowser();
+    const oldPage = [
+      inv({ tag: "button", visibleText: "Continue", selector: "button.continue" }),
+    ];
+    const settledPage = [
+      inv({ tag: "button", visibleText: "API Keys", selector: "button.apikeys" }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ];
+    // The Continue click kicks off server-side provisioning; the SPA keeps
+    // showing the old page for a while before navigating. Model that as:
+    // the first few post-click inventory reads return the OLD page, later
+    // reads the settled dashboard.
+    let extracts = 0;
+    (b.controller as { extractInteractiveElements: () => Promise<InteractiveElement[]> })
+      .extractInteractiveElements = async () => {
+      extracts += 1;
+      return extracts <= 3 ? oldPage : settledPage;
+    };
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Continue", provenance },
+        { kind: "click", text_match: "API Keys", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    const clicks = b.history.filter((c) => c.method === "click");
+    // First the old page's Continue, then — after the settle poll — the
+    // dashboard's API Keys. (The extract step's Copy click follows.)
+    expect(clicks.slice(0, 2).map((c) => c.args[0])).toEqual([
+      "button.continue",
+      "button.apikeys",
+    ]);
+  });
+});
+
+describe("fixupOtpDistribution", () => {
+  function otpBoxes(values: Array<string | null>): InteractiveElement[] {
+    return values.map((value, i) =>
+      inv({ tag: "input", type: "text", selector: `input.otp${i + 1}`, value, index: i }),
+    );
+  }
+
+  it("re-types only the digits that didn't stick after auto-advance typing", async () => {
+    const { fixupOtpDistribution } = await import("../replay-skill.js");
+    const b = stubBrowser();
+    // Dropped keystroke during focus transition: digit 2 of "413025" never
+    // registered, so every later digit shifted one box left.
+    b.setInventoryFor("extract", otpBoxes(["4", "3", "0", "2", "5", ""]));
+    await fixupOtpDistribution(b.controller, "413025", "");
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.map((c) => c.args)).toEqual([
+      ["input.otp2", "1"],
+      ["input.otp3", "3"],
+      ["input.otp4", "0"],
+      ["input.otp5", "2"],
+      ["input.otp6", "5"],
+    ]);
+  });
+
+  it("no-ops when every box already holds its digit", async () => {
+    const { fixupOtpDistribution } = await import("../replay-skill.js");
+    const b = stubBrowser();
+    b.setInventoryFor("extract", otpBoxes(["4", "1", "3", "0", "2", "5"]));
+    await fixupOtpDistribution(b.controller, "413025", "");
+    expect(b.history.some((c) => c.method === "type")).toBe(false);
+  });
+
+  it("no-ops when the widget auto-submitted on the last digit (URL changed)", async () => {
+    const { fixupOtpDistribution } = await import("../replay-skill.js");
+    const b = stubBrowser();
+    b.setInventoryFor("extract", otpBoxes(["", "", "", "", "", ""]));
+    await b.controller.goto("https://example.com/dashboard");
+    await fixupOtpDistribution(b.controller, "413025", "https://example.com/verify");
+    expect(b.history.some((c) => c.method === "type")).toBe(false);
+  });
+
+  it("no-ops when the boxes↔digits mapping is ambiguous (count mismatch)", async () => {
+    const { fixupOtpDistribution } = await import("../replay-skill.js");
+    const b = stubBrowser();
+    b.setInventoryFor("extract", otpBoxes(["", "", ""]));
+    await fixupOtpDistribution(b.controller, "413025", "");
+    expect(b.history.some((c) => c.method === "type")).toBe(false);
+  });
+
+  it("re-types a single combined input whose value doesn't match the code", async () => {
+    const { fixupOtpDistribution } = await import("../replay-skill.js");
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "input", type: "tel", selector: "input.otp", value: "4130" }),
+    ]);
+    await fixupOtpDistribution(b.controller, "413025", "");
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.map((c) => c.args)).toEqual([["input.otp", "413025"]]);
+  });
+});
+
+describe("findCodeInput", () => {
+  it("prefers an explicit label_hint, then a code-named attr, then the first code-shaped input", async () => {
+    const { findCodeInput } = await import("../replay-skill.js");
+    // attribute-less single box → the only candidate wins (zilliz).
+    expect(
+      findCodeInput([inv({ tag: "input", type: "tel", selector: "input.otp" })])?.selector,
+    ).toBe("input.otp");
+    // a code-named field is preferred over a bare text input.
+    const picked = findCodeInput([
+      inv({ tag: "input", type: "text", selector: "input.first" }),
+      inv({ tag: "input", type: "text", name: "verificationCode", selector: "input.code" }),
+    ]);
+    expect(picked?.selector).toBe("input.code");
+    // label_hint pins it.
+    const byLabel = findCodeInput(
+      [
+        inv({ tag: "input", type: "text", selector: "input.a" }),
+        inv({ tag: "input", type: "text", ariaLabel: "Verification code", selector: "input.b" }),
+      ],
+      "Verification code",
+    );
+    expect(byLabel?.selector).toBe("input.b");
+  });
+
+  it("never targets email/password inputs and returns null when there's nothing code-shaped", async () => {
+    const { findCodeInput } = await import("../replay-skill.js");
+    expect(
+      findCodeInput([
+        inv({ tag: "input", type: "email", selector: "input.email" }),
+        inv({ tag: "input", type: "password", selector: "input.pw" }),
+      ]),
+    ).toBeNull();
+  });
+});

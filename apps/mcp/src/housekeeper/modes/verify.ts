@@ -20,6 +20,8 @@ import {
 } from "@trusty-squire/skill-schema";
 import { BrowserController } from "../../bot/browser.js";
 import { replaySkill, type ReplayOutcome } from "../../bot/replay-skill.js";
+import { InboxClient } from "../../bot/inbox-client.js";
+import { makeEmailCodeFetcher } from "../../bot/email-code-fetcher.js";
 import {
   SkillSchemaDriftError,
   type VerifierOutcomeResponse,
@@ -111,15 +113,47 @@ export function createReplayRunner(): ReplayRunner {
         );
       const verifierTag = digitFree(input.skill.skill_id.slice(-6).toLowerCase());
       const tsTag = digitFree(Date.now().toString(36));
+
+      // Inbox wiring for `await_email_code` skills (zilliz/deepseek-class
+      // email-OTP signups). The replay engine has no inbox transport; when a
+      // machine token is available (the housekeeper box has one) we build a
+      // REAL catch-all alias and a code poller. EMAIL_ALIAS then receives
+      // mail and fetchEmailCode reads the code off it. Without a token, the
+      // static alias stays and any await_email_code step fails cleanly —
+      // non-OTP skills (the majority) replay exactly as before.
+      const machineToken = process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
+      const apiBase =
+        process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
+      let emailAlias = `verifier-${verifierTag}-${tsTag}@trustysquire.com`;
+      let fetchEmailCode:
+        | ((i: { alias: string }) => Promise<string | null>)
+        | undefined;
+      if (machineToken !== undefined && machineToken.length > 0) {
+        const inbox = new InboxClient({ baseUrl: apiBase, apiKey: machineToken });
+        const accountId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID ?? "verifier";
+        try {
+          emailAlias = await inbox.createAlias({
+            account_id: accountId,
+            service: input.skill.service,
+            run_id: `vfy-${verifierTag}-${tsTag}`.slice(0, 26),
+          });
+        } catch {
+          // Alias creation failed (no inbox service / network): keep the
+          // static alias. await_email_code skills then fail at that step.
+        }
+        fetchEmailCode = makeEmailCodeFetcher(inbox);
+      }
+
       return await replaySkill({
         skill: input.skill,
         browser,
         mode: input.mode,
         templateValues: {
           TOKEN_NAME: `verifier-${verifierTag}-${tsTag}`,
-          EMAIL_ALIAS: `verifier-${verifierTag}-${tsTag}@trustysquire.com`,
+          EMAIL_ALIAS: emailAlias,
           USER_DISPLAY_NAME: `Verifier-${verifierTag}`,
         },
+        ...(fetchEmailCode !== undefined ? { fetchEmailCode } : {}),
         ...(input.bypassStatusGuard === true ? { bypassStatusGuard: true } : {}),
       });
     } finally {

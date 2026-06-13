@@ -25,6 +25,12 @@ WorkingDirectory=%h/proj-ts
 # The machine token + account id (discover phase) do NOT need to live in
 # harvester.env — the CLI auto-reads them from ~/.config/trusty-squire/
 # session.json (an explicit env value still wins if you set one).
+#
+# Recommended in harvester.env: UNIVERSAL_BOT_MAX_LLM_CALLS=25. Discovery hits
+# hard multi-step onboarding wizards; the default 15-call breaker guillotines
+# legitimately-progressing wizards mid-flight (measured 2026-06-11: anyscale +
+# kinde cut off at 15 while still advancing). Housekeeper-only — end-user
+# installs keep 15. The loop-detector still bails true planning loops early.
 EnvironmentFile=%h/.config/trusty-squire/harvester.env
 # The daily autonomous engine: verify (keep the registry honest) → discover
 # across the curated ~300-service candidate queue (maximize skills) → one digest

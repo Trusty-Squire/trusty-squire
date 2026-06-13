@@ -10,6 +10,11 @@ const inputSchema = z
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
     type: z.string().min(1).max(60).optional(),
+    auth_shape: z
+      .string()
+      .max(120)
+      .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+      .optional(),
   })
   .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {
     message: "one of value or fields is required",
@@ -23,8 +28,12 @@ it (that's how you rotate a key: just store the new value). For
 multi-part credentials (AWS access key + secret, DB user+password) pass
 \`fields\` (e.g. {access_key_id, secret_access_key}); for a lone key pass
 \`value\`. Optional \`label\` (default "default") keeps prod/dev keys for
-the same service apart. Returns the reference, field names, and
-allowed_hosts. The value is never readable back to you afterwards.`;
+the same service apart. Optional \`auth_shape\` records how the provider
+expects the key so an EGRESS GRANT (grant_app_access) auto-injects it
+correctly: "bearer" (default) | "header:<name>" (e.g. "header:x-api-key")
+| "query:<param>". Set it for non-bearer providers; bearer needs nothing.
+Returns the reference, field names, and allowed_hosts. The value is never
+readable back to you afterwards.`;
 
 export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "store_credential",
@@ -40,6 +49,7 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       fields: { type: "object", additionalProperties: { type: "string" } },
       env_var_suggestion: { type: "string" },
       type: { type: "string" },
+      auth_shape: { type: "string" },
     },
   },
   annotations: { idempotentHint: true },
@@ -53,6 +63,7 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       ...(args.fields !== undefined ? { fields: args.fields } : {}),
       ...(args.env_var_suggestion !== undefined ? { env_var_suggestion: args.env_var_suggestion } : {}),
       ...(args.type !== undefined ? { type: args.type } : {}),
+      ...(args.auth_shape !== undefined ? { auth_shape: args.auth_shape } : {}),
     });
     return {
       reference: res.reference,

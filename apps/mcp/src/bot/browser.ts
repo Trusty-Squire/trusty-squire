@@ -25,6 +25,9 @@
 import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
+import { Socket, createServer } from "node:net";
+import { existsSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
 import { detectAsn, type AsnClass } from "./asn.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, reapLeakedProfileHolder, waitForProfileFree } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -144,6 +147,12 @@ export interface BrowserControllerOptions {
   // profile so an OAuth signup reuses the Google session google-login.ts
   // established. Defaults to CHROME_PROFILE_DIR.
   profileDir?: string;
+  // Per-launch egress override. When set, this run routes through this proxy
+  // instead of the env-global UNIVERSAL_BOT_PROXY_URL — so a fleet of verify
+  // identities can each egress from a distinct residential IP in ONE process
+  // (no containers). Subject to the same ASN-class gating + liveness probe as
+  // the env proxy. Unset → fall back to the env behavior.
+  proxyUrl?: string;
 }
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
@@ -302,6 +311,86 @@ async function detectChromiumChannel(): Promise<string | null> {
   return null;
 }
 
+// Resolve the on-disk Chrome binary for a detected channel, for the
+// self-launch path (see launchSelfManagedContext). Playwright launches a
+// channel by name; we have to spawn the binary ourselves, so we need the
+// path. Returns null when the channel is unknown / not found on disk
+// (caller falls back to launchPersistentContext).
+export function resolveChannelBinary(channel: string | null): string | null {
+  if (channel === null) return null; // bundled Chromium — no self-launch
+  const explicit = process.env.UNIVERSAL_BOT_CHROME_BINARY;
+  if (explicit !== undefined && explicit.length > 0) {
+    return existsSync(explicit) ? explicit : null;
+  }
+  const candidates = CHANNEL_PATHS[channel] ?? [];
+  for (const c of candidates) {
+    try {
+      if (existsSync(c)) return c;
+    } catch {
+      // skip unreadable candidate
+    }
+  }
+  return null;
+}
+
+// Whether to launch Chrome ourselves and attach over CDP, instead of
+// Playwright's launchPersistentContext.
+//
+// WHY THIS EXISTS — the single decisive finding (2026-06-12, fully
+// reproduced + falsifiable; see STATE.md "Cloudflare-Turnstile wall").
+// Cloudflare Turnstile's interactive challenge FAILS a Playwright/patchright
+// launchPersistentContext-driven Chrome and PASSES a Chrome the operator
+// launches itself and then attaches to over CDP — every other variable held
+// constant (same box, same datacenter IP, same Xvfb display, same Chrome 148
+// binary, same software-WebGL, same humanized click). The discriminator
+// matrix:
+//   launchPersistentContext + CDP click   → "Verification failed"
+//   launchPersistentContext + OS click     → "Verification failed"
+//   plain google-chrome      + OS click     → "Success!"
+//   plain google-chrome + connectOverCDP + page.mouse → token issued (len816)
+// So the tell is NEITHER the live CDP attachment NOR the click mechanism —
+// it is specifically the launch flags/instrumentation Playwright injects at
+// launchPersistentContext time. Self-launching the binary (no
+// --enable-automation et al.) and attaching with connectOverCDP avoids it.
+// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the old path. Exported for tests.
+export function selfLaunchEnabled(): boolean {
+  const v = process.env.BOT_SELF_LAUNCH;
+  return v !== "0" && v !== "false" && v !== "off";
+}
+
+// Find an ephemeral TCP port for Chrome's --remote-debugging-port.
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+      srv.close(() => (port > 0 ? resolve(port) : reject(new Error("no port"))));
+    });
+  });
+}
+
+// Poll Chrome's DevTools HTTP endpoint until it answers (the browser is up
+// and accepting CDP), or the deadline passes. Returns the base endpoint URL
+// connectOverCDP accepts.
+async function waitForDevtools(port: number, deadlineMs: number): Promise<string> {
+  const base = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + deadlineMs;
+  let lastErr = "";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) });
+      if (res.ok) return base;
+      lastErr = `HTTP ${res.status}`;
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
+}
+
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -361,6 +450,11 @@ export class BrowserController {
   // Google session across runs — see profile.ts / google-login.ts.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
+  // Chrome ourselves and attach over CDP, these hold the child process and
+  // the connected Browser so close() can tear both down.
+  private childChrome: ChildProcess | null = null;
+  private cdpBrowser: Browser | null = null;
   // True once launchPersistentContext succeeded this session. close() only
   // reaps a leaked Chrome when WE launched one — so a ProfileBusyError thrown
   // BEFORE launch (while waiting on a genuine concurrent holder) never kills
@@ -411,7 +505,15 @@ export class BrowserController {
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
     this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
+    this.proxyOverride =
+      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0
+        ? opts.proxyUrl.trim()
+        : null;
   }
+
+  // Per-launch egress override (verify-fleet identities each get their own IP).
+  // null → use the env-global proxy. See resolveProxy().
+  private readonly proxyOverride: string | null;
 
   // Which browser channel the most recent .start() actually used.
   // `null` means bundled Chromium; a string like "chrome" means a
@@ -444,6 +546,69 @@ export class BrowserController {
       throw new Error("BrowserController.stealthProfile read before .start()");
     }
     return activeStealthProfileValue();
+  }
+
+  // Launch Chrome ourselves and attach over CDP — the Turnstile-safe launch
+  // (see selfLaunchEnabled for the proof). The profile dir is the SAME shared
+  // profile launchPersistentContext would use, so the OAuth session carries
+  // over. Options that launchPersistentContext takes at creation but a default
+  // (connectOverCDP) context can't are applied differently:
+  //   • timezone  → TZ env on the child (more authentic than a CDP override)
+  //   • proxy     → --proxy-server flag (auth-less only; the caller routes
+  //                 credentialed proxies to the old path)
+  //   • viewport  → --window-size (with viewport:null-equivalent: we never set
+  //                 an emulated viewport on the connected context)
+  //   • locale/geo/permissions → applied post-connect by start()
+  private async launchSelfManagedContext(params: {
+    binary: string;
+    headless: boolean;
+    args: readonly string[];
+    proxy: ProxySettings | null;
+    env: NodeJS.ProcessEnv;
+    window: { width: number; height: number };
+  }): Promise<BrowserContext> {
+    const port = await findFreePort();
+    const argv = [
+      `--remote-debugging-port=${port}`,
+      "--remote-debugging-address=127.0.0.1",
+      `--user-data-dir=${this.profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--password-store=basic",
+      "--window-position=0,0",
+      `--window-size=${params.window.width},${params.window.height}`,
+      "--lang=en-US",
+      ...params.args,
+      ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+      ...(params.headless ? ["--headless=new"] : []),
+      "about:blank",
+    ];
+    const child = spawn(params.binary, argv, { env: params.env, stdio: "ignore" });
+    this.childChrome = child;
+    let endpoint: string;
+    try {
+      endpoint = await waitForDevtools(port, 30_000);
+    } catch (err) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      this.childChrome = null;
+      throw err;
+    }
+    // Use the patchright launcher's connectOverCDP — it's the exact path the
+    // falsification experiment validated (its connect avoids Runtime.enable,
+    // which a plain attach would emit). The anti-detection that matters here
+    // is the LAUNCH (which we now own), not the connect.
+    const launcher = getChromium();
+    const browser = await launcher.connectOverCDP(endpoint);
+    this.cdpBrowser = browser;
+    const ctx = browser.contexts()[0];
+    if (ctx === undefined) {
+      throw new Error("self-launched Chrome exposed no default browser context");
+    }
+    return ctx;
   }
 
   async start(): Promise<void> {
@@ -507,7 +672,13 @@ export class BrowserController {
       this.launchedMode = "display";
     } else if (xvfbAvailable()) {
       try {
-        this.xvfb = await startXvfb({ width: 1280, height: 720 });
+        // 1920×1080 — the most common real desktop resolution. The old
+        // 1280×720 here was exactly Playwright's emulated-device viewport
+        // default (the code's own comments flag that as an anti-bot tell),
+        // and with viewport:null the page read it straight back. A 720p
+        // screen whose availHeight==height (no taskbar) is a headless
+        // signature strict Turnstiles (exa/cartesia) score against.
+        this.xvfb = await startXvfb({ width: 1920, height: 1080 });
         chromeEnv = { ...process.env, DISPLAY: this.xvfb.display };
         chromeHeadless = false;
         this.launchedMode = "xvfb";
@@ -535,15 +706,36 @@ export class BrowserController {
     // SingletonLock from a killed run, or wait our turn behind a live
     // `mcp login` / another signup. Without this, launchPersistentContext
     // aborts with "Failed to create a ProcessSingleton" and bricks the run.
-    const free = await waitForProfileFree(this.profileDir, {
+    let free = await waitForProfileFree(this.profileDir, {
       deadlineMs: 120_000,
       onWait: () =>
         console.error("[universal-bot] bot Chrome profile is busy with another run — waiting…"),
     });
     if (!free) {
-      throw new ProfileBusyError(
-        "bot Chrome profile is held by another run (a login or signup); retry shortly",
-      );
+      // A live-pid holder that never released within the deadline. The
+      // signup/discover loop is strictly serial (one run at a time), so a
+      // local holder that outlasts 120s is NOT a legitimate concurrent run —
+      // it's a leaked Chrome from a previously EXTERNALLY-killed run
+      // (run_timeout SIGKILL, OOM, reboot) whose JS `finally`/close() never
+      // executed, so reapLeakedProfileHolder never ran. waitForProfileFree
+      // only reclaims dead-pid / null locks, so this live orphan otherwise
+      // crashes every subsequent run with ProfileBusyError (MEASURED
+      // 2026-06-11: cyclic, railpack). A genuine concurrent `mcp login` would
+      // have released within the 120s wait — so by here, reaping the LOCAL
+      // holder (SIGKILL + clear singletons; no-ops on a remote-host holder)
+      // and retrying once is safe and recovers the run instead of failing it.
+      const reaped = reapLeakedProfileHolder(this.profileDir);
+      if (reaped) {
+        console.error(
+          "[universal-bot] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
+        );
+        free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
+      }
+      if (!free) {
+        throw new ProfileBusyError(
+          "bot Chrome profile is held by another run (a login or signup); retry shortly",
+        );
+      }
     }
 
     // T3: a PERSISTENT context. The profile dir carries the user's
@@ -562,70 +754,100 @@ export class BrowserController {
     // rebrowser fork required (the pin is what crashed the OAuth flow and
     // confounded the A/B). One binary for both arms.
     this.launchedChannel = channel;
-    const context = await launchWithProfileGate(this.profileDir, () =>
-      launcher.launchPersistentContext(this.profileDir, {
-      headless: chromeHeadless,
-      ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-      // `channel:` selects a real installed browser over the bundled
-      // binary (omitted when channel detection found nothing).
-      ...(channel !== null ? { channel } : {}),
-      // `proxy:` routes egress through a residential proxy — only for
-      // datacenter-class egress (see resolveProxy()).
-      ...(proxy !== null ? { proxy } : {}),
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        // Enable software WebGL on the GPU-less Xvfb host. Without this,
-        // Chrome 120+ disables WebGL entirely (getContext("webgl") → null),
-        // which MEASURED (2026-06-04) as the bot's one real fingerprint gap:
-        // a browser with NO WebGL is itself an anti-bot tell (reCAPTCHA
-        // Enterprise / device-fingerprinting weight it). SwiftShader gives a
-        // real WebGL context. MEASURED 2026-06-04: with this on, WebGL reports
-        // a Mesa/llvmpipe software renderer and the reCAPTCHA v3 score stays
-        // 1.0 — a strict improvement over "no WebGL at all", which more
-        // fingerprint libs treat as suspicious than a software renderer. The
-        // rc.33 init-script below TRIES to spoof the renderer string to a real
-        // Intel GPU, but it is INERT under patchright (hardened) — see its
-        // comment. A clean GPU-string spoof under patchright needs binary-level
-        // support; tracked as a follow-up, not blocking (score is already 1.0).
-        "--enable-unsafe-swiftshader",
-        "--ignore-gpu-blocklist",
-      ],
-      // `viewport: null` makes the page use the REAL OS window size
-      // instead of a hardcoded value. The old fixed 1280×720 is exactly
-      // Playwright's device-emulation default and is flagged by anti-bot
-      // detectors as "default Playwright viewport"; the real window
-      // (sized by the Xvfb display) reads as an ordinary browser.
-      viewport: null,
-      // No `userAgent` override: a real Chrome (channel) supplies a UA
-      // that AGREES with navigator.userAgentData + the binary version.
-      // The old hardcoded "Chrome/131" string mismatched the actual
-      // binary (148) — a UA-vs-userAgentData inconsistency that is itself
-      // a fingerprint tell. Let the browser report its own coherent UA.
-      // locale stays en-US deliberately: matching it to the proxy
-      // country would render signup pages in that language, and the
-      // Claude vision form-planner expects English.
-      locale: "en-US",
-      // timezone + geolocation track the real egress (T3.1); a fixed
-      // default when the probe failed.
-      timezoneId: geo?.timezoneId ?? "America/New_York",
-      // F10: `clipboard-read` is what makes `navigator.clipboard.readText()`
-      // return the user's just-clicked Copy-button value, which is how
-      // every modern API-key modal (OpenRouter, Anthropic, OpenAI,
-      // Stripe) reveals the full secret — the visible display is
-      // masked / truncated and only the clipboard has the whole key.
-      // `clipboard-write` is a freebie; some Copy buttons no-op without
-      // it. Granting both at context-creation time so we don't have to
-      // re-grant on every nav.
-      permissions: [
-        ...(geo?.geolocation !== undefined ? ["geolocation"] : []),
-        "clipboard-read",
-        "clipboard-write",
-      ],
-      ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-      }),
-    );
+    // Launch args shared by BOTH paths (launchPersistentContext and the
+    // self-launch). See the per-flag rationale: swiftshader gives a real
+    // (software) WebGL context on the GPU-less Xvfb box; the others are the
+    // standard headless/sandbox flags. NOTE we deliberately do NOT include
+    // Playwright's automation flags (--enable-automation et al.) — on the
+    // self-launch path their ABSENCE is the whole fix.
+    const launchArgs: readonly string[] = [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--enable-unsafe-swiftshader",
+      "--ignore-gpu-blocklist",
+    ];
+    // F10 clipboard + egress-matched geolocation permission, built once for
+    // either path. Typed as string[] (Playwright's grantPermissions /
+    // permissions option both accept it).
+    const grantedPermissions: string[] = [
+      ...(geo?.geolocation !== undefined ? ["geolocation"] : []),
+      "clipboard-read",
+      "clipboard-write",
+    ];
+    // Decide the launch path. Self-launch (Turnstile-safe) requires a real
+    // Chrome binary on disk AND an auth-less proxy (a credentialed proxy needs
+    // Playwright's native proxy auth, which only the launchPersistentContext
+    // path provides — so route those there).
+    const selfLaunchBinary = selfLaunchEnabled() ? resolveChannelBinary(channel) : null;
+    const proxyHasAuth =
+      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
+    const useSelfLaunch = selfLaunchBinary !== null && !proxyHasAuth;
+
+    let context: BrowserContext;
+    if (useSelfLaunch && selfLaunchBinary !== null) {
+      console.error(
+        `[universal-bot] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
+      );
+      // Window size matches the display surface so viewport reads as a real
+      // window (no emulated-viewport tell). TZ on the child makes Chrome
+      // report the egress timezone natively.
+      const window =
+        this.launchedMode === "xvfb"
+          ? { width: 1920, height: 1080 }
+          : { width: 1280, height: 1024 };
+      const selfEnv: NodeJS.ProcessEnv = {
+        ...(chromeEnv ?? process.env),
+        TZ: geo?.timezoneId ?? "America/New_York",
+      };
+      context = await launchWithProfileGate(this.profileDir, () =>
+        this.launchSelfManagedContext({
+          binary: selfLaunchBinary,
+          headless: chromeHeadless,
+          args: launchArgs,
+          proxy,
+          env: selfEnv,
+          window,
+        }),
+      );
+      // Options the default (connectOverCDP) context can't take at creation —
+      // applied post-connect. Best-effort: a failure here is non-fatal (the
+      // signup proceeds; only clipboard-key-extraction / geo degrade).
+      try {
+        await context.grantPermissions(grantedPermissions);
+        if (geo?.geolocation !== undefined) {
+          await context.setGeolocation(geo.geolocation);
+        }
+      } catch (err) {
+        console.error(
+          `[universal-bot] post-connect context setup partial: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    } else {
+      if (selfLaunchEnabled() && selfLaunchBinary !== null && proxyHasAuth) {
+        console.error(
+          "[universal-bot] credentialed proxy → launchPersistentContext (self-launch can't carry proxy auth)",
+        );
+      }
+      // T3: a PERSISTENT context (the legacy path). The profile dir carries the
+      // user's Google session so the OAuth-first path reuses it.
+      context = await launchWithProfileGate(this.profileDir, () =>
+        launcher.launchPersistentContext(this.profileDir, {
+          headless: chromeHeadless,
+          ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+          ...(channel !== null ? { channel } : {}),
+          ...(proxy !== null ? { proxy } : {}),
+          args: [...launchArgs],
+          viewport: null,
+          locale: "en-US",
+          timezoneId: geo?.timezoneId ?? "America/New_York",
+          permissions: grantedPermissions,
+          ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+        }),
+      );
+    }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
@@ -686,6 +908,50 @@ export class BrowserController {
       }
       if (typeof WebGL2RenderingContext !== "undefined") {
         spoof(WebGL2RenderingContext.prototype);
+      }
+      // Device-tell normalization. The headless harvester box reports 20
+      // logical cores (navigator.hardwareConcurrency) — a consumer residential
+      // device is 4-16. A 20-core Linux machine behind a "residential" IP is
+      // an internal inconsistency Cloudflare Turnstile scores against
+      // (MEASURED 2026-06-11: exa/cartesia Turnstile won't issue a token on a
+      // clean-fingerprint click; hwConcurrency=20 + Linux is the standout
+      // anomaly). Normalize to a common consumer profile. Same per-nav main-
+      // world application as the WebGL spoof — patchright denies init-world
+      // reach, and Turnstile reads these after the challenge script loads
+      // (seconds in), so the framenavigated re-apply wins the race. Defined on
+      // Navigator.prototype (where the native getters live) so there's no own-
+      // property tell on the instance.
+      const navProto = Navigator.prototype as Navigator & { __tsDevicePatched?: boolean };
+      if (navProto.__tsDevicePatched !== true) {
+        try {
+          Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
+            get: () => 8,
+            configurable: true,
+          });
+          Object.defineProperty(Navigator.prototype, "deviceMemory", {
+            get: () => 8,
+            configurable: true,
+          });
+          // Screen availHeight tell: a headless Xvfb screen reports
+          // availHeight == height (no OS taskbar), whereas a real Windows
+          // desktop reserves ~40px for the taskbar (availHeight = height-40,
+          // availWidth = width). Reinstate that gap so the screen reads like
+          // an ordinary desktop, not a bare framebuffer. Guarded so it only
+          // applies when the two are currently equal (i.e. headless).
+          try {
+            if (screen.availHeight === screen.height) {
+              Object.defineProperty(Screen.prototype, "availHeight", {
+                get: () => screen.height - 40,
+                configurable: true,
+              });
+            }
+          } catch {
+            // leave it
+          }
+          navProto.__tsDevicePatched = true;
+        } catch {
+          // descriptor already locked by something else — leave it.
+        }
       }
     };
     await context.addInitScript(installWebglSpoof);
@@ -796,7 +1062,8 @@ export class BrowserController {
   // that misclassify as "unknown". A malformed URL never aborts the
   // run — we log and fall back to a direct connection.
   private async resolveProxy(): Promise<ProxySettings | null> {
-    const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
+    // Per-launch override (verify fleet) wins over the env-global proxy.
+    const raw = this.proxyOverride ?? process.env.UNIVERSAL_BOT_PROXY_URL;
     if (raw === undefined || raw.trim().length === 0) return null;
 
     let proxy: ProxySettings;
@@ -815,6 +1082,22 @@ export class BrowserController {
     const asn = await detectAsn();
     const asnClass: AsnClass = asn?.class ?? "unknown";
     if (shouldRouteThroughProxy(asnClass, forceAlways)) {
+      // Proxy liveness probe. A dead proxy (gost crashed, Tailscale down) makes
+      // EVERY navigation time out for 60s and silently breaks the whole heal
+      // pass — MEASURED 2026-06-12: the Mac gost SOCKS5 went down and every
+      // discover died on page.goto Timeout. A cheap TCP connect to the SOCKS
+      // host tells us it's reachable; if not, fall back to DIRECT (the box's own
+      // datacenter egress) so the run still serves the services that don't block
+      // datacenter IPs, instead of dying entirely. Self-healing > silent stall.
+      const reachable = await isProxyReachable(proxy.server);
+      if (!reachable) {
+        console.error(
+          `[universal-bot] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
+            `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
+            `better than every navigation timing out)`,
+        );
+        return null;
+      }
       console.error(
         `[universal-bot] routing through residential proxy ` +
           `(asn=${asnClass}${forceAlways ? ", forced" : ""})`,
@@ -851,12 +1134,35 @@ export class BrowserController {
     // The host is reachable on the next attempt — a single goto failure
     // shouldn't fail the whole signup. Only retry these connection-level
     // errors; HTTP statuses and selector/logic errors fall straight through.
+    // net::ERR_ABORTED — a navigation superseded by a redirect/JS-nav during
+    // the domcontentloaded wait. Usually transient (a redirect race on the
+    // first hit of an auth-gated portal — MEASURED 2026-06-11: defang's
+    // portal.defang.io aborted on the initial goto); a retry lands the
+    // settled page. Distinct from ERR_CONNECTION_ABORTED (a dropped socket).
     const TRANSIENT_NET =
-      /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE/i;
+      /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE|net::ERR_ABORTED/i;
     const MAX_GOTO_ATTEMPTS = 3;
     for (let attempt = 1; ; attempt++) {
       try {
         await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        // A SOCKS/connection drop does NOT always throw: Chrome resolves
+        // domcontentloaded on its own `chrome-error://chromewebdata/`
+        // interstitial and goto returns cleanly. The bot then ran the whole
+        // planner on a dead error page and gave up after one round (MEASURED
+        // 2026-06-11: galileo/lancedb landed on chrome-error with the app
+        // host as the title, never retried). Treat a chrome-error landing as
+        // the same transient class and retry it like a thrown net error.
+        const landed = this.page.url();
+        if (landed.startsWith("chrome-error://")) {
+          if (attempt >= MAX_GOTO_ATTEMPTS) {
+            throw new Error(
+              `net::navigation landed on a Chrome error page for ${url} ` +
+                `after ${attempt} attempts (transient proxy/host failure)`,
+            );
+          }
+          await this.sleep(1500 * attempt);
+          continue;
+        }
         break;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1031,6 +1337,135 @@ export class BrowserController {
     await locator.pressSequentially(text, { delay: rand(40, 110) });
   }
 
+  // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
+  // disabled submit. Returns a " Unfilled required field(s) — …" suffix for the
+  // disabled-click error so the planner fills the right field instead of
+  // re-clicking the dead button. Pure observation — never throws, never mutates.
+  private async unfilledRequiredHint(): Promise<string> {
+    if (!this.page) return "";
+    try {
+      const fields = await this.page.evaluate(() => {
+        const out: string[] = [];
+        const vis = (el: Element): boolean => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const label = (el: Element): string => {
+          const al = el.getAttribute("aria-label");
+          if (al && al.trim()) return al.trim().slice(0, 40);
+          const id = (el as HTMLElement).id;
+          if (id) {
+            const esc = window.CSS && CSS.escape ? CSS.escape(id) : id;
+            const lab = document.querySelector(`label[for="${esc}"]`);
+            if (lab && lab.textContent && lab.textContent.trim()) return lab.textContent.trim().slice(0, 40);
+          }
+          const ph = el.getAttribute("placeholder");
+          if (ph && ph.trim()) return ph.trim().slice(0, 40);
+          return (el.getAttribute("name") ?? el.tagName.toLowerCase()).slice(0, 40);
+        };
+        for (const el of Array.from(
+          document.querySelectorAll(
+            "input[required],textarea[required],input[aria-required='true'],textarea[aria-required='true']",
+          ),
+        )) {
+          if (!vis(el)) continue;
+          const inp = el as HTMLInputElement;
+          if (inp.type === "checkbox" || inp.type === "radio") {
+            if (!inp.checked) out.push(`unchecked: ${label(el)}`);
+          } else if (!inp.value || !inp.value.trim()) {
+            out.push(`empty: ${label(el)}`);
+          }
+        }
+        for (const el of Array.from(document.querySelectorAll("select"))) {
+          if (vis(el) && !(el as HTMLSelectElement).value) out.push(`unselected: ${label(el)}`);
+        }
+        for (const el of Array.from(document.querySelectorAll("[role='combobox'],[role='listbox']"))) {
+          if (!vis(el)) continue;
+          const txt = (el.textContent ?? "").trim();
+          if (txt.length === 0 || /^(select|choose|please|pick)\b/i.test(txt)) out.push(`unselected: ${label(el)}`);
+        }
+        for (const grp of Array.from(document.querySelectorAll("[role='radiogroup']"))) {
+          if (!vis(grp)) continue;
+          const chosen = grp.querySelector(
+            "[role='radio'][aria-checked='true'],input[type='radio']:checked",
+          );
+          if (!chosen) out.push(`nothing chosen: ${label(grp)}`);
+        }
+        return Array.from(new Set(out)).slice(0, 5);
+      });
+      return fields.length > 0
+        ? ` Unfilled required field(s) — fill/select these first: ${fields.join("; ")}.`
+        : "";
+    } catch {
+      return "";
+    }
+  }
+
+  // Read any visible transient toast / alert / notification text. Validation
+  // errors, rate-limits, and "operation failed" messages frequently appear as a
+  // toast that auto-dismisses BEFORE the next round's capture — so a failed
+  // submit looks like a SILENT no-op to the planner. Surfacing it turns the
+  // no-op into a diagnosable reason. MEASURED 2026-06-11 (deepseek Sign-up
+  // no-ops; the error is a ds-toast the round-start capture never sees).
+  // `settleMs` lets the caller reuse a wait it was already going to do.
+  async captureTransientAlert(settleMs = 600): Promise<string> {
+    if (!this.page) return "";
+    if (settleMs > 0) await this.sleep(settleMs);
+    try {
+      return await this.page.evaluate(() => {
+        const sels = [
+          "[role='alert']",
+          "[aria-live='assertive']",
+          ".ds-toast-container",
+          ".ds-notification-container",
+          ".Toastify__toast",
+          ".ant-message-notice",
+          ".ant-notification-notice",
+          ".sonner-toast",
+          "[data-sonner-toast]",
+          ".toast",
+          ".Toaster",
+        ];
+        const vis = (el: Element): boolean => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        for (const sel of sels) {
+          for (const el of Array.from(document.querySelectorAll(sel))) {
+            if (!vis(el)) continue;
+            const t = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+            if (t.length >= 2 && t.length <= 240) return t;
+          }
+        }
+        // Second pass: INLINE field-validation errors (not a transient
+        // toast). Many SPAs render "Please enter the verification code" /
+        // "Invalid code" as a small element with an error-ish class or an
+        // aria-invalid node rather than a toast — so the first pass misses
+        // them and a failed submit reads as a silent no-op.
+        // MEASURED 2026-06-11 (deepseek post-OTP submit).
+        const errSels = [
+          "[class*='error' i]",
+          "[class*='invalid' i]",
+          "[class*='danger' i]",
+          "[class*='explain' i]", // antd/ds-form-item-explain
+          "[aria-invalid='true']",
+        ];
+        for (const sel of errSels) {
+          for (const el of Array.from(document.querySelectorAll(sel))) {
+            if (!vis(el)) continue;
+            // Leaf-ish only — skip containers that wrap the whole form.
+            if (el.querySelector("input, button, form")) continue;
+            const t = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+            if (t.length >= 3 && t.length <= 160) return t;
+          }
+        }
+        return "";
+      });
+    } catch {
+      return "";
+    }
+  }
+
   async click(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
@@ -1042,14 +1477,40 @@ export class BrowserController {
     // dispatches input/change; `force` bypasses the visibility actionability
     // gate for the sr-only pattern. MEASURED 2026-06-09 (kinde tech-stack step).
     try {
-      const inputKind = await this.page
+      const probe = await this.page
         .$eval(selector, (el) => {
           const t = el as HTMLInputElement;
-          return t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox")
-            ? t.type
-            : "";
+          const inputKind =
+            t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") ? t.type : "";
+          return {
+            inputKind,
+            role: el.getAttribute("role") ?? "",
+            text: (el.textContent ?? "").trim().slice(0, 80),
+          };
         })
-        .catch(() => "");
+        .catch(() => ({ inputKind: "", role: "", text: "" }));
+      const inputKind = probe.inputKind;
+      // Custom-combobox / listbox options (role=option|menuitem) — react-select,
+      // Radix, downshift, MUI. Two failure modes the humanized RAW-COORDINATE
+      // click hits: (1) the menu is a PORTAL that re-renders/repositions, so the
+      // captured POSITIONAL selector (e.g. `div…>> nth=42`) resolves to the wrong
+      // element at click time — nothing selects, planner loops (MEASURED
+      // 2026-06-11, meilisearch Radix combobox); (2) options bind pointer/select
+      // handlers a raw coordinate click misses. Fix: re-resolve by role+accessible
+      // name (robust to portal/positional drift), and use the actionability-checked
+      // locator click. Options are post-load, NOT the anti-bot-scored gate.
+      if (probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio") {
+        const role = probe.role as "option" | "menuitem" | "menuitemradio";
+        if (probe.text.length > 0) {
+          const byName = this.page.getByRole(role, { name: probe.text, exact: false }).first();
+          if ((await byName.count().catch(() => 0)) > 0) {
+            await byName.click({ timeout: 8000 });
+            return;
+          }
+        }
+        await this.page.locator(selector).first().click({ timeout: 8000 });
+        return;
+      }
       if (inputKind === "radio" || inputKind === "checkbox") {
         // check() handles standard inputs; but a custom framework (kinde's kui)
         // binds its change handler via event delegation, and a force-check on an
@@ -1137,7 +1598,17 @@ export class BrowserController {
       // fall through — click() below will produce the canonical error
     }
     const locator = this.page.locator(selector);
-    const count = await locator.count();
+    // The count can throw "Execution context was destroyed" when an
+    // earlier fill already triggered a navigation/auto-submit (zilliz:
+    // typing email+password redirects before we reach the submit click).
+    // That race must NOT crash the whole signup — the page is already
+    // moving on, so treat the submit as effectively done and let the
+    // caller inspect the new page. MEASURED 2026-06-11 (zilliz /signup).
+    const count = await locator.count().catch(() => -1);
+    if (count < 0) {
+      await this.page.waitForLoadState("domcontentloaded").catch(() => {});
+      return;
+    }
     // A disabled submit means a required field or agreement checkbox
     // wasn't satisfied — throw a distinct `submit_disabled` so the
     // caller can re-plan to fix it, rather than wait out a generic
@@ -1204,13 +1675,58 @@ export class BrowserController {
       // Verify it actually became checked; some checkboxes need the
       // explicit `check()` call to flip state (e.g., styled labels
       // that swallow the click event).
-      const isChecked = await this.page.locator(selector).isChecked();
+      let isChecked = await this.page.locator(selector).isChecked();
       if (!isChecked) {
         await this.page.check(selector, { force: true });
+        isChecked = await this.page.locator(selector).isChecked().catch(() => false);
+      }
+      // Mantine / Radix styled checkboxes: the hidden <input> can read
+      // checked in the DOM while the library's React onChange never fired —
+      // so the form's controlled state stays false and the gated submit
+      // stays disabled even though isChecked() is true (MEASURED 2026-06-11:
+      // friendliai's #agreedToServiceTerms cost a wasted round because the
+      // first check didn't register the form state). Clicking the ASSOCIATED
+      // LABEL fires the real onChange the library listens for. Best-effort.
+      if (!isChecked) {
+        const labelClicked = await this.clickAssociatedLabel(selector);
+        if (!labelClicked) await this.page.check(selector, { force: true });
       }
     } catch {
       await this.page.check(selector, { force: true });
     }
+  }
+
+  // Click the <label> associated with a checkbox/radio input — either a
+  // `<label for="<id>">` or the wrapping `<label>` ancestor. Mantine/Radix
+  // render the real input visually-hidden inside a styled label; clicking the
+  // label is what fires the library's onChange (a direct input check can
+  // leave React's controlled state stale). Returns true if a label was
+  // found + clicked. Best-effort — never throws.
+  private async clickAssociatedLabel(selector: string): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      const id = await this.page
+        .locator(selector)
+        .first()
+        .evaluate((el) => (el instanceof HTMLElement ? el.id : ""))
+        .catch(() => "");
+      if (id) {
+        const forLabel = this.page.locator(`label[for="${id}"]`).first();
+        if ((await forLabel.count()) > 0) {
+          await forLabel.click({ timeout: 4000 });
+          return true;
+        }
+      }
+      // No `for=` label — try the wrapping <label> ancestor.
+      const wrapping = this.page.locator(selector).locator("xpath=ancestor::label[1]").first();
+      if ((await wrapping.count()) > 0) {
+        await wrapping.click({ timeout: 4000 });
+        return true;
+      }
+    } catch {
+      // best-effort
+    }
+    return false;
   }
 
   // Deterministic pre-submit guard: tick every visible, unchecked,
@@ -1876,16 +2392,44 @@ export class BrowserController {
     options: Locator,
     matcher?: string,
   ): Promise<void> {
+    let target = options.first();
     if (matcher !== undefined) {
       const filtered = options.filter({ hasText: matcher });
-      const filteredCount = await filtered.count();
-      if (filteredCount > 0) {
-        await this.humanClickLocator(filtered.first());
-        await this.wait(0.5);
-        return;
-      }
+      if ((await filtered.count()) > 0) target = filtered.first();
     }
-    await this.humanClickLocator(options.first());
+    // cmdk (the command-menu library) does NOT commit a selection from the
+    // bot's humanized page.mouse.click(x, y): cmdk re-renders + re-orders its
+    // list as the search filters, so the cached click coordinates land on the
+    // wrong row (or empty space), and cmdk's onSelect — bound to a real
+    // pointer/click event ON the item, or Enter on the highlighted item —
+    // never fires. The trigger keeps its placeholder and the gated submit
+    // stays disabled (MEASURED 2026-06-11: meilisearch's /welcome-informations
+    // "reasons" + "SDK" comboboxes looped the whole run). Detect cmdk/Radix
+    // option items and commit via a real, re-resolved actionable click (plus a
+    // pointer-event sequence as backup) instead of raw mouse coordinates.
+    const isCmdkItem = await target
+      .evaluate(
+        (el) =>
+          el.hasAttribute("cmdk-item") ||
+          el.closest("[cmdk-root],[cmdk-list],[cmdk-group]") !== null,
+      )
+      .catch(() => false);
+    if (isCmdkItem) {
+      await target.scrollIntoViewIfNeeded().catch(() => {});
+      // Playwright's locator.click() re-resolves geometry and dispatches the
+      // full trusted pointer/mouse sequence at the element's center — what
+      // cmdk's onSelect actually listens for.
+      await target.click({ timeout: 5000 }).catch(async () => {
+        // Backup: dispatch the pointer pair directly, then Enter (the cmdk
+        // input is focused after type-to-filter and highlights this item).
+        await target.dispatchEvent("pointerdown").catch(() => {});
+        await target.dispatchEvent("pointerup").catch(() => {});
+        await this.page?.keyboard.press("Enter").catch(() => {});
+      });
+      await this.wait(0.5);
+      return;
+    }
+    await this.humanClickLocator(target);
     await this.wait(0.5);
   }
 
@@ -1970,12 +2514,18 @@ export class BrowserController {
         await this.sleep(150);
       }
       if (isDisabled) {
+        // Name the SPECIFIC unfilled required field(s) so the planner fills the
+        // right one instead of re-clicking the dead submit. MEASURED 2026-06-11
+        // (meilisearch/zilliz: planner clicked a disabled Next 4+ times because
+        // the generic hint didn't say WHICH field blocked it). Feedback only.
+        const hint = await this.unfilledRequiredHint();
         throw new Error(
           "target is disabled (HTML disabled or aria-disabled=true) after 6s — " +
             "the click would no-op. A required precondition is unmet: an empty " +
             "input, an unselected dropdown, an unchecked agreement checkbox, or " +
             "a missing preset/permission choice. Do NOT retry this click — pick a " +
-            "different action that fills the missing field first.",
+            "different action that fills the missing field first." +
+            hint,
         );
       }
     }
@@ -2331,7 +2881,15 @@ export class BrowserController {
         if (count === 0) continue;
         for (let i = 0; i < count; i++) {
           const el = locator.nth(i);
-          const box = await el.boundingBox();
+          // Bounded + best-effort. boundingBox() carries Playwright's default
+          // 30s actionability wait; an invisible-mode Turnstile (the kind
+          // patchright + a residential IP pass silently) never stabilises into
+          // a visible box, so the unguarded call burned the full 30s and THREW
+          // — and because the form-fill runCaptchaGate path didn't catch it,
+          // it aborted the whole signup (measured: cartesia, cron-job.org).
+          // A short timeout + catch turns "no clickable widget here" into a
+          // skip, matching the Phase-2 host walk-up's `.catch(() => null)`.
+          const box = await el.boundingBox({ timeout: 1500 }).catch(() => null);
           if (box === null) continue;
           if (box.width < 50 || box.height < 30) continue;
           return { kind, box };
@@ -2573,6 +3131,81 @@ export class BrowserController {
         return true;
       }, token);
       return injected;
+    } catch {
+      return false;
+    }
+  }
+
+  // Cloudflare Turnstile sitekey. On the `.cf-turnstile` widget's
+  // data-sitekey, or as the `0x…` path segment in the challenge iframe src
+  // (challenges.cloudflare.com/.../0x4AAAAA…/…). Returns null when absent.
+  async extractTurnstileSitekey(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        // Turnstile sitekeys are `0x` + ~22 base64url chars (e.g.
+        // 0x4AAAAAADSpJWQOnICEKAwx). A site-embedded WIDGET exposes it; a
+        // Cloudflare-MANAGED interstitial does not (it's injected, not in the
+        // DOM) — those return null and the caller can't Tier-3 solve them.
+        const isKey = (k: string | null | undefined): k is string =>
+          k != null && /^0x[A-Za-z0-9_-]{18,}$/.test(k);
+        // 1. data-sitekey on any element.
+        for (const el of Array.from(document.querySelectorAll<HTMLElement>("[data-sitekey]"))) {
+          const k = el.getAttribute("data-sitekey");
+          if (isKey(k)) return k;
+        }
+        // 2. ANY iframe src carrying a 0x… sitekey (the challenge iframe path,
+        //    or a query param). Not just challenges.cloudflare.com — some
+        //    embeds proxy it.
+        for (const ifr of Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe"))) {
+          const src = ifr.src || "";
+          const path = src.match(/\/(0x[A-Za-z0-9_-]{18,})(?:\/|$)/);
+          if (path !== null && isKey(path[1])) return path[1] ?? null;
+          try {
+            const q = new URL(src).searchParams.get("sitekey");
+            if (isKey(q)) return q;
+          } catch {
+            /* relative/blank src */
+          }
+        }
+        // 3. Inline HTML: `sitekey: '0x…'`, `data-sitekey="0x…"`,
+        //    `turnstile.render(el, { sitekey: '0x…' })`. Covers JS-config
+        //    widgets that never set a DOM attribute.
+        const html = document.documentElement.outerHTML;
+        const m =
+          html.match(/data-sitekey=["'](0x[A-Za-z0-9_-]{18,})/i) ??
+          html.match(/sitekey["'\s:=]{1,4}["'](0x[A-Za-z0-9_-]{18,})/i);
+        if (m !== null && isKey(m[1])) return m[1] ?? null;
+        return null;
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  // Inject a 2Captcha-resolved Turnstile token into the page's
+  // cf-turnstile-response input(s) + dispatch input/change so the form's
+  // submit handler sees it. Turnstile exposes no public callback-read API
+  // (unlike grecaptcha), so DOM injection + events is the reliable path; the
+  // server-side validation reads the input value. Returns true if an input
+  // was populated.
+  async injectTurnstileToken(token: string): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate((tok: string) => {
+        const inputs = Array.from(
+          document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+            '[name="cf-turnstile-response"], [name^="cf-turnstile-response"], input[id^="cf-chl-widget"]',
+          ),
+        );
+        if (inputs.length === 0) return false;
+        for (const input of inputs) {
+          (input as HTMLInputElement).value = tok;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return true;
+      }, token);
     } catch {
       return false;
     }
@@ -3341,9 +3974,15 @@ export class BrowserController {
         return r.width > 2 && r.height > 2;
       };
       document.querySelectorAll("input, textarea").forEach((el) => {
+        // Only text-shaped inputs can RENDER a credential. A checkbox/
+        // radio/button's `value` is a markup constant, not page content —
+        // zilliz's CookieScript banner ships `<input type="checkbox"
+        // value="personalization">` and those words sit earlier in DOM
+        // order than the real key, so the validator-shaped scan tier was
+        // returning them as the "credential".
         if (
           el instanceof HTMLInputElement &&
-          (el.type === "hidden" || el.type === "password")
+          !["text", "search", "url", "tel", "number", "email", ""].includes(el.type)
         ) {
           return;
         }
@@ -3428,6 +4067,61 @@ export class BrowserController {
     } catch {
       // No interactive element appeared in time — let the planner run
       // anyway; it fails cleanly rather than hanging.
+    }
+    // The generic wait above is satisfied by ANY interactive element —
+    // on a signup page with marketing chrome (links, marketplace badges)
+    // that fires while the actual auth widget is still an async spinner.
+    // The bot then snapshots a form-less inventory and bails
+    // `oauth_required` ("no email/password form"). MEASURED 2026-06-11
+    // (zilliz /signup: right-panel spinner, marketing copy on the left).
+    // So: if a loading spinner is visible AND no auth-form signal exists
+    // yet, give the widget a bounded extra wait to hydrate.
+    await this.waitForAuthWidgetHydration();
+  }
+
+  // Bounded poll for an auth-form signal when the page is still showing a
+  // loading spinner. Strictly additive: returns immediately unless a
+  // spinner is visible AND no auth signal (email/password input or a
+  // provider/sign-up button) is present yet. Best-effort — never throws.
+  async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
+    if (!this.page) return;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const state = await this.page.evaluate(() => {
+          const vis = (el: Element): boolean => {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          };
+          const anyVis = (sel: string): boolean =>
+            Array.from(document.querySelectorAll(sel)).some(vis);
+          // Auth signal: a real form input or a recognizable provider /
+          // signup affordance.
+          const hasAuthInput = anyVis(
+            'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
+          );
+          let hasAuthButton = false;
+          const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
+          for (const el of Array.from(
+            document.querySelectorAll('button,a[href],[role="button"]'),
+          )) {
+            if (!vis(el)) continue;
+            if (re.test((el.textContent ?? "").trim())) { hasAuthButton = true; break; }
+          }
+          const spinnerVisible = anyVis(
+            '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
+          );
+          return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
+        });
+        // Done the moment an auth signal appears, or once nothing is
+        // spinning anymore (no point waiting on a page that simply has
+        // no auth widget — a true OAuth-less/blank page bails honestly).
+        if (state.hasAuth) return;
+        if (!state.spinnerVisible) return;
+      } catch {
+        return; // navigation / context teardown — let the caller proceed
+      }
+      await this.sleep(500);
     }
   }
 
@@ -3975,6 +4669,7 @@ export class BrowserController {
         inConsentWidget: boolean;
         href: string | null;
         iconLabel: string | null;
+        testId: string | null;
         title: string | null;
         landmark: string | null;
         value: string | null;
@@ -4052,6 +4747,18 @@ export class BrowserController {
           inConsentWidget: inConsent(el),
           href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
           iconLabel: iconLabelFor(el),
+          // The element's test-id, the GOLD-STANDARD stable anchor: authors set
+          // data-testid/data-test/data-cy precisely so it survives refactors +
+          // copy changes, which is exactly what text_match does not. Captured so
+          // the synthesizer can prefer it over planner-gloss text. Common
+          // variants folded to one field; first present wins.
+          testId:
+            el.getAttribute("data-testid") ??
+            el.getAttribute("data-test-id") ??
+            el.getAttribute("data-test") ??
+            el.getAttribute("data-cy") ??
+            el.getAttribute("data-qa") ??
+            null,
           title: clean(el.getAttribute("title")),
           landmark: (() => {
             // F15 — nearest HTML5 landmark ancestor. Used by the
@@ -4530,6 +5237,29 @@ export class BrowserController {
         const btn = this.page.getByRole("button", { name: re }).first();
         const count = await btn.count().catch(() => 0);
         if (count === 0) continue;
+        // GitHub disables the Authorize button with a clickjacking-protection
+        // COUNTDOWN (~3-8s) the first time you authorize an OAuth app that
+        // requests org scopes (read:org). Clicking while disabled silently
+        // no-ops and the URL never changes, so the whole consent bails
+        // "no approve control" even though the button is right there
+        // (MEASURED 2026-06-11: defang's "Authorize DefangLabs"). Poll up to
+        // 12s for it to enable before clicking.
+        {
+          const deadline = Date.now() + 12_000;
+          while (Date.now() < deadline) {
+            const disabled = await btn
+              .evaluate((el) => {
+                if (el instanceof HTMLButtonElement || el instanceof HTMLInputElement) {
+                  if (el.disabled) return true;
+                }
+                const aria = el.getAttribute("aria-disabled");
+                return aria === "true" || aria === "";
+              })
+              .catch(() => false);
+            if (!disabled) break;
+            await this.sleep(400);
+          }
+        }
         try {
           await btn.click({ timeout: 8000 });
         } catch {
@@ -4710,6 +5440,23 @@ export class BrowserController {
       ]);
     if (this.page) await capped(this.page.close(), 5_000);
     if (this.context) await capped(this.context.close(), 10_000);
+    // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
+    // spawned. context.close() on a connectOverCDP context only disconnects —
+    // it does NOT necessarily exit the browser process, which would leak the
+    // SingletonLock and brick the next run (the reap below is the backstop, but
+    // killing our own child directly is cleaner and faster).
+    if (this.cdpBrowser) {
+      await capped(this.cdpBrowser.close(), 5_000);
+      this.cdpBrowser = null;
+    }
+    if (this.childChrome) {
+      try {
+        this.childChrome.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      this.childChrome = null;
+    }
     // …and context.close() doesn't always kill the browser: headed Chrome
     // under Xvfb / some patchright teardowns leave the main process alive
     // holding the SingletonLock. A leaked browser makes the NEXT run wait
@@ -4865,6 +5612,45 @@ export interface ProxySettings {
 // and falls back to a direct connection.
 //
 // Exported for unit testing — URL parsing is the error-prone bit.
+// Cheap TCP liveness probe for a proxy `server` string ("socks5://host:port").
+// A SOCKS5 proxy listens on TCP; if a connect succeeds within the timeout the
+// proxy is up. Resolves false on connect error / timeout / a malformed server.
+// Pure (no class state) so resolveProxy can call it before launching Chrome.
+export async function isProxyReachable(
+  server: string,
+  timeoutMs = 4000,
+): Promise<boolean> {
+  let host: string;
+  let port: number;
+  try {
+    const u = new URL(server);
+    host = u.hostname;
+    port = Number(u.port) || (u.protocol.startsWith("socks") ? 1080 : 8080);
+  } catch {
+    return false;
+  }
+  if (host.length === 0 || !Number.isFinite(port)) return false;
+  return await new Promise<boolean>((resolve) => {
+    const sock = new Socket();
+    let settled = false;
+    const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+        // already closed
+      }
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+    sock.connect(port, host);
+  });
+}
+
 export function parseProxyUrl(raw: string): ProxySettings {
   const u = new URL(raw.trim());
   if (u.hostname.length === 0) {
@@ -4982,6 +5768,11 @@ export interface InteractiveElement {
   // extract_via_regex on bare UUIDs (which the regex library cannot
   // match without a label). Optional; test fixtures may omit.
   title?: string | null;
+  // The element's data-testid / data-test / data-cy / data-qa — the most stable
+  // selector anchor a site offers (authored to survive refactors + copy
+  // changes). pickStableDomHint prefers it; replay's matchesDomHint resolves it
+  // ahead of text_match. Optional; test fixtures may omit.
+  testId?: string | null;
   // F15 — nearest HTML5 landmark ancestor: header | main | footer |
   // nav | aside | article | section, or null when the element is
   // outside any landmark. The agent's inventory renderer uses this to

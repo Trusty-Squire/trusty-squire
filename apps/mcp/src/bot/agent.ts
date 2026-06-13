@@ -737,6 +737,32 @@ export function googleConsentIsBasicFromDom(bodyText: string): boolean {
   return GOOGLE_BASIC_CONSENT_PHRASES.some((p) => p.test(bodyText));
 }
 
+// The MODERN "Sign in with Google" (GIS) consent screen uses different copy
+// than the classic OAuth consent: "Allow <App> to access this info about you"
+// listing "Name and profile picture" / "Email address" with a Continue button
+// (MEASURED 2026-06-13: langfuse OAuth as a fresh robot lands exactly here, and
+// the bot mislabeled it oauth_stuck_on_chooser because the URL is still
+// accounts.google.com). This recognizes that basic-only GIS screen so the bot
+// can auto-approve it — same safety contract as googleConsentIsBasicFromDom:
+// any sensitive phrase (Drive/Gmail/contacts/…) hard-fails it. Exported for tests.
+export function googleGisConsentIsBasic(bodyText: string): boolean {
+  // Safety first — any sensitive scope wording disqualifies, via both the
+  // danger scraper and the explicit non-basic phrase set.
+  if (scrapeGoogleScopePhrases(bodyText).length > 0) return false;
+  if (GOOGLE_NON_BASIC_CONSENT_PHRASES.some((p) => p.test(bodyText))) return false;
+  // Positive GIS basic signal: the "access this info about you" framing plus a
+  // name/email/profile item and nothing else. Fall back to the classic
+  // basic-phrase check for the older consent layout.
+  const isGisScreen = /to access this info about you|access your google account/i.test(bodyText);
+  const hasBasicItem =
+    /name and profile picture/i.test(bodyText) ||
+    /\bemail address\b/i.test(bodyText) ||
+    /personal info/i.test(bodyText) ||
+    /public profile/i.test(bodyText);
+  if (isGisScreen && hasBasicItem) return true;
+  return googleConsentIsBasicFromDom(bodyText);
+}
+
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
@@ -2108,10 +2134,22 @@ export function detectAlreadySignedIn(args: {
     // /redis, /kafka, /vector, /cluster, /databases?, /instances?,
     // /apps?, /deployments?, /services? — all common product-name
     // routes that almost always indicate authenticated state.
+    // An /organizations/<…> or /orgs/<…> prefix is an authenticated-only
+    // marker: a logged-OUT visitor never has an organization-scoped route.
+    // pinecone's post-OAuth plan-chooser sits at
+    // app.pinecone.io/organizations/registration — the trailing
+    // "registration" tripped the register-exclusion below and the bot, fully
+    // signed in via the operator's existing Google-linked account, bailed
+    // no_signup_link instead of routing to key-extraction (MEASURED
+    // 2026-06-11: pinecone account was created May 25, so every later run
+    // lands here authenticated). An org-prefixed path forces dashboardy and
+    // bypasses the auth-route exclusion.
+    const hasOrgPrefix = /\/(?:organizations?|orgs?)\//i.test(parsed.pathname);
     dashboardyPath =
-      /\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
+      hasOrgPrefix ||
+      (/\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
         parsed.pathname,
-      ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname);
+      ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname));
   } catch {
     // Malformed URL — skip URL signal.
   }
@@ -2697,6 +2735,31 @@ export function detectGoogleNoAccount(url: string, bodyText: string): boolean {
 // post-verify planner can't reliably target, and the bot loops
 // trying. Defining trait: hostname accounts.google.com (or
 // accounts.googleusercontent.com) at the post-OAuth gate.
+// Is this URL on an OAuth PROVIDER's own domain (github.com, accounts.google.com,
+// gitlab.com, …)? Such a URL is mid-handshake — its `/login/oauth/authorize`
+// path reads as a "login route", but navigating to the provider's ROOT abandons
+// the handshake on the provider's domain instead of returning to the service
+// (MEASURED 2026-06-11: typesense's GitHub OAuth landed on
+// github.com/login/oauth/authorize and the dead-route escape navigated to
+// github.com/, breaking the flow). The dead-route escape must skip these.
+export function isOAuthProviderHost(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return (
+      h === "github.com" ||
+      h === "gitlab.com" ||
+      h === "bitbucket.org" ||
+      h === "accounts.google.com" ||
+      h === "accounts.googleusercontent.com" ||
+      h.endsWith(".accounts.google.com") ||
+      h === "login.microsoftonline.com" ||
+      h === "appleid.apple.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function detectStuckOnGoogleOAuth(url: string): boolean {
   try {
     const h = new URL(url).hostname.toLowerCase();
@@ -3024,7 +3087,12 @@ export function extractQuotedTokenFromReason(
   // its MAX_CREDENTIAL_LENGTH counterpart. Character class matches
   // what real API tokens look like: alphanumeric, underscores,
   // hyphens; no spaces, no punctuation that would gather UI text.
-  const matches = reason.matchAll(/['"`]([A-Za-z0-9_\-]{10,80})['"`]/g);
+  // `.` is in the class: many tokens are dot-separated (Zerops
+  // `LhJbaP.VeODh3ZZ…`, GitLab PATs, JWTs, Slack `xox*`); excluding it
+  // dropped every dotted token to null and looped to run_timeout
+  // (MEASURED 2026-06-12: zerops). The verbatim pageText.includes guard
+  // below keeps a sentence's trailing period from matching.
+  const matches = reason.matchAll(/['"`]([A-Za-z0-9_.\-]{10,80})['"`]/g);
   for (const m of matches) {
     const candidate = m[1];
     if (candidate === undefined) continue;
@@ -3185,7 +3253,7 @@ export function extractAllLabeledTokensFromReason(
   //     credential prefix); (2) hard-reject a curated set of common
   //     English status words that look label-like in extract prose.
   const quotedRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_\\-]{4,80})['"\`]`,
+    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_.\\-]{4,80})['"\`]`,
     "gi",
   );
   for (const m of reason.matchAll(quotedRe)) {
@@ -3227,7 +3295,7 @@ export function extractAllLabeledTokensFromReason(
   // value. The credential-shape + blacklist guards run on the
   // captured (possibly-unquoted) value.
   const proseRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_\\-]{4,80})['"\`]?`,
+    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_.\\-]{4,80})['"\`]?`,
     "gi",
   );
   for (const m of reason.matchAll(proseRe)) {
@@ -3498,6 +3566,26 @@ const CREDENTIAL_NOISE_TOKENS: readonly string[] = [
   "protonpass",
   "autofill",
   "passwords",
+  // Cookie-consent widget vocabulary (CookieScript/OneTrust-class banners
+  // render these as checkbox values and category labels on EVERY page,
+  // earlier in DOM order than any credential — zilliz's banner fed
+  // "personalization" to the validator-shaped scan tier as the "key").
+  // Whole-token equality with a generic English word is never a real
+  // credential, so rejecting these costs nothing.
+  "necessary",
+  "analytics",
+  "personalization",
+  "personalisation",
+  "advertising",
+  "advertisement",
+  "marketing",
+  "functional",
+  "preferences",
+  "statistics",
+  "performance",
+  "targeting",
+  "unclassified",
+  "security",
 ];
 
 // Verb-prefixed UI affordances ("Save to 1Password", "Copy to
@@ -3614,16 +3702,28 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
 // then a standalone 6-digit number (the most common verification length).
 // Returns null when nothing code-shaped is found so the caller still bails
 // honestly rather than typing garbage. Exported for unit testing.
-export function extractCodeFromEmailBody(email: {
-  subject: string;
-  body_text?: string | null;
-  body_html?: string | null;
-}): string | null {
-  const text = [
+export function extractCodeFromEmailBody(
+  email: {
+    subject: string;
+    body_text?: string | null;
+    body_html?: string | null;
+  },
+  // The recipient address, when known. Verification emails routinely echo
+  // the recipient ("sent to sandra.young487@…"); if its local part carries
+  // digits they can be mistaken for the code. Strip the address out before
+  // scanning so a human-looking alias never poisons the extraction.
+  recipient?: string,
+): string | null {
+  let text = [
     email.subject ?? "",
     email.body_text ?? "",
     (email.body_html ?? "").replace(/<[^>]+>/g, " "),
   ].join("\n");
+  if (recipient !== undefined && recipient.length > 0) {
+    text = text.split(recipient).join(" ");
+    const local = recipient.split("@")[0];
+    if (local !== undefined && local.length > 0) text = text.split(local).join(" ");
+  }
   // 1) A code sitting next to a verification keyword — the strongest signal.
   const kw = text.match(
     /(?:verification code|sign[\s-]?in code|one[\s-]?time(?:\s+(?:code|password))?|security code|your code|confirmation code|code is|enter(?:\s+this)?\s+code)\b[^0-9]{0,40}([0-9]{4,8})\b/i,
@@ -3873,6 +3973,17 @@ export class SignupAgent {
   // burn through more than MAX_LLM_CALLS_PER_SIGNUP. Reset isn't needed
   // because each signup gets a fresh SignupAgent in index.ts.
   private llmCallCount = 0;
+  // Capture-chain round counter shared across the signup-form-fill phase
+  // (captureSignupFormRounds) and the post-verify loop so they form ONE
+  // contiguous chain. Stays 0 on the OAuth path (no form-fill capture), so
+  // post-verify starts at 0 exactly as before. Per-run instance → no reset.
+  private captureChainRound = 0;
+  // The stable signup-form entry URL the bot navigated to (e.g.
+  // cloud.zilliz.com/signup). captureSignupFormRounds stamps it as the
+  // preamble rounds' URL instead of the transient SPA URL getState() reads
+  // mid-fill (zilliz settles to /login/loading) — so the synthesized
+  // signup_url points a fresh replay at the real form, not a loading shell.
+  private resolvedSignupUrl: string | undefined;
   // Tracks which backend handled each call, for debugging cost/quality.
   // backends_used[i] is the .name string of the LLMClient that produced
   // the i-th reply this run.
@@ -3962,7 +4073,21 @@ export class SignupAgent {
       steps.push(`${label} captcha gate skipped — session already captcha-blocked (${kind}).`);
       return { found: true, solved: false, blocked: true, kind };
     }
-    let result = await this.browser.solveVisibleCaptcha();
+    // Best-effort: captcha DETECTION must never abort a signup. A bounded
+    // boundingBox / detect race inside solveVisibleCaptcha that throws is
+    // treated as "no widget here, proceed" — the OAuth-first path already
+    // wraps this call (browser.ts ~6351); the form-fill path didn't, so an
+    // invisible-mode Turnstile (which patchright + residential pass) crashed
+    // the run instead of falling through to submit.
+    let result: Awaited<ReturnType<typeof this.browser.solveVisibleCaptcha>>;
+    try {
+      result = await this.browser.solveVisibleCaptcha();
+    } catch (err) {
+      steps.push(
+        `${label} captcha gate: detection error (${err instanceof Error ? err.message : String(err)}) — treating as no widget, continuing`,
+      );
+      return { found: false, solved: false, blocked: false, kind: "turnstile" };
+    }
     if (!result.found) {
       // No VISIBLE widget — but an invisible Turnstile / reCAPTCHA-v3 may
       // be present and scoring silently. Record its presence once (a
@@ -4075,6 +4200,43 @@ export class SignupAgent {
         }
       } else if (sitekey === null) {
         steps.push(`${label} captcha: hCaptcha widget detected but no sitekey found — cannot Tier-3 solve`);
+      }
+    }
+    // Turnstile Tier 3 (2026-06-12). Mirrors the hCaptcha path; the "Cloudflare
+    // IP-scores Turnstile so a solver token is rejected" belief that kept this
+    // off is FALSIFIED (exa fails on a fresh direct residential IP + real GPU
+    // — not IP-bound; STATE.md). The 2Captcha key is configured. Covers the
+    // post-SUBMIT form Turnstile (cartesia-class), complementing the
+    // OAuth-precheck branch in runOAuthFlow.
+    if (
+      !result.solved &&
+      result.kind === "turnstile" &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
+      const sitekey = await this.browser.extractTurnstileSitekey();
+      const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+      if (sitekey !== null && pageUrl !== undefined) {
+        steps.push(`${label} captcha: Tier 3 — submitting Turnstile sitekey to 2Captcha (${sitekey.slice(0, 12)}…)`);
+        const solveRes = await this.captchaSolver.solveTurnstile({ sitekey, pageUrl });
+        if (solveRes.kind === "ok") {
+          const injected = await this.browser.injectTurnstileToken(solveRes.token);
+          if (injected) {
+            steps.push(
+              `${label} captcha: Tier 3 Turnstile solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+            );
+            result = { ...result, solved: true };
+          } else {
+            steps.push(
+              `${label} captcha: Tier 3 Turnstile token arrived but page injection failed — captcha stays blocked`,
+            );
+          }
+        } else {
+          steps.push(`${label} captcha: Tier 3 Turnstile ${solveRes.kind}` +
+            ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+            ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : ""));
+        }
+      } else if (sitekey === null) {
+        steps.push(`${label} captcha: Turnstile widget detected but no sitekey found — cannot Tier-3 solve`);
       }
     }
     // rc.32 — forensic snapshot after the captcha attempt. Without
@@ -4376,9 +4538,31 @@ export class SignupAgent {
         // default 2 retries (otherwise the bot gives up at ~6s and wrongly
         // falls back to the email-signup path before the GitHub button
         // even exists).
-        const oauthScanShell = isLoadingShellText(
-          await this.browser.extractText().catch(() => ""),
+        // An almost-empty inventory is itself a strong unhydrated-SPA signal,
+        // even when the page TEXT doesn't match the loading-shell phrases
+        // (lancedb's accounts.lancedb.com/sign-up renders its Google button
+        // late and shows 0 interactive candidates meanwhile — MEASURED
+        // 2026-06-11: it bailed oauth_required after only 2 retries because
+        // the text heuristic missed it). Treat ≤1 interactive elements as a
+        // loading shell so the late-rendering provider button gets the patient
+        // 8-retry budget instead of a premature email-fallback bail.
+        //
+        // Also patient when the page has NO provider button (we're in this
+        // branch because the scan found none) AND no email/password form yet:
+        // the auth surface simply hasn't hydrated. An OAuth-ONLY signup
+        // (replit: "Continue with Google/GitHub", no credential input) renders
+        // its provider buttons a beat late, and with >1 element it otherwise
+        // got only 2 retries and bailed oauth_required. If a form IS present,
+        // it's a genuine form-signup → fall back to form-fill without waiting.
+        const hasCredentialInput = inventory.some(
+          (e) =>
+            e.tag === "input" &&
+            (e.type === "email" || e.type === "password" || e.type === "tel"),
         );
+        const oauthScanShell =
+          inventory.length <= 1 ||
+          !hasCredentialInput ||
+          isLoadingShellText(await this.browser.extractText().catch(() => ""));
         const maxOauthScanRetries = oauthScanShell ? 8 : 2;
         if (oauthScanRetries < maxOauthScanRetries) {
           oauthScanRetries += 1;
@@ -4866,7 +5050,68 @@ export class SignupAgent {
         hint = `The previous submit produced validation errors. Visible page text: ${afterText.slice(0, 600)}`;
         continue;
       }
+      // Capture the signup-form preamble (email + password fills + the
+      // submit click) as the FIRST rounds of the chain, so a synthesized
+      // email-OTP skill's graph DISPATCHES the verification email before
+      // its await_email_code step. Without it the capture begins post-
+      // verify and the skill can never replay (zilliz). Only the email-form
+      // path reaches here (OAuth returns `already_oauth` earlier), so OAuth
+      // skills keep starting their chain at round 0.
+      await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
       return { kind: "submitted" };
+    }
+  }
+
+  // Emit the signup-form-fill rounds (email + password + submit) into the
+  // capture chain. Shares this.captureChainRound with the post-verify loop
+  // so the two phases form one contiguous 0..N chain. The captured email
+  // value is templatized to ${EMAIL_ALIAS} by the synthesizer; the
+  // generated throwaway password is baked literally (a fresh account each
+  // replay, so reuse is harmless). Best-effort — capture must never fail a
+  // signup.
+  private async captureSignupFormRounds(
+    service: string,
+    plan: SignupPlan,
+    inventory: InteractiveElement[],
+    fillValues: Record<FillValueKind, string>,
+  ): Promise<void> {
+    try {
+      const live = await this.browser.getState();
+      // Stamp the STABLE signup-form URL (not the transient SPA URL the SPA
+      // may have settled to mid-fill); the synthesizer derives signup_url
+      // from round 0's url, and a fresh replay must land on the real form.
+      const state = {
+        ...live,
+        url: this.resolvedSignupUrl ?? live.url,
+      };
+      const emit = (observed: PostVerifyStep): void => {
+        captureOnboardingRound({
+          service,
+          round: this.captureChainRound,
+          oauth: false,
+          state,
+          inventory,
+          observed,
+        });
+        this.captureChainRound += 1;
+      };
+      for (const action of plan.actions) {
+        if (action.kind !== "fill") continue;
+        if (action.value_kind !== "email" && action.value_kind !== "password") continue;
+        emit({
+          kind: "fill",
+          selector: action.selector,
+          value: fillValues[action.value_kind],
+          reason: `Fill the signup ${action.value_kind}`,
+        });
+      }
+      emit({
+        kind: "click",
+        selector: plan.submit_selector,
+        reason: "Submit the signup form to dispatch the verification email",
+      });
+    } catch {
+      // Capture is a synthesis input + forensic aid; never fatal.
     }
   }
 
@@ -4966,6 +5211,46 @@ export class SignupAgent {
   // attribute equal to the account's email, plus role="link" or
   // jsaction. The fallback is any element whose visible text
   // contains an @ — accounts always show their email.
+  // Approve a basic "Sign in with Google" consent screen ("Allow <App> to
+  // access this info about you" → Continue). Returns:
+  //   "approved"    — basic consent, clicked Continue/Allow
+  //   "non_basic"   — consent reaches beyond identity; caller must NOT auto-grant
+  //   "not_consent" — not a consent screen (no Continue/Allow + access wording)
+  //   "error"       — page unavailable
+  // Mirrors tryClickGoogleChooserCard's direct-page approach. The safety gate
+  // (googleGisConsentIsBasic) is the same conservative one the popup-flow
+  // consent uses — only the basic identity grant is auto-approved.
+  private async tryApproveGoogleConsentScreen(): Promise<
+    "approved" | "non_basic" | "not_consent" | "error"
+  > {
+    try {
+      const page = (
+        this.browser as unknown as { page: import("playwright").Page | null }
+      ).page;
+      if (page === null || page === undefined) return "error";
+      const bodyText = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+      const looksLikeConsent =
+        /to access this info about you|access your google account|wants (?:to )?access|allow .{1,40} to access/i.test(
+          bodyText,
+        ) && /\b(continue|allow)\b/i.test(bodyText);
+      if (!looksLikeConsent) return "not_consent";
+      if (!googleGisConsentIsBasic(bodyText)) return "non_basic";
+      for (const name of [/^continue$/i, /^allow$/i]) {
+        const btn = page.getByRole("button", { name }).first();
+        try {
+          await btn.waitFor({ state: "visible", timeout: 2_500 });
+          await btn.click({ timeout: 3_000 });
+          return "approved";
+        } catch {
+          continue;
+        }
+      }
+      return "not_consent"; // basic scopes but no clickable Continue/Allow found
+    } catch {
+      return "error";
+    }
+  }
+
   private async tryClickGoogleChooserCard(): Promise<boolean> {
     try {
       const page = (
@@ -5472,6 +5757,7 @@ export class SignupAgent {
       }
 
       steps.push(`Navigating to ${signupUrl}`);
+      this.resolvedSignupUrl = signupUrl;
       await this.browser.goto(signupUrl);
       // Clear any anti-bot interstitial BEFORE the landing read below.
       // goto() only awaits domcontentloaded, so a Cloudflare "Verifying you
@@ -5525,14 +5811,50 @@ export class SignupAgent {
       // detectAlreadySignedIn's precondition (no email/password/tel input
       // visible) makes this safe: a real signup/login page short-circuits to
       // false before any dashboard marker is considered.
-      const landed = await this.browser.getState();
-      const landedInventory = await this.browser.extractInteractiveElements();
-      if (
-        detectAlreadySignedIn({
-          inventory: landedInventory,
-          url: landed.url,
-        })
-      ) {
+      let landed = await this.browser.getState();
+      let landedInventory = await this.browser.extractInteractiveElements();
+      let signedIn = detectAlreadySignedIn({
+        inventory: landedInventory,
+        url: landed.url,
+      });
+      // SPA-settle re-check (returning-user cluster). An authenticated SPA
+      // redirects the session AFTER the first read — pinecone's
+      // `/?sessionType=signup` routes to `/organizations/registration` once
+      // React hydrates — so a returning-user landing is initially captured as
+      // an un-hydrated shell (no dashboard markers, no credential input yet)
+      // and missed → no_signup_link. When the first detect is false, the page
+      // is shell-like (few elements), AND there's no credential form rendered,
+      // dwell once and re-read before classifying. Safe: a real login/signup
+      // page renders its credential input or signup affordance, so
+      // detectAlreadySignedIn stays false on the re-check (no false positive).
+      if (!signedIn && landedInventory.length <= 4) {
+        const hasCredInput = landedInventory.some(
+          (e) =>
+            e.tag === "input" &&
+            (e.type === "email" || e.type === "password" || e.type === "tel"),
+        );
+        // Only a BARE shell (no credential form AND no OAuth/signup button)
+        // is a returning-user-redirect candidate. A page that already shows a
+        // provider button is a usable signup entry — take it as-is (and don't
+        // perturb the OAuth-first flow with an extra settle).
+        const hasOAuthHere =
+          findFirstOAuthButton(landedInventory, ["google", "github"]) !== null;
+        if (!hasCredInput && !hasOAuthHere) {
+          await this.browser.wait(3);
+          await this.browser.waitForInteractiveDom(5, 12_000).catch(() => undefined);
+          const reLanded = await this.browser.getState();
+          const reInv = await this.browser.extractInteractiveElements();
+          if (detectAlreadySignedIn({ inventory: reInv, url: reLanded.url })) {
+            landed = reLanded;
+            landedInventory = reInv;
+            signedIn = true;
+            steps.push(
+              `${task.service}: returning-user dashboard surfaced after SPA settle (${pathOf(reLanded.url)})`,
+            );
+          }
+        }
+      }
+      if (signedIn) {
         steps.push(
           `${task.service}: already authenticated (dashboard markers, no signup CTA) — ` +
             `skipping signup, routing straight to key extraction`,
@@ -6098,7 +6420,9 @@ export class SignupAgent {
 
                 // If no creds yet, run the Claude-planned navigation loop.
                 if (credentials.api_key === undefined && credentials.username === undefined) {
-                  const maxRounds = task.postVerifyMaxRounds ?? 6;
+                  // 24 (not 6) — same multi-step onboarding wizard the OAuth
+                  // path budgets for; see the enterEmailVerificationCode note.
+                  const maxRounds = task.postVerifyMaxRounds ?? 24;
                   credentials = await this.postVerifyLoop({
                     service: task.service,
                     credentials: { email: task.email, password },
@@ -6120,7 +6444,7 @@ export class SignupAgent {
                 // No link and the inbox parser found no code — last-resort
                 // scan the email body ourselves for a verification code
                 // (passwordless "we emailed you a code" flow, e.g. axiom).
-                const bodyCode = extractCodeFromEmailBody(email);
+                const bodyCode = extractCodeFromEmailBody(email, task.email);
                 if (bodyCode !== null) {
                   steps.push(
                     `Email had no link but carried a verification code (…${bodyCode.slice(-2)}) — entering it.`,
@@ -6326,6 +6650,49 @@ export class SignupAgent {
                   ` — clicking the ${provider.label} affordance anyway`,
               );
             }
+          }
+        }
+        // Turnstile Tier-3 (2026-06-12). The "Cloudflare IP-scores Turnstile
+        // so a solver token is rejected" belief that kept this OFF was
+        // FALSIFIED — exa fails on a fresh direct residential IP + real GPU, so
+        // its Turnstile is NOT IP-bound (STATE.md). The 2Captcha key is
+        // configured (harvester.env). Try the solver token; if Cloudflare still
+        // rejects it the step trail says so and we fall through to the
+        // inert-click path (which now bails captcha_blocked truthfully).
+        if (
+          !solvedViaTier3 &&
+          captcha.kind === "turnstile" &&
+          this.captchaSolver?.isAvailable() === true
+        ) {
+          const sitekey = await this.browser.extractTurnstileSitekey();
+          const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+          if (sitekey !== null && pageUrl !== undefined) {
+            steps.push(
+              `OAuth: Tier 3 — submitting Turnstile sitekey to 2Captcha (${sitekey.slice(0, 12)}…)`,
+            );
+            const solveRes = await this.captchaSolver.solveTurnstile({ sitekey, pageUrl });
+            if (solveRes.kind === "ok") {
+              const injected = await this.browser.injectTurnstileToken(solveRes.token);
+              if (injected) {
+                solvedViaTier3 = true;
+                steps.push(
+                  `OAuth: Tier 3 solved the Turnstile in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha — clicking the ${provider.label} affordance`,
+                );
+              } else {
+                steps.push(
+                  `OAuth: Tier 3 Turnstile token arrived but page injection failed — clicking the ${provider.label} affordance anyway`,
+                );
+              }
+            } else {
+              steps.push(
+                `OAuth: Tier 3 Turnstile ${solveRes.kind}` +
+                  ("reason" in solveRes ? `: ${solveRes.reason}` : "") +
+                  ("durationMs" in solveRes ? ` (${Math.round(solveRes.durationMs / 1000)}s)` : "") +
+                  ` — clicking the ${provider.label} affordance anyway`,
+              );
+            }
+          } else {
+            steps.push(`OAuth: Tier 3 Turnstile — no sitekey found on page, skipping solver`);
           }
         }
         if (!solvedViaTier3) {
@@ -6936,6 +7303,24 @@ export class SignupAgent {
           await this.browser.wait(3);
           continue;
         }
+        // Defense-in-depth (MEASURED 2026-06-13: clarifai/daytona/gladia hit
+        // this on the OAuth-popup path even after the post-verify consent fix).
+        // Even without blind-consent, auto-approve a provably BASIC GIS consent
+        // (name/email/profile only). googleGisConsentIsBasic hard-fails on ANY
+        // sensitive scope phrase, so this only recovers the identity-only case
+        // Google now hides behind an opaque part= token (no URL-readable scopes).
+        const consentDom = await this.browser.extractText().catch(() => "");
+        if (googleGisConsentIsBasic(consentDom)) {
+          steps.push(
+            "OAuth: consent DOM is basic identity-only (GIS; scopes not URL-readable) — auto-approving",
+          );
+          const advanced = await this.browser.advanceOAuthConsent(provider.id);
+          if (advanced) {
+            consentAlreadyApproved = true;
+            await this.browser.wait(3);
+            continue;
+          }
+        }
         return this.oauthAbort(
           "oauth_consent_needs_review",
           `reached a ${provider.label} consent screen but could not read its requested scopes ` +
@@ -7024,7 +7409,10 @@ export class SignupAgent {
     // ORIGIN ROOT lets the service redirect an authenticated user to its
     // real dashboard. Generalizes: a service already on its dashboard has a
     // non-auth path here and is left alone.
-    if (isSignupOrLoginRoute(this.browser.currentUrl())) {
+    if (
+      isSignupOrLoginRoute(this.browser.currentUrl()) &&
+      !isOAuthProviderHost(this.browser.currentUrl())
+    ) {
       const root = originRoot(this.browser.currentUrl());
       if (root !== null) {
         steps.push(
@@ -7040,6 +7428,44 @@ export class SignupAgent {
       }
     }
     await saveDebugSnapshot(this.browser, "oauth-post-consent");
+
+    // Captcha-gated OAuth detection (truthful failure, not a false "signed in").
+    // exa's login lives at auth.exa.ai/?callbackUrl=… (path "/"), which
+    // isLoginPageUrl doesn't recognise, so the settle loop above declares
+    // "redirected to the app" even when we never left the gated login page.
+    // If we're STILL showing a provider OAuth button AND a Turnstile/verify
+    // challenge, the sign-in click was INERT — the unsolved captcha gated the
+    // button, the URL never reached the provider, and we are NOT signed in.
+    // MEASURED 2026-06-12: exa fails identically on a real laptop + fresh
+    // direct residential IP (so it is the Turnstile/automation layer, NOT
+    // IP/fingerprint — see STATE.md). Bail captcha_blocked instead of burning
+    // the whole post-verify budget flailing on the login page.
+    {
+      const postText = (await this.browser.extractText().catch(() => "")).toLowerCase();
+      const captchaChallenge =
+        /complete the verification challenge|verify you are human|are you human|please complete the (?:captcha|challenge|verification)/i.test(
+          postText,
+        );
+      if (captchaChallenge) {
+        const postInv = await this.browser
+          .extractInteractiveElements()
+          .catch(() => [] as InteractiveElement[]);
+        const stillGatedByProviderButton =
+          findFirstOAuthButton(postInv, [provider.id]) !== null;
+        if (stillGatedByProviderButton) {
+          return this.oauthAbort(
+            "captcha_blocked",
+            `${task.service}'s ${provider.label} sign-in is gated by an unsolved ` +
+              `Turnstile/verification challenge — the OAuth click was inert (still on the ` +
+              `pre-auth login page). Not IP/fingerprint (a real browser + fresh direct IP ` +
+              `fails identically); this service runs a strict Turnstile our automated solve ` +
+              `can't clear.`,
+            steps,
+          );
+        }
+      }
+    }
+
     steps.push(
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
     );
@@ -7302,43 +7728,54 @@ export class SignupAgent {
       // within a few seconds, abort with oauth_stuck_on_chooser.
       if (detectStuckOnGoogleOAuth(gateState.url)) {
         steps.push(
-          `Post-OAuth: stuck on Google account chooser (${pathOf(gateState.url)}). ` +
-            `Trying to click an account card.`,
+          `Post-OAuth: on Google OAuth screen (${pathOf(gateState.url)}). ` +
+            `Trying chooser card + consent.`,
         );
+        // (1) Multi-account chooser: pick the account card (no-op if it's
+        //     already the consent screen).
         const clicked = await this.tryClickGoogleChooserCard();
         if (clicked) {
           await this.browser.wait(3);
           await saveDebugSnapshot(this.browser, "oauth-chooser-click");
-          const afterUrl = this.browser.currentUrl();
-          steps.push(
-            `Post-OAuth: chooser card clicked — now at ${pathOf(afterUrl)} ` +
-              `(host=${(() => {try{return new URL(afterUrl).hostname;}catch{return "?";}})()})`,
-          );
-          // If the click moved us off accounts.google.com, fall
-          // through to the post-verify loop normally.
-          if (!detectStuckOnGoogleOAuth(afterUrl)) {
-            // continue to extract + postVerifyLoop
-          } else {
+          steps.push(`Post-OAuth: chooser card clicked — now at ${pathOf(this.browser.currentUrl())}`);
+        }
+        // (2) Consent screen: "Allow <App> to access this info about you" →
+        //     Continue. This is ALSO on accounts.google.com, so the old code
+        //     mislabeled it oauth_stuck_on_chooser and bailed (MEASURED
+        //     2026-06-13: langfuse). Auto-approve the BASIC identity grant
+        //     (googleGisConsentIsBasic gates out anything sensitive).
+        if (detectStuckOnGoogleOAuth(this.browser.currentUrl())) {
+          const consent = await this.tryApproveGoogleConsentScreen();
+          steps.push(`Post-OAuth: consent screen → ${consent}`);
+          if (consent === "approved") {
+            await this.browser.wait(4);
+            await saveDebugSnapshot(this.browser, "oauth-consent-approved");
+          } else if (consent === "non_basic") {
             return {
               success: false,
               error:
-                `oauth_stuck_on_chooser: clicked an account card on the chooser but the URL ` +
-                `stayed on accounts.google.com (${pathOf(afterUrl)}). Finish the signup manually.`,
+                `oauth_consent_needs_review: ${task.service}'s Google consent requests scopes ` +
+                `beyond basic identity — not auto-approving. Finish the signup manually.`,
               steps,
               ...this.resultTail(),
             };
           }
-        } else {
+        }
+        const afterUrl = this.browser.currentUrl();
+        // Moved off accounts.google.com → OAuth completed; fall through to
+        // extract + postVerifyLoop. Still stuck → genuine wall.
+        if (detectStuckOnGoogleOAuth(afterUrl)) {
           return {
             success: false,
             error:
               `oauth_stuck_on_chooser: ${task.service}'s Google OAuth flow did not redirect off ` +
-              `accounts.google.com (${pathOf(gateState.url)}) and no clickable account card was ` +
-              `found on the chooser. Finish the signup manually.`,
+              `accounts.google.com (${pathOf(afterUrl)}) after chooser + consent handling. ` +
+              `Finish the signup manually.`,
             steps,
             ...this.resultTail(),
           };
         }
+        steps.push(`Post-OAuth: cleared Google screens — now at ${pathOf(afterUrl)}`);
       }
     }
 
@@ -7671,6 +8108,16 @@ Output rules:
   modify a selector. A selector not in the inventory is rejected and
   you will be asked to re-plan.
 - Include the TOS/agree checkbox ONLY if the inventory has a real input of type=checkbox for it. If there is no such checkbox, OMIT the check action entirely — never substitute a link or a button.
+- Email verification-CODE buttons: if the inventory has a button like
+  "Send code", "Send verification code", "Get code", or "Email me a
+  code" beside an OTP / verification-code field, you MUST include a
+  click action on it, ORDERED AFTER the email fill. The bot operates a
+  live email inbox: clicking it dispatches the code to the filled
+  email, and the bot fetches the emailed code and fills the code field
+  itself in a later step. NEVER skip this button or treat the code as
+  un-automatable / manual — if you omit it, the service never sends the
+  email and the signup stalls. Do NOT fill the code field yourself (you
+  don't have the code yet); just click the send-code button.
 - Skip elements marked [cookie-consent — avoid], and skip optional
   marketing-opt-in checkboxes.
 - Do NOT add a separate password-confirmation fill unless the
@@ -7797,7 +8244,13 @@ ${formatInventory(input.inventory)}`,
     return this.postVerifyLoop({
       service: task.service,
       credentials: { email: task.email, password },
-      maxRounds: task.postVerifyMaxRounds ?? 6,
+      // Match the OAuth post-verify budget (24). The onboarding form
+      // reached after EMAIL verification is the same multi-step wizard the
+      // OAuth path hits — a profile form (name, country, company, role) +
+      // a "create your first project" step can need 8-10 rounds alone.
+      // The old 6 starved zilliz's "Set up your account" form: the planner
+      // had filled only name+jobTitle when the budget ran out.
+      maxRounds: task.postVerifyMaxRounds ?? 24,
       steps,
       initialHint: hint,
       ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
@@ -8235,6 +8688,13 @@ ${formatInventory(input.inventory)}`,
     // persisted (anti-bot/IP rejection) ⇒ oauth_session_not_persisted, not
     // a navigation bug. Generalizes without per-service URLs.
     let consecutiveOauthLoginPageRounds = 0;
+    // Fired once: before declaring the OAuth session dead, reload the page —
+    // an authenticated session whose cookie IS set often shows a transient
+    // login screen (Auth0/WorkOS silent re-auth round-trip, or a slow SPA that
+    // renders the login shell before hydrating the dashboard). A reload lands
+    // the dashboard for those; a genuine callback rejection stays on login
+    // even after reload, so this never masks a real wall.
+    let oauthBounceReloadTried = false;
     let planFailures = 0;
     // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
     // gate planFailures (so a transient 502 won't push us into the
@@ -8305,6 +8765,18 @@ ${formatInventory(input.inventory)}`,
     // rounds with no inventory change and break out with the proper
     // status before burning the post-verify budget.
     let consecutiveWaits = 0;
+    // Writer-class hung-redirect tracker. A post-OAuth interstitial
+    // (app.writer.com/redirect-auth?…&registered=true) renders a spinner
+    // SHELL — non-zero interactive elements — that never resolves because the
+    // new account's bootstrap (workspace/org provisioning) hangs. The planner
+    // correctly emits `wait`, but the 0-element guard above never fires (the
+    // shell has elements), so it waits out the entire 600s budget (MEASURED
+    // 2026-06-11: writer). Track consecutive waits on the SAME url regardless
+    // of element count; reload once (the redirect usually completes on a fresh
+    // load), then break with a clean terminal reason.
+    let consecutiveSameUrlWaits = 0;
+    let lastWaitUrl: string | null = null;
+    let waitReloadTried = false;
     // rc.39 — navigate-loop tracker. Perplexity / Koyeb / Porter all
     // had post-verify loops where the planner emitted `navigate`
     // 5-6 rounds in a row and the URL never changed — the service
@@ -8396,8 +8868,10 @@ ${formatInventory(input.inventory)}`,
     // rejected the run as `missing_round`, and auto-promote silently
     // dropped it. By tracking `capturedRound` separately we get a
     // contiguous 0..N-1 chain regardless of how many planner re-plans
-    // happen mid-run.
-    let capturedRound = 0;
+    // happen mid-run. Continues from any signup-form preamble rounds the
+    // form-fill phase already captured (captureSignupFormRounds); 0 on the
+    // OAuth path, so this is unchanged for OAuth skills.
+    let capturedRound = this.captureChainRound;
     // 0.8.2-rc.12 — multi-cred-aware loop exit. Track the number of
     // distinct credential keys we've accumulated; if we're in a
     // multi-cred bundle (cloud_name, api_secret, application_id, …)
@@ -8438,6 +8912,30 @@ ${formatInventory(input.inventory)}`,
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
     for (let round = 0; round < args.maxRounds; round++) {
+      // Top-of-round credential sweep (MEASURED 2026-06-13: langfuse). The
+      // credential can become visible on the page BETWEEN planner actions —
+      // the keys render in the dashboard after onboarding while the planner
+      // gets distracted re-clicking a promo banner it mis-reads as an error
+      // toast. Re-reading the page every round makes extraction independent of
+      // the planner choosing the right click, so an on-screen key is never
+      // missed into a maxRounds bail. Merge-only (never overwrites a prior
+      // capture); both extractors are best-effort.
+      try {
+        const sweep = await this.extractCredentials();
+        for (const [k, v] of Object.entries(sweep)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
+      } catch {
+        // page mid-render — the early-exit below just won't fire this round
+      }
+      try {
+        const sweepLabeled = await this.extractFromDomProximity();
+        for (const [k, v] of Object.entries(sweepLabeled)) {
+          if (credentials[k] === undefined) credentials[k] = v;
+        }
+      } catch {
+        // DOM-proximity miss is non-fatal
+      }
       const currentCredentialKeyCount = Object.keys(credentials).filter(
         (k) => !NON_CREDENTIAL_KEYS.has(k),
       ).length;
@@ -8775,10 +9273,30 @@ ${formatInventory(input.inventory)}`,
       // without-residential-egress) oauth_session_not_persisted wall.
       if (args.credentials === undefined && isLoginPageUrl(state.url)) {
         consecutiveOauthLoginPageRounds += 1;
+        if (consecutiveOauthLoginPageRounds >= 3 && !oauthBounceReloadTried) {
+          // One reload before giving up. A set session cookie + a transient
+          // login shell (silent re-auth bounce / slow hydration — measured on
+          // the activeloop/galileo/turbopuffer class) lands the dashboard on a
+          // fresh load; a genuine rejection stays on login and bails below.
+          oauthBounceReloadTried = true;
+          args.steps.push(
+            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
+              `${consecutiveOauthLoginPageRounds} rounds — reloading once before bailing ` +
+              `(a set session cookie often lands the dashboard on reload).`,
+          );
+          try {
+            await this.browser.goto(originRoot(state.url) ?? state.url);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch {
+            // reload failed — next login-page round bails below
+          }
+          consecutiveOauthLoginPageRounds = 0;
+          continue;
+        }
         if (consecutiveOauthLoginPageRounds >= 3) {
           args.steps.push(
             `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
-              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback never persisted; bailing.`,
+              `${consecutiveOauthLoginPageRounds} rounds (incl. a reload) — the OAuth callback never persisted; bailing.`,
           );
           throw new OAuthSessionNotPersistedError(
             `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
@@ -8982,6 +9500,36 @@ ${formatInventory(input.inventory)}`,
         }
         lastNavigatedTo = null;
       }
+      // Credential-domain grounding. The OAuth provider (GitHub/GitLab) is
+      // the LOGIN method, never the API-key source — but the planner, told to
+      // "find an API token", sometimes navigates to the provider's own
+      // token-minting settings and tries to create a GitHub PAT as if it were
+      // the service's key (MEASURED 2026-06-11: typesense — the bot went
+      // straight to github.com/settings/tokens and walked into GitHub's
+      // sudo-2FA gate, then mislabeled it the typesense wall). A PAT for
+      // GitHub has nothing to do with the service. Block it and point the
+      // planner back to the service's own dashboard.
+      if (
+        nextStep.kind === "navigate" &&
+        /^https?:\/\/(?:github\.com\/settings\/(?:tokens|personal-access-tokens|apps)|gitlab\.com\/-\/(?:profile\/personal_access_tokens|user_settings))/i.test(
+          nextStep.url,
+        ) &&
+        args.service.toLowerCase() !== "github" &&
+        args.service.toLowerCase() !== "gitlab"
+      ) {
+        args.steps.push(
+          `Post-verify: planner tried to mint a third-party token at ${nextStep.url} — blocked (provider is the login method, not the key source).`,
+        );
+        hint =
+          `STOP — ${nextStep.url} is the OAuth PROVIDER's own token page. You signed in ` +
+          `THROUGH that provider, but the ${args.service} API key lives on ${args.service}'s ` +
+          `OWN dashboard, NOT in a GitHub/GitLab personal access token. Do NOT create a ` +
+          `provider PAT. Navigate back to the ${args.service} dashboard and find its API-keys / ` +
+          `tokens / credentials page there (it is often per-project or per-cluster — create the ` +
+          `project/cluster first if none exists).`;
+        continue;
+      }
+
       // Refuse to re-navigate to a URL already known to 404 — force a
       // click-based re-plan instead of letting the planner re-guess it.
       if (nextStep.kind === "navigate" && deadUrls.has(nextStep.url)) {
@@ -9376,6 +9924,17 @@ ${formatInventory(input.inventory)}`,
               ? `Post-verify: no-progress detected — same ${nextStep.kind} on same selector, inventory unchanged. Re-planning instead of re-running.`
               : `Post-verify: no-progress detected — successive click steps with no inventory change. Forcing a non-click action.`,
           );
+          // A click that changed nothing often means an INLINE validation
+          // error is gating submit (e.g. deepseek's "Please enter the
+          // verification code" — red text, not a toast). Surface it + a
+          // forensic snapshot so the stall is diagnosable instead of silent.
+          const stallError = await this.browser.captureTransientAlert(0);
+          let stallHint = "";
+          if (stallError.length > 0) {
+            args.steps.push(`Post-verify: page shows an inline message: "${stallError}"`);
+            stallHint = ` The page currently shows this message: "${stallError}" — it explains the block; address it (the named field is likely empty/invalid to the form despite looking filled).`;
+          }
+          await saveDebugSnapshot(this.browser, "post-verify-stuck");
           hint =
             `Your previous ${sameSelector ? `'${nextStep.kind}' on ${JSON.stringify(sel)}` : "click steps"} had NO observable effect — the inventory ` +
             `count is unchanged. The element you targeted is either disabled or gated on ` +
@@ -9387,7 +9946,8 @@ ${formatInventory(input.inventory)}`,
             emptyInputHint +
             defaultedSelectHint +
             customComboboxHint +
-            uncheckedBoxHint;
+            uncheckedBoxHint +
+            stallHint;
           prevSignature = signature;
           prevInventorySize = inventory.length;
           continue;
@@ -9493,6 +10053,42 @@ ${formatInventory(input.inventory)}`,
         }
       } else {
         consecutiveWaits = 0;
+      }
+      // Writer-class hung post-OAuth redirect: consecutive waits on the SAME
+      // url even though the page has elements (a spinner shell). Reload once
+      // at the 4th, break at the 6th — don't burn the whole budget waiting.
+      if (nextStep.kind === "wait") {
+        if (state.url === lastWaitUrl) {
+          consecutiveSameUrlWaits += 1;
+        } else {
+          consecutiveSameUrlWaits = 1;
+          lastWaitUrl = state.url;
+        }
+        if (consecutiveSameUrlWaits === 4 && !waitReloadTried) {
+          waitReloadTried = true;
+          args.steps.push(
+            `Post-verify: ${consecutiveSameUrlWaits} consecutive waits on ${state.url} — reloading once to unstick a hung post-OAuth redirect.`,
+          );
+          try {
+            await this.browser.goto(state.url);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch {
+            // reload failed — next round's wait will reach the break below
+          }
+          continue;
+        }
+        if (consecutiveSameUrlWaits >= 6) {
+          this.lastPostVerifyDoneReason =
+            `post-OAuth interstitial (${state.url}) never resolved after ${consecutiveSameUrlWaits} waits — ` +
+            `likely a hung redirect or onboarding bootstrap for a freshly-created account`;
+          args.steps.push(
+            `Post-verify: wait-loop on ${state.url} (${consecutiveSameUrlWaits} rounds, page has elements but never advances) — breaking out.`,
+          );
+          break;
+        }
+      } else {
+        consecutiveSameUrlWaits = 0;
+        lastWaitUrl = null;
       }
       hint = undefined;
       try {
@@ -9762,8 +10358,18 @@ ${formatInventory(input.inventory)}`,
           // shaped regex, so a multi-cred reveal landed nothing
           // unless the explicit extract round re-fired afterward.
           const credentialDeadline = Date.now() + 8000;
+          let alertSeen = "";
+          let alertChecked = false;
           while (Date.now() < credentialDeadline) {
             await this.browser.wait(0.5);
+            // Reuse the first 0.5s settle to grab any transient toast/notification
+            // a submit-like click raised (validation error, rate-limit, "operation
+            // failed") before it auto-dismisses — otherwise a failed submit reads
+            // as a SILENT no-op. MEASURED 2026-06-11 (deepseek Sign-up).
+            if (!alertChecked) {
+              alertChecked = true;
+              alertSeen = await this.browser.captureTransientAlert(0);
+            }
             try {
               const pollExtract = await this.extractCredentials();
               for (const [k, v] of Object.entries(pollExtract)) {
@@ -9787,6 +10393,24 @@ ${formatInventory(input.inventory)}`,
             } catch {
               // Page mid-render — keep polling; next tick may settle.
             }
+          }
+          // A click that raised a notification but yielded no key — surface the
+          // toast text so the planner addresses the real error instead of
+          // re-clicking the same dead button into a stuck-loop.
+          if (credentials.api_key === undefined && alertSeen.length > 0) {
+            args.steps.push(
+              `Post-verify: the page showed a notification after the click: "${alertSeen}"`,
+            );
+            // Forensic snapshot of the page in its post-click error state.
+            // The before-fill/after-submit snapshots only cover the FIRST
+            // submit; a failure on a post-verify re-submit (e.g. deepseek's
+            // "Submitted failed. Please try again." after the OTP is filled)
+            // was otherwise unobservable. Non-fatal by contract.
+            await saveDebugSnapshot(this.browser, "post-verify-alert");
+            hint =
+              `After your last click the page showed this notification: "${alertSeen}". ` +
+              `It likely explains why the page did not advance — address it (fix the named ` +
+              `field, wait, or choose a different action) rather than repeating the same click.`;
           }
         } else if (nextStep.kind === "fill") {
           await this.browser.type(nextStep.selector, nextStep.value);
@@ -10324,6 +10948,23 @@ Strategy:
   ALSO shows preset choice buttons for the same step (e.g. "Optimize assets",
   "Transform images", "Next"). That input is a placeholder, not a field to
   complete — click a preset option button or "Next" instead.
+- **MULTI-FIELD PROFILE / ONBOARDING FORM ("Set up your account",
+  "Tell us about yourself").** When the page is a form with SEVERAL fields
+  (first/last name, country/region, company, job title, phone, use-case,
+  cloud region) gating a "Continue" / "Next" / "Submit" button, you must
+  fill EVERY visible empty text input and pick an option for EVERY
+  unselected dropdown — across your one-action-per-turn budget — BEFORE
+  clicking the gating button. Clicking it while ANY required field is
+  empty just re-renders the same page with red "X is required" errors and
+  wastes a round. Consult STEPS ALREADY TAKEN to see which fields you've
+  done and fill a REMAINING empty one each turn; only click Continue once
+  nothing is left empty.
+- When choosing a dropdown/select option for a profile field (job title,
+  role, use-case, company size, "how did you hear"), prefer a CONCRETE
+  real option (e.g. "Software Engineer", "Startup") — NEVER pick
+  "Other" / "None" / "Prefer not to say". Selecting "Other" SPAWNS an
+  extra required free-text field ("Please specify") that you then also
+  have to fill, costing rounds for no benefit.
 ${loginGuidance}
 - If we're on a "verify your phone" / "verify email" wall, return done (we can't solve those).
 - **EMPTY DASHBOARD — create the first resource.** Many services do NOT expose

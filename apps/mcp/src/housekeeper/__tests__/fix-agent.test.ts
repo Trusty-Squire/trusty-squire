@@ -111,18 +111,20 @@ describe("sameAction", () => {
 // ── clustering ───────────────────────────────────────────────────────
 
 describe("clusterFailures", () => {
-  it("collapses failures sharing stage+signature across services into one cluster", () => {
+  it("collapses failures sharing stage+action-kind across services, regardless of page signature", () => {
+    // The whole point: groq, render and kinde fail the same WAY (same stage,
+    // planner stuck on the same action kind) even though their pages (and thus
+    // signatures) differ. One cluster means one generalizing fix addresses all.
     const clusters = clusterFailures(
       batch([
         failure({ service: "groq", signature: "sig-x" }),
-        failure({ service: "meili", signature: "sig-x" }),
+        failure({ service: "render", signature: "sig-totally-different" }),
         failure({ service: "kinde", signature: "sig-y" }),
       ]),
     );
-    expect(clusters).toHaveLength(2);
-    const shared = clusters.find((c) => c.signature === "sig-x")!;
-    expect(shared.services.sort()).toEqual(["groq", "meili"]);
-    expect(shared.pages).toHaveLength(2);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.services.sort()).toEqual(["groq", "kinde", "render"]);
+    expect(clusters[0]!.pages).toHaveLength(3);
   });
 
   it("separates same-signature but different-stage failures", () => {
@@ -130,6 +132,26 @@ describe("clusterFailures", () => {
       batch([
         failure({ signature: "sig-x", failure_stage: "extract" }),
         failure({ signature: "sig-x", failure_stage: "planner_loop" }),
+      ]),
+    );
+    expect(clusters).toHaveLength(2);
+  });
+
+  it("separates same stage+signature failures with different planner action-kinds", () => {
+    // Same page shape + stage, but the planner died on different actions
+    // (clicking vs giving up) — likely different fixes, so not one cluster.
+    const clusters = clusterFailures(
+      batch([
+        failure({
+          service: "a",
+          signature: "sig-x",
+          terminal_page: { url: "u", inventory: [], observed: { kind: "click", selector: "#x", reason: "nav" } },
+        }),
+        failure({
+          service: "b",
+          signature: "sig-x",
+          terminal_page: { url: "u", inventory: [], observed: { kind: "done", reason: "stop" } },
+        }),
       ]),
     );
     expect(clusters).toHaveLength(2);
@@ -327,9 +349,10 @@ describe("runFixAgent", () => {
     const versions: string[] = [];
     await runFixAgent({
       ...base,
+      // Two distinct clusters under the (stage, action-kind) key → two RC bumps.
       batch: batch([
-        failure({ service: "a", signature: "sig-1" }),
-        failure({ service: "b", signature: "sig-2" }),
+        failure({ service: "a", signature: "sig-1", failure_stage: "planner_loop" }),
+        failure({ service: "b", signature: "sig-2", failure_stage: "extract" }),
       ]),
       propose: async () => proposal(["apps/mcp/src/bot/agent.ts"]),
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),

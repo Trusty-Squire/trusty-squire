@@ -37,6 +37,7 @@
 import { createHash } from "node:crypto";
 import {
   parseSkill,
+  validateReplayGraph,
   SKILL_SCHEMA_VERSION,
   type Skill,
   type SkillCredentialSpec,
@@ -112,7 +113,11 @@ export interface PromoteRejection {
     // `unparseable_credential_label`: an extract round's hint reduced
     // to an empty `produces` after normalization (just "Copy", say).
     | "duplicate_credential_produces"
-    | "unparseable_credential_label";
+    | "unparseable_credential_label"
+    // The synthesized graph is schema-valid but can't replay (mirrors the
+    // registry's POST /skills gate): an await_email_code with no preceding
+    // ${EMAIL_ALIAS} fill + send-code, or a per-run param in signup_url.
+    | "incomplete_replay_graph";
   message: string;
   offending_round?: number;
   offending_step?: number;
@@ -159,7 +164,19 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // session token (kinde-class psid=, redirect_to=) doesn't make replay's first
   // navigation dead.
   const firstRound = verification.rounds[0]!;
-  const signupUrl = generalizeCapturedUrl(firstRound.state.url);
+  // Pick the entry URL for signup_url. When the capture passed through an
+  // OAuth identity provider, round 0's URL can land on the provider's own
+  // domain (e.g. accounts.google.com / myaccount.google.com — the bot
+  // deliberately navigates to the Google app root so the service routes
+  // it back to the dashboard). That domain is NOT a valid signup entry:
+  // replay's first navigation would dead-end on Google instead of the
+  // service. Prefer the first captured round whose host is the service's
+  // own (a non-IdP domain); fall back to round 0 only if every round is on
+  // an IdP domain (shouldn't happen for a real signup).
+  const entryRound =
+    verification.rounds.find((r) => !isIdentityProviderUrl(r.state.url)) ??
+    firstRound;
+  const signupUrl = generalizeCapturedUrl(entryRound.state.url);
   const oauthProvider = inferOAuthProvider(stepsResult.steps);
 
   // rc.24 — guarantee the first step is a navigate. When the captured
@@ -292,9 +309,9 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   const skillId = deriveSkillId(candidate);
   const full: Skill = { ...candidate, skill_id: skillId };
 
+  let parsed: Skill;
   try {
-    const parsed = parseSkill(full);
-    return { kind: "ok", skill: parsed };
+    parsed = parseSkill(full);
   } catch (err) {
     return {
       kind: "rejected",
@@ -308,6 +325,23 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
       synthesizer_version: SYNTHESIZER_VERSION,
     };
   }
+
+  // Stage 1.f — fail fast on a structurally-unreplayable graph, BEFORE we
+  // sign + POST it (the registry enforces the same contract, but catching
+  // it here turns a 400 round-trip into a clear local rejection). zilliz-
+  // class: a capture that began on the post-signup verify page yields an
+  // await_email_code with no preceding email dispatch.
+  const graphCheck = validateReplayGraph(parsed);
+  if (!graphCheck.ok) {
+    return {
+      kind: "rejected",
+      stage: "synthesis",
+      error_kind: "incomplete_replay_graph",
+      message: graphCheck.reason,
+      synthesizer_version: SYNTHESIZER_VERSION,
+    };
+  }
+  return { kind: "ok", skill: parsed };
 }
 
 // ── Step synthesis ───────────────────────────────────────────────────
@@ -612,6 +646,18 @@ function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
   return JSON.stringify(stripped(a)) === JSON.stringify(stripped(b));
 }
 
+// True when a captured `fill` is an email-verification CODE entry: the
+// value is a short numeric code AND the planner's reason describes a
+// verification/OTP step. Both signals are required — a 4-8 digit value
+// alone could be a postal code or an all-numeric project name, and a
+// "code"-mentioning reason alone could be a coupon field.
+function isOtpCodeFill(observed: PostVerifyStep): boolean {
+  if (observed.kind !== "fill") return false;
+  const value = observed.value.trim();
+  if (!/^\d{4,8}$/.test(value)) return false;
+  return /\b(verif|otp|one[\s-]?time|code|2fa|mfa)\b/i.test(observed.reason);
+}
+
 // Returns { step: null } for kinds the synthesizer intentionally drops
 // (done, wait, login). Returns a rejection for kinds we can't translate.
 function translateStep(
@@ -676,6 +722,25 @@ function translateStep(
     }
 
     case "fill": {
+      // Email-verification (OTP) entry → an `await_email_code` step, NOT a
+      // `fill`. The captured value is a 4-8 digit code the bot fetched from
+      // the inbox: baking it as a literal would replay a STALE code, and the
+      // OTP input is frequently unlabeled, so resolveLabelHint would
+      // hard-reject `missing_text_hint` (exactly what blocked zilliz from
+      // synthesizing). The await_email_code step re-fetches a fresh code at
+      // replay time and finds the input heuristically. label_hint is
+      // best-effort — included only when the field happens to be labeled.
+      if (isOtpCodeFill(observed)) {
+        const otpHint = resolveLabelHint(observed.selector, inventory, roundIndex);
+        return {
+          kind: "ok",
+          step: {
+            kind: "await_email_code",
+            ...(otpHint.kind === "ok" ? { label_hint: otpHint.hint } : {}),
+            provenance,
+          },
+        };
+      }
       const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex);
       if (hintResult.kind !== "ok") return hintResult;
       // rc.17 — if the captured value looks like the unique-name
@@ -699,11 +764,20 @@ function translateStep(
       // ("API key name", "production-api-key") closes that gap.
       const literal = observed.value;
       const looksGenerated = /^[a-z]{3,15}-[a-z0-9]{4,12}$/.test(literal);
+      // An email value is the run's signup alias — templatize it to
+      // ${EMAIL_ALIAS} so replay fills a FRESH alias (and so the await_-
+      // email_code dispatch + poll target the same inbox). Baking the
+      // literal would replay the original run's email and, for OTP flows,
+      // dispatch the code to an inbox the replay doesn't own.
+      const looksLikeEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(literal.trim());
       const matchedInput = inventory.find((e) => e.selector === observed.selector);
       const inputLooksLikeTokenName =
         matchedInput !== undefined && looksLikeTokenNameInput(matchedInput);
-      const valueTemplate =
-        looksGenerated || inputLooksLikeTokenName ? "${TOKEN_NAME}" : literal;
+      const valueTemplate = looksLikeEmail
+        ? "${EMAIL_ALIAS}"
+        : looksGenerated || inputLooksLikeTokenName
+          ? "${TOKEN_NAME}"
+          : literal;
       return {
         kind: "ok",
         step: {
@@ -869,11 +943,16 @@ export function isStableDomAttr(value: string | null): value is string {
 // bytes — same additive contract as href_hint).
 export function pickStableDomHint(
   el: InteractiveElement,
-): { name?: string; id?: string } | undefined {
-  const hint: { name?: string; id?: string } = {};
+): { name?: string; id?: string; testid?: string } | undefined {
+  const hint: { name?: string; id?: string; testid?: string } = {};
+  // testid first — it's the strongest anchor (authored to be stable).
+  const testid = el.testId ?? null;
+  if (isStableDomAttr(testid)) hint.testid = testid;
   if (isStableDomAttr(el.name)) hint.name = el.name;
   if (isStableDomAttr(el.id)) hint.id = el.id;
-  return hint.name !== undefined || hint.id !== undefined ? hint : undefined;
+  return hint.testid !== undefined || hint.name !== undefined || hint.id !== undefined
+    ? hint
+    : undefined;
 }
 
 // A URL path segment that can't be reproduced on a fresh account: a UUID or a
@@ -893,11 +972,36 @@ export function hasEphemeralPathSegment(path: string): boolean {
 // Query params whose VALUE is a per-run session/auth token. Stripping them
 // turns a captured deep link back into a stable entry replay can reproduce.
 const EPHEMERAL_URL_PARAM =
-  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce)$/i;
+  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email)$/i;
 
 // Strip per-run session params from a captured URL, byte-preserving any URL
 // that has none. Used for navigate steps + the inferred signup_url so a stale
 // session token doesn't make the entry navigation dead on replay.
+// Hosts that belong to an OAuth identity provider, never a service's own
+// signup page. A capture that passes through one mid-OAuth must not adopt
+// it as signup_url — replay would navigate to the IdP instead of the
+// service. Matches the host exactly or any subdomain of it.
+const IDENTITY_PROVIDER_HOSTS = [
+  "google.com",
+  "github.com",
+  "microsoftonline.com",
+  "appleid.apple.com",
+  "facebook.com",
+  "okta.com",
+  "auth0.com",
+] as const;
+
+export function isIdentityProviderUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return IDENTITY_PROVIDER_HOSTS.some(
+      (idp) => host === idp || host.endsWith(`.${idp}`),
+    );
+  } catch {
+    return false; // relative / malformed — not an IdP entry
+  }
+}
+
 export function generalizeCapturedUrl(url: string): string {
   try {
     const u = new URL(url);
@@ -1219,6 +1323,27 @@ function resolveLabelHint(
   );
   if (duplicates.length === 0) {
     return { kind: "ok", hint };
+  }
+  // The label/placeholder hint is shared by sibling fields — the MUI/antd
+  // pattern where every input carries the same generic "Please input" /
+  // "Please select" placeholder and no <label for=> (zilliz's onboarding
+  // form). Before reaching for a positional near-text hint, prefer a
+  // UNIQUE stable attribute the target itself carries: firstName/lastName/
+  // company each have a distinct `name`, and matchesLabelHint matches
+  // name/id exactly at replay. pickStableAttribute already rejects
+  // React-runtime ids (`:r3:`), so a field whose only id is runtime-
+  // generated correctly falls through to the disambiguator below.
+  const stable = pickStableAttribute(match);
+  if (stable !== null && stable !== hint) {
+    const stableDupes = inventory.filter(
+      (e) =>
+        e.selector !== selector &&
+        (e.tag === "input" || e.tag === "textarea" || e.tag === "select") &&
+        (e.name?.trim() === stable || e.id?.trim() === stable),
+    );
+    if (stableDupes.length === 0) {
+      return { kind: "ok", hint: stable };
+    }
   }
   // 0.8.2-rc.3 — schema-level disambiguator. Look for a unique
   // visible-text element near `match` (Sentry's grid: each row has

@@ -327,3 +327,22 @@ model VaultAuditEvent {
   @@index([type, emitted_at])
   @@index([account_id, type, emitted_at])
 }
+
+// Egress grant — a standing, revocable token a deployed workload holds to
+// call a provider through the injecting proxy, so the raw vault credential
+// never leaves the server (v1a of Egress Grants; see DESIGN-egress-grants.md).
+// id is `g_<hex>` (not a ULID), so no VarChar(26). Only the token HASH is
+// stored — the token itself is shown to the caller exactly once at mint.
+model EgressGrant {
+  id                  String    @id
+  account_id          String    @db.VarChar(26)
+  credential_ref      String
+  token_hash          String    @unique
+  rate_limit_per_hour Int
+  spend_cap_usd       Float?
+  created_at          DateTime  @default(now())
+  revoked_at          DateTime?
+
+  @@index([account_id])
+  @@index([token_hash])
+}

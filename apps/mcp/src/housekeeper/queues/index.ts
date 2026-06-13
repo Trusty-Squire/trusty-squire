@@ -57,6 +57,11 @@ export type HousekeeperTask =
       // `force_form: true`. Used to A/B the CDP-hardening on services
       // whose OAuth would otherwise bypass the challenge.
       forceForm?: boolean;
+      // Extra OAuth scopes the operator pre-approves for THIS service (curated
+      // YAML `allow_extra_oauth_scopes`, e.g. defang's GitHub `read:org`).
+      // Opt-in per service; without it the bot aborts oauth_consent_needs_review
+      // on a non-basic scope.
+      allowExtraOAuthScopes?: readonly string[];
       // Optional metadata for the notifier surfaces (telegram, GH issue).
       // Discovery candidates come with telemetry counts; seed/ad-hoc
       // tasks leave this null.
@@ -125,6 +130,9 @@ interface YamlServiceEntry {
   // form-side captcha. For services whose OAuth would bypass a
   // Turnstile/reCAPTCHA-v3 we want to A/B against.
   force_form?: boolean;
+  // Operator-pre-approved extra OAuth scopes for this service (e.g.
+  // [read:org] for defang's GitHub consent). Opt-in, per service.
+  allow_extra_oauth_scopes?: string[];
   notes?: string;
 }
 
@@ -190,6 +198,9 @@ export class YamlSeedQueue implements QueueProvider {
           ? { signupUrl: e.signup_url }
           : {}),
         ...(e.force_form === true ? { forceForm: true } : {}),
+        ...(Array.isArray(e.allow_extra_oauth_scopes) && e.allow_extra_oauth_scopes.length > 0
+          ? { allowExtraOAuthScopes: e.allow_extra_oauth_scopes }
+          : {}),
       };
     });
   }
@@ -229,6 +240,10 @@ export class AdHocServiceQueue implements QueueProvider {
     // guessSignupUrl(slug) → https://<slug>.com/signup which is
     // wrong for any non-.com service (ipinfo.io etc.).
     private readonly signupUrl?: string,
+    // Operator-pre-approved extra OAuth scopes (curated YAML
+    // allow_extra_oauth_scopes) — carried through so a `--service=X --from=`
+    // ad-hoc run matches the seed/heal queue's scope handling (defang).
+    private readonly allowExtraOAuthScopes?: readonly string[],
   ) {}
   async fetch(_limit: number): Promise<HousekeeperTask[]> {
     if (this.fired) return [];
@@ -242,6 +257,9 @@ export class AdHocServiceQueue implements QueueProvider {
           : {}),
         ...(this.signupUrl !== undefined && this.signupUrl.length > 0
           ? { signupUrl: this.signupUrl }
+          : {}),
+        ...(this.allowExtraOAuthScopes !== undefined && this.allowExtraOAuthScopes.length > 0
+          ? { allowExtraOAuthScopes: this.allowExtraOAuthScopes }
           : {}),
       },
     ];
