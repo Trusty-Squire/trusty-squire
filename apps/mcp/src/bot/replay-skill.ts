@@ -57,6 +57,7 @@ import {
   extractApiKeyFromText,
   findOAuthButton,
   isCredentialNoiseCandidate,
+  detectAlreadySignedIn,
 } from "./agent.js";
 import { type OAuthProviderId, OAUTH_PROVIDERS, extractOAuthScopes } from "./oauth-providers.js";
 import { scrapeGoogleScopePhrases } from "./google-login.js";
@@ -440,6 +441,28 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
             `step still reaches the credential. Reason: ${validation.reason}`,
         );
         skippedOnboardingFill = true;
+        continue;
+      } else if (
+        step.kind === "click_oauth_button" &&
+        (await looksAuthenticatedReturningUser(browser))
+      ) {
+        // Returning-user login-head skip (THE dominant verify failure — measured
+        // 2026-06-12: 12/29 fails were "No element matches … for google OAuth
+        // button"). The skill was recorded on a FRESH signup, so its head is
+        // "click Continue with Google → consent → onboarding". The verifier's
+        // operator account already exists, so navigating signup_url lands an
+        // AUTHENTICATED dashboard — the provider button is simply gone. That's
+        // not rot. detectAlreadySignedIn returns false if a real login chooser
+        // (any "Continue with Google" affordance) is present, so a genuinely
+        // rotted button still fails below; it returns true only on an actual
+        // authenticated app shell. Skip the head and resume at the post-auth
+        // credential-fetch tail, in returning-user mode.
+        console.error(
+          `[replay] step ${i} (click_oauth_button ${step.provider}) target absent, but the page ` +
+            `is an authenticated returning-user session (account already exists) — skipping the ` +
+            `login head and resuming at the post-auth credential tail.`,
+        );
+        authedViaOAuth = true;
         continue;
       } else {
         await maybeDumpReplayDebug(browser, skill, i, validation.reason);
@@ -2241,9 +2264,10 @@ export function normalizeNavPath(path: string): string[] {
 // display text). The caller requires a UNIQUE match before trusting it.
 export function matchesDomHint(
   el: InteractiveElement,
-  hint: { name?: string | undefined; id?: string | undefined },
+  hint: { name?: string | undefined; id?: string | undefined; testid?: string | undefined },
 ): boolean {
-  if (hint.name === undefined && hint.id === undefined) return false;
+  if (hint.name === undefined && hint.id === undefined && hint.testid === undefined) return false;
+  if (hint.testid !== undefined && (el.testId ?? null) !== hint.testid) return false;
   if (hint.name !== undefined && el.name !== hint.name) return false;
   if (hint.id !== undefined && el.id !== hint.id) return false;
   return true;
@@ -2668,6 +2692,33 @@ function isSkippableAbsentClick(
 function markReturningUser(reason: string, divergent: boolean): string {
   if (!divergent) return reason;
   return `${reason} [returning-user: authenticated session diverged from fresh-signup capture (onboarding/nav element absent — not rot)]`;
+}
+
+// True when the current page is an authenticated returning-user app shell — used
+// to decide whether an ABSENT OAuth-button step is a returning-user login-head
+// skip (account already exists → no provider button) vs genuine rot. Reuses the
+// live bot's detectAlreadySignedIn, which is conservative: it returns FALSE if
+// any login chooser ("Continue with Google", bare "Sign up"/"Log in") or a
+// credential input is visible, so a genuinely-rotted provider button on a real
+// login page still fails. A short settle first — the OAuth step is usually step
+// 0/1 right after goto(signup_url), so the returning-user dashboard may still be
+// painting.
+async function looksAuthenticatedReturningUser(browser: BrowserController): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const inventory = await browser.extractInteractiveElements();
+    if (detectAlreadySignedIn({ inventory, url: browser.currentUrl() })) return true;
+    // A login chooser IS present (or nothing yet) → not a returning-user skip.
+    // Give a painting dashboard one short beat, then re-check; bail fast
+    // otherwise so a true login page doesn't cost three waits.
+    const hasChooser = inventory.some((e) =>
+      /continue with|sign ?in with|log ?in with|sign ?up/i.test(
+        `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`,
+      ),
+    );
+    if (hasChooser) return false;
+    await browser.wait(2);
+  }
+  return false;
 }
 
 // True when an absent onboarding FILL is safe to skip: the input is wholly

@@ -943,11 +943,16 @@ export function isStableDomAttr(value: string | null): value is string {
 // bytes — same additive contract as href_hint).
 export function pickStableDomHint(
   el: InteractiveElement,
-): { name?: string; id?: string } | undefined {
-  const hint: { name?: string; id?: string } = {};
+): { name?: string; id?: string; testid?: string } | undefined {
+  const hint: { name?: string; id?: string; testid?: string } = {};
+  // testid first — it's the strongest anchor (authored to be stable).
+  const testid = el.testId ?? null;
+  if (isStableDomAttr(testid)) hint.testid = testid;
   if (isStableDomAttr(el.name)) hint.name = el.name;
   if (isStableDomAttr(el.id)) hint.id = el.id;
-  return hint.name !== undefined || hint.id !== undefined ? hint : undefined;
+  return hint.testid !== undefined || hint.name !== undefined || hint.id !== undefined
+    ? hint
+    : undefined;
 }
 
 // A URL path segment that can't be reproduced on a fresh account: a UUID or a

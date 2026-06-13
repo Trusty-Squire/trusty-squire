@@ -190,14 +190,16 @@ const ClickStepSchema = z
       .object({
         name: z.string().min(1).optional(),
         id: z.string().min(1).optional(),
+        testid: z.string().min(1).optional(),
       })
       .strict()
       .optional()
       .describe(
-        "Optional stable attribute anchor — the target's name= and/or id= " +
-          "attribute, captured only when it looks human-authored (not a " +
-          "React/emotion-generated hash). Preferred over text_match when it " +
-          "uniquely matches.",
+        "Optional stable attribute anchor — the target's data-testid / name= / " +
+          "id= attribute, captured only when it looks human-authored (not a " +
+          "React/emotion-generated hash). testid is the strongest anchor " +
+          "(authored to survive refactors + copy changes). Preferred over " +
+          "text_match when it uniquely matches.",
       ),
     provenance: ProvenanceSchema,
   })

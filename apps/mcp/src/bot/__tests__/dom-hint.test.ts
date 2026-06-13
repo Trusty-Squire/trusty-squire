@@ -29,6 +29,32 @@ function el(over: Partial<InteractiveElement>): InteractiveElement {
   };
 }
 
+describe("testid anchor (strongest stable hint)", () => {
+  it("pickStableDomHint prefers a data-testid when present", () => {
+    const hint = pickStableDomHint(el({ testId: "create-api-key", id: "btn-x", name: "submit" }));
+    expect(hint).toEqual({ testid: "create-api-key", name: "submit", id: "btn-x" });
+  });
+
+  it("pickStableDomHint emits testid alone when name/id are absent", () => {
+    expect(pickStableDomHint(el({ testId: "copy-key-button" }))).toEqual({ testid: "copy-key-button" });
+  });
+
+  it("pickStableDomHint ignores a hash-shaped testid", () => {
+    expect(pickStableDomHint(el({ testId: "css-1a2b3c4d" }))).toBeUndefined();
+  });
+
+  it("matchesDomHint resolves on testid", () => {
+    expect(matchesDomHint(el({ testId: "create-api-key" }), { testid: "create-api-key" })).toBe(true);
+    expect(matchesDomHint(el({ testId: "other" }), { testid: "create-api-key" })).toBe(false);
+    expect(matchesDomHint(el({ id: "x" }), { testid: "create-api-key" })).toBe(false);
+  });
+
+  it("matchesDomHint requires ALL provided anchors to agree", () => {
+    expect(matchesDomHint(el({ testId: "k", name: "submit" }), { testid: "k", name: "submit" })).toBe(true);
+    expect(matchesDomHint(el({ testId: "k", name: "other" }), { testid: "k", name: "submit" })).toBe(false);
+  });
+});
+
 describe("isStableDomAttr", () => {
   it("accepts human-authored semantic identifiers", () => {
     for (const v of ["email", "submit", "continue-btn", "api_key_name", "next-step", "google"]) {

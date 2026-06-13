@@ -4654,6 +4654,7 @@ export class BrowserController {
         inConsentWidget: boolean;
         href: string | null;
         iconLabel: string | null;
+        testId: string | null;
         title: string | null;
         landmark: string | null;
         value: string | null;
@@ -4731,6 +4732,18 @@ export class BrowserController {
           inConsentWidget: inConsent(el),
           href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
           iconLabel: iconLabelFor(el),
+          // The element's test-id, the GOLD-STANDARD stable anchor: authors set
+          // data-testid/data-test/data-cy precisely so it survives refactors +
+          // copy changes, which is exactly what text_match does not. Captured so
+          // the synthesizer can prefer it over planner-gloss text. Common
+          // variants folded to one field; first present wins.
+          testId:
+            el.getAttribute("data-testid") ??
+            el.getAttribute("data-test-id") ??
+            el.getAttribute("data-test") ??
+            el.getAttribute("data-cy") ??
+            el.getAttribute("data-qa") ??
+            null,
           title: clean(el.getAttribute("title")),
           landmark: (() => {
             // F15 — nearest HTML5 landmark ancestor. Used by the
@@ -5740,6 +5753,11 @@ export interface InteractiveElement {
   // extract_via_regex on bare UUIDs (which the regex library cannot
   // match without a label). Optional; test fixtures may omit.
   title?: string | null;
+  // The element's data-testid / data-test / data-cy / data-qa — the most stable
+  // selector anchor a site offers (authored to survive refactors + copy
+  // changes). pickStableDomHint prefers it; replay's matchesDomHint resolves it
+  // ahead of text_match. Optional; test fixtures may omit.
+  testId?: string | null;
   // F15 — nearest HTML5 landmark ancestor: header | main | footer |
   // nav | aside | article | section, or null when the element is
   // outside any landmark. The agent's inventory renderer uses this to
