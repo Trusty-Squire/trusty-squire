@@ -15,6 +15,7 @@ import { provisionTool, checkProvisionStatusTool } from "./provision-any.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
 import { storeCredentialTool } from "./store-credential.js";
 import { useCredentialTool } from "./use-credential.js";
+import { grantAppAccessTool } from "./grant-app-access.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -62,6 +63,8 @@ export const TOOLS: Tool[] = [
   // Vault lifecycle + write-only-sink proxy (the credential surface).
   storeCredentialTool,
   useCredentialTool,
+  // Egress grants: a deployed app uses a vaulted credential via the proxy.
+  grantAppAccessTool,
   // Diagnostic tools: agent reads them after a failed extract so it
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
@@ -83,6 +86,7 @@ export {
   listCredentialsTool,
   storeCredentialTool,
   useCredentialTool,
+  grantAppAccessTool,
   listExtractFailuresTool,
   getExtractFailureTool,
 };
