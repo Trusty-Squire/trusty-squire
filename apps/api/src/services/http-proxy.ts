@@ -22,6 +22,7 @@ import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
+import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 
 export interface ProxyHttpRequest {
   method: string;
@@ -433,10 +434,42 @@ function defaultDispatch(input: DispatchInput): Promise<DispatchResult> {
           chunks.push(chunk);
         });
         res.on("end", () => {
+          const headers = { ...res.headers } as Record<string, string | string[]>;
+          let raw = Buffer.concat(chunks);
+          // Decompress per Content-Encoding BEFORE decoding to text. The old
+          // code did Buffer.toString("utf8") on the raw bytes — for a gzipped
+          // response that mangles every non-ASCII byte (0x8b → U+FFFD), and the
+          // stale `content-encoding: gzip` header then told the client to
+          // re-inflate the garbage (JSON.parse died on the leading 0x1f).
+          // sanitiseResponse already restricts bodies to JSON/text, so the
+          // decompressed payload is always text — no binary passthrough needed.
+          const enc = String(headers["content-encoding"] ?? "").trim().toLowerCase();
+          if (enc !== "" && enc !== "identity" && raw.length > 0) {
+            // Bound the decompressed size too — a small compressed body can
+            // inflate to a memory bomb. maxOutputLength makes zlib throw past
+            // the same cap we apply to the wire, which we map to too_large.
+            const zopts = { maxOutputLength: input.maxResponseBytes };
+            try {
+              if (enc.includes("br")) raw = brotliDecompressSync(raw, zopts);
+              else if (enc.includes("gzip") || enc.includes("x-gzip")) raw = gunzipSync(raw, zopts);
+              else if (enc.includes("deflate")) raw = inflateSync(raw, zopts);
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              if (/maxOutputLength|too large|ERR_BUFFER/i.test(msg)) {
+                reject(new ProxyError("response_too_large", "decompressed body exceeded cap"));
+              } else {
+                reject(new ProxyError("upstream_error", `could not decompress '${enc}' response`));
+              }
+              return;
+            }
+            // Body is now plaintext; these headers no longer describe it.
+            delete headers["content-encoding"];
+            delete headers["content-length"];
+          }
           resolve({
             status: res.statusCode ?? 0,
-            headers: res.headers as Record<string, string | string[]>,
-            body: Buffer.concat(chunks).toString("utf8"),
+            headers,
+            body: raw.toString("utf8"),
             truncated: false,
           });
         });

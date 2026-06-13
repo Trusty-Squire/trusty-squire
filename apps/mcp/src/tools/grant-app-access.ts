@@ -25,8 +25,10 @@ credential's allowed_hosts. Point the app's SDK base URL at the returned
 \`base_url\` and authenticate with the returned \`token\` — the SDK's requests are
 forwarded to the provider with the real key swapped in.
 
-Pass \`service\` or \`reference\` to pick which vaulted credential to leash, plus
-optional \`rate_limit_per_hour\` (default 1000) and \`spend_cap_usd\`.
+Pass \`service\` or \`reference\` to pick which vaulted credential to leash. Limits
+are OPT-IN and UNLIMITED by default: pass \`rate_limit_per_hour\` and/or
+\`spend_cap_usd\` ONLY if the caller wants a cap. Omit them for no rate/spend limit
+(the grant is still revocable + host-scoped + audited).
 
 SECURITY: the token is BACKEND-ONLY. It is metered spend until revoked — never
 put it in client/browser code. It is strictly safer than the raw key (scoped to
