@@ -325,6 +325,102 @@ describe("planExecuteWithRetry", () => {
     expect(llm.calls).toBe(3);
   });
 
+  it("F14: does NOT bail when the page changed between two clicks of the same selector (kinde unique-value retry)", async () => {
+    const browser = new FakeBrowser();
+    // kinde's post-OAuth register form: clicking "Next" with a colliding
+    // (globally-unique) domain value does not advance the page; the bot
+    // edits the field, the page re-renders (a new input/validation
+    // element appears), and the planner RE-CLICKS the same "Next". That
+    // re-click is legitimate progress, not a loop — the false-bail this
+    // guards against ended the kinde run at terminal_round 3.
+    browser.inventoryQueue = [
+      // Round 1: the "Next" affordance + a text field whose value
+      // collided — clicking Next does not advance.
+      [
+        mk({ tag: "input", type: "text", selector: "#domain" }),
+        mk({ tag: "a", visibleText: "Next", selector: "#next" }),
+      ],
+      // Round 2: page CHANGED — a validation message element appeared
+      // after the edit (inventory differs) → real progress. Same #next
+      // is re-clicked.
+      [
+        mk({ tag: "input", type: "text", selector: "#domain" }),
+        mk({ tag: "span", visibleText: "domain available", selector: "#domain-ok" }),
+        mk({ tag: "a", visibleText: "Next", selector: "#next" }),
+      ],
+      // Round 3: the revealed form to fill + submit.
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create", selector: "#go" }),
+      ],
+    ];
+    const llm = new QueueLLM([
+      clickPlan("#next"), // r1: no advance → records #next as no-progress
+      clickPlan("#next"), // r2: page changed → must NOT bail on the re-click
+      fillPlan("#email", "#go"), // r3: submit
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(llm.calls).toBe(3);
+  });
+
+  it("F14: does NOT bail when a check/select was issued between two same-selector clicks", async () => {
+    const browser = new FakeBrowser();
+    // Inventory holds steady (no element add/remove), but the planner
+    // ticks a required agreement box between the two "Next" clicks — a
+    // field edit IS progress, so the re-click must not be judged a loop.
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "checkbox", selector: "#tos" }),
+        mk({ tag: "button", visibleText: "Next", selector: "#next" }),
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create", selector: "#go" }),
+      ],
+    ];
+    const checkThenClick = JSON.stringify({
+      actions: [
+        { kind: "check", selector: "#tos", reason: "accept terms" },
+        { kind: "click", selector: "#next", reason: "advance" },
+      ],
+      submit_selector: "#next",
+      confidence: "high",
+    });
+    const llm = new QueueLLM([
+      clickPlan("#next"), // r1: no advance → records #next
+      checkThenClick, // r2: check = progress → clears #next from no-progress
+      fillPlan("#email", "#go"), // r3: submit
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(llm.calls).toBe(3);
+  });
+
+  it("F14: STILL bails on a true loop — same selector re-clicked with no intervening progress", async () => {
+    const browser = new FakeBrowser();
+    // Page never changes and no field is edited between the two identical
+    // dead-link clicks — a genuine planner loop that must still bail.
+    // (Same shape as the canonical F14 case so the page enters the
+    // planner rather than short-circuiting to oauth_required.)
+    browser.inventoryQueue = [
+      [mk({ tag: "a", visibleText: "Email", selector: "#footer-email" })],
+    ];
+    const llm = new QueueLLM([
+      clickPlan("#footer-email"),
+      clickPlan("#footer-email"),
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("planning_failed");
+    expect(outcome.reason ?? "").toMatch(/stuck/i);
+    expect(outcome.reason ?? "").toContain("#footer-email");
+    expect(llm.calls).toBe(2);
+  });
+
   it("bails clean on repeated empty plans instead of spinning (Axiom 0-action loop)", async () => {
     const browser = new FakeBrowser();
     // Only a sign-up button, no fields — the page never reveals a form.
