@@ -115,6 +115,13 @@ export interface UniversalSignupRequest {
   // returning-user profile. Omitted → the default shared profile + env proxy.
   profileDir?: string | undefined;
   proxyUrl?: string | undefined;
+  // The Google account the bot should sign up AS, when its Chrome profile holds
+  // more than one. Google's account chooser ("Choose an account") otherwise
+  // gets the first card blindly — wrong identity on a multi-account profile.
+  // With this set, the chooser picks the card whose email matches. Single-
+  // account profiles (the common end-user install) ignore it — one card, no
+  // ambiguity. fresh-verify passes the robot's own identity email.
+  oauthAccountEmail?: string | undefined;
 }
 
 export class UniversalSignupBot {
@@ -244,6 +251,7 @@ export class UniversalSignupBot {
         machineToken: request.machineToken,
         apiBase: request.apiBase,
         forceForm: request.forceForm,
+        oauthAccountEmail: request.oauthAccountEmail,
       });
 
       console.error(`[UniversalBot] Result: ${result.success ? "SUCCESS" : "FAILED"}`);

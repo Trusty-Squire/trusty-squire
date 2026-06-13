@@ -763,6 +763,22 @@ export function googleGisConsentIsBasic(bodyText: string): boolean {
   return googleConsentIsBasicFromDom(bodyText);
 }
 
+// Pure: pick which Google account-chooser card to click. Given the intended
+// signup email and the emails the chooser shows (its `data-identifier` values),
+// return the matching one (case-insensitive, whitespace-trimmed) so a profile
+// with more than one account signs up as the RIGHT identity instead of whoever
+// renders first. Returns null when there's no hint or no match — the caller
+// then falls back to the first card, which is correct for the common single-
+// account profile (one card, no ambiguity).
+export function pickChooserAccount(
+  targetEmail: string | undefined,
+  identifiers: readonly string[],
+): string | null {
+  if (targetEmail === undefined || targetEmail.trim() === "") return null;
+  const want = targetEmail.trim().toLowerCase();
+  return identifiers.find((id) => id.trim().toLowerCase() === want) ?? null;
+}
+
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
@@ -788,6 +804,12 @@ export interface SignupTask {
   // Absent (or no affordance found) → the form-fill path. T13 added
   // GitHub alongside Google.
   oauthProvider?: OAuthProviderId | undefined;
+  // The Google account to sign up AS when the profile holds more than one and
+  // Google shows its account chooser. The chooser picks the card whose email
+  // matches this; without it (or on a single-account profile) the first card is
+  // taken. Plumbed so a multi-account profile signs up as the intended identity
+  // instead of whichever account happens to render first.
+  oauthAccountEmail?: string | undefined;
   // Force the email/password FORM path even when the page (and the bot's
   // profile) would otherwise prefer OAuth. Used to exercise a service's
   // form-side captcha (e.g. Turnstile/reCAPTCHA-v3 on the signup form)
@@ -5251,13 +5273,45 @@ export class SignupAgent {
     }
   }
 
-  private async tryClickGoogleChooserCard(): Promise<boolean> {
+  private async tryClickGoogleChooserCard(targetEmail?: string): Promise<boolean> {
     try {
       const page = (
         this.browser as unknown as { page: import("playwright").Page | null }
       ).page;
       if (page === null || page === undefined) return false;
       const urlBefore = page.url();
+      // Multi-account profile: if we know which account to sign up as AND the
+      // chooser is showing it, click THAT card — not the first one blindly.
+      // (Single-account profiles fall straight through to the generic path.)
+      if (targetEmail !== undefined) {
+        const identifiers = await page
+          .evaluate(() =>
+            Array.from(document.querySelectorAll("[data-identifier]"))
+              .map((e) => e.getAttribute("data-identifier") ?? "")
+              .filter((s) => s.length > 0),
+          )
+          .catch(() => [] as string[]);
+        const pick = pickChooserAccount(targetEmail, identifiers);
+        if (pick !== null) {
+          // Email values are safe inside a quoted attribute selector (no quotes
+          // in an address). Match the exact account the caller asked for.
+          const loc = page.locator(`[data-identifier="${pick}"]`).first();
+          try {
+            await loc.waitFor({ state: "visible", timeout: 2_000 });
+            await loc.click({ timeout: 3_000 });
+            if (process.env.BOT_DEBUG_CHOOSER) {
+              await page.waitForTimeout(1500).catch(() => undefined);
+              console.error(
+                `[chooser-debug] matched account=${JSON.stringify(pick)} urlBefore=${urlBefore} urlAfter=${page.url()}`,
+              );
+            }
+            return true;
+          } catch {
+            // Matched account but the click didn't take — fall through to the
+            // generic first-card path rather than failing outright.
+          }
+        }
+      }
       // First-choice selector: data-identifier on an interactive element.
       const candidates = [
         '[data-identifier]:visible',
@@ -6205,6 +6259,7 @@ export class SignupAgent {
               service: task.service,
               maxRounds: task.postVerifyMaxRounds ?? 24,
               steps,
+              ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
               ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
               ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
@@ -6862,7 +6917,7 @@ export class SignupAgent {
         provider.id === "google" &&
         /\/(?:accountchooser|chooseaccount|oauthchooseaccount)/i.test(url)
       ) {
-        const clicked = await this.tryClickGoogleChooserCard();
+        const clicked = await this.tryClickGoogleChooserCard(task.oauthAccountEmail);
         steps.push(
           `OAuth: Google account chooser — ${clicked ? "clicked the account card" : "no clickable account card found"}`,
         );
@@ -7732,8 +7787,9 @@ export class SignupAgent {
             `Trying chooser card + consent.`,
         );
         // (1) Multi-account chooser: pick the account card (no-op if it's
-        //     already the consent screen).
-        const clicked = await this.tryClickGoogleChooserCard();
+        //     already the consent screen). Prefer the intended account on a
+        //     multi-account profile.
+        const clicked = await this.tryClickGoogleChooserCard(task.oauthAccountEmail);
         if (clicked) {
           await this.browser.wait(3);
           await saveDebugSnapshot(this.browser, "oauth-chooser-click");
@@ -7793,6 +7849,7 @@ export class SignupAgent {
         service: task.service,
         maxRounds: task.postVerifyMaxRounds ?? 24,
         steps,
+        ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
         ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
         ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
         ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
@@ -8650,6 +8707,9 @@ ${formatInventory(input.inventory)}`,
     // CODE pulled from the signup email (plausible) that the bot must type
     // into the on-page code input rather than click a link.
     initialHint?: string | undefined;
+    // Intended Google account on a multi-account profile, for any account
+    // chooser the post-OAuth onboarding surfaces mid-loop.
+    oauthAccountEmail?: string | undefined;
   }): Promise<Record<string, string>> {
     let credentials = await this.extractCredentials();
     // 0.8.2-rc.15 — also seed DOM-proximity at loop entry. If the
@@ -9065,7 +9125,7 @@ ${formatInventory(input.inventory)}`,
         ) ||
         /choose an account/i.test(chooserText)
       ) {
-        await this.tryClickGoogleChooserCard();
+        await this.tryClickGoogleChooserCard(args.oauthAccountEmail);
         args.steps.push(
           `Post-verify round ${round}: Google account chooser — clicked the account card to continue OAuth`,
         );
