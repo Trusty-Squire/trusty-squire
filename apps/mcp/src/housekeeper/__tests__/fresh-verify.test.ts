@@ -194,6 +194,8 @@ describe("isHardFailure", () => {
     expect(isHardFailure("no_signup_link")).toBe(true);
     expect(isHardFailure("captcha_blocked")).toBe(true);
     expect(isHardFailure("oauth_required")).toBe(true);
+    // Post-OAuth wizard nav wall — deterministic, 0% rescue.
+    expect(isHardFailure("oauth_onboarding_failed: could not reach an API key")).toBe(true);
   });
 
   it("treats timing/form flakes as transient (retry-worthy)", () => {
@@ -201,5 +203,14 @@ describe("isHardFailure", () => {
     expect(isHardFailure("signup_failed")).toBe(false);
     expect(isHardFailure("chrome wedged")).toBe(false);
     expect(isHardFailure(undefined)).toBe(false);
+  });
+
+  it("keeps the variance-prone OAuth codes transient (real promotions came from retrying these)", () => {
+    // gladia promoted after verify-01 hit oauth_loop_detected; clarifai promoted
+    // after verify-03 hit oauth_session_not_persisted. Making these hard would
+    // short-circuit those rescues — they MUST keep retrying.
+    expect(isHardFailure("oauth_loop_detected: redirect bounce")).toBe(false);
+    expect(isHardFailure("oauth_session_not_persisted: callback never settled")).toBe(false);
+    expect(isHardFailure("oauth_consent_needs_review: re-check")).toBe(false);
   });
 });
