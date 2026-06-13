@@ -68,6 +68,7 @@ interface ParsedArgs {
   oauthProvider: "google" | "github" | undefined;
   signupUrl: string | undefined; // fresh-verify: override the bot's URL guess
   skillId: string | undefined; // fresh-verify: report the 2-of-N verdict to this skill
+  retryBudget: number | undefined; // fresh-verify: extra identities to retry transient flakes
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
@@ -86,6 +87,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     oauthProvider: undefined,
     signupUrl: undefined,
     skillId: undefined,
+    retryBudget: undefined,
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
@@ -110,6 +112,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       args.signupUrl = arg.slice("--signup-url=".length);
     } else if (arg.startsWith("--skill-id=")) {
       args.skillId = arg.slice("--skill-id=".length);
+    } else if (arg.startsWith("--retry-budget=")) {
+      const n = Number(arg.slice("--retry-budget=".length));
+      if (Number.isFinite(n) && n >= 0) args.retryBudget = Math.floor(n);
     } else if (arg.startsWith("--oauth-provider=")) {
       const v = arg.slice("--oauth-provider=".length);
       if (v !== "google" && v !== "github") {
@@ -360,6 +365,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         service: args.service,
         ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
         ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
+        ...(args.retryBudget !== undefined ? { retryBudget: args.retryBudget } : {}),
       });
       if (res.kind === "not_configured") {
         console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");

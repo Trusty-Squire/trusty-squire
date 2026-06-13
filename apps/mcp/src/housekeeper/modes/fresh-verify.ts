@@ -31,6 +31,11 @@ export interface RunFreshVerifyInput {
   oauthProvider?: OAuthProviderId; // default "google"
   skillId?: string; // when set, the consolidated verdict is reported to the registry
   agreement?: number; // default 2
+  // Extra identities spent retrying TRANSIENT failures (timing flakes) toward the
+  // agreement bar before giving up — kills per-run variance where one unlucky
+  // robot fails a recipe that reproduces. Hard walls (no signup, SSO, anti-bot)
+  // still short-circuit. Default 2.
+  retryBudget?: number;
 }
 
 export interface RunFreshVerifyConfig {
@@ -57,6 +62,7 @@ export async function runFreshVerify(
   const log = cfg.log ?? ((m: string) => console.error(m));
   const provider = input.oauthProvider ?? "google";
   const agreement = input.agreement ?? 2;
+  const retryBudget = input.retryBudget ?? 2;
 
   if (!verifyPoolConfigured()) {
     log(`[fresh-verify] no identity pool configured (verify-identities.json) — skipping ${input.service}`);
@@ -124,6 +130,7 @@ export async function runFreshVerify(
     service: input.service,
     provider,
     agreement,
+    retryBudget,
     identities,
     usage,
     runSignup,

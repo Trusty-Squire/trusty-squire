@@ -52,6 +52,11 @@ export async function freshVerifyService(opts: {
   service: string;
   provider: IdentityProvider;
   agreement?: number;
+  // Extra identities to spend RETRYING transient failures (timing flakes), so a
+  // single unlucky run doesn't block an otherwise-reproducible skill. The 2-of-N
+  // bar is unchanged — we still require `agreement` GENUINE successes; retry just
+  // refuses to count a transient flake as a verdict. Default 0 (no retry).
+  retryBudget?: number;
   identities: readonly VerifyIdentity[];
   usage: readonly UsageRecord[];
   runSignup: (
@@ -61,19 +66,23 @@ export async function freshVerifyService(opts: {
   log?: (msg: string) => void;
 }): Promise<FreshVerifyResult> {
   const agreement = opts.agreement ?? 2;
+  const retryBudget = Math.max(0, opts.retryBudget ?? 0);
+  const maxAttempts = agreement + retryBudget;
   const log = opts.log ?? (() => undefined);
-  const picked = pickUnspentIdentities(
+  // Pull up to maxAttempts unspent identities; need at least `agreement` to have
+  // any chance of clearing the bar.
+  const pool = pickUnspentIdentities(
     opts.identities,
     opts.usage,
     opts.service,
     opts.provider,
-    agreement,
+    maxAttempts,
   );
 
-  if (picked.length < agreement) {
+  if (pool.length < agreement) {
     log(
-      `[fresh-verify] ${opts.service}: only ${picked.length} unspent ${opts.provider} ` +
-        `identit${picked.length === 1 ? "y" : "ies"} (need ${agreement}) — pool exhausted for this ` +
+      `[fresh-verify] ${opts.service}: only ${pool.length} unspent ${opts.provider} ` +
+        `identit${pool.length === 1 ? "y" : "ies"} (need ${agreement}) — pool exhausted for this ` +
         `service; mint more robots or fall back to refetch`,
     );
     return {
@@ -81,13 +90,15 @@ export async function freshVerifyService(opts: {
       service: opts.service,
       agreement,
       promoted: false,
-      available: picked.length,
+      available: pool.length,
       outcomes: [],
     };
   }
 
   const outcomes: FreshVerifyOutcome[] = [];
-  for (const identity of picked) {
+  let successes = 0;
+  for (const identity of pool) {
+    if (successes >= agreement) break; // bar met — stop spending identities
     log(`[fresh-verify] ${opts.service}: signing up as ${identity.id} (${identity.email})`);
     let res: { success: boolean; credential?: string; reason?: string };
     try {
@@ -108,12 +119,49 @@ export async function freshVerifyService(opts: {
       `[fresh-verify] ${opts.service}: ${identity.id} → ${res.success ? "success" : "fail"}` +
         (res.reason !== undefined ? ` (${res.reason})` : ""),
     );
+    if (res.success) {
+      successes += 1;
+      continue;
+    }
+    // A HARD wall (no self-serve signup, needs login, SSO, paywall, anti-bot)
+    // is deterministic — other identities will hit it too, so don't burn the
+    // retry pool. A TRANSIENT flake (timing/onboarding/consent) gets retried
+    // with the next identity. Only short-circuit while we have no success yet;
+    // once one identity proved the recipe, keep trying toward agreement.
+    if (successes === 0 && isHardFailure(res.reason)) {
+      log(
+        `[fresh-verify] ${opts.service}: hard failure (${res.reason ?? "?"}) — not retrying ` +
+          `other identities (deterministic wall)`,
+      );
+      break;
+    }
   }
 
-  const promoted = meetsAgreement(outcomes, agreement);
+  const promoted = successes >= agreement;
   log(
-    `[fresh-verify] ${opts.service}: ${outcomes.filter((o) => o.success).length}/${agreement} agreed → ` +
-      (promoted ? "PROMOTE" : "hold"),
+    `[fresh-verify] ${opts.service}: ${successes}/${agreement} agreed across ${outcomes.length} ` +
+      `attempt(s) → ${promoted ? "PROMOTE" : "hold"}`,
   );
   return { kind: "verified", service: opts.service, agreement, promoted, outcomes };
+}
+
+// A failure reason that other fresh identities will deterministically hit too —
+// so retrying is wasted pool. Everything else is treated as a transient flake
+// worth one more identity. Matches on the error-code prefix the bot emits.
+const HARD_FAILURE_CODES = [
+  "no_signup_link",
+  "needs_login",
+  "needs_oauth_provider_session",
+  "sso_restricted",
+  "oauth_required",
+  "payment_required",
+  "anti_bot_blocked",
+  "captcha_blocked",
+  "verification_not_sent",
+  "unservable",
+];
+export function isHardFailure(reason: string | undefined): boolean {
+  if (reason === undefined) return false;
+  const code = reason.split(/[:\s]/, 1)[0]?.toLowerCase() ?? "";
+  return HARD_FAILURE_CODES.includes(code);
 }
