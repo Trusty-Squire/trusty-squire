@@ -295,6 +295,17 @@ pnpm -F @trusty-squire/api prisma:generate
 ```
 
 ### Deploy (API only)
+
+**CI-AUTOMATED — the API deploys on push to `main` when `apps/api/**` (or the
+workspace packages it bundles: inbox/vault/skill-schema, or the lockfile)
+changes.** `.github/workflows/release-api.yml` runs typecheck+test as a gate,
+then `flyctl deploy --remote-only` to `trusty-squire-api` (the `release_command`
+runs `prisma db push` for the api schema). Pushes to `staging` run tests only,
+no deploy. This exists because a manual-only API deploy let the mcp client ship
+a feature whose server route was never deployed (egress grants 404'd in prod,
+0.9.15). Server + client now ship together.
+
+**Manual deploy = fallback only** (CI down, or deploying an un-merged branch):
 ```bash
 # from the repo root — the build context must be the monorepo root
 flyctl deploy --config apps/api/fly.toml --dockerfile apps/api/Dockerfile.fly
