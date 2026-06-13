@@ -23,7 +23,7 @@ import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerVaultRoute } from "./routes/vault.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerEgressRoutes } from "./routes/egress.js";
-import { InMemoryEgressGrantStore, type EgressGrantStore } from "./services/egress-grant.js";
+import type { EgressGrantStore } from "./services/egress-grant.js";
 import type { HttpProxyExecutor } from "./services/http-proxy.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
@@ -227,11 +227,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
   });
   // Egress Grants v1a (buffered): a deployed machine calls a provider through the
-  // injecting proxy with a revocable grant token. In-memory store for now —
-  // grants are re-mintable; Prisma persistence is a follow-up.
+  // injecting proxy with a revocable grant token. Persistence follows the deps
+  // layer — Prisma-backed when the auth DB is wired, in-memory otherwise; an
+  // explicit opts.egressGrantStore still wins for test injection.
   await fastify.register(registerEgressRoutes, {
     deps,
-    egressGrantStore: opts.egressGrantStore ?? new InMemoryEgressGrantStore(),
+    egressGrantStore: opts.egressGrantStore ?? deps.egressGrantStore,
     requireAgent: auth.requireAgent,
     ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
   });

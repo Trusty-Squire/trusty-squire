@@ -130,6 +130,17 @@ interface VaultAuditEventRow {
   emitted_at: Date;
 }
 
+interface EgressGrantRow {
+  id: string;
+  account_id: string;
+  credential_ref: string;
+  token_hash: string;
+  rate_limit_per_hour: number;
+  spend_cap_usd: number | null;
+  created_at: Date;
+  revoked_at: Date | null;
+}
+
 export interface ApiPrismaClient {
   machineToken: {
     create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
@@ -294,6 +305,16 @@ export interface ApiPrismaClient {
       orderBy?: Record<string, unknown>;
       take?: number;
     }): Promise<VaultAuditEventRow[]>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  egressGrant: {
+    create(args: { data: Record<string, unknown> }): Promise<EgressGrantRow>;
+    findUnique(args: { where: { id: string } }): Promise<EgressGrantRow | null>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<EgressGrantRow[]>;
+    update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<EgressGrantRow>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
 }
