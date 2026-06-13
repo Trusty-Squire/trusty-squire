@@ -737,6 +737,32 @@ export function googleConsentIsBasicFromDom(bodyText: string): boolean {
   return GOOGLE_BASIC_CONSENT_PHRASES.some((p) => p.test(bodyText));
 }
 
+// The MODERN "Sign in with Google" (GIS) consent screen uses different copy
+// than the classic OAuth consent: "Allow <App> to access this info about you"
+// listing "Name and profile picture" / "Email address" with a Continue button
+// (MEASURED 2026-06-13: langfuse OAuth as a fresh robot lands exactly here, and
+// the bot mislabeled it oauth_stuck_on_chooser because the URL is still
+// accounts.google.com). This recognizes that basic-only GIS screen so the bot
+// can auto-approve it — same safety contract as googleConsentIsBasicFromDom:
+// any sensitive phrase (Drive/Gmail/contacts/…) hard-fails it. Exported for tests.
+export function googleGisConsentIsBasic(bodyText: string): boolean {
+  // Safety first — any sensitive scope wording disqualifies, via both the
+  // danger scraper and the explicit non-basic phrase set.
+  if (scrapeGoogleScopePhrases(bodyText).length > 0) return false;
+  if (GOOGLE_NON_BASIC_CONSENT_PHRASES.some((p) => p.test(bodyText))) return false;
+  // Positive GIS basic signal: the "access this info about you" framing plus a
+  // name/email/profile item and nothing else. Fall back to the classic
+  // basic-phrase check for the older consent layout.
+  const isGisScreen = /to access this info about you|access your google account/i.test(bodyText);
+  const hasBasicItem =
+    /name and profile picture/i.test(bodyText) ||
+    /\bemail address\b/i.test(bodyText) ||
+    /personal info/i.test(bodyText) ||
+    /public profile/i.test(bodyText);
+  if (isGisScreen && hasBasicItem) return true;
+  return googleConsentIsBasicFromDom(bodyText);
+}
+
 export interface SignupTask {
   service: string;
   signupUrl?: string | undefined;
@@ -5185,6 +5211,46 @@ export class SignupAgent {
   // attribute equal to the account's email, plus role="link" or
   // jsaction. The fallback is any element whose visible text
   // contains an @ — accounts always show their email.
+  // Approve a basic "Sign in with Google" consent screen ("Allow <App> to
+  // access this info about you" → Continue). Returns:
+  //   "approved"    — basic consent, clicked Continue/Allow
+  //   "non_basic"   — consent reaches beyond identity; caller must NOT auto-grant
+  //   "not_consent" — not a consent screen (no Continue/Allow + access wording)
+  //   "error"       — page unavailable
+  // Mirrors tryClickGoogleChooserCard's direct-page approach. The safety gate
+  // (googleGisConsentIsBasic) is the same conservative one the popup-flow
+  // consent uses — only the basic identity grant is auto-approved.
+  private async tryApproveGoogleConsentScreen(): Promise<
+    "approved" | "non_basic" | "not_consent" | "error"
+  > {
+    try {
+      const page = (
+        this.browser as unknown as { page: import("playwright").Page | null }
+      ).page;
+      if (page === null || page === undefined) return "error";
+      const bodyText = await page.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+      const looksLikeConsent =
+        /to access this info about you|access your google account|wants (?:to )?access|allow .{1,40} to access/i.test(
+          bodyText,
+        ) && /\b(continue|allow)\b/i.test(bodyText);
+      if (!looksLikeConsent) return "not_consent";
+      if (!googleGisConsentIsBasic(bodyText)) return "non_basic";
+      for (const name of [/^continue$/i, /^allow$/i]) {
+        const btn = page.getByRole("button", { name }).first();
+        try {
+          await btn.waitFor({ state: "visible", timeout: 2_500 });
+          await btn.click({ timeout: 3_000 });
+          return "approved";
+        } catch {
+          continue;
+        }
+      }
+      return "not_consent"; // basic scopes but no clickable Continue/Allow found
+    } catch {
+      return "error";
+    }
+  }
+
   private async tryClickGoogleChooserCard(): Promise<boolean> {
     try {
       const page = (
@@ -7644,43 +7710,54 @@ export class SignupAgent {
       // within a few seconds, abort with oauth_stuck_on_chooser.
       if (detectStuckOnGoogleOAuth(gateState.url)) {
         steps.push(
-          `Post-OAuth: stuck on Google account chooser (${pathOf(gateState.url)}). ` +
-            `Trying to click an account card.`,
+          `Post-OAuth: on Google OAuth screen (${pathOf(gateState.url)}). ` +
+            `Trying chooser card + consent.`,
         );
+        // (1) Multi-account chooser: pick the account card (no-op if it's
+        //     already the consent screen).
         const clicked = await this.tryClickGoogleChooserCard();
         if (clicked) {
           await this.browser.wait(3);
           await saveDebugSnapshot(this.browser, "oauth-chooser-click");
-          const afterUrl = this.browser.currentUrl();
-          steps.push(
-            `Post-OAuth: chooser card clicked — now at ${pathOf(afterUrl)} ` +
-              `(host=${(() => {try{return new URL(afterUrl).hostname;}catch{return "?";}})()})`,
-          );
-          // If the click moved us off accounts.google.com, fall
-          // through to the post-verify loop normally.
-          if (!detectStuckOnGoogleOAuth(afterUrl)) {
-            // continue to extract + postVerifyLoop
-          } else {
+          steps.push(`Post-OAuth: chooser card clicked — now at ${pathOf(this.browser.currentUrl())}`);
+        }
+        // (2) Consent screen: "Allow <App> to access this info about you" →
+        //     Continue. This is ALSO on accounts.google.com, so the old code
+        //     mislabeled it oauth_stuck_on_chooser and bailed (MEASURED
+        //     2026-06-13: langfuse). Auto-approve the BASIC identity grant
+        //     (googleGisConsentIsBasic gates out anything sensitive).
+        if (detectStuckOnGoogleOAuth(this.browser.currentUrl())) {
+          const consent = await this.tryApproveGoogleConsentScreen();
+          steps.push(`Post-OAuth: consent screen → ${consent}`);
+          if (consent === "approved") {
+            await this.browser.wait(4);
+            await saveDebugSnapshot(this.browser, "oauth-consent-approved");
+          } else if (consent === "non_basic") {
             return {
               success: false,
               error:
-                `oauth_stuck_on_chooser: clicked an account card on the chooser but the URL ` +
-                `stayed on accounts.google.com (${pathOf(afterUrl)}). Finish the signup manually.`,
+                `oauth_consent_needs_review: ${task.service}'s Google consent requests scopes ` +
+                `beyond basic identity — not auto-approving. Finish the signup manually.`,
               steps,
               ...this.resultTail(),
             };
           }
-        } else {
+        }
+        const afterUrl = this.browser.currentUrl();
+        // Moved off accounts.google.com → OAuth completed; fall through to
+        // extract + postVerifyLoop. Still stuck → genuine wall.
+        if (detectStuckOnGoogleOAuth(afterUrl)) {
           return {
             success: false,
             error:
               `oauth_stuck_on_chooser: ${task.service}'s Google OAuth flow did not redirect off ` +
-              `accounts.google.com (${pathOf(gateState.url)}) and no clickable account card was ` +
-              `found on the chooser. Finish the signup manually.`,
+              `accounts.google.com (${pathOf(afterUrl)}) after chooser + consent handling. ` +
+              `Finish the signup manually.`,
             steps,
             ...this.resultTail(),
           };
         }
+        steps.push(`Post-OAuth: cleared Google screens — now at ${pathOf(afterUrl)}`);
       }
     }
 

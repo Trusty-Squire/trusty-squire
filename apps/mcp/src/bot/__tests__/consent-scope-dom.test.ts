@@ -1,6 +1,42 @@
 import { describe, expect, it } from "vitest";
 
-import { googleConsentIsBasicFromDom } from "../agent.js";
+import { googleConsentIsBasicFromDom, googleGisConsentIsBasic } from "../agent.js";
+
+// The MODERN "Sign in with Google" (GIS) consent screen — "Allow <App> to
+// access this info about you: Name and profile picture / Email address" with a
+// Continue button. The old wording-based check missed it (MEASURED 2026-06-13:
+// langfuse), so the bot bailed oauth_stuck_on_chooser on a benign basic consent.
+describe("googleGisConsentIsBasic", () => {
+  const gisBasic = [
+    "Sign in to Langfuse",
+    "Allow Langfuse to access this info about you",
+    "Verify Bot02",
+    "Name and profile picture",
+    "verify-02@trustysquire.ai",
+    "Email address",
+    "Cancel",
+    "Continue",
+  ].join("\n");
+
+  it("approves the basic GIS consent (name + email only)", () => {
+    expect(googleGisConsentIsBasic(gisBasic)).toBe(true);
+  });
+
+  it("rejects a GIS consent that reaches into Drive/Gmail", () => {
+    const sensitive = gisBasic.replace("Email address", "See and download all your Google Drive files");
+    expect(googleGisConsentIsBasic(sensitive)).toBe(false);
+  });
+
+  it("rejects a non-consent page (no access wording / items)", () => {
+    expect(googleGisConsentIsBasic("Welcome to your dashboard. Create an API key.")).toBe(false);
+  });
+
+  it("still accepts the classic basic consent wording", () => {
+    expect(
+      googleGisConsentIsBasic("Foo wants to access your Google Account\nSee your primary Google Account email address"),
+    ).toBe(true);
+  });
+});
 
 // Google's newer consent URL hides scope= behind an opaque part= token,
 // so the only signal is the visible DOM. googleConsentIsBasicFromDom is
