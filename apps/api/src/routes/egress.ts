@@ -35,12 +35,15 @@ const mintBody = z.object({
   message: "one of reference or service is required",
 });
 
-// Minimal per-grant rolling-hour rate limiter (in-memory). Mandatory-on so a
-// leaked token is bounded to an annoyance, not a bill. One writer per process;
-// the LLM tracker is the model, kept local here to avoid coupling.
+// Minimal per-grant rolling-hour rate limiter (in-memory). Limits are OPT-IN:
+// a grant minted without a rate carries perHour <= 0, which means UNLIMITED and
+// the limiter never blocks it. A leaked token is still bounded by revocation +
+// the (optional) spend cap; the rate cap only exists when the caller asked for
+// one. One writer per process; the LLM tracker is the model, kept local here.
 class GrantRateLimiter {
   private readonly hits = new Map<string, number[]>();
   allow(grantId: string, perHour: number, now: number): boolean {
+    if (perHour <= 0) return true; // unlimited — no rate cap requested
     const cutoff = now - 3_600_000;
     const arr = (this.hits.get(grantId) ?? []).filter((t) => t > cutoff);
     if (arr.length >= perHour) {
@@ -81,10 +84,22 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   proxyExecutor?: HttpProxyExecutor;
   now?: () => Date;
 }> = async (fastify, opts) => {
-  const executor = opts.proxyExecutor ?? new HttpProxyExecutor();
+  // Egress is a WORKLOAD proxy (LLM SDKs, deployed apps), not the agent's
+  // snappy one-shot use_credential call — so it needs a much larger body cap
+  // (LLM JSON responses dwarf the 10KB default) and patient timeouts (a non-
+  // streaming completion's time-to-first-byte is tens of seconds, not 5s).
+  const executor =
+    opts.proxyExecutor ??
+    new HttpProxyExecutor({
+      maxResponseBytes: 16 * 1024 * 1024, // 16MB — full LLM JSON responses
+      headersTimeoutMs: 120_000, // time-to-first-byte for slow completions
+      bodyTimeoutMs: 120_000,
+    });
   const limiter = new GrantRateLimiter();
   const now = opts.now ?? (() => new Date());
-  const DEFAULT_RATE = 1000;
+  // Limits are OPT-IN: 0 = unlimited. A grant only gets a rate cap when the
+  // caller passes rate_limit_per_hour; spend_cap is likewise null unless asked.
+  const UNLIMITED_RATE = 0;
 
   // ── Mint (agent) ──────────────────────────────────────────────
   fastify.post("/v1/egress/grants", { preHandler: opts.requireAgent }, async (req, reply) => {
@@ -118,7 +133,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
     const { grant, token } = mintGrant({
       account_id: auth.account_id,
       credential_ref: reference,
-      rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? DEFAULT_RATE,
+      rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? UNLIMITED_RATE,
       spend_cap_usd: parsed.data.spend_cap_usd ?? null,
       now: now().toISOString(),
     });
@@ -128,8 +143,8 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       grant_id: grant.id,
       base_url: base,
       token, // returned ONCE — only the hash is stored
-      rate_limit_per_hour: grant.rate_limit_per_hour,
-      spend_cap_usd: grant.spend_cap_usd,
+      rate_limit_per_hour: grant.rate_limit_per_hour > 0 ? grant.rate_limit_per_hour : null, // null = unlimited
+      spend_cap_usd: grant.spend_cap_usd, // null = unlimited
       hint: "Backend-only token. Point the SDK's base URL at base_url; it injects the real key server-side.",
     });
   });
@@ -143,8 +158,8 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       grants: grants.map((g) => ({
         grant_id: g.id,
         credential_ref: g.credential_ref,
-        rate_limit_per_hour: g.rate_limit_per_hour,
-        spend_cap_usd: g.spend_cap_usd,
+        rate_limit_per_hour: g.rate_limit_per_hour > 0 ? g.rate_limit_per_hour : null, // null = unlimited
+        spend_cap_usd: g.spend_cap_usd, // null = unlimited
         created_at: g.created_at,
         revoked_at: g.revoked_at, // token_hash deliberately omitted
       })),
