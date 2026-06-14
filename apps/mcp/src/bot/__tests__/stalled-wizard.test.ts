@@ -9,6 +9,8 @@ import {
   isStalledOnActions,
   isLoginPageUrl,
   isLoadingShellText,
+  isLoadingShell,
+  SHELL_MAX_ELEMENTS,
   isSignupOrLoginRoute,
   originRoot,
   isAuthProcessingText,
@@ -103,6 +105,47 @@ describe("isLoadingShellText (SPA hydration guard)", () => {
 
   it("STILL fires on a genuine loading shell (chooser veto is narrow)", () => {
     expect(isLoadingShellText("Loading…")).toBe(true);
+  });
+});
+
+describe("isLoadingShell (inventory-veto'd shell gate — the false-positive fix)", () => {
+  it("fires on a genuine empty/near-empty shell (loading text + tiny inventory)", () => {
+    // northflank's real post-OAuth shell: loading text, zero interactive DOM.
+    expect(
+      isLoadingShell(
+        "Northflank Cloud Platform Connecting This application cannot function " +
+          "without JavaScript.",
+        0,
+      ),
+    ).toBe(true);
+    // A shell that painted a logo link + nothing else is still a shell.
+    expect(isLoadingShell("Loading…", 1)).toBe(true);
+    expect(isLoadingShell("Please wait while we get things ready", SHELL_MAX_ELEMENTS - 1)).toBe(
+      true,
+    );
+  });
+
+  it("does NOT fire on a hydrated page despite a stray loading word (the luma-ai case)", () => {
+    // luma-ai: 95 visible interactive elements, with a hidden "Please wait 30
+    // seconds" string that the raw-textContent gate matched every round. The
+    // inventory veto makes the shell read un-fireable on a hydrated page.
+    expect(isLoadingShell("Generate Create Dashboard Please wait 30 seconds", 95)).toBe(false);
+    // Exactly at the threshold = hydrated.
+    expect(isLoadingShell("Loading…", SHELL_MAX_ELEMENTS)).toBe(false);
+    // The other field offenders (10–50 elements) likewise veto.
+    expect(isLoadingShell("Connecting… API Keys Settings Create token", 12)).toBe(false);
+  });
+
+  it("does NOT fire when there's NO loading text, regardless of inventory", () => {
+    // A normal dashboard with no loading copy is never a shell.
+    expect(isLoadingShell("API Tokens Create token Revoke", 0)).toBe(false);
+    expect(isLoadingShell("Create your API key — Settings", 3)).toBe(false);
+  });
+
+  it("threshold const stays in sync with waitForInteractiveDom's default", () => {
+    // The positive readiness gate (waitForInteractiveDom(SHELL_MAX_ELEMENTS))
+    // and this negative veto must agree on what 'hydrated' means.
+    expect(SHELL_MAX_ELEMENTS).toBe(5);
   });
 });
 

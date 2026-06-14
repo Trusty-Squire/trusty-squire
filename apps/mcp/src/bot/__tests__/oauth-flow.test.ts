@@ -141,6 +141,15 @@ class FakeOAuthBrowser {
   async extractText(): Promise<string> {
     return this.page().text;
   }
+  // Visibility-respecting body text — the real controller reads innerText;
+  // the fake has no hidden nodes, so the visible text equals extractText().
+  async extractVisibleText(): Promise<string> {
+    return this.page().text;
+  }
+  // Positive-readiness gate. The fake's pages are synchronously "rendered"
+  // (the dashboard inventory is available immediately), so this resolves at
+  // once — mirroring the real controller returning the moment the count is met.
+  async waitForInteractiveDom(): Promise<void> {}
   async extractCredentialCandidates(): Promise<string[]> {
     return this.fieldValuesByIdx[this.idx] ?? [];
   }

@@ -3991,6 +3991,55 @@ export function isLoadingShellText(text: string): boolean {
   );
 }
 
+// The interactive-element count at/above which a page is "hydrated by
+// definition" — a rendered dashboard/form a user can act on — so a stray
+// "loading"/"please wait" word in its (visible) text is NOT a hydration
+// shell. WHY 5: a genuine loading shell paints zero or a handful of chrome
+// affordances (a logo link, maybe a skip-link); a real authenticated surface
+// (nav + content + an "API Keys"/"Create" affordance) clears 5 trivially.
+// Field evidence: luma-ai/unify-ai/sambanova/fireworks-ai/defang carried
+// 10–95 visible interactive elements yet were flagged a shell EVERY round —
+// any threshold from ~5 up vetoes all of them while still catching the true
+// 0-to-few-element shell (northflank). Reuses the same minElements default as
+// waitForInteractiveDom (5) so the negative gate and the positive readiness
+// wait agree on what "hydrated" means.
+export const SHELL_MAX_ELEMENTS = 5;
+
+// The authoritative loading-shell decision: a page is a hydration shell only
+// when loading-text is present in its VISIBLE text AND it has fewer than
+// SHELL_MAX_ELEMENTS interactive elements. Splitting the two conditions kills
+// the dominant false positive two ways at once:
+//   1. visibleText (innerText) drops hidden skeleton/RSC "loading" strings a
+//      raw textContent read picked up;
+//   2. the inventory veto makes the gate un-fireable on a hydrated page
+//      regardless of any residual stray "loading" word.
+// Pure + exported for unit tests. The text predicate stays isLoadingShellText
+// (still used where only text is on hand); this is the call-site gate where
+// both signals are available.
+export function isLoadingShell(
+  visibleText: string,
+  inventoryCount: number,
+): boolean {
+  if (inventoryCount >= SHELL_MAX_ELEMENTS) return false;
+  return isLoadingShellText(visibleText);
+}
+
+// Thrown from postVerifyLoop when a post-OAuth/post-verify SPA presents a
+// genuine loading shell that never hydrates within the bounded budget (and a
+// navigate-to-root retry didn't unstick it). Surfaced as the terminal status
+// `spa_never_hydrated`. classifyFailure() (skill-schema failure-taxonomy)
+// has no entry for this kind, so it falls to the deliberate transient default
+// — a non-demoting outcome (a never-hydrating route is environmental/transient,
+// not skill rot), and no new exported skill-schema symbol is needed (avoids
+// the published-dep-skew trap). The leading token before ':' is what
+// classifyFailure keys on, so the message MUST start with the bare kind.
+export class SpaNeverHydratedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SpaNeverHydratedError";
+  }
+}
+
 // Transient "the session is being established RIGHT NOW" copy. MEASURED on
 // groq (Stytch B2B): after the OAuth callback, /authenticate shows
 // "Logging in…" then "Creating your organization…" for ~5-7s of async
@@ -8890,6 +8939,15 @@ ${formatInventory(input.inventory)}`,
     // the dashboard for those; a genuine callback rejection stays on login
     // even after reload, so this never masks a real wall.
     let oauthBounceReloadTried = false;
+    // Consecutive rounds the post-verify page read as a genuine loading shell
+    // (visible loading-text AND a sub-threshold inventory). A real SPA
+    // hydrates within the bounded per-round wait, so a streak means the route
+    // never paints content — burn a navigate-to-root retry, then bail
+    // truthfully rather than re-running the wait every round to run_timeout.
+    // Reset on any non-shell round. Mirrors the consecutiveOauthLoginPageRounds
+    // / oauthBounceReloadTried escape used for the stuck-login case.
+    let shellStreak = 0;
+    let shellRootNavTried = false;
     let planFailures = 0;
     // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
     // gate planFailures (so a transient 502 won't push us into the
@@ -9279,51 +9337,105 @@ ${formatInventory(input.inventory)}`,
       // SPA hydration guard. A post-OAuth dashboard (northflank's
       // /settings/access-tokens, PostHog) can render a "Connecting"/loading
       // shell while its JS bundle + websocket finish — slow over a
-      // residential tunnel. The shell often carries a stray element or two
-      // (a logo link, the <noscript>), so gating on an EMPTY inventory
-      // misses it; the loading-shell TEXT is the authoritative "not yet
-      // rendered" signal. Wait while that text persists, then proceed with
-      // whatever's there (an honest "still a shell" beats a premature done —
-      // and if the SPA never hydrates, e.g. a blocked websocket, the bound
-      // keeps us from hanging).
+      // residential tunnel. We gate on POSITIVE readiness — the instant the
+      // page has SHELL_MAX_ELEMENTS visible interactive elements it is
+      // hydrated by definition and we proceed — rather than looping on the
+      // negative "text still says loading" signal. waitForInteractiveDom
+      // returns the moment that count is met (or after the budget), so a fast
+      // page costs ~0 and a slow one waits exactly as long as needed. This is
+      // the fix for the dominant false positive: a fully-rendered dashboard
+      // whose DOM merely CONTAINS a hidden "loading…"/"please wait 30
+      // seconds…" string no longer spins the wait every round to run_timeout.
       //
       // Budget = 6x3s = 18s. MEASURED: a dashboard SPA gated on a websocket
       // (northflank's wss://platform.northflank.com/websocket) hydrates in
-      // ~12-15s over the tunnel. A larger budget BACKFIRES on a page that
-      // will NEVER hydrate (e.g. an authed user stranded on /signup): the
-      // wait re-runs every round and burns the 600s run cap. The escape for
-      // a never-hydrating route is navigate-to-root post-OAuth, not a longer
-      // wait here.
+      // ~12-15s over the tunnel.
       //
       // ADAPTIVE exception (MEASURED 2026-06-04, clerk): an OAuth/SSO
       // CALLBACK route does a token exchange that renders even slower than a
       // plain dashboard — clerk's `/sign-in/sso-callback` outlasts 18s and
       // the bot bailed at the edge with `oauth_session_not_persisted`. On a
-      // callback route the SPA IS making progress, so 12x3s = 36s of
-      // patience is warranted; everywhere else the 6-tick budget holds so a
-      // genuinely-stuck route still hits the navigate-to-root escape fast.
-      // Read the URL fresh each round (it may redirect off the callback).
-      const HYDRATION_TICKS = isOAuthCallbackRoute(state.url) ? 12 : 6;
-      for (
-        let hydrationWait = 0;
-        hydrationWait < HYDRATION_TICKS &&
-        isLoadingShellText(await this.browser.extractText().catch(() => ""));
-        hydrationWait++
-      ) {
-        args.steps.push(
-          `Post-verify round ${round}: ${pathOf(state.url)} is a loading shell ` +
-            `(hydration wait ${hydrationWait + 1}/${HYDRATION_TICKS}) — waiting for the SPA to render`,
+      // callback route the SPA IS making progress, so 36s of patience is
+      // warranted; everywhere else the 18s budget holds so a genuinely-stuck
+      // route reaches the navigate-to-root escape fast. Read the URL fresh
+      // each round (it may redirect off the callback).
+      const onOAuthCallback = isOAuthCallbackRoute(state.url);
+      const HYDRATION_BUDGET_MS = onOAuthCallback ? 36_000 : 18_000;
+      await this.browser
+        .waitForInteractiveDom(SHELL_MAX_ELEMENTS, HYDRATION_BUDGET_MS)
+        .catch(() => undefined);
+      // Re-read after the wait — the page may have hydrated (or redirected).
+      try {
+        [state, inventory] = await Promise.all([
+          this.browser.getState(),
+          this.buildInventory(args.steps, undefined, 80),
+        ]);
+      } catch {
+        // mid-navigation read — keep the prior state/inventory; the shell
+        // decision below uses whatever count we have.
+      }
+      // Negative-side decision, now visibility- AND inventory-aware: a shell
+      // requires loading-text in the VISIBLE text AND a sub-threshold
+      // inventory. The OAuth-callback exclusion keeps the navigate-to-root
+      // escape from firing mid-token-exchange (the callback IS making
+      // progress and a navigate-away would abort the session).
+      const stillShell =
+        !onOAuthCallback &&
+        isLoadingShell(
+          await this.browser.extractVisibleText().catch(() => ""),
+          inventory.length,
         );
-        await this.browser.wait(3);
-        try {
-          [state, inventory] = await Promise.all([
-            this.browser.getState(),
-            this.buildInventory(args.steps, undefined, 80),
-          ]);
-        } catch {
-          // mid-navigation read — keep the prior state/inventory and let
-          // the next hydration tick (or the planner) retry.
+      if (stillShell) {
+        shellStreak += 1;
+        // On the 2nd consecutive shell round, do the navigate-to-root the
+        // budgeted wait can't fix — a route stuck mid-hydration (a blocked
+        // websocket, an SPA wedged on a stale path) often paints the real
+        // dashboard from origin root. Once only.
+        if (shellStreak >= 2 && !shellRootNavTried) {
+          shellRootNavTried = true;
+          const root = originRoot(state.url);
+          args.steps.push(
+            `Post-verify round ${round}: ${pathOf(state.url)} read as a loading shell for ` +
+              `${shellStreak} consecutive rounds — navigating to origin root once before bailing.`,
+          );
+          try {
+            await this.browser.goto(root ?? state.url);
+            await this.browser
+              .waitForInteractiveDom(SHELL_MAX_ELEMENTS, 15_000)
+              .catch(() => undefined);
+            [state, inventory] = await Promise.all([
+              this.browser.getState(),
+              this.buildInventory(args.steps, undefined, 80),
+            ]);
+          } catch {
+            // navigate/read failed — the streak check below bails on the
+            // next shell read.
+          }
+          // Re-evaluate after the root nav. If it hydrated, fall through to
+          // planning; if it's STILL a shell, bail truthfully now rather than
+          // burning the rest of the round budget to run_timeout.
+          const recovered = !isLoadingShell(
+            await this.browser.extractVisibleText().catch(() => ""),
+            inventory.length,
+          );
+          if (recovered) {
+            shellStreak = 0;
+          } else {
+            throw new SpaNeverHydratedError(
+              `spa_never_hydrated: ${args.service}'s post-verify page (${pathOf(state.url)}) ` +
+                `stayed a loading shell across ${shellStreak} rounds and an origin-root reload — ` +
+                `the SPA never rendered an actionable surface (blocked websocket / wedged hydration). ` +
+                `Not a navigation bug; retry or finish the signup manually.`,
+            );
+          }
+        } else {
+          args.steps.push(
+            `Post-verify round ${round}: ${pathOf(state.url)} is a loading shell ` +
+              `(streak ${shellStreak}) — letting the SPA settle one more round`,
+          );
         }
+      } else {
+        shellStreak = 0;
       }
       // Stalled-wizard breaker. Build a content signature (URL + each
       // inventory element's selector + label) and judge whether the

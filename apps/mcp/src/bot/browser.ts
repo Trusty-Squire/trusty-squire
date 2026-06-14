@@ -3442,6 +3442,21 @@ export class BrowserController {
     return await this.page.textContent("body") || "";
   }
 
+  // RENDERED, visibility-respecting body text. extractText() reads
+  // textContent("body"), which includes display:none / visibility:hidden /
+  // off-screen nodes — so a fully-rendered dashboard whose DOM merely
+  // CONTAINS a hidden skeleton / "Loading…" / "Please wait 30 seconds…"
+  // string (Next.js RSC inline payloads, lazy placeholders, aria-hidden
+  // spinners) reads as still-loading and false-trips the loading-shell gate.
+  // innerText is layout-aware: it omits hidden text and reflects what a user
+  // would actually see. Use this for the SHELL decision ONLY — credential/key
+  // extraction and wall-text checks deliberately read RAW text via
+  // extractText() and must stay byte-identical, so this is purely additive.
+  async extractVisibleText(): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => document.body?.innerText ?? "");
+  }
+
   // Discrete strings an API key might occupy — for credential
   // extraction. Gathered so a key is read WHOLE and un-glued from its
   // neighbours: extractText() concatenates the whole <body>, which
