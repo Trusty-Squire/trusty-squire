@@ -407,6 +407,50 @@ file. Currently set (names only):
 Rule: a key in `harvester.env` or the vault is CONFIGURED. Don't ask for it;
 read it.
 
+## Post-signup nav-search engine (NAV_SEARCH, default-OFF) — live-validated on unify-ai (2026-06-14)
+
+Goal-directed best-first search over the dashboard's affordances, replacing the
+greedy per-screen LLM step-picker for the post-OAuth → API-key phase
+(`apps/mcp/src/bot/nav-search.ts`, `DESIGN-post-signup-nav-search.md`). Iterating
+it live on unify-ai (Google OAuth → onboarding → dashboard → key) surfaced **6
+generalizable bugs**, each fixed + unit-tested (38 tests) + suite-green
+(commits 2a33eb7, 2ec34c9, 64cdbb3):
+
+1. **Goal signals read `extractText` (textContent) → poisoned by inline `<script>`
+   source + display:none nodes** (the false-shell class again). Switched the port
+   to `extractVisibleText` (innerText). The single biggest fix — every text-based
+   goal/onboarding verdict was reading JS source, not the page.
+2. **`expandLatentNav` is destructive** — it toggles `aria-haspopup` menus
+   blindly, re-closing an already-open avatar/settings dropdown so the post-expand
+   read LOSES the keys-bearing nav. Fix: `mergeInventories` ranks the UNION of the
+   pre- and post-expand reads.
+3. **Clicks on portaled dropdown items (Radix popover/avatar menu) no-op** — the
+   popover closes between read and click, URL never changes. Fix: `resolveNavHref`
+   + href-first navigation for anchor picks (go to the known destination, don't
+   click the fragile node). This is what got unify off the dashboard to `/account`.
+4. **LLM tiebreak** (was deferred) — when keys hide behind a generically-named
+   affordance ("Advanced"/"Security" tab) nothing ranks; one cheap deterministic
+   LLM call picks the best candidate. Explored unify's Profile→Advanced→Security.
+5. **SAFETY: the tiebreak picked "Delete Account"** on a keyless settings page.
+   `enumerateCandidates` now hard-excludes destructive controls
+   (delete/remove/revoke/deactivate/cancel/close-account/leave-org) so neither the
+   ranker nor the tiebreak can ever auto-click one.
+6. **Tiebreak now knows API keys are often org/workspace-scoped** (B2B) — widened
+   its preference list; "usage" excluded.
+
+**unify-ai outcome:** NOT an IP/fingerprint/engine problem. The bot reaches
+`/account` and exhausts its tabs (Profile/Contact/Preferences/Advanced/Security —
+all account-management, **no keys**). The entire nav is Account/Organizations/
+Usage/Billing with **no personal "API keys"/"Developer" link anywhere** ⇒ unify's
+key is almost certainly **org-scoped** (under Organizations) or not self-serve for
+a fresh personal account. The org-scoped tiebreak hint (#6) is meant to reach it;
+**live re-validation is BLOCKED — the 10-robot verify-identity pool is fully spent
+on unify-ai** after this debugging marathon (refill or wait to re-test).
+
+**T6 remaining before flag→default:** multi-service regression validation (assert
+nav-search doesn't regress services the greedy loop already handles, and that
+auto-promote skill-minting stays intact end-to-end). Needs verify-pool refill.
+
 ## Recurring meta-lesson
 
 **Stop concluding "IP" or "fingerprint" from a single observation.** Every time
