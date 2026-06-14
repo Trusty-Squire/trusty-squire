@@ -18,9 +18,11 @@ import {
   isReturningUserDivergence,
   ACCOUNT_EXISTS_KIND,
   failureCountsTowardDemotion,
+} from "@trusty-squire/skill-schema";
+import {
   probeShowsServable,
   BRITTLE_PROBE_KIND,
-} from "@trusty-squire/skill-schema";
+} from "../probe-demotion-guard.js";
 import { BrowserController } from "../../bot/browser.js";
 import {
   probeAffordances,

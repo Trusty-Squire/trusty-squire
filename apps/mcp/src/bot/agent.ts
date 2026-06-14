@@ -229,6 +229,48 @@ export function isAtPaywall(text: string): boolean {
   return false;
 }
 
+// A service can complete the signup form / OAuth handshake and THEN drop the
+// account into a manual-approval gate — a waiting room, a waitlist, a
+// "request access / your account is pending approval / under review" screen —
+// instead of granting a dashboard + API key. Baseten is the field example:
+// the form submits, then a "waiting_room" / account-review screen appears and
+// no key is obtainable autonomously.
+//
+// This is NOT a captcha and NOT an anti-bot block — it's a service-side human
+// gate. Left undetected, the post-verify loop exhausts its budget and the run
+// gets mislabeled (oauth_onboarding_failed / a generic no-credentials miss),
+// which is misleading and can wrongly count toward skill demotion or send us
+// chasing a non-existent code bug. We classify it as `onboarding_blocked` —
+// the same terminal, human-pile, non-demoting status the billing wall uses —
+// so the loop routes it to the manual pile and never advances the demote
+// counter.
+//
+// Tuned for PRECISION over recall: every pattern requires explicit
+// account-review / waitlist / pending-approval phrasing. A marketing tile that
+// merely mentions "early access" as a feature must not trip it, so the verbs
+// are scoped to the gate's own phrasing (you ARE on the list / access IS
+// pending / the account IS under review).
+const ACCOUNT_REVIEW_GATE_PATTERNS: readonly RegExp[] = [
+  /\bwaiting\s+room\b/i,
+  /\b(?:join|on|added\s+to)\s+(?:the\s+|our\s+)?waitlist\b/i,
+  /\byou'?re\s+on\s+the\s+(?:list|waitlist)\b/i,
+  /\brequest\s+(?:early\s+)?access\b/i,
+  /\baccess\s+(?:is\s+)?pending\b/i,
+  /\b(?:your\s+)?account\s+is\s+pending\b/i,
+  /\bpending\s+approval\b/i,
+  /\baccount\s+(?:is\s+)?(?:currently\s+)?under\s+review\b/i,
+  /\byour\s+account\s+is\s+being\s+reviewed\b/i,
+  /\bwe'?ll\s+email\s+you\s+when\b/i,
+  /\bawaiting\s+(?:approval|access)\b/i,
+];
+
+// Exported for unit testing — the post-signup heuristic that distinguishes a
+// service-side manual-approval gate (waiting room / waitlist / pending review)
+// from a normal dashboard, signup form, or captcha page. Pure over page text.
+export function isAtAccountReviewGate(text: string): boolean {
+  return ACCOUNT_REVIEW_GATE_PATTERNS.some((p) => p.test(text));
+}
+
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
 // full verification timeout or runs only a short probe. Exported so the
@@ -6606,6 +6648,25 @@ export class SignupAgent {
         };
       }
 
+      // Before the generic no-credentials miss: a service that completed the
+      // signup form and then dropped the account into a manual-approval gate
+      // (waiting room / waitlist / pending review). Same terminal, non-demoting
+      // onboarding_blocked status the OAuth path uses — there's no key to reach
+      // until a human approves the account, so don't surface it as a generic
+      // failure (which can wrongly chase a code bug) or punish a skill for it.
+      const reviewGateText = await this.browser.extractText().catch(() => "");
+      if (isAtAccountReviewGate(reviewGateText)) {
+        return {
+          success: false,
+          error:
+            `onboarding_blocked: ${task.service} put the account into a manual review / ` +
+            `waitlist gate after signup — no API key is obtainable until a human approves ` +
+            `the account. Finish the signup manually once access is granted.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+
       return {
         success: false,
         error: verificationFailed ?? "Could not find credentials on page or via email",
@@ -7956,6 +8017,23 @@ export class SignupAgent {
         error:
           `onboarding_blocked: ${task.service}'s API key sits behind a billing or ` +
           `payment-method wall the bot will not cross — finish the signup manually.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
+    // Service-side manual-approval gate (waiting room / waitlist / account
+    // pending review). The OAuth handshake succeeded but the service won't
+    // grant a key until a human approves the account — there is no key to
+    // reach autonomously. Same terminal onboarding_blocked status as the
+    // billing wall so it's a non-demoting human-pile outcome, not a
+    // mislabeled oauth_onboarding_failed that wrongly implies a code bug.
+    if (isAtAccountReviewGate(paywallCheckText)) {
+      return {
+        success: false,
+        error:
+          `onboarding_blocked: ${task.service} put the account into a manual review / ` +
+          `waitlist gate after signup — no API key is obtainable until a human approves ` +
+          `the account. Finish the signup manually once access is granted.`,
         steps,
         ...this.resultTail(),
       };

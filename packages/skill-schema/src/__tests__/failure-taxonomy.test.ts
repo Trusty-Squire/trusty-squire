@@ -7,8 +7,6 @@ import {
   NAV_TIMEOUT_KIND,
   isReturningUserDivergence,
   ACCOUNT_EXISTS_KIND,
-  probeShowsServable,
-  BRITTLE_PROBE_KIND,
 } from "../failure-taxonomy.js";
 
 describe("classifyFailure", () => {
@@ -154,49 +152,5 @@ describe("isReturningUserDivergence", () => {
   it("the downgraded kind is transient and never counts toward demotion", () => {
     expect(classifyFailure(ACCOUNT_EXISTS_KIND)).toBe("transient");
     expect(failureCountsTowardDemotion(ACCOUNT_EXISTS_KIND)).toBe(false);
-  });
-});
-
-describe("probeShowsServable", () => {
-  const base = {
-    providers: [] as string[],
-    has_email_signup: false,
-    card_gate: false,
-    interstitial: false,
-  };
-
-  it("is true when an OAuth provider is present and no wall", () => {
-    expect(probeShowsServable({ ...base, providers: ["google"] })).toBe(true);
-  });
-
-  it("is true when an email-signup form is present", () => {
-    expect(probeShowsServable({ ...base, has_email_signup: true })).toBe(true);
-  });
-
-  it("is false on an anti-bot interstitial even with an affordance", () => {
-    expect(
-      probeShowsServable({ ...base, providers: ["google"], interstitial: true }),
-    ).toBe(false);
-  });
-
-  it("is false when no entry affordance is present", () => {
-    expect(probeShowsServable({ ...base, card_gate: true })).toBe(false);
-    expect(probeShowsServable(base)).toBe(false);
-  });
-
-  it("accepts a card-gate upsell ALONGSIDE a real entry affordance", () => {
-    expect(
-      probeShowsServable({ ...base, providers: ["github"], card_gate: true }),
-    ).toBe(true);
-  });
-
-  it("is null/undefined safe", () => {
-    expect(probeShowsServable(null)).toBe(false);
-    expect(probeShowsServable(undefined)).toBe(false);
-  });
-
-  it("the brittle kind is transient and never counts toward demotion", () => {
-    expect(classifyFailure(BRITTLE_PROBE_KIND)).toBe("transient");
-    expect(failureCountsTowardDemotion(BRITTLE_PROBE_KIND)).toBe(false);
   });
 });
