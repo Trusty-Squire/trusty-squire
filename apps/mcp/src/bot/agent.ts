@@ -9214,7 +9214,7 @@ ${formatInventory(input.inventory)}`,
         const system = `You navigate a SaaS dashboard after signup. Goal: reach the page that SHOWS or CREATES an API key (or any credential — token, secret, access key).
 You are given a numbered list of the clickable affordances on the current page. Pick the ONE most likely to lead toward an API-keys / tokens / developer-credentials surface.
 Reply with a single JSON object and nothing else: {"index": N} (N = the list number) or {"index": null} if NONE plausibly leads to API keys.
-Prefer items naming keys / tokens / API / developer / secrets; then security / advanced / credentials / settings / account. NEVER pick log out, billing, invoices, docs, pricing, a link back to the current page, or any destructive action (delete, remove, revoke, deactivate, cancel).`;
+Prefer items naming keys / tokens / API / developer / secrets; then credentials / advanced / settings / account / security. On a B2B product an API key is frequently scoped to an ORGANIZATION / WORKSPACE / PROJECT / TEAM rather than the personal account — so if no personal "API keys" surface exists, an "Organization", "Workspace", "Project", or "Team" link is a strong candidate (its settings usually hold the keys). NEVER pick log out, billing, invoices, usage, docs, pricing, a link back to the current page, or any destructive action (delete, remove, revoke, deactivate, cancel).`;
         const userBlocks: LLMBlock[] = [
           { kind: "text", text: `Current URL: ${here}\n\nAffordances:\n${list}` },
         ];
