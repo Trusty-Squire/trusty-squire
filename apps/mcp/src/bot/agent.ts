@@ -271,6 +271,19 @@ export function isAtAccountReviewGate(text: string): boolean {
   return ACCOUNT_REVIEW_GATE_PATTERNS.some((p) => p.test(text));
 }
 
+// Decide whether a no-credential form-fill outcome is a manual-review gate.
+// A verification timeout is the AUTHORITATIVE cause and must win: a pending
+// "check your email / we sent a code" page can read as a review gate to
+// isAtAccountReviewGate, so without this guard a verification_not_sent gets
+// mislabeled onboarding_blocked (the anthropic regression). Only when
+// verification did NOT fail is the review-gate text trusted. Pure, testable.
+export function isOnboardingReviewGate(
+  verificationFailed: string | undefined,
+  pageText: string,
+): boolean {
+  return verificationFailed === undefined && isAtAccountReviewGate(pageText);
+}
+
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
 // full verification timeout or runs only a short probe. Exported so the
@@ -6815,7 +6828,7 @@ export class SignupAgent {
       // is the failure; don't reinterpret it as a manual-review gate.
       const reviewGateText =
         verificationFailed === undefined ? await this.browser.extractText().catch(() => "") : "";
-      if (verificationFailed === undefined && isAtAccountReviewGate(reviewGateText)) {
+      if (isOnboardingReviewGate(verificationFailed, reviewGateText)) {
         return {
           success: false,
           error:

@@ -9,7 +9,7 @@
 // marketing tile that merely mentions "early access" as a feature.
 
 import { describe, expect, it } from "vitest";
-import { isAtAccountReviewGate } from "../agent.js";
+import { isAtAccountReviewGate, isOnboardingReviewGate } from "../agent.js";
 
 describe("isAtAccountReviewGate — positive (real manual-approval gates)", () => {
   it("matches a 'waiting room' screen (baseten)", () => {
@@ -114,6 +114,32 @@ describe("isAtAccountReviewGate — negative (no false positives)", () => {
   it("returns false on empty / unrelated text", () => {
     expect(isAtAccountReviewGate("")).toBe(false);
     expect(isAtAccountReviewGate("Your API key: sk-abc123. Copy it now.")).toBe(
+      false,
+    );
+  });
+});
+
+describe("isOnboardingReviewGate — a verification timeout must NOT be a review gate", () => {
+  const GATE_TEXT = "Your account is pending approval. We'll email you when access is granted.";
+
+  it("returns false when verification failed, even if the page reads as a gate", () => {
+    // The anthropic regression: a 'check your email' page timed out, then the
+    // gate heuristic matched and mislabeled verification_not_sent as
+    // onboarding_blocked. The verification failure is authoritative.
+    expect(
+      isOnboardingReviewGate(
+        "verification_not_sent: form submitted and the page asked to check email, but none arrived in 180s",
+        GATE_TEXT,
+      ),
+    ).toBe(false);
+  });
+
+  it("returns true for a genuine review gate when verification did not fail", () => {
+    expect(isOnboardingReviewGate(undefined, GATE_TEXT)).toBe(true);
+  });
+
+  it("returns false when verification did not fail but the page is a normal dashboard", () => {
+    expect(isOnboardingReviewGate(undefined, "Welcome to your dashboard. Create a project.")).toBe(
       false,
     );
   });
