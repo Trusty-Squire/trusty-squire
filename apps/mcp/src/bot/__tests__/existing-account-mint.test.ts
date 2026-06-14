@@ -18,7 +18,7 @@
 //     the captcha-short-circuit test's documented encapsulation break.
 
 import { describe, expect, it } from "vitest";
-import { findCreateKeyAffordance, SignupAgent } from "../agent.js";
+import { findApiKeysNavLink, findCreateKeyAffordance, SignupAgent } from "../agent.js";
 import type { BrowserController, InteractiveElement } from "../browser.js";
 import type { LLMClient, LLMRequest, LLMResponse } from "../llm-client.js";
 
@@ -118,6 +118,63 @@ describe("findCreateKeyAffordance", () => {
 
   it("returns null on an empty inventory", () => {
     expect(findCreateKeyAffordance([])).toBeNull();
+  });
+});
+
+describe("findApiKeysNavLink", () => {
+  it("finds an anchor whose href points at a keys page", () => {
+    const inv = [
+      el({ tag: "a", visibleText: "Dashboard", href: "/dashboard", selector: "#d" }),
+      el({ tag: "a", visibleText: "Settings", href: "/settings/api-keys", selector: "#k" }),
+    ];
+    expect(findApiKeysNavLink(inv)?.selector).toBe("#k");
+  });
+
+  it("finds a non-conventional keys href the URL-guesser would never reach", () => {
+    // unify-ai: the keys link exists but at a path /keys, /api-keys,
+    // /settings/api-keys all 404'd — only the real href works.
+    const inv = [
+      el({ tag: "a", visibleText: "API", href: "/org/abc/developer/api-keys", selector: "#real" }),
+    ];
+    expect(findApiKeysNavLink(inv)?.selector).toBe("#real");
+  });
+
+  it("matches by link text when no href is present", () => {
+    expect(
+      findApiKeysNavLink([el({ tag: "a", visibleText: "API Keys", selector: "#t" })])?.selector,
+    ).toBe("#t");
+  });
+
+  it("prefers a real href target over a text-only match", () => {
+    const inv = [
+      el({ tag: "a", visibleText: "API keys", selector: "#text" }),
+      el({ tag: "a", visibleText: "Keys", href: "/settings/keys", selector: "#href" }),
+    ];
+    expect(findApiKeysNavLink(inv)?.selector).toBe("#href");
+  });
+
+  it("skips a link already clicked", () => {
+    const inv = [el({ tag: "a", visibleText: "API Keys", href: "/api-keys", selector: "#k" })];
+    expect(findApiKeysNavLink(inv, new Set(["#k"]))).toBeNull();
+  });
+
+  it("ignores a 'Create API key' button (not a nav link) without a keys href", () => {
+    expect(
+      findApiKeysNavLink([el({ tag: "button", visibleText: "Create API key", selector: "#c" })]),
+    ).toBeNull();
+  });
+
+  it("does not match unrelated nav (keyboard shortcuts, billing, docs)", () => {
+    const inv = [
+      el({ tag: "a", visibleText: "Keyboard shortcuts", href: "/help/shortcuts", selector: "#kb" }),
+      el({ tag: "a", visibleText: "Billing", href: "/settings/billing", selector: "#b" }),
+      el({ tag: "a", visibleText: "Docs", href: "/docs", selector: "#d" }),
+    ];
+    expect(findApiKeysNavLink(inv)).toBeNull();
+  });
+
+  it("returns null on an empty inventory", () => {
+    expect(findApiKeysNavLink([])).toBeNull();
   });
 });
 

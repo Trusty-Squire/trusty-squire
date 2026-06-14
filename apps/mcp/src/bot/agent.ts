@@ -532,6 +532,61 @@ export function findCreateKeyAffordance(
   return candidates[0]!.el;
 }
 
+// An in-DOM nav link/affordance that points AT an API-keys / tokens page.
+// Distinct from findCreateKeyAffordance (the "create key" button): this finds
+// the LINK that navigates TO the keys page, so the bot can click the real
+// target — whose href is the correct path — instead of GUESSING a URL from a
+// fixed convention list (which 404s whenever a service hosts keys at a
+// non-standard path: unify-ai's keys aren't at /keys, /api-keys, or
+// /settings/api-keys, all of which 404). A human clicks the sidebar link; so
+// should the bot. Exported, pure (operates on the inventory shape only).
+const API_KEYS_HREF =
+  /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)/i;
+const API_KEYS_TEXT =
+  /\b(?:api|access|secret|auth|personal\s+access)\s*(?:keys?|tokens?)\b/i;
+
+export function findApiKeysNavLink(
+  inventory: readonly InteractiveElement[],
+  alreadyClicked: ReadonlySet<string> = new Set(),
+): InteractiveElement | null {
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of inventory) {
+    const isClickable =
+      el.tag === "a" ||
+      el.tag === "button" ||
+      el.role === "link" ||
+      el.role === "button";
+    if (!isClickable) continue;
+    if (el.visible === false) continue;
+    if (alreadyClicked.has(el.selector)) continue;
+    const href = el.href ?? "";
+    const text = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    // The loose href segments (keys?/tokens?/developers?) are only trusted on
+    // an actual anchor href, where they're a structured path, not free text.
+    const hrefHit = href.length > 0 && API_KEYS_HREF.test(href);
+    const textHit = API_KEYS_TEXT.test(text);
+    if (!hrefHit && !textHit) continue;
+    // A "create API key" control is a different affordance (it opens a
+    // create flow / modal, it doesn't navigate to the listing). Skip it here
+    // UNLESS it's a real anchor with a keys href (then it's a nav link that
+    // merely happens to read "New API key").
+    if (CREATE_KEY_PHRASE.test(text) && !(el.tag === "a" && hrefHit)) continue;
+    let score = 0;
+    if (hrefHit) score += 4; // a real, navigable target beats a text guess
+    if (/\bapi\s*(?:keys?|tokens?)\b/i.test(text)) score += 2;
+    else if (textHit) score += 1;
+    if (el.tag === "a") score += 1; // prefer anchors over role=button
+    if (el.inViewport === true) score += 1;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
 // Pick the next fallback URL to try, keyed against the origin of the
 // currently-stuck URL. The curated SERVICE_KEYS_PATHS for the run's
 // service (when its host matches the stuck origin) are tried FIRST,
@@ -9137,6 +9192,9 @@ ${formatInventory(input.inventory)}`,
     let stuckFiresAtUrl = 0;
     let lastStuckFireUrl: string | null = null;
     const triedFallbackUrls = new Set<string>();
+    // Selectors of API-keys nav links already clicked, so the
+    // click-the-real-link escalation doesn't re-click the same link.
+    const clickedKeysLinks = new Set<string>();
     // Premature-done guard budget. When the planner gives up (`done`)
     // with zero credentials captured, we navigate to an unvisited
     // canonical keys URL and re-plan — bounded so a service that
@@ -10377,6 +10435,33 @@ ${formatInventory(input.inventory)}`,
           (k) => !NON_CREDENTIAL_KEYS.has(k),
         ).length;
         if (capturedCredCount === 0 && prematureDoneFallbacks < MAX_PREMATURE_DONE_FALLBACKS) {
+          // Prefer CLICKING a real API-keys nav link over guessing a URL.
+          // The dashboard's own sidebar/menu link carries the correct href;
+          // guessing /keys, /api-keys, /settings/api-keys 404s on services
+          // that host keys at a non-standard path (unify-ai). Only when no
+          // such link is in the DOM do we fall through to URL composition.
+          const keysLink = findApiKeysNavLink(inventory, clickedKeysLinks);
+          if (keysLink !== null) {
+            prematureDoneFallbacks += 1;
+            clickedKeysLinks.add(keysLink.selector);
+            const label =
+              (keysLink.visibleText ?? keysLink.ariaLabel ?? keysLink.href ?? keysLink.selector) || keysLink.selector;
+            args.steps.push(
+              `Post-verify: planner emitted done with no credential captured — ` +
+                `clicking the in-page API-keys link "${label.slice(0, 60)}" ` +
+                `(${keysLink.href ?? keysLink.selector}) before guessing a URL`,
+            );
+            try {
+              await this.browser.click(keysLink.selector);
+              await this.browser.waitForInteractiveDom(5, 15_000);
+            } catch (err) {
+              args.steps.push(
+                `Post-verify: API-keys link click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+              );
+            }
+            hint = undefined;
+            continue;
+          }
           const fallback = pickStuckLoopFallbackUrl(
             state.url,
             triedFallbackUrls,
