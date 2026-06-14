@@ -1,5 +1,44 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.16 (2026-06-13)
+
+Stable release. Promotes the staging post-OAuth navigation work to `latest`,
+plus the egress + CI increments already cherry-picked onto `main`.
+
+- fix(oauth): generalize the multi-account chooser across account count — replay walks the Google account-chooser as a dynamic interstitial and picks the card matching the intended account (no longer assumes a single-account flow)
+- fix(fresh-verify): fail fast on `oauth_onboarding_failed` — a deterministic post-OAuth wizard wall short-circuits instead of burning the retry budget
+- fix(bot): post-verify planner skips optional setup wizards and beelines to the API key (no more stalling on "invite your team" / "name your project" interstitials)
+- fix(egress): decompress upstream gzip/br/deflate bodies + make grant limits opt-in (already on `main` via cherry-pick; listed for completeness)
+- ci(api): deploy the API to Fly on release to close the client/server skew (already on `main` via cherry-pick; listed for completeness)
+
+## 0.9.15 (2026-06-13)
+
+**HOTFIX: 0.9.14 could not start the MCP server.** 0.9.14 pinned
+`@trusty-squire/skill-schema@0.1.2-rc.2`, but that published version predates the
+`replay-graph` module — so the `validateReplayGraph` import on the server's eager
+boot path (`server.js → tools/index.js → provision-any.js → promote-to-skill.js`)
+threw a missing-export error and the server died on launch. CI missed it because the
+monorepo resolves skill-schema via `workspace:*` (source has the module); only the
+npm-published pin was stale. Fix: republish `@trusty-squire/skill-schema@0.1.2`
+(stable, with `replay-graph`) and pin it here. Also folds in the staging work since
+0.9.14:
+
+- fix(skill-schema): publish 0.1.2 with the replay-graph module (validateReplayGraph) — unbreaks server boot
+- fix(oauth): generalize skills across account count — replay walks the Google account-chooser as a dynamic interstitial; bot picks the card matching the intended account
+- fix(fresh-verify): fail fast on oauth_onboarding_failed (deterministic post-OAuth wizard wall)
+- chore(egress): direct-first — datacenter IP clears 23/24 anti-bot doors; residential proxy retired as the default
+
+## 0.9.14 (2026-06-13)
+
+Stable promotion of 0.9.14-rc.1 + rc.2. Two headlines: **Cloudflare Turnstile is
+beaten** (self-launch Chrome + `connectOverCDP` — the wall was Playwright's
+`launchPersistentContext`, not IP/GPU/fingerprint), and **fresh-verify no longer
+loses skills to per-run variance** (transient OAuth-callback flakes retry toward
+the 2-of-N bar; deterministic walls short-circuit — rescued 4/5 held OAuth services
+live). Plus a session of discovery-bot hardening, an explicit cross-process signup
+queue, replay fixes, and two Egress Grant increments (Prisma persistence + non-bearer
+`auth_shape`). Full per-commit notes under the rc.1 / rc.2 sections below.
+
 ## 0.9.14-rc.2 (2026-06-13)
 
 **Headline: fresh-verify no longer loses skills to per-run variance.** A sweep held
