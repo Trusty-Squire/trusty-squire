@@ -17,8 +17,15 @@ import {
   NAV_TIMEOUT_KIND,
   isReturningUserDivergence,
   ACCOUNT_EXISTS_KIND,
+  failureCountsTowardDemotion,
+  probeShowsServable,
+  BRITTLE_PROBE_KIND,
 } from "@trusty-squire/skill-schema";
 import { BrowserController } from "../../bot/browser.js";
+import {
+  probeAffordances,
+  type PageAffordances,
+} from "../../bot/affordance-probe.js";
 import { replaySkill, type ReplayOutcome } from "../../bot/replay-skill.js";
 import { InboxClient } from "../../bot/inbox-client.js";
 import { makeEmailCodeFetcher } from "../../bot/email-code-fetcher.js";
@@ -48,6 +55,17 @@ export type ReplayRunner = (input: {
   // path, where a non-active skill must never be replayed.
   bypassStatusGuard?: boolean;
 }) => Promise<ReplayOutcome>;
+
+// Auto-probe-before-retire hook. Loads the skill's signup page in a fresh
+// browser and reports its affordances, so the verifier can tell a brittle
+// replay failure (page still servable) from genuine skill rot before letting
+// a rot failure advance the demote counter. Owns its own BrowserController
+// lifecycle (handleReplay holds no browser handle — the replay runner already
+// opened and closed one). Injectable so the downgrade logic is unit-testable
+// without a browser.
+export type SignupProbeRunner = (input: {
+  url: string;
+}) => Promise<PageAffordances>;
 
 export type ReplayResult =
   | "skipped" // schema drift; task left in queue for next worker rev
@@ -166,6 +184,27 @@ export function createReplayRunner(): ReplayRunner {
   };
 }
 
+// Build the SignupProbeRunner the CLI wires into HousekeeperOpts.probe.
+// A separate browser from the replay runner's — the replay browser is
+// already torn down by the time the probe is needed, and a probe must
+// load the page fresh (no replay-mutated state, no logged-in session
+// from an OAuth step).
+export function createProbeRunner(): SignupProbeRunner {
+  return async (input: { url: string }): Promise<PageAffordances> => {
+    const browser = new BrowserController({});
+    try {
+      await browser.start();
+      return await probeAffordances(browser, input.url);
+    } finally {
+      try {
+        await browser.close();
+      } catch {
+        // shutdown noise — the affordance read is already captured
+      }
+    }
+  };
+}
+
 export async function handleReplay(
   task: Extract<HousekeeperTask, { kind: "replay" }>,
   opts: HousekeeperOpts,
@@ -259,6 +298,38 @@ export async function handleReplay(
       failureKind = ACCOUNT_EXISTS_KIND;
     }
 
+    // Auto-probe-before-retire. A failure that WOULD still count toward
+    // demotion at this point (a rot kind the two guards above didn't already
+    // downgrade) might be replay brittleness against a still-servable service,
+    // not genuine rot — the fly.io bug (2026-06-13): a brittle text_match
+    // retired a working skill. Probe the live signup page; if it clearly shows
+    // the service's entry affordances (an OAuth provider or an email-signup
+    // form, no anti-bot interstitial), the failure is brittleness — downgrade
+    // it to the non-demoting BRITTLE_PROBE_KIND and flag it for re-synthesis
+    // instead of retiring it. Conservative: only DOWNGRADE on a clear positive;
+    // a probe error or an empty/ambiguous page leaves the rot classification
+    // intact.
+    if (
+      !isOk &&
+      opts.probe !== undefined &&
+      failureCountsTowardDemotion(failureKind)
+    ) {
+      const downgrade = await tryBrittleProbeDowngrade({
+        probe: opts.probe,
+        signupUrl: skill.signup_url,
+        log,
+        service: item.service,
+      });
+      if (downgrade !== null) {
+        failureKind = BRITTLE_PROBE_KIND;
+        outcomeReason =
+          `${outcomeReason} | [brittle: probe shows servable] ${downgrade}`.slice(
+            0,
+            800,
+          );
+      }
+    }
+
     if (isOk && replay.kind === "ok") {
       const cleanup = await runCleanup({
         skill,
@@ -304,6 +375,41 @@ export async function handleReplay(
     `replay end:   ${item.service} (skill_id=${item.skill_id}, outcome=${outcomeKind}, transition=${transition}, ${duration_ms}ms) — ${outcomeReason.slice(0, 120)}`,
   );
   return { outcome: outcomeKind, reason: outcomeReason, transition };
+}
+
+// Run the auto-probe-before-retire check. Returns a short human summary of
+// the probe result when it CLEARLY shows the page is still servable (the
+// caller then downgrades the failure to non-demoting), or null otherwise — a
+// probe error, an ambiguous/empty page, or a page that itself explains a wall.
+// Null always means "leave the rot classification intact" (never upgrades).
+async function tryBrittleProbeDowngrade(args: {
+  probe: SignupProbeRunner;
+  signupUrl: string;
+  service: string;
+  log: (line: string) => void;
+}): Promise<string | null> {
+  const { probe, signupUrl, service, log } = args;
+  let affordances: PageAffordances;
+  try {
+    affordances = await probe({ url: signupUrl });
+  } catch (err) {
+    // Probe failed (nav/network/launch) — we learned nothing, so don't touch
+    // the demoting classification. A wall/rot here is indistinguishable from
+    // a transient probe blip, and the safe default is the original kind.
+    log(
+      `brittle-probe error: ${service} — ${err instanceof Error ? err.message : String(err)} — leaving rot classification intact`,
+    );
+    return null;
+  }
+  if (!probeShowsServable(affordances)) return null;
+  const summary =
+    `providers=[${affordances.providers.join(",") || "none"}] ` +
+    `email=${affordances.has_email_signup} card=${affordances.card_gate} ` +
+    `interstitial=${affordances.interstitial} url=${affordances.final_url}`;
+  log(
+    `brittle-probe: ${service} — replay failed but signup page still servable (${summary}) — downgrading, flagged for re-synthesis`,
+  );
+  return summary;
 }
 
 function describeReplayOutcome(outcome: ReplayOutcome): string {

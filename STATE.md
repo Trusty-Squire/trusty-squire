@@ -208,7 +208,7 @@ gost SOCKS5 over Tailscale, `UNIVERSAL_BOT_PROXY_ALWAYS=true`) on the premise th
 its datacenter IP would be blocked. Two independent measurements falsify that the
 proxy is load-bearing post-Turnstile-fix:
 
-1. **Live door-check (`tools/egress-doorcheck.mjs`, DIRECT datacenter IP, Miami).**
+1. **Live door-check (`tools/affordance-probe.mjs`, the `interstitial` field — was the now-removed `egress-doorcheck.mjs`, folded into the one probe; DIRECT datacenter IP, Miami).**
    Loaded 24 curated Google-OAuth signup pages on the raw datacenter IP and
    classified the anti-bot door (`classifyInterstitialText`). **23/24 cleared** —
    sentry, openai, anthropic, neon, render, posthog, cockroachdb, weaviate, etc.

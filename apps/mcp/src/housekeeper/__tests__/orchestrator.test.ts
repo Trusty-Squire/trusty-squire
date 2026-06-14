@@ -193,6 +193,134 @@ describe("runOneBatch — replay path", () => {
     expect(outcomes[0]!.failure_kind).toBe("account_already_registered");
   });
 
+  it("downgrades a rot step_failed to non-demoting when the probe shows the page is still servable", async () => {
+    const { client, outcomes } = recordingClient({});
+    await runOneBatch({
+      queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000PRB1") }]),
+      client: client as never,
+      replay: async () => ({
+        kind: "step_failed",
+        stepIndex: 1,
+        reason: "Tokens matched 2 elements",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create token",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      }),
+      // Probe says: the signup page still offers Google OAuth, no wall.
+      probe: async () => ({
+        providers: ["google"],
+        has_email_signup: false,
+        has_email_field: false,
+        card_gate: false,
+        interstitial: false,
+        final_url: "https://fly.io/signup",
+        inventory_size: 12,
+      }),
+      log: () => undefined,
+    });
+    expect(outcomes[0]!.kind).toBe("failure");
+    // Brittle, not rot — must not advance the demote counter, and is flagged
+    // for re-synthesis via the reason marker.
+    expect(outcomes[0]!.failure_kind).toBe("brittle_replay_servable");
+    expect(outcomes[0]!.reason).toMatch(/\[brittle: probe shows servable\]/);
+  });
+
+  it("does NOT downgrade when the probe shows no entry affordances", async () => {
+    const { client, outcomes } = recordingClient({});
+    await runOneBatch({
+      queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000PRB2") }]),
+      client: client as never,
+      replay: async () => ({
+        kind: "step_failed",
+        stepIndex: 1,
+        reason: "selector not found",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create token",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      }),
+      // Probe shows an empty/walled page — no OAuth, no form, an interstitial.
+      probe: async () => ({
+        providers: [],
+        has_email_signup: false,
+        has_email_field: false,
+        card_gate: false,
+        interstitial: true,
+        final_url: "https://svc.example/signup",
+        inventory_size: 0,
+      }),
+      log: () => undefined,
+    });
+    expect(outcomes[0]!.kind).toBe("failure");
+    // No clear affordances → leave the rot kind intact (still demotes).
+    expect(outcomes[0]!.failure_kind).toBe("step_failed");
+  });
+
+  it("does NOT downgrade when the probe itself errors", async () => {
+    const { client, outcomes } = recordingClient({});
+    await runOneBatch({
+      queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000PRB3") }]),
+      client: client as never,
+      replay: async () => ({
+        kind: "step_failed",
+        stepIndex: 1,
+        reason: "selector not found",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create token",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      }),
+      probe: async () => {
+        throw new Error("net::ERR_TIMED_OUT");
+      },
+      log: () => undefined,
+    });
+    expect(outcomes[0]!.kind).toBe("failure");
+    expect(outcomes[0]!.failure_kind).toBe("step_failed");
+  });
+
+  it("does NOT probe a non-rot failure (returning-user divergence)", async () => {
+    const { client, outcomes } = recordingClient({});
+    let probeCalls = 0;
+    await runOneBatch({
+      queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000PRB4") }]),
+      client: client as never,
+      replay: async () => ({
+        kind: "step_failed",
+        stepIndex: 5,
+        reason:
+          "target is disabled (aria-disabled=true) after 6s " +
+          "[returning-user: onboarding fill was absent; credential step diverged from fresh-signup capture]",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create service token",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      }),
+      probe: async () => {
+        probeCalls += 1;
+        return {
+          providers: ["google"],
+          has_email_signup: false,
+          has_email_field: false,
+          card_gate: false,
+          interstitial: false,
+          final_url: "https://svc.example/signup",
+          inventory_size: 12,
+        };
+      },
+      log: () => undefined,
+    });
+    // The divergence guard already downgraded it to a non-rot kind, so the
+    // probe must not even run (it's gated on failureCountsTowardDemotion).
+    expect(probeCalls).toBe(0);
+    expect(outcomes[0]!.failure_kind).toBe("account_already_registered");
+  });
+
   it("skips schema-drift without posting an outcome", async () => {
     const { SkillSchemaDriftError } = await import("../registry-client.js");
     const { client, outcomes } = recordingClient({

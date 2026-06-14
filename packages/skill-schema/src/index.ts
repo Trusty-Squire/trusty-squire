@@ -38,8 +38,10 @@ export {
   NAV_TIMEOUT_KIND,
   isReturningUserDivergence,
   ACCOUNT_EXISTS_KIND,
+  BRITTLE_PROBE_KIND,
+  probeShowsServable,
 } from "./failure-taxonomy.js";
-export type { FailureClass } from "./failure-taxonomy.js";
+export type { FailureClass, ProbedAffordances } from "./failure-taxonomy.js";
 export {
   classifyProvisionState,
   unknownStateSignature,

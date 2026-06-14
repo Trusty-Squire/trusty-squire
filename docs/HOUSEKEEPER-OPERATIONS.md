@@ -49,7 +49,8 @@ Env vars per mode live in CLAUDE.md ("Housekeeper env" table) — values only.
 ## Egress model
 
 **Direct-first since 2026-06-13. The residential proxy is retired as the default.**
-A door-check (`tools/egress-doorcheck.mjs`) loaded 24 curated Google-OAuth signup
+A door-check (`tools/affordance-probe.mjs`, reading its `interstitial` field — the
+standalone `egress-doorcheck.mjs` was folded into the one probe) loaded 24 curated Google-OAuth signup
 pages on the raw datacenter IP: **23/24 cleared the anti-bot door** (only `together`
 blocks — CF 1020). Combined with the heal-run failure distribution (~95%+ of failures
 are nav/OAuth/session/planner bugs, ~2% IP-class), the proxy's entire upside is a
