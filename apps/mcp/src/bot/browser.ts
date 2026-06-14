@@ -484,6 +484,12 @@ export class BrowserController {
   // parked here so settleAfterOAuth() can switch back to it once the
   // Google handshake completes.
   private oauthProductPage: Page | null = null;
+  // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
+  // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
+  // Stytch SSO callback fails to persist a session (cookie not set, FAPI
+  // rejection, etc.) without guessing. Off by default; zero cost when unset.
+  private oauthNetLog: Array<{ url: string; status: number; setCookie: boolean; ct: string }> = [];
+  private oauthNetListenerAttached = false;
 
   // F13 — on-demand Xvfb. Set when start() determined the host has no
   // display surface but Xvfb is available, so Chrome can run with
@@ -4874,6 +4880,7 @@ export class BrowserController {
   // settleAfterOAuth() restores the product page afterwards.
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
+    this.maybeAttachOAuthNetListener();
     this.oauthProductPage = this.page;
     // Race a popup `page` event against the click. context-level
     // "page" fires for both window.open popups and target=_blank.
@@ -4889,6 +4896,83 @@ export class BrowserController {
       await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
+    }
+  }
+
+  // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
+  // Attach a context-level response recorder ONCE. Records SSO-relevant
+  // responses (the service host + Clerk/Stytch/WorkOS FAPI hosts) with their
+  // status + whether they set a cookie — the signal for "did the callback's
+  // session-establish request succeed and set the session cookie?"
+  private maybeAttachOAuthNetListener(): void {
+    if (this.oauthNetListenerAttached) return;
+    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
+    if (!this.context) return;
+    this.oauthNetListenerAttached = true;
+    const RELEVANT = /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
+    this.context.on("response", (res) => {
+      void (async () => {
+        try {
+          const url = res.url();
+          if (!RELEVANT.test(url)) return;
+          const headers = res.headers();
+          if (this.oauthNetLog.length >= 200) return;
+          const entry: { url: string; status: number; setCookie: boolean; ct: string; body?: string } = {
+            url: url.slice(0, 200),
+            status: res.status(),
+            setCookie: "set-cookie" in headers || "Set-Cookie" in headers,
+            ct: (headers["content-type"] ?? "").slice(0, 40),
+          };
+          // Capture the body of a Clerk/Stytch/WorkOS sign-in/up/callback error
+          // (>=400) — its error code is the definitive tell (captcha_invalid vs
+          // transfer vs identifier_*). JSON only, bounded.
+          if (res.status() >= 400 && /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)) {
+            entry.body = (await res.text().catch(() => "")).slice(0, 800);
+          }
+          this.oauthNetLog.push(entry);
+        } catch {
+          // best-effort observability — never perturb the run
+        }
+      })();
+    });
+  }
+
+  // Dump cookies + the SSO network log to a file for post-mortem. Called at the
+  // oauth_session_not_persisted decision point when UNIVERSAL_BOT_OAUTH_DEBUG.
+  async dumpOAuthDebug(service: string, label: string): Promise<void> {
+    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
+    if (!this.context) return;
+    try {
+      const cookies = await this.context.cookies();
+      const cookieSummary = cookies.map((c) => ({
+        name: c.name,
+        domain: c.domain,
+        path: c.path,
+        len: c.value.length,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        sameSite: c.sameSite,
+      }));
+      const url = this.page ? this.page.url() : "(no page)";
+      const consoleText = await this.extractText().catch(() => "");
+      const { writeFileSync, mkdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { homedir } = await import("node:os");
+      const dir = join(homedir(), ".trusty-squire", "oauth-debug");
+      mkdirSync(dir, { recursive: true });
+      const ts = process.env.OAUTH_DEBUG_TS ?? String(this.oauthNetLog.length);
+      const path = join(dir, `${service}-${label}-${ts}.json`);
+      writeFileSync(
+        path,
+        JSON.stringify(
+          { service, label, finalUrl: url, cookies: cookieSummary, netLog: this.oauthNetLog, pageText: consoleText.slice(0, 600) },
+          null,
+          2,
+        ),
+      );
+      console.error(`[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`);
+    } catch (err) {
+      console.error(`[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

@@ -9789,12 +9789,14 @@ ${formatInventory(input.inventory)}`,
             `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
               `${consecutiveOauthLoginPageRounds} rounds (incl. a reload) — the OAuth callback never persisted; bailing.`,
           );
+          await this.browser.dumpOAuthDebug(args.service, "callback-not-persisted").catch(() => {});
           throw new OAuthSessionNotPersistedError(
             `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
               `still presents a login screen (${pathOf(state.url)}) after ` +
-              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback never established a ` +
-              `session (anti-bot / IP rejection of the callback). Not a navigation bug; needs ` +
-              `residential egress or manual signup.`,
+              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback was rejected at the ` +
+              `automation/fingerprint layer. NOT an IP issue (FALSIFIED 2026-06-14: a clean ` +
+              `residential IP fails this callback identically — see STATE.md), so residential ` +
+              `egress does NOT fix it. Needs a fingerprint/automation fix or manual signup.`,
           );
         }
       } else {

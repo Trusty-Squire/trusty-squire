@@ -138,6 +138,13 @@ const CLEAN_STATE_RETRY_KINDS: ReadonlySet<string> = new Set([
 
 function shouldCleanStateRetry(error: string | undefined): boolean {
   if (error === undefined) return false;
+  // Controlled-experiment escape: skip the D1 retry so each attempt consumes
+  // exactly one identity (the retry rotates to a second robot, which doubles
+  // pool consumption and muddies single-attempt matrices like the egress
+  // direct-vs-proxy proof). Unset in normal operation — D1 stays on.
+  if (/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_NO_CLEAN_STATE_RETRY ?? "")) {
+    return false;
+  }
   const head = error.trim().toLowerCase().split(/[:\s]/, 1)[0] ?? "";
   return CLEAN_STATE_RETRY_KINDS.has(head);
 }
