@@ -143,3 +143,79 @@ export function assessKeyGoal(input: {
   // but it's not arrival — keep searching with it available to the caller.
   return { kind: "not_yet" };
 }
+
+// ── overlay / wizard handling (T3) ───────────────────────────────────────────
+// Onboarding wizards and modals are a RECURRING obstacle (imagekit role-select,
+// unify "Hire Assistant", "name your project") — each currently re-improvised and
+// trapped the bot. One mechanism: when blocked, DISMISS the overlay (skip/close)
+// or, failing that, ADVANCE the wizard (Next/Continue). Pure detection here; the
+// click (and an Escape-key fallback) is the loop's browser action.
+
+// Generalizes the inline WIZARD_FORWARD (agent.ts:10413). A forward control that
+// advances a multi-step onboarding wizard.
+const WIZARD_ADVANCE =
+  /^\s*(?:next|continue|submit|finish|done|get\s+started|let'?s\s+go|proceed)\s*$/i;
+// A control that skips/closes an onboarding step or modal entirely — preferred
+// over advancing, since skipping gets us to the dashboard fastest.
+const OVERLAY_DISMISS =
+  /\b(?:skip(?:\s+for\s+now)?|dismiss|not\s+now|maybe\s+later|no\s+thanks?|close|×|✕|✖)\b/i;
+
+function isClickable(el: InteractiveElement): boolean {
+  return (
+    (el.tag === "button" || el.tag === "a" || el.role === "button" || el.role === "link") &&
+    el.visible !== false
+  );
+}
+
+function elText(el: InteractiveElement): string {
+  return [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+    .filter((s): s is string => s !== null && s !== undefined && s.length > 0)
+    .join(" ")
+    .trim();
+}
+
+// Find a skip/close affordance for a blocking onboarding step or modal. Pure.
+export function findOverlayDismiss(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  for (const el of inventory) {
+    if (!isClickable(el)) continue;
+    const t = elText(el);
+    if (t.length === 0) continue;
+    // Long text that merely CONTAINS "close" (e.g. "Close your first deal") is
+    // not a dismiss control — require the control to be short/affordance-shaped.
+    if (t.length > 24) continue;
+    if (OVERLAY_DISMISS.test(t)) return el;
+  }
+  return null;
+}
+
+// Find a Next/Continue-style control that advances a wizard. Pure. Matches on
+// the WHOLE label (anchored) so a "Continue with Google" OAuth button or a
+// "Submit feedback" doesn't trip it.
+export function findWizardAdvance(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  for (const el of inventory) {
+    if (!isClickable(el)) continue;
+    if (WIZARD_ADVANCE.test(elText(el))) return el;
+  }
+  return null;
+}
+
+export type OverlayStep =
+  | { kind: "dismiss"; selector: string }
+  | { kind: "advance"; selector: string }
+  | { kind: "none" };
+
+// Plan one step to get past a blocking overlay/wizard: prefer dismissing
+// (skip/close — exits the wizard) over advancing (only when there's no skip).
+// Pure; the caller clicks the selector (with an Escape-key fallback for modals
+// that expose no in-DOM close control).
+export function planOverlayStep(inventory: readonly InteractiveElement[]): OverlayStep {
+  const dismiss = findOverlayDismiss(inventory);
+  if (dismiss !== null) return { kind: "dismiss", selector: dismiss.selector };
+  const advance = findWizardAdvance(inventory);
+  if (advance !== null) return { kind: "advance", selector: advance.selector };
+  return { kind: "none" };
+}

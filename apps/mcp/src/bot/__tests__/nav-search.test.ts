@@ -9,6 +9,9 @@ import type { InteractiveElement } from "../browser.js";
 import {
   assessKeyGoal,
   enumerateCandidates,
+  findOverlayDismiss,
+  findWizardAdvance,
+  planOverlayStep,
   rankCandidates,
   scoreCandidate,
   type NavCandidate,
@@ -151,5 +154,38 @@ describe("assessKeyGoal", () => {
     const inv = [el({ tag: "button", visibleText: "Create API key", selector: "#create" })];
     const g = assessKeyGoal({ url: "https://x.test/app/projects", pageText: "Projects", inventory: inv });
     expect(g.kind).toBe("not_yet");
+  });
+});
+
+describe("findOverlayDismiss / findWizardAdvance / planOverlayStep", () => {
+  it("finds skip/close/not-now dismiss affordances", () => {
+    expect(findOverlayDismiss([el({ tag: "button", visibleText: "Skip", selector: "#s" })])?.selector).toBe("#s");
+    expect(findOverlayDismiss([el({ tag: "button", visibleText: "Skip for now", selector: "#s2" })])?.selector).toBe("#s2");
+    expect(findOverlayDismiss([el({ tag: "button", ariaLabel: "Close", visibleText: null, selector: "#x" })])?.selector).toBe("#x");
+    expect(findOverlayDismiss([el({ tag: "button", visibleText: "Maybe later", selector: "#l" })])?.selector).toBe("#l");
+  });
+
+  it("does NOT treat long text merely containing 'close' as a dismiss control", () => {
+    expect(findOverlayDismiss([el({ tag: "button", visibleText: "Close your first deal today", selector: "#deal" })])).toBeNull();
+  });
+
+  it("finds Next/Continue/Get started wizard-advance controls (anchored)", () => {
+    expect(findWizardAdvance([el({ tag: "button", visibleText: "Next", selector: "#n" })])?.selector).toBe("#n");
+    expect(findWizardAdvance([el({ tag: "button", visibleText: "Get started", selector: "#g" })])?.selector).toBe("#g");
+  });
+
+  it("does NOT match 'Continue with Google' or 'Submit feedback' (whole-label anchor)", () => {
+    expect(findWizardAdvance([el({ tag: "button", visibleText: "Continue with Google", selector: "#goog" })])).toBeNull();
+    expect(findWizardAdvance([el({ tag: "button", visibleText: "Submit feedback", selector: "#fb" })])).toBeNull();
+  });
+
+  it("planOverlayStep prefers dismiss over advance, then advance, then none", () => {
+    const both = [
+      el({ tag: "button", visibleText: "Next", selector: "#next" }),
+      el({ tag: "button", visibleText: "Skip", selector: "#skip" }),
+    ];
+    expect(planOverlayStep(both)).toEqual({ kind: "dismiss", selector: "#skip" });
+    expect(planOverlayStep([el({ tag: "button", visibleText: "Continue", selector: "#c" })])).toEqual({ kind: "advance", selector: "#c" });
+    expect(planOverlayStep([el({ tag: "button", visibleText: "Dashboard", selector: "#d" })])).toEqual({ kind: "none" });
   });
 });
