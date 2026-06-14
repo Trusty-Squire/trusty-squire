@@ -6806,8 +6806,16 @@ export class SignupAgent {
       // onboarding_blocked status the OAuth path uses — there's no key to reach
       // until a human approves the account, so don't surface it as a generic
       // failure (which can wrongly chase a code bug) or punish a skill for it.
-      const reviewGateText = await this.browser.extractText().catch(() => "");
-      if (isAtAccountReviewGate(reviewGateText)) {
+      //
+      // ONLY when verification did NOT time out. A pending email-verification
+      // page ("check your email", "we sent a code") can read as a review gate
+      // to the classifier, but the authoritative cause there is the missing
+      // mail (verification_not_sent) — anthropic mislabeled as onboarding_blocked
+      // exactly this way. If we were waiting on an email that never came, that
+      // is the failure; don't reinterpret it as a manual-review gate.
+      const reviewGateText =
+        verificationFailed === undefined ? await this.browser.extractText().catch(() => "") : "";
+      if (verificationFailed === undefined && isAtAccountReviewGate(reviewGateText)) {
         return {
           success: false,
           error:
