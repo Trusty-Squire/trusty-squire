@@ -726,3 +726,60 @@ describe("planExecuteWithRetry", () => {
     expect(llm.calls).toBe(0);
   });
 });
+
+// Fix C — the form-fill planner (planSignupForm, reached via
+// planExecuteWithRetry) must mark its LLM call deterministic:true so the
+// proxy pins a single model + provider + seed. temperature 0 alone leaves
+// the model/provider lottery in play.
+describe("planner call sites set deterministic=true (Fix C)", () => {
+  // Records every request the planner sends so the test can assert the
+  // deterministic flag rode along.
+  class RecordingLLM implements LLMClient {
+    readonly name = "recording";
+    public requests: import("../llm-client.js").LLMRequest[] = [];
+    constructor(private readonly reply: string) {}
+    async createMessage(
+      req: import("../llm-client.js").LLMRequest,
+    ): Promise<LLMResponse> {
+      this.requests.push(req);
+      return { text: this.reply, backend: this.name };
+    }
+  }
+
+  it("planSignupForm sends deterministic=true + temperature 0", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", id: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    const llm = new RecordingLLM(fillPlan("#email", "#go"));
+    const asController: unknown = browser;
+    if (!isController(asController)) throw new Error("unreachable");
+    const agent = new SignupAgent(asController, llm);
+    const fillValues = {
+      email: "bot@inbox.test",
+      password: "Pw-test-12345",
+      name: "Test Bot",
+      username: "testbot12",
+      company: "Trusty Squire",
+      literal: "",
+    };
+    const fn = (
+      agent as unknown as {
+        planExecuteWithRetry: (
+          t: { service: string; email: string },
+          fv: typeof fillValues,
+          s: string[],
+        ) => Promise<Outcome>;
+      }
+    ).planExecuteWithRetry.bind(agent);
+    await fn({ service: "Test", email: "bot@inbox.test" }, fillValues, []);
+
+    expect(llm.requests.length).toBeGreaterThan(0);
+    const first = llm.requests[0]!;
+    expect(first.deterministic).toBe(true);
+    expect(first.temperature).toBe(0);
+  });
+});

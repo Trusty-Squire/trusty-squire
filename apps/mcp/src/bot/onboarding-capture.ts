@@ -101,6 +101,12 @@ export interface OnboardingRoundCapture {
   // The step the planner actually chose this round — a reference for
   // the curator, NOT ground truth (the planner may have been wrong).
   observed: PostVerifyStep;
+  // Fix C4 — the model/provider the LLM backend actually served for this
+  // round's plan. Optional: undefined when the backend didn't report one,
+  // or on an older client. Persisted so model-swap flakiness is
+  // attributable from the corpus (which round used which backend).
+  resolved_model?: string;
+  resolved_provider?: string;
 }
 
 // Wire shape of one dumped round. `expect: null` is the curator slot;
@@ -113,6 +119,12 @@ export interface OnboardingCaseFile {
   state: OnboardingRoundCapture["state"];
   inventory: readonly InteractiveElement[];
   observed: PostVerifyStep;
+  // Fix C4 — served model/provider for this round (see
+  // OnboardingRoundCapture). Optional + only written when present, so the
+  // integrity hash of an older round (no resolved_* keys) is unaffected
+  // and the format stays forward-compatible.
+  resolved_model?: string;
+  resolved_provider?: string;
   expect: null;
   prev_hash: string | null;
   content_hash: string;
@@ -195,6 +207,11 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
       state: entry.state,
       inventory: entry.inventory,
       observed: entry.observed,
+      // Only set when present so a round that has no resolved_* (older
+      // client / backend that didn't report) hashes identically to before
+      // — this keeps the integrity chain forward-compatible.
+      ...(entry.resolved_model !== undefined ? { resolved_model: entry.resolved_model } : {}),
+      ...(entry.resolved_provider !== undefined ? { resolved_provider: entry.resolved_provider } : {}),
       prev_hash: prevHash,
     };
     const contentHash = computeContentHash(payload);

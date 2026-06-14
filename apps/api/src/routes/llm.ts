@@ -55,6 +55,23 @@ const chatBodySchema = z.object({
   // Sampling temperature, forwarded to OpenRouter. Omitted → provider default
   // (~0.7). The navigation planner sends 0 for deterministic decisions.
   temperature: z.number().min(0).max(2).optional(),
+  // Determinism flag (Fix C). When true this is a NAVIGATION-PLANNER call,
+  // and we need bit-for-bit reproducibility run-to-run — temperature 0 is
+  // necessary but not sufficient: the `models` routing array, tier=free's
+  // per-call model lottery, and OpenRouter spreading one model across
+  // backend providers each flip the reply even at temp 0. When set we:
+  //   • pin a SINGLE model (LLM_PROXY_PLANNER_MODEL) — never a routing
+  //     array, never openrouter/free,
+  //   • pin the provider order + allow_fallbacks:false,
+  //   • forward `seed`.
+  // Non-planner calls (vision number-match, premium parse-failure retry)
+  // omit it → the existing tier/models/fallback behavior is untouched.
+  // Optional + additive so an older client that never sends it interops.
+  deterministic: z.boolean().optional(),
+  // Sampling seed, forwarded to OpenRouter for deterministic calls. The
+  // client sends 1 by default on planner calls. Ignored by providers that
+  // don't honor seeds, harmless when present. Optional/additive.
+  seed: z.number().int().optional(),
 });
 
 const CHEAP_MODEL = process.env.LLM_PROXY_CHEAP_MODEL ?? "google/gemini-flash-1.5";
@@ -119,6 +136,41 @@ const FREE_IGNORE_PROVIDERS: string[] = (
 // looks like a cheap-tier run, not a premium one.
 const FREE_ESCAPE = process.env.LLM_PROXY_FREE_ESCAPE ?? "google/gemini-2.0-flash-001";
 
+// ── Deterministic planner path (Fix C) ──────────────────────────────
+//
+// Navigation-planner calls (deterministic=true) ignore the tier→model
+// pick entirely and use ONE pinned model with a pinned backend provider
+// + seed. Why a single pinned model: a `models` routing array and
+// tier=free are both per-call lotteries — OpenRouter can serve a
+// different model run-to-run, which flips the planner's reply even at
+// temperature 0. Why a pinned provider: OR load-balances one model
+// across multiple backend providers whose outputs differ even at temp 0.
+//
+// LLM_PROXY_PLANNER_MODEL — the pinned planner model. Default
+// gemini-2.0-flash-001 (cheap, vision-capable, the bot's de-facto cheap
+// primary), env-overridable so the operator can re-pin without a deploy.
+const PLANNER_MODEL =
+  process.env.LLM_PROXY_PLANNER_MODEL ?? "google/gemini-2.0-flash-001";
+// LLM_PROXY_PLANNER_PROVIDER_ORDER — comma-separated OpenRouter provider
+// order for the pinned model, with fallbacks OFF (so the call resolves to
+// exactly one backend or hard-fails). Mirrors the eval-path pin in
+// llm-client.ts (UNIVERSAL_BOT_OR_PROVIDER). Default targets Google's
+// own backends for the Gemini default model.
+const PLANNER_PROVIDER_ORDER: string[] = (
+  process.env.LLM_PROXY_PLANNER_PROVIDER_ORDER ?? "google-vertex,google-ai-studio"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+// Paid escape used ONLY when the pinned model+provider HARD-FAILS
+// (upstream error or empty content) — never when it returns a successful
+// but merely different reply (that's the determinism we want to keep).
+// A provider outage must not dead-stop the planner, so we fall through
+// to a single alternate model without the provider pin. Defaults to the
+// free-tier escape so the worst-case cost stays cheap-class.
+const PLANNER_ESCAPE =
+  process.env.LLM_PROXY_PLANNER_ESCAPE ?? FREE_ESCAPE;
+
 export interface LLMRouteDeps {
   machineTokenStore: MachineTokenStore;
   llmUsageTracker: LLMUsageTracker;
@@ -182,8 +234,14 @@ export async function registerLLMRoute(
         : { type: "text" as const, text: b.text },
     );
 
-    const primaryModel =
-      parsed.data.tier === "premium"
+    // Deterministic planner calls bypass the tier→model pick entirely and
+    // use the single pinned planner model. NEVER tier=free here (its router
+    // is a per-call lottery), NEVER a `models` fallback array (also a
+    // lottery). The provider pin + seed are added below.
+    const deterministic = parsed.data.deterministic === true;
+    const primaryModel = deterministic
+      ? PLANNER_MODEL
+      : parsed.data.tier === "premium"
         ? PREMIUM_MODEL
         : parsed.data.tier === "free"
           ? FREE_MODEL
@@ -199,7 +257,23 @@ export async function registerLLMRoute(
         { role: "user", content: userContent },
       ],
     };
-    if (parsed.data.tier === "cheap" && CHEAP_FALLBACKS.length > 0) {
+    if (deterministic) {
+      // Provider-pin + seed for reproducibility. Lifted from the
+      // BYOK-eval path in llm-client.ts (UNIVERSAL_BOT_OR_PROVIDER) so the
+      // PRODUCTION proxy path is just as deterministic as the offline eval.
+      // allow_fallbacks:false → the call resolves to exactly one backend
+      // or hard-fails (and the hard-fail escape below catches that). No
+      // `models` array — a single pinned model is the whole point.
+      if (PLANNER_PROVIDER_ORDER.length > 0) {
+        body["provider"] = {
+          order: PLANNER_PROVIDER_ORDER,
+          allow_fallbacks: false,
+        };
+      }
+      if (parsed.data.seed !== undefined) {
+        body["seed"] = parsed.data.seed;
+      }
+    } else if (parsed.data.tier === "cheap" && CHEAP_FALLBACKS.length > 0) {
       body["models"] = [primaryModel, ...CHEAP_FALLBACKS];
     } else if (parsed.data.tier === "free") {
       // free → free → paid escape. OpenRouter caps at 3, which is
@@ -222,8 +296,13 @@ export async function registerLLMRoute(
     // dropped from the chain, so the next entry (cheap paid backstop)
     // serves the response. The retry only applies on tier=free; cheap
     // and premium never use openrouter/free.
+    // `swallowError` suppresses the 502 reply on a hard upstream failure
+    // so the caller can try a fallback first (the deterministic-planner
+    // escape). When false (the default, for non-deterministic paths) the
+    // function sends the 502 itself, preserving the original behavior.
     const callOpenRouter = async (
       requestBody: Record<string, unknown>,
+      swallowError = false,
     ): Promise<{ ok: true; data: OrResponse } | { ok: false }> => {
       const orRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -241,7 +320,9 @@ export async function registerLLMRoute(
           { status: orRes.status, body: text.slice(0, 500) },
           "openrouter upstream error",
         );
-        reply.code(502).send({ error: "upstream_error", upstream_status: orRes.status });
+        if (!swallowError) {
+          reply.code(502).send({ error: "upstream_error", upstream_status: orRes.status });
+        }
         return { ok: false };
       }
       const data = (await orRes.json()) as OrResponse;
@@ -249,15 +330,42 @@ export async function registerLLMRoute(
     };
 
     try {
-      let result = await callOpenRouter(body);
-      if (!result.ok) return;
-      let text = result.data.choices[0]?.message.content;
+      // Deterministic calls swallow the first call's hard-failure 502 so
+      // the escape below can fire; all other paths keep the original
+      // (502-sends-itself) behavior.
+      let result = await callOpenRouter(body, deterministic);
+      let text = result.ok ? result.data.choices[0]?.message.content : undefined;
+
+      // Hard-failure escape for the deterministic planner path (Fix C).
+      // Fires ONLY on a HARD failure — upstream error (!result.ok) or
+      // empty content — NEVER on a successful-but-different reply (that's
+      // the determinism we're protecting). A provider outage on the pinned
+      // model+provider must not dead-stop the planner, so retry once with a
+      // single alternate model and NO provider pin. We accept that this
+      // escape reply is non-deterministic — it only happens when the pinned
+      // path is unavailable, which is rare and strictly better than failing.
+      if (deterministic && (!result.ok || typeof text !== "string")) {
+        fastify.log.warn(
+          { pinned_model: primaryModel, escape_model: PLANNER_ESCAPE },
+          "deterministic planner pinned model hard-failed — escaping",
+        );
+        // Strip the provider pin + seed; use a single alternate model.
+        const { provider: _provider, seed: _seed, ...rest } = body;
+        const escapeBody = { ...rest, model: PLANNER_ESCAPE };
+        result = await callOpenRouter(escapeBody);
+        if (!result.ok) return;
+        text = result.data.choices[0]?.message.content;
+      } else if (!result.ok) {
+        // Non-deterministic hard failure already sent its own 502.
+        return;
+      }
 
       // Empty-content retry. Only on tier=free where the router can
       // route to a reasoning-style model with empty content. Drop
       // FREE_MODEL from the chain on the retry — start with the
       // cheap paid backstop so we get an actual reply.
       if (
+        result.ok &&
         typeof text !== "string" &&
         parsed.data.tier === "free"
       ) {
@@ -280,6 +388,13 @@ export async function registerLLMRoute(
       reply.send({
         text,
         backend: data.model !== undefined ? `proxy:${data.model}` : `proxy:${primaryModel}`,
+        // Fix C4 — surface the ACTUALLY-served model (and provider when OR
+        // reports it) so the client can persist it per capture round. This
+        // makes model-swap flakiness attributable from the corpus — today
+        // a round records nothing about which backend produced its plan.
+        // Additive/optional; older clients ignore the extra fields.
+        ...(data.model !== undefined ? { resolved_model: data.model } : {}),
+        ...(data.provider !== undefined ? { resolved_provider: data.provider } : {}),
         ...(data.usage?.prompt_tokens !== undefined ? { input_tokens: data.usage.prompt_tokens } : {}),
         ...(data.usage?.completion_tokens !== undefined ? { output_tokens: data.usage.completion_tokens } : {}),
       });
@@ -331,4 +446,8 @@ interface OrResponse {
   choices: Array<{ message: { content: string } }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   model?: string;
+  // OpenRouter echoes which backend provider actually served the request
+  // (e.g. "Google", "Google AI Studio"). Present on most responses; used
+  // for the resolved_provider capture field (Fix C4).
+  provider?: string;
 }

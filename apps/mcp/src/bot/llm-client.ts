@@ -50,6 +50,16 @@ export interface LLMRequest {
   // makes the offline eval (eval-onboarding) faithful to production. See
   // docs/DESIGN-planner-navigation-eval.md.
   temperature?: number;
+  // Determinism flag (Fix C). Set by the navigation/form planners. On the
+  // proxy path it tells the server to pin a SINGLE model + backend provider
+  // + seed instead of a `models` routing array / tier=free lottery, so the
+  // planner's reply is reproducible run-to-run (temperature 0 alone is not
+  // enough — model-swap + provider-swap flip the bytes even at temp 0).
+  // Non-planner calls (vision number-match, premium parse retry) omit it.
+  deterministic?: boolean;
+  // Sampling seed forwarded on deterministic calls. Defaults to 1 at the
+  // proxy client. Honored by backends that support it; harmless elsewhere.
+  seed?: number;
 }
 
 export interface LLMResponse {
@@ -61,6 +71,13 @@ export interface LLMResponse {
   // Identifies which backend handled this so the agent can surface it
   // in step logs.
   backend: string;
+  // The model the backend actually served (Fix C4). On the proxy path
+  // this is OpenRouter's reported served model; the agent persists it per
+  // capture round so model-swap flakiness is attributable from the corpus.
+  // Optional — not every backend reports it.
+  resolved_model?: string;
+  // The backend provider OpenRouter routed to, when reported.
+  resolved_provider?: string;
 }
 
 export interface LLMClient {
@@ -225,6 +242,9 @@ export class OpenRouterClient implements LLMClient {
       ...(data.usage?.prompt_tokens !== undefined ? { input_tokens: data.usage.prompt_tokens } : {}),
       ...(data.usage?.completion_tokens !== undefined ? { output_tokens: data.usage.completion_tokens } : {}),
       backend: data.model !== undefined ? `openrouter:${data.model}` : this.name,
+      // Fix C4 parity — surface the served model on the BYOK path too so
+      // the capture round records it regardless of which backend won.
+      ...(data.model !== undefined ? { resolved_model: data.model } : {}),
     };
   }
 }
@@ -323,6 +343,12 @@ export class ProxyLLMClient implements LLMClient {
       max_tokens: req.max_tokens,
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       tier: this.tier,
+      // Fix C — planner determinism. When the caller marks the request
+      // deterministic we forward the flag plus a seed so the server pins a
+      // single model + backend provider (no models-array / free-tier
+      // lottery). Default the seed to 1 so the client doesn't have to.
+      ...(req.deterministic === true ? { deterministic: true } : {}),
+      ...(req.deterministic === true ? { seed: req.seed ?? 1 } : {}),
     };
     const payload = JSON.stringify(body);
 
@@ -399,12 +425,19 @@ export class ProxyLLMClient implements LLMClient {
         const data = JSON.parse(text) as {
           text: string;
           backend?: string;
+          resolved_model?: string;
+          resolved_provider?: string;
           input_tokens?: number;
           output_tokens?: number;
         };
         return {
           text: data.text,
           backend: data.backend ?? this.name,
+          // Fix C4 — pass the server-reported served model/provider through
+          // so the agent can stamp it onto the capture round. Optional:
+          // an older server that doesn't send them just omits the fields.
+          ...(data.resolved_model !== undefined ? { resolved_model: data.resolved_model } : {}),
+          ...(data.resolved_provider !== undefined ? { resolved_provider: data.resolved_provider } : {}),
           ...(data.input_tokens !== undefined ? { input_tokens: data.input_tokens } : {}),
           ...(data.output_tokens !== undefined ? { output_tokens: data.output_tokens } : {}),
         };

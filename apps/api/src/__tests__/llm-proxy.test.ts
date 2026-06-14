@@ -415,6 +415,147 @@ describe("/v1/llm/chat", () => {
     expect("temperature" in orBody).toBe(false);
   });
 
+  // Fix C — deterministic planner path. When the body sets
+  // deterministic=true the proxy must pin a SINGLE model (no `models`
+  // routing array, never the free-tier router), pin the backend provider
+  // with allow_fallbacks:false, and forward the seed.
+  it("deterministic=true pins a single model + provider + seed (no models array)", async () => {
+    const fetchMock = okOpenRouter();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, temperature: 0, deterministic: true, seed: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    const orBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+    // Single pinned planner model — default gemini-2.0-flash-001.
+    expect(orBody.model).toBe("google/gemini-2.0-flash-001");
+    // NO routing array — that's the lottery we're killing.
+    expect("models" in orBody).toBe(false);
+    // Provider pin with fallbacks off.
+    expect(orBody.provider).toEqual({
+      order: ["google-vertex", "google-ai-studio"],
+      allow_fallbacks: false,
+    });
+    expect(orBody.seed).toBe(1);
+  });
+
+  it("deterministic ignores tier=free (never the per-call free router)", async () => {
+    const fetchMock = okOpenRouter();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, tier: "free", deterministic: true, seed: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    const orBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+    // Pinned planner model, NOT openrouter/free, and no free chain.
+    expect(orBody.model).toBe("google/gemini-2.0-flash-001");
+    expect("models" in orBody).toBe(false);
+  });
+
+  it("non-deterministic cheap requests keep the models array + no seed/provider", async () => {
+    const fetchMock = okOpenRouter();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      // No deterministic flag — default cheap tier behavior is unchanged.
+      payload: { ...VALID_BODY },
+    });
+    expect(res.statusCode).toBe(200);
+    const orBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as { body: string }).body);
+    expect(orBody.model).toBe("google/gemini-flash-1.5");
+    expect(orBody.models).toEqual([
+      "google/gemini-flash-1.5",
+      "google/gemini-flash-1.5-8b",
+      "openai/gpt-4o-mini",
+    ]);
+    expect("seed" in orBody).toBe(false);
+    expect("provider" in orBody).toBe(false);
+  });
+
+  it("deterministic HARD-failure escapes to a single alternate model (no provider pin)", async () => {
+    // The pinned model+provider returns a 502 on the first call; the
+    // escape must retry once with a single alternate model and NO
+    // provider pin so a provider outage doesn't dead-stop the planner.
+    const captures: Array<Record<string, unknown>> = [];
+    let call = 0;
+    globalThis.fetch = vi.fn().mockImplementation(async (_url, init) => {
+      captures.push(JSON.parse(String((init as { body?: string }).body ?? "{}")));
+      call += 1;
+      if (call === 1) {
+        return new Response("provider unavailable", { status: 502 });
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "escape reply" } }],
+          model: "google/gemini-2.0-flash-001",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, deterministic: true, seed: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { text: string }).text).toBe("escape reply");
+    expect(captures).toHaveLength(2);
+    // First call: pinned provider. Escape call: provider pin stripped.
+    expect("provider" in captures[0]!).toBe(true);
+    expect("provider" in captures[1]!).toBe(false);
+    expect("seed" in captures[1]!).toBe(false);
+  });
+
+  it("deterministic does NOT escape on a successful-but-different reply", async () => {
+    // The whole point of determinism: a successful reply is honored as-is,
+    // even though it could differ from a prior run. Only a HARD failure
+    // (error/empty) triggers the escape — so exactly one upstream call.
+    const fetchMock = okOpenRouter();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, deterministic: true, seed: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces resolved_model + resolved_provider from the OpenRouter reply (Fix C4)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" } }],
+          model: "google/gemini-2.0-flash-001",
+          provider: "Google AI Studio",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/llm/chat",
+      headers: { ...JSON_HEADERS, "x-machine-token": machine_token },
+      payload: { ...VALID_BODY, deterministic: true, seed: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      resolved_model: "google/gemini-2.0-flash-001",
+      resolved_provider: "Google AI Studio",
+    });
+  });
+
   describe("GET /v1/llm/credits", () => {
   it("returns the operator's remaining OpenRouter balance", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(

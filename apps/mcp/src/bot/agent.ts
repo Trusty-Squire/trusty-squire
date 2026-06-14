@@ -4101,6 +4101,12 @@ export class SignupAgent {
   // backends_used[i] is the .name string of the LLMClient that produced
   // the i-th reply this run.
   private readonly backendsUsed: string[] = [];
+  // Fix C4 — the model/provider the backend actually served on the most
+  // recent LLM call, captured per round. callLLM stamps these after every
+  // call; the capture sites read them when dumping a round. Undefined
+  // until the first call (or when the backend doesn't report a model).
+  private lastResolvedModel: string | undefined;
+  private lastResolvedProvider: string | undefined;
   private readonly llmPair: LLMPair;
 
   // Captcha encounter state for the current run. Updated by the
@@ -5262,6 +5268,11 @@ export class SignupAgent {
           state,
           inventory,
           observed,
+          // Fix C4 — the form-plan's backend (planSignupForm ran before
+          // this synthetic preamble capture, so lastResolved* still reflect
+          // it). These preamble rounds replay the one plan; one backend.
+          ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+          ...(this.lastResolvedProvider !== undefined ? { resolved_provider: this.lastResolvedProvider } : {}),
         });
         this.captureChainRound += 1;
       };
@@ -5709,6 +5720,11 @@ export class SignupAgent {
     // deterministic decisions (see docs/DESIGN-planner-navigation-eval.md);
     // omitted → provider default.
     temperature?: number;
+    // Fix C — mark a NAVIGATION-PLANNER call. Forwarded to the proxy so it
+    // pins a single model + backend provider + seed (temperature 0 alone
+    // doesn't kill the model/provider-swap byte-flips). Set true by the
+    // form + post-verify planners; left unset by every other call.
+    deterministic?: boolean;
   }): Promise<T extends undefined ? string : T> {
     // Use a typed helper because the conditional return type confuses
     // the inner narrowing.
@@ -5721,6 +5737,7 @@ export class SignupAgent {
     maxTokens: number;
     parse?: (raw: string) => T;
     temperature?: number;
+    deterministic?: boolean;
   }): Promise<T | string> {
     const callOne = async (client: LLMClient): Promise<string> => {
       if (this.llmCallCount >= MAX_LLM_CALLS_PER_SIGNUP) {
@@ -5741,9 +5758,14 @@ export class SignupAgent {
         user: args.userBlocks,
         max_tokens: args.maxTokens,
         ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
+        ...(args.deterministic === true ? { deterministic: true } : {}),
       });
       this.llmCallCount += 1;
       this.backendsUsed.push(resp.backend);
+      // Fix C4 — remember the served model/provider so the capture sites
+      // can stamp this round with what actually produced the plan.
+      this.lastResolvedModel = resp.resolved_model;
+      this.lastResolvedProvider = resp.resolved_provider;
       return resp.text;
     };
 
@@ -8392,6 +8414,9 @@ ${formatInventory(input.inventory)}`,
       // Deterministic form-fill picks (same rationale as the post-verify
       // planner — D2). Removes a run-to-run flakiness source.
       temperature: 0,
+      // Fix C — pin a single model + provider + seed on the proxy path.
+      // temperature 0 alone leaves the model/provider lottery in play.
+      deterministic: true,
       parse: (raw) => parseSignupPlan(raw, allowed),
     });
   }
@@ -9764,6 +9789,10 @@ ${formatInventory(input.inventory)}`,
         state,
         inventory,
         observed: nextStep,
+        // Fix C4 — stamp the backend that produced THIS round's plan
+        // (planPostVerifyStep set these via callLLM just above).
+        ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+        ...(this.lastResolvedProvider !== undefined ? { resolved_provider: this.lastResolvedProvider } : {}),
       });
       capturedRound += 1;
 
@@ -10870,6 +10899,10 @@ ${formatInventory(input.inventory)}`,
             state: postState,
             inventory: postInventory,
             observed: syntheticExtract,
+            // Fix C4 — attribute this synthetic round to the planner call
+            // that drove us here (no LLM ran for this implicit extract).
+            ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+            ...(this.lastResolvedProvider !== undefined ? { resolved_provider: this.lastResolvedProvider } : {}),
           });
           capturedRound += 1;
           if (this.roundUploader !== undefined) {
@@ -11366,6 +11399,11 @@ ${formatInventory(input.inventory)}${
       // navigation-eval.md). The stall-detector + prior-action memory are the
       // escape from a deterministic loop.
       temperature: 0,
+      // Fix C — pin a single model + provider + seed on the proxy path so
+      // the same dashboard yields the same step regardless of which backend
+      // OpenRouter would otherwise route to (the model/provider lottery
+      // survives temperature 0).
+      deterministic: true,
       parse: (raw) => {
         const step = parsePostVerifyStep(raw, allowed);
         // A `check` must land on a real checkbox/radio — the planner
