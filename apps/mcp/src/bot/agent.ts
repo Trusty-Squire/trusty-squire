@@ -7794,17 +7794,38 @@ export class SignupAgent {
       isSignupOrLoginRoute(this.browser.currentUrl()) &&
       !isOAuthProviderHost(this.browser.currentUrl())
     ) {
-      const root = originRoot(this.browser.currentUrl());
-      if (root !== null) {
+      // Clerk callback: don't immediately navigate away. On a Clerk combined
+      // sign-in/sign-up flow a new-user OAuth completes the account via a
+      // client-side sign-up transfer that takes a beat AFTER the callback lands;
+      // navigating to root unmounts Clerk's JS and interrupts it (the bug behind
+      // the cartesia/braintrust "oauth_session_not_persisted" cluster — proven
+      // not IP). We can't drive the transfer via window.Clerk (patchright's
+      // isolated world hides it), so instead give Clerk's own JS time and detect
+      // success via cookies (world-agnostic). If a session appears, we're signed
+      // in — skip the navigate-away.
+      const onClerkCallback = /sso-callback|\/sso\b/i.test(this.browser.currentUrl());
+      let clerkSignedIn = false;
+      if (onClerkCallback) {
+        clerkSignedIn = await this.browser.waitForClerkSession(12000).catch(() => false);
         steps.push(
-          `OAuth: post-auth landing is a signup/login route (${pathOf(this.browser.currentUrl())}) — ` +
-            `navigating to the app root (${root}) so the service routes us to the dashboard.`,
+          `OAuth: Clerk callback — waited for session establish → ${clerkSignedIn ? "signed in" : "no session (likely login-only OAuth / needs email signup)"}`,
         );
-        try {
-          await this.browser.goto(root);
-          await this.browser.wait(2);
-        } catch {
-          // navigation hiccup — the post-verify loop re-reads regardless.
+      }
+      if (clerkSignedIn) {
+        await this.browser.wait(2);
+      } else {
+        const root = originRoot(this.browser.currentUrl());
+        if (root !== null) {
+          steps.push(
+            `OAuth: post-auth landing is a signup/login route (${pathOf(this.browser.currentUrl())}) — ` +
+              `navigating to the app root (${root}) so the service routes us to the dashboard.`,
+          );
+          try {
+            await this.browser.goto(root);
+            await this.browser.wait(2);
+          } catch {
+            // navigation hiccup — the post-verify loop re-reads regardless.
+          }
         }
       }
     }

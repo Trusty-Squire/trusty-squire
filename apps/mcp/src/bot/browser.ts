@@ -4954,6 +4954,31 @@ export class BrowserController {
         sameSite: c.sameSite,
       }));
       const url = this.page ? this.page.url() : "(no page)";
+      // Capture the live Clerk SDK state — the definitive read on whether a
+      // sign-up transfer is available (the new-user-OAuth fix hinges on this).
+      const clerkState = this.page
+        ? await this.page
+            .evaluate(() => {
+              const w = window as unknown as { Clerk?: Record<string, unknown> };
+              const c = w.Clerk;
+              if (c === undefined) return { present: false };
+              const client = (c as { client?: Record<string, unknown> }).client;
+              const si = client?.["signIn"] as Record<string, unknown> | undefined;
+              const su = client?.["signUp"] as Record<string, unknown> | undefined;
+              const ffv = si?.["firstFactorVerification"] as Record<string, unknown> | undefined;
+              return {
+                present: true,
+                loaded: (c as { loaded?: unknown }).loaded ?? null,
+                signInStatus: si?.["status"] ?? null,
+                signInFFVStatus: ffv?.["status"] ?? null,
+                signInFFVError: ffv?.["error"] ?? null,
+                signUpStatus: su?.["status"] ?? null,
+                signUpMissingFields: su?.["missingFields"] ?? null,
+                hasSignUpCreate: typeof (su as { create?: unknown })?.create === "function",
+              };
+            })
+            .catch((e: unknown) => ({ present: "evalError", err: String(e).slice(0, 120) }))
+        : { present: false };
       const consoleText = await this.extractText().catch(() => "");
       const { writeFileSync, mkdirSync } = await import("node:fs");
       const { join } = await import("node:path");
@@ -4965,7 +4990,7 @@ export class BrowserController {
       writeFileSync(
         path,
         JSON.stringify(
-          { service, label, finalUrl: url, cookies: cookieSummary, netLog: this.oauthNetLog, pageText: consoleText.slice(0, 600) },
+          { service, label, finalUrl: url, clerkState, cookies: cookieSummary, netLog: this.oauthNetLog, pageText: consoleText.slice(0, 600) },
           null,
           2,
         ),
@@ -5489,6 +5514,33 @@ export class BrowserController {
       `[universal-bot] Google advanceOAuthConsent failed — visible buttons: ` +
         `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
     );
+    return false;
+  }
+
+  // Wait on a Clerk callback for a session to establish, polling COOKIES (which
+  // are world-agnostic — unlike window.Clerk, invisible to our isolated-world
+  // page.evaluate under patchright). Clerk's main-world JS, if left alone on the
+  // /sso-callback page (not navigated away), completes the new-user sign-up
+  // transfer and sets a session; this detects that. Returns true once a Clerk
+  // session indicator appears (`__session` cookie, or `__client_uat` flips off
+  // "0"), false on timeout. Cheap + safe: only the bot's own context cookies.
+  async waitForClerkSession(timeoutMs = 12000): Promise<boolean> {
+    if (!this.context) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const cookies = await this.context.cookies();
+        const signedIn = cookies.some(
+          (c) =>
+            (c.name === "__session" && c.value.length > 0) ||
+            (c.name.startsWith("__client_uat") && c.value.length > 0 && c.value !== "0"),
+        );
+        if (signedIn) return true;
+      } catch {
+        // transient — keep polling
+      }
+      await this.sleep(1000);
+    }
     return false;
   }
 
