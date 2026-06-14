@@ -9147,9 +9147,15 @@ ${formatInventory(input.inventory)}`,
 
     const port: NavSearchBrowserPort = {
       currentUrl: () => this.browser.currentUrl(),
-      extractText: () => this.browser.extractText(),
+      // Visibility-respecting text (innerText) for goal assessment — extractText()
+      // reads textContent, which fuses inline <script> source + display:none nodes
+      // into the page text and poisons every text-based goal/onboarding signal
+      // (the false-shell class). Key extraction still reads RAW text via
+      // extractCredentials() downstream; this is the nav-decision surface only.
+      extractText: () => this.browser.extractVisibleText(),
       extractInventory: () => this.browser.extractInteractiveElements(),
       clickSelector: (s) => this.browser.click(s),
+      navigate: (u) => this.browser.goto(u),
       pressEscape: () => this.browser.pressKey("Escape"),
       settle: async () => {
         await this.browser.waitForInteractiveDom(5, 15_000).catch(() => {});

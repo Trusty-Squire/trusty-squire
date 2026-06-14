@@ -26,6 +26,40 @@ export interface NavCandidate {
   inViewport: boolean;
 }
 
+// Resolve a candidate's href to an absolute URL worth navigating to, or null
+// when it isn't a real destination (empty, "#", javascript:, mailto:, or a bare
+// fragment). Relative paths resolve against the current page URL. Pure.
+export function resolveNavHref(href: string | null, currentUrl: string): string | null {
+  if (href === null) return null;
+  const h = href.trim();
+  if (h.length === 0 || h === "#" || h.startsWith("#")) return null;
+  if (/^(?:javascript:|mailto:|tel:)/i.test(h)) return null;
+  try {
+    const abs = new URL(h, currentUrl);
+    if (abs.protocol !== "http:" && abs.protocol !== "https:") return null;
+    // A link that points back to exactly where we are is not progress.
+    if (abs.href === currentUrl) return null;
+    return abs.href;
+  } catch {
+    return null;
+  }
+}
+
+// Union two inventory snapshots, deduped by selector (first wins). Used to
+// survive expandLatentNav's destructive menu-toggling: an affordance present
+// in EITHER the pre- or post-expand read is kept, so an already-open dropdown
+// that the toggle later closes still contributes its items. Pure.
+export function mergeInventories(
+  a: readonly InteractiveElement[],
+  b: readonly InteractiveElement[],
+): InteractiveElement[] {
+  const bySelector = new Map<string, InteractiveElement>();
+  for (const el of [...a, ...b]) {
+    if (!bySelector.has(el.selector)) bySelector.set(el.selector, el);
+  }
+  return [...bySelector.values()];
+}
+
 // Pull the navigable affordances out of an inventory. Pure.
 export function enumerateCandidates(inventory: readonly InteractiveElement[]): NavCandidate[] {
   const out: NavCandidate[] = [];
@@ -208,6 +242,37 @@ export type OverlayStep =
   | { kind: "advance"; selector: string }
   | { kind: "none" };
 
+// On an onboarding CHOICE step (a role/usage picker that gates progress — no
+// nav, no skip, no Next: unify's "Just for me / For my team", imagekit's role
+// select), "satisfy the minimal step": pick the LEAST-committal option so the
+// flow advances toward the dashboard. Returns the selector, or null when this
+// isn't a recognizable choice step (so the caller doesn't click random buttons).
+const ONBOARDING_CONTEXT =
+  /\b(?:how (?:do|will) you (?:plan to )?use|get started|welcome to|set\s*up your|tell us about|what brings you|choose your|select (?:your )?(?:a )?role|how do you describe)\b/i;
+const MINIMAL_CHOICE =
+  /\b(?:just for me|personal|individual|myself|solo|skip|i'?m an individual|for myself)\b/i;
+
+export function planOnboardingChoice(input: {
+  url: string;
+  pageText: string;
+  inventory: readonly InteractiveElement[];
+}): string | null {
+  const onboardingish =
+    /\/(?:onboarding|welcome|setup|get-started)\b/i.test(input.url) ||
+    ONBOARDING_CONTEXT.test(input.pageText);
+  if (!onboardingish) return null;
+  const choices = input.inventory.filter(
+    (el) =>
+      (el.tag === "button" || el.role === "button") &&
+      el.visible !== false &&
+      (el.visibleText ?? el.ariaLabel ?? "").trim().length > 0,
+  );
+  if (choices.length === 0) return null;
+  const text = (el: InteractiveElement): string => (el.visibleText ?? el.ariaLabel ?? "").trim();
+  const minimal = choices.find((el) => MINIMAL_CHOICE.test(text(el)));
+  return (minimal ?? choices[0])!.selector;
+}
+
 // ── the search loop (T4) ─────────────────────────────────────────────────────
 // Drives the browser through the dashboard using the pure primitives above:
 // each step — settle → clear any blocking overlay → check the goal → else
@@ -225,6 +290,12 @@ export interface NavSearchBrowserPort {
   extractText(): Promise<string>;
   extractInventory(): Promise<InteractiveElement[]>;
   clickSelector(selector: string): Promise<void>;
+  // Direct navigation to a known URL. Preferred over clickSelector for anchor
+  // candidates that carry a concrete href: a menu item inside a portaled/animated
+  // dropdown (Radix popover, avatar menu) is a fragile click target — the popover
+  // can close between read and click, so the click hits nothing and the URL never
+  // changes. The href is the destination; go there directly.
+  navigate(url: string): Promise<void>;
   pressEscape(): Promise<void>;
   settle(): Promise<void>; // bounded readiness wait (waitForInteractiveDom)
   expandLatentNav(): Promise<void>; // open hamburger/avatar/settings so hidden nav mounts
@@ -286,6 +357,20 @@ export async function runNavSearch(
     await browser.settle();
     let inv = await browser.extractInventory();
 
+    // Per-step diagnostic so a failed run is debuggable from the step trail
+    // alone (URL + element count + goal verdict + text snippet) — mirrors the
+    // greedy loop's "Inventory diagnostic" line. Without it an exhaustion is
+    // a black box: we can't see what page each click landed on.
+    {
+      const durl = browser.currentUrl();
+      const dtext = (await browser.extractText().catch(() => "")).replace(/\s+/g, " ").trim();
+      const dgoal = assessKeyGoal({ url: durl, pageText: dtext, inventory: inv });
+      log(
+        `nav-search: step ${step} url=${durl} elements=${inv.length} goal=${dgoal.kind} ` +
+          `text="${dtext.slice(0, 160)}"`,
+      );
+    }
+
     // 1) Clear a blocking onboarding overlay / modal before anything else.
     const overlay = planOverlayStep(inv);
     if (overlay.kind !== "none" && !overlayTried.has(overlay.selector)) {
@@ -324,11 +409,18 @@ export async function runNavSearch(
       continue;
     }
 
-    // 3) Move: expand latent nav, re-read, rank candidates, click the best
-    //    unsearched one (LLM tiebreak only when the deterministic ranker can't).
+    // 3) Move: expand latent nav, then rank candidates from the UNION of the
+    //    pre-expand and post-expand inventories. expandLatentNav toggles
+    //    aria-haspopup menus blindly — if a menu (e.g. the user-avatar dropdown
+    //    holding Account/Settings/Billing) was ALREADY open, the toggle closes
+    //    it and a post-expand-only read loses exactly the keys-bearing nav. The
+    //    union keeps an already-open menu's items AND adds a newly-opened one's.
+    const invBefore = inv;
     await browser.expandLatentNav().catch(() => {});
-    inv = await browser.extractInventory();
-    const candidates = enumerateCandidates(inv).filter((c) => !tried.has(c.selector));
+    const invAfter = await browser.extractInventory();
+    const mergedInv = mergeInventories(invBefore, invAfter);
+    inv = mergedInv;
+    const candidates = enumerateCandidates(mergedInv).filter((c) => !tried.has(c.selector));
     const rank = rankCandidates(candidates);
     let pick: string | null = rank.ranked[0]?.selector ?? null;
     if (pick === null && rank.needsTiebreak && deps.tiebreak !== undefined && candidates.length > 0) {
@@ -336,13 +428,43 @@ export async function runNavSearch(
       if (pick !== null && tried.has(pick)) pick = null;
     }
     if (pick === null) {
-      log("nav-search: candidates exhausted — no self-serve key surface reachable");
+      // No rankable nav — but a gating onboarding CHOICE step (role/usage
+      // picker) blocks the dashboard. Satisfy the minimal step to advance.
+      const choice = planOnboardingChoice({ url, pageText: text, inventory: inv });
+      if (choice !== null && !tried.has(choice)) {
+        tried.add(choice);
+        log(`nav-search: onboarding choice → ${choice}`);
+        await capture("overlay_advance", inv, choice);
+        await browser.clickSelector(choice).catch(() => {});
+        continue;
+      }
+      // Dump what WAS on the page (text + href + selector) so an exhaustion is
+      // diagnosable: did the keys nav exist but score 0, or was it genuinely
+      // absent (behind a menu/icon we didn't expand)?
+      const seen = enumerateCandidates(inv).map(
+        (c) => `[${c.isAnchor ? "a" : "btn"}] "${c.text.slice(0, 40)}" href=${c.href ?? "-"} sel=${c.selector}`,
+      );
+      log(
+        `nav-search: candidates exhausted — no self-serve key surface reachable. ` +
+          `page had ${seen.length} clickable(s): ${seen.join(" | ")}`,
+      );
       return { kind: "no_self_serve_key" };
     }
     tried.add(pick);
-    log(`nav-search: → ${pick}`);
+    const picked = candidates.find((c) => c.selector === pick);
+    const pickText = picked?.text ?? "";
+    // Prefer direct href-navigation for anchor picks: a click on a portaled/
+    // animated dropdown item (avatar menu, Radix popover) is fragile and often
+    // no-ops. The href is the known destination — go there.
+    const hrefTarget = picked?.isAnchor === true ? resolveNavHref(picked.href, url) : null;
     await capture("navigate", inv, pick);
-    await browser.clickSelector(pick).catch(() => {});
+    if (hrefTarget !== null) {
+      log(`nav-search: → "${pickText.slice(0, 40)}" via href ${hrefTarget}`);
+      await browser.navigate(hrefTarget).catch(() => {});
+    } else {
+      log(`nav-search: → "${pickText.slice(0, 40)}" ${pick}`);
+      await browser.clickSelector(pick).catch(() => {});
+    }
   }
 
   log(`nav-search: step cap (${maxSteps}) reached without a key`);

@@ -9,8 +9,11 @@ import type { InteractiveElement } from "../browser.js";
 import {
   assessKeyGoal,
   enumerateCandidates,
+  mergeInventories,
+  resolveNavHref,
   findOverlayDismiss,
   findWizardAdvance,
+  planOnboardingChoice,
   planOverlayStep,
   rankCandidates,
   runNavSearch,
@@ -74,6 +77,49 @@ describe("enumerateCandidates", () => {
   it("folds visibleText/ariaLabel/title/iconLabel into one text field", () => {
     const inv = [el({ tag: "button", visibleText: null, ariaLabel: "API keys", selector: "#x" })];
     expect(enumerateCandidates(inv)[0]?.text).toBe("API keys");
+  });
+});
+
+describe("mergeInventories", () => {
+  it("unions both snapshots deduped by selector (an open-then-closed menu's items survive)", () => {
+    const before = [
+      el({ selector: "#avatar", visibleText: "User" }),
+      el({ selector: "#account", visibleText: "Account" }), // menu item, open at entry
+      el({ selector: "#billing", visibleText: "Billing" }),
+    ];
+    const after = [
+      el({ selector: "#avatar", visibleText: "User" }), // menu re-closed by expand → items gone
+      el({ selector: "#new", visibleText: "New" }), // a newly-revealed control
+    ];
+    const merged = mergeInventories(before, after).map((e) => e.selector).sort();
+    expect(merged).toEqual(["#account", "#avatar", "#billing", "#new"]);
+  });
+
+  it("first occurrence wins on selector collision", () => {
+    const a = [el({ selector: "#x", visibleText: "first" })];
+    const b = [el({ selector: "#x", visibleText: "second" })];
+    expect(mergeInventories(a, b)[0]?.visibleText).toBe("first");
+  });
+});
+
+describe("resolveNavHref", () => {
+  const here = "https://x.test/assistants";
+  it("resolves a relative path against the current URL", () => {
+    expect(resolveNavHref("/account", here)).toBe("https://x.test/account");
+  });
+  it("keeps an absolute http(s) URL", () => {
+    expect(resolveNavHref("https://x.test/settings/keys", here)).toBe("https://x.test/settings/keys");
+  });
+  it("rejects non-destinations (#, javascript:, mailto:, empty)", () => {
+    expect(resolveNavHref("#", here)).toBeNull();
+    expect(resolveNavHref("#section", here)).toBeNull();
+    expect(resolveNavHref("javascript:void(0)", here)).toBeNull();
+    expect(resolveNavHref("mailto:a@b.c", here)).toBeNull();
+    expect(resolveNavHref("", here)).toBeNull();
+    expect(resolveNavHref(null, here)).toBeNull();
+  });
+  it("rejects a self-link (no progress)", () => {
+    expect(resolveNavHref("/assistants", here)).toBeNull();
   });
 });
 
@@ -222,6 +268,11 @@ class FakeBrowser implements NavSearchBrowserPort {
     const next = this.transitions.get(sel);
     if (next) this.page = next;
   }
+  async navigate(url: string): Promise<void> {
+    // Transitions may be keyed by selector (click) OR by absolute URL (href-nav).
+    const next = this.transitions.get(url);
+    this.page = next ?? { url, text: "", inv: [] };
+  }
   async pressEscape(): Promise<void> {
     this.escapes += 1;
   }
@@ -232,11 +283,12 @@ class FakeBrowser implements NavSearchBrowserPort {
 }
 
 describe("runNavSearch", () => {
-  it("finds the key by clicking the real API-keys nav link", async () => {
+  it("finds the key by navigating the real API-keys nav link (href-first)", async () => {
     const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "Your API key", inv: [] };
     const browser = new FakeBrowser(
       { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] },
-      { "#keys": keysPage },
+      // Anchor picks navigate by resolved href, so key the transition by URL.
+      { "https://x.test/settings/api-keys": keysPage },
     );
     const res = await runNavSearch(browser, {
       extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_1" } : null),
@@ -265,7 +317,7 @@ describe("runNavSearch", () => {
     const afterDismiss: FakePage = { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] };
     const browser = new FakeBrowser(
       { url: "https://x.test/app", text: "Welcome", inv: [el({ tag: "button", visibleText: "Skip", selector: "#skip" }), el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] },
-      { "#skip": afterDismiss, "#keys": keysPage },
+      { "#skip": afterDismiss, "https://x.test/settings/api-keys": keysPage },
     );
     const res = await runNavSearch(browser, {
       extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_d" } : null),
@@ -288,7 +340,7 @@ describe("runNavSearch", () => {
     const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
     const browser = new FakeBrowser(
       { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "Workspace", href: "/app/ws", selector: "#ws" }), el({ tag: "a", visibleText: "Build", href: "/app/build", selector: "#build" })] },
-      { "#build": keysPage },
+      { "https://x.test/app/build": keysPage },
     );
     let tiebreakCalls = 0;
     const res = await runNavSearch(browser, {
@@ -302,11 +354,48 @@ describe("runNavSearch", () => {
     expect(tiebreakCalls).toBeGreaterThan(0);
   });
 
+  it("reaches keys via an avatar-menu anchor by href even though the click target is fragile (unify class)", async () => {
+    // The dashboard exposes the settings nav only inside a dropdown that
+    // expandLatentNav opens; the "Account" anchor is portaled. clickSelector on
+    // it no-ops (the menu closes), so the loop must navigate by its href instead.
+    const accountPage: FakePage = {
+      url: "https://console.unify.test/account",
+      text: "Account API keys",
+      inv: [el({ tag: "button", visibleText: "Create API key", selector: "#mk" })],
+    };
+    const dashboard: FakePage = {
+      url: "https://console.unify.test/assistants",
+      text: "Select an assistant",
+      inv: [el({ tag: "button", ariaLabel: "User Avatar", selector: "#avatar" })],
+    };
+    // expandLatentNav reveals the dropdown's items (Account/Billing).
+    const expanded: FakePage = {
+      url: "https://console.unify.test/assistants",
+      text: "Account Billing Sign out",
+      inv: [
+        el({ tag: "button", ariaLabel: "User Avatar", selector: "#avatar" }),
+        el({ tag: "a", visibleText: "Account", href: "/account", selector: "body > div:nth-of-type(2) > a:nth-of-type(1)" }),
+        el({ tag: "a", visibleText: "Billing", href: "/billing", selector: "body > div:nth-of-type(2) > a:nth-of-type(2)" }),
+      ],
+    };
+    const browser = new FakeBrowser(
+      dashboard,
+      // Account is reached by href-nav (NOT by its fragile selector); the
+      // selector deliberately has no transition, so a clickSelector would no-op.
+      { "https://console.unify.test/account": accountPage },
+      expanded,
+    );
+    const res = await runNavSearch(browser, {
+      extractKey: async () => (browser.currentUrl().includes("/account") ? { api_key: "sk_acct" } : null),
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_acct" } });
+  });
+
   it("calls captureRound each step (capture-chain parity, A2/OF#1)", async () => {
     const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
     const browser = new FakeBrowser(
       { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] },
-      { "#keys": keysPage },
+      { "https://x.test/settings/api-keys": keysPage },
     );
     const actions: string[] = [];
     await runNavSearch(browser, {
@@ -315,5 +404,28 @@ describe("runNavSearch", () => {
     });
     expect(actions).toContain("navigate");
     expect(actions).toContain("extract");
+  });
+});
+
+describe("planOnboardingChoice", () => {
+  it("picks the least-committal option on an onboarding role-picker (unify class)", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Just for me", selector: "#me" }),
+      el({ tag: "button", visibleText: "For my team", selector: "#team" }),
+    ];
+    expect(planOnboardingChoice({ url: "https://console.unify.ai/login/onboarding", pageText: "How do you plan to use the platform?", inventory: inv })).toBe("#me");
+  });
+
+  it("falls back to the first choice when no minimal option matches", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Engineering", selector: "#eng" }),
+      el({ tag: "button", visibleText: "Marketing", selector: "#mkt" }),
+    ];
+    expect(planOnboardingChoice({ url: "https://x/welcome", pageText: "Welcome to X", inventory: inv })).toBe("#eng");
+  });
+
+  it("returns null when the page is NOT an onboarding step (no random clicks)", () => {
+    const inv = [el({ tag: "button", visibleText: "Save", selector: "#save" })];
+    expect(planOnboardingChoice({ url: "https://x/app/dashboard", pageText: "Your dashboard", inventory: inv })).toBeNull();
   });
 });
