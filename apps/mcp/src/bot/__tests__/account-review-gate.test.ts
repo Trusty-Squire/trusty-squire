@@ -9,7 +9,7 @@
 // marketing tile that merely mentions "early access" as a feature.
 
 import { describe, expect, it } from "vitest";
-import { isAtAccountReviewGate, isOnboardingReviewGate } from "../agent.js";
+import { isAtAccountReviewGate, isOnboardingReviewGate, isSignupsClosed } from "../agent.js";
 
 describe("isAtAccountReviewGate — positive (real manual-approval gates)", () => {
   it("matches a 'waiting room' screen (baseten)", () => {
@@ -142,5 +142,27 @@ describe("isOnboardingReviewGate — a verification timeout must NOT be a review
     expect(isOnboardingReviewGate(undefined, "Welcome to your dashboard. Create a project.")).toBe(
       false,
     );
+  });
+});
+
+describe("isSignupsClosed — closed / invite-only registration", () => {
+  it("matches turbopuffer's 'Sign-ups are closed'", () => {
+    expect(isSignupsClosed("Sign-ups are closed. Follow us for updates.")).toBe(true);
+  });
+
+  it("matches common closed/invite-only phrasings", () => {
+    expect(isSignupsClosed("Signup is currently disabled")).toBe(true);
+    expect(isSignupsClosed("We are not accepting new signups at this time")).toBe(true);
+    expect(isSignupsClosed("We're not currently accepting new registrations")).toBe(true);
+    expect(isSignupsClosed("Registration is closed")).toBe(true);
+    expect(isSignupsClosed("Access is invite-only")).toBe(true);
+    expect(isSignupsClosed("Invite-only beta — request an invite")).toBe(true);
+  });
+
+  it("does NOT match a normal signup page or 'invite your team' feature", () => {
+    expect(isSignupsClosed("Sign up for free. Create your account.")).toBe(false);
+    expect(isSignupsClosed("Invite your team members to collaborate")).toBe(false);
+    expect(isSignupsClosed("Welcome! Your API key: sk-abc123")).toBe(false);
+    expect(isSignupsClosed("Create a new project to get started")).toBe(false);
   });
 });

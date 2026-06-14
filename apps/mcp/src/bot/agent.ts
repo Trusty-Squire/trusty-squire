@@ -284,6 +284,27 @@ export function isOnboardingReviewGate(
   return verificationFailed === undefined && isAtAccountReviewGate(pageText);
 }
 
+// Closed / invite-only registration: the service does not accept new self-serve
+// signups at all (turbopuffer: "Sign-ups are closed"). Distinct from a review
+// gate (you signed up, awaiting approval) — here NO account can be created, so
+// the run is terminally unservable and the service should be dequeued, not
+// retried or mislabeled oauth_onboarding_failed (which implies a fixable nav
+// bug). Precision-tuned: requires explicit closed/disabled/invite-only phrasing
+// scoped to sign-up/registration, so a normal page mentioning "sign up" or an
+// "invite your team" feature doesn't trip it. Pure over page text.
+const SIGNUPS_CLOSED_PATTERNS: readonly RegExp[] = [
+  /\bsign[\s-]?ups?\s+(?:are|is)\s+(?:currently\s+)?(?:closed|disabled|paused|not\s+(?:open|available|being\s+accepted))\b/i,
+  /\b(?:we\s+are|we're)\s+not\s+(?:currently\s+)?accepting\s+(?:new\s+)?(?:sign[\s-]?ups|registrations|users|accounts)\b/i,
+  /\bregistration\s+(?:is\s+)?(?:currently\s+)?(?:closed|disabled)\b/i,
+  /\b(?:sign[\s-]?up|registration|access)\s+is\s+(?:by\s+)?invite[\s-]?only\b/i,
+  /\binvite[\s-]?only\s+(?:beta|access|signup|registration)\b/i,
+  /\brequest\s+an\s+invite\b/i,
+];
+
+export function isSignupsClosed(text: string): boolean {
+  return SIGNUPS_CLOSED_PATTERNS.some((p) => p.test(text));
+}
+
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
 // full verification timeout or runs only a short probe. Exported so the
@@ -6828,6 +6849,20 @@ export class SignupAgent {
       // is the failure; don't reinterpret it as a manual-review gate.
       const reviewGateText =
         verificationFailed === undefined ? await this.browser.extractText().catch(() => "") : "";
+      // Closed / invite-only registration takes precedence over the review-gate
+      // and the generic miss — no account can be created, so it's terminally
+      // unservable (dequeue), not a fixable nav bug. Checked only when
+      // verification didn't time out (same reasoning as the review gate).
+      if (verificationFailed === undefined && isSignupsClosed(reviewGateText)) {
+        return {
+          success: false,
+          error:
+            `signups_closed: ${task.service} is not accepting new self-serve sign-ups ` +
+            `(closed / invite-only registration) — no account can be created. Dequeue or sign up manually once open.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
       if (isOnboardingReviewGate(verificationFailed, reviewGateText)) {
         return {
           success: false,
@@ -8184,6 +8219,20 @@ export class SignupAgent {
       this.lastPostVerifyDoneReason !== null
         ? `${finalText}\n${this.lastPostVerifyDoneReason}`
         : finalText;
+    // Closed / invite-only registration — no account can be created at all
+    // (turbopuffer: "Sign-ups are closed"). Terminally unservable; label it
+    // honestly so the operator dequeues rather than seeing a misleading
+    // oauth_onboarding_failed that implies a fixable nav bug.
+    if (isSignupsClosed(paywallCheckText)) {
+      return {
+        success: false,
+        error:
+          `signups_closed: ${task.service} is not accepting new self-serve sign-ups ` +
+          `(closed / invite-only registration) — no account can be created. Dequeue or sign up manually once open.`,
+        steps,
+        ...this.resultTail(),
+      };
+    }
     if (isAtPaywall(paywallCheckText)) {
       return {
         success: false,
