@@ -13,8 +13,10 @@ import {
   findWizardAdvance,
   planOverlayStep,
   rankCandidates,
+  runNavSearch,
   scoreCandidate,
   type NavCandidate,
+  type NavSearchBrowserPort,
 } from "../nav-search.js";
 
 function el(partial: Partial<InteractiveElement>): InteractiveElement {
@@ -187,5 +189,131 @@ describe("findOverlayDismiss / findWizardAdvance / planOverlayStep", () => {
     expect(planOverlayStep(both)).toEqual({ kind: "dismiss", selector: "#skip" });
     expect(planOverlayStep([el({ tag: "button", visibleText: "Continue", selector: "#c" })])).toEqual({ kind: "advance", selector: "#c" });
     expect(planOverlayStep([el({ tag: "button", visibleText: "Dashboard", selector: "#d" })])).toEqual({ kind: "none" });
+  });
+});
+
+// ── search loop (T4) — driven by a scriptable fake browser ───────────────────
+interface FakePage {
+  url: string;
+  text: string;
+  inv: InteractiveElement[];
+}
+
+class FakeBrowser implements NavSearchBrowserPort {
+  page: FakePage;
+  readonly transitions: Map<string, FakePage>;
+  expandedTo: FakePage | null;
+  escapes = 0;
+  constructor(start: FakePage, transitions: Record<string, FakePage>, expandedTo: FakePage | null = null) {
+    this.page = start;
+    this.transitions = new Map(Object.entries(transitions));
+    this.expandedTo = expandedTo;
+  }
+  currentUrl(): string {
+    return this.page.url;
+  }
+  async extractText(): Promise<string> {
+    return this.page.text;
+  }
+  async extractInventory(): Promise<InteractiveElement[]> {
+    return this.page.inv;
+  }
+  async clickSelector(sel: string): Promise<void> {
+    const next = this.transitions.get(sel);
+    if (next) this.page = next;
+  }
+  async pressEscape(): Promise<void> {
+    this.escapes += 1;
+  }
+  async settle(): Promise<void> {}
+  async expandLatentNav(): Promise<void> {
+    if (this.expandedTo) this.page = this.expandedTo;
+  }
+}
+
+describe("runNavSearch", () => {
+  it("finds the key by clicking the real API-keys nav link", async () => {
+    const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "Your API key", inv: [] };
+    const browser = new FakeBrowser(
+      { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] },
+      { "#keys": keysPage },
+    );
+    const res = await runNavSearch(browser, {
+      extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_1" } : null),
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_1" } });
+  });
+
+  it("runs the create-key subgoal then extracts the freshly created key", async () => {
+    const created: FakePage = {
+      url: "https://x.test/settings/api-keys",
+      text: "API keys sk_new123",
+      inv: [el({ tag: "button", visibleText: "Create API key", selector: "#create" })],
+    };
+    const browser = new FakeBrowser(
+      { url: "https://x.test/settings/api-keys", text: "API keys", inv: [el({ tag: "button", visibleText: "Create API key", selector: "#create" })] },
+      { "#create": created },
+    );
+    const res = await runNavSearch(browser, {
+      extractKey: async () => (browser.page.text.includes("sk_") ? { api_key: "sk_new123" } : null),
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_new123" } });
+  });
+
+  it("dismisses a blocking overlay before navigating, then finds the key", async () => {
+    const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
+    const afterDismiss: FakePage = { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] };
+    const browser = new FakeBrowser(
+      { url: "https://x.test/app", text: "Welcome", inv: [el({ tag: "button", visibleText: "Skip", selector: "#skip" }), el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] },
+      { "#skip": afterDismiss, "#keys": keysPage },
+    );
+    const res = await runNavSearch(browser, {
+      extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_d" } : null),
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_d" } });
+  });
+
+  it("returns no_self_serve_key when no candidate is reachable", async () => {
+    const browser = new FakeBrowser(
+      { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "Dashboard", href: "/app", selector: "#d" }), el({ tag: "a", visibleText: "Billing", href: "/billing", selector: "#b" })] },
+      {},
+    );
+    const res = await runNavSearch(browser, { extractKey: async () => null });
+    expect(res).toEqual({ kind: "no_self_serve_key" });
+  });
+
+  it("uses the LLM tiebreak when the deterministic ranker can't decide", async () => {
+    // Both candidates are unrankable (no keys signal in href OR text), so the
+    // deterministic ranker scores nothing → needsTiebreak → the LLM picks.
+    const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
+    const browser = new FakeBrowser(
+      { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "Workspace", href: "/app/ws", selector: "#ws" }), el({ tag: "a", visibleText: "Build", href: "/app/build", selector: "#build" })] },
+      { "#build": keysPage },
+    );
+    let tiebreakCalls = 0;
+    const res = await runNavSearch(browser, {
+      extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_tb" } : null),
+      tiebreak: async (cands) => {
+        tiebreakCalls += 1;
+        return cands.find((c) => c.href === "/app/build")?.selector ?? null;
+      },
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_tb" } });
+    expect(tiebreakCalls).toBeGreaterThan(0);
+  });
+
+  it("calls captureRound each step (capture-chain parity, A2/OF#1)", async () => {
+    const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
+    const browser = new FakeBrowser(
+      { url: "https://x.test/app", text: "Dashboard", inv: [el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" })] },
+      { "#keys": keysPage },
+    );
+    const actions: string[] = [];
+    await runNavSearch(browser, {
+      extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_c" } : null),
+      captureRound: async (ctx) => { actions.push(ctx.action); },
+    });
+    expect(actions).toContain("navigate");
+    expect(actions).toContain("extract");
   });
 });

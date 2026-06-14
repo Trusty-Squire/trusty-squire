@@ -51,11 +51,15 @@ export function enumerateCandidates(inventory: readonly InteractiveElement[]): N
   return out;
 }
 
-// Deterministic relevance score toward an API-keys destination. The loose href
-// tokens (settings/account/keys/tokens/developers) are trusted because an href
-// is a structured path, not free text. NEG kills obvious non-destinations.
-const KEYS_HREF =
+// THE key-destination URL pattern — the single source of truth used by BOTH the
+// ranker (href match) and the goal verifier (am I on a key surface?). They MUST
+// agree: if the ranker navigates to a URL it thinks is a key destination, the
+// goal verifier has to recognize the same URL, or the loop arrives and never
+// extracts. The loose tokens (settings/account/keys/tokens/developers) are
+// trusted because an href/url is a structured path, not free text.
+export const KEYS_DESTINATION_URL =
   /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|settings|account|keys?|tokens?)(?:[/?#]|$)/i;
+const KEYS_HREF = KEYS_DESTINATION_URL;
 const KEYS_TEXT_STRONG = /\b(?:api|access|secret|auth|personal\s+access)\s*(?:keys?|tokens?)\b/i;
 const KEYS_TEXT_WEAK = /\b(?:developers?|settings|account)\b/i;
 const NEG_TEXT =
@@ -107,10 +111,6 @@ export type GoalAssessment =
   | { kind: "on_key_surface" } // looks like the keys page → caller runs the real extractor
   | { kind: "not_yet" };
 
-// A keys/settings/tokens-ish URL — the page where keys live or are created.
-const KEYS_SURFACE_URL =
-  /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|secret[-_]?keys?|developers?|settings|account)(?:[/?#]|$)/i;
-
 export function assessKeyGoal(input: {
   url: string;
   pageText: string;
@@ -131,12 +131,12 @@ export function assessKeyGoal(input: {
   // treat it as the goal-action when we're plausibly on a key surface (avoids
   // a stray "create" button elsewhere hijacking the search).
   const create = findCreateKeyAffordance(input.inventory);
-  if (create !== null && KEYS_SURFACE_URL.test(input.url)) {
+  if (create !== null && KEYS_DESTINATION_URL.test(input.url)) {
     return { kind: "create_gated", createSelector: create.selector };
   }
   // On a keys/settings surface but no create affordance yet (key may be masked /
   // behind a reveal / already listed) → let the caller run the extractor.
-  if (KEYS_SURFACE_URL.test(input.url)) {
+  if (KEYS_DESTINATION_URL.test(input.url)) {
     return { kind: "on_key_surface" };
   }
   // A create affordance off a non-key URL is still worth trying as a last move,
@@ -207,6 +207,131 @@ export type OverlayStep =
   | { kind: "dismiss"; selector: string }
   | { kind: "advance"; selector: string }
   | { kind: "none" };
+
+// ── the search loop (T4) ─────────────────────────────────────────────────────
+// Drives the browser through the dashboard using the pure primitives above:
+// each step — settle → clear any blocking overlay → check the goal → else
+// expand latent nav, rank candidates, click the best untried one. Bounded by a
+// tried-set (keyed by affordance SELECTOR, not URL — SPA re-renders make URL
+// keys unstable, outside-voice #4) and a step cap. Frontier exhaustion is an
+// HONEST `no_self_serve_key`, not a 600s timeout.
+//
+// The browser is a narrow port (only the methods the loop needs) so the loop is
+// unit-testable with a fake. The real wiring (T5) adapts BrowserController +
+// the existing extractor/capture to this port behind the NAV_SEARCH flag.
+
+export interface NavSearchBrowserPort {
+  currentUrl(): string;
+  extractText(): Promise<string>;
+  extractInventory(): Promise<InteractiveElement[]>;
+  clickSelector(selector: string): Promise<void>;
+  pressEscape(): Promise<void>;
+  settle(): Promise<void>; // bounded readiness wait (waitForInteractiveDom)
+  expandLatentNav(): Promise<void>; // open hamburger/avatar/settings so hidden nav mounts
+}
+
+export interface NavSearchDeps {
+  // Returns extracted credentials if the current page yields a key (handles
+  // reveal/copy internally), else null. The goal verifier of last resort.
+  extractKey(): Promise<Record<string, string> | null>;
+  // Capture-chain parity hook (A2 / OF#1): called once per step so auto-promote
+  // still sees the round chain it depends on. Best-effort; never throws.
+  captureRound?: (ctx: { url: string; inventory: readonly InteractiveElement[]; action: string }) => Promise<void>;
+  // LLM tiebreaker: pick a selector from candidates when the deterministic
+  // ranker can't decide (needsTiebreak). The ONLY place the LLM touches the loop.
+  tiebreak?: (candidates: readonly NavCandidate[]) => Promise<string | null>;
+  maxSteps?: number;
+  log?: (line: string) => void;
+}
+
+export type NavSearchResult =
+  | { kind: "found"; credentials: Record<string, string> }
+  | { kind: "no_self_serve_key" }; // frontier exhausted or step cap with no key
+
+export async function runNavSearch(
+  browser: NavSearchBrowserPort,
+  deps: NavSearchDeps,
+): Promise<NavSearchResult> {
+  const maxSteps = deps.maxSteps ?? 12;
+  const log = deps.log ?? (() => {});
+  const tried = new Set<string>(); // affordance selectors already clicked
+  const overlayTried = new Set<string>(); // overlay controls already actioned
+
+  const capture = async (action: string, inv: readonly InteractiveElement[]): Promise<void> => {
+    if (deps.captureRound === undefined) return;
+    try {
+      await deps.captureRound({ url: browser.currentUrl(), inventory: inv, action });
+    } catch {
+      // capture is best-effort — never fail the search
+    }
+  };
+
+  for (let step = 0; step < maxSteps; step++) {
+    await browser.settle();
+    let inv = await browser.extractInventory();
+
+    // 1) Clear a blocking onboarding overlay / modal before anything else.
+    const overlay = planOverlayStep(inv);
+    if (overlay.kind !== "none" && !overlayTried.has(overlay.selector)) {
+      overlayTried.add(overlay.selector);
+      log(`nav-search: overlay ${overlay.kind} → ${overlay.selector}`);
+      await capture(`overlay_${overlay.kind}`, inv);
+      try {
+        await browser.clickSelector(overlay.selector);
+      } catch {
+        await browser.pressEscape().catch(() => {}); // modal with no in-DOM close
+      }
+      continue;
+    }
+
+    // 2) Goal check. Try extraction whenever we're plausibly on a key surface
+    //    (on_key_surface OR create_gated — both imply we're at the keys page,
+    //    and after a create-click the key may now be present). Extraction-first
+    //    so a freshly-created key isn't missed because the create button persists.
+    const url = browser.currentUrl();
+    const text = await browser.extractText().catch(() => "");
+    const goal = assessKeyGoal({ url, pageText: text, inventory: inv });
+    if (goal.kind === "on_key_surface" || goal.kind === "create_gated") {
+      const creds = await deps.extractKey().catch(() => null);
+      if (creds !== null && Object.keys(creds).length > 0) {
+        log(`nav-search: key extracted on ${url}`);
+        await capture("extract", inv);
+        return { kind: "found", credentials: creds };
+      }
+    }
+    // 2b) No key yet, but a create affordance is available and untried → use it.
+    if (goal.kind === "create_gated" && !tried.has(goal.createSelector)) {
+      tried.add(goal.createSelector);
+      log(`nav-search: create-key subgoal → ${goal.createSelector}`);
+      await capture("create_key", inv);
+      await browser.clickSelector(goal.createSelector).catch(() => {});
+      continue;
+    }
+
+    // 3) Move: expand latent nav, re-read, rank candidates, click the best
+    //    unsearched one (LLM tiebreak only when the deterministic ranker can't).
+    await browser.expandLatentNav().catch(() => {});
+    inv = await browser.extractInventory();
+    const candidates = enumerateCandidates(inv).filter((c) => !tried.has(c.selector));
+    const rank = rankCandidates(candidates);
+    let pick: string | null = rank.ranked[0]?.selector ?? null;
+    if (pick === null && rank.needsTiebreak && deps.tiebreak !== undefined && candidates.length > 0) {
+      pick = await deps.tiebreak(candidates).catch(() => null);
+      if (pick !== null && tried.has(pick)) pick = null;
+    }
+    if (pick === null) {
+      log("nav-search: candidates exhausted — no self-serve key surface reachable");
+      return { kind: "no_self_serve_key" };
+    }
+    tried.add(pick);
+    log(`nav-search: → ${pick}`);
+    await capture("navigate", inv);
+    await browser.clickSelector(pick).catch(() => {});
+  }
+
+  log(`nav-search: step cap (${maxSteps}) reached without a key`);
+  return { kind: "no_self_serve_key" };
+}
 
 // Plan one step to get past a blocking overlay/wizard: prefer dismissing
 // (skip/close — exits the wizard) over advancing (only when there's no skip).
