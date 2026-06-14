@@ -35,7 +35,7 @@ import {
   type HousekeeperOpts,
   type ReplayMode,
 } from "./orchestrator.js";
-import { createReplayRunner } from "./modes/verify.js";
+import { createReplayRunner, createProbeRunner } from "./modes/verify.js";
 import {
   RegistryVerifierQueue,
   RegistryDiscoverQueue,
@@ -421,6 +421,9 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       client,
       notifiers,
       replay: createReplayRunner(),
+      // Auto-probe-before-retire: a brittle replay failure on a still-servable
+      // page must not retire a working skill (the fly.io bug).
+      probe: createProbeRunner(),
       discover: healDiscover,
       replayMode: args.replayMode,
       once: args.once,
@@ -513,6 +516,10 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // lifecycle lives in modes/verify.ts; this just wires it.
   const replay = createReplayRunner();
 
+  // Auto-probe-before-retire runner — invoked by handleReplay when a replay
+  // failure would otherwise count toward demotion, to tell brittleness from rot.
+  const probe = createProbeRunner();
+
   // Discover runner: only required when the queue can produce
   // 'discover' tasks. Lazy-imported so the verifier-only path
   // doesn't pull in the bot session machinery.
@@ -535,6 +542,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     queue,
     client,
     replay,
+    probe,
     replayMode: args.replayMode,
     once: args.once,
     notifiers,

@@ -23,13 +23,18 @@ import type { VerifierRegistryClient } from "./registry-client.js";
 import type { QueueProvider } from "./queues/index.js";
 import type { Notifier, NotifierEvent } from "./notifier.js";
 import type { CleanupOutcome } from "./cleanup.js";
-import { handleReplay, type ReplayMode, type ReplayRunner } from "./modes/verify.js";
+import {
+  handleReplay,
+  type ReplayMode,
+  type ReplayRunner,
+  type SignupProbeRunner,
+} from "./modes/verify.js";
 import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
 import { gradeLedgerAgainstPass, describeGrade } from "./fix-ledger.js";
 import { VERSION } from "../version.js";
 
-export type { ReplayMode, ReplayRunner } from "./modes/verify.js";
+export type { ReplayMode, ReplayRunner, SignupProbeRunner } from "./modes/verify.js";
 export type { DiscoveryBotRunner } from "./modes/discover.js";
 
 export interface HousekeeperOpts {
@@ -44,6 +49,13 @@ export interface HousekeeperOpts {
   // Optional — runs without a replay handler just won't process
   // 'replay' tasks (they're skipped with a log).
   replay?: ReplayRunner;
+  // Auto-probe-before-retire (modes/verify.ts). When wired, a replay
+  // failure that would otherwise count toward demotion is first checked
+  // against a live probe of the signup page: if the page still shows the
+  // service's entry affordances, the failure is treated as brittleness
+  // (non-demoting) rather than rot. Optional — unset leaves the existing
+  // demote classification untouched.
+  probe?: SignupProbeRunner;
   // Wired by the CLI to runDiscover. Same shape; required for
   // 'discover' tasks.
   discover?: DiscoveryBotRunner;
