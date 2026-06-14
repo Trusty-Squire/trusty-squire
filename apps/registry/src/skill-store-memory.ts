@@ -330,66 +330,85 @@ export class InMemorySkillStore implements SkillStore {
     const now = input.now ?? new Date();
     let transition: RecordVerifierOutcomeResult["transition"] = "none";
 
-    if (input.kind === "success") {
+    // C11-gated pending-review → active promotion. Factored so BOTH the
+    // count-based path (verifier_succeeded ≥ threshold) and the producer-verdict
+    // path (input.verdict === "promote", D2.C) go through the SAME phishing/abuse
+    // gate — the verdict path must never bypass it. Returns "promoted" when it
+    // flipped status, "none" when the C11 gate held it in pending-review.
+    const promoteThroughC11Gate = (): "promoted" | "none" => {
+      let existingActive: SkillStoreRecord | null = null;
+      for (const other of this.skills.values()) {
+        if (
+          other.skill_id !== skill.skill_id &&
+          other.service === skill.service &&
+          other.status === "active" &&
+          other.deleted_at === null
+        ) {
+          existingActive = other;
+          break;
+        }
+      }
+      if (
+        existingActive !== null &&
+        triggersHumanReview(existingActive.payload, skill.payload)
+      ) {
+        // Stay in pending-review; operator must explicitly approve via
+        // `mcp skill approve-review`. Counters stay bumped; transition stays
+        // "none" so the loop logs accurately rather than a phantom promotion.
+        return "none";
+      }
+      // Promote pending → active. Mirror approveReview's supersession logic so
+      // the (service, status='active') invariant holds and stale demoted/pending
+      // rows collapse.
+      for (const other of this.skills.values()) {
+        if (
+          other.skill_id !== skill.skill_id &&
+          other.service === skill.service &&
+          STALE_ON_ACTIVATE_STATUSES.has(other.status)
+        ) {
+          other.status = "superseded";
+          other.superseded_at = now;
+          other.payload.status = "superseded";
+          other.payload.superseded_at = now.toISOString();
+        }
+      }
+      skill.status = "active";
+      skill.payload.status = "active";
+      skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
+      return "promoted";
+    };
+
+    // D2.C — when the producer carries a CONVERGED verdict from the fresh-verify
+    // sequential-confidence sampler, trust it over the raw success count. A
+    // `hold` is an explicit no-op (no signal). `promote`/`reject` fall through
+    // to the shared promote-gate / demote-path below by treating them as a
+    // success / failure outcome respectively — so the C11 gate and the rot
+    // taxonomy still apply unchanged.
+    if (input.verdict === "hold") {
+      // No state change. Don't even bump the stat counters — a hold is "we
+      // learned nothing", not an outcome.
+      return { record: skill, transition: "none" };
+    }
+    const effectiveKind: "success" | "failure" =
+      input.verdict === "promote"
+        ? "success"
+        : input.verdict === "reject"
+          ? "failure"
+          : input.kind;
+
+    if (effectiveKind === "success") {
       skill.verifier_succeeded += 1;
       skill.consecutive_verifier_failures = 0;
       skill.last_verified_at = now;
-      if (
+      // The producer verdict short-circuits the count threshold: a converged
+      // `promote` promotes on this single outcome (still through the C11 gate).
+      // Without a verdict, the historic count threshold applies.
+      const eligibleToPromote =
         skill.status === "pending-review" &&
-        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
-      ) {
-        // C11 gate — when this pending-review skill would replace an
-        // existing active skill for the same service, and the
-        // incoming signup_url or oauth_provider DIFFERS from the
-        // active one, the auto-promotion path must defer to an
-        // operator review. Otherwise the verifier becomes a
-        // phishing-vector laundromat: anyone who submits a skill
-        // pointing at attacker-controlled signup_url just needs
-        // two successful verifier runs (which the attacker can
-        // engineer with a service that returns ANYTHING resembling
-        // a token) to overwrite the legit active skill. Same gate
-        // `insert()` uses for direct-active publishes.
-        let existingActive: SkillStoreRecord | null = null;
-        for (const other of this.skills.values()) {
-          if (
-            other.skill_id !== skill.skill_id &&
-            other.service === skill.service &&
-            other.status === "active" &&
-            other.deleted_at === null
-          ) {
-            existingActive = other;
-            break;
-          }
-        }
-        if (
-          existingActive !== null &&
-          triggersHumanReview(existingActive.payload, skill.payload)
-        ) {
-          // Stay in pending-review; operator must explicitly
-          // approve via `mcp skill approve-review`. Counters still
-          // bumped — transition stays "none" so the loop logs
-          // accurately rather than reporting a phantom promotion.
-        } else {
-          // Promote pending → active. Mirror approveReview's
-          // supersession logic so the (service, status='active')
-          // invariant holds and stale demoted/pending rows collapse.
-          for (const other of this.skills.values()) {
-            if (
-              other.skill_id !== skill.skill_id &&
-              other.service === skill.service &&
-              STALE_ON_ACTIVATE_STATUSES.has(other.status)
-            ) {
-              other.status = "superseded";
-              other.superseded_at = now;
-              other.payload.status = "superseded";
-              other.payload.superseded_at = now.toISOString();
-            }
-          }
-          skill.status = "active";
-          skill.payload.status = "active";
-          skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);
-          transition = "promoted";
-        }
+        (input.verdict === "promote" ||
+          skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD);
+      if (eligibleToPromote) {
+        transition = promoteThroughC11Gate();
       } else if (skill.status === "active") {
         // Freshness-sweep pass — schedule the next sweep.
         skill.next_freshness_due_at = new Date(now.getTime() + ONE_WEEK_MS);

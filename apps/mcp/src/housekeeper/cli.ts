@@ -35,7 +35,8 @@ import {
   type HousekeeperOpts,
   type ReplayMode,
 } from "./orchestrator.js";
-import { createReplayRunner, createProbeRunner } from "./modes/verify.js";
+import { createReplayRunner, createProbeRunner, type FreshVerifyRunner } from "./modes/verify.js";
+import { verifyPoolConfigured } from "./identity-pool.js";
 import {
   RegistryVerifierQueue,
   RegistryDiscoverQueue,
@@ -67,8 +68,7 @@ interface ParsedArgs {
   service: string | undefined;
   oauthProvider: "google" | "github" | undefined;
   signupUrl: string | undefined; // fresh-verify: override the bot's URL guess
-  skillId: string | undefined; // fresh-verify: report the 2-of-N verdict to this skill
-  retryBudget: number | undefined; // fresh-verify: extra identities to retry transient flakes
+  skillId: string | undefined; // fresh-verify: report the converged verdict to this skill
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
@@ -87,7 +87,6 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     oauthProvider: undefined,
     signupUrl: undefined,
     skillId: undefined,
-    retryBudget: undefined,
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
@@ -112,9 +111,6 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       args.signupUrl = arg.slice("--signup-url=".length);
     } else if (arg.startsWith("--skill-id=")) {
       args.skillId = arg.slice("--skill-id=".length);
-    } else if (arg.startsWith("--retry-budget=")) {
-      const n = Number(arg.slice("--retry-budget=".length));
-      if (Number.isFinite(n) && n >= 0) args.retryBudget = Math.floor(n);
     } else if (arg.startsWith("--oauth-provider=")) {
       const v = arg.slice("--oauth-provider=".length);
       if (v !== "google" && v !== "github") {
@@ -352,8 +348,9 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   }
 
   // fresh-verify mode: verify a service by fresh-signing-up as N robot
-  // identities (2-of-N agreement) instead of replaying as a returning user.
-  // Needs a configured identity pool + operator machine token + account id.
+  // identities, driving the verdict off the bounded sequential-confidence
+  // sampler (D2) instead of replaying as a returning user. Needs a configured
+  // identity pool + operator machine token + account id.
   if (args.mode === "fresh-verify") {
     if (args.service === undefined) {
       console.error("housekeeper --mode=fresh-verify needs --service=<slug>");
@@ -365,18 +362,23 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         service: args.service,
         ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
         ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
-        ...(args.retryBudget !== undefined ? { retryBudget: args.retryBudget } : {}),
       });
       if (res.kind === "not_configured") {
         console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
         return 1;
       }
       if (res.kind === "insufficient_identities") {
-        console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available}/${res.agreement} unspent) — mint more robots`);
+        console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available} unspent) — mint more robots`);
         return 1;
       }
-      console.log(`[fresh-verify] ${args.service}: ${res.promoted ? "PROMOTE" : "hold"} (${res.outcomes.filter((o) => o.success).length}/${res.agreement} agreed)`);
-      return res.promoted ? 0 : 1;
+      console.log(
+        `[fresh-verify] ${args.service}: ${res.verdict.toUpperCase()} ` +
+          `(${res.successes}✓/${res.failures}✗, LCB ${res.passRateLcb.toFixed(2)}/` +
+          `UCB ${res.passRateUcb.toFixed(2)}, ${res.samples} sample(s))`,
+      );
+      // promote → 0 (success). reject/hold → 1 (no promotion this pass); hold is
+      // "not enough signal", reject is "the recipe failed", both non-zero.
+      return res.verdict === "promote" ? 0 : 1;
     } catch (err) {
       console.error(`housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
@@ -417,6 +419,31 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       signupUrl?: string;
       allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
+    // D2.D — wire the fresh-identity confidence sampler into the scheduled verify
+    // batch when an identity pool is configured on this box. The verify batch
+    // then routes OAuth-based skills through N independent fresh signups (the
+    // sequential-confidence verdict) instead of single-account replay — the
+    // diverging path the identity-pool redesign was meant to replace. Email-only
+    // skills, and boxes with no pool, stay on single-account replay (the runner
+    // falls back). Lazy-imported so the bot/inbox deps load only when used.
+    let healFreshVerify: FreshVerifyRunner | undefined;
+    if (verifyPoolConfigured()) {
+      const { runFreshVerify } = await import("./modes/fresh-verify.js");
+      healFreshVerify = (input) =>
+        runFreshVerify({
+          service: input.service,
+          skillId: input.skillId,
+          ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
+          ...(input.oauthProvider !== undefined ? { oauthProvider: input.oauthProvider } : {}),
+        });
+      console.error(
+        "[housekeeper] heal: identity pool configured — verify batch uses fresh-identity confidence sampler for OAuth skills",
+      );
+    } else {
+      console.error(
+        "[housekeeper] heal: no identity pool — verify batch stays on single-account replay",
+      );
+    }
     const base = {
       client,
       notifiers,
@@ -425,6 +452,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       // page must not retire a working skill (the fly.io bug).
       probe: createProbeRunner(),
       discover: healDiscover,
+      ...(healFreshVerify !== undefined ? { freshVerify: healFreshVerify } : {}),
       replayMode: args.replayMode,
       once: args.once,
       ...(args.limit !== undefined ? { limit: args.limit } : {}),

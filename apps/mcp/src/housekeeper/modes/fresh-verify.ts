@@ -1,13 +1,14 @@
 // fresh-verify mode — verify a service by FRESH-signing-up as N independent
-// robot identities (2-of-N agreement), instead of replaying the recipe against
-// the one returning-user account. See ../fresh-verify.ts for the orchestration
-// core and ../identity-pool.ts for the fleet model.
+// robot identities and driving the verdict off the BOUNDED SEQUENTIAL-CONFIDENCE
+// SAMPLER (D2), instead of a fixed 2-of-N count. See ../fresh-verify.ts for the
+// sampler + orchestration core and ../identity-pool.ts for the fleet model.
 //
-// The 2-of-N agreement gate is enforced HERE (housekeeper-side): we only report
-// a `success` verifier-outcome to the registry when `agreement` independent
-// identities each produced a credential. So the registry's existing
-// promote-on-success path keeps working, but "success" now means "N independent
-// fresh users agreed" — a strictly higher bar — with no registry-app change.
+// The verdict is computed HERE (housekeeper-side): the sampler updates a Beta
+// posterior over the recipe's pass-rate from each genuine signup outcome,
+// dropping flakes as non-observations, and converges to promote / reject / hold.
+// We carry that whole posterior to the registry (samples, successes, failures,
+// LCB/UCB, verdict, failure_kind) so the registry trusts the producer's
+// converged verdict rather than re-deriving from a single success count.
 //
 // v1 scope: pure-OAuth Google services (the robots are Cloud Identity Free, no
 // mailbox for email-OTP). Email-signup services keep using the alias path.
@@ -22,20 +23,35 @@ import {
   recordSpent,
   verifyPoolConfigured,
 } from "../identity-pool.js";
-import { freshVerifyService, type FreshVerifyResult } from "../fresh-verify.js";
-import { VerifierRegistryClient } from "../registry-client.js";
+import {
+  freshVerifyService,
+  freshVerifyConfidenceFromEnv,
+  type ConfidenceOpts,
+  type FreshVerifyResult,
+} from "../fresh-verify.js";
+import {
+  VerifierRegistryClient,
+  type VerifierOutcomeResponse,
+} from "../registry-client.js";
+
+// The fresh-verify result, plus the registry's transition when the verdict was
+// reported (D2.D — lets the heal pass fold the outcome into its batch summary).
+// `transition` is undefined when nothing was reported (no skillId, hold, or no
+// admin bearer).
+export type RunFreshVerifyResult =
+  | (FreshVerifyResult & { transition?: VerifierOutcomeResponse["transition"] })
+  | { kind: "not_configured"; service: string };
 
 export interface RunFreshVerifyInput {
   service: string;
   signupUrl?: string;
   oauthProvider?: OAuthProviderId; // default "google"
-  skillId?: string; // when set, the consolidated verdict is reported to the registry
-  agreement?: number; // default 2
-  // Extra identities spent retrying TRANSIENT failures (timing flakes) toward the
-  // agreement bar before giving up — kills per-run variance where one unlucky
-  // robot fails a recipe that reproduces. Hard walls (no signup, SSO, anti-bot)
-  // still short-circuit. Default 2.
-  retryBudget?: number;
+  skillId?: string; // when set, the converged verdict is reported to the registry
+  // Sampler bounds override. Defaults to freshVerifyConfidenceFromEnv() so an
+  // operator can calibrate promoteFloor / rejectCeiling / maxSamples via env
+  // (FRESH_VERIFY_*) without a deploy. See ../fresh-verify.ts for the UNTUNED
+  // default bounds and the calibration note.
+  confidence?: ConfidenceOpts;
 }
 
 export interface RunFreshVerifyConfig {
@@ -58,11 +74,10 @@ function firstCredential(result: SignupResult): string | undefined {
 export async function runFreshVerify(
   input: RunFreshVerifyInput,
   cfg: RunFreshVerifyConfig = {},
-): Promise<FreshVerifyResult | { kind: "not_configured"; service: string }> {
+): Promise<RunFreshVerifyResult> {
   const log = cfg.log ?? ((m: string) => console.error(m));
   const provider = input.oauthProvider ?? "google";
-  const agreement = input.agreement ?? 2;
-  const retryBudget = input.retryBudget ?? 2;
+  const confidence = input.confidence ?? freshVerifyConfidenceFromEnv();
 
   if (!verifyPoolConfigured()) {
     log(`[fresh-verify] no identity pool configured (verify-identities.json) — skipping ${input.service}`);
@@ -132,8 +147,7 @@ export async function runFreshVerify(
   const result = await freshVerifyService({
     service: input.service,
     provider,
-    agreement,
-    retryBudget,
+    confidence,
     identities,
     usage,
     runSignup,
@@ -141,11 +155,27 @@ export async function runFreshVerify(
     log,
   });
 
-  // Report the consolidated verdict (the 2-of-N gate) to the registry.
+  // Report the converged posterior + verdict to the registry (D2.C). A `hold`
+  // is NOT reported — it means "not enough signal this pass"; reporting it as a
+  // failure would feed the demote path on no evidence. `promote` posts a
+  // success outcome carrying verdict=promote; `reject` posts a failure carrying
+  // the informative failure_kind so a genuine 0/N fresh failure can demote
+  // instead of defaulting `transient`. The wire fields are additive — an older
+  // registry that ignores them falls back to the count-based path on `kind`.
   if (input.skillId !== undefined && result.kind === "verified") {
+    if (result.verdict === "hold") {
+      log(
+        `[fresh-verify] ${input.service}: HOLD (LCB ${result.passRateLcb.toFixed(2)}/UCB ` +
+          `${result.passRateUcb.toFixed(2)}, ${result.samples} sample(s)) — not reported (no-op)`,
+      );
+      return result;
+    }
     const adminBearer = process.env.REGISTRY_ADMIN_BEARER;
     if (cfg.registry === undefined && (adminBearer === undefined || adminBearer.length === 0)) {
-      log(`[fresh-verify] ${input.service}: no REGISTRY_ADMIN_BEARER — verdict computed (${result.promoted ? "PROMOTE" : "hold"}) but not reported`);
+      log(
+        `[fresh-verify] ${input.service}: no REGISTRY_ADMIN_BEARER — verdict computed ` +
+          `(${result.verdict.toUpperCase()}) but not reported`,
+      );
       return result;
     }
     try {
@@ -155,15 +185,29 @@ export async function runFreshVerify(
           baseUrl: process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? "https://registry.trustysquire.ai",
           adminBearer: adminBearer ?? "",
         });
-      const agreed = result.outcomes.filter((o) => o.success).length;
-      await registry.postOutcome({
+      const trail = result.outcomes
+        .map((o) => `${o.identityId}:${o.success ? "ok" : "fail"}/${o.observation}`)
+        .join(", ");
+      const res = await registry.postOutcome({
         skill_id: input.skillId,
-        kind: result.promoted ? "success" : "failure",
-        reason: `fresh-verify ${agreed}/${agreement} independent identities agreed (${result.outcomes
-          .map((o) => `${o.identityId}:${o.success ? "ok" : "fail"}`)
-          .join(", ")})`,
+        kind: result.verdict === "promote" ? "success" : "failure",
+        reason:
+          `fresh-verify ${result.verdict} ` +
+          `(${result.successes}✓/${result.failures}✗, LCB ${result.passRateLcb.toFixed(2)}/` +
+          `UCB ${result.passRateUcb.toFixed(2)}, ${result.samples} sample(s)) [${trail}]`,
+        verdict: result.verdict,
+        samples: result.samples,
+        successes: result.successes,
+        failures: result.failures,
+        pass_rate_lcb: result.passRateLcb,
+        pass_rate_ucb: result.passRateUcb,
+        ...(result.failureKind !== undefined ? { failure_kind: result.failureKind } : {}),
       });
-      log(`[fresh-verify] ${input.service}: reported ${result.promoted ? "success" : "failure"} for skill ${input.skillId}`);
+      log(
+        `[fresh-verify] ${input.service}: reported ${result.verdict.toUpperCase()} ` +
+          `for skill ${input.skillId} → ${res.transition}`,
+      );
+      return { ...result, transition: res.transition };
     } catch (err) {
       log(`[fresh-verify] ${input.service}: outcome report failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
     }

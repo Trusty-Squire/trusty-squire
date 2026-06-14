@@ -139,6 +139,18 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
           ...(req.body.duration_ms !== undefined
             ? { duration_ms: req.body.duration_ms }
             : {}),
+          // D2.C — the fresh-verify sampler's converged posterior + verdict.
+          // All additive/optional; absent on the single-account replay path.
+          ...(req.body.verdict !== undefined ? { verdict: req.body.verdict } : {}),
+          ...(req.body.samples !== undefined ? { samples: req.body.samples } : {}),
+          ...(req.body.successes !== undefined ? { successes: req.body.successes } : {}),
+          ...(req.body.failures !== undefined ? { failures: req.body.failures } : {}),
+          ...(req.body.pass_rate_lcb !== undefined
+            ? { pass_rate_lcb: req.body.pass_rate_lcb }
+            : {}),
+          ...(req.body.pass_rate_ucb !== undefined
+            ? { pass_rate_ucb: req.body.pass_rate_ucb }
+            : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -491,6 +503,16 @@ interface VerifierOutcomeBody {
   // classifies as transient and never demotes.
   failure_kind?: string;
   duration_ms?: number;
+  // D2.C — the fresh-verify producer's converged sequential-confidence verdict +
+  // posterior. All additive/optional: the single-account replay path omits them
+  // and the store falls back to count-based semantics. When `verdict` is present
+  // the store TRUSTS it (promote/reject/hold) instead of re-deriving from counts.
+  verdict?: "promote" | "reject" | "hold";
+  samples?: number;
+  successes?: number;
+  failures?: number;
+  pass_rate_lcb?: number;
+  pass_rate_ucb?: number;
 }
 
 interface BotFailureBody {
@@ -517,5 +539,11 @@ function isVerifierOutcomeBody(body: unknown): body is VerifierOutcomeBody {
   if (typeof b["reason"] !== "string") return false;
   if (b["failure_kind"] !== undefined && typeof b["failure_kind"] !== "string") return false;
   if (b["duration_ms"] !== undefined && typeof b["duration_ms"] !== "number") return false;
+  // D2.C — additive optional sampler fields.
+  const v = b["verdict"];
+  if (v !== undefined && v !== "promote" && v !== "reject" && v !== "hold") return false;
+  for (const k of ["samples", "successes", "failures", "pass_rate_lcb", "pass_rate_ucb"]) {
+    if (b[k] !== undefined && typeof b[k] !== "number") return false;
+  }
   return true;
 }

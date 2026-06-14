@@ -273,11 +273,33 @@ export class PrismaSkillStore implements SkillStore {
     // transient (oauth/session/timeout) records the stat but must NOT
     // advance consecutive_verifier_failures, or a working skill thrashes
     // toward demotion on a blip. Unknown kinds default to transient.
-    const fclass = input.kind === "failure" ? classifyFailure(input.failure_kind) : null;
+    // D2.C — a converged producer verdict from the fresh-verify
+    // sequential-confidence sampler is TRUSTED over the raw success count. A
+    // `hold` is an explicit no-op (no signal — don't even bump the stat
+    // counters). `promote`/`reject` map to a success/failure outcome so the
+    // shared C11 promote-gate + rot demote-path below apply unchanged; a
+    // `promote` additionally short-circuits the count threshold (promotes on
+    // this single converged outcome). Absent verdict → historic count semantics.
+    if (input.verdict === "hold") {
+      const current = (await this.client.skillRecord.findUnique({
+        where: { skill_id: input.skill_id },
+      })) as PrismaSkillRow | null;
+      if (current === null) {
+        throw new Error(`Cannot record verifier outcome for unknown skill ${input.skill_id}`);
+      }
+      return { record: toSkillStoreRecord(current), transition: "none" };
+    }
+    const effectiveKind: "success" | "failure" =
+      input.verdict === "promote"
+        ? "success"
+        : input.verdict === "reject"
+          ? "failure"
+          : input.kind;
+    const fclass = effectiveKind === "failure" ? classifyFailure(input.failure_kind) : null;
     const failureKind = (input.failure_kind ?? "unknown").slice(0, 80);
     return this.client.$transaction(async (tx) => {
       let skill: PrismaSkillRow;
-      if (input.kind === "success") {
+      if (effectiveKind === "success") {
         skill = (await tx.skillRecord.update({
           where: { skill_id: input.skill_id },
           data: {
@@ -304,9 +326,10 @@ export class PrismaSkillStore implements SkillStore {
       // double-demote.
       let transition: RecordVerifierOutcomeResult["transition"] = "none";
       if (
-        input.kind === "success" &&
+        effectiveKind === "success" &&
         skill.status === "pending-review" &&
-        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
+        (input.verdict === "promote" ||
+          skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD)
       ) {
         // C11 gate — same logic as InMemorySkillStore. If an existing
         // active skill for this service has a DIFFERENT signup_url or
@@ -354,14 +377,14 @@ export class PrismaSkillStore implements SkillStore {
         }
         // else: counter incremented, status stays pending-review,
         // operator runs `mcp skill approve-review` to land it.
-      } else if (input.kind === "success" && skill.status === "active") {
+      } else if (effectiveKind === "success" && skill.status === "active") {
         // Freshness pass — schedule the next sweep.
         skill = (await tx.skillRecord.update({
           where: { skill_id: input.skill_id },
           data: { next_freshness_due_at: new Date(now.getTime() + oneWeek) },
         })) as unknown as PrismaSkillRow;
       } else if (
-        input.kind === "failure" &&
+        effectiveKind === "failure" &&
         fclass === "wall" &&
         (skill.status === "active" || skill.status === "pending-review")
       ) {
@@ -379,7 +402,7 @@ export class PrismaSkillStore implements SkillStore {
         })) as unknown as PrismaSkillRow;
         transition = "quarantined";
       } else if (
-        input.kind === "failure" &&
+        effectiveKind === "failure" &&
         skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
       ) {
         // Reaching the threshold here means 3 consecutive ROT failures —

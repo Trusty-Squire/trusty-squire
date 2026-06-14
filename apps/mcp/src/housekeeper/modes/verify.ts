@@ -38,6 +38,18 @@ import {
 import type { HousekeeperTask } from "../queues/index.js";
 import { runCleanup } from "../cleanup.js";
 import type { HousekeeperOpts } from "../orchestrator.js";
+import type { RunFreshVerifyResult } from "./fresh-verify.js";
+
+// D2.D — the fresh-identity verifier hook. Wired by the CLI in heal mode when an
+// identity pool is configured. Returns the sampler result + the registry
+// transition it reported. Shaped as a function so the orchestrator stays
+// decoupled from the bot/inbox wiring runFreshVerify needs.
+export type FreshVerifyRunner = (input: {
+  service: string;
+  skillId: string;
+  signupUrl?: string;
+  oauthProvider?: "google" | "github";
+}) => Promise<RunFreshVerifyResult>;
 
 // Replay mode applies to the verifier path. 'full' actually
 // generates a credential (proves the path still produces one);
@@ -256,6 +268,20 @@ export async function handleReplay(
     return { outcome: "failure", reason, transition };
   }
 
+  // D2.D — prefer the fresh-identity confidence sampler over single-account
+  // replay when the heal pass wired it AND this skill has a fresh-identity path.
+  // v1 fresh-verify scope is pure-OAuth (the robots are Cloud Identity Free with
+  // no mailbox), so we route only OAuth-based skills here; email-only skills and
+  // unwired runs fall through to single-account replay below. This is the
+  // promotion trust signal: "the lower-confidence-bound pass-rate over N
+  // independent fresh signups is high", not "replayed once as a returning user".
+  if (opts.freshVerify !== undefined && skill.oauth_provider !== null) {
+    const fresh = await runFreshIdentityVerify(task, skill, opts, log, startMs);
+    if (fresh !== "fallback") return fresh;
+    // "fallback" → the fresh path couldn't run (no pool / pool exhausted);
+    // fall through to single-account replay so the skill still gets verified.
+  }
+
   let outcomeKind: "success" | "failure" = "failure";
   let outcomeReason = "uncaught";
   // Structured failure kind for the demotion classifier (T4). The replay
@@ -412,6 +438,68 @@ async function tryBrittleProbeDowngrade(args: {
     `brittle-probe: ${service} — replay failed but signup page still servable (${summary}) — downgrading, flagged for re-synthesis`,
   );
   return summary;
+}
+
+// D2.D — drive a 'replay' task through the fresh-identity confidence sampler.
+// Returns a ReplayResult mapped from the sampler verdict, or the sentinel
+// "fallback" when the fresh path can't run (no identity pool, pool exhausted,
+// not configured) so handleReplay continues to single-account replay. The
+// sampler reports its OWN outcome to the registry (carrying the verdict +
+// posterior) — runFreshVerify hands back the transition the registry returned,
+// which we surface in the batch summary.
+async function runFreshIdentityVerify(
+  task: Extract<HousekeeperTask, { kind: "replay" }>,
+  skill: Skill,
+  opts: HousekeeperOpts,
+  log: (line: string) => void,
+  startMs: number,
+): Promise<ReplayResult | "fallback"> {
+  const item = task.queueItem;
+  const provider = skill.oauth_provider; // non-null per the caller's guard
+  log(`fresh-verify start: ${item.service} (skill_id=${item.skill_id}, oauth=${provider})`);
+  let fresh: RunFreshVerifyResult;
+  try {
+    fresh = await opts.freshVerify!({
+      service: item.service,
+      skillId: item.skill_id,
+      ...(skill.signup_url.length > 0 ? { signupUrl: skill.signup_url } : {}),
+      ...(provider !== null ? { oauthProvider: provider } : {}),
+    });
+  } catch (err) {
+    // A crash in the fresh path is not a skill verdict — fall back to replay.
+    log(
+      `fresh-verify error: ${item.service} — ${err instanceof Error ? err.message : String(err)} — falling back to single-account replay`,
+    );
+    return "fallback";
+  }
+
+  if (fresh.kind === "not_configured") {
+    log(`fresh-verify: ${item.service} — no identity pool; falling back to single-account replay`);
+    return "fallback";
+  }
+  if (fresh.kind === "insufficient_identities") {
+    log(
+      `fresh-verify: ${item.service} — pool exhausted (${fresh.available ?? 0} unspent); falling back to single-account replay`,
+    );
+    return "fallback";
+  }
+
+  // A converged verdict. runFreshVerify already posted it to the registry (when
+  // a skillId + admin bearer were present) and handed back the transition. A
+  // `hold` is a deliberate no-op — surface it as a skipped task so the batch
+  // doesn't count it as a pass or a fail.
+  const duration_ms = Date.now() - startMs;
+  const reason =
+    `fresh-verify ${fresh.verdict} (${fresh.successes}✓/${fresh.failures}✗, ` +
+    `LCB ${fresh.passRateLcb.toFixed(2)}/UCB ${fresh.passRateUcb.toFixed(2)}, ` +
+    `${fresh.samples} sample(s), ${duration_ms}ms)`;
+  log(`fresh-verify end:   ${item.service} — ${reason} → transition=${fresh.transition ?? "none"}`);
+  if (fresh.verdict === "hold") return "skipped";
+  return {
+    outcome: fresh.verdict === "promote" ? "success" : "failure",
+    reason,
+    transition: fresh.transition ?? "none",
+  };
 }
 
 function describeReplayOutcome(outcome: ReplayOutcome): string {

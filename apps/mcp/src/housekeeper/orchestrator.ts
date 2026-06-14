@@ -28,13 +28,14 @@ import {
   type ReplayMode,
   type ReplayRunner,
   type SignupProbeRunner,
+  type FreshVerifyRunner,
 } from "./modes/verify.js";
 import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
 import { gradeLedgerAgainstPass, describeGrade } from "./fix-ledger.js";
 import { VERSION } from "../version.js";
 
-export type { ReplayMode, ReplayRunner, SignupProbeRunner } from "./modes/verify.js";
+export type { ReplayMode, ReplayRunner, SignupProbeRunner, FreshVerifyRunner } from "./modes/verify.js";
 export type { DiscoveryBotRunner } from "./modes/discover.js";
 
 export interface HousekeeperOpts {
@@ -59,6 +60,14 @@ export interface HousekeeperOpts {
   // Wired by the CLI to runDiscover. Same shape; required for
   // 'discover' tasks.
   discover?: DiscoveryBotRunner;
+  // D2.D — fresh-identity verifier. When wired (heal mode, identity pool
+  // configured), a 'replay' task for a skill with a fresh-identity path
+  // (OAuth-based) routes through the bounded sequential-confidence sampler
+  // (N independent fresh signups) INSTEAD of single-account replay. The sampler
+  // reports its own verdict to the registry and returns the transition. Skills
+  // with NO fresh-identity path (email-only, or when this hook is unwired) fall
+  // back to single-account replay via handleReplay. See modes/fresh-verify.ts.
+  freshVerify?: FreshVerifyRunner;
   // Replay mode for the verifier path. Defaults to 'full'.
   replayMode?: ReplayMode;
   // Per-batch size cap.

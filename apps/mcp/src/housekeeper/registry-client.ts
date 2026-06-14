@@ -170,6 +170,17 @@ export class VerifierRegistryClient {
     // Structured failure kind for the demotion classifier (T4).
     failure_kind?: string;
     duration_ms?: number;
+    // D2.C — the fresh-verify sequential-confidence sampler's converged posterior.
+    // ALL OPTIONAL + ADDITIVE: the single-account replay path omits them and the
+    // registry falls back to its count-based semantics. When `verdict` is
+    // present the registry trusts the producer's converged verdict (promote /
+    // reject) instead of re-deriving from the success count.
+    verdict?: "promote" | "reject" | "hold";
+    samples?: number;
+    successes?: number;
+    failures?: number;
+    pass_rate_lcb?: number;
+    pass_rate_ucb?: number;
   }): Promise<VerifierOutcomeResponse> {
     const url = `${this.baseUrl}/admin/skills/${encodeURIComponent(input.skill_id)}/verifier-outcome`;
     const res = await this.fetchFn(url, {
@@ -183,6 +194,12 @@ export class VerifierRegistryClient {
         reason: input.reason,
         ...(input.failure_kind !== undefined ? { failure_kind: input.failure_kind } : {}),
         ...(input.duration_ms !== undefined ? { duration_ms: input.duration_ms } : {}),
+        ...(input.verdict !== undefined ? { verdict: input.verdict } : {}),
+        ...(input.samples !== undefined ? { samples: input.samples } : {}),
+        ...(input.successes !== undefined ? { successes: input.successes } : {}),
+        ...(input.failures !== undefined ? { failures: input.failures } : {}),
+        ...(input.pass_rate_lcb !== undefined ? { pass_rate_lcb: input.pass_rate_lcb } : {}),
+        ...(input.pass_rate_ucb !== undefined ? { pass_rate_ucb: input.pass_rate_ucb } : {}),
       }),
     });
     if (!res.ok) {
