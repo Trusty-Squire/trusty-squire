@@ -296,6 +296,11 @@ correct; these need manual signup or are genuine walls. Don't keep "fixing" nav:
   retire was replay text_match brittleness ("Tokens" matched 2 elements), NOT
   rot. Re-pinned to `oauth_provider: google` in discovery-candidates.yaml so the
   robots can fresh-verify it. Re-discover via Google to regenerate the skill.
+  EVIDENCE (`tools/affordance-probe.mjs fly-io`, 2026-06-14):
+  `providers=[google,github] email=false card=false interstitial=false` — the
+  page itself shows BOTH providers. Plus a 2/2 fresh-verify (real api_key +
+  access_token) and now pending-review in the registry. This is the template:
+  a wall/capability claim cites a dated probe, not prose.
 - **xata** (pre-existing account for the operator's identity + email-link gate).
 
 ---
