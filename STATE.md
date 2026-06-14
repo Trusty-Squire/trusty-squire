@@ -289,8 +289,14 @@ correct; these need manual signup or are genuine walls. Don't keep "fixing" nav:
 - **predibase, humanloop** (mislabeled `oauth_loop_detected` — same class),
   **hyperbolic, braintrust** (Clerk `/sso-callback`). The reload fix fires and
   is exhausted; it does not help these.
-- **fly-io** (SSO-required org — tokens can't be UI-created), **xata**
-  (pre-existing account for the operator's identity + email-link gate).
+- ~~**fly-io** (SSO-required org — tokens can't be UI-created)~~ **CORRECTED
+  2026-06-14: fly.io is SERVABLE.** It offers **Google OAuth** (not just GitHub),
+  and personal accounts create tokens via Account → Access Tokens. The prior
+  "SSO/unservable" note was the GitHub-path misdiagnosis; the 2026-06-13 verify
+  retire was replay text_match brittleness ("Tokens" matched 2 elements), NOT
+  rot. Re-pinned to `oauth_provider: google` in discovery-candidates.yaml so the
+  robots can fresh-verify it. Re-discover via Google to regenerate the skill.
+- **xata** (pre-existing account for the operator's identity + email-link gate).
 
 ---
 

@@ -86,7 +86,7 @@
 - { slug: brave-search, name: Brave Search API, signup_url: https://api-dashboard.search.brave.com/register, oauth_provider: google }
 
 # ── Infra / compute / hosting ────────────────────────────────────────
-- { slug: fly-io, name: Fly.io, signup_url: https://fly.io/app/sign-up, oauth_provider: github }
+- { slug: fly-io, name: Fly.io, signup_url: https://fly.io/app/sign-up, oauth_provider: google }  # Google OAuth available (more reliable than the flaky GitHub-session path); robots can fresh-verify it. Token UI: Account -> Access Tokens. Was mis-pinned to github + mislabeled SSO-unservable (2026-06-14).
 - { slug: koyeb, name: Koyeb, signup_url: https://app.koyeb.com/auth/signup, oauth_provider: github, status: needs-manual }  # unservable: $30/mo Pro plan + card required before API keys (discover 2026-06-11)
 - { slug: northflank, name: Northflank, signup_url: https://app.northflank.com/signup, oauth_provider: github }
 - { slug: deno-deploy, name: Deno Deploy, signup_url: https://dash.deno.com/signin, oauth_provider: github }
