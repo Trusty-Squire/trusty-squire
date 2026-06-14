@@ -9194,8 +9194,53 @@ ${formatInventory(input.inventory)}`,
         });
         this.captureChainRound += 1;
       },
-      // tiebreak left undefined for v1: deterministic-only ranking. The LLM
-      // semantic fallback for oddly-named nav is a fast-follow (T-followup).
+      // LLM tiebreak: the deterministic ranker only fires on keys-keyword text /
+      // href. When keys live behind a generically-named affordance (a settings
+      // tab like "Advanced"/"Security", an icon nav), nothing scores and the
+      // ranker can't decide. This is the ONE place the LLM touches the loop —
+      // it picks the single candidate most likely to lead to a key surface, or
+      // null. Cheap (text-only, ≤80 tokens, deterministic) and bounded by the
+      // per-signup LLM budget; a budget/parse failure falls through to null
+      // (honest exhaustion), never throws into the loop.
+      tiebreak: async (candidates) => {
+        if (candidates.length === 0) return null;
+        const here = this.browser.currentUrl();
+        const list = candidates
+          .map(
+            (c, i) =>
+              `${i}. "${c.text.slice(0, 60)}"${c.href !== null ? ` (href=${c.href})` : ""}`,
+          )
+          .join("\n");
+        const system = `You navigate a SaaS dashboard after signup. Goal: reach the page that SHOWS or CREATES an API key (or any credential — token, secret, access key).
+You are given a numbered list of the clickable affordances on the current page. Pick the ONE most likely to lead toward an API-keys / tokens / developer-credentials surface.
+Reply with a single JSON object and nothing else: {"index": N} (N = the list number) or {"index": null} if NONE plausibly leads to API keys.
+Prefer items naming keys / tokens / API / developer / secrets; then security / advanced / credentials / settings / account. NEVER pick log out, billing, invoices, docs, pricing, a link back to the current page, or any destructive action (delete, remove, revoke, deactivate, cancel).`;
+        const userBlocks: LLMBlock[] = [
+          { kind: "text", text: `Current URL: ${here}\n\nAffordances:\n${list}` },
+        ];
+        try {
+          return await this.callLLM<string | null>({
+            system,
+            userBlocks,
+            maxTokens: 80,
+            temperature: 0,
+            deterministic: true,
+            parse: (raw) => {
+              const m = raw.match(/\{[\s\S]*\}/);
+              if (m === null) return null;
+              const obj: unknown = JSON.parse(m[0]);
+              const idx =
+                typeof obj === "object" && obj !== null && "index" in obj
+                  ? (obj as { index: unknown }).index
+                  : null;
+              if (typeof idx !== "number") return null;
+              return candidates[idx]?.selector ?? null;
+            },
+          });
+        } catch {
+          return null;
+        }
+      },
       log: (line) => args.steps.push(line),
       maxSteps: args.maxRounds,
     };

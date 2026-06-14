@@ -78,6 +78,17 @@ describe("enumerateCandidates", () => {
     const inv = [el({ tag: "button", visibleText: null, ariaLabel: "API keys", selector: "#x" })];
     expect(enumerateCandidates(inv)[0]?.text).toBe("API keys");
   });
+
+  it("never surfaces destructive actions (delete/revoke/deactivate) — they must not be auto-clicked", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Delete Account", selector: "#del" }),
+      el({ tag: "button", visibleText: "Revoke token", selector: "#rev" }),
+      el({ tag: "button", visibleText: "Deactivate", selector: "#deact" }),
+      el({ tag: "a", visibleText: "Cancel subscription", href: "/billing/cancel", selector: "#cancel" }),
+      el({ tag: "a", visibleText: "API Keys", href: "/settings/keys", selector: "#keep" }),
+    ];
+    expect(enumerateCandidates(inv).map((c) => c.selector)).toEqual(["#keep"]);
+  });
 });
 
 describe("mergeInventories", () => {

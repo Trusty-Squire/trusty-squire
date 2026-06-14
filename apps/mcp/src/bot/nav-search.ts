@@ -60,6 +60,15 @@ export function mergeInventories(
   return [...bySelector.values()];
 }
 
+// Destructive / irreversible actions nav-search must NEVER auto-click — neither
+// by deterministic rank nor by LLM tiebreak. The search clicks affordances
+// unattended chasing a key; a positional/portaled mis-click on one of these
+// could delete the account or revoke a credential. Excluded at enumeration so
+// no downstream path can ever reach them. (Observed: the LLM tiebreak once
+// picked "Delete Account" on a settings page that had no keys.)
+const DESTRUCTIVE_TEXT =
+  /\b(?:delete|remove|deactivate|destroy|revoke|cancel\s+(?:account|subscription|plan)|close\s+account|wipe|reset\s+account|leave\s+(?:team|organization|org))\b/i;
+
 // Pull the navigable affordances out of an inventory. Pure.
 export function enumerateCandidates(inventory: readonly InteractiveElement[]): NavCandidate[] {
   const out: NavCandidate[] = [];
@@ -72,6 +81,7 @@ export function enumerateCandidates(inventory: readonly InteractiveElement[]): N
       .filter((s): s is string => s !== null && s !== undefined && s.length > 0)
       .join(" ")
       .trim();
+    if (DESTRUCTIVE_TEXT.test(text)) continue; // never auto-click a destructive control
     const href = el.href ?? null;
     if (text.length === 0 && (href === null || href.length === 0)) continue;
     out.push({
