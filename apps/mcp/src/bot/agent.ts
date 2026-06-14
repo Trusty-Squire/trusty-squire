@@ -302,8 +302,9 @@ export class OAuthSessionNotPersistedError extends Error {
 // 0.8.2-rc.10 — common dashboard paths that vendors host their
 // per-account API key UI at. Ordered most-specific first so a
 // fallback navigate doesn't land short of the actual page. Returned
-// as an array of path-strings; the caller composes them onto the
-// origin of the currently-stuck URL and skips any already tried.
+// as an array of path-strings; the caller composes them onto the APP
+// origin (the signup/app URL the bot navigated to), NOT the auth/IdP
+// origin it may be stuck on post-OAuth, and skips any already tried.
 //
 // Patterns harvested from Anthropic (settings/keys), Sentry
 // (settings/account/api/auth-tokens), Neon (settings#api-keys),
@@ -540,28 +541,53 @@ export function pickStuckLoopFallbackUrl(
   currentUrl: string,
   alreadyTried: ReadonlySet<string>,
   service?: string,
+  appUrl?: string,
 ): string | null {
-  let parsed: URL;
+  let parsedCurrent: URL;
   try {
-    parsed = new URL(currentUrl);
+    parsedCurrent = new URL(currentUrl);
   } catch {
     return null;
+  }
+
+  // Compose key-path guesses onto the APP origin, NOT the origin of the
+  // currently-stuck URL. After OAuth the stuck URL is the identity-provider
+  // subdomain (auth.lumalabs.ai, accounts.<svc>, login.<svc>, the IdP) — which
+  // has no settings/keys pages, so "${authOrigin}/settings/keys" 404s by
+  // construction. The keys live on the app host (lumalabs.ai). `appUrl` is the
+  // signup/app URL the bot actually navigated to (this.resolvedSignupUrl), so
+  // its origin is the right host to guess against. Fall back to the stuck
+  // origin only when no usable app URL is known.
+  let composeBase: URL = parsedCurrent;
+  if (appUrl !== undefined) {
+    try {
+      const parsedApp = new URL(appUrl);
+      if (
+        (parsedApp.protocol === "http:" || parsedApp.protocol === "https:") &&
+        !isGoogleSearchUrl(appUrl)
+      ) {
+        composeBase = parsedApp;
+      }
+    } catch {
+      // keep the stuck origin
+    }
   }
   // about:blank / data: / chrome-error pages have an opaque origin that
   // serializes to the literal string "null" — building "${origin}${path}"
   // then yields an unnavigable "null/settings/keys". Only compose
   // fallbacks against a real http(s) origin.
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+  if (composeBase.protocol !== "http:" && composeBase.protocol !== "https:") {
     return null;
   }
-  const origin = parsed.origin;
-  // Skip a candidate when the current URL's path ALREADY matches it
-  // (case-insensitive, trailing-slash tolerant). The planner is stuck
-  // ON the page the candidate points to — navigating to the same URL
-  // again won't break the cycle, only a different path will.
-  const currentPath = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+  const origin = composeBase.origin;
+  // Skip a candidate when it resolves to the exact URL we're already stuck
+  // on (full origin+path, trailing-slash/case tolerant) — re-navigating
+  // there won't break the cycle. Compared on the full URL now that the
+  // compose origin can differ from the stuck origin.
+  const currentFull =
+    `${parsedCurrent.origin}${parsedCurrent.pathname}`.replace(/\/+$/, "").toLowerCase();
 
-  // Compose curated per-service paths first, but only when the stuck
+  // Compose curated per-service paths first, but only when the COMPOSE
   // origin's host actually belongs to the named service. The slug is
   // a substring of the host for the vendors we curate (groq →
   // console.groq.com, launchdarkly → app.launchdarkly.com, …); this
@@ -572,7 +598,7 @@ export function pickStuckLoopFallbackUrl(
   const curated =
     slug !== "" &&
     SERVICE_KEYS_PATHS[slug] !== undefined &&
-    parsed.hostname.toLowerCase().includes(slug)
+    composeBase.hostname.toLowerCase().includes(slug)
       ? SERVICE_KEYS_PATHS[slug]
       : [];
 
@@ -585,7 +611,7 @@ export function pickStuckLoopFallbackUrl(
     seen.add(candidatePath);
     const candidate = `${origin}${path}`;
     if (alreadyTried.has(candidate)) continue;
-    if (candidatePath === currentPath) continue;
+    if (`${origin}${path}`.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
     return candidate;
   }
   return null;
@@ -8862,7 +8888,12 @@ ${formatInventory(input.inventory)}`,
       } catch {
         break;
       }
-      const fallback = pickStuckLoopFallbackUrl(currentUrl, visitedKeysUrls);
+      const fallback = pickStuckLoopFallbackUrl(
+        currentUrl,
+        visitedKeysUrls,
+        undefined,
+        this.resolvedSignupUrl,
+      );
       if (fallback === null) break;
       visitedKeysUrls.add(fallback);
       try {
@@ -10212,6 +10243,7 @@ ${formatInventory(input.inventory)}`,
               state.url,
               triedFallbackUrls,
               args.service,
+              this.resolvedSignupUrl,
             );
             if (fallback !== null) {
               triedFallbackUrls.add(fallback);
@@ -10349,6 +10381,7 @@ ${formatInventory(input.inventory)}`,
             state.url,
             triedFallbackUrls,
             args.service,
+            this.resolvedSignupUrl,
           );
           if (fallback !== null) {
             prematureDoneFallbacks += 1;

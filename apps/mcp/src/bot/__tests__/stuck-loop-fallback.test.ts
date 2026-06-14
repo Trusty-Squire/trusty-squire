@@ -162,6 +162,52 @@ describe("pickStuckLoopFallbackUrl", () => {
     );
     expect(fallback).toBe("https://app.somevendor.test/settings/keys");
   });
+
+  it("composes onto the APP origin, not the auth/IdP origin the run is stuck on", () => {
+    // luma's real bug: post-OAuth the stuck URL is the auth subdomain
+    // (auth.lumalabs.ai), which has no settings pages — every guess there
+    // 404s. The app URL the bot navigated to is on lumalabs.ai, so the
+    // fallback must be composed against THAT origin.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://auth.lumalabs.ai/sign-up",
+      new Set(),
+      "luma-ai",
+      "https://lumalabs.ai/dream-machine",
+    );
+    expect(fallback).toBe("https://lumalabs.ai/settings/keys");
+  });
+
+  it("uses the app origin's host for the curated-path gate", () => {
+    // Stuck on accounts.google.com (OAuth), but the app is console.groq.com.
+    // The curated groq path must compose onto the app host, not the IdP.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://accounts.google.com/oauth/authorize",
+      new Set(),
+      "groq",
+      "https://console.groq.com/login",
+    );
+    expect(fallback).toBe("https://console.groq.com/keys");
+  });
+
+  it("ignores a Google-search app URL and keeps the stuck origin", () => {
+    // resolvedSignupUrl can be a google-search URL when no real signup
+    // page resolved; that's not an app origin, so don't compose onto it.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://platform.claude.com/dashboard",
+      new Set(),
+      undefined,
+      "https://www.google.com/search?q=claude+signup",
+    );
+    expect(fallback).toBe("https://platform.claude.com/settings/keys");
+  });
+
+  it("falls back to the stuck origin when no app URL is given (back-compat)", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://platform.claude.com/dashboard",
+      new Set(),
+    );
+    expect(fallback).toBe("https://platform.claude.com/settings/keys");
+  });
 });
 
 describe("serviceSlug", () => {
