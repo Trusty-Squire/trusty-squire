@@ -23,6 +23,23 @@
 //   4. Drop the JSON key at ~/.trusty-squire/admin-sa.json (chmod 600).
 // After that, every mint/login/sweep is autonomous.
 //
+// KEYLESS ALTERNATIVE (when SA-key creation is org-blocked by
+// iam.disableServiceAccountKeyCreation — the "Secure by Default" policy):
+// use an OAuth refresh token instead. NOT blocked by that policy.
+//   1. GCP console → APIs & Services → Credentials → Create OAuth client ID →
+//      type "Web application" → add redirect URI
+//        https://developers.google.com/oauthplayground
+//      (Consent screen: "Internal" — sensitive scopes need no verification for
+//      your own Workspace org.) Note the client_id + client_secret.
+//   2. OAuth Playground (developers.google.com/oauthplayground) → gear icon →
+//      "Use your own OAuth credentials" → paste client_id + client_secret →
+//      authorize scope https://www.googleapis.com/auth/admin.directory.user
+//      signing in AS A SUPER ADMIN → "Exchange authorization code for tokens"
+//      → copy the refresh_token.
+//   3. Write ~/.trusty-squire/admin-oauth.json (chmod 600):
+//        { "client_id": "...", "client_secret": "...", "refresh_token": "..." }
+// mintAdminToken() uses the SA key if present, else this OAuth config.
+//
 // Config (env overrides): the SA key path and the admin to impersonate.
 //   GOOGLE_ADMIN_SA_KEY   (default ~/.trusty-squire/admin-sa.json)
 //   GOOGLE_ADMIN_SUBJECT  (default lunchbox@trustysquire.ai — must be a super admin)
@@ -33,6 +50,12 @@ import { join } from "node:path";
 import { createSign } from "node:crypto";
 
 const KEY_PATH = process.env.GOOGLE_ADMIN_SA_KEY ?? join(homedir(), ".trusty-squire", "admin-sa.json");
+// Keyless fallback: an OAuth refresh token (client_id/client_secret/refresh_token
+// JSON), for orgs where `iam.disableServiceAccountKeyCreation` blocks SA-key
+// download. Not blocked by that policy — it's a user-consented OAuth grant, not
+// an SA key. The refresh token must carry admin.directory.user, consented by a
+// super admin. See the OAuth setup block in this file's header.
+const OAUTH_PATH = process.env.GOOGLE_ADMIN_OAUTH ?? join(homedir(), ".trusty-squire", "admin-oauth.json");
 const SUBJECT = process.env.GOOGLE_ADMIN_SUBJECT ?? "lunchbox@trustysquire.ai";
 const SCOPE = "https://www.googleapis.com/auth/admin.directory.user";
 
@@ -40,15 +63,53 @@ function b64url(buf) {
   return Buffer.from(buf).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+// Keyless path: exchange a stored OAuth refresh token for an access token. No SA
+// key, no `sub` impersonation — the refresh token already IS a super admin's
+// grant for admin.directory.user.
+async function mintFromOAuth() {
+  const cfg = JSON.parse(readFileSync(OAUTH_PATH, "utf8"));
+  if (!cfg.client_id || !cfg.client_secret || !cfg.refresh_token) {
+    throw new Error(`${OAUTH_PATH} must have client_id, client_secret, refresh_token`);
+  }
+  const res = await fetch(cfg.token_uri ?? "https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: cfg.client_id,
+      client_secret: cfg.client_secret,
+      refresh_token: cfg.refresh_token,
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const body = await res.json();
+  if (!res.ok || !body.access_token) {
+    throw new Error(
+      `OAuth refresh failed (${res.status}): ${JSON.stringify(body)}. ` +
+        `Common cause: the refresh token lacks admin.directory.user, or was not consented by a super admin.`,
+    );
+  }
+  return body.access_token;
+}
+
 export async function mintAdminToken() {
+  // Prefer the SA key (autonomous, no expiry concerns); fall back to the OAuth
+  // refresh token when the key isn't present (e.g. SA-key creation is org-blocked).
   let sa;
   try {
     sa = JSON.parse(readFileSync(KEY_PATH, "utf8"));
-  } catch (err) {
-    throw new Error(
-      `service-account key not found/readable at ${KEY_PATH} ` +
-        `(${err instanceof Error ? err.message : String(err)}). See the one-time setup in this file's header.`,
-    );
+  } catch {
+    try {
+      return await mintFromOAuth();
+    } catch (oauthErr) {
+      throw new Error(
+        `no admin credential found. Provide EITHER a service-account key at ${KEY_PATH} ` +
+          `(blocked by iam.disableServiceAccountKeyCreation? use the OAuth path) OR an OAuth ` +
+          `refresh-token config at ${OAUTH_PATH}. OAuth attempt: ` +
+          `${oauthErr instanceof Error ? oauthErr.message : String(oauthErr)}. ` +
+          `See the one-time setup in this file's header.`,
+      );
+    }
   }
   if (!sa.client_email || !sa.private_key) {
     throw new Error(`${KEY_PATH} is missing client_email / private_key — not a valid SA key JSON`);
