@@ -37,6 +37,11 @@ import {
 } from "./login-state.js";
 import { saveDebugSnapshot } from "./debug.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
+import {
+  runNavSearch,
+  type NavSearchBrowserPort,
+  type NavSearchDeps,
+} from "./nav-search.js";
 import type { FailureStage } from "./failure-stage.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -9123,6 +9128,80 @@ ${formatInventory(input.inventory)}`,
     return null;
   }
 
+  // NAV_SEARCH phase (slice 1): drive the post-verify phase with the goal-directed
+  // nav-search engine (nav-search.ts) instead of the greedy planner. Adapts the
+  // BrowserController to the engine's narrow port and wires the extractor, the
+  // capture-chain (sequential rounds → OF#1/auto-promote parity, A2), and the
+  // log. Returns the extracted credentials, or {} (+ a no_self_serve_key done
+  // reason) when the dashboard's navigation has no reachable key surface.
+  private async runNavSearchPhase(
+    args: { service: string; maxRounds: number; steps: string[] },
+    oauth: boolean,
+  ): Promise<Record<string, string>> {
+    const hasRealKey = (c: Record<string, string>): boolean =>
+      Object.keys(c).some((k) => !NON_CREDENTIAL_KEYS.has(k));
+
+    // Already on a key surface at entry (bot landed there directly).
+    const entry = await this.extractCredentials();
+    if (hasRealKey(entry)) return entry;
+
+    const port: NavSearchBrowserPort = {
+      currentUrl: () => this.browser.currentUrl(),
+      extractText: () => this.browser.extractText(),
+      extractInventory: () => this.browser.extractInteractiveElements(),
+      clickSelector: (s) => this.browser.click(s),
+      pressEscape: () => this.browser.pressKey("Escape"),
+      settle: async () => {
+        await this.browser.waitForInteractiveDom(5, 15_000).catch(() => {});
+      },
+      expandLatentNav: () => this.browser.expandLatentNav(),
+    };
+
+    const deps: NavSearchDeps = {
+      extractKey: async () => {
+        const c = await this.extractCredentials();
+        return hasRealKey(c) ? c : null;
+      },
+      // Capture-chain parity (A2 / OF#1): one sequential round per step, full
+      // state + the real selector, so the synthesizer's chain check (no gaps)
+      // still passes and auto-promote keeps minting skills.
+      captureRound: async (ctx) => {
+        const state = await this.browser.getState().catch(() => null);
+        if (state === null) return;
+        const observed: PostVerifyStep =
+          ctx.action === "extract"
+            ? { kind: "extract", reason: "nav-search: extract on key surface" }
+            : ctx.selector !== undefined
+              ? { kind: "click", selector: ctx.selector, reason: `nav-search: ${ctx.action}` }
+              : { kind: "done", reason: `nav-search: ${ctx.action}` };
+        captureOnboardingRound({
+          service: args.service,
+          round: this.captureChainRound,
+          oauth,
+          state,
+          inventory: ctx.inventory,
+          observed,
+          ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+          ...(this.lastResolvedProvider !== undefined
+            ? { resolved_provider: this.lastResolvedProvider }
+            : {}),
+        });
+        this.captureChainRound += 1;
+      },
+      // tiebreak left undefined for v1: deterministic-only ranking. The LLM
+      // semantic fallback for oddly-named nav is a fast-follow (T-followup).
+      log: (line) => args.steps.push(line),
+      maxSteps: args.maxRounds,
+    };
+
+    const result = await runNavSearch(port, deps);
+    if (result.kind === "found") return result.credentials;
+    this.lastPostVerifyDoneReason =
+      "no_self_serve_key: nav-search exhausted the dashboard's navigation without " +
+      "reaching an API-key surface";
+    return {};
+  }
+
   private async postVerifyLoop(args: {
     service: string;
     credentials?: { email: string; password: string } | undefined;
@@ -9207,6 +9286,13 @@ ${formatInventory(input.inventory)}`,
     let upstreamBlipRetries = 0;
     const MAX_UPSTREAM_BLIP_RETRIES = 8;
     const oauth = args.credentials === undefined;
+    // NAV_SEARCH (slice 1, DEFAULT OFF): replace the greedy planner with the
+    // goal-directed nav-search engine for the post-verify phase. Flag-gated for
+    // reversibility (DESIGN-post-signup-nav-search.md, A2) — until live-validated
+    // (T6), the greedy loop below remains the default. Opt in with NAV_SEARCH=1.
+    if (/^(1|true|on)$/i.test(process.env.NAV_SEARCH ?? "")) {
+      return await this.runNavSearchPhase(args, oauth);
+    }
     // Re-plan hint for the next round — set when an `extract` step
     // found no key, which means the visible key text is masked /
     // truncated (the S3-class trap: the planner sees a key-shaped

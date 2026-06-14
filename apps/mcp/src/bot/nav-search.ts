@@ -235,8 +235,15 @@ export interface NavSearchDeps {
   // reveal/copy internally), else null. The goal verifier of last resort.
   extractKey(): Promise<Record<string, string> | null>;
   // Capture-chain parity hook (A2 / OF#1): called once per step so auto-promote
-  // still sees the round chain it depends on. Best-effort; never throws.
-  captureRound?: (ctx: { url: string; inventory: readonly InteractiveElement[]; action: string }) => Promise<void>;
+  // still sees the round chain it depends on. `selector` is the affordance the
+  // step acts on (so the synthesizer learns the real click target); absent on
+  // the extract step. Best-effort; never throws.
+  captureRound?: (ctx: {
+    url: string;
+    inventory: readonly InteractiveElement[];
+    action: "navigate" | "create_key" | "overlay_dismiss" | "overlay_advance" | "extract";
+    selector?: string;
+  }) => Promise<void>;
   // LLM tiebreaker: pick a selector from candidates when the deterministic
   // ranker can't decide (needsTiebreak). The ONLY place the LLM touches the loop.
   tiebreak?: (candidates: readonly NavCandidate[]) => Promise<string | null>;
@@ -257,10 +264,19 @@ export async function runNavSearch(
   const tried = new Set<string>(); // affordance selectors already clicked
   const overlayTried = new Set<string>(); // overlay controls already actioned
 
-  const capture = async (action: string, inv: readonly InteractiveElement[]): Promise<void> => {
+  const capture = async (
+    action: "navigate" | "create_key" | "overlay_dismiss" | "overlay_advance" | "extract",
+    inv: readonly InteractiveElement[],
+    selector?: string,
+  ): Promise<void> => {
     if (deps.captureRound === undefined) return;
     try {
-      await deps.captureRound({ url: browser.currentUrl(), inventory: inv, action });
+      await deps.captureRound({
+        url: browser.currentUrl(),
+        inventory: inv,
+        action,
+        ...(selector !== undefined ? { selector } : {}),
+      });
     } catch {
       // capture is best-effort — never fail the search
     }
@@ -275,7 +291,7 @@ export async function runNavSearch(
     if (overlay.kind !== "none" && !overlayTried.has(overlay.selector)) {
       overlayTried.add(overlay.selector);
       log(`nav-search: overlay ${overlay.kind} → ${overlay.selector}`);
-      await capture(`overlay_${overlay.kind}`, inv);
+      await capture(overlay.kind === "dismiss" ? "overlay_dismiss" : "overlay_advance", inv, overlay.selector);
       try {
         await browser.clickSelector(overlay.selector);
       } catch {
@@ -303,7 +319,7 @@ export async function runNavSearch(
     if (goal.kind === "create_gated" && !tried.has(goal.createSelector)) {
       tried.add(goal.createSelector);
       log(`nav-search: create-key subgoal → ${goal.createSelector}`);
-      await capture("create_key", inv);
+      await capture("create_key", inv, goal.createSelector);
       await browser.clickSelector(goal.createSelector).catch(() => {});
       continue;
     }
@@ -325,7 +341,7 @@ export async function runNavSearch(
     }
     tried.add(pick);
     log(`nav-search: → ${pick}`);
-    await capture("navigate", inv);
+    await capture("navigate", inv, pick);
     await browser.clickSelector(pick).catch(() => {});
   }
 

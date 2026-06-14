@@ -5275,6 +5275,38 @@ export class BrowserController {
     return this.page !== null ? this.page.url() : "";
   }
 
+  // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that
+  // exposes no in-DOM close control). Best-effort. Used by the nav-search
+  // overlay handler's dismiss fallback.
+  async pressKey(key: string): Promise<void> {
+    if (!this.page) return;
+    await this.page.keyboard.press(key).catch(() => {});
+  }
+
+  // Open obvious collapsed menus (hamburger / avatar / account / "Settings"
+  // toggles) so nav links hidden behind them mount in the DOM before the
+  // nav-search enumerates candidates (outside-voice #1: the keys link is often
+  // behind a menu, not in the rendered top nav). CONSERVATIVE: only clicks
+  // elements that ADVERTISE a popup menu (aria-haspopup=menu/true), capped at 3,
+  // short timeouts, best-effort — never a plain link, so it can't wander.
+  async expandLatentNav(): Promise<void> {
+    if (!this.page) return;
+    try {
+      const n = await this.page
+        .$$eval('[aria-haspopup="menu"], [aria-haspopup="true"]', (els) => {
+          const slice = els.slice(0, 3);
+          slice.forEach((e, i) => e.setAttribute("data-navsearch-toggle", String(i)));
+          return slice.length;
+        })
+        .catch(() => 0);
+      for (let i = 0; i < n; i++) {
+        await this.page.click(`[data-navsearch-toggle="${i}"]`, { timeout: 1200 }).catch(() => {});
+      }
+    } catch {
+      // best-effort — never fail the search over menu expansion
+    }
+  }
+
   // Fetch a URL's final response (following redirects) and return its
   // status, final URL, and body text — or null on any failure.
   //
