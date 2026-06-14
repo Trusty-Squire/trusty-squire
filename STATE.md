@@ -14,6 +14,74 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ---
 
+## `oauth_session_not_persisted` (cartesia, braintrust, pinecone, … the "OAuth-callback wall")
+
+### ✗✗ FALSIFIED: "it's IP / needs residential egress" (2026-06-14, controlled matrix)
+
+The error string used to say "anti-bot / IP rejection of the callback — needs
+residential egress." **Proven false.** Controlled direct-vs-proxy matrix on
+cartesia (D1 retry disabled → 1 identity/attempt; `UNIVERSAL_BOT_NO_CLEAN_STATE_RETRY=1`):
+- **DIRECT** (datacenter Miami, ReliableSite AS23470): **4/4 fail** `oauth_session_not_persisted`.
+- **PROXY** (clean residential Seoul, SK Broadband AS9318, egress geo confirmed
+  Asia/Seoul): **2/2 callback attempts fail identically** (+1 proxy-latency
+  run_timeout). Only the egress IP changed; everything else held.
+A clean residential consumer IP fails the callback the same as the datacenter
+IP → **NOT IP, NOT egress.** The Tailscale Mac proxy does NOT help this class —
+do not route it through the proxy. (Matrix logs: `/tmp/cartesia-matrix-*`.)
+
+### ✓ ROOT CAUSE (2026-06-14, instrumented): Clerk new-user OAuth, not a session/cookie bug
+
+`UNIVERSAL_BOT_OAUTH_DEBUG=1` records the Clerk FAPI network + cookies at the
+bail point. cartesia is a **Clerk** app. The tell:
+`POST clerk.cartesia.ai/v1/client/sign_ins` → **422 `form_identifier_not_found`**
+("Couldn't find your account"). The bot drives Google OAuth through Clerk's
+**sign-IN** endpoint for a brand-new identity; Clerk won't sign in a
+non-existent account, and the **`sign_ups` transfer is never called** (0
+sign_ups across the whole run). `__client` cookie IS present (Clerk JS loaded,
+cookies persist) and `__client_uat`="0" (never signed in) → NOT a cookie/
+persistence/fingerprint-at-network bug, NOT captcha (`form_identifier_not_found`,
+not `captcha_*`). It was just mislabeled "anti-bot / IP."
+
+### ✗ FALSIFIED fixes (both tested live on cartesia):
+- **SDK transfer** (`window.Clerk.client.signUp.create({transfer:true})`):
+  unreachable — **patchright runs `page.evaluate` in an ISOLATED world where
+  `window.Clerk` is undefined** (verified: 20 polls/10s → present:false, while
+  clerk.browser.js had loaded). DOM access works in isolated worlds; JS globals
+  don't. So any window.* SDK intervention is blocked under BOT_CDP_HARDENED.
+- **Wait-for-auto-transfer** (stay on /sso-callback, cookie-poll 12s instead of
+  navigating away): Clerk did NOT auto-transfer (still 0 sign_ups, no session).
+  cartesia's Clerk genuinely does not create the account from the Google click.
+
+### ✓✓ CRACKED (2026-06-14) — cartesia signs up end-to-end, api_key extracted
+NOT a bot-detection block at all — two bot bugs, both fixed + validated live
+(normal discovery, `ok`, `api_key=sk_car_…` extracted):
+1. **`captcha_blocked` was a PREMATURE BAIL.** cartesia's email signup uses a
+   Clerk MANAGED Turnstile that resolves SERVER-SIDE. The submit succeeded
+   (cartesia emailed a verification code — the user's tell: "if it was flagged,
+   why send an email?"), but the bot bailed `captcha_blocked` while polling for
+   a client-side token that an invisible Turnstile never populates — ONE STEP
+   before success. Fix: on a POST-submit Turnstile timeout WITH an inbox,
+   proceed to verification and let the inbox poll arbitrate (a code = the submit
+   went through). Genuine pre-submit gates (no inbox / non-Turnstile) still bail.
+2. **OAuth-first re-fired after the login-only fallback.** Google OAuth is
+   login-only (form_identifier_not_found); the bot fell back to email but the
+   dispatch loop's OAuth-first scan re-clicked Google and looped. Fix: a sticky
+   `committedToEmailPath` flag, set on the login-only fallback, honored by
+   `resolveOAuthCandidates`.
+End-to-end now: OAuth login-only → sticky email commit → form fill → managed-
+Turnstile arbiter → inbox code → key. Re-pinned SERVABLE (removed needs-manual).
+
+LESSON: don't label a block "anti-bot/captcha" without the inbox + network
+ground truth. A verification email = the submit succeeded = not flagged.
+
+### Related improvement
+`waitForClerkSession` (cookie-poll before navigate-away) helps Clerk services
+that DO auto-transfer (e.g. pinecone, which succeeds) by not interrupting them.
+The flakiness across the Clerk cluster is which context the OAuth lands in
+(sign-up creates the account → ✓; sign-in for a new user → form_identifier_not_found → fall back to email).
+
+---
+
 ## Cloudflare-Turnstile "wall" (exa, cartesia, render-cron, replit, runpod, turso)
 
 ### ✅✅ ROOT CAUSE FOUND + FIXED (2026-06-12) — it was the Playwright LAUNCH, not the environment

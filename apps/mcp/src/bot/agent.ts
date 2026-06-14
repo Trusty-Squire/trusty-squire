@@ -4231,6 +4231,14 @@ export class SignupAgent {
   // "solved" one and we always want the failure mode in the result.
   private captchaEncounter: SignupResult["captcha"] = undefined;
 
+  // Sticky "this run is on the email path" flag. Set when OAuth turns out to be
+  // login-only (a new identity has no account — Clerk's form_identifier_not_found)
+  // and we fall back to email signup. Without it, the dispatch loop re-runs the
+  // OAuth-first scan after the re-route and re-clicks Google → loops forever
+  // (the cartesia oauth_session_not_persisted bug). Honored by
+  // resolveOAuthCandidates; reset at the start of each signup().
+  private committedToEmailPath = false;
+
   // Invisible-captcha presence for the current run. Cloudflare Turnstile
   // and reCAPTCHA-v3 are score-based: a HIGH score passes silently with no
   // visible widget to "solve", so the visible-gate path above records
@@ -5674,8 +5682,12 @@ export class SignupAgent {
     task: SignupTask,
     steps: string[],
   ): Promise<OAuthProviderId[]> {
-    if (task.forceForm === true) {
-      steps.push("Force-form: OAuth-first scan suppressed — taking the email/password path");
+    if (task.forceForm === true || this.committedToEmailPath) {
+      steps.push(
+        this.committedToEmailPath
+          ? "Committed to email path (OAuth was login-only) — OAuth-first scan suppressed"
+          : "Force-form: OAuth-first scan suppressed — taking the email/password path",
+      );
       return [];
     }
     const ordered = orderOAuthCandidates(
@@ -5987,6 +5999,8 @@ export class SignupAgent {
     // (Google number-match etc.). Without it, the run still works —
     // steps are just only visible in the final result.
     const steps: string[] = task.stepsSink ?? [];
+    // Fresh per-run: don't let a prior run's email-path commitment leak.
+    this.committedToEmailPath = false;
     // Stash the service name so the diagnostic uploader (called from
     // deep inside postVerifyLoop after a failed extract) can label
     // the snapshot without us threading task through every method.
@@ -6532,6 +6546,10 @@ export class SignupAgent {
             // /signup form), fill it IN PLACE — re-navigating to task.signupUrl
             // could bounce back to the demo. Otherwise re-navigate (the
             // login-only / no-account case left us on a /login page).
+            // OAuth was login-only (no account for this identity). Commit to the
+            // email path for the rest of the run so the dispatch loop's
+            // OAuth-first scan doesn't re-click Google and loop.
+            this.committedToEmailPath = true;
             const onSignupFormHtml =
               (await this.browser.getState().catch(() => null))?.html ?? "";
             if (classifySignupHtml(onSignupFormHtml) === "signup") {
@@ -8059,6 +8077,9 @@ export class SignupAgent {
       // oauth_session_not_persisted and abort. The account simply needs
       // creating via email, so re-route to form-fill instead of bailing.
       if (detectGoogleNoAccount(gateState.url, gateText)) {
+        // Commit to email for the rest of the run — OAuth is login-only here, so
+        // the OAuth-first scan must not re-fire after the form-fill re-route.
+        this.committedToEmailPath = true;
         steps.push(
           `OAuth: ${provider.label} sign-in succeeded but ${task.service} has no account for ` +
             `this identity (login-only OAuth, ${pathOf(gateState.url)}) — abandoning OAuth and ` +
