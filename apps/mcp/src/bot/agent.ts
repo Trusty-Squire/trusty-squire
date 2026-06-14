@@ -5315,7 +5315,32 @@ export class SignupAgent {
       await this.browser.wait(2);
 
       const postGate = await this.runCaptchaGate("Post-submit", steps);
-      if (postGate.blocked) return { kind: "captcha_blocked", captchaKind: postGate.kind };
+      if (postGate.blocked) {
+        // A managed/invisible Turnstile (Clerk's Smart CAPTCHA) resolves
+        // SERVER-SIDE: the submit can succeed — account created, verification
+        // email sent — even though our client-side token poll timed out.
+        // cartesia PROVED this: it emailed a verification code AFTER the bot had
+        // bailed captcha_blocked. The ground truth of "did the submit go
+        // through" is the INBOX, not the client token. So for a POST-submit
+        // Turnstile with an inbox available, don't hard-bail: proceed to the
+        // verification step and let the inbox poll arbitrate — a code arriving
+        // proves the managed Turnstile passed (→ completes); no code surfaces
+        // an honest verification_not_sent rather than a false captcha_blocked.
+        // A genuine pre-submit gate (no inbox, or a non-Turnstile challenge)
+        // still bails captcha_blocked.
+        if (postGate.kind === "turnstile" && task.inbox !== undefined) {
+          steps.push(
+            "Post-submit Turnstile token didn't populate — but a managed Turnstile resolves " +
+              "server-side, so the submit may have gone through. Proceeding to verification; " +
+              "the inbox poll arbitrates (a code = submit succeeded).",
+          );
+          // Don't let the recorded block short-circuit later gates / the result.
+          this.captchaEncounter = undefined;
+          await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
+          return { kind: "submitted" };
+        }
+        return { kind: "captcha_blocked", captchaKind: postGate.kind };
+      }
       if (postGate.found && postGate.solved) {
         // Re-click submit so the populated token ships with the form.
         try {
