@@ -62,9 +62,14 @@ with tests, NOT yet wired (cannot regress):
    byte-identical. The engine method owns the I/O + per-candidate classification and
    routes accumulation + resolution through the module. Faithful incl. passes 3+4
    accept FULL hits only (never record a truncated stub).
-4. ⏳ **Validate** live (any signup exercises pass 1; a truncated modal — OpenRouter/
-   Anthropic — exercises the pass-2 clipboard recovery) then flip default-on + delete
-   the inline policy. THE REMAINING GATE.
+4. ◑ **Validate** live — PASS 1 validated (2026-06-15: `EXTRACTION_ENGINE=1` ipinfo
+   → extracted api_key, `outcome=ok`). HELD before flipping default-on: ipinfo is a
+   full-key pass-1 service, so the engine's risk path — the pass-2 truncated/clipboard
+   recovery + the passes-3+4-full-only subtlety (the S3 masked-key trap this slice
+   targets) — is NOT yet live-exercised. Flip only after a TRUNCATED-MODAL service
+   (OpenRouter/Anthropic) validates the clipboard path, then delete the inline policy.
+   (Deliberately not stacking a third unvalidated-risk-path flip on the same heal
+   pass as form-fill + OAuth — clean attribution.)
 
 ## NOT in scope (this slice)
 
