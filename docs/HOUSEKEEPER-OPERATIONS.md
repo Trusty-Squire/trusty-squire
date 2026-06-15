@@ -198,3 +198,36 @@ node tools/provision-verify-robot.mjs licenses [--apply]    # audit / strip paid
   auto-licensing → robots become free Cloud Identity. Until then, rotation keeps
   cost flat (delete frees a seat, create takes one); after the fix, fresh robots
   are free so rotation reduces cost.
+
+### Auto-replenish in the heal pass (2026-06-15) — the loop refills itself
+
+The heal pass (`runHealPass`, phase 3, after discover) now rotates the pool
+**unattended** so a sole operator never has to manually refill — the one thing
+that kept the "autonomous" loop from being autonomous. Robots are **2SV-OFF**, so
+mint + warm need **NO 2FA and no human**.
+
+- **Opt-IN + gated.** No-op unless `ROBOT_AUTO_REPLENISH=1` AND an unattended admin
+  token exists (`~/.trusty-squire/admin-oauth.json` or `admin-sa.json`). Ships
+  default-off; safe before the token is set up.
+- **Trigger:** a robot is "worn" once spent at `>= ROBOT_REPLENISH_SPENT_GE`
+  (default 8) distinct services. When any are worn, rotate up to
+  `ROBOT_REPLENISH_MAX_PER_PASS` (default 2) per pass (warming is ~minutes each, so
+  it's capped). Cost-flat (`rotate --make-room=N`), then `google-login-fleet.mjs`
+  warms each fresh robot. Best-effort: a failure never breaks the heal. Digest
+  shows `· pool +N fresh`.
+- **One-time operator setup — the unattended admin token (OAuth refresh, keyless,
+  no SA key so the org key-creation block is irrelevant):**
+  1. GCP Console (as `lunchbox@trustysquire.ai`): enable **Admin SDK API** +
+     **Enterprise License Manager API**; OAuth consent screen User type **Internal**;
+     create an OAuth client ID, **Web application**, with redirect URI
+     `https://developers.google.com/oauthplayground`. Copy client_id + client_secret.
+  2. OAuth Playground → gear → "Use your own OAuth credentials" → paste id/secret →
+     authorize BOTH scopes `…/auth/admin.directory.user` + `…/auth/apps.licensing`
+     as the super admin → exchange for tokens → copy the `refresh_token` (`1//…`).
+  3. `~/.trusty-squire/admin-oauth.json` (chmod 600):
+     `{"client_id":"…","client_secret":"…","refresh_token":"1//…"}`.
+  4. Verify: `node tools/google-admin-token.mjs` prints an access token. If the
+     consent step says "app blocked": Admin console → Security → API controls → App
+     access control → Add app by Client ID → mark **Trusted**, re-do step 2.
+  The refresh token self-renews the hourly access token, so refills run hands-off.
+  Enable with `ROBOT_AUTO_REPLENISH=1` in `harvester.env` once verified.
