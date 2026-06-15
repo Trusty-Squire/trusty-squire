@@ -34,6 +34,13 @@ import {
   type FormFillOutcome,
   type FormFillState,
 } from "./form-fill.js";
+import {
+  accumulateCandidate,
+  hasFullHit,
+  initialExtractionState,
+  resolveExtraction,
+  type CandidateClass,
+} from "./extraction.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
@@ -12621,6 +12628,14 @@ ${formatInventory(input.inventory)}${
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
+    // EXTRACTION_ENGINE (default-off, strangler slice 4): route the cross-pass
+    // accumulation + resolution through the pure extraction module (extraction.ts,
+    // unit-tested). The inline body below is the unchanged default-off path; the
+    // engine path reuses every candidate-source I/O method. Flip default-on after
+    // live validation (DESIGN-extraction-engine.md migration step 4).
+    if (/^(1|true|on)$/i.test(process.env.EXTRACTION_ENGINE ?? "")) {
+      return this.extractCredentialsViaEngine();
+    }
     // IMPORTANT: pull credentials from the *visible* page, not the raw
     // HTML. Reading from HTML matches anti-bot challenge JS (Cloudflare
     // Turnstile, hCaptcha) whose challenge tokens look like API keys to
@@ -12745,6 +12760,77 @@ ${formatInventory(input.inventory)}${
 
     if (apiKey !== null) credentials.api_key = apiKey;
     return credentials;
+  }
+
+  // EXTRACTION_ENGINE path (strangler slice 4) — the same five-pass extraction as
+  // extractCredentials, but the cross-pass accumulation (first full wins; first
+  // truncated remembered) + final resolution go through the pure module
+  // (extraction.ts). This method owns only the I/O + the per-candidate regex
+  // classification. Faithful to the inline passes (incl. the subtlety that passes
+  // 3 + 4 accept FULL hits only — they never record a truncated stub).
+  private async extractCredentialsViaEngine(): Promise<Record<string, string>> {
+    const curUrl =
+      typeof this.browser.currentUrl === "function" ? this.browser.currentUrl() : "";
+    if (typeof curUrl === "string" && isDocumentationUrl(curUrl)) return {};
+
+    let st = initialExtractionState();
+    const classify = (text: string): CandidateClass => {
+      const hit = extractApiKeyFromText(text);
+      if (hit === null) return { kind: "none" };
+      return isTruncatedCapture(text, hit) ? { kind: "truncated", value: hit } : { kind: "full", value: hit };
+    };
+
+    // Pass 1 — visible candidates (records truncated hits).
+    for (const candidate of await this.browser.extractCredentialCandidates()) {
+      st = accumulateCandidate(st, classify(candidate));
+      if (hasFullHit(st)) return resolveExtraction(st);
+    }
+    // Pass 1b — body text (records truncated hits).
+    if (!hasFullHit(st)) {
+      st = accumulateCandidate(st, classify(await this.browser.extractText()));
+      if (hasFullHit(st)) return resolveExtraction(st);
+    }
+    // Pass 2 — copy-button + clipboard recovery, only when a truncated stub was
+    // seen. The copied value is accepted as a full hit directly (inline does the
+    // same — no re-classification).
+    if (!hasFullHit(st) && st.truncatedHit !== null) {
+      const copied = await this.tryCopyButtonExtraction();
+      if (copied !== null) {
+        st = accumulateCandidate(st, { kind: "full", value: copied });
+        if (hasFullHit(st)) return resolveExtraction(st);
+      }
+    }
+    // Pass 3 — hidden-input scan. FULL hits only (inline ignores truncated here).
+    if (!hasFullHit(st)) {
+      try {
+        for (const value of await this.browser.extractAllInputValues()) {
+          const c = classify(value);
+          if (c.kind !== "full") continue;
+          st = accumulateCandidate(st, c);
+          if (hasFullHit(st)) return resolveExtraction(st);
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    // Pass 4 — copy-button colocation. A bare UUID is accepted directly; otherwise
+    // the normal extractor, FULL only (inline records no truncated here).
+    if (!hasFullHit(st)) {
+      try {
+        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        for (const candidate of await this.browser.extractCredentialsNearCopyButtons()) {
+          const c: CandidateClass = UUID_RE.test(candidate)
+            ? { kind: "full", value: candidate }
+            : classify(candidate);
+          if (c.kind !== "full") continue;
+          st = accumulateCandidate(st, c);
+          if (hasFullHit(st)) return resolveExtraction(st);
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    return resolveExtraction(st);
   }
 
   // F10: click the page's Copy button (whose label typically reads
