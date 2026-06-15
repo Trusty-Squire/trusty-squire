@@ -1,0 +1,72 @@
+# DESIGN — extraction engine (post-signup refactor, strangler slice 4)
+
+Status: scoping + first pure extraction (2026-06-15). Owner: bot. Scope: the
+universal signup bot's credential-EXTRACTION phase only. Fourth strangler-fig
+slice of the agent.ts de-monolithing (A4 in `DESIGN-post-signup-nav-search.md`):
+nav-search (default-on) → OAuth/consent (default-on) → form-fill (default-on) →
+**extraction (this)** → capture-chain.
+
+## Problem
+
+`extractCredentials` (`apps/mcp/src/bot/agent.ts:12623`, ~125 lines) pulls the API
+key off the credential surface via a FIVE-pass pipeline, each pass a different
+source with its own I/O:
+
+1. visible candidates (`extractCredentialCandidates` — input values + element text)
+2. body text (`extractText`)
+3. copy-button + clipboard recovery (`tryCopyButtonExtraction`) — when pass 1/2
+   only saw a truncated display
+4. hidden-input scan (`extractAllInputValues`)
+5. copy-button colocation (`extractCredentialsNearCopyButtons`) — Railway's
+   char-by-span `<code>` UUID
+
+Interleaved with the I/O is a small but brittle DECISION policy: a doc-URL guard
+(never trust a key on a docs SAMPLE page), per-candidate classification
+(`extractApiKeyFromText` + `isTruncatedCapture` + the pass-4 UUID accept), the
+**truncated-vs-full priority** (the S3 masked-key trap: a masked `sk-…1687…`
+display must NOT win over a later full secret from the clipboard), and the final
+resolution (`{api_key}` vs `{api_key_truncated}` vs `{}`). The policy is welded to
+the I/O, so it can't be tested without a browser.
+
+## Approach: the eng-reviewed stateful-reducer pattern (slices 2–3)
+
+The executor owns ALL I/O (the five sources) AND the regex classification of each
+candidate. This module decides only the cross-pass POLICY — accumulation +
+resolution — over a `CandidateClass` the executor feeds it. (Dependency-injection
+boundary, like oauth-flow.ts's `deps` — keeps the module browser-free and avoids a
+circular import on the heavy `extractApiKeyFromText`/`isTruncatedCapture` helpers,
+which stay in agent.ts until the wiring commit moves them here.)
+
+## This commit — first pure primitives (the truncated-vs-full accumulator)
+
+The most self-contained, highest-value pure piece, extracted to `extraction.ts`
+with tests, NOT yet wired (cannot regress):
+
+- `accumulateCandidate(state, c)` — fold one classified candidate: first FULL hit
+  wins + is sticky; first TRUNCATED hit is remembered as a fallback, never
+  overriding a full (faithful to `truncatedHit = truncatedHit ?? hit`).
+- `hasFullHit(state)` — the executor stops scanning / skips remaining passes once
+  a full hit lands.
+- `resolveExtraction(state)` — the final record: `{api_key}` › `{api_key_truncated}`
+  › `{}`, faithful to extractCredentials' tail.
+
+## Migration (separate commits — Beck)
+
+1. **Extract the pure primitives** (this commit) — `extraction.ts` + tests, unwired.
+2. **Move the pure helpers** — relocate `extractApiKeyFromText` / `isTruncatedCapture`
+   / `isDocumentationUrl` from agent.ts to extraction.ts (their true home), update
+   the replay-skill.ts + test importers. Lets the reducer classify candidates
+   itself and breaks the would-be circular import.
+3. **Wire behind `EXTRACTION_ENGINE`** (default-off) — `extractCredentials` drives
+   the passes but routes accumulation + resolution through the module; the five
+   I/O sources stay.
+4. **Validate** live (an extraction-heavy service: OpenRouter/Anthropic truncated
+   modal, Railway UUID) then flip default-on + delete the inline policy.
+
+## NOT in scope (this slice)
+
+- The five candidate-source I/O methods (`extractCredentialCandidates`,
+  `tryCopyButtonExtraction`, etc.) — stay in agent.ts/browser.ts.
+- The credential regex/shape logic (`extractApiKeyFromText`) — moves in commit 2
+  but its rules don't change.
+- Multi-credential extraction (`replay-skill.ts` Phase D) — separate concern.
