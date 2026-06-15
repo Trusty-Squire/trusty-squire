@@ -26,6 +26,13 @@ import {
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
 import { decideOAuthStep } from "./oauth-flow.js";
+import {
+  decideFormFillStep,
+  initialFormFillState,
+  type FormFillObservation,
+  type FormFillOutcome,
+  type FormFillState,
+} from "./form-fill.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
@@ -4580,6 +4587,15 @@ export class SignupAgent {
     // same no-account bounce. One-shot equivalent of committedToEmailPath.
     forceFormFill = false,
   ): Promise<PlanExecOutcome> {
+    // FORM_FILL_ENGINE (default-off, strangler slice 3): route the whole round
+    // through the pure decideFormFillStep reducer. The inline loop below is the
+    // unchanged default-off path; the engine path reuses every I/O helper and is
+    // covered by the golden-transition table (form-fill.test.ts). The temporary
+    // orchestration duplication is deleted once the engine is validated live and
+    // flipped default-on (DESIGN-form-fill-engine.md migration step 4).
+    if (/^(1|true|on)$/i.test(process.env.FORM_FILL_ENGINE ?? "")) {
+      return this.planExecuteViaEngine(task, fillValues, steps, forceFormFill);
+    }
     const MAX_ERROR_REPLANS = 2;
     // 0.8.3-rc.1 — widened from 4 to 6 so submit_disabled re-plans
     // get more attempts to identify the gating control. Mailgun's
@@ -5390,6 +5406,438 @@ export class SignupAgent {
       await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
       return { kind: "submitted" };
     }
+  }
+
+  // FORM_FILL_ENGINE path (strangler slice 3) — the same round as
+  // planExecuteWithRetry, but every DECISION goes through the pure
+  // decideFormFillStep reducer (form-fill.ts); this method owns only the I/O and
+  // the replan-hint CONTENT. Faithful to the inline loop; reuses its helpers.
+  private async planExecuteViaEngine(
+    task: SignupTask,
+    fillValues: Record<FillValueKind, string>,
+    steps: string[],
+    forceFormFill: boolean,
+  ): Promise<PlanExecOutcome> {
+    let state: FormFillState = initialFormFillState(forceFormFill);
+    let hint: string | undefined;
+    // Map a reducer terminal outcome to PlanExecOutcome. needs_oauth_provider_session
+    // + oauth carry provider IDs the executor holds in typed form — pass those in.
+    const toPlanExec = (
+      outcome: FormFillOutcome,
+      typed?: {
+        oauth?: { selector: string; provider: OAuthProviderId } | undefined;
+        missingProviders?: readonly OAuthProviderId[] | undefined;
+        haveSessions?: readonly OAuthProviderId[] | undefined;
+      },
+    ): PlanExecOutcome => {
+      switch (outcome.kind) {
+        case "oauth":
+          return { kind: "oauth", selector: typed!.oauth!.selector, provider: typed!.oauth!.provider };
+        case "needs_oauth_provider_session":
+          return {
+            kind: "needs_oauth_provider_session",
+            missingProviders: typed!.missingProviders!,
+            haveSessions: typed!.haveSessions!,
+          };
+        default:
+          return outcome;
+      }
+    };
+
+    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
+    for (;;) {
+      await this.browser.waitForFormReady();
+      const dismissed = await this.browser.dismissConsentBanner();
+      if (dismissed !== null) steps.push(`Dismissed cookie consent: "${dismissed}"`);
+      await saveDebugSnapshot(this.browser, "before-fill");
+      const [browserState, inventory] = await Promise.all([
+        this.browser.getState(),
+        this.buildInventory(steps, oauthCandidates),
+      ]);
+
+      // ── C1 pre_plan: gather the observation, then decide ──
+      const hasFillableInput = inventory.some(
+        (e) =>
+          e.tag === "input" &&
+          (e.type === "email" || e.type === "text" || e.type === "password" || e.type === null) &&
+          e.visible !== false,
+      );
+      const wallAlias = extractVerifyWallAlias(browserState.html);
+      const ourInboxDomain = task.email.slice(task.email.indexOf("@") + 1).toLowerCase();
+      const aliasPollable =
+        wallAlias === null ||
+        wallAlias.slice(wallAlias.indexOf("@") + 1).toLowerCase() === ourInboxDomain;
+      const oauthButtonHitRaw = findFirstOAuthButton(inventory, oauthCandidates);
+      const offersOAuthSignup = oauthCandidates.length > 0 && oauthButtonHitRaw !== null;
+      const verifyWall =
+        !hasFillableInput &&
+        expectsVerificationEmail(browserState.html) &&
+        aliasPollable &&
+        !offersOAuthSignup;
+      const hasCredentialInput = inventory.some(
+        (e) => e.tag === "input" && (e.type === "email" || e.type === "password" || e.type === "tel"),
+      );
+      const oauthScanShell =
+        inventory.length <= 1 ||
+        !hasCredentialInput ||
+        isLoadingShellText(await this.browser.extractText().catch(() => ""));
+      const signInAdvance = findSignInAdvanceButton(inventory, oauthCandidates);
+      const antiBotVendor = inventory.length < 10 ? detectAntiBotBlock(browserState.html) : null;
+      const oauthOnly = isOauthOnlyChooser(inventory);
+      let missingProviders: readonly OAuthProviderId[] = [];
+      let haveSessions: readonly OAuthProviderId[] = [];
+      if (oauthOnly) {
+        const visibleProviders = detectOAuthProvidersInInventory(inventory);
+        haveSessions = await this.effectiveLoggedInProviders();
+        missingProviders = visibleProviders.filter((p) => !haveSessions.includes(p));
+      }
+      const preObs: FormFillObservation = {
+        checkpoint: "pre_plan",
+        hasFillableInput,
+        verifyWall,
+        codeGate: isVerificationCodeGate(inventory, browserState.html),
+        oauthCandidatesPresent: oauthCandidates.length > 0,
+        oauthButtonHit:
+          oauthButtonHitRaw !== null
+            ? { selector: oauthButtonHitRaw.button.selector, provider: oauthButtonHitRaw.provider }
+            : null,
+        oauthScanShell,
+        alreadySignedIn: detectAlreadySignedIn({ inventory, url: browserState.url }),
+        signInAdvancePresent: signInAdvance !== null,
+        antiBotVendor,
+        oauthOnly,
+        oauthOnlyMissingProviders: missingProviders,
+        oauthOnlyHaveSessions: haveSessions,
+      };
+      const pre = decideFormFillStep(state, preObs);
+      state = pre.nextState;
+      const preAct = pre.action;
+      if (preAct.kind === "route_to_verification") {
+        this.pendingVerificationAlias = wallAlias;
+        steps.push(
+          `Form: email-verification wall (no fields to fill${wallAlias !== null ? `, check ${wallAlias}` : ""}) — ` +
+            `routing to the inbox-poll + verification-link flow.`,
+        );
+        const resend = inventory.find((e) => {
+          if (e.tag !== "button" && e.tag !== "a") return false;
+          const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+          return /resend (?:verification )?(?:email|link)|send (?:it )?again/.test(t);
+        });
+        if (resend !== undefined) {
+          try {
+            await this.browser.click(resend.selector);
+            steps.push(`Form: clicked "Resend verification email" to refresh the link.`);
+            await this.browser.wait(2);
+          } catch {
+            // non-fatal
+          }
+        }
+        return { kind: "submitted" };
+      }
+      if (preAct.kind === "terminal") {
+        steps.push(`Form[engine]: pre-plan → ${preAct.outcome.kind}`);
+        return toPlanExec(preAct.outcome, {
+          oauth:
+            oauthButtonHitRaw !== null
+              ? { selector: oauthButtonHitRaw.button.selector, provider: oauthButtonHitRaw.provider }
+              : undefined,
+          missingProviders,
+          haveSessions,
+        });
+      }
+      if (preAct.kind === "oauth_scan_wait") {
+        steps.push(
+          `OAuth-first[engine]: no provider affordance yet — waiting for async render ` +
+            `(retry ${state.oauthScanRetries}${oauthScanShell ? ", loading shell" : ""})`,
+        );
+        await this.browser.wait(3);
+        continue;
+      }
+      if (preAct.kind === "oauth_shell_reload") {
+        steps.push(`OAuth-first[engine]: page stuck as a loading shell — reloading once to unstick the SPA`);
+        try {
+          await this.browser.goto(this.browser.currentUrl());
+          await this.browser.waitForFormReady();
+        } catch {
+          // reload failed — re-loop and let the terminal handling take over
+        }
+        continue;
+      }
+      if (preAct.kind === "sign_in_advance" && signInAdvance !== null) {
+        steps.push(
+          `OAuth-first[engine]: clicking a generic sign-in affordance to advance to the real login page`,
+        );
+        try {
+          await this.browser.click(signInAdvance.selector);
+        } catch (err) {
+          steps.push(
+            `OAuth-first[engine]: sign-in advance click failed (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
+        continue;
+      }
+      // preAct.kind === "run_planner" → fall through to the planner.
+
+      steps.push("Asking Claude to plan the signup form fill...");
+      let plan: SignupPlan;
+      try {
+        plan = await this.planSignupForm({
+          service: task.service,
+          url: browserState.url,
+          inventory,
+          screenshot: browserState.screenshot,
+          ...(hint !== undefined ? { hint } : {}),
+        });
+      } catch (err) {
+        // ── C2 plan_error ──
+        const reason = err instanceof Error ? err.message : String(err);
+        const isUpstreamBlip =
+          /\b50[234]\b/.test(reason) ||
+          /\bupstream_(?:error|unreachable)\b/i.test(reason) ||
+          /\bnetwork error\b/i.test(reason);
+        const pe = decideFormFillStep(state, { checkpoint: "plan_error", isUpstreamBlip, reason });
+        state = pe.nextState;
+        if (pe.action.kind === "terminal") return toPlanExec(pe.action.outcome);
+        if (pe.action.kind === "blip_retry") {
+          steps.push(`⚠ planner request hit a transient upstream blip (${reason}) — retrying`);
+          await this.browser.wait(2);
+          continue;
+        }
+        // replan (selector_not_in_inventory)
+        steps.push(`⚠ plan rejected (${reason}) — re-planning`);
+        hint =
+          "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
+        continue;
+      }
+      steps.push(
+        `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
+          (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
+      );
+
+      // ── C3 post_plan ──
+      const planClickSelectors = plan.actions
+        .filter((a) => a.kind === "click")
+        .map((a) => a.selector);
+      const planEditsAField = plan.actions.some((a) => a.kind === "fill" || a.kind === "check");
+      const pageSig =
+        browserState.url + "§" + inventory.map((e) => e.selector).sort().join("|");
+      const bySelector = new Map(inventory.map((e) => [e.selector, e]));
+      const miss = await this.verifyPlan(plan, bySelector);
+      const post = decideFormFillStep(state, {
+        checkpoint: "post_plan",
+        isDashboard: detectFormFillIsDashboard(plan),
+        pageSig,
+        planClickSelectors,
+        planEditsAField,
+        verifyMiss: miss,
+        verifyMissNotCheckbox: miss !== null && miss.includes("not a checkbox"),
+      });
+      state = post.nextState;
+      if (post.action.kind === "terminal") {
+        if (post.action.outcome.kind === "planning_failed") {
+          steps.push(`Form[engine]: post-plan → planning_failed (${post.action.outcome.reason})`);
+        }
+        return toPlanExec(post.action.outcome);
+      }
+      if (post.action.kind === "replan") {
+        if (post.action.hintKind === "drop_the_check") {
+          steps.push(`⚠ planned selectors did not verify (${miss}) — re-planning`);
+          hint =
+            `These selectors did not resolve correctly: ${miss}. Pick different inventory entries.` +
+            " If the inventory has NO input of type=checkbox, OMIT the check" +
+            " action entirely — do not substitute a link or a button. The" +
+            " agreement may be implicit or pre-accepted.";
+        } else {
+          steps.push(`⚠ planned selectors did not verify (${miss}) — re-planning`);
+          hint = `These selectors did not resolve correctly: ${miss}. Pick different inventory entries.`;
+        }
+        continue;
+      }
+      // post.action.kind === "execute_plan"
+      await this.executePlan(plan, fillValues, steps, bySelector);
+
+      // ── C4 post_execute ──
+      const hadFill = plan.actions.some((a) => a.kind === "fill");
+      const hadFieldEdit = plan.actions.some((a) => a.kind === "fill" || a.kind === "check");
+      const clickedEmailAffordance = plan.actions.some(
+        (a) => a.kind === "click" && /\bemail\b/i.test(a.reason),
+      );
+      const wasCommitted = state.committedToEmailPath;
+      const px = decideFormFillStep(state, {
+        checkpoint: "post_execute",
+        clickedEmailAffordance,
+        planClickSelectors,
+        hadFill,
+        hadFieldEdit,
+        planActionCount: plan.actions.length,
+      });
+      state = px.nextState;
+      if (!wasCommitted && state.committedToEmailPath) {
+        steps.push("Committed to email-fill path — auto-OAuth-first scan suppressed for the rest of this signup");
+      }
+      if (px.action.kind === "terminal") {
+        steps.push(`Form[engine]: post-execute → planning_failed`);
+        return toPlanExec(px.action.outcome);
+      }
+      if (px.action.kind === "replan") {
+        const avoidHint =
+          planClickSelectors.length > 0
+            ? ` AVOID these selectors — they were clicked but the page did NOT advance: ${planClickSelectors.map((s) => JSON.stringify(s)).join(", ")}.`
+            : "";
+        steps.push(
+          plan.actions.length === 0
+            ? "Plan found nothing to act on — re-checking once for a late render"
+            : "Plan only revealed the page — re-planning the now-visible form",
+        );
+        hint =
+          "The previous step revealed or advanced the page. Plan the signup form that should now be visible." +
+          avoidHint;
+        continue;
+      }
+      // px.action.kind === "submit"
+      const agreementBoxes = await this.browser.checkRequiredAgreementBoxes();
+      if (agreementBoxes.length > 0) {
+        steps.push(`Form: checked required agreement box(es): [${agreementBoxes.join(", ")}]`);
+      }
+
+      // ── C4 post_submit: gather facts incrementally (the reducer's priority-order
+      // checks make an early-blocking pre-gate correct even with default tails). ──
+      const preGate = await this.runCaptchaGate("Pre-submit", steps);
+      let submitError: string | null = null;
+      let submitDisabled = false;
+      let submitTimeout = false;
+      let postGateBlocked = false;
+      let postGateKind = "";
+      let validationFailure = false;
+      if (!preGate.blocked) {
+        steps.push(`Submit → ${plan.submit_selector}`);
+        try {
+          await this.browser.clickSubmit(plan.submit_selector);
+        } catch (err) {
+          submitError = err instanceof Error ? err.message : String(err);
+          submitDisabled = submitError.startsWith("submit_disabled");
+          submitTimeout = !submitDisabled && isSubmitTimeout(submitError);
+        }
+        if (submitError === null) {
+          await this.browser.wait(2);
+          const postGate = await this.runCaptchaGate("Post-submit", steps);
+          postGateBlocked = postGate.blocked;
+          postGateKind = postGate.kind;
+          if (!postGate.blocked && postGate.found && postGate.solved) {
+            try {
+              await this.browser.click(plan.submit_selector);
+              await this.browser.wait(3);
+            } catch (err) {
+              steps.push(
+                `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+          if (!postGate.blocked) {
+            const afterText = (await this.browser.extractText()).slice(0, 4000);
+            validationFailure = this.looksLikeValidationFailure(afterText);
+            if (validationFailure) hint = `The previous submit produced validation errors. Visible page text: ${afterText.slice(0, 600)}`;
+          }
+        }
+      }
+      const ps = decideFormFillStep(state, {
+        checkpoint: "post_submit",
+        preGateBlocked: preGate.blocked,
+        preGateKind: preGate.kind,
+        submitError,
+        submitDisabled,
+        submitTimeout,
+        postGateBlocked,
+        postGateKind,
+        hasInbox: task.inbox !== undefined,
+        validationFailure,
+      });
+      state = ps.nextState;
+      if (ps.action.kind === "replan") {
+        if (ps.action.hintKind === "submit_disabled") {
+          steps.push(`⚠ ${submitError} — re-planning to satisfy it`);
+          hint = await this.buildSubmitDisabledHint(steps);
+        } else if (ps.action.hintKind === "submit_went_stale") {
+          steps.push(`⚠ submit selector went stale — the page likely advanced; re-planning`);
+          hint =
+            "The submit button selected last round was no longer present when " +
+            "we tried to click it — an earlier action probably advanced the page. " +
+            "Re-read the now-visible form and plan the next step (pick the submit " +
+            "button that is actually on the current screen).";
+        } else {
+          steps.push("Post-submit validation errors — re-planning");
+          // hint already set above from afterText
+        }
+        continue;
+      }
+      if (ps.action.kind === "terminal") {
+        if (ps.action.outcome.kind === "submitted" && postGateBlocked && postGateKind === "turnstile") {
+          // managed-Turnstile + inbox flip: clear the recorded block so it can't
+          // short-circuit a later gate, and capture the form rounds.
+          steps.push(
+            "Post-submit Turnstile token didn't populate — managed Turnstile resolves server-side; " +
+              "proceeding to verification (the inbox poll arbitrates).",
+          );
+          this.captchaEncounter = undefined;
+        }
+        if (ps.action.outcome.kind === "submitted") {
+          await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
+        }
+        return toPlanExec(ps.action.outcome);
+      }
+    }
+  }
+
+  // The submit_disabled replan hint CONTENT (review Q2 — the executor owns this;
+  // the reducer only emits the intent). A fresh inventory snapshot lists concrete
+  // unchecked-checkbox + empty-input candidates so the planner picks one
+  // immediately. Best-effort: a snapshot failure falls back to the generic prose.
+  private async buildSubmitDisabledHint(steps: string[]): Promise<string> {
+    let uncheckedHint = "";
+    let emptyInputHint = "";
+    try {
+      const snapshotInv = await this.buildInventory(steps, undefined, 60);
+      const unchecked = snapshotInv.filter(
+        (e) =>
+          e.tag === "input" &&
+          (e.type === "checkbox" || e.role === "checkbox") &&
+          e.checked === false &&
+          e.visible === true,
+      );
+      if (unchecked.length > 0) {
+        const lines = unchecked.slice(0, 6).map((e) => {
+          const label = (e.labelText ?? e.ariaLabel ?? e.placeholder ?? e.name ?? "(no label)").toString().slice(0, 60);
+          return `  - selector ${JSON.stringify(e.selector)} label=${JSON.stringify(label)}`;
+        });
+        uncheckedHint = `\nUnchecked checkboxes visible on the page:\n${lines.join("\n")}`;
+      }
+      const emptyInputs = snapshotInv.filter(
+        (e) =>
+          e.tag === "input" &&
+          e.type !== "checkbox" &&
+          e.type !== "radio" &&
+          e.type !== "hidden" &&
+          (e.value === null || e.value === "") &&
+          e.visible === true,
+      );
+      if (emptyInputs.length > 0) {
+        const lines = emptyInputs.slice(0, 6).map((e) => {
+          const label = (e.labelText ?? e.placeholder ?? e.ariaLabel ?? e.name ?? "(no label)").toString().slice(0, 60);
+          return `  - selector ${JSON.stringify(e.selector)} label=${JSON.stringify(label)}`;
+        });
+        emptyInputHint = `\nEmpty visible inputs (any could be the unmet required field):\n${lines.join("\n")}`;
+      }
+    } catch {
+      // best-effort
+    }
+    return (
+      "The submit button is disabled — a required field or an agreement " +
+      "was not satisfied. Issue {\"kind\":\"check\"} on an unchecked " +
+      "agreement/terms checkbox, OR {\"kind\":\"fill\"} on an empty " +
+      "required input. Do NOT click a link." +
+      uncheckedHint +
+      emptyInputHint
+    );
   }
 
   // Emit the signup-form-fill rounds (email + password + submit) into the
