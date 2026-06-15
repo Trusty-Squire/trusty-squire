@@ -25,6 +25,7 @@ import {
   type OAuthProviderId,
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
+import { decideOAuthStep } from "./oauth-flow.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
@@ -7263,6 +7264,12 @@ export class SignupAgent {
     // complete first.
     let consentAdvanceWaits = 0;
     const MAX_CONSENT_ADVANCE_WAITS = 3;
+    // OAUTH_ENGINE (default-off): route the CONSENT decision through the pure
+    // reducer (oauth-flow.ts, eng-reviewed) instead of the inline scope-gate
+    // branches below. Opt in for validation; the inline path stays the
+    // byte-identical default until the engine is live-validated, then flips
+    // (DESIGN-oauth-consent-engine.md migration step 2).
+    const oauthEngineOn = /^(1|true|on)$/i.test(process.env.OAUTH_ENGINE ?? "");
     for (let i = 0; i < MAX_OAUTH_NAV; i++) {
       if (this.browser.oauthPageClosed()) {
         steps.push(
@@ -7592,6 +7599,91 @@ export class SignupAgent {
           "needs_login",
           `the bot's ${provider.label} session is missing or expired — no consent screen was reached. ` +
             `Re-run \`${loginCmd}\` to re-establish it, then retry.`,
+          steps,
+        );
+      }
+
+      // authState === "consent" — route through the reducer when OAUTH_ENGINE is
+      // on (every path here continues or returns, so the inline block below is
+      // the default-off path). Faithful to the inline ordering; the executor owns
+      // the advance-success flag flip + the consentAdvanceWaits budget.
+      if (oauthEngineOn) {
+        const hasLoginForm = await this.oauthLoginFormPresent();
+        const scopes = extractOAuthScopes(url);
+        const dangerPhrases = provider.id === "google" ? scrapeGoogleScopePhrases(body) : [];
+        const consentDom = scopes === null ? await this.browser.extractText().catch(() => "") : "";
+        const { action } = decideOAuthStep(
+          {
+            providerId: provider.id,
+            consentAlreadyApproved,
+            omniauthPostTried,
+            allowBlindOAuthConsent: task.allowBlindOAuthConsent === true,
+            allowExtraOAuthScopes: task.allowExtraOAuthScopes ?? [],
+          },
+          {
+            isChooser: false,
+            authState: "consent",
+            hasLoginForm,
+            omniAuthPassthru: false,
+            scopes,
+            dangerPhrases,
+            domBasicFromDom: provider.id === "google" && googleConsentIsBasicFromDom(body),
+            domBasicGis: provider.id === "google" && googleGisConsentIsBasic(consentDom),
+          },
+          { scopesAreBasic: (s) => provider.scopesAreBasic(s) },
+        );
+        steps.push(
+          `OAuth[engine]: scopes=[${scopes === null ? "<unreadable>" : scopes.join(", ")}] → ` +
+            `${action.kind}${action.kind === "advance_consent" ? `:${action.mode}` : ""}`,
+        );
+        if (action.kind === "abort") {
+          if (action.clearProviderLoggedIn) clearProviderLoggedIn(provider.id);
+          const detail =
+            action.reason === "needs_login"
+              ? `landed on a ${provider.label} sign-in form / no session — re-run \`${loginCmd}\`, then retry. ` +
+                `The bot will not type into ${provider.label}'s login form.`
+              : action.unauthorizedScopes !== undefined
+                ? `${provider.label} consent requests non-basic scopes: [${action.unauthorizedScopes.join(", ")}]. ` +
+                  `All requested: [${(scopes ?? []).join(", ")}]. Re-run provision with allow_extra_oauth_scopes set to proceed.`
+                : `reached a ${provider.label} consent screen but could not safely auto-approve its scopes — approve it manually.`;
+          return this.oauthAbort(action.reason, detail, steps);
+        }
+        // A consent observation only ever yields abort | advance_consent; this
+        // narrows the union for TS (and is a defensive no-op if it ever doesn't).
+        if (action.kind !== "advance_consent") break;
+        // advance_consent — perform the advance; flip the flag only on success.
+        const advanced = await this.browser.advanceOAuthConsent(provider.id);
+        if (advanced) {
+          consentAlreadyApproved = true;
+          await this.browser.wait(3);
+          continue;
+        }
+        if (action.onAdvanceFail === "bounded_wait") {
+          if (consentAdvanceWaits < MAX_CONSENT_ADVANCE_WAITS) {
+            consentAdvanceWaits += 1;
+            steps.push(
+              `OAuth[engine]: approve control not present yet — waiting for hydrate/redirect ` +
+                `(${consentAdvanceWaits}/${MAX_CONSENT_ADVANCE_WAITS})`,
+            );
+            await this.browser.wait(4);
+            continue;
+          }
+          return this.oauthAbort(
+            "oauth_consent_needs_review",
+            `blind-consent approved but no approve control on the ${provider.label} consent page ` +
+              `after ${consentAdvanceWaits} waits — sign up manually.`,
+            steps,
+          );
+        }
+        if (action.onAdvanceFail === "wait_nav") {
+          steps.push("OAuth[engine]: post-grant page, no approve control — waiting for natural navigation");
+          await this.browser.wait(3);
+          continue;
+        }
+        // onAdvanceFail === "abort"
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `reached a ${provider.label} consent screen but found no approve control to click — approve it manually.`,
           steps,
         );
       }

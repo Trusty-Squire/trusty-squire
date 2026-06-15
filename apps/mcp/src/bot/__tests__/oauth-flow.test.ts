@@ -9,7 +9,7 @@
 // SignupAgent's private methods are reflected here, the same
 // break-the-encapsulation pattern as plan-execute-retry.test.ts.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   SignupAgent,
   detectEmailOtpGate,
@@ -1054,6 +1054,64 @@ describe("OAuth signup — happy path (T6/T7)", () => {
 
     expect(result.success).toBe(true);
     expect(result.credentials?.api_key).toBe("rnd_fieldvalueabcdefghij1234567890");
+  });
+});
+
+// Validates the OAUTH_ENGINE wiring (agent.ts) end-to-end through agent.signup,
+// not just the reducer unit. The engine path routes the CONSENT decision through
+// decideOAuthStep; these assert it produces the same outcomes as the inline path
+// (approve basic, hold non-basic, never type into a login form).
+describe("OAuth signup — OAUTH_ENGINE consent wiring", () => {
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env.OAUTH_ENGINE;
+    process.env.OAUTH_ENGINE = "1";
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.OAUTH_ENGINE;
+    else process.env.OAUTH_ENGINE = prev;
+  });
+
+  it("approves basic consent via the reducer (same outcome as inline) + logs the engine step", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      CONSENT_BASIC,
+      PRODUCT_DASH("Dashboard — Your API Key: ts_engine_abcdefghijklmnop12345"),
+    ]);
+    const result = await newAgent(browser).signup(oauthTask());
+    expect(result.success).toBe(true);
+    expect(result.credentials?.api_key).toBe("ts_engine_abcdefghijklmnop12345");
+    expect(browser.advanceCalls).toBe(1);
+    expect(browser.typeCalls).toHaveLength(0);
+    expect(result.steps.some((s) => /OAuth\[engine\].*advance_consent:approve/.test(s))).toBe(true);
+  });
+
+  it("holds a non-basic scope for review via the reducer (never approves)", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      {
+        url: "https://accounts.google.com/signin/oauth/consent?scope=openid+email+https://www.googleapis.com/auth/drive&client_id=abc",
+        text: "Consent",
+      },
+    ]);
+    const result = await newAgent(browser).signup(oauthTask());
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/oauth_consent_needs_review/);
+    expect(browser.advanceCalls).toBe(0);
+    expect(browser.typeCalls).toHaveLength(0);
+  });
+
+  it("aborts needs_login and NEVER types when a consent page is really a login form", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      CONSENT_BASIC, // consent-classified URL …
+    ]);
+    // … but a credential field is live → it's a login form, not a consent screen.
+    browser.consentPageInventory = [mk({ tag: "input", type: "text", selector: "#password" })];
+    const result = await newAgent(browser).signup(oauthTask());
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/needs_login/);
+    expect(browser.typeCalls).toHaveLength(0); // THE D4 guarantee, via the engine
   });
 });
 
