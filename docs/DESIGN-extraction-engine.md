@@ -52,16 +52,19 @@ with tests, NOT yet wired (cannot regress):
 
 ## Migration (separate commits — Beck)
 
-1. **Extract the pure primitives** (this commit) — `extraction.ts` + tests, unwired.
-2. **Move the pure helpers** — relocate `extractApiKeyFromText` / `isTruncatedCapture`
-   / `isDocumentationUrl` from agent.ts to extraction.ts (their true home), update
-   the replay-skill.ts + test importers. Lets the reducer classify candidates
-   itself and breaks the would-be circular import.
-3. **Wire behind `EXTRACTION_ENGINE`** (default-off) — `extractCredentials` drives
-   the passes but routes accumulation + resolution through the module; the five
-   I/O sources stay.
-4. **Validate** live (an extraction-heavy service: OpenRouter/Anthropic truncated
-   modal, Railway UUID) then flip default-on + delete the inline policy.
+1. ✅ **Extract the pure primitives** (`dae8134`) — `extraction.ts` + 11 tests, unwired.
+2. ~~Move the pure helpers~~ — **DROPPED as unnecessary.** The module takes a
+   `CandidateClass` the EXECUTOR produces (dependency injection, like oauth-flow.ts's
+   `deps`), so the heavy `extractApiKeyFromText`/`isTruncatedCapture` helpers never
+   need importing into the module — no circular import, no risky ~570-line move.
+3. ✅ **Wire behind `EXTRACTION_ENGINE`** (default-off, `8e91a37`) — `extractCredentials`
+   early-returns to `extractCredentialsViaEngine`; the inline 5-pass pipeline stays
+   byte-identical. The engine method owns the I/O + per-candidate classification and
+   routes accumulation + resolution through the module. Faithful incl. passes 3+4
+   accept FULL hits only (never record a truncated stub).
+4. ⏳ **Validate** live (any signup exercises pass 1; a truncated modal — OpenRouter/
+   Anthropic — exercises the pass-2 clipboard recovery) then flip default-on + delete
+   the inline policy. THE REMAINING GATE.
 
 ## NOT in scope (this slice)
 
