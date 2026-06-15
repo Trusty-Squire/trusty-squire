@@ -317,33 +317,39 @@ async function cmdCreate(count, dryRun, allowGrow = false) {
     writeJson(PW_PATH, pw);
   }
   console.log(`\nDone — created: ${created.join(", ")}`);
-  console.log(`Next: WARM each one (one human login via noVNC):`);
+  console.log(`Next: WARM each (automated Google login, no human):`);
   for (const id of created) console.log(`  node tools/provision-verify-robot.mjs warm ${id}`);
 }
 
+// Warm a robot's Chrome profile by driving the AUTOMATED Google login (email →
+// password → new-account ToS) headed under Xvfb — fully autonomous, no human, no
+// noVNC. This is the same path that warmed the original fleet (2026-06-13). The
+// "never type into Google's form" guard in google-login.ts is about the SIGNUP
+// bot not typing a USER's creds into a service's login; warming OUR OWN robots
+// with OUR OWN known passwords (from verify-passwords.json / the vault mirror) is
+// exactly what the fleet logger is for. Delegates to tools/google-login-fleet.mjs.
 async function cmdWarm(id) {
   const pool = loadPool();
   const robot = pool.identities.find((e) => e.id === id);
   if (!robot) throw new Error(`${id} not in the pool (verify-identities.json). Create it first.`);
-  const profileDir = robot.profileDir.startsWith("~/")
-    ? join(homedir(), robot.profileDir.slice(2))
-    : robot.profileDir;
   const pw = readJson(PW_PATH, {});
-  const secret = pw[robot.email];
-  console.log(`Warming ${id} (${robot.email}).`);
-  console.log(`A Chrome window opens via the noVNC URL below — log in as ${robot.email}.`);
-  console.log(secret ? `Password is in verify-passwords.json (key ${robot.email}).` : `(no stored password — set one or use the one you created with).`);
-  console.log("");
+  if (!pw[robot.email]) {
+    console.warn(
+      `WARN: no password for ${robot.email} in verify-passwords.json — the fleet logger will fail. ` +
+        `(create stores it; if this robot was minted elsewhere, set VERIFY_${id.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_PW.)`,
+    );
+  }
+  console.log(`Warming ${id} (${robot.email}) via automated Google login (headed/Xvfb, no human)…`);
   const child = spawn(
     process.execPath,
-    [join(REPO_ROOT, "apps/mcp/dist/bin.js"), "login", "--provider=google", "--force-relogin"],
-    { stdio: "inherit", env: { ...process.env, TRUSTY_SQUIRE_PROFILE_DIR: profileDir } },
+    [join(dirname(fileURLToPath(import.meta.url)), "google-login-fleet.mjs"), id],
+    { stdio: "inherit", env: process.env },
   );
   await new Promise((resolve, reject) => {
-    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`login exited ${code}`))));
+    child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`fleet login exited ${code}`))));
     child.on("error", reject);
   });
-  console.log(`\n${id} warmed — its profile now holds a logged-in Google session at ${profileDir}.`);
+  console.log(`\n${id} warmed — its profile holds a logged-in Google session.`);
 }
 
 async function cmdDelete(id, dryRun) {
@@ -420,7 +426,10 @@ async function cmdRotate({ spentGe, target, makeRoom, dryRun }) {
   for (const id of retire) await cmdDelete(id, false);
   if (toCreate > 0) await cmdCreate(toCreate, false);
   if (toCreate > 0) {
-    console.log(`\nIMPORTANT: the ${toCreate} fresh robot(s) are UNWARMED — warm each (one noVNC login) before they can OAuth.`);
+    console.log(
+      `\nThe ${toCreate} fresh robot(s) are UNWARMED — warm each (automated, no human) before they OAuth:`,
+    );
+    console.log(`  node tools/provision-verify-robot.mjs warm <verify-NN>   (or google-login-fleet.mjs <id>)`);
   }
 }
 

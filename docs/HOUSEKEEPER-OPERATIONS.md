@@ -157,3 +157,44 @@ skill (posthog, kinde, cohere, imagekit, …). Established facts:
 - **Do not** "fix" this by adding interstitial-driving code or flipping egress.
   Work the Diagnosing section first; the working state likely needs restoring,
   not new code.
+
+## Verify-pool provisioning + cost-capped rotation (`tools/provision-verify-robot.mjs`)
+
+The OAuth verify pool is N Cloud Identity Free robots (`verify-NN@trustysquire.ai`,
+profiles at `~/.trusty-squire/profiles/verify-NN`). Full lifecycle is autonomous:
+
+```
+node tools/provision-verify-robot.mjs list                 # pool + per-robot spent@count + google live
+node tools/provision-verify-robot.mjs create [N]            # mint N (REFUSED over the cost cap)
+node tools/provision-verify-robot.mjs warm verify-NN        # AUTOMATED Google login (no human)
+node tools/provision-verify-robot.mjs rotate --make-room=N  # retire N most-spent → mint N fresh (cost-flat)
+node tools/provision-verify-robot.mjs rotate --spent-ge=K   # retire worn-out (spent at ≥K services), refill
+node tools/provision-verify-robot.mjs delete verify-NN
+node tools/provision-verify-robot.mjs licenses [--apply]    # audit / strip paid Workspace seats
+```
+
+- **COST CAP = `ROBOT_POOL_CAP` (default 10) active robots = max billed seats.**
+  `create` refuses to exceed it (`--allow-grow` overrides). `rotate` is
+  **DELETE-BEFORE-CREATE** with a capped refill, so the active count never spikes
+  past the cap mid-rotation — cost can only stay flat or drop, never rise.
+- **Warming is AUTOMATED, not manual.** `warm` delegates to
+  `tools/google-login-fleet.mjs <id>` which drives the real Google login
+  (email→password→ToS) headed under Xvfb with the robot's password from
+  `~/.trusty-squire/verify-passwords.json` (mirror of vault `trustysquire-verify-bots`).
+  This is the path that warmed the original fleet. The "never type into Google's
+  form" guard in `google-login.ts` is about the SIGNUP bot, not warming OUR robots
+  with OUR known passwords. `--all` warms the whole fleet.
+- **Admin auth.** Account create/delete use the Admin SDK Directory API. When an
+  agent drives it interactively it can call the API through the Squire vault
+  (`use_credential`, credential `Google admin sdk` — Refresh + Access token,
+  client_id/secret added 2026-06-14; needs Admin SDK + Enterprise License Manager
+  APIs enabled + the app Internal so `apps.licensing`/`admin.directory.*` scopes
+  grant). For UNATTENDED runs (cron/heal) the node tool reads a LOCAL admin file
+  (`~/.trusty-squire/admin-sa.json` SA key, or `~/.trusty-squire/admin-oauth.json`
+  client_id/secret/refresh_token) via `tools/google-admin-token.mjs`. The local
+  file is NOT needed when an agent drives via the vault proxy.
+- **Billing note (2026-06-15).** Auto-licensing put the robots on paid Business
+  Starter seats (~$8.40/mo each). Google support ticket open to disable
+  auto-licensing → robots become free Cloud Identity. Until then, rotation keeps
+  cost flat (delete frees a seat, create takes one); after the fix, fresh robots
+  are free so rotation reduces cost.

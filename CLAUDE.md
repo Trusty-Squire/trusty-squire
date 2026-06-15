@@ -577,6 +577,14 @@ Three modes share one CLI: `--mode=verify` (skill replay; default),
 single-service shortcut that implies discover. Each mode requires different
 auth (table below).
 
+**Verify-pool robots** (the OAuth fresh-identity fleet `verify-NN@trustysquire.ai`)
+are managed by `tools/provision-verify-robot.mjs` (list / create / **warm**
+[automated Google login via `tools/google-login-fleet.mjs`] / rotate / delete /
+licenses). It enforces a **cost cap** (`ROBOT_POOL_CAP`, default 10 billed seats)
+and **cost-flat rotation** (`rotate --make-room=N` is delete-before-create, so the
+active count never exceeds the cap). Full runbook: the "Verify-pool provisioning +
+cost-capped rotation" section of `docs/HOUSEKEEPER-OPERATIONS.md`.
+
 | Env var | Required by | Effect |
 |---|---|---|
 | `REGISTRY_ADMIN_BEARER` | verify, discover (telemetry) | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
