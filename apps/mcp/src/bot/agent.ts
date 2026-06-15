@@ -9163,6 +9163,15 @@ ${formatInventory(input.inventory)}`,
       expandLatentNav: () => this.browser.expandLatentNav(),
     };
 
+    // Cap nav-search's LLM tiebreak calls so the navigation phase can't starve
+    // the greedy planner's budget when we hand off (DEFAULT-ON hybrid): the
+    // per-signup circuit breaker is shared, so an unbounded tiebreak could leave
+    // the form-fill handoff with no budget. Deterministic ranking is unbounded
+    // (free); only the LLM tiebreak is capped. Past the cap, tiebreak returns
+    // null (deterministic-only), which leads to honest exhaustion → handoff.
+    let tiebreakCalls = 0;
+    const MAX_NAV_TIEBREAKS = Number(process.env.NAV_SEARCH_MAX_TIEBREAKS) || 6;
+
     const deps: NavSearchDeps = {
       extractKey: async () => {
         const c = await this.extractCredentials();
@@ -9204,6 +9213,8 @@ ${formatInventory(input.inventory)}`,
       // (honest exhaustion), never throws into the loop.
       tiebreak: async (candidates) => {
         if (candidates.length === 0) return null;
+        if (tiebreakCalls >= MAX_NAV_TIEBREAKS) return null; // reserve budget for the handoff
+        tiebreakCalls += 1;
         const here = this.browser.currentUrl();
         const list = candidates
           .map(
@@ -9337,27 +9348,45 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     let upstreamBlipRetries = 0;
     const MAX_UPSTREAM_BLIP_RETRIES = 8;
     const oauth = args.credentials === undefined;
-    // NAV_SEARCH (DEFAULT OFF): drive the post-verify phase with the goal-directed
-    // nav-search engine, then HAND OFF to the greedy planner if it couldn't finish.
-    // T6 (live, neon) proved the two are complementary: nav-search is strong at
-    // NAVIGATION (it drove through two onboarding wizards + the dashboard to the
-    // exact create-API-key modal, where the greedy planner often gets lost), but
-    // it's nav-only by design — it can't fill+submit a create-key form. The greedy
-    // planner is strong at form-fill but weak at navigation. So: nav-search
-    // navigates to (or near) the key surface; if it extracts a key, done; if not,
-    // we FALL THROUGH to the greedy loop, which resumes from the current page
-    // nav-search reached and completes the local form-fill + extract. The capture
-    // chain continues on the same this.captureChainRound counter (read below at
-    // loop start), so it stays gap-free for auto-promote. Flag-gated for
-    // reversibility (DESIGN-post-signup-nav-search.md, A2).
-    if (/^(1|true|on)$/i.test(process.env.NAV_SEARCH ?? "")) {
-      const navResult = await this.runNavSearchPhase(args, oauth);
-      if (Object.keys(navResult).some((k) => !NON_CREDENTIAL_KEYS.has(k))) {
-        return navResult;
+    // NAV_SEARCH (DEFAULT-ON as of T6): drive the post-verify phase with the
+    // goal-directed nav-search engine, then HAND OFF to the greedy planner if it
+    // couldn't finish. T6 (live, neon) proved the two are complementary:
+    // nav-search is strong at NAVIGATION (it drove through two onboarding wizards
+    // + the dashboard to the exact create-API-key modal, where the greedy planner
+    // often gets lost), but it's nav-only by design — it can't fill+submit a
+    // create-key form. The greedy planner is strong at form-fill but weak at
+    // navigation. So: nav-search navigates to (or near) the key surface; if it
+    // extracts a key, done; if not, we FALL THROUGH to the greedy loop, which
+    // resumes from the current page nav-search reached and completes the local
+    // form-fill + extract. The capture chain continues on the same
+    // this.captureChainRound counter (read below at loop start), so it stays
+    // gap-free for auto-promote.
+    //
+    // Default-on is SAFE because the worst case is the pre-existing behavior: if
+    // nav-search reaches no key, control falls through to the same greedy loop
+    // that was the default before. nav-search only changes outcomes by reaching
+    // key surfaces greedy couldn't — a strict improvement in the cases it helps.
+    // Its LLM tiebreak is budget-capped (MAX_NAV_TIEBREAKS) so the handoff keeps
+    // form-fill budget; the same-site guard keeps it on the app. Opt OUT with
+    // NAV_SEARCH=0/false/off (kept for reversibility — DESIGN A2).
+    if (!/^(0|false|off|no)$/i.test(process.env.NAV_SEARCH ?? "")) {
+      try {
+        const navResult = await this.runNavSearchPhase(args, oauth);
+        if (Object.keys(navResult).some((k) => !NON_CREDENTIAL_KEYS.has(k))) {
+          return navResult;
+        }
+        args.steps.push(
+          "nav-search: no key via navigation alone — handing off to the planner from the current surface",
+        );
+      } catch (err) {
+        // Default-on safety: nav-search must NEVER crash a signup. Any unexpected
+        // error (a browser-port method throwing, a bad selector, etc.) falls
+        // through to the greedy planner — the pre-existing default behavior — so
+        // the worst case of enabling nav-search is "no better than before".
+        args.steps.push(
+          `nav-search: errored (${err instanceof Error ? err.message : String(err)}) — falling back to the planner`,
+        );
       }
-      args.steps.push(
-        "nav-search: no key via navigation alone — handing off to the planner from the current surface",
-      );
       // fall through to the greedy planner loop below
     }
     // Re-plan hint for the next round — set when an `extract` step
