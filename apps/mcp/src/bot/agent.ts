@@ -12628,12 +12628,16 @@ ${formatInventory(input.inventory)}${
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
-    // EXTRACTION_ENGINE (default-off, strangler slice 4): route the cross-pass
-    // accumulation + resolution through the pure extraction module (extraction.ts,
-    // unit-tested). The inline body below is the unchanged default-off path; the
-    // engine path reuses every candidate-source I/O method. Flip default-on after
-    // live validation (DESIGN-extraction-engine.md migration step 4).
-    if (/^(1|true|on)$/i.test(process.env.EXTRACTION_ENGINE ?? "")) {
+    // EXTRACTION_ENGINE (default-ON since 2026-06-15, strangler slice 4): route the
+    // cross-pass accumulation + resolution through the pure extraction module
+    // (extraction.ts). Flipped after pass-1 live validation (ipinfo → api_key) on
+    // the dominant path; the truncated/clipboard path (pass 2) reuses the IDENTICAL
+    // I/O as inline — only the unit-tested accumulation differs — and its
+    // truncated-modal services (OpenRouter-class) are currently anti-bot-walled, so
+    // its live blast radius is ~zero. The inline 5-pass body below is kept one cycle
+    // as the explicit opt-out (EXTRACTION_ENGINE=0) and deleted next
+    // (DESIGN-extraction-engine.md migration step 4).
+    if (!/^(0|false|off|no)$/i.test(process.env.EXTRACTION_ENGINE ?? "")) {
       return this.extractCredentialsViaEngine();
     }
     // IMPORTANT: pull credentials from the *visible* page, not the raw
