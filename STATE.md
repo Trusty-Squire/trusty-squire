@@ -96,6 +96,24 @@ it fires on the next not-persisted occurrence. So the "Server-side OAuth-callbac
 walls (NOT nav-fixable)" list below is now servable for its EMAIL-capable members
 (probe `has_email_signup` before declaring any of them a wall).
 
+CLUSTER PROBE (2026-06-15, `tools/affordance-probe.mjs`, sequential — the batch
+mode has a concurrent-navigation bug):
+| service     | providers      | has_email_signup | fix helps? |
+|-------------|----------------|------------------|------------|
+| openrouter  | google,github  | true             | ✅ servable |
+| northflank  | google,github  | true             | ✅ servable |
+| hyperbolic  | google,github  | true             | ✅ servable |
+| braintrust  | google         | true             | ✅ servable |
+| groq        | google,github  | false            | ✗ OAuth-only — still walled |
+| turso       | google,github  | false            | ✗ OAuth-only — still walled |
+| activeloop  | google,github  | false            | ✗ OAuth-only — still walled |
+| predibase   | (ERR_NAME_NOT_RESOLVED on app.predibase.com) | — | URL stale; fix the queue URL first |
+The email-fallback opens the 4 email-capable members on the next not-persisted
+occurrence. The 3 OAuth-ONLY members (groq/turso/activeloop) need the harder
+Clerk sign-UP-context transfer (window.Clerk unreachable in the isolated world —
+the remaining open problem; a raw CDP main-world Runtime.evaluate is the untested
+angle). predibase needs a current signup URL before any retry.
+
 ---
 
 ## Cloudflare-Turnstile "wall" (exa, cartesia, render-cron, replit, runpod, turso)
