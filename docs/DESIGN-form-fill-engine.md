@@ -55,13 +55,19 @@ extracted to `form-fill.ts` with tests, NOT yet wired (cannot regress):
 
 ## Migration (separate commits — Beck)
 
-1. **Extract the pure primitives** (this commit) — `form-fill.ts` + tests, unwired.
-2. **Extract the full `decideFormFillStep` reducer** — the replan/bail/reroute
-   policy, eng-reviewed (the consent gate's lesson: model the WHOLE stateful loop,
-   not action-only).
-3. **Wire behind `FORM_FILL_ENGINE`** (default-off) — `planExecuteWithRetry`'s
-   decision branches call the reducer; the I/O executors stay.
-4. **Validate** live (email-signup discover, pool-free) then flip default-on.
+1. ✅ **Extract the pure primitives** (`430fbfe`) — `form-fill.ts` + tests, unwired.
+2. ✅ **Extract the full `decideFormFillStep` reducer** (`6ba2674`) — phase-
+   discriminated, eng-reviewed; 33-case golden-transition table (the parity gate).
+3. ✅ **Wire behind `FORM_FILL_ENGINE`** (default-off, `add145e`) — realized as a
+   flag-gated sibling executor `planExecuteViaEngine` (early-return from
+   `planExecuteWithRetry`) rather than in-place interleaving: the proven inline
+   loop stays byte-identical (only the guard added), so the default path cannot
+   regress. The engine method routes all 5 checkpoints through the reducer and
+   owns only the I/O + the replan-hint CONTENT (`buildSubmitDisabledHint`). The
+   temporary orchestration duplication is the strangler bridge — deleted in step 4.
+4. ⏳ **Validate live** (`FORM_FILL_ENGINE=1` email-signup discover, pool-free) →
+   confirm parity with the inline path on real pages → flip default-on → DELETE
+   the inline `planExecuteWithRetry` loop + the duplication. THE REMAINING GATE.
 
 ## NOT in scope (this slice)
 
