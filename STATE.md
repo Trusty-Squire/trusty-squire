@@ -80,6 +80,22 @@ that DO auto-transfer (e.g. pinecone, which succeeds) by not interrupting them.
 The flakiness across the Clerk cluster is which context the OAuth lands in
 (sign-up creates the account → ✓; sign-in for a new user → form_identifier_not_found → fall back to email).
 
+### ✓ GENERALIZED email-fallback (2026-06-15, commit 9f78bfb)
+The cartesia crack only fell back to email when Clerk showed the EXPLICIT "no
+account" text (detectGoogleNoAccount). The rest of the cluster (openrouter, groq,
+northflank, …) fails the callback SILENTLY — no such text — so it surfaced as a
+stuck login page and dead-bailed `oauth_session_not_persisted`. Fix: at that bail
+(the 3-login-page-rounds throw, agent.ts ~10628) return the existing
+`OAUTH_FALL_BACK_TO_FORM_FILL` sentinel instead of failing — runSignup re-creates
+the account via EMAIL (one-shot guarded; forceFormFill suppresses OAuth so no
+bounce-back). Every cluster member with an email signup option becomes servable
+when OAuth lands in the failing context. NOTE: openrouter probes
+`has_email_signup=true`; a 2026-06-15 re-run hit SUCCESS but via stochastic
+OAuth-persist (sign-up context) so the fallback branch wasn't exercised that run —
+it fires on the next not-persisted occurrence. So the "Server-side OAuth-callback
+walls (NOT nav-fixable)" list below is now servable for its EMAIL-capable members
+(probe `has_email_signup` before declaring any of them a wall).
+
 ---
 
 ## Cloudflare-Turnstile "wall" (exa, cartesia, render-cron, replit, runpod, turso)
