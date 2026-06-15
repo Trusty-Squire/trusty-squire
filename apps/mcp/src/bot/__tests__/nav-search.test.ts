@@ -11,6 +11,7 @@ import {
   enumerateCandidates,
   mergeInventories,
   resolveNavHref,
+  isOffSiteHref,
   findOverlayDismiss,
   findWizardAdvance,
   planOnboardingChoice,
@@ -131,6 +132,23 @@ describe("resolveNavHref", () => {
   });
   it("rejects a self-link (no progress)", () => {
     expect(resolveNavHref("/assistants", here)).toBeNull();
+  });
+});
+
+describe("isOffSiteHref", () => {
+  const app = "https://console.neon.tech/app/projects/x/settings";
+  it("flags a link to the marketing/docs domain as off-site (the neon wander)", () => {
+    expect(isOffSiteHref(app, "https://neon.com/docs/get-started")).toBe(true);
+    expect(isOffSiteHref(app, "https://neon.com/blog/why")).toBe(true);
+  });
+  it("keeps same-registrable-domain links (app subdomains)", () => {
+    expect(isOffSiteHref(app, "https://console.neon.tech/app/settings")).toBe(false);
+    expect(isOffSiteHref(app, "https://api.neon.tech/v2/keys")).toBe(false);
+    expect(isOffSiteHref(app, "/app/settings#api-keys")).toBe(false); // relative
+  });
+  it("treats non-navigable hrefs (null/#) as not-off-site (handled elsewhere)", () => {
+    expect(isOffSiteHref(app, null)).toBe(false);
+    expect(isOffSiteHref(app, "#")).toBe(false);
   });
 });
 

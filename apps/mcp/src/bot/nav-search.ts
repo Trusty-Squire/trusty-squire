@@ -45,6 +45,23 @@ export function resolveNavHref(href: string | null, currentUrl: string): string 
   }
 }
 
+// True if `href` resolves to a DIFFERENT registrable domain than the page we're
+// on — i.e. it would navigate off the authenticated app (e.g. console.neon.tech
+// → neon.com/docs). The key hunt must stay inside the app; a marketing/docs link
+// is a dead end that also burns the step budget and drops the session. Buttons
+// and same-site/relative links are NOT off-site. Registrable domain = last two
+// labels (good enough for these dev-tool hosts; no PSL dependency). Pure.
+export function isOffSiteHref(currentUrl: string, href: string | null): boolean {
+  const abs = resolveNavHref(href, currentUrl);
+  if (abs === null) return false; // relative/self/non-navigable → never off-site
+  try {
+    const reg = (h: string): string => h.split(".").slice(-2).join(".");
+    return reg(new URL(abs).hostname) !== reg(new URL(currentUrl).hostname);
+  } catch {
+    return true; // unparseable target → treat as off-site (don't follow)
+  }
+}
+
 // Union two inventory snapshots, deduped by selector (first wins). Used to
 // survive expandLatentNav's destructive menu-toggling: an affordance present
 // in EITHER the pre- or post-expand read is kept, so an already-open dropdown
@@ -430,7 +447,11 @@ export async function runNavSearch(
     const invAfter = await browser.extractInventory();
     const mergedInv = mergeInventories(invBefore, invAfter);
     inv = mergedInv;
-    const candidates = enumerateCandidates(mergedInv).filter((c) => !tried.has(c.selector));
+    // Drop already-tried AND off-site anchors: the key always lives inside the
+    // authenticated app, never on its marketing/docs domain.
+    const candidates = enumerateCandidates(mergedInv).filter(
+      (c) => !tried.has(c.selector) && !isOffSiteHref(url, c.href),
+    );
     const rank = rankCandidates(candidates);
     let pick: string | null = rank.ranked[0]?.selector ?? null;
     if (pick === null && rank.needsTiebreak && deps.tiebreak !== undefined && candidates.length > 0) {
