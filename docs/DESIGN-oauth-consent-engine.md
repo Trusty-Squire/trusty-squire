@@ -61,18 +61,59 @@ The terminal outcomes the caller (`runSignup`) dispatches on:
 `OAUTH_FALL_BACK_TO_FORM_FILL` sentinel (login-only OAuth, no account →
 re-run form-fill), and `OAuthTryNextProvider`.
 
-## Boundary: pure decision vs I/O
+## Boundary: a PURE STATEFUL REDUCER vs I/O (revised — eng-review 2026-06-15)
 
-- **PURE (→ `oauth-flow.ts`, unit-tested, no browser):**
-  - `isAccountChooser(url)` — the chooser-URL test.
-  - `planConsentDecision({ scopes, dangerPhrases, domLooksBasic })` →
-    `approve | needs_review | … ` — the scope gate (invariant #2) as one pure
-    function. Reuses `scopesAreBasic`.
-  - `planOAuthAction({ authState, isChooser, hasLoginForm, consentDecision, … })`
-    → the high-level action enum above. The state→action mapping.
+The first cut was action-only pure functions (`planConsentDecision`,
+`planOAuthAction`). The eng review (Claude + Codex) found that **too thin** for a
+flow that is genuinely a *stateful* machine: the loop carries
+`consentAlreadyApproved`, `consentAdvanceWaits`, the `i--` nav-budget trick, and
+ordered side effects — none of which an action-only function can express, so the
+gnarliest sequencing would stay un-extracted and untested in agent.ts. Verdict:
+model the whole thing as a **pure reducer**.
+
+- **PURE (→ `oauth-flow.ts`, unit-tested incl. transitions, no browser):**
+  ```
+  decideOAuthStep(state, observation) → { action, nextState }
+  ```
+  - `state`: `{ providerId, consentAlreadyApproved, consentAdvanceWaits,
+    omniauthPostTried, allowBlindOAuthConsent, allowExtraOAuthScopes,
+    challengeBudgetLeft, … }` — every loop-carried variable.
+  - `observation`: `{ url, isChooser, authState, scopes, dangerPhrases,
+    domLooksBasicGis, hasLoginForm }` — the I/O-gathered facts (the executor
+    reads these from the browser, the reducer never touches a browser).
+  - `action` ∈ click_account_card | approve_consent | blind_advance |
+    soft_advance | recover_omniauth_post | settle_left_provider |
+    handle_challenge | abort(reason) — and carries **side-effect intent**
+    (e.g. `abort` carries `clearProviderLoggedIn: true` so the executor performs
+    the marker-clear BEFORE aborting; invariant for non-sticky retries).
+  - `nextState`: the updated loop state (sets `consentAlreadyApproved`,
+    decrements budgets), so the executor stays a dumb apply-loop.
 - **I/O (stays in agent.ts as a thin executor):** captcha, clicks, the account
-  card, challenge handling + notifications, OmniAuth POST, snapshots. These call
-  the pure planner and execute its verdict.
+  card, challenge *mechanics* + notifications, OmniAuth POST, snapshots,
+  `advanceOAuthConsent`. It gathers the `observation`, calls `decideOAuthStep`,
+  executes `action` (+ its side-effect intent), and adopts `nextState`.
+
+### Gaps the reducer MUST cover (from the eng review — both models)
+
+1. **Provider-aware scope policy** — use `provider.scopesAreBasic`, NOT the
+   Google-only import. Else GitHub basic scopes (`read:user`, `user:email`)
+   regress to review.
+2. **`allowExtraOAuthScopes`** — non-basic scopes the user pre-approved
+   auto-approve; only truly-unauthorized non-basic scopes → review.
+3. **`allowBlindOAuthConsent`** — its own decision path (blind_advance) with the
+   bounded hydrate-retry budget (`consentAdvanceWaits`/`MAX_CONSENT_ADVANCE_WAITS`).
+4. **`consentAlreadyApproved` soft-advance** — checked FIRST on a post-grant
+   unreadable consent page (F16); else the multi-page-consent false-negative.
+5. **Two distinct DOM checks** — `scrapeGoogleScopePhrases` (danger → abort) and
+   `googleGisConsentIsBasic` (basic → approve) are separate signals, not one
+   boolean.
+6. **Control-flow contracts** — `not_provider` is `settle_left_provider` (the
+   live `break`), NOT a terminal failure; `handle_challenge` success re-classifies
+   WITHOUT burning nav budget (the live `i--`). The reducer's `nextState`
+   encodes these so the executor can't get them wrong.
+7. **Side-effect ordering** — `clearProviderLoggedIn` BEFORE `needs_login` abort
+   (and the consent-page-login-form abort) — carried as side-effect intent.
+8. **Account-chooser is provider-gated** — `isChooser` only for Google.
 
 ## Migration (separate commits — Beck: make the change easy, then make it)
 
@@ -102,3 +143,35 @@ re-run form-fill), and `OAuthTryNextProvider`.
 - The form-fill and extraction phases (later strangler slices).
 - An eng-review (plan-eng-review) is recommended before step 2 (wiring), as the
   consent gate is security-critical — same discipline nav-search got.
+
+## What already exists (reuse, don't rebuild)
+
+- `google-login.ts` — `classifyGoogleAuthState`, `extractOAuthScopes`,
+  `scrapeGoogleScopePhrases`, `scopesAreBasic`, `googleGisConsentIsBasic`,
+  `detectActiveProviderSessions`. The reducer CONSUMES these (the executor calls
+  them to build the `observation`); it does not re-implement them.
+- `oauth-providers.ts` — `provider.scopesAreBasic`, `provider.classifyAuthState`
+  (provider-aware policy). The reducer takes the provider's predicate, not the
+  Google-only one (eng-review gap #1).
+
+## NOT in scope (deferred, with rationale)
+
+- Rewriting the challenge / 2FA / device-confirmation / OmniAuth-POST **I/O**
+  mechanics — stays in agent.ts; the reducer only decides `handle_challenge` vs
+  abort and owns the budget accounting.
+- The form-fill, captcha, and extraction phases — later strangler slices.
+- Multi-provider beyond google/github — the provider abstraction already exists;
+  no new providers added here.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_found | 8 issues (1 critical-class: action-only decomposition too thin for a stateful flow), 2 decisions resolved |
+| Outside Voice | `/plan-eng-review` (codex) | Independent 2nd opinion | 1 | issues_found | +3 gaps Claude missed (provider scope predicate, control-flow `i--`/`break` contracts, side-effect ordering) + recommended stateful reducer |
+
+- **CODEX:** confirmed the incomplete-model finding and extended it; proposed `decideOAuthStep(state, observation) → (action, nextState)` over action-only. Adopted.
+- **CROSS-MODEL:** both models agree the extraction must be completed before wiring; the action-only-vs-reducer tension resolved to the reducer (user-approved).
+- **VERDICT:** ENG review — re-architect to a pure stateful reducer covering the 8 gaps, with transition tests, THEN wire behind `OAUTH_ENGINE` (default-off) and live-validate before flip. Extraction-only so far has not touched the live OAuth path. Implement before wiring.
+
+NO UNRESOLVED DECISIONS
