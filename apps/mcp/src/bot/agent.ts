@@ -4260,6 +4260,15 @@ export class SignupAgent {
   // resolveOAuthCandidates; reset at the start of each signup().
   private committedToEmailPath = false;
 
+  // One-shot guard for the post-OAuth-callback email fallback. When a Clerk-class
+  // app completes the Google handshake but never persists a session (its callback
+  // silently fails for a brand-new identity driven through sign-IN — the cartesia
+  // root cause WITHOUT the explicit "no account" text), the bot recovers by
+  // creating the account via email instead. This flag keeps that to one attempt so
+  // a service that's genuinely OAuth-only (no email form to fall back to) fails
+  // honestly rather than re-trying forever. Reset at the start of each signup().
+  private oauthEmailFallbackTried = false;
+
   // Invisible-captcha presence for the current run. Cloudflare Turnstile
   // and reCAPTCHA-v3 are score-based: a HIGH score passes silently with no
   // visible widget to "solve", so the visible-gate path above records
@@ -6494,6 +6503,7 @@ export class SignupAgent {
     const steps: string[] = task.stepsSink ?? [];
     // Fresh per-run: don't let a prior run's email-path commitment leak.
     this.committedToEmailPath = false;
+    this.oauthEmailFallbackTried = false;
     // Stash the service name so the diagnostic uploader (called from
     // deep inside postVerifyLoop after a failed extract) can label
     // the snapshot without us threading task through every method.
@@ -8843,6 +8853,24 @@ export class SignupAgent {
       // (oauth_session_not_persisted) instead of thrashing into
       // oauth_onboarding_failed.
       if (err instanceof OAuthSessionNotPersistedError) {
+        // The handshake completed but the service never created a session — the
+        // Clerk new-user-via-sign-in bounce, surfacing here as a stuck login page
+        // (no explicit "no account" text, so detectGoogleNoAccount missed it
+        // upstream). If the service also offers email signup, creating the account
+        // that way is the recovery — the SAME OAUTH_FALL_BACK_TO_FORM_FILL path the
+        // explicit-text case uses (runSignup re-navigates to the form and runs the
+        // email path with forceFormFill, which suppresses OAuth so it can't bounce
+        // back here). One-shot: an OAuth-only service with no email form then fails
+        // honestly on the re-run instead of looping. Generalizes the cartesia crack
+        // to the whole silent-callback Clerk cluster (openrouter/groq/northflank/…).
+        if (!this.oauthEmailFallbackTried) {
+          this.oauthEmailFallbackTried = true;
+          steps.push(
+            `OAuth callback never persisted a session (Clerk new-user sign-in bounce) — ` +
+              `falling back to email/password signup to create the account.`,
+          );
+          return OAUTH_FALL_BACK_TO_FORM_FILL;
+        }
         return { success: false, error: err.message, steps, ...this.resultTail() };
       }
       throw err;
