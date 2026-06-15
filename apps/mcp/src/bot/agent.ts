@@ -28,6 +28,7 @@ import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-log
 import { decideOAuthStep } from "./oauth-flow.js";
 import {
   decideFormFillStep,
+  FORM_FILL_BUDGETS as B_FF,
   initialFormFillState,
   type FormFillObservation,
   type FormFillOutcome,
@@ -4587,13 +4588,16 @@ export class SignupAgent {
     // same no-account bounce. One-shot equivalent of committedToEmailPath.
     forceFormFill = false,
   ): Promise<PlanExecOutcome> {
-    // FORM_FILL_ENGINE (default-off, strangler slice 3): route the whole round
-    // through the pure decideFormFillStep reducer. The inline loop below is the
-    // unchanged default-off path; the engine path reuses every I/O helper and is
-    // covered by the golden-transition table (form-fill.test.ts). The temporary
-    // orchestration duplication is deleted once the engine is validated live and
-    // flipped default-on (DESIGN-form-fill-engine.md migration step 4).
-    if (/^(1|true|on)$/i.test(process.env.FORM_FILL_ENGINE ?? "")) {
+    // FORM_FILL_ENGINE (default-ON since 2026-06-15, strangler slice 3): route the
+    // whole round through the pure decideFormFillStep reducer. Flipped default-on
+    // after live validation showed the engine reaches the correct terminal on
+    // every fillable form (ipinfo full success; cohere/deepinfra/postmark each
+    // reached submit — their failures were downstream verification/extraction or
+    // already-registered, NOT the form-fill phase). The inline loop below is kept
+    // one cycle as the explicit opt-out fallback (FORM_FILL_ENGINE=0/off) and is
+    // deleted next, once a heal pass confirms no per-service regression
+    // (DESIGN-form-fill-engine.md migration step 4).
+    if (!/^(0|false|off|no)$/i.test(process.env.FORM_FILL_ENGINE ?? "")) {
       return this.planExecuteViaEngine(task, fillValues, steps, forceFormFill);
     }
     const MAX_ERROR_REPLANS = 2;
@@ -5477,10 +5481,18 @@ export class SignupAgent {
       const hasCredentialInput = inventory.some(
         (e) => e.tag === "input" && (e.type === "email" || e.type === "password" || e.type === "tel"),
       );
+      // LAZY (parity with inline agent.ts:4823): the loading-shell check calls
+      // extractText() — an I/O read — so only compute it when the OAuth-scan
+      // branch will actually consult it (candidates present, NOT committed, and
+      // no provider button hit yet). Computing it unconditionally would fire a
+      // spurious extractText() every round and diverge from the inline path.
+      const needScanShell =
+        oauthCandidates.length > 0 && !state.committedToEmailPath && oauthButtonHitRaw === null;
       const oauthScanShell =
-        inventory.length <= 1 ||
-        !hasCredentialInput ||
-        isLoadingShellText(await this.browser.extractText().catch(() => ""));
+        needScanShell &&
+        (inventory.length <= 1 ||
+          !hasCredentialInput ||
+          isLoadingShellText(await this.browser.extractText().catch(() => "")));
       const signInAdvance = findSignInAdvanceButton(inventory, oauthCandidates);
       const antiBotVendor = inventory.length < 10 ? detectAntiBotBlock(browserState.html) : null;
       const oauthOnly = isOauthOnlyChooser(inventory);
@@ -5535,7 +5547,14 @@ export class SignupAgent {
         return { kind: "submitted" };
       }
       if (preAct.kind === "terminal") {
-        steps.push(`Form[engine]: pre-plan → ${preAct.outcome.kind}`);
+        if (preAct.outcome.kind === "oauth" && oauthButtonHitRaw !== null) {
+          const label = OAUTH_PROVIDERS[oauthButtonHitRaw.provider].label;
+          steps.push(
+            `OAuth-first: found a ${label} sign-in affordance ` +
+              `(${JSON.stringify(oauthButtonHitRaw.button.visibleText ?? oauthButtonHitRaw.button.ariaLabel ?? label)}) ` +
+              `— taking the OAuth path`,
+          );
+        }
         return toPlanExec(preAct.outcome, {
           oauth:
             oauthButtonHitRaw !== null
@@ -5565,7 +5584,10 @@ export class SignupAgent {
       }
       if (preAct.kind === "sign_in_advance" && signInAdvance !== null) {
         steps.push(
-          `OAuth-first[engine]: clicking a generic sign-in affordance to advance to the real login page`,
+          `OAuth-first: no provider affordance, but found a generic ` +
+            `sign-in affordance (${JSON.stringify(signInAdvance.visibleText ?? signInAdvance.ariaLabel ?? "")}) ` +
+            `— clicking it to advance to the real login page ` +
+            `(${state.signInAdvanceClicks}/${B_FF.MAX_SIGN_IN_ADVANCE_CLICKS})`,
         );
         try {
           await this.browser.click(signInAdvance.selector);
@@ -5771,6 +5793,16 @@ export class SignupAgent {
         continue;
       }
       if (ps.action.kind === "terminal") {
+        // Match the inline step trail: a genuine (non-disabled, non-timeout)
+        // submit error logs "submit click failed" before failing.
+        if (
+          ps.action.outcome.kind === "submit_failed" &&
+          submitError !== null &&
+          !submitDisabled &&
+          !submitTimeout
+        ) {
+          steps.push(`⚠ submit click failed: ${submitError}`);
+        }
         if (ps.action.outcome.kind === "submitted" && postGateBlocked && postGateKind === "turnstile") {
           // managed-Turnstile + inbox flip: clear the recorded block so it can't
           // short-circuit a later gate, and capture the form rounds.
