@@ -65,15 +65,18 @@ extracted to `form-fill.ts` with tests, NOT yet wired (cannot regress):
    regress. The engine method routes all 5 checkpoints through the reducer and
    owns only the I/O + the replan-hint CONTENT (`buildSubmitDisabledHint`). The
    temporary orchestration duplication is the strangler bridge — deleted in step 4.
-4. ◑ **Validate live** — FIRST live run PASSED (2026-06-15): `FORM_FILL_ENGINE=1
-   UNIVERSAL_BOT_FORCE_FORM=1` ipinfo discover went end-to-end through the engine
-   (C1 run_planner → C2 plan ok → C3 verify→execute → C4 captcha-solve + submit →
-   verification link → extracted 3 creds, `outcome=ok`) — same outcome as the
-   inline baseline. The C1→oauth handoff was also confirmed on an un-forced ipinfo
-   run (`Form[engine]: pre-plan → oauth`). REMAINING before flipping the code
-   default-on + deleting the inline loop: a broader heal-pass A/B (engine on across
-   the curated queue, success-rate vs the inline baseline) to prove parity across
-   the long-tail form shapes — one service success de-risks the wiring, not all 100.
+4. ✅ **Validated live + FLIPPED default-ON** (2026-06-15, `8819057`). Live runs:
+   ipinfo full success end-to-end through the engine; cohere/deepinfra/postmark
+   each REACHED submit (failures were downstream verification/extraction or
+   already-registered — NOT the form-fill phase); the inline baseline hit postmark
+   with the identical `already-registered` outcome (same code → same result =
+   parity). The flip surfaced + fixed two faithfulness bugs (lazy `oauthScanShell`
+   extractText; engine step strings aligned to inline). `planExecuteWithRetry` now
+   early-returns to `planExecuteViaEngine` unless `FORM_FILL_ENGINE=0`.
+5. ⏳ **Delete the inline loop** — kept ONE cycle as the explicit opt-out fallback.
+   The next heal pass now exercises the engine by default (the timer runs from the
+   rebuilt dist); once it shows no per-service regression, delete the inline
+   `planExecuteWithRetry` body + the `FORM_FILL_ENGINE` flag + the duplication.
 
 ## NOT in scope (this slice)
 
