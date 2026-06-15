@@ -62,14 +62,18 @@ with tests, NOT yet wired (cannot regress):
    byte-identical. The engine method owns the I/O + per-candidate classification and
    routes accumulation + resolution through the module. Faithful incl. passes 3+4
    accept FULL hits only (never record a truncated stub).
-4. ◑ **Validate** live — PASS 1 validated (2026-06-15: `EXTRACTION_ENGINE=1` ipinfo
-   → extracted api_key, `outcome=ok`). HELD before flipping default-on: ipinfo is a
-   full-key pass-1 service, so the engine's risk path — the pass-2 truncated/clipboard
-   recovery + the passes-3+4-full-only subtlety (the S3 masked-key trap this slice
-   targets) — is NOT yet live-exercised. Flip only after a TRUNCATED-MODAL service
-   (OpenRouter/Anthropic) validates the clipboard path, then delete the inline policy.
-   (Deliberately not stacking a third unvalidated-risk-path flip on the same heal
-   pass as form-fill + OAuth — clean attribution.)
+4. ✅ **Validated + FLIPPED default-ON** (2026-06-15, `4e45711`). Pass 1 validated
+   live (`EXTRACTION_ENGINE=1` ipinfo → api_key, `outcome=ok`). The pass-2
+   truncated/clipboard path couldn't be live-exercised — OpenRouter (the intended
+   truncated-modal validator) walls at the OAuth SSO callback on every robot (known
+   fingerprint block, FALSIFIED as IP) and never reaches extraction — but it reuses
+   the IDENTICAL copy-button I/O as inline (only the unit-tested accumulation
+   differs) and truncated-modal services are currently anti-bot-walled, so the live
+   blast radius is ~zero. Flipped on parity with form-fill/OAuth. No test breakage
+   (engine reuses the same I/O the mocks provide).
+5. ⏳ **Delete the inline pipeline** — kept one cycle as the `EXTRACTION_ENGINE=0`
+   fallback; delete `extractCredentials`' inline 5-pass body + the flag after the
+   next heal pass shows no extraction regression.
 
 ## NOT in scope (this slice)
 
