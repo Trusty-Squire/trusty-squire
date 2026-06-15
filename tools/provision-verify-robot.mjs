@@ -138,6 +138,35 @@ async function dirApi(method, token, pathSuffix = "", body) {
   return json;
 }
 
+// ── Enterprise License Manager API (serves on www.googleapis.com) ───────────
+async function licensingApi(method, token, suffix) {
+  const res = await fetch(`https://www.googleapis.com/apps/licensing/v1/${suffix}`, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(30000),
+  });
+  const text = await res.text();
+  const json = text.length > 0 ? JSON.parse(text) : {};
+  if (!res.ok) {
+    throw new Error(`Licensing ${method} ${suffix} (${res.status}): ${json?.error?.message ?? text}`);
+  }
+  return json;
+}
+
+// Every paid Google Workspace license assignment on the domain (paginated).
+async function listWorkspaceLicenses(token) {
+  const items = [];
+  let pageToken;
+  do {
+    const q = new URLSearchParams({ customerId: DOMAIN, maxResults: "100" });
+    if (pageToken) q.set("pageToken", pageToken);
+    const page = await licensingApi("GET", token, `product/Google-Apps/users?${q.toString()}`);
+    for (const it of page.items ?? []) items.push(it);
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return items;
+}
+
 // All users on the domain (paginated). Returns array of {primaryEmail,...}.
 async function listDomainUsers(token) {
   const users = [];
@@ -191,6 +220,39 @@ async function cmdList() {
     const live = domainUsers.some((u) => (u.primaryEmail ?? "").toLowerCase() === e.email.toLowerCase());
     console.log(`  ${e.id}  spent@${String(spent).padStart(2)} services  google=${live ? "live" : "MISSING"}`);
   }
+}
+
+// Audit (and with --apply, strip) the paid Workspace license on every verify-NN
+// bot — they should be on free Cloud Identity, not a billed Business Starter seat.
+// Never touches non-bot users (dani@/lunchbox@). Re-lists after to confirm.
+async function cmdLicenses(apply) {
+  const token = await mintAdminToken();
+  const all = await listWorkspaceLicenses(token);
+  const bots = all.filter((a) => /^verify-\d+@/.test(a.userId ?? ""));
+  console.log(`Workspace (paid) license holders: ${all.length} total — ${bots.length} are verify-NN bots:`);
+  for (const a of bots) console.log(`  ${a.userId}  ${a.skuName} (${a.skuId})`);
+  if (bots.length === 0) {
+    console.log("No bot holds a paid Workspace license — already clean ✓");
+    return;
+  }
+  if (!apply) {
+    console.log(`\n[dry-run] pass --apply to UNASSIGN these ${bots.length} bot licenses (reversible).`);
+    return;
+  }
+  for (const a of bots) {
+    await licensingApi(
+      "DELETE",
+      token,
+      `product/${a.productId}/sku/${a.skuId}/user/${encodeURIComponent(a.userId)}`,
+    );
+    console.log(`unassigned ${a.userId}`);
+  }
+  const after = (await listWorkspaceLicenses(token)).filter((a) => /^verify-\d+@/.test(a.userId ?? ""));
+  console.log(
+    after.length === 0
+      ? `\nAll verify-NN bots are off paid Workspace seats ✓`
+      : `\nStill paid: ${after.map((a) => a.userId).join(", ")} (re-run, or auto-assign re-added them — turn it off in Admin → Billing)`,
+  );
 }
 
 async function cmdCreate(count, dryRun) {
@@ -328,6 +390,9 @@ async function main() {
     case "list":
       await cmdList();
       break;
+    case "licenses":
+      await cmdLicenses(flag(argv, "apply"));
+      break;
     case "create":
       await cmdCreate(Number(positional[0] ?? "1"), dryRun);
       break;
@@ -344,7 +409,7 @@ async function main() {
       break;
     default:
       console.error(
-        "usage: provision-verify-robot.mjs <list|create [N]|warm verify-NN|rotate|delete verify-NN> [--dry-run]",
+        "usage: provision-verify-robot.mjs <list|licenses [--apply]|create [N]|warm verify-NN|rotate|delete verify-NN> [--dry-run]",
       );
       process.exit(64);
   }
