@@ -45,6 +45,11 @@ import { mintAdminToken } from "./google-admin-token.mjs";
 
 const DOMAIN = process.env.TRUSTY_SQUIRE_VERIFY_DOMAIN ?? "trustysquire.ai";
 const FREE_CAP = Number(process.env.CLOUD_IDENTITY_FREE_CAP ?? 50);
+// COST CAP — the max ACTIVE robots we ever hold (= max billed seats). The whole
+// point: rotation refreshes the pool's composition without ever increasing cost
+// exposure. `create` refuses to push the pool above this; `rotate` retires
+// before it creates so the active count never spikes past the cap mid-rotation.
+const POOL_CAP = Number(process.env.ROBOT_POOL_CAP ?? 10);
 const BASE = process.env.TRUSTY_SQUIRE_VERIFY_POOL_DIR ?? join(homedir(), ".trusty-squire");
 const POOL_PATH = join(BASE, "verify-identities.json");
 const PW_PATH = join(BASE, "verify-passwords.json");
@@ -255,15 +260,31 @@ async function cmdLicenses(apply) {
   );
 }
 
-async function cmdCreate(count, dryRun) {
+async function cmdCreate(count, dryRun, allowGrow = false) {
   const pool = loadPool();
   if (dryRun) {
     const taken = takenNumbers(pool, []);
     const nums = nextFreeNumbers(taken, count);
+    const over = !allowGrow && pool.identities.length + count > POOL_CAP;
     console.log(`[dry-run] would create ${count} robot(s): ${nums.map(idFor).join(", ")}`);
-    console.log(`[dry-run] (offline — local pool only; live run also checks Google for collisions + the ${FREE_CAP} cap)`);
+    console.log(
+      `[dry-run] pool ${pool.identities.length}→${pool.identities.length + count} of cap ${POOL_CAP}` +
+        (over ? ` — OVER the cost cap; would be REJECTED (use 'rotate --make-room=${count}' instead)` : " — within cap ✓"),
+    );
     for (const n of nums) console.log(`[dry-run]   ${emailFor(n)}  profile=${profileDirFor(n)}`);
     return;
+  }
+  // COST CAP (the billing guardrail): never let OUR managed robots exceed
+  // POOL_CAP, since each robot is a billed seat. To add capacity without raising
+  // cost, rotate (retire spent → mint fresh, net zero). Bypass for a deliberate
+  // one-time grow with --allow-grow.
+  if (!allowGrow && pool.identities.length + count > POOL_CAP) {
+    throw new Error(
+      `creating ${count} would put the pool at ${pool.identities.length + count} robots, over the cost cap of ` +
+        `${POOL_CAP} (each robot = a billed seat). To add capacity WITHOUT increasing cost, rotate instead: ` +
+        `node tools/provision-verify-robot.mjs rotate --make-room=${count}  ` +
+        `(or override the cap with ROBOT_POOL_CAP / --allow-grow if you truly want more seats).`,
+    );
   }
   const token = await mintAdminToken();
   const domainUsers = await listDomainUsers(token);
@@ -349,27 +370,58 @@ async function cmdDelete(id, dryRun) {
   console.log(`deleted ${robot.email} + purged its pool/password/usage entries.`);
 }
 
-async function cmdRotate(spentGe, target, dryRun) {
+// Cost-flat rotation: retire robots and mint the SAME number of fresh ones, so
+// the active count (= billed seats) never increases. DELETE-BEFORE-CREATE is the
+// guarantee — the pool only ever shrinks then refills back to a target that is
+// capped at POOL_CAP, so it never spikes past the cap mid-rotation.
+//
+//   rotate --make-room=N   retire the N MOST-SPENT robots (least remaining value)
+//                          + mint N fresh → pool size unchanged. Use when a
+//                          service's slots are exhausted and you need fresh ones.
+//   rotate --spent-ge=K    retire every robot spent at ≥K services + refill to
+//                          the current size (housekeeping the worn-out ones).
+//   --target=N             explicit final size (still capped at POOL_CAP).
+async function cmdRotate({ spentGe, target, makeRoom, dryRun }) {
   const pool = loadPool();
   const usage = loadUsage();
   const byRobot = servicesByRobot(usage);
-  const retire = pool.identities
-    .filter((e) => (byRobot.get(e.id)?.size ?? 0) >= spentGe)
-    .map((e) => e.id);
+  const spentOf = (id) => byRobot.get(id)?.size ?? 0;
+
+  let retire;
+  if (makeRoom !== undefined) {
+    // Most-spent first = least remaining capacity = best to retire.
+    retire = [...pool.identities]
+      .sort((a, b) => spentOf(b.id) - spentOf(a.id))
+      .slice(0, makeRoom)
+      .map((e) => e.id);
+  } else {
+    retire = pool.identities.filter((e) => spentOf(e.id) >= spentGe).map((e) => e.id);
+  }
+
   const keepCount = pool.identities.length - retire.length;
-  const tgt = target ?? pool.identities.length; // default: keep pool the same size
+  // Default target keeps the pool the same size (cost-flat); always capped.
+  const tgt = Math.min(target ?? pool.identities.length, POOL_CAP);
   const toCreate = Math.max(0, tgt - keepCount);
+
   console.log(
-    `Rotate: ${retire.length} robot(s) spent at ≥${spentGe} services → retire; ` +
-      `then create ${toCreate} to reach target ${tgt}.`,
+    makeRoom !== undefined
+      ? `Rotate (make-room=${makeRoom}): retire the ${retire.length} most-spent robot(s), mint ${toCreate} fresh — ` +
+          `pool stays ${pool.identities.length} (cap ${POOL_CAP}), cost flat.`
+      : `Rotate: ${retire.length} robot(s) spent at ≥${spentGe} services → retire; then mint ${toCreate} to reach ${tgt} (cap ${POOL_CAP}).`,
   );
-  if (retire.length > 0) console.log(`  retire: ${retire.join(", ")}`);
+  if (retire.length > 0) {
+    console.log(`  retire: ${retire.map((id) => `${id}(spent@${spentOf(id)})`).join(", ")}`);
+  }
   if (dryRun) {
-    console.log(`[dry-run] no API calls, no writes.`);
+    console.log(`[dry-run] DELETE-before-CREATE; no API calls, no writes. Active count never exceeds ${POOL_CAP}.`);
     return;
   }
+  // DELETE FIRST — frees the seats so CREATE refills under the cap.
   for (const id of retire) await cmdDelete(id, false);
   if (toCreate > 0) await cmdCreate(toCreate, false);
+  if (toCreate > 0) {
+    console.log(`\nIMPORTANT: the ${toCreate} fresh robot(s) are UNWARMED — warm each (one noVNC login) before they can OAuth.`);
+  }
 }
 
 // ── arg parse ──────────────────────────────────────────────────────────────
@@ -394,7 +446,7 @@ async function main() {
       await cmdLicenses(flag(argv, "apply"));
       break;
     case "create":
-      await cmdCreate(Number(positional[0] ?? "1"), dryRun);
+      await cmdCreate(Number(positional[0] ?? "1"), dryRun, flag(argv, "allow-grow"));
       break;
     case "warm":
       if (!positional[0]) throw new Error("usage: warm verify-NN");
@@ -405,11 +457,18 @@ async function main() {
       await cmdDelete(positional[0], dryRun);
       break;
     case "rotate":
-      await cmdRotate(Number(opt(argv, "spent-ge", "40")), opt(argv, "target", undefined) !== undefined ? Number(opt(argv, "target")) : undefined, dryRun);
+      await cmdRotate({
+        spentGe: Number(opt(argv, "spent-ge", "40")),
+        target: opt(argv, "target", undefined) !== undefined ? Number(opt(argv, "target")) : undefined,
+        makeRoom: opt(argv, "make-room", undefined) !== undefined ? Number(opt(argv, "make-room")) : undefined,
+        dryRun,
+      });
       break;
     default:
       console.error(
-        "usage: provision-verify-robot.mjs <list|licenses [--apply]|create [N]|warm verify-NN|rotate|delete verify-NN> [--dry-run]",
+        "usage: provision-verify-robot.mjs <list | licenses [--apply] | create [N] [--allow-grow] | " +
+          "warm verify-NN | rotate [--make-room=N | --spent-ge=K] [--target=N] | delete verify-NN> [--dry-run]\n" +
+          `cost cap = ROBOT_POOL_CAP (default ${POOL_CAP}) active robots; rotate is cost-flat (delete-before-create).`,
       );
       process.exit(64);
   }
