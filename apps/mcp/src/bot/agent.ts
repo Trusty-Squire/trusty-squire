@@ -9337,12 +9337,28 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     let upstreamBlipRetries = 0;
     const MAX_UPSTREAM_BLIP_RETRIES = 8;
     const oauth = args.credentials === undefined;
-    // NAV_SEARCH (slice 1, DEFAULT OFF): replace the greedy planner with the
-    // goal-directed nav-search engine for the post-verify phase. Flag-gated for
-    // reversibility (DESIGN-post-signup-nav-search.md, A2) — until live-validated
-    // (T6), the greedy loop below remains the default. Opt in with NAV_SEARCH=1.
+    // NAV_SEARCH (DEFAULT OFF): drive the post-verify phase with the goal-directed
+    // nav-search engine, then HAND OFF to the greedy planner if it couldn't finish.
+    // T6 (live, neon) proved the two are complementary: nav-search is strong at
+    // NAVIGATION (it drove through two onboarding wizards + the dashboard to the
+    // exact create-API-key modal, where the greedy planner often gets lost), but
+    // it's nav-only by design — it can't fill+submit a create-key form. The greedy
+    // planner is strong at form-fill but weak at navigation. So: nav-search
+    // navigates to (or near) the key surface; if it extracts a key, done; if not,
+    // we FALL THROUGH to the greedy loop, which resumes from the current page
+    // nav-search reached and completes the local form-fill + extract. The capture
+    // chain continues on the same this.captureChainRound counter (read below at
+    // loop start), so it stays gap-free for auto-promote. Flag-gated for
+    // reversibility (DESIGN-post-signup-nav-search.md, A2).
     if (/^(1|true|on)$/i.test(process.env.NAV_SEARCH ?? "")) {
-      return await this.runNavSearchPhase(args, oauth);
+      const navResult = await this.runNavSearchPhase(args, oauth);
+      if (Object.keys(navResult).some((k) => !NON_CREDENTIAL_KEYS.has(k))) {
+        return navResult;
+      }
+      args.steps.push(
+        "nav-search: no key via navigation alone — handing off to the planner from the current surface",
+      );
+      // fall through to the greedy planner loop below
     }
     // Re-plan hint for the next round — set when an `extract` step
     // found no key, which means the visible key text is masked /
