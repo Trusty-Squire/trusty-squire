@@ -127,8 +127,12 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
 // phone via noVNC (the spike's 1920x1080 was the UX mistake). 720x1280
 // is the smallest size that doesn't look pixel-y on a 1080p+ phone
 // screen, and stays bandwidth-friendly compared to 1080x1920.
-const HEADLESS_W = 720;
-const HEADLESS_H = 1280;
+// Overridable via BOT_NOVNC_W/H — a desktop-width display (e.g. 1440x900) is
+// needed when the remote page is a responsive app whose desktop-only controls
+// (hover-revealed row menus in the Workspace Admin console) collapse at phone
+// width. Defaults stay phone-shaped for the common login-from-phone case.
+const HEADLESS_W = Number(process.env.BOT_NOVNC_W) || 720;
+const HEADLESS_H = Number(process.env.BOT_NOVNC_H) || 1280;
 
 // The Debian/Ubuntu `novnc` package installs its web assets here — the
 // `core/` RFB library our branded page reuses (see runHeadlessChrome).
