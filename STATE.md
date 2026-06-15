@@ -407,7 +407,23 @@ file. Currently set (names only):
 Rule: a key in `harvester.env` or the vault is CONFIGURED. Don't ask for it;
 read it.
 
-## Post-signup nav-search engine (NAV_SEARCH, default-OFF) — live-validated on unify-ai (2026-06-14)
+## Post-signup nav-search engine (NAV_SEARCH, **DEFAULT-ON** as of T6, 2026-06-15)
+
+**T6 complete — nav-search is now the default**, as a HYBRID with the greedy
+planner (commits 722870b same-site, a84505a handoff, d798c30 default-on).
+Live-validated: neon went FAILED→SUCCESS once the handoff landed, and confirmed
+to engage with NO flag. The architecture is **nav-search navigates → greedy
+planner finishes**: nav-search is strong at navigation (drove neon's org+project
+wizards + dashboard to the exact create-API-key modal where greedy gets lost) but
+nav-only by design; the greedy planner fills the create-key form. On ANY
+nav-search failure (or exhaustion) control falls through to the greedy loop —
+the prior default — so enabling it is worst-case "no worse than before". Safety
+rails: try/catch (never crash a signup), LLM-tiebreak budget cap (reserve budget
+for the handoff), same-site guard (don't wander to marketing/docs). Opt out:
+`NAV_SEARCH=0`. T6 evidence: ipinfo/galileo (entry-extract, no regression), unify
+(nav-loop navigation), neon (hybrid create-key success). Full suite green (1592).
+
+### History — live-validated on unify-ai (2026-06-14)
 
 Goal-directed best-first search over the dashboard's affordances, replacing the
 greedy per-screen LLM step-picker for the post-OAuth → API-key phase
