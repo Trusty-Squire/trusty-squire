@@ -7744,12 +7744,14 @@ export class SignupAgent {
     // complete first.
     let consentAdvanceWaits = 0;
     const MAX_CONSENT_ADVANCE_WAITS = 3;
-    // OAUTH_ENGINE (default-off): route the CONSENT decision through the pure
-    // reducer (oauth-flow.ts, eng-reviewed) instead of the inline scope-gate
-    // branches below. Opt in for validation; the inline path stays the
-    // byte-identical default until the engine is live-validated, then flips
-    // (DESIGN-oauth-consent-engine.md migration step 2).
-    const oauthEngineOn = /^(1|true|on)$/i.test(process.env.OAUTH_ENGINE ?? "");
+    // OAUTH_ENGINE (default-ON since 2026-06-15): route the CONSENT decision
+    // through the pure reducer (oauth-flow.ts, eng-reviewed) instead of the inline
+    // scope-gate branches below. Flipped after live validation drove a real Google
+    // consent screen both ways — advance_consent (opaque-scope→blind approve, full
+    // ipinfo OAuth signup succeeded) AND the abort-on-login-form safety invariant.
+    // The inline scope-gate block is kept one cycle as the explicit opt-out
+    // (OAUTH_ENGINE=0) and deleted next (DESIGN-oauth-consent-engine.md step 2).
+    const oauthEngineOn = !/^(0|false|off|no)$/i.test(process.env.OAUTH_ENGINE ?? "");
     for (let i = 0; i < MAX_OAUTH_NAV; i++) {
       if (this.browser.oauthPageClosed()) {
         steps.push(
@@ -8116,6 +8118,11 @@ export class SignupAgent {
           `OAuth[engine]: scopes=[${scopes === null ? "<unreadable>" : scopes.join(", ")}] → ` +
             `${action.kind}${action.kind === "advance_consent" ? `:${action.mode}` : ""}`,
         );
+        // Faithful inline step trail: a readable all-basic approve logs the same
+        // "scopes all basic … auto-approving" line the inline scope-gate emits.
+        if (action.kind === "advance_consent" && action.mode === "approve" && scopes !== null) {
+          steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
+        }
         if (action.kind === "abort") {
           if (action.clearProviderLoggedIn) clearProviderLoggedIn(provider.id);
           const detail =
