@@ -6407,9 +6407,22 @@ export class SignupAgent {
       // permission scope, 5 short of the API key. Failed calls produce
       // no progress; charging them against the budget is wrong. Behave
       // like a meter: only count consumption that actually delivered.
+      // Text-only planner experiment (BOT_PLANNER_TEXT_ONLY, default-off).
+      // The DOM inventory is the authoritative action space — the planner
+      // may only pick a selector the bot supplied, so the screenshot can
+      // never expand the move set. This strips the screenshot from
+      // NAVIGATION-PLANNER calls (deterministic=true) ONLY, leaving genuine
+      // vision calls (2SV number-read, on-screen key extraction) untouched,
+      // to measure whether the image earns its latency + token cost.
+      const plannerTextOnly =
+        args.deterministic === true &&
+        /^(1|true|on)$/i.test(process.env.BOT_PLANNER_TEXT_ONLY ?? "");
+      const userBlocks = plannerTextOnly
+        ? args.userBlocks.filter((b) => b.kind !== "image")
+        : args.userBlocks;
       const resp = await client.createMessage({
         system: args.system,
-        user: args.userBlocks,
+        user: userBlocks,
         max_tokens: args.maxTokens,
         ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
         ...(args.deterministic === true ? { deterministic: true } : {}),
