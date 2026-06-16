@@ -1488,27 +1488,51 @@ export class BrowserController {
           const t = el as HTMLInputElement;
           const inputKind =
             t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") ? t.type : "";
+          // The planner's selector often resolves to a CHILD of the real option
+          // (the inner <span> with the visible text, or a positional wrapper), not
+          // the role=option element itself. Walk up to the nearest combobox-option
+          // ancestor so the role-based re-resolution below fires. cmdk items carry
+          // role=option but the `[cmdk-item]` attribute is the most stable tell.
+          // MEASURED 2026-06-16 (meilisearch /welcome-informations cmdk multi-
+          // select): a plain getByRole("option",{name}).click() COMMITS the value
+          // — the trigger updates + Next un-gates — but only when we target the
+          // option element, not its child span (which a raw coordinate click drops).
+          const optEl = el.closest(
+            '[role="option"],[role="menuitem"],[role="menuitemradio"],[cmdk-item]',
+          );
+          const optRole = optEl !== null ? optEl.getAttribute("role") ?? "option" : "";
+          const optText = optEl !== null ? (optEl.textContent ?? "").trim().slice(0, 80) : "";
           return {
             inputKind,
             role: el.getAttribute("role") ?? "",
             text: (el.textContent ?? "").trim().slice(0, 80),
+            optRole,
+            optText,
           };
         })
-        .catch(() => ({ inputKind: "", role: "", text: "" }));
+        .catch(() => ({ inputKind: "", role: "", text: "", optRole: "", optText: "" }));
       const inputKind = probe.inputKind;
       // Custom-combobox / listbox options (role=option|menuitem) — react-select,
-      // Radix, downshift, MUI. Two failure modes the humanized RAW-COORDINATE
+      // Radix, downshift, cmdk, MUI. Two failure modes the humanized RAW-COORDINATE
       // click hits: (1) the menu is a PORTAL that re-renders/repositions, so the
       // captured POSITIONAL selector (e.g. `div…>> nth=42`) resolves to the wrong
       // element at click time — nothing selects, planner loops (MEASURED
       // 2026-06-11, meilisearch Radix combobox); (2) options bind pointer/select
       // handlers a raw coordinate click misses. Fix: re-resolve by role+accessible
-      // name (robust to portal/positional drift), and use the actionability-checked
-      // locator click. Options are post-load, NOT the anti-bot-scored gate.
-      if (probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio") {
-        const role = probe.role as "option" | "menuitem" | "menuitemradio";
-        if (probe.text.length > 0) {
-          const byName = this.page.getByRole(role, { name: probe.text, exact: false }).first();
+      // name (robust to portal/positional drift + the planner targeting a child),
+      // and use the actionability-checked locator click. Options are post-load,
+      // NOT the anti-bot-scored gate.
+      const optRole =
+        probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio"
+          ? probe.role
+          : probe.optRole === "option" || probe.optRole === "menuitem" || probe.optRole === "menuitemradio"
+            ? probe.optRole
+            : "";
+      const optName = probe.role !== "" ? probe.text : probe.optText;
+      if (optRole !== "") {
+        const role = optRole as "option" | "menuitem" | "menuitemradio";
+        if (optName.length > 0) {
+          const byName = this.page.getByRole(role, { name: optName, exact: false }).first();
           if ((await byName.count().catch(() => 0)) > 0) {
             await byName.click({ timeout: 8000 });
             return;
