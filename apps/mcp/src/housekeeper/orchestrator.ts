@@ -348,20 +348,25 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   discover: HousekeeperBatchSummary;
 }> {
   const log = opts.log ?? ((line: string) => console.log(`[housekeeper] ${line}`));
-  log("heal pass — phase 1/2: verify (demote rot, quarantine walls)");
+  log("heal pass — phase 1/3: verify (demote rot, quarantine walls)");
   const verify = await runOneBatch(opts.verify);
-  log("heal pass — phase 2/2: discover (re-skill freshly-demoted + demand)");
-  const discover = await runOneBatch(opts.discover);
 
-  // Phase 3 (opt-in) — keep the verify-robot pool fresh so the loop runs
-  // unattended for weeks. No-op unless ROBOT_AUTO_REPLENISH=1 + an admin token
-  // exists; runs AFTER discover so the fresh robots are ready for the next pass.
+  // Phase 2 (opt-in) — replenish the verify-robot pool BEFORE discover, so (a)
+  // this pass's discover gets the fresh robots immediately (relieving the
+  // insufficient_identities exhaustion that otherwise fails services outright),
+  // and (b) it runs at all: discover routinely burns the whole 240min
+  // self-deadline and hard-exits the process, so anything placed AFTER it never
+  // executes. No-op unless ROBOT_AUTO_REPLENISH=1 + an admin token exists.
+  log("heal pass — phase 2/3: replenish verify-robot pool (cost-flat rotate + warm)");
   let poolLine = "";
   try {
     poolLine = await autoReplenishVerifyPool(log);
   } catch (err) {
     log(`pool replenish failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  log("heal pass — phase 3/3: discover (re-skill freshly-demoted + demand)");
+  const discover = await runOneBatch(opts.discover);
 
   // Close-the-loop (#1): grade open fix attempts whose targeted services were
   // re-tested in THIS pass's discovery. A fix committed by a prior --mode=fix
