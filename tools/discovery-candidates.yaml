@@ -78,7 +78,7 @@
 - { slug: vectorize, name: Vectorize, signup_url: https://platform.vectorize.io/, oauth_provider: google }
 - { slug: superlinked, name: Superlinked, signup_url: https://superlinked.com/, oauth_provider: google, status: needs-manual }  # unservable: no self-serve signup — self-hosted SIE (github.com/superlinked/sie) + sales "Contact us" only; no app/cloud console, no API-key issuance (discover 2026-06-11)
 - { slug: activeloop, name: Activeloop, signup_url: https://app.activeloop.ai/register, oauth_provider: google }
-- { slug: trieve, name: Trieve, signup_url: https://dashboard.trieve.ai/, oauth_provider: github }
+- { slug: trieve, name: Trieve, signup_url: https://dashboard.trieve.ai/, oauth_provider: github, status: needs-manual }  # unservable: dashboard.trieve.ai unresponsive — page.goto 60s timeout x2 from our box AND a 60s timeout from independent Anthropic egress (2026-06-17). Host down/hung. Re-check later.
 - { slug: meorphis, name: SearchAPI, signup_url: https://www.searchapi.io/users/sign_up, oauth_provider: google }  # was /dashboard (404 → no_signup_link); /users/sign_up is the real form (2026-06-16)
 - { slug: serpapi, name: SerpApi, signup_url: https://serpapi.com/users/sign_up, oauth_provider: google }
 - { slug: exa, name: Exa, signup_url: https://dashboard.exa.ai/login, oauth_provider: google }
