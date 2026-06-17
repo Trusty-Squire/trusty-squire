@@ -77,13 +77,57 @@ async function loginOne(identity, password) {
       })
       .catch(() => {});
     await sleep(1500);
-    // Already signed in?
+    // FLEET_FORCE_FRESH — force a clean activation login. A never-activated
+    // account (agreedToTerms=false) keeps a stale SID that still LANDS on
+    // myaccount.google.com, so every session-based shortcut fires and the ToS
+    // page (only shown on a cookieless sign-in) is never reached. Clearing the
+    // session here forces the full email→password→ToS flow that actually
+    // activates the account. The warm command sets this only for accounts the
+    // Directory API reports as not-yet-activated, so working robots keep the
+    // safe fast path.
+    if (process.env.FLEET_FORCE_FRESH === "1") {
+      await bc["context"].clearCookies().catch(() => {});
+      out.stages.push("force-fresh-cleared");
+      await page
+        .goto(
+          "https://accounts.google.com/v3/signin/identifier?flowName=GlifWebSignIn&hl=en&continue=https%3A%2F%2Fmyaccount.google.com%2F",
+          { waitUntil: "domcontentloaded", timeout: 45000 },
+        )
+        .catch(() => {});
+      await sleep(2500);
+    }
+    // Already signed in? A SID cookie ALONE is NOT proof — a never-activated
+    // account (agreedToTerms=false) keeps a leftover SID from its partial
+    // creation, but its OAuth still bounces to /signin/deletedaccount. The
+    // honest signal is the `continue` redirect actually landing us on
+    // myaccount.google.com (only a real, ToS-accepted session gets there).
+    // Require BOTH; otherwise fall through to the full email→password→ToS flow
+    // that ACTIVATES the account. (This shortcut firing on cookie-presence
+    // alone is what silently rotted verify-01..05 — warm reported ✅ in 8s
+    // while the accounts never agreed to terms and stayed unusable.)
     const cookiesNow = await bc["context"].cookies();
-    if (cookiesNow.some((c) => /^(SID|__Secure-1PSID|SAPISID|__Secure-3PSID)$/.test(c.name) && c.value.length > 5)) {
+    const hasSidNow = cookiesNow.some(
+      (c) => /^(SID|__Secure-1PSID|SAPISID|__Secure-3PSID)$/.test(c.name) && c.value.length > 5,
+    );
+    if (hasSidNow && /myaccount\.google\.com/.test(page.url())) {
       out.stages.push("already-signed-in");
       out.loggedIn = true;
       await bc.close().catch(() => {});
       return out;
+    }
+    // A stale session that did NOT land on myaccount (deletedaccount bounce /
+    // account-chooser / parked on signin) blocks the email form. Clear it so
+    // the activation login runs clean.
+    if (hasSidNow) {
+      await bc["context"].clearCookies().catch(() => {});
+      out.stages.push("cleared-stale-session");
+      await page
+        .goto(
+          "https://accounts.google.com/v3/signin/identifier?flowName=GlifWebSignIn&hl=en&continue=https%3A%2F%2Fmyaccount.google.com%2F",
+          { waitUntil: "domcontentloaded", timeout: 45000 },
+        )
+        .catch(() => {});
+      await sleep(2500);
     }
     // Email — #identifierId, not input[type=email].
     const EMAIL = '#identifierId, input[name="identifier"], input[type="email"]';
@@ -119,7 +163,15 @@ async function loginOne(identity, password) {
     await sleep(2000);
     out.finalUrl = page.url();
     const cookies = await bc["context"].cookies();
-    out.loggedIn = cookies.some((c) => /^(SID|__Secure-1PSID|SAPISID|__Secure-3PSID)$/.test(c.name) && c.value.length > 5);
+    const hasSid = cookies.some(
+      (c) => /^(SID|__Secure-1PSID|SAPISID|__Secure-3PSID)$/.test(c.name) && c.value.length > 5,
+    );
+    // Activation is only real when the flow actually landed on
+    // myaccount.google.com — Google forces ToS before letting a fresh account
+    // reach it, so this doubles as proof of agreedToTerms. A SID cookie while
+    // still parked on a signin/ToS/deletedaccount page means activation did NOT
+    // complete: report ❌ loudly instead of a false ✅.
+    out.loggedIn = hasSid && /myaccount\.google\.com/.test(out.finalUrl);
   } catch (e) {
     out.error = String((e && e.stack) || e).slice(0, 240);
   }

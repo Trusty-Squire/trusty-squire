@@ -339,11 +339,31 @@ async function cmdWarm(id) {
         `(create stores it; if this robot was minted elsewhere, set VERIFY_${id.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_PW.)`,
     );
   }
+  // A Directory-API-created account is UNUSABLE for OAuth (it bounces to
+  // /signin/deletedaccount) until a real first sign-in completes Google's ToS —
+  // `agreedToTerms` flips true only then. A never-activated account keeps a
+  // stale SID from its creation that lands on myaccount.google.com, so every
+  // session shortcut fires and the warm reports a FALSE ✅ without ever showing
+  // the ToS page. Detect the not-yet-activated state and force the fleet logger
+  // to clear the session + run the full email→password→ToS activation flow.
+  // (Working robots stay on the fast path — this only triggers for the rot.)
+  let forceFresh = process.env.FLEET_FORCE_FRESH === "1";
+  try {
+    const token = await mintAdminToken();
+    const rec = await dirApi("GET", token, `/${encodeURIComponent(robot.email)}?fields=agreedToTerms,lastLoginTime`);
+    const activated = rec?.agreedToTerms === true;
+    if (!activated) {
+      forceFresh = true;
+      console.log(`  ${id}: agreedToTerms=false (never activated) — forcing a clean ToS activation login.`);
+    }
+  } catch (err) {
+    console.warn(`  ${id}: activation precheck failed (${err instanceof Error ? err.message : String(err)}) — warming as-is.`);
+  }
   console.log(`Warming ${id} (${robot.email}) via automated Google login (headed/Xvfb, no human)…`);
   const child = spawn(
     process.execPath,
     [join(dirname(fileURLToPath(import.meta.url)), "google-login-fleet.mjs"), id],
-    { stdio: "inherit", env: process.env },
+    { stdio: "inherit", env: { ...process.env, ...(forceFresh ? { FLEET_FORCE_FRESH: "1" } : {}) } },
   );
   await new Promise((resolve, reject) => {
     child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`fleet login exited ${code}`))));
