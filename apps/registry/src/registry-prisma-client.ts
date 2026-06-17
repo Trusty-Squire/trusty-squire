@@ -16,6 +16,37 @@ export interface RegistryPrismaClient {
   provisionEvent: ProvisionEventDelegate;
   // T10 — closed-loop heal-pass heartbeats for the admin status panel.
   healRun: HealRunDelegate;
+  // Memory-overhaul Phase 3 — materialized per-service status.
+  serviceState: ServiceStateDelegate;
+}
+
+interface ServiceStateRow {
+  service: string;
+  status: string;
+  confidence: number;
+  successful_count: number;
+  failed_count: number;
+  last_attempt_at: Date | null;
+  last_green_at: Date | null;
+  last_failure_kind: string | null;
+  current_diagnosis: string | null;
+  diagnosis_evidence: string | null;
+  wall_classification: string | null;
+  projection_updated_at: Date;
+}
+
+interface ServiceStateDelegate {
+  upsert(args: {
+    where: Record<string, unknown>;
+    create: Record<string, unknown>;
+    update: Record<string, unknown>;
+  }): Promise<ServiceStateRow>;
+  findUnique(args: {
+    where: Record<string, unknown>;
+  }): Promise<ServiceStateRow | null>;
+  findMany(args: {
+    orderBy?: Record<string, unknown>;
+  }): Promise<ServiceStateRow[]>;
 }
 
 interface HealRunRow {

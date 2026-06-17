@@ -421,3 +421,48 @@ model HealRun {
 
   @@index([ran_at(sort: Desc)])
 }
+
+// ServiceState — memory-overhaul Phase 3. The CANONICAL per-service status
+// (one row per service). Two halves:
+//
+//  1. PROJECTION (recomputed from ProvisionEvent on every insert, via the
+//     SAME buildCompatHealth used by the on-read /health route — so the
+//     materialized status can't drift from the derived one). Pure function
+//     of the recent event slice → convergent under concurrent inserts (a
+//     later green after a blocking run in the same batch wins because the
+//     recompute reads the full committed set, not just "this event").
+//
+//  2. MUTABLE OVERLAY (written by the heal pass / OpenIssue in Phase 4) —
+//     the machine-written diagnosis + human/heal status classification that
+//     a pure event-projection CANNOT hold. recomputeFrom() updates ONLY the
+//     projection fields and NEVER clobbers the overlay.
+//
+// Replaces the hand-written STATE.md as the source of truth (STATE.md
+// becomes a generated projection of this table — a later slice).
+model ServiceState {
+  service String @id
+
+  // ---- projection (buildCompatHealth over the recent ProvisionEvent slice) ----
+  // CompatState: "skill-active" | "working" | "struggling" | "hard-block".
+  status            String
+  confidence        Float // the signed compat_score (positive healthy, negative blocked)
+  successful_count  Int       @default(0)
+  failed_count      Int       @default(0)
+  last_attempt_at   DateTime?
+  last_green_at     DateTime? // most recent SUCCESS occurred_at — the "last_green_run" anchor
+  last_failure_kind String?
+
+  // ---- mutable overlay (Phase 4: heal pass / OpenIssue write these) ----
+  // One-line machine-written hypothesis for the current failure, + a pointer
+  // to the run/evidence that shows it (provision_id or artifacts_uri).
+  current_diagnosis  String?
+  diagnosis_evidence String?
+  // Human/heal classification a projection can't derive: null (let the
+  // projection speak) | "wall" (proven, with a falsification record in
+  // OpenIssue) | "unservable" (dequeued). Advisory over the projection.
+  wall_classification String?
+
+  projection_updated_at DateTime @updatedAt
+
+  @@index([status])
+}

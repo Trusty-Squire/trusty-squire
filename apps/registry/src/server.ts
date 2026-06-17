@@ -24,6 +24,11 @@ import {
   InMemoryProvisionEventStore,
   type ProvisionEventStore,
 } from "./provision-event-store.js";
+import {
+  InMemoryServiceStateStore,
+  projectServiceState,
+  type ServiceStateStore,
+} from "./service-state-store.js";
 import { adminAuthFromEnv, type AdminAuthConfig } from "./admin-auth.js";
 
 function numEnv(name: string, fallback: number): number {
@@ -43,6 +48,9 @@ export interface BuildServerOpts {
   // dashboard cache-hit/demand views. In-memory default; production
   // wires a Prisma-backed store at boot.
   provisionEventStore?: ProvisionEventStore;
+  // Memory-overhaul Phase 3 — materialized per-service status (projection +
+  // overlay). In-memory default; production wires a Prisma store at boot.
+  serviceStateStore?: ServiceStateStore;
   // Google SSO config for the dashboard. Defaults to adminAuthFromEnv()
   // when omitted; tests inject a config (or null for bearer-only).
   adminAuth?: AdminAuthConfig | null;
@@ -94,6 +102,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     opts.botFailureStore ?? new InMemoryBotFailureStore();
   const provisionEventStore =
     opts.provisionEventStore ?? new InMemoryProvisionEventStore();
+  const serviceStateStore =
+    opts.serviceStateStore ?? new InMemoryServiceStateStore();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
   // used both for skill provenance (`signed_by` field on stored
@@ -150,15 +160,45 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
 
   // T44 — compat-score endpoints. Env tunables here surface through
   // routes/services-health.ts → compat-score.ts.
+  const scoreOptions = {
+    halfLifeDays: numEnv("COMPAT_HALF_LIFE_DAYS", 14),
+    hardBlockThreshold: numEnv("COMPAT_HARD_BLOCK_THRESHOLD", -2),
+    strugglingCeiling: numEnv("COMPAT_STRUGGLING_THRESHOLD", 0),
+  };
   await fastify.register(registerServicesHealthRoute, {
     eventStore: provisionEventStore,
     skillStore,
     resolveAccountId,
-    scoreOptions: {
-      halfLifeDays: numEnv("COMPAT_HALF_LIFE_DAYS", 14),
-      hardBlockThreshold: numEnv("COMPAT_HARD_BLOCK_THRESHOLD", -2),
-      strugglingCeiling: numEnv("COMPAT_STRUGGLING_THRESHOLD", 0),
-    },
+    scoreOptions,
+    serviceStateStore,
+  });
+  // Memory-overhaul Phase 3 — one-time backfill so existing services aren't
+  // "unknown" until their next event (Codex rollout note). Best-effort,
+  // fire-and-forget after listen; the projection self-heals on each new event
+  // anyway. Skipped for the in-memory store (nothing to backfill on boot).
+  fastify.addHook("onReady", async () => {
+    if (opts.serviceStateStore === undefined) return; // in-mem default: nothing persisted yet
+    try {
+      const demand = await provisionEventStore.demandByService(
+        60 * 86_400_000,
+        500,
+      );
+      for (const { service } of demand) {
+        const [attempts, activeSkill] = await Promise.all([
+          provisionEventStore.listByService(service, 60 * 86_400_000),
+          skillStore.findActiveByService(service),
+        ]);
+        await serviceStateStore.recomputeFrom(
+          projectServiceState(service, attempts, activeSkill !== null, scoreOptions),
+        );
+      }
+      fastify.log.info(
+        { count: demand.length },
+        "ServiceState backfill complete",
+      );
+    } catch (err) {
+      fastify.log.warn({ err }, "ServiceState backfill failed (non-fatal)");
+    }
   });
 
   const adminBearer = opts.adminBearer ?? process.env.REGISTRY_ADMIN_BEARER;
@@ -235,6 +275,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       // Production-mode persistence for the compat-score endpoint +
       // dashboard cache-hit/demand views.
       provisionEventStore: await PrismaProvisionEventStore.fromEnv(),
+      // Memory-overhaul Phase 3 — materialized per-service status.
+      serviceStateStore: await (
+        await import("./prisma-service-state-store.js")
+      ).PrismaServiceStateStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);

@@ -17,6 +17,10 @@ import {
 } from "../compat-score.js";
 import type { ProvisionEventStore } from "../provision-event-store.js";
 import type { SkillStore } from "../skill-store.js";
+import {
+  projectServiceState,
+  type ServiceStateStore,
+} from "../service-state-store.js";
 
 export interface ServicesHealthRouteDeps {
   eventStore: ProvisionEventStore;
@@ -24,6 +28,10 @@ export interface ServicesHealthRouteDeps {
   resolveAccountId: (req: { headers: Record<string, unknown> }) => string;
   /** Override score config — surfaced for env-tunables on bootstrap. */
   scoreOptions?: CompatScoreOptions;
+  /** Memory-overhaul Phase 3 — materialized per-service status. When wired,
+   *  a POSTed attempt recomputes the projection on insert and the dossier
+   *  endpoint reads it. Optional so legacy bootstraps work unchanged. */
+  serviceStateStore?: ServiceStateStore;
 }
 
 const PostBodySchema = z.object({
@@ -133,7 +141,67 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
         account_id,
         mcp_version: d.mcp_version,
       });
+      // Memory-overhaul Phase 3 — recompute the materialized projection from
+      // the (now-inclusive) event slice. Best-effort: a projection failure
+      // must never fail the attempt POST. Convergent under concurrency —
+      // reads the full committed slice, not just this event.
+      if (opts.serviceStateStore !== undefined) {
+        try {
+          const [attempts, activeSkill] = await Promise.all([
+            eventStore.listByService(slug, LOOKBACK_MS),
+            skillStore.findActiveByService(slug),
+          ]);
+          await opts.serviceStateStore.recomputeFrom(
+            projectServiceState(slug, attempts, activeSkill !== null, scoreOpts),
+          );
+        } catch (err) {
+          request.log.warn(
+            { err, service: slug },
+            "ServiceState projection recompute failed (non-fatal)",
+          );
+        }
+      }
       return reply.code(201).send({ id });
+    },
+  );
+
+  // Memory-overhaul Phase 3 — the DOSSIER: one read that answers "what's the
+  // deal with service X" (replaces the 6-source hand-join). Materialized
+  // status + the recent event slice (capped). Evidence + OpenIssue links join
+  // in later slices. Public-readish: same surface as /health, no secrets.
+  fastify.get<{ Params: { slug: string }; Querystring: { events?: string } }>(
+    "/v1/services/:slug/dossier",
+    async (request, reply) => {
+      const slug = request.params.slug?.toLowerCase();
+      if (!isValidSlug(slug)) {
+        return reply.code(400).send({ error: "invalid_slug" });
+      }
+      // Cap the event page hard (Codex #9 — bound the join). Default 20, max 100.
+      const reqN = Number.parseInt(request.query.events ?? "20", 10);
+      const limit = Number.isFinite(reqN) ? Math.min(Math.max(reqN, 1), 100) : 20;
+      const state =
+        opts.serviceStateStore !== undefined
+          ? await opts.serviceStateStore.get(slug)
+          : null;
+      const recent = (await eventStore.listByService(slug, LOOKBACK_MS)).slice(
+        0,
+        limit,
+      );
+      return reply.send({
+        service: slug,
+        state,
+        recent_events: recent.map((e) => ({
+          id: e.id,
+          status: e.status,
+          mode: e.mode,
+          failure_kind: e.failure_kind,
+          captcha_kind: e.captcha_kind,
+          captcha_blocked: e.captcha_blocked,
+          provision_id: e.provision_id,
+          occurred_at: e.occurred_at,
+        })),
+        recent_count: recent.length,
+      });
     },
   );
 

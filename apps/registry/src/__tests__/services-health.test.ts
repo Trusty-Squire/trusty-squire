@@ -8,6 +8,10 @@ import { generateKeyPairSync } from "node:crypto";
 import { buildServer } from "../server.js";
 import { InMemorySkillStore } from "../skill-store-memory.js";
 import { InMemoryProvisionEventStore } from "../provision-event-store.js";
+import {
+  InMemoryServiceStateStore,
+  projectServiceState,
+} from "../service-state-store.js";
 import { ManifestSigner } from "../signer.js";
 import {
   classifyCompat,
@@ -96,14 +100,17 @@ function build() {
   const signer = ManifestSigner.fromKeyObject(privateKey, "test-signer");
   const skillStore = new InMemorySkillStore();
   const attemptStore = new InMemoryProvisionEventStore();
+  const stateStore = new InMemoryServiceStateStore();
   return {
     skillStore,
     attemptStore,
+    stateStore,
     build: () =>
       buildServer({
         skillStore,
         signer,
         provisionEventStore: attemptStore,
+        serviceStateStore: stateStore,
       }),
   };
 }
@@ -624,5 +631,103 @@ describe("HTTP — GET /v1/services/:slug/health?peers=…", () => {
     // The first two should be skill-active; fly (working) should be last
     expect(body.alternates[0]?.state).toBe("skill-active");
     expect(body.alternates[body.alternates.length - 1]?.service).toBe("fly");
+  });
+});
+
+// ---------- Memory-overhaul Phase 3: ServiceState projection + dossier ----
+describe("projectServiceState — pure projection", () => {
+  it("a recent success → working/skill-active, stamps last_green_at", () => {
+    const events = [mkAttempt("success", 0)];
+    const p = projectServiceState("ipinfo", events, false);
+    expect(p.status).toBe("working");
+    expect(p.last_green_at).not.toBeNull();
+    expect(p.successful_count).toBe(1);
+  });
+
+  it("later green after a blocking run wins (convergent tie-break)", () => {
+    // A blocking run yesterday + a success today: last_green is today, and the
+    // projection reads the whole slice (order of arrival doesn't matter).
+    const events = [
+      { ...mkAttempt("failed", 1), failure_kind: "captcha_blocked" },
+      mkAttempt("success", 0),
+    ];
+    const p = projectServiceState("groq", events, false);
+    expect(p.last_green_at).not.toBeNull();
+    expect(p.last_failure_kind).toBe("captcha_blocked");
+  });
+
+  it("only failures → struggling/hard-block, no last_green", () => {
+    const events = [
+      { ...mkAttempt("failed", 0), failure_kind: "oauth_onboarding_failed" },
+      { ...mkAttempt("failed", 0), failure_kind: "oauth_onboarding_failed" },
+    ];
+    const p = projectServiceState("turso", events, false);
+    expect(p.last_green_at).toBeNull();
+    expect(p.last_failure_kind).toBe("oauth_onboarding_failed");
+    expect(["struggling", "hard-block"]).toContain(p.status);
+  });
+});
+
+describe("HTTP — POST recomputes ServiceState; GET /dossier reads it", () => {
+  it("a posted attempt materializes ServiceState", async () => {
+    const { stateStore, build: b } = build();
+    const server = await b();
+    await server.inject({
+      method: "POST",
+      url: "/v1/services/ipinfo/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: { status: "success", mcp_version: "0.9.17" },
+    });
+    const state = await stateStore.get("ipinfo");
+    expect(state).not.toBeNull();
+    expect(state?.status).toBe("working");
+    expect(state?.last_green_at).not.toBeNull();
+  });
+
+  it("recompute preserves the heal-written overlay", async () => {
+    const { stateStore, build: b } = build();
+    const server = await b();
+    await stateStore.patchOverlay("groq", {
+      current_diagnosis: "in-modal Turnstile gates the create button",
+      wall_classification: null,
+    });
+    await server.inject({
+      method: "POST",
+      url: "/v1/services/groq/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: { status: "failed", failure_kind: "captcha_blocked", mode: "discover", mcp_version: "0.9.17" },
+    });
+    const state = await stateStore.get("groq");
+    // Projection updated…
+    expect(state?.last_failure_kind).toBe("captcha_blocked");
+    // …but the overlay diagnosis survived the recompute.
+    expect(state?.current_diagnosis).toBe("in-modal Turnstile gates the create button");
+  });
+
+  it("GET /dossier returns state + capped recent events", async () => {
+    const { build: b } = build();
+    const server = await b();
+    for (let i = 0; i < 3; i++) {
+      await server.inject({
+        method: "POST",
+        url: "/v1/services/groq/attempts",
+        headers: { "x-account-id": "acct-a" },
+        payload: { status: "failed", failure_kind: "captcha_blocked", mode: "discover", mcp_version: "0.9.17" },
+      });
+    }
+    const res = await server.inject({ method: "GET", url: "/v1/services/groq/dossier?events=2" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.service).toBe("groq");
+    expect(body.state?.status).toBeDefined();
+    expect(body.recent_events.length).toBe(2); // capped by ?events=2
+    expect(body.recent_events[0]?.mode).toBe("discover");
+  });
+
+  it("GET /dossier 400s an invalid slug", async () => {
+    const { build: b } = build();
+    const server = await b();
+    const res = await server.inject({ method: "GET", url: "/v1/services/!!!/dossier" });
+    expect(res.statusCode).toBe(400);
   });
 });
