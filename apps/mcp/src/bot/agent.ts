@@ -12329,13 +12329,39 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             .trim()}" to reveal the email/password form.`,
         );
         await this.browser.click(emailButton.selector);
-        await this.browser.wait(2);
+        await this.browser.wait(3);
         inv = await this.buildInventory(steps);
         ({ emailEl, pwEl } = findLoginFields(inv));
       }
     }
-    if (emailEl === undefined || pwEl === undefined) {
-      steps.push("Login: no email/password fields on the page — skipped.");
+
+    // Progressive (email-first) login: some flows reveal ONLY the email field;
+    // you enter it, click Continue, THEN the password field appears on the next
+    // step. portkey (MEASURED 2026-06-17): "Continue with work email" → email
+    // field → Continue → password. Fill the email, advance, and re-read.
+    if (emailEl !== undefined && pwEl === undefined) {
+      await this.browser.type(emailEl.selector, email).catch(() => undefined);
+      const advance =
+        inv.find((e) => e.type === "submit") ??
+        inv.find(
+          (e) =>
+            (e.tag === "button" || e.type === "submit") &&
+            /\b(continue|next|log ?in|sign ?in|submit)\b/i.test(
+              `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`,
+            ),
+        );
+      if (advance !== undefined) {
+        steps.push(
+          "Login: email-first flow — submitted the email, advancing to the password step.",
+        );
+        await this.browser.clickSubmit(advance.selector).catch(() => undefined);
+        await this.browser.wait(3);
+        inv = await this.buildInventory(steps);
+        ({ emailEl, pwEl } = findLoginFields(inv));
+      }
+    }
+    if (pwEl === undefined) {
+      steps.push("Login: no password field reachable — skipped.");
       return false;
     }
     // Login submit: a submit-typed button, else one whose text reads
@@ -12351,7 +12377,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       ) ??
       buttons[0];
     try {
-      await this.browser.type(emailEl.selector, email);
+      // The email may already have been entered on the prior step.
+      if (emailEl !== undefined) {
+        await this.browser.type(emailEl.selector, email);
+      }
       await this.browser.type(pwEl.selector, password);
       steps.push("Login: filled the signup credentials");
       if (submitEl !== undefined) {
