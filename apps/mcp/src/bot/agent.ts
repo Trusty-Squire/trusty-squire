@@ -3373,9 +3373,13 @@ export function extractQuotedTokenFromReason(
   // `.` is in the class: many tokens are dot-separated (Zerops
   // `LhJbaP.VeODh3ZZ…`, GitLab PATs, JWTs, Slack `xox*`); excluding it
   // dropped every dotted token to null and looped to run_timeout
-  // (MEASURED 2026-06-12: zerops). The verbatim pageText.includes guard
-  // below keeps a sentence's trailing period from matching.
-  const matches = reason.matchAll(/['"`]([A-Za-z0-9_.\-]{10,80})['"`]/g);
+  // (MEASURED 2026-06-12: zerops). `+/=` are in too: some services mint
+  // BASE64-encoded keys (portkey, MEASURED 2026-06-17: `tdCwXd/8kp4…` — the
+  // `/` truncated capture to `tdCwXd` (<10) → null → 24-round loop to
+  // run_timeout despite the key being on the page). The verbatim
+  // pageText.includes guard below keeps a sentence's trailing period — or a
+  // stray path/URL fragment — from matching anything not actually on the page.
+  const matches = reason.matchAll(/['"`]([A-Za-z0-9_.+/=\-]{10,80})['"`]/g);
   for (const m of matches) {
     const candidate = m[1];
     if (candidate === undefined) continue;
@@ -3536,7 +3540,7 @@ export function extractAllLabeledTokensFromReason(
   //     credential prefix); (2) hard-reject a curated set of common
   //     English status words that look label-like in extract prose.
   const quotedRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_.\\-]{4,80})['"\`]`,
+    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_.+/=\\-]{4,80})['"\`]`,
     "gi",
   );
   for (const m of reason.matchAll(quotedRe)) {
@@ -3578,7 +3582,7 @@ export function extractAllLabeledTokensFromReason(
   // value. The credential-shape + blacklist guards run on the
   // captured (possibly-unquoted) value.
   const proseRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_.\\-]{4,80})['"\`]?`,
+    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_.+/=\\-]{4,80})['"\`]?`,
     "gi",
   );
   for (const m of reason.matchAll(proseRe)) {

@@ -123,3 +123,19 @@ describe("parseFirebaseEmailAction — Firebase verifyEmail link → {apiKey, oo
     ).toBeNull();
   });
 });
+
+import { extractQuotedTokenFromReason } from "../agent.js";
+
+describe("extractQuotedTokenFromReason — base64-style keys (with /)", () => {
+  it("captures a base64 key containing '/' (portkey) — present on page", () => {
+    const key = "tdCwXd/8kp4EqdACsvfojKF5bkTx";
+    expect(
+      extractQuotedTokenFromReason(`api_key='${key}'`, `Your API key: ${key}`),
+    ).toBe(key);
+  });
+  it("still rejects a quoted token NOT present on the page", () => {
+    expect(
+      extractQuotedTokenFromReason("api_key='abc/def/ghi/jkl'", "no key here"),
+    ).toBeNull();
+  });
+});
