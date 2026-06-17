@@ -196,6 +196,12 @@ per-service failure aggregation).
 
 ## Phased rollout (each phase non-breaking, shippable alone)
 
+> STATUS (2026-06-17): all four phases SHIPPED to `staging`. Registry needs a
+> deploy to apply the non-destructive `db push` (new columns + ServiceState +
+> OpenIssue tables) and wire the Prisma stores. Until deployed, the new
+> columns/fields are silently dropped by the older route (zod strips unknowns)
+> — graceful.
+
 1. **Extend `ProvisionEvent`** (+mode, +captcha summary columns; all
    nullable/defaulted → `db push` non-destructive). Backfill not required —
    new columns default. Unifies the firehose with no rename risk.

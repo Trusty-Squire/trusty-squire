@@ -18,6 +18,41 @@ export interface RegistryPrismaClient {
   healRun: HealRunDelegate;
   // Memory-overhaul Phase 3 — materialized per-service status.
   serviceState: ServiceStateDelegate;
+  // Memory-overhaul Phase 4 — the drainable failure ledger.
+  openIssue: OpenIssueDelegate;
+}
+
+interface OpenIssueRow {
+  id: string;
+  service: string;
+  failure_kind: string;
+  status: string;
+  first_seen: Date;
+  attempts: number;
+  resolved_run: string | null;
+  falsified: unknown;
+  actor: string | null;
+  version: number;
+  updated_at: Date;
+}
+
+interface OpenIssueDelegate {
+  create(args: { data: Record<string, unknown> }): Promise<OpenIssueRow>;
+  update(args: {
+    where: Record<string, unknown>;
+    data: Record<string, unknown>;
+  }): Promise<OpenIssueRow>;
+  updateMany(args: {
+    where: Record<string, unknown>;
+    data: Record<string, unknown>;
+  }): Promise<{ count: number }>;
+  findUnique(args: {
+    where: Record<string, unknown>;
+  }): Promise<OpenIssueRow | null>;
+  findMany(args: {
+    where?: Record<string, unknown>;
+    orderBy?: Record<string, unknown>;
+  }): Promise<OpenIssueRow[]>;
 }
 
 interface ServiceStateRow {

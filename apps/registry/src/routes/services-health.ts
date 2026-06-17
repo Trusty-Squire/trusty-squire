@@ -21,6 +21,7 @@ import {
   projectServiceState,
   type ServiceStateStore,
 } from "../service-state-store.js";
+import type { OpenIssueStore } from "../open-issue-store.js";
 
 export interface ServicesHealthRouteDeps {
   eventStore: ProvisionEventStore;
@@ -32,6 +33,10 @@ export interface ServicesHealthRouteDeps {
    *  a POSTed attempt recomputes the projection on insert and the dossier
    *  endpoint reads it. Optional so legacy bootstraps work unchanged. */
   serviceStateStore?: ServiceStateStore;
+  /** Memory-overhaul Phase 4 — the drainable ledger. A failed attempt seeds
+   *  an OpenIssue from the firehose; a success drains the service's open
+   *  tickets. Optional. */
+  openIssueStore?: OpenIssueStore;
 }
 
 const PostBodySchema = z.object({
@@ -158,6 +163,26 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
           request.log.warn(
             { err, service: slug },
             "ServiceState projection recompute failed (non-fatal)",
+          );
+        }
+      }
+      // Memory-overhaul Phase 4 — feed the drainable ledger from the firehose
+      // (Codex #5: seed from ProvisionEvent, NOT UniversalBotFailureRecord —
+      // UBF isn't populated on every failure path, which would leave silent
+      // all-clear gaps). A failure seeds/reopens a ticket; a success with a
+      // provision_id drains the service's open tickets (drain-on-green).
+      // Best-effort — never fail the attempt POST.
+      if (opts.openIssueStore !== undefined) {
+        try {
+          if (d.status === "failed" && d.failure_kind !== undefined) {
+            await opts.openIssueStore.seedFailure(slug, d.failure_kind);
+          } else if (d.status === "success" && d.provision_id !== undefined) {
+            await opts.openIssueStore.resolveServiceOnSuccess(slug, d.provision_id);
+          }
+        } catch (err) {
+          request.log.warn(
+            { err, service: slug },
+            "OpenIssue ledger update failed (non-fatal)",
           );
         }
       }

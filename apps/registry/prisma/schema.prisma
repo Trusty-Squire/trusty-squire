@@ -466,3 +466,46 @@ model ServiceState {
 
   @@index([status])
 }
+
+// OpenIssue — memory-overhaul Phase 4. The DRAINABLE work queue: one ticket
+// per (service, failure_kind) while a service isn't servable. The point that
+// makes it more than telemetry is the CLOSE-GATE, enforced SERVER-SIDE: you
+// cannot mark a ticket `resolved` without pointing at a green run, and you
+// cannot mark it `wall` without a falsification record (the experiment that
+// proved the wall + its result). That mechanically blocks "I gave up and
+// called it terrain" under context pressure — the recurring failure mode.
+//
+// Seeded from the ProvisionEvent firehose (NOT UniversalBotFailureRecord —
+// Codex #5: UBF isn't populated on every failure path, which would leave
+// silent all-clear gaps). A success auto-resolves the service's open tickets
+// (drain-on-green); a later failure reopens. Optimistic concurrency (`version`)
+// keeps parallel loop workers (we run concurrency≥2) from stomping each other.
+model OpenIssue {
+  // Stable id "service:failure_kind" — a recurrence updates, not duplicates.
+  id           String @id
+  service      String
+  failure_kind String
+
+  // open → in_progress → resolved | wall. (resolved/wall require evidence;
+  // see the close-gate in routes/issues.ts.)
+  status String @default("open")
+
+  first_seen DateTime @default(now())
+  attempts   Int      @default(1)
+
+  // Close evidence — the gate REQUIRES the matching one for the target status.
+  resolved_run String? // a green ProvisionEvent.provision_id (status=resolved)
+  // { experiment, result, evidence_ref? } — the falsification record (status=wall).
+  falsified Json?
+
+  // Who last transitioned it (loop worker id / "auto" for event-driven paths).
+  actor String?
+  // Optimistic-concurrency token; bumped on every mutation. A claim/resolve/
+  // wall with a stale version is rejected 409.
+  version Int @default(0)
+
+  updated_at DateTime @updatedAt
+
+  @@index([status])
+  @@index([service])
+}

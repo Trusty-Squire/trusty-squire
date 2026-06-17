@@ -29,6 +29,11 @@ import {
   projectServiceState,
   type ServiceStateStore,
 } from "./service-state-store.js";
+import {
+  InMemoryOpenIssueStore,
+  type OpenIssueStore,
+} from "./open-issue-store.js";
+import { registerIssuesRoutes } from "./routes/issues.js";
 import { adminAuthFromEnv, type AdminAuthConfig } from "./admin-auth.js";
 
 function numEnv(name: string, fallback: number): number {
@@ -51,6 +56,9 @@ export interface BuildServerOpts {
   // Memory-overhaul Phase 3 — materialized per-service status (projection +
   // overlay). In-memory default; production wires a Prisma store at boot.
   serviceStateStore?: ServiceStateStore;
+  // Memory-overhaul Phase 4 — the drainable failure ledger. In-memory default;
+  // production wires a Prisma store at boot.
+  openIssueStore?: OpenIssueStore;
   // Google SSO config for the dashboard. Defaults to adminAuthFromEnv()
   // when omitted; tests inject a config (or null for bearer-only).
   adminAuth?: AdminAuthConfig | null;
@@ -104,6 +112,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     opts.provisionEventStore ?? new InMemoryProvisionEventStore();
   const serviceStateStore =
     opts.serviceStateStore ?? new InMemoryServiceStateStore();
+  const openIssueStore =
+    opts.openIssueStore ?? new InMemoryOpenIssueStore();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
   // used both for skill provenance (`signed_by` field on stored
@@ -171,6 +181,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     resolveAccountId,
     scoreOptions,
     serviceStateStore,
+    openIssueStore,
   });
   // Memory-overhaul Phase 3 — one-time backfill so existing services aren't
   // "unknown" until their next event (Codex rollout note). Best-effort,
@@ -214,6 +225,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
       : {}),
     ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
+  });
+  // Memory-overhaul Phase 4 — the drainable ledger's HTTP surface (admin-bearer
+  // gated; the close-gate is enforced inside the store, not the route).
+  await fastify.register(registerIssuesRoutes, {
+    openIssueStore,
+    ...(adminBearer !== undefined && adminBearer.length > 0 ? { adminBearer } : {}),
   });
   // Workspace-restricted Google SSO for the browser dashboard. Read from
   // env unless the caller injects a config (tests). Null = bearer-only.
@@ -279,6 +296,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       serviceStateStore: await (
         await import("./prisma-service-state-store.js")
       ).PrismaServiceStateStore.fromEnv(),
+      // Memory-overhaul Phase 4 — the drainable failure ledger.
+      openIssueStore: await (
+        await import("./prisma-open-issue-store.js")
+      ).PrismaOpenIssueStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);
