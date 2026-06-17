@@ -154,6 +154,64 @@ export function verificationLinkFailed(pageText: string): boolean {
   return VERIFY_LINK_FAILED_PATTERNS.some((p) => t.includes(p));
 }
 
+// Firebase email-action links carry mode=verifyEmail + oobCode + apiKey as
+// query params — even on a custom domain (portkey: app.portkey.ai/auth?…).
+// Extract them so we can confirm the verification via Firebase's REST API
+// directly: far lower latency than a browser SPA navigation (racing a short
+// oobCode TTL) and it issues the single-use code exactly ONCE (no SPA
+// double-submit). Returns null when the link isn't a Firebase verifyEmail
+// action. Exported for unit tests.
+export function parseFirebaseEmailAction(
+  url: string,
+): { apiKey: string; oobCode: string } | null {
+  let u: URL;
+  try {
+    u = new URL(url.replace(/&amp;/g, "&"));
+  } catch {
+    return null;
+  }
+  const oobCode = u.searchParams.get("oobCode");
+  const apiKey = u.searchParams.get("apiKey");
+  if (u.searchParams.get("mode") !== "verifyEmail" || oobCode === null || apiKey === null) {
+    return null;
+  }
+  if (!/^AIza[\w-]{20,}$/.test(apiKey)) return null; // Firebase web API key shape
+  return { apiKey, oobCode };
+}
+
+// Apply a Firebase email-verification oobCode via the Identity Toolkit REST API
+// — the same call the emailed link's SPA makes, issued directly so it runs the
+// instant the mail lands and only once. The apiKey is the Firebase WEB api key
+// (public by design). ok=true + the verified email on success; ok=false + the
+// Firebase error (EXPIRED_OOB_CODE / INVALID_OOB_CODE) otherwise — which itself
+// proves whether the code was alive at receipt. Exported for unit tests.
+export async function applyFirebaseEmailVerification(
+  apiKey: string,
+  oobCode: string,
+): Promise<{ ok: boolean; email?: string; error?: string }> {
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ oobCode }),
+      },
+    );
+    const data = (await resp.json().catch(() => ({}))) as {
+      email?: string;
+      emailVerified?: boolean;
+      error?: { message?: string };
+    };
+    if (resp.ok && (data.emailVerified === true || data.email !== undefined)) {
+      return { ok: true, ...(data.email !== undefined ? { email: data.email } : {}) };
+    }
+    return { ok: false, error: data.error?.message ?? `http_${resp.status}` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // Short probe when, even after a settle, the post-submit page still never
 // prompted the user to check their email AND no account-created signal
 // appeared. Legitimate verification mail almost always lands inside a
@@ -7308,6 +7366,42 @@ export class SignupAgent {
                 this.pickVerificationLink(Array.from(email.parsed_links)) ??
                 pickVerificationLinkFromHtml(email.body_html ?? "");
               if (verifyLink !== null) {
+                // Firebase email-action link → verify via the REST API
+                // IMMEDIATELY (clean ms-latency POST) instead of the browser
+                // SPA, which (portkey, 2026-06-17) landed on "link expired".
+                // This races a short oobCode TTL, issues the single-use code
+                // once, AND diagnoses: an EXPIRED error here proves the code is
+                // dead at receipt (mail-pipeline latency), not a browser bug.
+                const fbAction = parseFirebaseEmailAction(verifyLink);
+                let firebaseVerified = false;
+                if (fbAction !== null) {
+                  const r = await applyFirebaseEmailVerification(
+                    fbAction.apiKey,
+                    fbAction.oobCode,
+                  );
+                  firebaseVerified = r.ok;
+                  steps.push(
+                    r.ok
+                      ? `Verified the email directly via Firebase REST (${r.email ?? "account"} now verified) — bypassing the browser link.`
+                      : `Firebase REST verify did not succeed (${r.error ?? "unknown"}) — oobCode appears dead at receipt; falling back to the browser link.`,
+                  );
+                }
+                if (firebaseVerified) {
+                  // Email verified server-side → go to the app and log in
+                  // (two-stage aware); extraction below then reaches the key.
+                  try {
+                    await this.browser.goto(new URL(verifyLink).origin);
+                    await this.browser.wait(2);
+                    await this.loginWithCredentials(task.email, password, steps);
+                    await this.browser.wait(2);
+                  } catch (err) {
+                    steps.push(
+                      `Post-Firebase-verify login errored (non-fatal): ${
+                        err instanceof Error ? err.message : String(err)
+                      }`,
+                    );
+                  }
+                } else {
                 steps.push(`Following verification link: ${verifyLink}`);
                 await this.browser.goto(verifyLink);
                 // PERF: a 1s settle is enough for the verify landing
@@ -7365,6 +7459,7 @@ export class SignupAgent {
                     }`,
                   );
                 }
+                } // end browser-link fallback (non-Firebase path)
 
                 // Try extracting first — many services drop the API key
                 // straight onto the landing page after verification.

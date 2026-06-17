@@ -98,3 +98,28 @@ describe("verificationLinkFailed — expired/used single-use link → go log in"
     expect(verificationLinkFailed("Check your email to verify your account.")).toBe(false);
   });
 });
+
+import { parseFirebaseEmailAction } from "../agent.js";
+
+describe("parseFirebaseEmailAction — Firebase verifyEmail link → {apiKey, oobCode}", () => {
+  it("parses a portkey-style custom-domain Firebase action link (with &amp;)", () => {
+    const url =
+      "https://app.portkey.ai/auth?mode=verifyEmail&amp;oobCode=GYIRIG8NBin9i3XZz8q4&amp;apiKey=AIzaSyCFDZUr22oV3OhhCqUm_3bXtA9h4l5MDP8&amp;lang=en";
+    expect(parseFirebaseEmailAction(url)).toEqual({
+      apiKey: "AIzaSyCFDZUr22oV3OhhCqUm_3bXtA9h4l5MDP8",
+      oobCode: "GYIRIG8NBin9i3XZz8q4",
+    });
+  });
+  it("returns null for non-verifyEmail modes and non-Firebase links", () => {
+    expect(
+      parseFirebaseEmailAction("https://app.x.com/auth?mode=resetPassword&oobCode=z&apiKey=AIzaSyAAAAAAAAAAAAAAAAAAAAAA"),
+    ).toBeNull();
+    expect(parseFirebaseEmailAction("https://arize.com/confirm?token=abc")).toBeNull();
+    expect(parseFirebaseEmailAction("not a url")).toBeNull();
+  });
+  it("rejects a malformed apiKey", () => {
+    expect(
+      parseFirebaseEmailAction("https://x/auth?mode=verifyEmail&oobCode=z&apiKey=nope"),
+    ).toBeNull();
+  });
+});
