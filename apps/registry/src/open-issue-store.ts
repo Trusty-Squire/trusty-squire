@@ -31,6 +31,17 @@ export interface OpenIssueRecord {
   updated_at: Date;
 }
 
+// Normalize a raw failure string to a STABLE coarse bucket for the ledger key.
+// ProvisionEvent.failure_kind is the raw error ("needs_login: landed on a
+// Google sign-in form…"); the coarse token is the part before the first colon
+// ("needs_login"). Without this the ledger fragments — the same underlying
+// failure seeds a fresh ticket per error-string variant, and the ids become
+// unusable on the CLI. (Design doc: "failure_kind taxonomy stability".)
+export function coarseFailureKind(raw: string): string {
+  const head = (raw.split(":")[0] ?? "").trim().toLowerCase().replace(/\s+/g, "_");
+  return head.length > 0 && head.length <= 48 ? head : "unknown";
+}
+
 export function issueId(service: string, failureKind: string): string {
   return `${service}:${failureKind}`;
 }
@@ -69,6 +80,10 @@ export interface OpenIssueStore {
   ): Promise<CloseResult>;
   get(id: string): Promise<OpenIssueRecord | null>;
   list(status?: IssueStatus): Promise<OpenIssueRecord[]>;
+  /** One-time self-heal: delete OPEN tickets whose failure_kind isn't a coarse
+   *  token (a legacy raw-string seed — contains a space or colon). Preserves
+   *  resolved/wall (human work). Returns how many it removed. */
+  purgeUnnormalizedOpen(): Promise<number>;
 }
 
 // Shared close-gate so the in-memory and Prisma stores can't diverge on the
@@ -96,7 +111,8 @@ export function checkCloseGate(
 export class InMemoryOpenIssueStore implements OpenIssueStore {
   private readonly rows = new Map<string, OpenIssueRecord>();
 
-  async seedFailure(service: string, failureKind: string): Promise<OpenIssueRecord> {
+  async seedFailure(service: string, rawKind: string): Promise<OpenIssueRecord> {
+    const failureKind = coarseFailureKind(rawKind);
     const id = issueId(service, failureKind);
     const prior = this.rows.get(id);
     if (prior === undefined) {
@@ -222,5 +238,17 @@ export class InMemoryOpenIssueStore implements OpenIssueStore {
     const all = [...this.rows.values()];
     const filtered = status === undefined ? all : all.filter((r) => r.status === status);
     return filtered.sort((a, b) => b.attempts - a.attempts);
+  }
+
+  async purgeUnnormalizedOpen(): Promise<number> {
+    let n = 0;
+    for (const [id, row] of this.rows) {
+      if (row.status !== "open") continue;
+      if (/[:\s]/.test(row.failure_kind)) {
+        this.rows.delete(id);
+        n += 1;
+      }
+    }
+    return n;
   }
 }

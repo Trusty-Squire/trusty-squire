@@ -194,6 +194,10 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
         60 * 86_400_000,
         500,
       );
+      // Self-heal: drop legacy raw-string OPEN tickets before re-seeding with
+      // the coarse-token key (the failure_kind-taxonomy fix). One-time effect
+      // — normalized seeds never match, and resolved/wall human work is kept.
+      const purged = await openIssueStore.purgeUnnormalizedOpen();
       let seededIssues = 0;
       for (const { service } of demand) {
         const [attempts, activeSkill] = await Promise.all([
@@ -222,7 +226,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
         }
       }
       fastify.log.info(
-        { services: demand.length, seededIssues },
+        { services: demand.length, seededIssues, purged },
         "ServiceState + OpenIssue backfill complete",
       );
     } catch (err) {

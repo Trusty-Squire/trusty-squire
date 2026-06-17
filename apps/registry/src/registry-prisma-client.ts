@@ -53,6 +53,9 @@ interface OpenIssueDelegate {
     where?: Record<string, unknown>;
     orderBy?: Record<string, unknown>;
   }): Promise<OpenIssueRow[]>;
+  deleteMany(args: {
+    where: Record<string, unknown>;
+  }): Promise<{ count: number }>;
 }
 
 interface ServiceStateRow {

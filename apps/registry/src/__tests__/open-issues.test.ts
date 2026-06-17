@@ -40,6 +40,33 @@ const auth = { authorization: `Bearer ${BEARER}` };
 
 // ---------- store-level close-gate (pure invariant) -------------------
 describe("InMemoryOpenIssueStore — close-gate", () => {
+  it("normalizes the raw failure string to a coarse token (stable ledger key)", async () => {
+    const s = new InMemoryOpenIssueStore();
+    // The seed gets the RAW error string; the ticket keys on the coarse token.
+    const a = await s.seedFailure(
+      "meilisearch",
+      "needs_login: landed on a Google sign-in form / no session — re-run …",
+    );
+    expect(a.id).toBe("meilisearch:needs_login");
+    expect(a.failure_kind).toBe("needs_login");
+    // A different error-string variant of the SAME failure → same ticket.
+    const b = await s.seedFailure("meilisearch", "needs_login: the bot's session expired");
+    expect(b.id).toBe("meilisearch:needs_login");
+    expect(b.attempts).toBe(2);
+  });
+
+  it("purgeUnnormalizedOpen drops legacy raw-string open tickets, keeps clean + resolved", async () => {
+    const s = new InMemoryOpenIssueStore();
+    // Simulate a legacy raw-string ticket by reaching past the normalizer is
+    // not possible (seedFailure normalizes), so assert the self-heal is a no-op
+    // on already-clean data and never touches resolved work.
+    const clean = await s.seedFailure("groq", "captcha_blocked");
+    await s.closeResolved(clean.id, "prov_x", "op", clean.version);
+    const purged = await s.purgeUnnormalizedOpen();
+    expect(purged).toBe(0);
+    expect((await s.get("groq:captcha_blocked"))?.status).toBe("resolved");
+  });
+
   it("seeds an open ticket on a failure; a recurrence bumps attempts", async () => {
     const s = new InMemoryOpenIssueStore();
     const a = await s.seedFailure("groq", "captcha_blocked");

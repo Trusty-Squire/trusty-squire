@@ -10,6 +10,7 @@ import {
 } from "./registry-prisma-client.js";
 import {
   checkCloseGate,
+  coarseFailureKind,
   issueId,
   type CloseResult,
   type Falsification,
@@ -61,7 +62,8 @@ export class PrismaOpenIssueStore implements OpenIssueStore {
     await this.client.$disconnect();
   }
 
-  async seedFailure(service: string, failureKind: string): Promise<OpenIssueRecord> {
+  async seedFailure(service: string, rawKind: string): Promise<OpenIssueRecord> {
+    const failureKind = coarseFailureKind(rawKind);
     const id = issueId(service, failureKind);
     const prior = await this.client.openIssue.findUnique({ where: { id } });
     if (prior === null) {
@@ -158,5 +160,14 @@ export class PrismaOpenIssueStore implements OpenIssueStore {
       orderBy: { attempts: "desc" },
     });
     return (rows as Row[]).map(mapRow);
+  }
+
+  async purgeUnnormalizedOpen(): Promise<number> {
+    // A coarse token never contains whitespace or a colon; a legacy raw-string
+    // seed always does. Delete only OPEN ones (preserve resolved/wall).
+    const { count } = await this.client.openIssue.deleteMany({
+      where: { status: "open", failure_kind: { contains: ":" } },
+    });
+    return count;
   }
 }
