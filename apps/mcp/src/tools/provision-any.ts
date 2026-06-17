@@ -42,6 +42,7 @@ import {
 import { categoryPeersOf } from "../data/service-categories.js";
 import { promoteToSkill } from "../bot/promote-to-skill.js";
 import { currentRunId, resolveCaptureDir } from "../bot/onboarding-capture.js";
+import { redactCredentials, redactHtml } from "../bot/redact.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import { CliExit } from "../skill-cli/errors.js";
 
@@ -1317,7 +1318,7 @@ async function postCredentialsToVault(
 //
 // All errors are swallowed: a snapshot upload failure must never
 // abort a signup.
-function buildExtractFailureUploader(
+export function buildExtractFailureUploader(
   accountId: string,
   provisionId?: string,
 ): (input: {
@@ -1343,9 +1344,13 @@ function buildExtractFailureUploader(
         url: input.url,
         title: input.title,
         step_label: input.step_label,
-        extract_reason: input.extract_reason,
-        candidates: input.candidates,
-        html: input.html,
+        // Phase 2 — redact secrets before anything leaves the box. The DOM
+        // gets the full HTML scrub (captcha/auth/password + key shapes); the
+        // prose reason + candidate strings get the key-shape redactor (they
+        // routinely contain the LLM's verbatim view of an extracted value).
+        extract_reason: redactCredentials(input.extract_reason),
+        candidates: input.candidates.map(redactCredentials),
+        html: redactHtml(input.html),
         ...(input.screenshot_jpeg_base64 !== undefined
           ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
           : {}),
@@ -1382,7 +1387,7 @@ function buildExtractFailureUploader(
 // are logged but never propagate, and the round-uploader call site in
 // agent.ts ALSO wraps in try/catch so the loop is bulletproof either
 // way. Account-scoped identically.
-function buildRoundUploader(
+export function buildRoundUploader(
   accountId: string,
   provisionId?: string,
 ): (input: {
@@ -1409,9 +1414,13 @@ function buildRoundUploader(
         // planner's chosen reason so the trail is intelligible
         // without fetching the full row.
         step_label: `round-${input.round}-${input.kind}`,
-        extract_reason: `round_telemetry: ${input.observed_reason}`.slice(0, 4000),
+        extract_reason: redactCredentials(
+          `round_telemetry: ${input.observed_reason}`.slice(0, 4000),
+        ),
         candidates: [`inventory_count=${input.inventory_count}`],
-        html: input.html,
+        // Phase 2 — redact secrets from the DOM before upload (every failure
+        // kind now uploads its chain, so this path is the one that grows).
+        html: redactHtml(input.html),
         ...(input.screenshot_jpeg_base64 !== undefined
           ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
           : {}),

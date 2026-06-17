@@ -60,3 +60,51 @@ export function redactCredentials(text: string): string {
   }
   return out;
 }
+
+// Memory-overhaul Phase 2 — DOM-secret scrub for the EVIDENCE-UPLOAD path.
+// Centralizing the full per-round DOM on every failure (so a failure can be
+// re-inspected without reproducing it) multiplies the sensitive-data surface
+// in the registry. On top of the key-prefix redactor above, the DOM can carry
+// session material that is NOT a known API-key shape: captcha response tokens,
+// Authorization/Cookie headers leaked into inline JS or attributes, and the
+// value typed into a password field. Scrub them BEFORE any DOM leaves the box.
+//
+// Best-effort defense-in-depth, NOT a security boundary — regex over HTML
+// can't catch every shape, but it removes the obvious high-value secrets. The
+// 7-day retention sweep + operator-only trust boundary remain the backstops.
+// (Screenshot pixel redaction is out of scope — see the design doc.)
+const HTML_SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  // Captcha response tokens — as a hidden input value…
+  [
+    /(\bname=["'](?:cf-turnstile-response|g-recaptcha-response|h-captcha-response)["'][^>]*\bvalue=["'])[^"']{16,}(["'])/gi,
+    "$1REDACTED$2",
+  ],
+  // …or assigned in inline JS / JSON config.
+  [
+    /(["']?(?:cf-turnstile-response|g-recaptcha-response|h-captcha-response)["']?\s*[:=]\s*["'])[^"']{16,}(["'])/gi,
+    "$1REDACTED$2",
+  ],
+  // Authorization / Cookie / api-key headers in attributes or inline JS.
+  [
+    /(["']?(?:authorization|cookie|set-cookie|x-api-key|x-auth-token)["']?\s*[:=]\s*["'])[^"'\n]{12,}(["'])/gi,
+    "$1REDACTED$2",
+  ],
+  [/(\bBearer\s+)[A-Za-z0-9._\-]{16,}/gi, "$1REDACTED"],
+  // A populated password input's value (either attribute order).
+  [
+    /(<input\b[^>]*\btype=["']password["'][^>]*\bvalue=["'])[^"']+(["'])/gi,
+    "$1REDACTED$2",
+  ],
+  [
+    /(<input\b[^>]*\bvalue=["'])[^"']+(["'][^>]*\btype=["']password["'])/gi,
+    "$1REDACTED$2",
+  ],
+];
+
+export function redactHtml(html: string): string {
+  let out = redactCredentials(html);
+  for (const [re, repl] of HTML_SECRET_PATTERNS) {
+    out = out.replace(re, repl);
+  }
+  return out;
+}

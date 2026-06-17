@@ -29,6 +29,8 @@ import { InboxClient } from "../../bot/inbox-client.js";
 import {
   isAutoPromoteEnabled,
   runAutoPromote,
+  buildExtractFailureUploader,
+  buildRoundUploader,
 } from "../../tools/provision-any.js";
 import { emitProvisionEvent, postCaptchaEvent } from "../../tools/signup-telemetry.js";
 import { clientFromEnv, generateProvisionId } from "../../skill-registry-client.js";
@@ -461,6 +463,15 @@ export async function runDiscover(
         stepsSink,
         machineToken,
         apiBase,
+        // Memory-overhaul Phase 2 — the discover worker now uploads its
+        // per-round DOM/screenshot chain AND extract-failure snapshots to the
+        // registry (redacted), keyed by provisionId. Previously only the
+        // end-user provision path wired these, so a discovery failure
+        // (oauth_onboarding_failed / needs_login / captcha_blocked) left no
+        // central evidence — the groq case, crackable only because a LOCAL
+        // capture happened to survive. Both are fire-and-forget + redacted.
+        extractFailureUploader: buildExtractFailureUploader(accountId, provisionId),
+        roundUploader: buildRoundUploader(accountId, provisionId),
         // Per-run profile binding (Fix B). Absent (github / no plan) →
         // browser.ts falls back to the shared CHROME_PROFILE_DIR.
         ...(plan.profileDir !== undefined ? { profileDir: plan.profileDir } : {}),
