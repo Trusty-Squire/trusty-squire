@@ -139,3 +139,32 @@ describe("extractQuotedTokenFromReason — base64-style keys (with /)", () => {
     ).toBeNull();
   });
 });
+
+import { pickServiceDomainLink } from "../agent.js";
+
+describe("pickServiceDomainLink — same-domain confirm link fallback (arize)", () => {
+  it("picks the link on the service's registrable domain (app.arize.com ~ arize.com)", () => {
+    const links = [
+      "https://click.arize.com/track?u=unsubscribe",
+      "https://app.arize.com/confirm?token=abc123xyz",
+      "https://twitter.com/arizeai",
+    ];
+    expect(pickServiceDomainLink(links, "app.arize.com")).toBe(
+      "https://app.arize.com/confirm?token=abc123xyz",
+    );
+  });
+  it("skips unsubscribe/social/manage links even on-domain", () => {
+    expect(
+      pickServiceDomainLink(
+        ["https://arize.com/unsubscribe?u=1", "https://arize.com/email-settings"],
+        "arize.com",
+      ),
+    ).toBeNull();
+  });
+  it("returns null when no link matches the service domain", () => {
+    expect(
+      pickServiceDomainLink(["https://sendgrid.net/x", "https://other.com/y"], "arize.com"),
+    ).toBeNull();
+    expect(pickServiceDomainLink(["https://x.com"], null)).toBeNull();
+  });
+});

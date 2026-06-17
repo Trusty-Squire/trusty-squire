@@ -3980,6 +3980,39 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
   return best !== null && best.score > 0 ? best.url : null;
 }
 
+// Last-resort verification-link pick: a link in the email that points at the
+// SERVICE's OWN domain. MEASURED on arize (2026-06-17): the confirm email says
+// "Click the link in the email", but its confirm link is a click-tracker the
+// keyword scorers miss, and a spurious number in the body got read as a code →
+// the bot entered a code on a page with no code field and stalled. A same-
+// registrable-domain link in a signup email is almost always the confirmation,
+// so follow it when the keyword scorers came up empty. Skips obvious non-confirm
+// links (unsubscribe/preferences/privacy/terms/social). Exported for unit tests.
+export function pickServiceDomainLink(
+  links: readonly string[],
+  serviceHost: string | null,
+): string | null {
+  if (serviceHost === null || serviceHost.length === 0) return null;
+  // Compare the last two labels so app.arize.com matches arize.com.
+  const base = (h: string): string =>
+    h.toLowerCase().replace(/^www\./, "").split(".").slice(-2).join(".");
+  const target = base(serviceHost);
+  const SKIP =
+    /unsubscribe|preferences|email[_-]?settings|\bmanage\b|privacy|\bterms\b|twitter|linkedin|facebook|instagram|youtube|status\.|\/help\b|\/support\b|\/docs\b/i;
+  for (const raw of links) {
+    let u: URL;
+    try {
+      u = new URL(raw.replace(/&amp;/g, "&"));
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "https:" && u.protocol !== "http:") continue;
+    if (SKIP.test(raw)) continue;
+    if (base(u.hostname) === target) return u.href;
+  }
+  return null;
+}
+
 // Last-resort verification-CODE extraction from an email body, for the
 // passwordless "we emailed you a code" flow (axiom: "Axiom sign-in
 // verification code") when the inbox parser's parsed_codes came back empty.
@@ -7366,9 +7399,27 @@ export class SignupAgent {
               // URL-keyword scorer first; if it can't see past a click-tracker
               // wrapper, fall back to matching the link's ANCHOR TEXT in the
               // HTML body (amplitude's SendGrid-wrapped "Activate account").
+              // The service's own host — for the same-domain link fallback
+              // below. The current page IS the service (its confirm-email
+              // wall), so its URL is the most reliable source; task.signupUrl
+              // backs it up.
+              let serviceHost: string | null = null;
+              try {
+                serviceHost = new URL((await this.browser.getState()).url).hostname;
+              } catch {
+                /* fall through to signupUrl */
+              }
+              if (serviceHost === null && task.signupUrl !== undefined) {
+                try {
+                  serviceHost = new URL(task.signupUrl).hostname;
+                } catch {
+                  /* leave null */
+                }
+              }
               const verifyLink =
                 this.pickVerificationLink(Array.from(email.parsed_links)) ??
-                pickVerificationLinkFromHtml(email.body_html ?? "");
+                pickVerificationLinkFromHtml(email.body_html ?? "") ??
+                pickServiceDomainLink(Array.from(email.parsed_links), serviceHost);
               if (verifyLink !== null) {
                 // Firebase email-action link → verify via the REST API
                 // IMMEDIATELY (clean ms-latency POST) instead of the browser
