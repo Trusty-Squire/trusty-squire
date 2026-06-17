@@ -22,7 +22,7 @@
 - { slug: mistral, name: Mistral AI, signup_url: https://console.mistral.ai/, oauth_provider: google }
 - { slug: deepseek, name: DeepSeek, signup_url: https://platform.deepseek.com/sign_up, oauth_provider: google }
 - { slug: fireworks-ai, name: Fireworks AI, signup_url: https://fireworks.ai/login, oauth_provider: google }
-- { slug: huggingface, name: Hugging Face, signup_url: https://huggingface.co/join, oauth_provider: github }
+- { slug: huggingface, name: Hugging Face, signup_url: https://huggingface.co/join, oauth_provider: github, status: needs-manual }  # wall: /join gated by hCaptcha ENTERPRISE (page carries "Enterprise" + sitekey bd5f2066-…). Bot now DETECTS + routes the invisible hCaptcha to 2Captcha (c2c1305), but Enterprise hCaptcha needs an rqdata blob 2Captcha can't get → solve_timeout (180s) → submit rejected. Re-check if HF drops Enterprise or we add rqdata extraction (2026-06-17).
 - { slug: deepgram, name: Deepgram, signup_url: https://console.deepgram.com/signup, oauth_provider: google }
 - { slug: assemblyai, name: AssemblyAI, signup_url: https://www.assemblyai.com/dashboard/signup, oauth_provider: google }
 - { slug: cerebras, name: Cerebras, signup_url: https://cloud.cerebras.ai/, oauth_provider: google }
