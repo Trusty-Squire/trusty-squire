@@ -37,6 +37,10 @@ function mkAttempt(
     final_outcome: null,
     failure_kind: null,
     signup_url: null,
+    mode: null,
+    captcha_kind: null,
+    captcha_variant: null,
+    captcha_blocked: null,
     artifacts_uri: null,
     provision_id: null,
     step_trail: null,
@@ -253,6 +257,58 @@ describe("HTTP — POST /v1/services/:slug/attempts", () => {
     expect(rows[0]?.status).toBe("failed");
     expect(rows[0]?.failure_kind).toBe("verification_not_sent");
     expect(rows[0]?.signup_url).toBe("https://vercel.com/signup");
+  });
+
+  it("stores the Phase-1 mode + captcha summary (memory overhaul)", async () => {
+    const { attemptStore, build: b } = build();
+    const server = await b();
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/services/groq/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: {
+        status: "failed",
+        failure_kind: "captcha_blocked",
+        mode: "discover",
+        captcha_kind: "turnstile",
+        captcha_variant: "turnstile",
+        captcha_blocked: true,
+        mcp_version: "0.9.17",
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const rows = await attemptStore.listByService("groq", 60 * DAY);
+    expect(rows[0]?.mode).toBe("discover");
+    expect(rows[0]?.captcha_kind).toBe("turnstile");
+    expect(rows[0]?.captcha_variant).toBe("turnstile");
+    expect(rows[0]?.captcha_blocked).toBe(true);
+  });
+
+  it("rejects an invalid mode value (zod enum guard)", async () => {
+    const { build: b } = build();
+    const server = await b();
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/services/groq/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: { status: "success", mode: "bogus", mcp_version: "0.9.17" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("omitting mode + captcha leaves them null (legacy client)", async () => {
+    const { attemptStore, build: b } = build();
+    const server = await b();
+    await server.inject({
+      method: "POST",
+      url: "/v1/services/ipinfo/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: { status: "success", mcp_version: "0.7.18" },
+    });
+    const rows = await attemptStore.listByService("ipinfo", 60 * DAY);
+    expect(rows[0]?.mode).toBeNull();
+    expect(rows[0]?.captcha_kind).toBeNull();
+    expect(rows[0]?.captcha_blocked).toBeNull();
   });
 
   it("blind-defaults strategy to bot when the post omits it (legacy client)", async () => {

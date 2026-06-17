@@ -321,6 +321,19 @@ model ProvisionEvent {
   final_strategy   String? // "replay" | "bot" — what actually served it
   replay_outcome   String? // "ok" | "miss" | "na" — why replay did/didn't serve
   final_outcome    String? // "ok" | "failed" | "blocked"
+  // Memory-overhaul Phase 1 — the housekeeper CONTEXT this run ran in:
+  // "discover" | "verify" | "replay". Distinct from *_strategy (which path
+  // the router tried): an end-user provision and a housekeeper discovery
+  // run can share strategy=bot but differ in mode. Null for legacy rows +
+  // end-user provisions that don't set it.
+  mode String?
+  // Memory-overhaul Phase 1 — captcha SUMMARY (partial fold, decision 4).
+  // The detailed CaptchaEvent (stealth_profile + egress-reputation
+  // correlation) stays in the API DB; the firehose carries just enough to
+  // answer "did this run hit a captcha, which kind, was it blocked".
+  captcha_kind    String? // "turnstile" | "recaptcha" | "hcaptcha" | …
+  captcha_variant String? // e.g. "turnstile" | "recaptcha_v2" | "recaptcha_v3"
+  captcha_blocked Boolean?
   // Optional failure classification — same vocabulary as
   // UniversalBotFailureRecord.error_kind. Populated when status="failed".
   failure_kind String?

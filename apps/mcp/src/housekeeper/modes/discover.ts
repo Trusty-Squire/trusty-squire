@@ -231,6 +231,19 @@ async function recordDiscoverTelemetry(
         ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
         ...(ctx.stepsSink.length > 0 ? { stepTrail: ctx.stepsSink.join("\n") } : {}),
         replayServed: false,
+        // Memory-overhaul Phase 1 — this is the housekeeper discover worker;
+        // stamp the mode + the captcha summary (same data postCaptchaEvent
+        // sends to the API in detail) into the firehose.
+        mode: "discover",
+        ...(result.captcha !== undefined
+          ? {
+              captcha: {
+                kind: result.captcha.kind,
+                variant: result.captcha.variant,
+                blocked: result.captcha.blocked,
+              },
+            }
+          : {}),
       });
     }
     if (result.captcha !== undefined) {

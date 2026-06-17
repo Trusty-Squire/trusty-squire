@@ -31,6 +31,14 @@ export interface ProvisionEventInput {
   final_outcome?: FinalOutcomeTag;
   failure_kind?: string | null;
   signup_url?: string | null;
+  // Memory-overhaul Phase 1 — housekeeper context: "discover" | "verify"
+  // | "replay". Null for end-user provisions / legacy clients.
+  mode?: string | null;
+  // Memory-overhaul Phase 1 — captcha SUMMARY (partial fold). The detailed
+  // CaptchaEvent stays API-side; the firehose carries kind/variant/blocked.
+  captcha_kind?: string | null;
+  captcha_variant?: string | null;
+  captcha_blocked?: boolean | null;
   account_id: string;
   mcp_version: string;
   // Correlation id linking this event to ExtractFailureSnapshot rows
@@ -86,6 +94,10 @@ export interface ProvisionEventRecord {
   final_outcome: FinalOutcomeTag | null;
   failure_kind: string | null;
   signup_url: string | null;
+  mode: string | null;
+  captcha_kind: string | null;
+  captcha_variant: string | null;
+  captcha_blocked: boolean | null;
   artifacts_uri: string | null;
   provision_id: string | null;
   step_trail: string | null;
@@ -145,6 +157,10 @@ export class InMemoryProvisionEventStore implements ProvisionEventStore {
       final_outcome: input.final_outcome ?? null,
       failure_kind: input.failure_kind ?? null,
       signup_url: input.signup_url ?? null,
+      mode: input.mode ?? null,
+      captcha_kind: input.captcha_kind ?? null,
+      captcha_variant: input.captcha_variant ?? null,
+      captcha_blocked: input.captcha_blocked ?? null,
       artifacts_uri: null,
       provision_id,
       step_trail: capTrail(input.step_trail ?? null),

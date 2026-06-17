@@ -38,6 +38,12 @@ const PostBodySchema = z.object({
   final_outcome: z.enum(["ok", "failed", "blocked"]).optional(),
   failure_kind: z.string().min(1).max(120).optional(),
   signup_url: z.string().max(2048).optional(),
+  // Memory-overhaul Phase 1 — housekeeper context + captcha summary
+  // (partial fold). All optional; legacy clients omit them.
+  mode: z.enum(["discover", "verify", "replay"]).optional(),
+  captcha_kind: z.string().min(1).max(40).optional(),
+  captcha_variant: z.string().min(1).max(40).optional(),
+  captcha_blocked: z.boolean().optional(),
   mcp_version: z.string().min(1).max(40),
   // T45 — correlation id linking this attempt to ExtractFailureSnapshot
   // rows uploaded during the same provision call. Also the idempotency
@@ -115,6 +121,10 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
         ...(d.final_outcome !== undefined ? { final_outcome: d.final_outcome } : {}),
         ...(d.failure_kind !== undefined ? { failure_kind: d.failure_kind } : {}),
         ...(d.signup_url !== undefined ? { signup_url: d.signup_url } : {}),
+        ...(d.mode !== undefined ? { mode: d.mode } : {}),
+        ...(d.captcha_kind !== undefined ? { captcha_kind: d.captcha_kind } : {}),
+        ...(d.captcha_variant !== undefined ? { captcha_variant: d.captcha_variant } : {}),
+        ...(d.captcha_blocked !== undefined ? { captcha_blocked: d.captcha_blocked } : {}),
         ...(d.provision_id !== undefined ? { provision_id: d.provision_id } : {}),
         ...(d.step_trail !== undefined ? { step_trail: d.step_trail } : {}),
         ...(d.llm_cost !== undefined ? { llm_cost: d.llm_cost } : {}),

@@ -381,6 +381,12 @@ export class SkillRegistryClient {
     finalOutcome?: "ok" | "failed" | "blocked";
     failureKind?: string;
     signupUrl?: string;
+    // Memory-overhaul Phase 1 — housekeeper context ("discover"|"verify"|
+    // "replay") + captcha summary (partial fold). Optional.
+    mode?: "discover" | "verify" | "replay";
+    captchaKind?: string;
+    captchaVariant?: string;
+    captchaBlocked?: boolean;
     mcpVersion: string;
     // T45 — correlation id linking this event to the
     // ExtractFailureSnapshot rows uploaded during the same run. Also the
@@ -419,6 +425,10 @@ export class SkillRegistryClient {
           ? { failure_kind: input.failureKind.slice(0, 120) }
           : {}),
         ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
+        ...(input.mode !== undefined ? { mode: input.mode } : {}),
+        ...(input.captchaKind !== undefined ? { captcha_kind: input.captchaKind.slice(0, 40) } : {}),
+        ...(input.captchaVariant !== undefined ? { captcha_variant: input.captchaVariant.slice(0, 40) } : {}),
+        ...(input.captchaBlocked !== undefined ? { captcha_blocked: input.captchaBlocked } : {}),
         ...(input.provisionId !== undefined ? { provision_id: input.provisionId } : {}),
         ...(input.stepTrail !== undefined ? { step_trail: input.stepTrail } : {}),
         ...(input.llmCost !== undefined ? { llm_cost: input.llmCost } : {}),

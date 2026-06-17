@@ -792,6 +792,8 @@ async function runSignupTask(
           result: replayed,
           ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
           replayServed: true,
+          // Memory-overhaul Phase 1 — a learned skill served this provision.
+          mode: "replay",
         });
         // Persist to vault same as the bot path — credentials are real.
         if (replayed.success && replayed.credentials !== undefined) {
