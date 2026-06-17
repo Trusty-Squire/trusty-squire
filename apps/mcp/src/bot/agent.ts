@@ -12323,6 +12323,18 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         );
       });
       if (emailButton !== undefined) {
+        // The continue button is frequently DISABLED until a Terms/consent
+        // checkbox is ticked (portkey, MEASURED 2026-06-17: "Continue with
+        // work email" stays inert until the TOS box is checked → the click
+        // silently no-ops and the form never reveals). Tick required agreement
+        // boxes first (skips marketing opt-ins; best-effort, never throws).
+        const agreed = await this.browser.checkRequiredAgreementBoxes();
+        if (agreed.length > 0) {
+          steps.push(
+            `Login: ticked terms/consent box(es) [${agreed.join(", ")}] to enable the button.`,
+          );
+          await this.browser.wait(1);
+        }
         steps.push(
           `Login: two-stage page — clicking "${(emailButton.visibleText ?? "email")
             .slice(0, 40)
