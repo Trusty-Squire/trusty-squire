@@ -52,7 +52,7 @@
 - { slug: langfuse, name: Langfuse, signup_url: https://cloud.langfuse.com/auth/sign-up, oauth_provider: google }
 - { slug: unify-ai, name: Unify, signup_url: https://console.unify.ai/, oauth_provider: google }
 - { slug: writer, name: Writer, signup_url: https://app.writer.com/register, oauth_provider: google }
-- { slug: recraft, name: Recraft, signup_url: https://www.recraft.ai/, oauth_provider: google }
+- { slug: recraft, name: Recraft, signup_url: https://www.recraft.ai/auth/login, oauth_provider: google }  # was www.recraft.ai/ (marketing homepage → bot found no form → false oauth_required); /auth/login is the real auth page w/ Google OAuth (2026-06-16)
 - { slug: ideogram, name: Ideogram, signup_url: https://ideogram.ai/, oauth_provider: google }
 - { slug: luma-ai, name: Luma AI, signup_url: https://lumalabs.ai/dream-machine/api, oauth_provider: google }
 - { slug: cartesia, name: Cartesia, signup_url: https://play.cartesia.ai/sign-up, oauth_provider: google }  # SERVABLE (cracked 2026-06-14, api_key extracted live): Google OAuth is login-only → bot commits to email fallback → managed-Turnstile inbox-arbiter → email code → key. NOT IP (proxy matrix falsified).
