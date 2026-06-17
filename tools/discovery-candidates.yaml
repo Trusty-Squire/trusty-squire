@@ -34,7 +34,7 @@
 - { slug: anyscale, name: Anyscale, signup_url: https://console.anyscale.com/register, oauth_provider: google }
 - { slug: runpod, name: RunPod, signup_url: https://www.runpod.io/console/signup, oauth_provider: google }
 - { slug: lambda-labs, name: Lambda, signup_url: https://cloud.lambdalabs.com/sign-up, oauth_provider: google, status: needs-manual }  # unservable: payment method required before API keys (discover 2026-06-11)
-- { slug: predibase, name: Predibase, signup_url: https://predibase.com/free-trial, oauth_provider: google }  # was app.predibase.com (NXDOMAIN → ERR_NAME_NOT_RESOLVED); /free-trial is the live signup (2026-06-16)
+- { slug: predibase, name: Predibase, signup_url: https://predibase.com/free-trial, oauth_provider: google, status: needs-manual }  # unservable: app.predibase.com is NXDOMAIN AND predibase.com serves a TLS cert that EXPIRED Apr 22 2026 (ERR_CERT_DATE_INVALID, verified via openssl 2026-06-16) — site broken (post-Rubrik-acquisition). Re-check if cert restored.
 - { slug: clarifai, name: Clarifai, signup_url: https://clarifai.com/signup, oauth_provider: google }
 - { slug: ai21, name: AI21 Labs, signup_url: https://studio.ai21.com/sign-up, oauth_provider: google }
 - { slug: voyage-ai, name: Voyage AI, signup_url: https://dashboard.voyageai.com/, oauth_provider: google }
@@ -56,7 +56,7 @@
 - { slug: ideogram, name: Ideogram, signup_url: https://ideogram.ai/, oauth_provider: google }
 - { slug: luma-ai, name: Luma AI, signup_url: https://lumalabs.ai/dream-machine/api, oauth_provider: google }
 - { slug: cartesia, name: Cartesia, signup_url: https://play.cartesia.ai/sign-up, oauth_provider: google }  # SERVABLE (cracked 2026-06-14, api_key extracted live): Google OAuth is login-only → bot commits to email fallback → managed-Turnstile inbox-arbiter → email code → key. NOT IP (proxy matrix falsified).
-- { slug: playht, name: PlayHT, signup_url: https://play.ht/signup/, oauth_provider: google }
+- { slug: playht, name: PlayHT, signup_url: https://play.ht/signup/, oauth_provider: google, status: needs-manual }  # unservable: play.ht / playht.com / www.playht.com / app.play.ht all public NXDOMAIN (dig @1.1.1.1, 2026-06-16) — domain dead/moved. Re-check for a new domain.
 - { slug: gladia, name: Gladia, signup_url: https://app.gladia.io/auth/signup, oauth_provider: google }
 - { slug: sieve, name: Sieve, signup_url: https://www.sievedata.com/, oauth_provider: google, status: needs-manual }  # dead/unservable: rebranded to data-licensing sieve.ai; no self-serve dev signup (discover 2026-06-12)
 - { slug: octoai, name: OctoAI, signup_url: https://octoai.cloud/, oauth_provider: google, status: needs-manual }  # dead: OctoAI acquired by NVIDIA; octoai.cloud serves an nvidia.com cert (ERR_CERT_COMMON_NAME_INVALID) + redirects to nvidia.com — no self-serve signup (discover 2026-06-11)
