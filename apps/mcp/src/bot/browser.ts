@@ -617,6 +617,60 @@ export class BrowserController {
     return ctx;
   }
 
+  // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
+  // image/media/font requests + known analytics/tracker hosts to cut page-load
+  // wall-clock (3-5x on byte-heavy pages; also stops trackers from holding the
+  // network "busy"). HARD ALLOW-GUARD first for captcha/challenge + payment
+  // scripts (blocking those breaks the Turnstile/hCaptcha token poll and the
+  // signup form). CSS + first-party JS are never blocked (not in BLOCK_TYPES) —
+  // the SPA form renders from them and the vision planner reads the styled
+  // render. DUAL RISK, hence default-OFF + an OF#2 A/B before flipping on:
+  //   (1) a browser that loads ZERO images is itself an anti-bot fingerprint;
+  //   (2) the screenshot the vision planner reads loses detail — mitigated
+  //       because the DOM inventory is the authoritative action space, but
+  //       still a regression risk on image-only affordances.
+  // Registered on the CONTEXT so it covers OAuth popups + iframes.
+  private async installResourceBlocking(): Promise<void> {
+    const ctx = this.context;
+    if (ctx === null) return;
+    if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
+    const BLOCK_TYPES = new Set(["image", "media", "font"]);
+    const BLOCK_HOSTS = [
+      "google-analytics.com", "googletagmanager.com", "analytics.google.com",
+      "doubleclick.net", "static.hotjar.com", "script.hotjar.com",
+      "segment.com", "segment.io", "cdn.segment.com", "fullstory.com",
+      "mixpanel.com", "bugsnag.com", "intercom.io", "intercomcdn.com",
+      "widget.intercom.io", "connect.facebook.net", "analytics.tiktok.com",
+      "clarity.ms", "cdn.heapanalytics.com", "wistia.com",
+    ];
+    // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
+    const ALWAYS_ALLOW = [
+      "challenges.cloudflare.com", "turnstile", "hcaptcha.com",
+      "newassets.hcaptcha.com", "recaptcha", "gstatic.com/recaptcha",
+      "js.stripe.com",
+    ];
+    await ctx.route("**/*", async (route) => {
+      try {
+        const url = route.request().url();
+        if (ALWAYS_ALLOW.some((h) => url.includes(h))) {
+          await route.continue();
+          return;
+        }
+        const type = route.request().resourceType();
+        if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      } catch {
+        // Routing race / already-handled — never let a decision crash nav.
+      }
+    });
+    console.error(
+      "[universal-bot] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
+    );
+  }
+
   async start(): Promise<void> {
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
@@ -857,6 +911,8 @@ export class BrowserController {
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
+    // Speed: optionally abort heavy/irrelevant requests before any navigation.
+    await this.installResourceBlocking();
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
