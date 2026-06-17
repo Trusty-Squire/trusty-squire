@@ -55,9 +55,16 @@ export type CloseResult =
   | { kind: "missing_evidence"; need: "resolved_run" | "falsified" };
 
 export interface OpenIssueStore {
-  /** Seed/reopen a ticket on a failed run. Open or in_progress stays as-is
-   *  (attempts++); a resolved/wall ticket REOPENS (the failure recurred). */
+  /** Seed/reopen a ticket on a LIVE failed run. Open or in_progress stays
+   *  as-is (attempts++); a resolved/wall ticket REOPENS (the failure recurred
+   *  live — the bug came back, or the "wall" wasn't one). */
   seedFailure(service: string, failureKind: string): Promise<OpenIssueRecord>;
+  /** Create-only seed for the BOOT BACKFILL (replaying history). If ANY
+   *  ticket already exists for this (service, coarse-kind) — including a
+   *  resolved/wall one a human closed — leave it untouched. Without this, the
+   *  backfill replays the historical failure that caused a wall and reopens
+   *  it on every restart, wiping the close-gate work. */
+  seedIfAbsent(service: string, failureKind: string): Promise<OpenIssueRecord | null>;
   /** Drain on green: resolve every non-resolved ticket for the service with
    *  the green run id (actor="auto"). Returns how many it closed. A green run
    *  even resolves a `wall` — if it went green, it wasn't a wall. */
@@ -149,6 +156,15 @@ export class InMemoryOpenIssueStore implements OpenIssueStore {
     };
     this.rows.set(id, row);
     return row;
+  }
+
+  async seedIfAbsent(
+    service: string,
+    rawKind: string,
+  ): Promise<OpenIssueRecord | null> {
+    const id = issueId(service, coarseFailureKind(rawKind));
+    if (this.rows.has(id)) return null; // never reopen a closed/existing ticket
+    return this.seedFailure(service, rawKind);
   }
 
   async resolveServiceOnSuccess(service: string, greenRun: string): Promise<number> {

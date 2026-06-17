@@ -221,8 +221,13 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
             (projection.last_attempt_at !== null &&
               projection.last_green_at < projection.last_attempt_at))
         ) {
-          await openIssueStore.seedFailure(service, projection.last_failure_kind);
-          seededIssues += 1;
+          // Create-only — the backfill replays history; it must NEVER reopen a
+          // human-closed (wall/resolved) ticket on a restart.
+          const seeded = await openIssueStore.seedIfAbsent(
+            service,
+            projection.last_failure_kind,
+          );
+          if (seeded !== null) seededIssues += 1;
         }
       }
       fastify.log.info(

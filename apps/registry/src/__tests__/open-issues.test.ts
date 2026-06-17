@@ -67,6 +67,21 @@ describe("InMemoryOpenIssueStore — close-gate", () => {
     expect((await s.get("groq:captcha_blocked"))?.status).toBe("resolved");
   });
 
+  it("seedIfAbsent (backfill) NEVER reopens a human-closed wall on replay", async () => {
+    const s = new InMemoryOpenIssueStore();
+    const seeded = await s.seedFailure("playht", "page.goto: net::ERR_NAME_NOT_RESOLVED");
+    await s.closeWall(
+      seeded.id,
+      { experiment: "DNS lookup of play.ht", result: "NXDOMAIN — dead domain" },
+      "op",
+      seeded.version,
+    );
+    // The boot backfill replays the SAME historical failure — must be a no-op.
+    const again = await s.seedIfAbsent("playht", "page.goto: net::ERR_NAME_NOT_RESOLVED");
+    expect(again).toBeNull();
+    expect((await s.get("playht:page.goto"))?.status).toBe("wall");
+  });
+
   it("seeds an open ticket on a failure; a recurrence bumps attempts", async () => {
     const s = new InMemoryOpenIssueStore();
     const a = await s.seedFailure("groq", "captcha_blocked");

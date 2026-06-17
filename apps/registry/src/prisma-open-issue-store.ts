@@ -89,6 +89,16 @@ export class PrismaOpenIssueStore implements OpenIssueStore {
     return mapRow(row as Row);
   }
 
+  async seedIfAbsent(
+    service: string,
+    rawKind: string,
+  ): Promise<OpenIssueRecord | null> {
+    const id = issueId(service, coarseFailureKind(rawKind));
+    const prior = await this.client.openIssue.findUnique({ where: { id } });
+    if (prior !== null) return null; // never reopen a closed/existing ticket
+    return this.seedFailure(service, rawKind);
+  }
+
   async resolveServiceOnSuccess(service: string, greenRun: string): Promise<number> {
     const { count } = await this.client.openIssue.updateMany({
       where: { service, status: { not: "resolved" } },
