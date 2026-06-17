@@ -4401,7 +4401,7 @@ export class SignupAgent {
   // blocked=true and which wins over this (captchaEncounter takes
   // precedence in resultTail).
   private invisibleCaptcha:
-    | { kind: "turnstile" | "recaptcha"; variant: CaptchaVariant }
+    | { kind: "turnstile" | "recaptcha" | "hcaptcha"; variant: CaptchaVariant }
     | undefined = undefined;
 
   // Helper: build the common trailing fields every SignupResult needs.
@@ -4501,6 +4501,46 @@ export class SignupAgent {
           steps.push(
             `${label} captcha: invisible reCAPTCHA v3 — ${minted ? "minted score token via grecaptcha.execute()" : "badge present, token not minted (form may submit it itself)"}`,
           );
+        } else if (this.captchaSolver?.isAvailable() === true) {
+          // INVISIBLE hCaptcha (huggingface, 2026-06-17): sitekey in the page's
+          // JS config, NO visible widget, but the form REQUIRES an
+          // h-captcha-response token to submit (the wired Tier 3 hCaptcha path
+          // only fires for VISIBLE widgets). Solve via 2Captcha now and inject,
+          // so the imminent submit carries a token instead of a silent reject.
+          // HONEST CAVEAT: a sophisticated host (HF may run Enterprise hCaptcha)
+          // can bind the token to the browser session and reject a solver token
+          // regardless — in which case this surfaces the real wall instead of a
+          // misleading "validation error".
+          const hSitekey = await this.browser.extractHcaptchaSitekey();
+          if (hSitekey !== null) {
+            this.invisibleCaptcha = { kind: "hcaptcha", variant: "hcaptcha" };
+            const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+            if (pageUrl !== undefined && this.captchaSolver !== undefined) {
+              steps.push(
+                `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit`,
+              );
+              const solveRes = await this.captchaSolver.solveHcaptcha({
+                sitekey: hSitekey,
+                pageUrl,
+              });
+              if (solveRes.kind === "ok") {
+                const injected = await this.browser.injectHcaptchaToken(solveRes.token);
+                steps.push(
+                  injected
+                    ? `${label} captcha: invisible hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s + token injected`
+                    : `${label} captcha: hCaptcha token arrived but injection failed`,
+                );
+                if (injected) {
+                  return { found: true, solved: true, blocked: false, kind: "hcaptcha" };
+                }
+              } else {
+                steps.push(
+                  `${label} captcha: invisible hCaptcha 2Captcha ${solveRes.kind}` +
+                    ("reason" in solveRes ? `: ${solveRes.reason}` : ""),
+                );
+              }
+            }
+          }
         }
       }
       return { found: false, solved: false, blocked: false, kind: "turnstile" };

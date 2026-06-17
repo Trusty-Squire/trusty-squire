@@ -3356,6 +3356,19 @@ export class BrowserController {
           const k = new URL(iframe.src).searchParams.get("sitekey");
           if (k !== null && k.length > 10) return k;
         }
+        // INVISIBLE hCaptcha (huggingface, 2026-06-17): no .h-captcha div, no
+        // rendered iframe — the sitekey lives in the page's JS config
+        // (`captchaApiKey:"<uuid>"`, `sitekey:"<uuid>"`). Scan the HTML for a
+        // UUID-shaped key next to a sitekey/captcha hint, but ONLY when an
+        // hCaptcha script is present (so an unrelated config UUID can't match).
+        // UUID shape excludes reCAPTCHA `6L…` and Turnstile `0x…` keys.
+        const html = document.documentElement.outerHTML;
+        if (/hcaptcha\.com|h-captcha|hcaptcha/i.test(html)) {
+          const m = html.match(
+            /(?:sitekey|captchaApiKey|data-(?:hcaptcha-)?sitekey)["'\s]*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/i,
+          );
+          if (m !== null && m[1] !== undefined) return m[1];
+        }
         return null;
       });
     } catch {
