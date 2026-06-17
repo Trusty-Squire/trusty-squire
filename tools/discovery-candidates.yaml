@@ -46,7 +46,7 @@
 - { slug: openpipe, name: OpenPipe, signup_url: https://app.openpipe.ai/, oauth_provider: google }
 - { slug: langsmith, name: LangSmith, signup_url: https://smith.langchain.com/, oauth_provider: google }
 - { slug: braintrust, name: Braintrust, signup_url: https://www.braintrust.dev/signup, oauth_provider: google }
-- { slug: humanloop, name: Humanloop, signup_url: https://app.humanloop.com/signup, oauth_provider: google, status: needs-manual }  # unservable: /signup redirects to /login ("Welcome back", only Log-in-with-Google/email/SSO — NO self-serve signup; invite/sales-gated). Google auth loops back to /login (no account created). OAuth-callback/no-signup wall (2026-06-17).
+- { slug: humanloop, name: Humanloop, signup_url: https://app.humanloop.com/signup, oauth_provider: google }
 - { slug: vellum, name: Vellum, signup_url: https://app.vellum.ai/signup, oauth_provider: google }
 - { slug: literal-ai, name: Literal AI, signup_url: https://cloud.getliteral.ai/, oauth_provider: google, status: needs-manual }  # dead/unservable: service sunset 2025-10-31; cloud.getliteral.ai 404 (discover 2026-06-12)
 - { slug: langfuse, name: Langfuse, signup_url: https://cloud.langfuse.com/auth/sign-up, oauth_provider: google }
@@ -63,7 +63,7 @@
 - { slug: galileo, name: Galileo, signup_url: https://app.galileo.ai/sign-up, oauth_provider: google }
 - { slug: arize, name: Arize Phoenix, signup_url: https://app.arize.com/auth/join, oauth_provider: google }
 - { slug: pinecone-assistant, name: Pinecone Assistant, signup_url: https://app.pinecone.io/?sessionType=signup, oauth_provider: google }
-- { slug: nvidia-nim, name: NVIDIA NIM, signup_url: https://build.nvidia.com/explore/discover, oauth_provider: google, status: needs-manual }  # unservable: build.nvidia.com has no self-serve signup CTA (no_signup_link x2); API key requires an NVIDIA proprietary SSO account (login.nvidia.com email+verification), NOT Google/GitHub OAuth — outside the bot's OAuth model (2026-06-17).
+- { slug: nvidia-nim, name: NVIDIA NIM, signup_url: https://build.nvidia.com/explore/discover, oauth_provider: google }
 - { slug: friendliai, name: FriendliAI, signup_url: https://suite.friendli.ai/, oauth_provider: google }
 - { slug: inferless, name: Inferless, signup_url: https://console.inferless.com/, oauth_provider: github, status: needs-manual }  # unservable: console.inferless.com (their site's ONLY signup host) is public NXDOMAIN — dig @1.1.1.1 returns no record for console./api.inferless.com (2026-06-16). Re-enable if they restore the subdomain.
 
