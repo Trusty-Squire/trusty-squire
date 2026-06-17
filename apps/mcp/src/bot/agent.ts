@@ -218,6 +218,20 @@ export async function applyFirebaseEmailVerification(
 // minute; this catches the fast case without 300s of dead air.
 const VERIFICATION_PROBE_SECONDS = 45;
 
+// Give-up ceiling for the "page says check your email" case (mail IS coming).
+// These poll timeouts are pure GIVE-UP BOUNDS: the inbox server long-polls and
+// early-exits the instant mail arrives, so a real email returns at ~its arrival
+// time regardless of the ceiling — the ceiling only costs wall-clock when mail
+// NEVER comes (young-domain withhold). Sized to the ARRIVAL TAIL, not the
+// average: transactional mail lands <30s typically, with a greylist retry tail
+// to ~60s, so 90s covers every real case with margin while failing a withheld
+// mail 90s sooner (was 180). Tail-sized, NOT average-sized — abandoning real
+// mail loses a signup (OF#2). Env-tunable for an A/B.
+const VERIFY_EMAIL_CEILING_SECONDS = Number.parseInt(
+  process.env.BOT_VERIFY_EMAIL_CEILING_S ?? "120",
+  10,
+);
+
 // Settle window before the SECOND post-submit page read. SPA signups
 // (Postmark, ElevenLabs, Browserbase, Grafana Cloud, …) swap in their
 // "check your email" confirmation screen a beat AFTER submit. Reading the
@@ -233,9 +247,14 @@ const SUBMIT_SETTLE_SECONDS = 3;
 // fresh send (Postmark, SendGrid) routinely take longer than the 45s
 // probe. Polling 120s here — rather than bailing at 45s — is the
 // difference between catching that mail and a false `verification_not_sent`.
-// Still bounded so a genuinely-silent service doesn't hold the run for the
-// full 180s expected-email timeout.
-const SUBMITTED_PROBE_FLOOR_SECONDS = 120;
+// Still bounded so a genuinely-silent service doesn't hold the run for the full
+// ceiling. Tail-sized to ~90s (arrival tail incl. a greylist retry); since the
+// long-poll early-exits on arrival, this only costs wall-clock when mail never
+// comes — failing an inconclusive no-mail run 30s sooner (was 120). Env-tunable.
+const SUBMITTED_PROBE_FLOOR_SECONDS = Number.parseInt(
+  process.env.BOT_VERIFY_INCONCLUSIVE_CEILING_S ?? "90",
+  10,
+);
 
 // Post-submit page text that means the submit was REJECTED, not accepted —
 // no account was created, so no verification mail is coming and even the
@@ -7416,7 +7435,7 @@ export class SignupAgent {
           //     created, so transactional mail is plausibly inbound and
           //     can outlast the 45s probe; bounded below the full timeout).
           const verificationTimeoutSeconds = expectsEmail
-            ? (task.verificationTimeoutSeconds ?? 180)
+            ? (task.verificationTimeoutSeconds ?? VERIFY_EMAIL_CEILING_SECONDS)
             : submitRejected
               ? VERIFICATION_PROBE_SECONDS
               : SUBMITTED_PROBE_FLOOR_SECONDS;
