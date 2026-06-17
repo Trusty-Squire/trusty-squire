@@ -194,18 +194,36 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
         60 * 86_400_000,
         500,
       );
+      let seededIssues = 0;
       for (const { service } of demand) {
         const [attempts, activeSkill] = await Promise.all([
           provisionEventStore.listByService(service, 60 * 86_400_000),
           skillStore.findActiveByService(service),
         ]);
-        await serviceStateStore.recomputeFrom(
-          projectServiceState(service, attempts, activeSkill !== null, scoreOptions),
+        const projection = projectServiceState(
+          service,
+          attempts,
+          activeSkill !== null,
+          scoreOptions,
         );
+        await serviceStateStore.recomputeFrom(projection);
+        // Backfill the ledger from history: a non-servable service whose latest
+        // signal is a failure becomes an open ticket (Codex #5: seeded from the
+        // ProvisionEvent firehose). drain-on-green resolves it if it recovers.
+        if (
+          (projection.status === "hard-block" || projection.status === "struggling") &&
+          projection.last_failure_kind !== null &&
+          (projection.last_green_at === null ||
+            (projection.last_attempt_at !== null &&
+              projection.last_green_at < projection.last_attempt_at))
+        ) {
+          await openIssueStore.seedFailure(service, projection.last_failure_kind);
+          seededIssues += 1;
+        }
       }
       fastify.log.info(
-        { count: demand.length },
-        "ServiceState backfill complete",
+        { services: demand.length, seededIssues },
+        "ServiceState + OpenIssue backfill complete",
       );
     } catch (err) {
       fastify.log.warn({ err }, "ServiceState backfill failed (non-fatal)");
