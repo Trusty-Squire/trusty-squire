@@ -12311,6 +12311,27 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     let inv = await this.buildInventory(steps);
     let { emailEl, pwEl } = findLoginFields(inv);
 
+    // Poll for the form to render after a click. SPA login forms reveal on a
+    // VARIABLE delay — portkey's "Continue with work email" → password form was
+    // a render race where a fixed wait passed one run and missed the next
+    // (stochastic login). Re-reads up to maxAttempts times ~1.2s apart, mutating
+    // inv/emailEl/pwEl, returning as soon as the wanted field(s) appear. Uses a
+    // throwaway steps array so polling doesn't spam the trail.
+    const pollForFields = async (
+      maxAttempts: number,
+      requirePassword: boolean,
+    ): Promise<void> => {
+      for (let i = 0; i < maxAttempts; i++) {
+        await this.browser.wait(1.2);
+        inv = await this.buildInventory([]);
+        ({ emailEl, pwEl } = findLoginFields(inv));
+        const done = requirePassword
+          ? pwEl !== undefined
+          : pwEl !== undefined || emailEl !== undefined;
+        if (done) return;
+      }
+    };
+
     // Two-stage email login: many login pages render only provider buttons
     // ("Continue with Google / Microsoft / work email", SSO) and reveal the
     // email+password inputs ONLY after you click the email option. portkey
@@ -12345,9 +12366,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             .trim()}" to reveal the email/password form.`,
         );
         await this.browser.click(emailButton.selector);
-        await this.browser.wait(3);
-        inv = await this.buildInventory(steps);
-        ({ emailEl, pwEl } = findLoginFields(inv));
+        // Poll up to ~10s for the form to reveal (render race — see above).
+        await pollForFields(8, false);
       }
     }
 
@@ -12371,9 +12391,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           "Login: email-first flow — submitted the email, advancing to the password step.",
         );
         await this.browser.clickSubmit(advance.selector).catch(() => undefined);
-        await this.browser.wait(3);
-        inv = await this.buildInventory(steps);
-        ({ emailEl, pwEl } = findLoginFields(inv));
+        // Poll up to ~10s for the password step to render (render race).
+        await pollForFields(8, true);
       }
     }
     if (pwEl === undefined) {
