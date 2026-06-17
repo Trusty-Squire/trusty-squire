@@ -141,17 +141,21 @@ distinct nav/mint bugs — all generalizable, all fixed:
    that gates key creation behind a captcha. Helpers: `findKeyModalSubmit` /
    `findKeyNameInput` (agent.ts).
 
-### ⚠ verify-pool health (2026-06-17): verify-01..05 are DEAD (never warmed, not suspended)
+### ✅ verify-pool health (2026-06-17): verify-01..05 were NEVER-ACTIVATED, now fixed (warm bug)
 groq runs kept failing `needs_login` with `accounts.google.com/v3/signin/deletedaccount`
-on whatever robot got picked — and JIT re-warm could not rescue them. Admin-API
-`users.get` proves the cause: verify-01..05 have `suspended=false` but
-`lastLoginTime=1970-01-01T00:00:00Z` (epoch zero = **never successfully logged in** —
-created but never warmed), while verify-10..14 show real recent logins and work. So
-`deletedaccount` here = Google's response to an OAuth attempt from a profile that was
-NEVER warmed, NOT account suspension. The `provision-verify-robot.mjs list` "google=live"
-flag only checks directory existence, not warmth/suspension. Action: `warm verify-01..05`
-(automated fleet login) or rotate them out; meanwhile pin a warmed robot (verify-10..14)
-to validate discover work. Don't force-relogin or flip egress — it's per-identity warmth.
+on whatever robot got picked, and JIT re-warm couldn't rescue them. Admin-API `users.get`
+nailed it: verify-01..05 had `suspended=false` but **`agreedToTerms=false` +
+`lastLoginTime=1970-01-01Z`** (never activated), while verify-10..14 had `agreedToTerms=true`
++ real logins. A Directory-API-created Google account is OAuth-UNUSABLE (→ `deletedaccount`)
+until a real first sign-in completes Google's ToS. The bug: the fleet warmer
+(`google-login-fleet.mjs`) short-circuited on a stale SID cookie that LANDS on
+myaccount.google.com, so it reported a FALSE `✅ logged in` in ~8s and never reached the
+ToS page. FIX (committed): warm now prechecks `agreedToTerms` and force-clears the session
+(`FLEET_FORCE_FRESH`) to run the full email→password→ToS activation for not-yet-activated
+robots; success is gated on actually landing on myaccount, not cookie-presence. All five
+now `agreedToTerms=true`; pool back to 10. LESSON: `provision-verify-robot.mjs list`
+`google=live` only checks directory existence — NOT activation. A never-activated robot
+looks healthy and silently tanks every run that picks it.
 
 ---
 
