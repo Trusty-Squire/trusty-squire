@@ -267,6 +267,14 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // into args.adminBearer, so loading after it would leave the bearer unseen.
   loadHarvesterEnvFile();
 
+  // Memory-overhaul Phase 4 — the drainable-ledger + STATE.md subcommands are
+  // a different shape from the --mode runs (subcommand + id + flags), so they
+  // dispatch early, before parseArgs. Operator-only (REGISTRY_ADMIN_BEARER).
+  if (argv[0] === "issue" || argv[0] === "state-doc") {
+    const { runLedgerCli } = await import("./modes/ledger-cli.js");
+    return await runLedgerCli(argv);
+  }
+
   const args = parseArgs(argv);
 
   // Reap stale sibling housekeeper runs before we touch the shared Chrome

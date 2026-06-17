@@ -253,4 +253,117 @@ export class VerifierRegistryClient {
       hit_total: num(body.hit_total),
     };
   }
+
+  // ── Memory-overhaul Phase 4 — the drainable ledger (operator loop) ──────
+
+  async listIssues(status?: IssueRow["status"]): Promise<IssueRow[]> {
+    const url = new URL("/admin/issues", this.baseUrl);
+    if (status !== undefined) url.searchParams.set("status", status);
+    const res = await this.fetchFn(url.toString(), {
+      headers: { authorization: `Bearer ${this.adminBearer}` },
+    });
+    if (!res.ok) throw new Error(`listIssues: ${res.status} ${res.statusText}`);
+    return ((await res.json()) as { issues?: IssueRow[] }).issues ?? [];
+  }
+
+  async getIssue(id: string): Promise<IssueRow | null> {
+    const url = `${this.baseUrl}/admin/issues/${encodeURIComponent(id)}`;
+    const res = await this.fetchFn(url, {
+      headers: { authorization: `Bearer ${this.adminBearer}` },
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`getIssue: ${res.status} ${res.statusText}`);
+    return ((await res.json()) as { issue: IssueRow }).issue;
+  }
+
+  // Returns the updated issue, or a typed gate verdict the CLI surfaces.
+  private async mutateIssue(
+    id: string,
+    action: "claim" | "resolve" | "wall",
+    body: Record<string, unknown>,
+  ): Promise<IssueMutateResult> {
+    const url = `${this.baseUrl}/admin/issues/${encodeURIComponent(id)}/${action}`;
+    const res = await this.fetchFn(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.adminBearer}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return { kind: "ok", issue: ((await res.json()) as { issue: IssueRow }).issue };
+    if (res.status === 409) {
+      const j = (await res.json()) as { current?: number };
+      return { kind: "version_conflict", current: j.current ?? -1 };
+    }
+    if (res.status === 422) {
+      const j = (await res.json()) as { need?: string };
+      return { kind: "missing_evidence", need: j.need ?? "?" };
+    }
+    if (res.status === 404) return { kind: "not_found" };
+    throw new Error(`${action} ${id}: ${res.status} ${res.statusText}`);
+  }
+
+  claimIssue(id: string, actor: string, version: number): Promise<IssueMutateResult> {
+    return this.mutateIssue(id, "claim", { actor, version });
+  }
+
+  resolveIssue(
+    id: string,
+    actor: string,
+    version: number,
+    resolvedRun: string,
+  ): Promise<IssueMutateResult> {
+    return this.mutateIssue(id, "resolve", { actor, version, resolved_run: resolvedRun });
+  }
+
+  wallIssue(
+    id: string,
+    actor: string,
+    version: number,
+    falsified: { experiment: string; result: string; evidence_ref?: string },
+  ): Promise<IssueMutateResult> {
+    return this.mutateIssue(id, "wall", { actor, version, falsified });
+  }
+
+  async listServiceStates(): Promise<ServiceStateRow[]> {
+    const url = `${this.baseUrl}/admin/service-states`;
+    const res = await this.fetchFn(url, {
+      headers: { authorization: `Bearer ${this.adminBearer}` },
+    });
+    if (!res.ok) throw new Error(`listServiceStates: ${res.status} ${res.statusText}`);
+    return ((await res.json()) as { states?: ServiceStateRow[] }).states ?? [];
+  }
+}
+
+// Wire-shapes mirrored from the registry's OpenIssue / ServiceState rows.
+export interface IssueRow {
+  id: string;
+  service: string;
+  failure_kind: string;
+  status: "open" | "in_progress" | "resolved" | "wall";
+  attempts: number;
+  resolved_run: string | null;
+  falsified: { experiment: string; result: string; evidence_ref?: string } | null;
+  actor: string | null;
+  version: number;
+  updated_at: string;
+}
+
+export type IssueMutateResult =
+  | { kind: "ok"; issue: IssueRow }
+  | { kind: "not_found" }
+  | { kind: "version_conflict"; current: number }
+  | { kind: "missing_evidence"; need: string };
+
+export interface ServiceStateRow {
+  service: string;
+  status: string;
+  confidence: number;
+  successful_count: number;
+  failed_count: number;
+  last_green_at: string | null;
+  last_failure_kind: string | null;
+  current_diagnosis: string | null;
+  wall_classification: string | null;
 }

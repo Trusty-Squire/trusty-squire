@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.17-rc.2 (2026-06-17)
+
+Prerelease (`next`). groq cracked end-to-end, the verify-pool warmer no longer
+false-succeeds, and the housekeeper memory overhaul (Phases 1-4) lands.
+
+- fix(bot): mint through groq's in-modal Cloudflare Turnstile — nav-search now reaches the create-key surface (a virgin keys table's headers no longer mis-classify as an existing masked listing), drives the "name your key" modal, and runs the captcha gate INSIDE the modal so the disabled submit enables. groq signs up + extracts a key live; skill auto-promoted.
+- fix(verify-pool): `warm` actually ACTIVATES never-`agreedToTerms` robots instead of reporting a false success off a stale cookie — it prechecks activation and forces a clean ToS login. verify-01..05 recovered.
+- feat(memory): Phase 1 — `ProvisionEvent` carries `mode` (discover/verify/replay) + a captcha summary (firehose unification, no rename).
+- feat(memory): Phase 2 — the discover worker uploads its full per-round failure chain to the registry (redacted: captcha tokens, auth/cookie headers, password values scrubbed before upload), closing the "evidence dies locally" gap.
+- feat(memory): operator ledger CLI — `mcp housekeeper issue list|claim|resolve|wall` drains the registry's failure queue (server-side close-gate: no resolve without a green run, no wall without a falsification), and `state-doc` generates the status doc from materialized `ServiceState`. (Registry-side Phases 3-4 ship via the registry deploy.)
+
 ## 0.9.17-rc.1 (2026-06-14)
 
 Prerelease (`next`). Diagnosis-driven bot reliability: a controlled experiment

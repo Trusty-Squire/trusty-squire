@@ -185,6 +185,24 @@ describe("HTTP /admin/issues — auth + close-gate", () => {
     expect(ok.json().issue.status).toBe("wall");
   });
 
+  it("GET /admin/service-states lists materialized states (for STATE.md gen)", async () => {
+    const { build: b } = build();
+    const server = await b();
+    await server.inject({
+      method: "POST",
+      url: "/v1/services/ipinfo/attempts",
+      headers: { "x-account-id": "acct-a" },
+      payload: { status: "success", mcp_version: "0.9.17" },
+    });
+    const noauth = await server.inject({ method: "GET", url: "/admin/service-states" });
+    expect(noauth.statusCode).toBe(401);
+    const res = await server.inject({ method: "GET", url: "/admin/service-states", headers: auth });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.states.length).toBeGreaterThanOrEqual(1);
+    expect(body.states.find((s: { service: string }) => s.service === "ipinfo")).toBeDefined();
+  });
+
   it("a success drains the ticket (drain-on-green over the wire)", async () => {
     const { issueStore, build: b } = build();
     const server = await b();

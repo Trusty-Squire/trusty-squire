@@ -17,9 +17,13 @@ import type {
   IssueStatus,
   OpenIssueStore,
 } from "../open-issue-store.js";
+import type { ServiceStateStore } from "../service-state-store.js";
 
 export interface IssuesRouteDeps {
   openIssueStore: OpenIssueStore;
+  // Memory-overhaul Phase 4 follow-up — the materialized ServiceState list
+  // feeds the `mcp housekeeper state-doc` generator (STATE.md projection).
+  serviceStateStore?: ServiceStateStore;
   adminBearer?: string;
 }
 
@@ -100,6 +104,16 @@ export const registerIssuesRoutes: FastifyPluginAsync<IssuesRouteDeps> = async (
       return reply.send({ ok: true, issues, count: issues.length });
     },
   );
+
+  // Materialized ServiceState list — the source for the STATE.md generator.
+  fastify.get("/admin/service-states", async (req, reply) => {
+    if (denyIfNotAdmin(req as { headers: Record<string, unknown> }, reply)) return;
+    if (opts.serviceStateStore === undefined) {
+      return reply.send({ ok: true, states: [], count: 0 });
+    }
+    const states = await opts.serviceStateStore.list();
+    return reply.send({ ok: true, states, count: states.length });
+  });
 
   fastify.get<{ Params: { id: string } }>(
     "/admin/issues/:id",

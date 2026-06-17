@@ -230,6 +230,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   // gated; the close-gate is enforced inside the store, not the route).
   await fastify.register(registerIssuesRoutes, {
     openIssueStore,
+    serviceStateStore,
     ...(adminBearer !== undefined && adminBearer.length > 0 ? { adminBearer } : {}),
   });
   // Workspace-restricted Google SSO for the browser dashboard. Read from
