@@ -300,3 +300,92 @@ describe("runDiscover — Fix D1: clean-state retry on the anti-bot tail", () =>
     expect(existsSync(dir2!)).toBe(false);
   });
 });
+
+describe("runDiscover — JIT re-warm on needs_login", () => {
+  const needsLogin: SignupResult = {
+    success: false,
+    error:
+      "needs_login: landed on a Google sign-in form / no session — re-run login",
+    steps: [],
+  };
+
+  it("re-warms the SAME picked robot and retries once, then succeeds", async () => {
+    const { port, spent } = fakePool([identity("verify-01"), identity("verify-02")]);
+    const { requests, bot } = recordingBot([needsLogin, ok]);
+    const warmed: string[] = [];
+
+    const outcome = await runDiscover(
+      { service: "langfuse", oauthProvider: "google" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        identityPool: port,
+        skipAutoPromote: true,
+        warmIdentity: async (id) => {
+          warmed.push(id);
+          return true;
+        },
+      },
+    );
+
+    expect(outcome.kind).toBe("ok");
+    // Warmed the picked robot, exactly once.
+    expect(warmed).toEqual(["verify-01"]);
+    // Two attempts, both on the SAME identity (no rotation — keeps one-shot).
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+    expect(requests[1]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+    // The robot is recorded spent exactly once (markSpent is idempotent).
+    expect(spent).toEqual([{ id: "verify-01", service: "langfuse" }]);
+  });
+
+  it("keeps the needs_login failure when re-warm fails (no retry attempt)", async () => {
+    const { port } = fakePool([identity("verify-01")]);
+    const { requests, bot } = recordingBot([needsLogin, ok]);
+
+    const outcome = await runDiscover(
+      { service: "cartesia", oauthProvider: "google" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        identityPool: port,
+        skipAutoPromote: true,
+        warmIdentity: async () => false, // re-warm unavailable / failed
+      },
+    );
+
+    expect(outcome.kind).toBe("failed");
+    expect((outcome as { reason: string }).reason).toMatch(/needs_login/);
+    expect(requests).toHaveLength(1); // no retry when warm failed
+  });
+
+  it("does not warm for github (no robot identity bound)", async () => {
+    const { port } = fakePool([identity("verify-01")]);
+    const { requests, bot } = recordingBot([needsLogin, ok]);
+    const warmed: string[] = [];
+
+    const outcome = await runDiscover(
+      { service: "unify-ai", oauthProvider: "github" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        identityPool: port,
+        skipAutoPromote: true,
+        warmIdentity: async (id) => {
+          warmed.push(id);
+          return true;
+        },
+      },
+    );
+
+    expect(outcome.kind).toBe("failed");
+    expect(warmed).toEqual([]); // github binds no robot → nothing to re-warm
+    expect(requests).toHaveLength(1);
+  });
+});

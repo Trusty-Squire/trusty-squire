@@ -18,6 +18,7 @@
 // will later promote on the first verifier success.
 
 import { randomBytes } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -85,6 +86,10 @@ export interface DiscoveryBotConfig {
   // For tests: inject a deterministic identity pool. Production reads the
   // on-disk verify pool.
   identityPool?: IdentityPoolPort;
+  // For tests: mock the just-in-time robot re-warm. Production shells
+  // tools/google-login-fleet.mjs to re-establish a stale Google session.
+  // Returns true when the robot's session was successfully re-warmed.
+  warmIdentity?: (identityId: string) => Promise<boolean>;
 }
 
 export type DiscoveryBotOutcome =
@@ -136,6 +141,13 @@ const CLEAN_STATE_RETRY_KINDS: ReadonlySet<string> = new Set([
   "oauth_session_not_persisted",
 ]);
 
+// The error's leading token — the bot's terminal vocabulary stems a message
+// at "<kind>: <detail>", so the first `:`/whitespace-delimited token IS the
+// failure kind. Shared by the D1 and JIT-warm remediation gates.
+function headTokenOf(error: string | undefined): string {
+  return (error ?? "").trim().toLowerCase().split(/[:\s]/, 1)[0] ?? "";
+}
+
 function shouldCleanStateRetry(error: string | undefined): boolean {
   if (error === undefined) return false;
   // Controlled-experiment escape: skip the D1 retry so each attempt consumes
@@ -145,8 +157,32 @@ function shouldCleanStateRetry(error: string | undefined): boolean {
   if (/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_NO_CLEAN_STATE_RETRY ?? "")) {
     return false;
   }
-  const head = error.trim().toLowerCase().split(/[:\s]/, 1)[0] ?? "";
-  return CLEAN_STATE_RETRY_KINDS.has(head);
+  return CLEAN_STATE_RETRY_KINDS.has(headTokenOf(error));
+}
+
+// Just-in-time robot re-warm. needs_login means the picked verify-pool robot
+// landed on Google's sign-in form — ITS warmed session went stale. (The heal
+// replenish only warms freshly-MINTED robots, so an existing robot's session
+// drifts stale over days; the back half of a long discover queue, where the
+// fresh identities were already spent up front, is where this bites.) The
+// remedy is not rotation — the next robot may be just as stale — but warming
+// THIS robot's session on demand, then retrying the same identity, which keeps
+// the one-shot-per-(identity, service) invariant (no second seat consumed).
+// Default shells the operator login-fleet tool; failure is non-fatal (the
+// caller logs "warm-retry skipped" and keeps the original needs_login).
+function defaultWarmIdentity(): (identityId: string) => Promise<boolean> {
+  return async (identityId) => {
+    try {
+      execFileSync("node", ["tools/google-login-fleet.mjs", identityId], {
+        cwd: process.cwd(),
+        timeout: 240_000,
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
 }
 
 // Emit the same telemetry the provision router emits, so harvest runs
@@ -295,6 +331,7 @@ export async function runDiscover(
 
   const bot = cfg.bot ?? new UniversalSignupBot();
   const pool = cfg.identityPool ?? defaultIdentityPool();
+  const warmIdentity = cfg.warmIdentity ?? defaultWarmIdentity();
   // Telemetry correlation + duration baseline — shared by the success,
   // failure, and crash emits below.
   const provisionId = generateProvisionId();
@@ -485,6 +522,40 @@ export async function runDiscover(
         } else {
           result = second.result;
         }
+      }
+    }
+
+    // ── JIT re-warm on needs_login ─────────────────────────────────────
+    //
+    // The picked robot's Google session went stale (landed on the sign-in
+    // form). Re-warm THIS robot's session on demand, then retry the same
+    // identity once — no rotation (the next robot may be just as stale) and no
+    // second seat consumed (the one-shot invariant holds). Only meaningful for
+    // a Google-OAuth attempt that actually bound a robot identity; warming is
+    // best-effort and a failed/absent re-warm leaves the needs_login intact.
+    if (
+      !result.success &&
+      headTokenOf(result.error) === "needs_login" &&
+      firstPlan.identityId !== undefined
+    ) {
+      const robot = firstPlan.oauthAccountEmail ?? firstPlan.identityId;
+      stepsSink.push(
+        `[discovery] needs_login: robot ${robot} session stale — re-warming ` +
+          `just-in-time and retrying the same identity once.`,
+      );
+      const warmed = await warmIdentity(firstPlan.identityId).catch(() => false);
+      if (warmed) {
+        const reheated = await attemptSignup(firstPlan);
+        if ("crash" in reheated) {
+          stepsSink.push(`[discovery] needs_login warm-retry crashed: ${reheated.crash}`);
+        } else {
+          result = reheated.result;
+        }
+      } else {
+        stepsSink.push(
+          `[discovery] needs_login warm-retry skipped: re-warm of ${robot} failed ` +
+            `or the login-fleet tool is unavailable on this host.`,
+        );
       }
     }
   } finally {
