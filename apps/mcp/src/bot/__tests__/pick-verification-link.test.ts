@@ -75,3 +75,26 @@ describe("pickVerificationLinkFromHtml (anchor-text fallback for tracker-wrapped
     expect(pickVerificationLinkFromHtml("")).toBeNull();
   });
 });
+
+import { verificationLinkFailed } from "../agent.js";
+
+describe("verificationLinkFailed — expired/used single-use link → go log in", () => {
+  it("detects the portkey Firebase expired-link page", () => {
+    expect(
+      verificationLinkFailed(
+        "Back to login Email Verification Failed This link has expired. Please try again. Return to login",
+      ),
+    ).toBe(true);
+  });
+  it("detects 'already been used' and 'invalid or expired'", () => {
+    expect(verificationLinkFailed("This link has already been used.")).toBe(true);
+    expect(verificationLinkFailed("The link is invalid or expired.")).toBe(true);
+    expect(verificationLinkFailed("Your email is already verified.")).toBe(true);
+  });
+  it("does NOT fire on a normal post-verify dashboard", () => {
+    expect(
+      verificationLinkFailed("Welcome! Your API key: sk-abc123. Create new key."),
+    ).toBe(false);
+    expect(verificationLinkFailed("Check your email to verify your account.")).toBe(false);
+  });
+});

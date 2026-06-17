@@ -129,6 +129,31 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
   "one more step",
 ];
 
+// A single-use verification link that lands on an "expired / already used /
+// invalid" page. MEASURED on portkey (2026-06-17): a FRESH, seconds-old
+// Firebase mode=verifyEmail oobCode rendered "Email Verification Failed — This
+// link has expired" on the bot's FIRST navigation. A single-use action link is
+// routinely burned by an upstream mail link-scanner (anti-phishing prefetch) —
+// and following a Firebase verifyEmail link COMPLETES the verification
+// server-side. So "expired" almost always means the email is ALREADY verified;
+// the right move is to log in with the signup credentials and proceed, not bail.
+// Exported for unit tests.
+const VERIFY_LINK_FAILED_PATTERNS: readonly string[] = [
+  "link has expired",
+  "link is invalid",
+  "link is no longer valid",
+  "invalid or expired",
+  "expired or invalid",
+  "verification failed",
+  "already been used",
+  "already verified", // some apps say so outright → also "go log in"
+];
+
+export function verificationLinkFailed(pageText: string): boolean {
+  const t = pageText.toLowerCase();
+  return VERIFY_LINK_FAILED_PATTERNS.some((p) => t.includes(p));
+}
+
 // Short probe when, even after a settle, the post-submit page still never
 // prompted the user to check their email AND no account-created signal
 // appeared. Legitimate verification mail almost always lands inside a
@@ -7313,6 +7338,34 @@ export class SignupAgent {
                   // best-effort — fall through to extraction regardless
                 }
 
+                // Expired/used single-use verification link (portkey,
+                // 2026-06-17). A fresh Firebase oobCode that reads "expired" on
+                // first touch was consumed upstream by a mail link-scanner —
+                // which ALSO ran the verification server-side, so the email is
+                // already verified. Don't fail: log in with the signup
+                // credentials (the account is ready) and let the extraction +
+                // post-verify loop below reach the key. Generalizes to every
+                // single-use verify-link flow (Firebase et al.).
+                try {
+                  const linkText = await this.browser.extractText();
+                  if (verificationLinkFailed(linkText)) {
+                    steps.push(
+                      "Verification link reported expired/used — a single-use link is typically burned by an upstream mail scanner, which also completes verification server-side. Treating the email as verified and logging in with the signup credentials.",
+                    );
+                    const origin = new URL(verifyLink).origin;
+                    await this.browser.goto(origin);
+                    await this.browser.wait(2);
+                    await this.loginWithCredentials(task.email, password, steps);
+                    await this.browser.wait(2);
+                  }
+                } catch (err) {
+                  steps.push(
+                    `Post-expiry login attempt errored (non-fatal): ${
+                      err instanceof Error ? err.message : String(err)
+                    }`,
+                  );
+                }
+
                 // Try extracting first — many services drop the API key
                 // straight onto the landing page after verification.
                 credentials = await this.extractCredentials();
@@ -7355,7 +7408,14 @@ export class SignupAgent {
                     steps,
                   );
                 } else {
-                  steps.push("Email had no usable verification link or code.");
+                  // Diagnostic (arize, 2026-06-17): the email arrived but
+                  // neither scorer found a usable link and no code parsed —
+                  // dump the candidate hrefs so the next run shows WHY (e.g. an
+                  // image-only button, or anchor text the scorer doesn't weight).
+                  const hrefs = email.parsed_links.slice(0, 8).join(" | ");
+                  steps.push(
+                    `Email had no usable verification link or code. parsed_links(${email.parsed_links.length}): ${hrefs || "(none)"}`,
+                  );
                 }
               }
             } else if (email.parsed_codes.length > 0) {
