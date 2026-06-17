@@ -133,20 +133,32 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
   // exit clean (see pacing.ts). Replay tasks don't launch the bot, so they're
   // never paced or counted.
   const pacer = new RunPacer(pacingFromEnv(), { log });
-  for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i]!;
+  // Bounded concurrency (HOUSEKEEPER_CONCURRENCY, default 1 = serial). >1 runs
+  // discover slots in parallel — safe because the IP-wall hypothesis the serial
+  // pacing guards against is FALSIFIED (STATE.md: datacenter and residential
+  // fail the per-service callback identically) AND a live 3-wide-OAuth-from-one-
+  // IP test showed no Google anti-abuse. Each concurrent slot takes a DISTINCT
+  // robot via the atomic claim (identity-pool.ts). Size against the LLM proxy
+  // 150/hr cap, not RAM. The per-run cooldown is skipped in concurrent mode; the
+  // daily cap still applies.
+  const concurrency = Math.max(
+    1,
+    Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1,
+  );
+  const processTask = async (
+    task: (typeof tasks)[number],
+    i: number,
+  ): Promise<void> => {
     const isLiveSignup = task.kind !== "replay";
 
     if (isLiveSignup) {
       const cap = pacer.capRemaining();
       if (!cap.allowed) {
-        const left = tasks.length - i;
         log(
-          `[pace] daily signup cap reached (${cap.used}/${cap.cap}) — stopping batch ` +
-            `to rest the IP; ${left} task(s) skipped.`,
+          `[pace] daily signup cap reached (${cap.used}/${cap.cap}) — skipping ${task.service ?? "task"}.`,
         );
-        summary.skipped += left;
-        break;
+        summary.skipped += 1;
+        return;
       }
     }
 
@@ -247,11 +259,36 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     }
 
     // Count the run + adaptively back off; cooldown only when another live
-    // signup follows (no point sleeping after the last one).
+    // signup follows (no point sleeping after the last one). Concurrent slots
+    // already overlap and the cooldown's IP rationale is falsified, so it's
+    // serial-mode only.
     if (isLiveSignup) {
       pacer.recordRun(pacingReason);
-      const moreLive = tasks.slice(i + 1).some((t) => t.kind !== "replay");
-      if (moreLive) await pacer.cooldown();
+      if (concurrency <= 1) {
+        const moreLive = tasks.slice(i + 1).some((t) => t.kind !== "replay");
+        if (moreLive) await pacer.cooldown();
+      }
+    }
+  };
+
+  if (concurrency > 1) {
+    log(
+      `bounded-concurrency: ${tasks.length} task(s), ${concurrency}-wide ` +
+        `(per-run cooldown skipped, daily cap kept, distinct robot per slot)`,
+    );
+    let nextIdx = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+        for (;;) {
+          const i = nextIdx++;
+          if (i >= tasks.length) return;
+          await processTask(tasks[i]!, i);
+        }
+      }),
+    );
+  } else {
+    for (let i = 0; i < tasks.length; i++) {
+      await processTask(tasks[i]!, i);
     }
   }
   log(

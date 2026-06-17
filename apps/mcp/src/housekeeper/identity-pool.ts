@@ -96,6 +96,30 @@ export function isSpent(
   return usage.some((u) => u.identityId === identityId && u.service === service);
 }
 
+// ── In-flight claim registry (CONCURRENT discover, HOUSEKEEPER_CONCURRENCY>1) ──
+//
+// pick→recordSpent is NOT atomic: a slot reads the usage notebook, picks the
+// first-unspent robot, runs the signup for ~minutes, THEN writes spent. Two
+// concurrent slots would therefore pick the SAME first-unspent robot and OAuth
+// as one Google account simultaneously (a self-inflicted collision — and the
+// account-sharing fails one of them). This module-level Set reserves a robot
+// the instant it's picked and releases it when the run finishes, so concurrent
+// slots always take DISTINCT robots. In-process only (the worker runs N
+// runDiscover() in ONE process); single-threaded JS makes claim()'s check+add
+// atomic between awaits, which is exactly the guarantee we need.
+const inFlightClaims = new Set<string>();
+export function claimIdentity(id: string): boolean {
+  if (inFlightClaims.has(id)) return false;
+  inFlightClaims.add(id);
+  return true;
+}
+export function releaseIdentity(id: string): void {
+  inFlightClaims.delete(id);
+}
+export function isIdentityClaimed(id: string): boolean {
+  return inFlightClaims.has(id);
+}
+
 // How many fresh (identity, service) verifications remain possible for a service
 // at the given agreement size (e.g. 2-of-N). Lets the scheduler warn before the
 // pool is exhausted for a service.

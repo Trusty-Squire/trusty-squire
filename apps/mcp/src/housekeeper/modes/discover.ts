@@ -39,6 +39,9 @@ import {
   loadUsage,
   pickUnspentIdentities,
   recordSpent,
+  claimIdentity,
+  releaseIdentity,
+  isIdentityClaimed,
   type VerifyIdentity,
 } from "../identity-pool.js";
 import {
@@ -65,8 +68,12 @@ function defaultIdentityPool(): IdentityPoolPort {
   return {
     // Discover OAuth is Google-only (the robots are Cloud Identity Free Google
     // accounts; github discover keeps the shared-profile fallback).
+    // Exclude robots a concurrent slot has already claimed (over-fetch then
+    // filter, so concurrent claims don't starve the pick).
     pick: (service, n) =>
-      pickUnspentIdentities(loadIdentities(), loadUsage(), service, "google", n),
+      pickUnspentIdentities(loadIdentities(), loadUsage(), service, "google", n + 8)
+        .filter((i) => !isIdentityClaimed(i.id))
+        .slice(0, n),
     markSpent: (identityId, service) =>
       recordSpent(identityId, service, new Date().toISOString()),
   };
@@ -382,6 +389,23 @@ export async function runDiscover(
     | { exhausted: true }
   > => {
     if (isGoogleOAuth) {
+      // BOT_FORCE_IDENTITY pins a specific robot regardless of spent-state —
+      // for controlled experiments (e.g. the concurrent-OAuth-from-one-IP A/B,
+      // where each parallel slot must take a DIFFERENT robot rather than the
+      // pool's deterministic first-unspent, which would collide all slots on
+      // one account) and for debugging a single robot. Off in normal operation.
+      const forced = process.env.BOT_FORCE_IDENTITY;
+      if (forced !== undefined && forced.length > 0) {
+        const pinned = loadIdentities().find((i) => i.id === forced);
+        if (pinned !== undefined && !excludeIdentityIds.includes(pinned.id)) {
+          claimIdentity(pinned.id);
+          return {
+            profileDir: pinned.profileDir,
+            oauthAccountEmail: pinned.email,
+            identityId: pinned.id,
+          };
+        }
+      }
       // Pick a few unspent so we can skip any already used this invocation
       // (the picker is pool-wide; usedIdentityIds is the in-run exclusion).
       const candidates = pool
@@ -389,6 +413,9 @@ export async function runDiscover(
         .filter((i) => !excludeIdentityIds.includes(i.id));
       const identity = candidates[0];
       if (identity === undefined) return { exhausted: true };
+      // Reserve it so concurrent discover slots take a DIFFERENT robot (the
+      // pick→claim is synchronous here — no await between — so it's atomic).
+      claimIdentity(identity.id);
       return {
         profileDir: identity.profileDir,
         oauthAccountEmail: identity.email,
@@ -573,6 +600,9 @@ export async function runDiscover(
           }`,
         );
       }
+      // Release the in-flight claim so the robot is available to a later slot
+      // (it's now recorded spent for THIS service, so it won't be re-picked here).
+      releaseIdentity(id);
     }
     // Reap ephemeral profiles so thousands of small dirs don't accumulate.
     for (const dir of ephemeralDirs) {
