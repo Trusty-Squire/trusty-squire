@@ -12200,13 +12200,45 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     password: string,
     steps: string[],
   ): Promise<boolean> {
-    const inv = await this.buildInventory(steps);
-    const emailEl =
-      inv.find((e) => e.tag === "input" && e.type === "email") ??
-      inv.find(
-        (e) => e.tag === "input" && (e.type === "text" || e.type === null),
-      );
-    const pwEl = inv.find((e) => e.tag === "input" && e.type === "password");
+    const findLoginFields = (inventory: ReadonlyArray<InteractiveElement>) => {
+      const emailEl =
+        inventory.find((e) => e.tag === "input" && e.type === "email") ??
+        inventory.find(
+          (e) => e.tag === "input" && (e.type === "text" || e.type === null),
+        );
+      const pwEl = inventory.find((e) => e.tag === "input" && e.type === "password");
+      return { emailEl, pwEl };
+    };
+    let inv = await this.buildInventory(steps);
+    let { emailEl, pwEl } = findLoginFields(inv);
+
+    // Two-stage email login: many login pages render only provider buttons
+    // ("Continue with Google / Microsoft / work email", SSO) and reveal the
+    // email+password inputs ONLY after you click the email option. portkey
+    // (MEASURED 2026-06-17): /login is button-only with "Continue with work
+    // email". Click that affordance — NOT Google/Microsoft/SSO — then re-read.
+    if (emailEl === undefined || pwEl === undefined) {
+      const emailButton = inv.find((e) => {
+        if (e.tag !== "button" && e.type !== "submit") return false;
+        const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+        return (
+          t.includes("email") &&
+          /\b(continue|log ?in|sign ?in|use|with|password)\b/.test(t) &&
+          !/google|microsoft|apple|github|\bsso\b|single sign/.test(t)
+        );
+      });
+      if (emailButton !== undefined) {
+        steps.push(
+          `Login: two-stage page — clicking "${(emailButton.visibleText ?? "email")
+            .slice(0, 40)
+            .trim()}" to reveal the email/password form.`,
+        );
+        await this.browser.click(emailButton.selector);
+        await this.browser.wait(2);
+        inv = await this.buildInventory(steps);
+        ({ emailEl, pwEl } = findLoginFields(inv));
+      }
+    }
     if (emailEl === undefined || pwEl === undefined) {
       steps.push("Login: no email/password fields on the page — skipped.");
       return false;
