@@ -18,7 +18,13 @@
 //     the captcha-short-circuit test's documented encapsulation break.
 
 import { describe, expect, it } from "vitest";
-import { findApiKeysNavLink, findCreateKeyAffordance, SignupAgent } from "../agent.js";
+import {
+  findApiKeysNavLink,
+  findCreateKeyAffordance,
+  findKeyModalSubmit,
+  findKeyNameInput,
+  SignupAgent,
+} from "../agent.js";
 import type { BrowserController, InteractiveElement } from "../browser.js";
 import type { LLMClient, LLMRequest, LLMResponse } from "../llm-client.js";
 
@@ -118,6 +124,53 @@ describe("findCreateKeyAffordance", () => {
 
   it("returns null on an empty inventory", () => {
     expect(findCreateKeyAffordance([])).toBeNull();
+  });
+});
+
+describe("findKeyModalSubmit / findKeyNameInput", () => {
+  // groq's create-key flow: clicking the page-level "Create API Key" opens a
+  // dialog with a Name input + a bare "Submit". findCreateKeyAffordance can't
+  // see "Submit", so the modal needs its own confirm matcher.
+  const groqModal = [
+    el({ tag: "input", type: "text", placeholder: "Name", selector: "#name" }),
+    el({ tag: "button", visibleText: "Cancel", selector: "#cancel" }),
+    el({ tag: "button", visibleText: "Submit", selector: "#submit" }),
+    // The page-level create button is STILL in the background DOM:
+    el({ tag: "button", visibleText: "Create API Key", selector: "#create-page" }),
+  ];
+
+  it("finds the modal's bare 'Submit' (excluding the page-level create button)", () => {
+    expect(findKeyModalSubmit(groqModal, "#create-page")?.selector).toBe("#submit");
+  });
+
+  it("ignores Cancel/Close negatives", () => {
+    const inv = [
+      el({ tag: "input", type: "text", selector: "#name" }),
+      el({ tag: "button", visibleText: "Cancel", selector: "#cancel" }),
+      el({ tag: "button", visibleText: "Close", selector: "#close" }),
+    ];
+    expect(findKeyModalSubmit(inv, "#none")).toBeNull();
+  });
+
+  it("requires a name input to be present (no modal → no submit)", () => {
+    const inv = [el({ tag: "button", visibleText: "Submit", selector: "#submit" })];
+    expect(findKeyModalSubmit(inv, "#none")).toBeNull();
+  });
+
+  it("does not return the excluded page-level create button as the confirm", () => {
+    const inv = [
+      el({ tag: "input", type: "text", selector: "#name" }),
+      el({ tag: "button", visibleText: "Create API Key", selector: "#create-page" }),
+    ];
+    // "Create API Key" is the excluded selector; nothing else is affirmative.
+    expect(findKeyModalSubmit(inv, "#create-page")).toBeNull();
+  });
+
+  it("findKeyNameInput returns the first visible text input", () => {
+    expect(findKeyNameInput(groqModal)?.selector).toBe("#name");
+    expect(
+      findKeyNameInput([el({ tag: "input", type: "checkbox", selector: "#cb" })]),
+    ).toBeNull();
   });
 });
 

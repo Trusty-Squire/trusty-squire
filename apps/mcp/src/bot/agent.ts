@@ -689,6 +689,61 @@ export function findCreateKeyAffordance(
   return candidates[0]!.el;
 }
 
+// A "name your key" confirm modal frequently labels its submit button
+// generically — "Submit", "Create", "Generate", "Done" — with NO key noun, so
+// findCreateKeyAffordance can't see it (groq: the page-level "Create API Key"
+// opens a dialog whose only affirmative is a bare "Submit"). Worse, the
+// page-level create button is still in the background DOM, so a naive
+// findCreateKeyAffordance re-grabs IT and reopens the modal forever. This finds
+// the modal's affirmative submit instead. Bounded to the modal shape — a text
+// input (the name field) MUST be present — so a page-level Submit on an
+// unrelated form can't be tripped. Excludes the just-clicked create button and
+// any cancel/close control. Pure; exported for unit testing.
+const KEY_MODAL_SUBMIT_AFFIRM =
+  /^\s*(?:submit|create(?:\s+(?:api\s+)?key)?|generate(?:\s+key)?|confirm|done|save|add(?:\s+key)?|ok)\s*$/i;
+const KEY_MODAL_NEGATIVE = /\b(?:cancel|close|back|dismiss|never\s*mind)\b/i;
+
+export function findKeyModalSubmit(
+  inventory: readonly InteractiveElement[],
+  excludeSelector: string,
+): InteractiveElement | null {
+  const hasNameInput = inventory.some(
+    (el) =>
+      el.tag === "input" &&
+      el.visible !== false &&
+      (el.type === null || /^(?:text|search|email)$/i.test(el.type)),
+  );
+  if (!hasNameInput) return null;
+  for (const el of inventory) {
+    if (el.selector === excludeSelector) continue;
+    const clickable =
+      el.tag === "button" || el.tag === "a" || el.role === "button" || el.role === "link";
+    if (!clickable || el.visible === false) continue;
+    const label = [el.visibleText, el.ariaLabel, el.title]
+      .filter((s): s is string => s !== null && s !== undefined && s.length > 0)
+      .join(" ")
+      .trim();
+    if (label.length === 0 || label.length > 24) continue;
+    if (KEY_MODAL_NEGATIVE.test(label)) continue;
+    if (KEY_MODAL_SUBMIT_AFFIRM.test(label)) return el;
+  }
+  return null;
+}
+
+// The name input inside a "name your key" modal — the first visible text-like
+// input. Some vendors gate the submit on a non-empty name (groq), so the mint
+// flow types one before clicking submit. Pure; exported for unit testing.
+export function findKeyNameInput(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  for (const el of inventory) {
+    if (el.tag !== "input" || el.visible === false) continue;
+    if (el.type !== null && !/^(?:text|search|email)$/i.test(el.type)) continue;
+    return el;
+  }
+  return null;
+}
+
 // An in-DOM nav link/affordance that points AT an API-keys / tokens page.
 // Distinct from findCreateKeyAffordance (the "create key" button): this finds
 // the LINK that navigates TO the keys page, so the bot can click the real
@@ -9901,15 +9956,53 @@ ${formatInventory(input.inventory)}`,
         );
         return null;
       }
-      // Poll for the freshly-minted key — minting is a server
-      // round-trip (Render/Mistral/Mailtrap render the value into a
-      // modal after the POST returns). Reuse the modal-reveal poll
-      // budget the click branch uses elsewhere (~8s), early-exiting the
-      // moment any tier surfaces a credential. A confirmation dialog
-      // ("Name your key" → Create) is common; fire the reveal pass each
-      // round so a modal that needs a second confirm-then-show click is
-      // still harvested.
-      const deadline = Date.now() + 8000;
+      // Forensic: capture the post-click state so a "modal never minted a key"
+      // failure is diagnosable — what does the create-key dialog render (name
+      // field? an in-modal captcha? a disabled submit?), and is it in our
+      // inventory? Off by default; production runs don't pay the snapshot.
+      if (process.env.BOT_DEBUG_MINT_MODAL === "1") {
+        await this.browser.wait(1.2);
+        await saveDebugSnapshot(this.browser, "mint-after-create-click");
+      }
+      // Drive the "name your key" dialog the create-click opened, then poll for
+      // the freshly-minted value (minting is a server round-trip; Render/Mistral
+      // render the value into the modal after the POST returns).
+      //
+      // Two gates commonly hold the dialog's submit DISABLED until satisfied:
+      //   (1) a non-empty NAME (groq's keyName field), and
+      //   (2) a CAPTCHA token — groq embeds a Cloudflare Turnstile INSIDE the
+      //       create-key modal (cf-turnstile-response), and the submit stays
+      //       disabled until the widget issues a token. The captcha gate never
+      //       ran here (it fires during form-fill, not post-verify mint), so the
+      //       modal sat unsolved and every re-click just reopened it. Satisfy
+      //       both up front: type the name, then run the captcha gate (Tier 1
+      //       behavior / Tier 2 click-and-wait, polling for the token), and only
+      //       then start clicking submit.
+      try {
+        const openInv = await this.browser.extractInteractiveElements();
+        const nameInput = findKeyNameInput(openInv);
+        if (nameInput !== null) {
+          await this.browser.type(nameInput.selector, "trusty-squire").catch(() => {});
+          steps.push("Existing-account recovery: named the new key.");
+        }
+      } catch {
+        // best-effort name fill
+      }
+      // Solve any captcha gating the modal's submit (groq's in-modal Turnstile).
+      // Best-effort: a no-widget result or a solver miss just falls through to
+      // the submit poll below, which still works for modals with no captcha.
+      const mintGate = await this.runCaptchaGate("Mint-modal", steps);
+      if (mintGate.blocked) {
+        steps.push(
+          "Existing-account recovery: the create-key modal's captcha is blocking — cannot mint.",
+        );
+      }
+
+      // Poll: click the modal's affirmative submit (re-clicking is harmless —
+      // it's a no-op while still disabled, and once name+token clear the gate
+      // the click lands), harvesting the minted value each round. No
+      // single-click guard: the gate may enable a beat after we first try.
+      const deadline = Date.now() + 12000;
       while (Date.now() < deadline) {
         await this.browser.wait(0.5);
         const minted = await this.harvestVisibleCredentials();
@@ -9919,17 +10012,20 @@ ${formatInventory(input.inventory)}`,
           );
           return minted;
         }
-        // A two-step create modal: clicking the page-level "Create key"
-        // opened a "name + confirm" dialog. Click a now-visible confirm
-        // affordance once, then keep polling.
         try {
           const modalInv = await this.browser.extractInteractiveElements();
-          const confirmBtn = findCreateKeyAffordance(modalInv);
-          if (
-            confirmBtn !== null &&
-            confirmBtn.selector !== createBtn.selector
-          ) {
-            await this.browser.click(confirmBtn.selector);
+          // Prefer the modal's generic submit ("Submit"/"Create"/…) over
+          // findCreateKeyAffordance: the page-level "Create API Key" button is
+          // still in the background DOM, and re-clicking IT just reopens the
+          // modal (the pre-fix groq failure loop). Fall back to the affordance
+          // matcher for modals whose confirm DOES carry a key noun.
+          let confirmBtn = findKeyModalSubmit(modalInv, createBtn.selector);
+          if (confirmBtn === null) {
+            const aff = findCreateKeyAffordance(modalInv);
+            if (aff !== null && aff.selector !== createBtn.selector) confirmBtn = aff;
+          }
+          if (confirmBtn !== null) {
+            await this.browser.click(confirmBtn.selector).catch(() => {});
           }
         } catch {
           // best-effort confirm
@@ -10072,6 +10168,15 @@ ${formatInventory(input.inventory)}`,
       extractKey: async () => {
         const c = await this.extractCredentials();
         return hasRealKey(c) ? c : null;
+      },
+      // Mint on a create-gated key surface: reuse the proven existing-account
+      // recovery (readable → reveal → click create → drive the name+confirm
+      // modal → poll the create POST → reveal masked-on-first-show). Without
+      // this, nav-search only bare-clicks "Create API Key" and never submits
+      // the resulting modal (groq's virgin /keys flow).
+      mintKey: async () => {
+        const c = await this.attemptMintNewKey(args.steps);
+        return c !== null && hasRealKey(c) ? c : null;
       },
       // Capture-chain parity (A2 / OF#1): one sequential round per step, full
       // state + the real selector, so the synthesizer's chain check (no gaps)

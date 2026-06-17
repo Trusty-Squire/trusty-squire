@@ -177,8 +177,21 @@ export function assessKeyGoal(input: {
   pageText: string;
   inventory: readonly InteractiveElement[];
 }): GoalAssessment {
-  // An existing-key listing with no re-reveal (e.g. Neon) IS arrival — the caller
-  // extracts/handles it. Strongest signal first.
+  // A create-key affordance on a key surface → mint a fresh key. This is checked
+  // BEFORE the existing-account-no-extract heuristic below, and deliberately so:
+  // an EMPTY keys table still renders its column headers ("Key name" / "Created" /
+  // "Last used"), which that heuristic mistakes for an existing masked listing
+  // (groq's /keys on a virgin account) — and then extraction finds nothing and the
+  // loop wanders off-surface. When a "Create API Key" button is right there,
+  // minting is unambiguously the move: it yields a fresh extractable key whether
+  // the account is virgin OR has masked existing keys. A stray "create" button
+  // elsewhere can't hijack the search — we gate on being on a key surface.
+  const create = findCreateKeyAffordance(input.inventory);
+  if (create !== null && KEYS_DESTINATION_URL.test(input.url)) {
+    return { kind: "create_gated", createSelector: create.selector };
+  }
+  // No create affordance, but an existing-key listing with no re-reveal (e.g.
+  // Neon) IS arrival — the caller extracts/handles whatever is shown.
   if (
     detectExistingAccountNoExtract({
       url: input.url,
@@ -187,13 +200,6 @@ export function assessKeyGoal(input: {
     })
   ) {
     return { kind: "on_key_surface" };
-  }
-  // A create-key affordance → this is the create-flow start, a subgoal. Only
-  // treat it as the goal-action when we're plausibly on a key surface (avoids
-  // a stray "create" button elsewhere hijacking the search).
-  const create = findCreateKeyAffordance(input.inventory);
-  if (create !== null && KEYS_DESTINATION_URL.test(input.url)) {
-    return { kind: "create_gated", createSelector: create.selector };
   }
   // On a keys/settings surface but no create affordance yet (key may be masked /
   // behind a reveal / already listed) → let the caller run the extractor.
@@ -332,6 +338,12 @@ export interface NavSearchDeps {
   // Returns extracted credentials if the current page yields a key (handles
   // reveal/copy internally), else null. The goal verifier of last resort.
   extractKey(): Promise<Record<string, string> | null>;
+  // Mint a fresh key on the CURRENT key surface: click the create affordance,
+  // drive any "name + confirm" modal, poll for the server-rendered value, and
+  // harvest it (revealing a masked-on-first-show value if needed). Returns the
+  // credentials or null. Optional — when absent (unit tests with a fake port),
+  // the create_gated branch falls back to a bare create-click + continue.
+  mintKey?(): Promise<Record<string, string> | null>;
   // Capture-chain parity hook (A2 / OF#1): called once per step so auto-promote
   // still sees the round chain it depends on. `selector` is the affordance the
   // step acts on (so the synthesizer learns the real click target); absent on
@@ -427,11 +439,25 @@ export async function runNavSearch(
         return { kind: "found", credentials: creds };
       }
     }
-    // 2b) No key yet, but a create affordance is available and untried → use it.
+    // 2b) No key yet, but a create affordance is available and untried → MINT.
+    //     Prefer the full mint dep (it drives the two-step "name + confirm"
+    //     modal, waits out the create POST's server round-trip, and reveals a
+    //     masked-on-first-show value) — a bare click would leave the modal
+    //     un-submitted and the loop would then dismiss it as an overlay. Fall
+    //     back to a bare click only when no mint dep is wired (unit tests).
     if (goal.kind === "create_gated" && !tried.has(goal.createSelector)) {
       tried.add(goal.createSelector);
       log(`nav-search: create-key subgoal → ${goal.createSelector}`);
       await capture("create_key", inv, goal.createSelector);
+      if (deps.mintKey !== undefined) {
+        const minted = await deps.mintKey().catch(() => null);
+        if (minted !== null && Object.keys(minted).length > 0) {
+          log(`nav-search: minted key on ${url}`);
+          await capture("extract", inv);
+          return { kind: "found", credentials: minted };
+        }
+        continue;
+      }
       await browser.clickSelector(goal.createSelector).catch(() => {});
       continue;
     }

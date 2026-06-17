@@ -109,10 +109,49 @@ mode has a concurrent-navigation bug):
 | activeloop  | google,github  | false            | ✗ OAuth-only — still walled |
 | predibase   | (ERR_NAME_NOT_RESOLVED on app.predibase.com) | — | URL stale; fix the queue URL first |
 The email-fallback opens the 4 email-capable members on the next not-persisted
-occurrence. The 3 OAuth-ONLY members (groq/turso/activeloop) need the harder
+occurrence. The 3 OAuth-ONLY members (turso/activeloop) need the harder
 Clerk sign-UP-context transfer (window.Clerk unreachable in the isolated world —
 the remaining open problem; a raw CDP main-world Runtime.evaluate is the untested
 angle). predibase needs a current signup URL before any retry.
+
+### ✅✅ groq CRACKED (2026-06-17) — it was NEVER an OAuth-callback wall; it was an in-modal Turnstile
+The "groq → OAuth-only, still walled" classification above is **FALSIFIED**. groq's
+Google OAuth signs in cleanly (verify-11, end-to-end) and reaches the dashboard.
+The real blocker was post-OAuth, on the **API-key page**, and decomposed into three
+distinct nav/mint bugs — all generalizable, all fixed:
+1. **nav-search wandered off the keys page.** groq's virgin `/keys` renders an
+   EMPTY key table whose column headers ("Key name" / "Created" / "Last used")
+   trip `detectExistingAccountNoExtract` → it returned `on_key_surface`, extraction
+   found nothing, and the loop navigated to `/settings`. FIX: in `assessKeyGoal`, a
+   visible create-key affordance on a keys URL → `create_gated` wins over the
+   existing-account heuristic (mint, don't declare a dead end). `nav-search.ts`.
+2. **nav-search never minted.** The `create_gated` branch bare-clicked "Create API
+   Key" and moved on; it never drove the resulting modal. FIX: wired the proven
+   `attemptMintNewKey` recovery in as a `mintKey` dep.
+3. **THE wall — a Cloudflare Turnstile INSIDE the create-key modal.** Clicking
+   "Create API Key" opens a Radix dialog with a `keyName` field + a hidden
+   `cf-turnstile-response`; the submit ("Create API Key", same label as the page
+   button) stays DISABLED until the Turnstile issues a token. The captcha gate
+   only ran during form-fill, never in post-verify mint, so the modal sat unsolved
+   and every re-click just reopened it (the planner clicked it 6× and gave up).
+   FIX: `attemptMintNewKey` now fills the name, then runs `runCaptchaGate` on the
+   open modal (Tier-1/2 Turnstile) before polling the submit. Live trail:
+   `Mint-modal captcha (turnstile): solved` → `extracted the freshly-minted key` →
+   `groq → ok (2 credentials)`, skill auto-promoted. Generalizes to any service
+   that gates key creation behind a captcha. Helpers: `findKeyModalSubmit` /
+   `findKeyNameInput` (agent.ts).
+
+### ⚠ verify-pool health (2026-06-17): verify-01..05 are DEAD (never warmed, not suspended)
+groq runs kept failing `needs_login` with `accounts.google.com/v3/signin/deletedaccount`
+on whatever robot got picked — and JIT re-warm could not rescue them. Admin-API
+`users.get` proves the cause: verify-01..05 have `suspended=false` but
+`lastLoginTime=1970-01-01T00:00:00Z` (epoch zero = **never successfully logged in** —
+created but never warmed), while verify-10..14 show real recent logins and work. So
+`deletedaccount` here = Google's response to an OAuth attempt from a profile that was
+NEVER warmed, NOT account suspension. The `provision-verify-robot.mjs list` "google=live"
+flag only checks directory existence, not warmth/suspension. Action: `warm verify-01..05`
+(automated fleet login) or rotate them out; meanwhile pin a warmed robot (verify-10..14)
+to validate discover work. Don't force-relogin or flip egress — it's per-identity warmth.
 
 ---
 

@@ -232,6 +232,22 @@ describe("assessKeyGoal", () => {
     const g = assessKeyGoal({ url: "https://x.test/app/projects", pageText: "Projects", inventory: inv });
     expect(g.kind).toBe("not_yet");
   });
+
+  it("empty keys table (header text trips existing-account heuristic) but with a create button → create_gated, not on_key_surface", () => {
+    // Regression: groq's virgin /keys renders an EMPTY table whose column
+    // headers ("Key name" + "Last used") satisfy detectExistingAccountNoExtract
+    // (2 existing-key word signals on a /keys URL). Pre-fix that won, returned
+    // on_key_surface, extraction found nothing, and the loop wandered to
+    // /settings. The visible "Create API Key" button must win → mint instead.
+    const inv = [el({ tag: "button", visibleText: "Create API Key", selector: "#create" })];
+    const g = assessKeyGoal({
+      url: "https://console.groq.com/keys",
+      pageText: "API Keys Manage your project API keys. Key name Created Last used",
+      inventory: inv,
+    });
+    expect(g.kind).toBe("create_gated");
+    if (g.kind === "create_gated") expect(g.createSelector).toBe("#create");
+  });
 });
 
 describe("findOverlayDismiss / findWizardAdvance / planOverlayStep", () => {
