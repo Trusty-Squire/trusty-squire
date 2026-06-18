@@ -175,4 +175,34 @@ describe("resolveSignupUrlByProbe", () => {
     );
     expect(resolved).toBeNull();
   });
+
+  it("recovers a stale model host with a reachable service-derived cloud console", async () => {
+    const hint = "https://console.cloud.clickhouse.com/signup";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "clickhouse-cloud",
+      fakeFetch({
+        // The LLM-provided hint is unreachable (not present in this map).
+        "https://console.clickhouse.cloud/signup": {
+          body: MARKETING_HTML,
+        },
+      }),
+    );
+    expect(resolved).toBe("https://console.clickhouse.cloud/signup");
+  });
+
+  it("does not recover an unreachable hint through an off-domain service candidate", async () => {
+    const hint = "https://console.cloud.clickhouse.com/signup";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "clickhouse-cloud",
+      fakeFetch({
+        "https://console.clickhouse.cloud/signup": {
+          finalUrl: "https://evil.example/signup",
+          body: PLUNK_SIGNUP_HTML,
+        },
+      }),
+    );
+    expect(resolved).toBeNull();
+  });
 });

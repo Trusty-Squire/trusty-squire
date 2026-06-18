@@ -792,6 +792,44 @@ export function guessSignupUrl(service: string): string {
   return `https://${slug}.com/signup`;
 }
 
+const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
+  // The model repeatedly returns the stale/dead host
+  // console.cloud.clickhouse.com, which no longer resolves. ClickHouse's own
+  // docs and current console use console.clickhouse.cloud.
+  clickhousecloud: "https://console.clickhouse.cloud/signup",
+};
+
+function canonicalSignupUrl(service: string): string | null {
+  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return CANONICAL_SIGNUP_URLS[slug] ?? null;
+}
+
+function serviceDerivedSignupCandidates(serviceSlug: string): string[] {
+  const parts = serviceSlug
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) return [];
+
+  const candidates: string[] = [];
+  const add = (url: string): void => {
+    if (!candidates.includes(url)) candidates.push(url);
+  };
+
+  const compact = parts.join("");
+  add(`https://${compact}.com/signup`);
+
+  if (parts.length >= 2) {
+    const root = parts.slice(0, -1).join("");
+    const tld = parts[parts.length - 1];
+    add(`https://${root}.${tld}/signup`);
+    add(`https://app.${root}.${tld}/signup`);
+    add(`https://console.${root}.${tld}/signup`);
+  }
+
+  return candidates;
+}
+
 // Pull the first well-formed http(s) URL out of arbitrary model text.
 // Exported for unit testing.
 export function firstHttpsUrl(text: string): string | null {
@@ -852,6 +890,11 @@ export async function resolveSignupUrl(
         `skill-URL lookup failed for "${service}" (${err instanceof Error ? err.message : String(err)}) — trying the model`,
       );
     }
+  }
+  const canonical = canonicalSignupUrl(service);
+  if (canonical !== null) {
+    opts.log?.(`Resolved signup URL for "${service}" from canonical map: ${canonical}`);
+    return canonical;
   }
   // No model available → preserve the old deterministic behavior exactly.
   if (llm === null || llm === undefined) return guessSignupUrl(service);
@@ -2225,6 +2268,56 @@ export async function resolveSignupUrlByProbe(
     }
     note(`[signup-url] resolved via probe: ${candidate} → ${res.finalUrl}`);
     return res.finalUrl;
+  }
+
+  // If the model/curated hint is not even reachable, widen from "same origin"
+  // to service-name-derived origins and validate those with the same HTTP
+  // probe. This recovers stale host guesses like
+  // console.cloud.clickhouse.com → console.clickhouse.cloud without trusting
+  // the LLM blindly. If a candidate is reachable but its static HTML is
+  // inconclusive (common Auth0/Clerk shell), return it only as a replacement
+  // for an unreachable hint; the browser planner can then inspect the live
+  // page instead of dying on DNS.
+  let firstReachableServiceCandidate: string | null = null;
+  if (hintRes === null) {
+    for (const candidate of serviceDerivedSignupCandidates(serviceSlug)) {
+      if (candidate === hintUrl) continue;
+      const res = await fetchText(candidate);
+      if (res === null) continue;
+
+      let finalHost: string;
+      let candidateHost: string;
+      try {
+        finalHost = new URL(res.finalUrl).hostname;
+        candidateHost = new URL(candidate).hostname;
+      } catch {
+        continue;
+      }
+      const finalDomain = getDomain(finalHost.toLowerCase());
+      const candidateDomain = getDomain(candidateHost.toLowerCase());
+      const sameCandidateDomain =
+        finalDomain !== null && candidateDomain !== null && finalDomain === candidateDomain;
+      if (!sameCandidateDomain && !hostMatchesServiceDomain(finalHost, serviceSlug)) {
+        note(
+          `[signup-url] service candidate ${candidate} → ${res.finalUrl} rejected: off-domain`,
+        );
+        continue;
+      }
+
+      if (classifySignupHtml(res.bodyText) === "signup") {
+        note(`[signup-url] recovered via service probe: ${candidate} → ${res.finalUrl}`);
+        return res.finalUrl;
+      }
+      firstReachableServiceCandidate ??= res.finalUrl;
+    }
+  }
+
+  if (firstReachableServiceCandidate !== null) {
+    note(
+      `[signup-url] hint ${hintUrl} was unreachable; using reachable service candidate ` +
+        `${firstReachableServiceCandidate}`,
+    );
+    return firstReachableServiceCandidate;
   }
 
   note(`[signup-url] no conventional signup path resolved for ${hintUrl}`);

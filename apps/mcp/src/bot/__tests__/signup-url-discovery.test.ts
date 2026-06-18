@@ -148,6 +148,14 @@ describe("resolveSignupUrl", () => {
     expect(calls.n).toBe(0); // a verified skill URL never spends an LLM call
   });
 
+  it("uses canonical canary URLs before spending LLM calls", async () => {
+    const calls = { n: 0 };
+    const llm = stubLLM("https://console.cloud.clickhouse.com/signup", calls);
+    const url = await resolveSignupUrl("clickhouse-cloud", llm);
+    expect(url).toBe("https://console.clickhouse.cloud/signup");
+    expect(calls.n).toBe(0);
+  });
+
   it("falls through to the model when the skill lookup returns null", async () => {
     const url = await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
       lookupSkillUrl: async () => null,
