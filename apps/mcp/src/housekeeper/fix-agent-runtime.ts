@@ -22,6 +22,8 @@ import type {
   GateRunner,
 } from "./fix-agent.js";
 
+import { runLiveGate, type LiveRunner } from "./live-gate.js";
+
 const exec = promisify(execFile);
 
 // Both the gate and the page replay must run in a FRESH process so they reflect
@@ -234,5 +236,82 @@ export function gitCommitter(config: {
       await git(config.repoRoot, ["push", "origin", "staging"]);
       log(`pushed staging → CI publishes @trusty-squire/mcp@${version} (next)`);
     }
+  };
+}
+
+// ── The LIVE ORACLE (autonomous-fix-loop Phase 2) ───────────────────────────
+//
+// A LiveRunner backed by a real single-service discover subprocess. It runs
+// `dist/bin.js housekeeper --service=<svc> --once`, exercising the freshly BUILT
+// dist — which is why makeLiveGate rebuilds dist before each gate run, so the
+// applied (not-yet-committed) fix is actually live. Green = the run extracted a
+// credential; a crash/timeout/non-green outcome = not green.
+
+export function discoverLiveRunner(config: {
+  repoRoot: string;
+  timeoutMs?: number;
+  log?: (line: string) => void;
+}): LiveRunner {
+  const timeout = config.timeoutMs ?? 9 * 60 * 1000;
+  return async (service) => {
+    try {
+      const { stdout, stderr } = await exec(
+        "node",
+        ["apps/mcp/dist/bin.js", "housekeeper", `--service=${service}`, "--once"],
+        {
+          cwd: config.repoRoot,
+          maxBuffer: 64 * 1024 * 1024,
+          timeout,
+          env: { ...process.env, HOUSEKEEPER_CONCURRENCY: "1" },
+        },
+      );
+      const out = `${stdout}\n${stderr}`;
+      const green = /extracted \d+ credential|outcome=ok|→ ok \(/i.test(out);
+      config.log?.(`live: ${service} → ${green ? "green" : "red"}`);
+      return { green };
+    } catch {
+      config.log?.(`live: ${service} → red (crash/timeout)`);
+      return { green: false };
+    }
+  };
+}
+
+// The fix-agent's live gate: rebuild dist (so the applied fix is live), then
+// runLiveGate(cluster + canary) against a FIXED pre-loop canary baseline (the
+// caller measures it once, so canary flakiness doesn't block a good fix — only
+// a real regression below where we started does).
+export function makeLiveGate(config: {
+  repoRoot: string;
+  canary: readonly string[];
+  baselineCanaryGreen: number;
+  minClusterMove: number;
+  runner: LiveRunner;
+  build: () => Promise<void>;
+  log?: (line: string) => void;
+}): (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }> {
+  return async (cluster) => {
+    config.log?.("live gate: rebuilding dist so the applied fix is live…");
+    await config.build();
+    const v = await runLiveGate(config.runner, {
+      cluster: cluster.services,
+      canary: config.canary,
+      baselineCanaryGreen: config.baselineCanaryGreen,
+      minClusterMove: config.minClusterMove,
+    });
+    return { passed: v.passed, reason: v.reason };
+  };
+}
+
+// Rebuild the mcp dist (tsc) — the live runner spawns dist/bin.js, so the fix
+// must be compiled in before a gate run.
+export function makeDistBuilder(config: {
+  repoRoot: string;
+}): () => Promise<void> {
+  return async () => {
+    await exec("pnpm", ["-F", "@trusty-squire/mcp", "build"], {
+      cwd: config.repoRoot,
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 5 * 60 * 1000,
+    });
   };
 }

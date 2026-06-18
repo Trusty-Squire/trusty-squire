@@ -205,6 +205,46 @@ describe("runFixAgent", () => {
     expect(prop.revert).not.toHaveBeenCalled();
   });
 
+  it("commits when offline is green AND the LIVE oracle passes", async () => {
+    const commit = vi.fn(async () => undefined);
+    const prop = proposal(["apps/mcp/src/bot/agent.ts"]);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose: async () => prop,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 }), gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      liveGate: async () => ({ passed: true, reason: "2/3 cluster green, canary held" }),
+      commit,
+      log: () => undefined,
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(res.committed).toHaveLength(1);
+  });
+
+  it("does NOT commit when offline is green but the LIVE oracle rejects; reverts every attempt", async () => {
+    const commit = vi.fn(async () => undefined);
+    const prop = proposal(["apps/mcp/src/bot/agent.ts"]);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose: async () => prop,
+      gate: scriptedGate([
+        gate({ regressPassed: true, holdout: 5 }),
+        gate({ regressPassed: true, holdout: 5 }),
+        gate({ regressPassed: true, holdout: 5 }),
+        gate({ regressPassed: true, holdout: 5 }),
+      ]),
+      replay: replayMoved, // offline says it moved
+      liveGate: async () => ({ passed: false, reason: "0/3 cluster green live — fix didn't generalize" }),
+      commit,
+      maxAttemptsPerCluster: 3,
+      log: () => undefined,
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect((prop.revert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(3);
+  });
+
   it("does NOT commit when the gate is green but the page didn't move; parks after K", async () => {
     const commit = vi.fn(async () => undefined);
     const prop = proposal(["apps/mcp/src/bot/agent.ts"]);

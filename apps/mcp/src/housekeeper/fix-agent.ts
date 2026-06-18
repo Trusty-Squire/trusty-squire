@@ -115,6 +115,13 @@ export interface FixAgentOpts {
   // Replays a captured page through the (freshly-edited) planner so the loop can
   // verify the fix actually moved the stuck page before committing.
   replay: ClusterReplay;
+  // The LIVE ORACLE (autonomous-fix-loop Phase 2). When wired, the offline gate
+  // + replay above are only the FAST inner filter; a fix commits ONLY if it also
+  // passes the live gate — the cluster's services extract a working key on ≥M
+  // distinct services AND a held-out canary doesn't regress. Builds dist + runs
+  // real signups internally; returns the verdict. Absent → offline-only (the
+  // pre-Phase-2 behaviour; the unit tests drive it without live runs).
+  liveGate?: (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }>;
   commit: Committer;
   branch: string;
   currentVersion: string;
@@ -366,7 +373,25 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
         continue;
       }
 
-      // Verified: no regression AND every stuck page moved.
+      // Guard 3 — the LIVE ORACLE (Phase 2). Offline said the page moves; now
+      // prove it against reality: the cluster extracts a working key live AND
+      // the canary held. The offline gate can be fooled (stale DOM, a fix that
+      // moves the planner's STEP but doesn't complete the signup); a live key
+      // cannot. Only run after the cheap offline filters pass.
+      if (opts.liveGate !== undefined) {
+        const live = await opts.liveGate(cluster);
+        log(`cluster ${cluster.id}: attempt ${attempt}/${K} live gate — ${live.reason}`);
+        if (!live.passed) {
+          await proposal.revert();
+          priorFeedback =
+            `offline said the page moved, but the LIVE gate rejected it: ${live.reason}. ` +
+            `The fix must make REAL signups extract a working key without breaking the canary.`;
+          continue;
+        }
+      }
+
+      // Verified: no regression, every stuck page moved offline, AND the live
+      // oracle confirmed real keys without canary regression.
       await opts.commit({ cluster, proposal, version: nextVersion });
       result.committed.push({
         cluster_id: cluster.id,

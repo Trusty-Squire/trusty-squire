@@ -275,6 +275,14 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     return await runLedgerCli(argv);
   }
 
+  // autonomous-fix-loop Phase 3 — the conductor: live-gated fix-agent looped to
+  // convergence. Operator-only, long-running.
+  if (argv[0] === "autoloop") {
+    const { runAutoloop } = await import("./modes/autoloop.js");
+    await runAutoloop({});
+    return 0;
+  }
+
   const args = parseArgs(argv);
 
   // Reap stale sibling housekeeper runs before we touch the shared Chrome

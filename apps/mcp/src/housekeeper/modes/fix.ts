@@ -10,7 +10,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveCaptureDir } from "../../bot/onboarding-capture.js";
 import { readFixBatch } from "../fix-batch.js";
-import { runFixAgent, type FixAgentResult } from "../fix-agent.js";
+import {
+  runFixAgent,
+  type FixAgentResult,
+  type FixCluster,
+} from "../fix-agent.js";
 import { appendFixAttempts } from "../fix-ledger.js";
 import {
   codingAgentProposer,
@@ -42,6 +46,10 @@ export async function runFixMode(opts: {
   // daily run only re-clusters recent failures, not the accumulated dir.
   sinceMs?: number;
   log?: (line: string) => void;
+  // The LIVE ORACLE (Phase 2). When provided, a fix commits only if it also
+  // passes the live gate. The autoloop builds this (canary baseline measured
+  // once); a plain --mode=fix run leaves it undefined (offline-only).
+  liveGate?: (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }>;
 }): Promise<FixAgentResult | null> {
   const log = opts.log ?? ((line: string) => console.log(`[fix] ${line}`));
   const sinceMs = opts.sinceMs ?? defaultSinceMs();
@@ -106,6 +114,7 @@ export async function runFixMode(opts: {
     propose: codingAgentProposer({ repoRoot, cliCommand, log }),
     gate: makeEvalGateRunner({ repoRoot }),
     replay: makeClusterReplayRunner({ repoRoot }),
+    ...(opts.liveGate !== undefined ? { liveGate: opts.liveGate } : {}),
     commit: gitCommitter({ repoRoot, push, log }),
     log,
   });
