@@ -298,7 +298,22 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // wall guarantees the process dies even if it wedges outside the lock. unref()
   // so it never itself keeps the loop alive. Single-service/discover runs get a
   // tight ceiling; a full heal pass gets a loose backstop.
-  const selfDeadlineS = args.mode === "heal" ? 4 * 60 * 60 : 25 * 60;
+  //
+  // Edge fix (concurrent drains): a CONCURRENT discover batch legitimately runs
+  // far longer than a single-service run — N services in waves of C. The flat
+  // 25-min ceiling killed a 19-service 5-wide drain at service 8. Scale the
+  // ceiling with concurrency (each ~8-min run, waves = N/C) up to a 2h cap, so
+  // a big concurrent drain finishes instead of hard-exiting mid-batch.
+  const concurrency = Math.max(
+    1,
+    Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1,
+  );
+  const selfDeadlineS =
+    args.mode === "heal"
+      ? 4 * 60 * 60
+      : concurrency > 1
+        ? Math.min(2 * 60 * 60, 25 * 60 * concurrency)
+        : 25 * 60;
   const selfDeadline = setTimeout(() => {
     console.error(
       `[housekeeper] SELF-DEADLINE: process exceeded ${Math.round(

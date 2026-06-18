@@ -70,6 +70,7 @@ export class PrismaOpenIssueStore implements OpenIssueStore {
       const row = await this.client.openIssue.create({
         data: { id, service, failure_kind: failureKind, status: "open", attempts: 1 },
       });
+      await this.supersedeStale(service, id);
       return mapRow(row as Row);
     }
     const p = mapRow(prior as Row);
@@ -86,7 +87,20 @@ export class PrismaOpenIssueStore implements OpenIssueStore {
           : {}),
       },
     });
+    await this.supersedeStale(service, id);
     return mapRow(row as Row);
+  }
+
+  async supersedeStale(service: string, keepId: string): Promise<number> {
+    const { count } = await this.client.openIssue.updateMany({
+      where: {
+        service,
+        id: { not: keepId },
+        status: { in: ["open", "in_progress"] },
+      },
+      data: { status: "superseded", actor: "auto-supersede" },
+    });
+    return count;
   }
 
   async seedIfAbsent(

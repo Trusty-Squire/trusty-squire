@@ -67,6 +67,26 @@ describe("InMemoryOpenIssueStore — close-gate", () => {
     expect((await s.get("groq:captcha_blocked"))?.status).toBe("resolved");
   });
 
+  it("a new failure mode supersedes the service's older open ticket (drift fix)", async () => {
+    const s = new InMemoryOpenIssueStore();
+    await s.seedFailure("hasura", "oauth_stuck_on_chooser: account chooser");
+    // Same service fails a DIFFERENT way next run → the old ticket is superseded.
+    await s.seedFailure("hasura", "needs_login: stale session");
+    expect((await s.get("hasura:oauth_stuck_on_chooser"))?.status).toBe("superseded");
+    expect((await s.get("hasura:needs_login"))?.status).toBe("open");
+    // The queue carries ONE current ticket for the service.
+    const open = await s.list("open");
+    expect(open.filter((i) => i.service === "hasura").length).toBe(1);
+  });
+
+  it("supersede never touches a resolved/wall ticket (human work preserved)", async () => {
+    const s = new InMemoryOpenIssueStore();
+    const w = await s.seedFailure("playht", "page.goto: dead");
+    await s.closeWall(w.id, { experiment: "dns", result: "NXDOMAIN" }, "op", w.version);
+    await s.seedFailure("playht", "needs_login: x"); // a new mode for the same service
+    expect((await s.get("playht:page.goto"))?.status).toBe("wall"); // untouched
+  });
+
   it("seedIfAbsent (backfill) NEVER reopens a human-closed wall on replay", async () => {
     const s = new InMemoryOpenIssueStore();
     const seeded = await s.seedFailure("playht", "page.goto: net::ERR_NAME_NOT_RESOLVED");

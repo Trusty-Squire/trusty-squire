@@ -6,7 +6,12 @@
 // Seeded from the ProvisionEvent firehose; a success drains the service's open
 // tickets; optimistic concurrency keeps parallel loop workers from stomping.
 
-export type IssueStatus = "open" | "in_progress" | "resolved" | "wall";
+export type IssueStatus =
+  | "open"
+  | "in_progress"
+  | "resolved"
+  | "wall"
+  | "superseded"; // a NEWER failure-mode ticket for the same service replaced this one
 
 // The falsification record required to close a ticket as a `wall`. Mirrors the
 // STATE.md discipline: name the experiment + its result, optionally point at
@@ -69,6 +74,12 @@ export interface OpenIssueStore {
    *  the green run id (actor="auto"). Returns how many it closed. A green run
    *  even resolves a `wall` — if it went green, it wasn't a wall. */
   resolveServiceOnSuccess(service: string, greenRun: string): Promise<number>;
+  /** Failure-mode drift: when a service starts failing a NEW way, mark its
+   *  OTHER open/in_progress tickets (different failure_kind) `superseded`, so
+   *  the queue carries ONE current ticket per service instead of accumulating
+   *  one per error string the service ever produced. Keeps resolved/wall.
+   *  Returns how many it superseded. */
+  supersedeStale(service: string, keepId: string): Promise<number>;
   /** Loop worker claims a ticket → in_progress. Optimistic concurrency. */
   claim(id: string, actor: string, expectedVersion: number): Promise<CloseResult>;
   /** Close `resolved` — REQUIRES a green-run pointer. */
@@ -137,6 +148,7 @@ export class InMemoryOpenIssueStore implements OpenIssueStore {
         updated_at: new Date(),
       };
       this.rows.set(id, row);
+      await this.supersedeStale(service, id);
       return row;
     }
     // A recurrence: bump attempts; a resolved/wall ticket reopens (the bug
@@ -155,7 +167,26 @@ export class InMemoryOpenIssueStore implements OpenIssueStore {
       updated_at: new Date(),
     };
     this.rows.set(id, row);
+    await this.supersedeStale(service, id);
     return row;
+  }
+
+  async supersedeStale(service: string, keepId: string): Promise<number> {
+    let n = 0;
+    for (const [id, row] of this.rows) {
+      if (row.service !== service || id === keepId) continue;
+      if (row.status === "open" || row.status === "in_progress") {
+        this.rows.set(id, {
+          ...row,
+          status: "superseded",
+          actor: "auto-supersede",
+          version: row.version + 1,
+          updated_at: new Date(),
+        });
+        n += 1;
+      }
+    }
+    return n;
   }
 
   async seedIfAbsent(

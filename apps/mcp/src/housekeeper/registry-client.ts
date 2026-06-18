@@ -341,7 +341,7 @@ export interface IssueRow {
   id: string;
   service: string;
   failure_kind: string;
-  status: "open" | "in_progress" | "resolved" | "wall";
+  status: "open" | "in_progress" | "resolved" | "wall" | "superseded";
   attempts: number;
   resolved_run: string | null;
   falsified: { experiment: string; result: string; evidence_ref?: string } | null;

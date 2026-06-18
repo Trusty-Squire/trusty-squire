@@ -27,7 +27,7 @@ export interface IssuesRouteDeps {
   adminBearer?: string;
 }
 
-const STATUSES = ["open", "in_progress", "resolved", "wall"] as const;
+const STATUSES = ["open", "in_progress", "resolved", "wall", "superseded"] as const;
 
 const ClaimBody = z.object({
   actor: z.string().min(1).max(80),
