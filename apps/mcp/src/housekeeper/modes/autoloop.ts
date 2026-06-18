@@ -14,7 +14,11 @@
 // The offline gate is the cheap inner filter; the live key is the oracle. The
 // canary baseline is the silent-collapse tripwire. Operator-only.
 
-import { runFixMode } from "./fix.js";
+import {
+  checkFixAgentCommand,
+  resolveFixAgentCommand,
+  runFixMode,
+} from "./fix.js";
 import {
   discoverLiveRunner,
   makeDistBuilder,
@@ -28,10 +32,18 @@ const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
 export async function runAutoloop(opts: {
   log?: (line: string) => void;
   maxLaps?: number;
+  agent?: string;
 }): Promise<void> {
   const log = opts.log ?? ((l: string) => console.log(`[autoloop] ${l}`));
   const repoRoot = process.cwd();
   const maxLaps = opts.maxLaps ?? (Number(process.env.AUTOLOOP_MAX_LAPS ?? "6") || 6);
+  const cliCommand = resolveFixAgentCommand(opts.agent);
+  const commandProblem = checkFixAgentCommand(cliCommand.command);
+  if (commandProblem !== null) {
+    log(`ABORT: ${commandProblem}`);
+    return;
+  }
+  log(`using fix proposer agent=${cliCommand.label}`);
 
   const canary = (process.env.TRUSTY_SQUIRE_FIX_CANARY ?? DEFAULT_CANARY.join(","))
     .split(",")
@@ -76,17 +88,31 @@ export async function runAutoloop(opts: {
       sinceMs: Date.now() - SIXTY_DAYS_MS,
       liveGate,
       log,
+      ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     });
     const committed = result?.committed.length ?? 0;
     const walls = result?.walls.length ?? 0;
     const parked = result?.parked.length ?? 0;
+    const proposerBlocked = (result?.parked ?? []).some((p) =>
+      p.reason.startsWith("proposer error:") ||
+      p.reason.includes("proposer command not found"),
+    );
+    const exhaustedFixes = (result?.walls ?? []).some((w) =>
+      w.reason.includes("no fix both held the gate"),
+    );
     totalCommitted += committed;
     log(`LAP ${lap}: committed=${committed} walls=${walls} parked=${parked}`);
     for (const c of result?.committed ?? []) {
       log(`  ✅ ${c.cluster_id} → ${c.version}: ${c.summary}`);
     }
     if (committed === 0) {
-      log(`CONVERGED at lap ${lap}: a full lap committed nothing.`);
+      if (proposerBlocked) {
+        log(`STOPPED at lap ${lap}: proposer failed; not converged.`);
+      } else if (exhaustedFixes) {
+        log(`STOPPED at lap ${lap}: fixable clusters exhausted without a passing candidate; not converged.`);
+      } else {
+        log(`CONVERGED at lap ${lap}: no commit-worthy fixable clusters remained.`);
+      }
       break;
     }
   }

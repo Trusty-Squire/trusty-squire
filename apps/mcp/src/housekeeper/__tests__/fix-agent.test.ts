@@ -111,20 +111,27 @@ describe("sameAction", () => {
 // ── clustering ───────────────────────────────────────────────────────
 
 describe("clusterFailures", () => {
-  it("collapses failures sharing stage+action-kind across services, regardless of page signature", () => {
-    // The whole point: groq, render and kinde fail the same WAY (same stage,
-    // planner stuck on the same action kind) even though their pages (and thus
-    // signatures) differ. One cluster means one generalizing fix addresses all.
+  it("collapses failures sharing stage+action-kind+signature across services", () => {
     const clusters = clusterFailures(
       batch([
         failure({ service: "groq", signature: "sig-x" }),
-        failure({ service: "render", signature: "sig-totally-different" }),
-        failure({ service: "kinde", signature: "sig-y" }),
+        failure({ service: "render", signature: "sig-x" }),
+        failure({ service: "kinde", signature: "sig-x" }),
       ]),
     );
     expect(clusters).toHaveLength(1);
     expect(clusters[0]!.services.sort()).toEqual(["groq", "kinde", "render"]);
     expect(clusters[0]!.pages).toHaveLength(3);
+  });
+
+  it("separates same stage+action failures with different page signatures", () => {
+    const clusters = clusterFailures(
+      batch([
+        failure({ service: "groq", signature: "sig-x" }),
+        failure({ service: "render", signature: "sig-y" }),
+      ]),
+    );
+    expect(clusters).toHaveLength(2);
   });
 
   it("separates same-signature but different-stage failures", () => {

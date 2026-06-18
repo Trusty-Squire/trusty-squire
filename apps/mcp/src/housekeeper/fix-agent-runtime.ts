@@ -132,16 +132,34 @@ async function changedPaths(repoRoot: string): Promise<string[]> {
 }
 
 // Build the coding-agent prompt for a cluster: the evidence + the contract.
-function clusterPrompt(cluster: FixCluster): string {
+function refsForPrompt(cluster: FixCluster): string {
+  const refs: string[] = [];
+  for (const page of cluster.pages) {
+    if (!refs.includes(page.captureRef)) refs.push(page.captureRef);
+    if (refs.length >= 12) break;
+  }
+  for (const ref of cluster.capture_refs) {
+    if (!refs.includes(ref)) refs.push(ref);
+    if (refs.length >= 12) break;
+  }
+  return refs.join("\n  ");
+}
+
+function clusterPrompt(
+  cluster: FixCluster,
+  attempt: number,
+  priorFeedback: string | undefined,
+): string {
   const services = cluster.services.join(", ");
-  const refs = cluster.capture_refs.slice(0, 8).join("\n  ");
+  const refs = refsForPrompt(cluster);
   const reasoning = cluster.failures
     .map((f) => f.planner_reasoning)
     .filter((r): r is string => r !== undefined)
-    .slice(0, 4)
+    .slice(0, 8)
     .join("\n  ");
   return [
     `You are the autonomous fix-agent for the Trusty Squire signup bot.`,
+    `Attempt ${attempt} of this cluster.`,
     `A daily run failed on these services at the SAME stuck page (failure_stage=${cluster.failure_stage}):`,
     `  ${services}`,
     ``,
@@ -150,6 +168,13 @@ function clusterPrompt(cluster: FixCluster): string {
     ``,
     `The planner's last reasoning on these failures:`,
     `  ${reasoning}`,
+    ...(priorFeedback !== undefined
+      ? [
+          ``,
+          `Previous attempt feedback:`,
+          `  ${priorFeedback}`,
+        ]
+      : []),
     ``,
     `Propose ONE GENERALIZING fix to the post-OAuth navigation planner prompt or`,
     `the deterministic nav/inventory code that resolves this cluster without a`,
@@ -192,7 +217,11 @@ export function codingAgentProposer(config: {
   const log = config.log ?? (() => undefined);
   const timeoutMs = config.timeoutMs ?? 15 * 60 * 1000;
   const maxRateRetries = config.maxRateRetries ?? 4;
-  return async (cluster: FixCluster): Promise<FixProposal | null> => {
+  return async (
+    cluster: FixCluster,
+    attemptNumber: number,
+    priorFeedback: string | undefined,
+  ): Promise<FixProposal | null> => {
     // Start from a clean tree so changedPaths attributes only this attempt.
     const before = await changedPaths(config.repoRoot);
     if (before.length > 0) {
@@ -205,7 +234,7 @@ export function codingAgentProposer(config: {
     try {
       for (let attempt = 0; ; attempt++) {
         try {
-          await exec(cmd, [...rest, clusterPrompt(cluster)], {
+          await exec(cmd, [...rest, clusterPrompt(cluster, attemptNumber, priorFeedback)], {
             cwd: config.repoRoot,
             maxBuffer: 64 * 1024 * 1024,
             timeout: timeoutMs,

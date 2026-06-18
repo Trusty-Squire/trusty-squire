@@ -72,6 +72,7 @@ interface ParsedArgs {
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
+  fixAgent: string | undefined;
   enableTelegram: boolean;
   enableGithubIssues: boolean;
 }
@@ -91,6 +92,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
     adminBearer: process.env.REGISTRY_ADMIN_BEARER,
+    fixAgent: undefined,
     enableTelegram: false,
     enableGithubIssues: false,
   };
@@ -130,6 +132,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       args.registryUrl = arg.slice("--registry-url=".length);
     } else if (arg.startsWith("--admin-bearer=")) {
       args.adminBearer = arg.slice("--admin-bearer=".length);
+    } else if (arg.startsWith("--agent=")) {
+      args.fixAgent = arg.slice("--agent=".length);
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -167,8 +171,10 @@ Modes (pick one — default: verify):
                             eval gate, and commits surviving fixes to
                             staging (the next/RC channel). Needs git
                             + a local coding CLI (TRUSTY_SQUIRE_FIX_
-                            AGENT_CLI, default 'claude -p'); set
+                            AGENT/--agent, default 'claude'); set
                             TRUSTY_SQUIRE_FIX_AGENT_PUSH=1 to push.
+  autoloop                  Live-gated fix-agent loop to convergence.
+                            Supports --agent=claude|codex|COMMAND.
   --service=SLUG            Ad-hoc single-service mode. Implies
                             discover. Bot runs once against SLUG.
   --oauth-provider=google|github
@@ -200,6 +206,8 @@ Pacing:
 Auth:
   --registry-url=URL        Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=TOKEN      Override REGISTRY_ADMIN_BEARER.
+  --agent=AGENT             Fix proposer for --mode=fix/autoloop:
+                            claude, codex, or a custom command string.
 
 Required env per mode:
   verify:              REGISTRY_ADMIN_BEARER
@@ -208,6 +216,13 @@ Required env per mode:
   discover --from=:    TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID
   --service:           same as discover --from=
 `);
+}
+
+function parseAutoloopAgent(argv: readonly string[]): string | undefined {
+  for (const arg of argv) {
+    if (arg.startsWith("--agent=")) return arg.slice("--agent=".length);
+  }
+  return undefined;
 }
 
 // Auto-load ~/.config/trusty-squire/harvester.env for manual `node dist/bin.js
@@ -279,7 +294,8 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // convergence. Operator-only, long-running.
   if (argv[0] === "autoloop") {
     const { runAutoloop } = await import("./modes/autoloop.js");
-    await runAutoloop({});
+    const agent = parseAutoloopAgent(argv.slice(1));
+    await runAutoloop(agent !== undefined ? { agent } : {});
     return 0;
   }
 
@@ -363,7 +379,9 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   if (args.mode === "fix") {
     const { runFixMode } = await import("./modes/fix.js");
     try {
-      const res = await runFixMode({});
+      const res = await runFixMode({
+        ...(args.fixAgent !== undefined ? { agent: args.fixAgent } : {}),
+      });
       if (res !== null) {
         console.log(
           `[fix] committed=${res.committed.length} walls=${res.walls.length} parked=${res.parked.length}`,

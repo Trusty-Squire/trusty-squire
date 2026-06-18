@@ -43,6 +43,7 @@ import { classifyCluster } from "./fix-router.js";
 
 // Default give-up bound per cluster (decision: K = 3).
 export const DEFAULT_MAX_ATTEMPTS = 3;
+const MAX_FAILURES_PER_CLUSTER = 8;
 
 // Paths the agent may NEVER write, regardless of allowedPaths — the corpus is
 // append-only-from-successes (build-corpus), never edited to make the gate pass.
@@ -158,28 +159,24 @@ export interface FixAgentResult {
 
 // ── Clustering (pure) ───────────────────────────────────────────────
 //
-// Group failures by (failure_stage, signature). Failures that hit the SAME
-// stuck page (same signature) cluster together even across services — that's
-// the shared-root-cause case the holistic pass exists to catch. Same stage but
-// a different page stays a separate cluster (likely a different fix).
+// Group failures by failure shape + page signature, then cap each cluster.
+// A fix still needs to generalize across services, but the verifier requires
+// every captured page in the cluster to move. Huge heterogeneous clusters make
+// that acceptance rule unreachable and starve smaller, actionable fixes.
 export function clusterFailures(batch: FixBatch): FixCluster[] {
   const byKey = new Map<string, FixCluster>();
+  const baseCounts = new Map<string, number>();
   for (const f of batch.failures) {
-    // Cluster by SEMANTIC failure shape: failure_stage + the planner's terminal
-    // action kind. This groups "the planner kept clicking and looped" or "the
-    // planner gave up (done) too early" across services — the shared-root-cause
-    // case the holistic pass exists for. The page signature is deliberately NOT
-    // in the key: even a structural (role-only) signature is per-page, so it
-    // shatters same-root-cause failures back into per-service singletons
-    // (measured 2026-06-11: stage+kind → 11 clusters, +signature → 22). The
-    // eval gate + per-cluster replay are the safety net against an over-merge —
-    // a fix that can't satisfy the whole cluster fails the gate and walls.
     const observedKind = f.terminal_page?.observed.kind ?? "none";
-    const key = `${f.failure_stage}:${observedKind}`;
+    const baseKey = `${f.failure_stage}:${observedKind}:${f.signature}`;
     const page =
       f.terminal_capture_ref !== undefined && f.terminal_page !== undefined
         ? { service: f.service, captureRef: f.terminal_capture_ref, observed: f.terminal_page.observed }
         : undefined;
+    const count = baseCounts.get(baseKey) ?? 0;
+    baseCounts.set(baseKey, count + 1);
+    const bucket = Math.floor(count / MAX_FAILURES_PER_CLUSTER);
+    const key = `${baseKey}:${bucket + 1}`;
     const existing = byKey.get(key);
     if (existing === undefined) {
       byKey.set(key, {
