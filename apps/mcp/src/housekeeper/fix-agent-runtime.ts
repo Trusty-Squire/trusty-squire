@@ -363,6 +363,7 @@ export function makeLiveGate(config: {
   canary: readonly string[];
   baselineCanaryGreen: number;
   minClusterMove: number;
+  concurrency?: number;
   runner: LiveRunner;
   build: () => Promise<void>;
   log?: (line: string) => void;
@@ -375,6 +376,7 @@ export function makeLiveGate(config: {
       canary: config.canary,
       baselineCanaryGreen: config.baselineCanaryGreen,
       minClusterMove: config.minClusterMove,
+      ...(config.concurrency !== undefined ? { concurrency: config.concurrency } : {}),
     });
     return { passed: v.passed, reason: v.reason };
   };

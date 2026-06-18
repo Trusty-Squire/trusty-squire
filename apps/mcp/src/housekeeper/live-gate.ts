@@ -26,6 +26,8 @@ export interface LiveGateInput {
   baselineCanaryGreen: number;
   /** Minimum distinct cluster services that must now extract a key (anti-overfit). */
   minClusterMove: number;
+  /** Maximum live service runs in flight. Defaults to 1. */
+  concurrency?: number;
 }
 
 export interface LiveGateVerdict {
@@ -42,30 +44,85 @@ export interface LiveGateVerdict {
   reason: string;
 }
 
+function normalizeConcurrency(raw: number | undefined): number {
+  if (raw === undefined || !Number.isFinite(raw) || raw < 1) return 1;
+  return Math.floor(raw);
+}
+
 async function countGreen(
   run: LiveRunner,
   services: readonly string[],
+  concurrency: number = 1,
 ): Promise<number> {
-  // Sequential by default — the caller owns concurrency (a gate run shares the
-  // drain's bounded pool). Each result is independent; a thrown run counts as
-  // not-green (a fix that crashes the bot is not a pass).
+  // Sequential by default. When enabled, concurrency is bounded because each
+  // service run may consume a browser, identity, proxy slot, and signup quota.
   let green = 0;
-  for (const s of services) {
-    try {
-      if ((await run(s)).green) green += 1;
-    } catch {
-      // a crash is a non-green outcome, not a gate error
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(normalizeConcurrency(concurrency), services.length) },
+    async () => {
+      for (;;) {
+        const i = next++;
+        const service = services[i];
+        if (service === undefined) return;
+        try {
+          if ((await run(service)).green) green += 1;
+        } catch {
+          // a crash is a non-green outcome, not a gate error
+        }
+      }
     }
-  }
+  );
+  await Promise.all(workers);
   return green;
+}
+
+type LiveGateTask = { group: "cluster" | "canary"; service: string };
+
+async function countGateGroups(
+  run: LiveRunner,
+  tasks: readonly LiveGateTask[],
+  concurrency: number,
+): Promise<{ clusterGreen: number; canaryGreen: number }> {
+  let clusterGreen = 0;
+  let canaryGreen = 0;
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(normalizeConcurrency(concurrency), tasks.length) },
+    async () => {
+      for (;;) {
+        const i = next++;
+        const task = tasks[i];
+        if (task === undefined) return;
+        try {
+          const result = await run(task.service);
+          if (result.green) {
+            if (task.group === "cluster") clusterGreen += 1;
+            else canaryGreen += 1;
+          }
+        } catch {
+          // a crash is a non-green outcome, not a gate error
+        }
+      }
+    }
+  );
+  await Promise.all(workers);
+  return { clusterGreen, canaryGreen };
 }
 
 export async function runLiveGate(
   run: LiveRunner,
   input: LiveGateInput,
 ): Promise<LiveGateVerdict> {
-  const clusterGreen = await countGreen(run, input.cluster);
-  const canaryGreen = await countGreen(run, input.canary);
+  const concurrency = normalizeConcurrency(input.concurrency);
+  const { clusterGreen, canaryGreen } = await countGateGroups(
+    run,
+    [
+      ...input.cluster.map((service) => ({ group: "cluster" as const, service })),
+      ...input.canary.map((service) => ({ group: "canary" as const, service })),
+    ],
+    concurrency,
+  );
 
   const clusterMoved = clusterGreen >= input.minClusterMove;
   // "Held" = didn't drop below baseline (the generalization guard). A canary
@@ -96,6 +153,7 @@ export async function runLiveGate(
 export async function measureCanaryBaseline(
   run: LiveRunner,
   canary: readonly string[],
+  concurrency?: number,
 ): Promise<number> {
-  return countGreen(run, canary);
+  return countGreen(run, canary, normalizeConcurrency(concurrency));
 }

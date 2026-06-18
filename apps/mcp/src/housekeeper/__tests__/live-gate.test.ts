@@ -89,4 +89,28 @@ describe("runLiveGate — the oracle", () => {
     const run = runnerFrom(new Set(["ipinfo", "openrouter"]));
     expect(await measureCanaryBaseline(run, CANARY)).toBe(2);
   });
+
+  it("bounds live runner concurrency", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const run: LiveRunner = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return { green: true };
+    };
+
+    const v = await runLiveGate(run, {
+      cluster: ["a", "b", "c", "d"],
+      canary: ["e", "f", "g", "h"],
+      baselineCanaryGreen: 4,
+      minClusterMove: 2,
+      concurrency: 2,
+    });
+
+    expect(v.passed).toBe(true);
+    // The cap is global across cluster + canary services.
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
 });

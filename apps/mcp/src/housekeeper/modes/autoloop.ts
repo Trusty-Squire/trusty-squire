@@ -29,6 +29,12 @@ import { measureCanaryBaseline } from "../live-gate.js";
 const DEFAULT_CANARY = ["ipinfo", "clickhouse-cloud", "instant-db", "langfuse"];
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
 
+function liveGateConcurrencyFromEnv(): number {
+  const raw = Number(process.env.TRUSTY_SQUIRE_LIVE_GATE_CONCURRENCY ?? "1");
+  if (!Number.isFinite(raw) || raw < 1) return 1;
+  return Math.floor(raw);
+}
+
 export async function runAutoloop(opts: {
   log?: (line: string) => void;
   maxLaps?: number;
@@ -50,6 +56,7 @@ export async function runAutoloop(opts: {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   const minClusterMove = Number(process.env.TRUSTY_SQUIRE_FIX_MIN_MOVE ?? "2") || 2;
+  const liveGateConcurrency = liveGateConcurrencyFromEnv();
 
   const runner = discoverLiveRunner({ repoRoot, log });
   const build = makeDistBuilder({ repoRoot });
@@ -57,8 +64,14 @@ export async function runAutoloop(opts: {
   // The canary baseline — measured ONCE, live, before any fix. The live gate
   // rejects any fix that drops the canary below this. Measured against the
   // CURRENT (pre-loop) code, so it reflects reality at the start of the run.
-  log(`measuring canary baseline (live): ${canary.join(", ")}…`);
-  const baselineCanaryGreen = await measureCanaryBaseline(runner, canary);
+  log(
+    `measuring canary baseline (live, concurrency=${liveGateConcurrency}): ${canary.join(", ")}…`,
+  );
+  const baselineCanaryGreen = await measureCanaryBaseline(
+    runner,
+    canary,
+    liveGateConcurrency,
+  );
   log(`canary baseline: ${baselineCanaryGreen}/${canary.length} green`);
   if (baselineCanaryGreen === 0) {
     log(
@@ -74,6 +87,7 @@ export async function runAutoloop(opts: {
     canary,
     baselineCanaryGreen,
     minClusterMove,
+    concurrency: liveGateConcurrency,
     runner,
     build,
     log,
