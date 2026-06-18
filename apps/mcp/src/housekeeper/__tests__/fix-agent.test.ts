@@ -489,6 +489,11 @@ describe("runFixAgent", () => {
     // phone → wall; run_timeout + oauth_handshake → parked (router-drain / -capability_gap).
     expect(res.walls.some((w) => w.reason.startsWith("router:"))).toBe(true);
     expect(res.parked.filter((p) => p.reason.startsWith("router-")).length).toBe(2);
+    expect(res.routed.map((r) => [r.route, r.owner, r.disposition])).toEqual([
+      ["wall", "external", "blocked_wall"],
+      ["drain", "retry", "retry_later"],
+      ["capability_gap", "capability", "needs_capability"],
+    ]);
   });
 
   it("router gate: in-fence (planner_loop / extract) clusters still reach the coding agent", async () => {
@@ -505,6 +510,23 @@ describe("runFixAgent", () => {
     });
     expect(propose).toHaveBeenCalled();
     expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it("router gate: curated manual facts wall even in-fence clusters before proposer spend", async () => {
+    const propose = vi.fn(async () => proposal(["apps/mcp/src/bot/agent.ts"]));
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({ service: "manual-svc", failure_stage: "planner_loop" })]),
+      routerFacts: { "manual-svc": { curatedNeedsManual: true } },
+      propose,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit: async () => undefined,
+      log: () => undefined,
+    });
+    expect(propose).not.toHaveBeenCalled();
+    expect(res.walls[0]!.reason).toMatch(/curated needs-manual/);
+    expect(res.routed[0]!.owner).toBe("external");
   });
 
   it("bumps the rc per committed cluster", async () => {

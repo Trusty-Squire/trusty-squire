@@ -51,7 +51,52 @@ import {
   clearProviderLoggedIn,
   markProviderLoggedIn,
 } from "./login-state.js";
+import { SignupOAuthFlow } from "./signup-oauth-flow.js";
 import { saveDebugSnapshot } from "./debug.js";
+import { captureObservationFrame, type ObservationFrame } from "./observation-frame.js";
+import { classifyObservationFrame } from "./state-classifier.js";
+import {
+  isAtAccountReviewGate,
+  isAtPaywall,
+  isOnboardingReviewGate,
+  isSignupsClosed,
+} from "./terminal-gate.js";
+export {
+  isAtAccountReviewGate,
+  isAtPaywall,
+  isOnboardingReviewGate,
+  isSignupsClosed,
+} from "./terminal-gate.js";
+import {
+  PostSignupCredentialTracker,
+  classifyNoCredentialPostSignup,
+} from "./post-signup-flow.js";
+import {
+  PostSignupActionExecutor,
+  type PostSignupExecutableAction,
+} from "./post-signup-action-executor.js";
+import { PostSignupLoginFlow } from "./post-signup-login-flow.js";
+import {
+  MAX_POST_VERIFY_NAVIGATES,
+  MAX_PREMATURE_DONE_FALLBACKS,
+  MAX_UPSTREAM_BLIP_RETRIES,
+  PostSignupRecoveryFlow,
+  PostSignupRecoveryState,
+} from "./post-signup-recovery-state.js";
+import { PostSignupSyntheticCapture } from "./post-signup-synthetic-capture.js";
+import {
+  CredentialExtractionFlow,
+  DOM_LABEL_TO_KEY,
+  NON_CREDENTIAL_KEYS,
+  extractAllLabeledTokensFromReason,
+  hasAnyExtractedCredential,
+  hasUsableCredentialBundle,
+} from "./credential-extraction-flow.js";
+export {
+  extractAllLabeledTokensFromReason,
+  hasAnyExtractedCredential,
+  isMultiCredBundle,
+} from "./credential-extraction-flow.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
 import {
   runNavSearch,
@@ -276,156 +321,6 @@ const SUBMIT_REJECTED_PATTERNS: readonly RegExp[] = [
 // verification email that will never arrive.
 export function submitWasRejected(pageText: string): boolean {
   return SUBMIT_REJECTED_PATTERNS.some((p) => p.test(pageText));
-}
-
-// T7: page text that means the post-OAuth API key sits behind a
-// billing / payment-method wall. When the OAuth onboarding loop ends
-// without a key and the page reads like this, the run ends
-// `onboarding_blocked` rather than grep-looping a wall it cannot
-// satisfy (the S3-class trap named in the plan's failure modes).
-//
-// rc.27 — patterns are regexes (not substrings) so word boundaries
-// hold. `isAtPaywall` also rejects matches preceded by a negator
-// ("no", "without", "doesn't require", …) so a free-plan blurb like
-// "No credit card required, no hidden fees" — the exact phrase that
-// false-positively halted the IPInfo run on rc.26 — no longer
-// triggers a paywall verdict.
-const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
-  /\badd\s+a\s+payment\s+method\b/i,
-  /\badd\s+(?:a\s+)?credit\s+card\b/i,
-  /\bpayment\s+method\s+(?:is\s+)?required\b/i,
-  /\bcredit\s+card\s+required\b/i,
-  /\benter\s+your\s+card\b/i,
-  /\benter\s+your\s+payment\b/i,
-  /\benter\s+payment\s+details\b/i,
-  /\bconnect\s+a(?:\s+valid)?\s+payment\s+method\b/i,
-  /\byour\s+(?:free\s+)?trial\s+(?:is\s+)?ending\b/i,
-  /\bupgrade\s+your\s+plan\s+to\b/i,
-  /\bstart\s+your\s+paid\s+plan\b/i,
-  // rc.39 — Koyeb-class. Cover the variants the post-verify planner
-  // produces in its `done` reason when it gives up on a billing wall:
-  // "requires credit card payment", "credit card verification wall",
-  // "payment wall", "Pro plan payment required", "complete billing".
-  /\brequir(?:es?|ing)\s+(?:a\s+)?credit\s+card\b/i,
-  /\b(?:credit\s+card|payment)\s+wall\b/i,
-  /\bcredit\s+card\s+verification\b/i,
-  /\b(?:plan\s+|account\s+)?payment\s+required\b/i,
-  /\bcomplet(?:e|ing)\s+(?:billing|payment)\b/i,
-  /\bbilling\s+setup\s+(?:is\s+)?required\b/i,
-  // 0.8.2-rc.5 — Together.ai's post-OAuth landing surfaces a "payment
-  // form" gate that the post-verify planner reliably describes in its
-  // `done` reason:
-  //
-  //   "This page shows a payment form, and it's not possible to proceed
-  //    further without inputting payment information."
-  //
-  // None of the rc.39 patterns covered "payment form" / "payment
-  // information" — together fell through to `oauth_onboarding_failed`,
-  // which is misleading (the OAuth handshake succeeded; the wall is
-  // billing). Patterns are scoped to the "form/information requirement"
-  // shape so a marketing tile mentioning "payment information" doesn't
-  // false-positive.
-  /\bpayment\s+form\b/i,
-  /\binput(?:ting)?\s+payment\s+information\b/i,
-  /\benter(?:ing)?\s+payment\s+information\b/i,
-];
-
-// Negators that, if they appear in the ~30 characters immediately
-// before a paywall pattern match, flip its meaning from a demand
-// to a marketing reassurance. "No", "without", "doesn't require",
-// "don't need", "isn't".
-const PAYWALL_NEGATION_PREFIX =
-  /\b(?:no|without|doesn'?t\s+(?:need|require)|don'?t\s+(?:need|require)|isn'?t)\s+$/i;
-
-// Exported for unit testing — the post-OAuth heuristic distinguishing
-// "the dashboard is asking for a card before issuing a key" from "the
-// dashboard happens to mention cards on a marketing tile".
-export function isAtPaywall(text: string): boolean {
-  for (const pattern of ONBOARDING_PAYWALL_PATTERNS) {
-    const m = pattern.exec(text);
-    if (m === null) continue;
-    const start = Math.max(0, m.index - 30);
-    const prefix = text.slice(start, m.index);
-    if (PAYWALL_NEGATION_PREFIX.test(prefix)) continue;
-    return true;
-  }
-  return false;
-}
-
-// A service can complete the signup form / OAuth handshake and THEN drop the
-// account into a manual-approval gate — a waiting room, a waitlist, a
-// "request access / your account is pending approval / under review" screen —
-// instead of granting a dashboard + API key. Baseten is the field example:
-// the form submits, then a "waiting_room" / account-review screen appears and
-// no key is obtainable autonomously.
-//
-// This is NOT a captcha and NOT an anti-bot block — it's a service-side human
-// gate. Left undetected, the post-verify loop exhausts its budget and the run
-// gets mislabeled (oauth_onboarding_failed / a generic no-credentials miss),
-// which is misleading and can wrongly count toward skill demotion or send us
-// chasing a non-existent code bug. We classify it as `onboarding_blocked` —
-// the same terminal, human-pile, non-demoting status the billing wall uses —
-// so the loop routes it to the manual pile and never advances the demote
-// counter.
-//
-// Tuned for PRECISION over recall: every pattern requires explicit
-// account-review / waitlist / pending-approval phrasing. A marketing tile that
-// merely mentions "early access" as a feature must not trip it, so the verbs
-// are scoped to the gate's own phrasing (you ARE on the list / access IS
-// pending / the account IS under review).
-const ACCOUNT_REVIEW_GATE_PATTERNS: readonly RegExp[] = [
-  /\bwaiting\s+room\b/i,
-  /\b(?:join|on|added\s+to)\s+(?:the\s+|our\s+)?waitlist\b/i,
-  /\byou'?re\s+on\s+the\s+(?:list|waitlist)\b/i,
-  /\brequest\s+(?:early\s+)?access\b/i,
-  /\baccess\s+(?:is\s+)?pending\b/i,
-  /\b(?:your\s+)?account\s+is\s+pending\b/i,
-  /\bpending\s+approval\b/i,
-  /\baccount\s+(?:is\s+)?(?:currently\s+)?under\s+review\b/i,
-  /\byour\s+account\s+is\s+being\s+reviewed\b/i,
-  /\bwe'?ll\s+email\s+you\s+when\b/i,
-  /\bawaiting\s+(?:approval|access)\b/i,
-];
-
-// Exported for unit testing — the post-signup heuristic that distinguishes a
-// service-side manual-approval gate (waiting room / waitlist / pending review)
-// from a normal dashboard, signup form, or captcha page. Pure over page text.
-export function isAtAccountReviewGate(text: string): boolean {
-  return ACCOUNT_REVIEW_GATE_PATTERNS.some((p) => p.test(text));
-}
-
-// Decide whether a no-credential form-fill outcome is a manual-review gate.
-// A verification timeout is the AUTHORITATIVE cause and must win: a pending
-// "check your email / we sent a code" page can read as a review gate to
-// isAtAccountReviewGate, so without this guard a verification_not_sent gets
-// mislabeled onboarding_blocked (the anthropic regression). Only when
-// verification did NOT fail is the review-gate text trusted. Pure, testable.
-export function isOnboardingReviewGate(
-  verificationFailed: string | undefined,
-  pageText: string,
-): boolean {
-  return verificationFailed === undefined && isAtAccountReviewGate(pageText);
-}
-
-// Closed / invite-only registration: the service does not accept new self-serve
-// signups at all (turbopuffer: "Sign-ups are closed"). Distinct from a review
-// gate (you signed up, awaiting approval) — here NO account can be created, so
-// the run is terminally unservable and the service should be dequeued, not
-// retried or mislabeled oauth_onboarding_failed (which implies a fixable nav
-// bug). Precision-tuned: requires explicit closed/disabled/invite-only phrasing
-// scoped to sign-up/registration, so a normal page mentioning "sign up" or an
-// "invite your team" feature doesn't trip it. Pure over page text.
-const SIGNUPS_CLOSED_PATTERNS: readonly RegExp[] = [
-  /\bsign[\s-]?ups?\s+(?:are|is)\s+(?:currently\s+)?(?:closed|disabled|paused|not\s+(?:open|available|being\s+accepted))\b/i,
-  /\b(?:we\s+are|we're)\s+not\s+(?:currently\s+)?accepting\s+(?:new\s+)?(?:sign[\s-]?ups|registrations|users|accounts)\b/i,
-  /\bregistration\s+(?:is\s+)?(?:currently\s+)?(?:closed|disabled)\b/i,
-  /\b(?:sign[\s-]?up|registration|access)\s+is\s+(?:by\s+)?invite[\s-]?only\b/i,
-  /\binvite[\s-]?only\s+(?:beta|access|signup|registration)\b/i,
-  /\brequest\s+an\s+invite\b/i,
-];
-
-export function isSignupsClosed(text: string): boolean {
-  return SIGNUPS_CLOSED_PATTERNS.some((p) => p.test(text));
 }
 
 // S3: does this post-submit page text indicate the service genuinely
@@ -3483,286 +3378,6 @@ export function extractQuotedTokenFromReason(
   return null;
 }
 
-// Phase E — multi-credential planner-prose parser. When a service
-// exposes several distinct credentials on the same page (Cloudinary:
-// cloud_name + api_key + api_secret; Algolia: application_id +
-// admin_api_key + search_api_key; Twilio: account_sid + auth_token;
-// Stripe: publishable_key + secret_key), the post-verify planner is
-// instructed (Phase E prompt update) to label each value explicitly
-// in its extract reason. This parser pulls those labels + values out
-// and returns them as { [label]: value }.
-//
-// The label vocabulary is whitelisted to known credential-shaped
-// names so the parser doesn't false-match prose like "the
-// dashboard_url is …" or "the project_name is …". Anything outside
-// the whitelist is dropped to keep credentials objects clean.
-//
-// Returns empty record when nothing parsed. Caller folds the result
-// into the credentials dict; falls back to single-cred extraction
-// when this returns empty.
-export function extractAllLabeledTokensFromReason(
-  reason: string,
-  pageText: string,
-): Record<string, string> {
-  // Whitelist of credential labels we recognize. Snake_case canonical;
-  // the matcher tolerates the LLM emitting hyphenated or PascalCase
-  // variants. Each entry maps a normalized form back to the canonical
-  // snake_case used in the credentials Record.
-  const LABEL_ALIASES: Record<string, string> = {
-    api_key: "api_key",
-    apikey: "api_key",
-    api_token: "api_key",
-    apitoken: "api_key",
-    access_token: "access_token",
-    accesstoken: "access_token",
-    api_secret: "api_secret",
-    apisecret: "api_secret",
-    secret_key: "secret_key",
-    secretkey: "secret_key",
-    publishable_key: "publishable_key",
-    publishablekey: "publishable_key",
-    client_id: "client_id",
-    clientid: "client_id",
-    client_secret: "client_secret",
-    clientsecret: "client_secret",
-    cloud_name: "cloud_name",
-    cloudname: "cloud_name",
-    application_id: "application_id",
-    applicationid: "application_id",
-    app_id: "application_id",
-    appid: "application_id",
-    admin_api_key: "admin_api_key",
-    adminapikey: "admin_api_key",
-    search_api_key: "search_api_key",
-    searchapikey: "search_api_key",
-    monitoring_api_key: "monitoring_api_key",
-    account_sid: "account_sid",
-    accountsid: "account_sid",
-    auth_token: "auth_token",
-    authtoken: "auth_token",
-    sandbox_secret: "sandbox_secret",
-    sandboxsecret: "sandbox_secret",
-    org_id: "org_id",
-    orgid: "org_id",
-    organization_id: "org_id",
-    consumer_key: "consumer_key",
-    consumer_secret: "consumer_secret",
-    access_token_secret: "access_token_secret",
-    project_api_key: "project_api_key",
-    personal_api_key: "personal_api_key",
-    app_key: "app_key",
-    appkey: "app_key",
-    app_secret: "app_secret",
-    appsecret: "app_secret",
-    // 2026-06-08 — bare "secret" (Pusher's App Keys page labels its app
-    // secret just "secret"; the bot reached the keys page + saw it but the
-    // parser dropped it because no alias mapped bare "secret"). Maps to a
-    // neutral `secret` credential name. The \bsecret\b match can't fire
-    // inside api_secret/client_secret/app_secret (the preceding "_" kills
-    // the word boundary), so this doesn't double-capture those.
-    secret: "secret",
-    // 0.8.3-rc.1 — typeform's planner uses `personal_access_token`
-    // and `Personal access token` (the latter when transcribing the
-    // page heading verbatim). Both alias to api_key — typeform issues
-    // ONE token type, and downstream consumers expect `api_key`.
-    personal_access_token: "api_key",
-    personalaccesstoken: "api_key",
-    // Bearer / private / write key patterns surfaced across the
-    // 2026-05-29 retest. Each was quoted by the planner but not in
-    // the alias set, so the labeled extractor missed them.
-    bearer_token: "api_key",
-    bearertoken: "api_key",
-    private_key: "api_key",
-    privatekey: "api_key",
-    write_key: "api_key",
-    writekey: "api_key",
-    read_key: "api_key",
-    readkey: "api_key",
-    server_token: "api_key",
-    servertoken: "api_key",
-  };
-
-  const out: Record<string, string> = {};
-
-  // Build the label-alternation from the whitelist keys. Restricting
-  // the regex to KNOWN labels avoids the greedy-match-eats-real-label
-  // bug (without this, "shows: application_id" would match as
-  // label='shows' / value='application_id' and consume the real
-  // 'application_id' that follows). Longer aliases first so the
-  // regex prefers `admin_api_key` over `api_key` at the same start.
-  const labelKeys = Object.keys(LABEL_ALIASES).sort(
-    (a, b) => b.length - a.length,
-  );
-  const labelAlt = labelKeys.map(escapeRegex).join("|");
-  // Hyphen + space variants — the LLM sometimes emits `cloud-name`
-  // or `Cloud name` instead of `cloud_name`. Replace _ with
-  // [-_\s] inside each alternative so the regex matches all three.
-  const labelAltLoose = labelAlt.replace(/_/g, "[-_\\s]");
-  // Two patterns:
-  //
-  // (A) Strict QUOTED form — `label='value'` / `label="value"` /
-  //     `label:'value'` etc. Trusts the value as credential-shape
-  //     because the planner was instructed (Phase E prompt) to quote.
-  //
-  // (B) Prose `label is value` form — required for natural-language
-  //     extracts but DANGEROUS. The Cloudinary trace produced
-  //     "api_secret is hidden behind asterisks" — the prose-pattern
-  //     greedily captured `hidden` as the value, then the
-  //     anti-hallucination check passed (the word "hidden" was in
-  //     pageText/reason). Mitigations: (1) require the value to LOOK
-  //     credential-shape (mixed alpha+digit, ≥16 chars, OR a known
-  //     credential prefix); (2) hard-reject a curated set of common
-  //     English status words that look label-like in extract prose.
-  const quotedRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_.+/=\\-]{4,80})['"\`]`,
-    "gi",
-  );
-  for (const m of reason.matchAll(quotedRe)) {
-    const rawLabel = (m[1] ?? "").toLowerCase().replace(/[-\s]+/g, "_");
-    const normalized = rawLabel.replace(/_+/g, "_");
-    const canonical = LABEL_ALIASES[normalized];
-    const value = m[2];
-    if (canonical === undefined || value === undefined) continue;
-    // Email local-part guard. The value class stops at '@', so an email
-    // ("giselle703@gmail.com") is captured as its local-part ("giselle703")
-    // — a digit-bearing string that passes credential-shape. An email is
-    // never a credential; reject when the captured value is immediately
-    // followed by '@' in the source. (Cloudinary email-settings page.)
-    if (reason.includes(value + "@") || pageText.includes(value + "@")) continue;
-    if (!pageText.includes(value)) continue;
-    if (out[canonical] === undefined) out[canonical] = value;
-  }
-
-  // English status words that show up in planner prose alongside
-  // a credential label but are NEVER the credential value itself.
-  // Each is a literal lowercase comparison after value-lowercase.
-  const PROSE_BLACKLIST = new Set<string>([
-    "hidden", "masked", "shown", "visible", "available", "missing",
-    "unavailable", "redacted", "obscured", "concealed", "secret",
-    "true", "false", "null", "none", "empty", "unset", "undefined",
-    "displayed", "revealed", "asterisks", "bullets", "dots", "stars",
-    "blurred", "encrypted",
-  ]);
-  const looksCredentialShape = (v: string): boolean => {
-    if (v.length >= 16) return true; // long-enough tokens are presumed real
-    if (/^[A-Za-z]+$/.test(v)) return false; // pure word → suspect
-    if (/^\d{10,}$/.test(v)) return true; // long all-digit (Cloudinary api_key)
-    if (/[_\-]/.test(v) && /[a-z]/i.test(v) && /\d/.test(v)) return true; // mixed
-    if (/^[a-z]+_[A-Za-z0-9]/i.test(v)) return true; // prefix_ style (sk_…, npm_…)
-    if (/\d/.test(v) && /[A-Za-z]/.test(v)) return true; // alphanumeric mix
-    return false; // pure short word → reject as suspect
-  };
-  // Same separator vocab as quoted, plus optional quotes around the
-  // value. The credential-shape + blacklist guards run on the
-  // captured (possibly-unquoted) value.
-  const proseRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_.+/=\\-]{4,80})['"\`]?`,
-    "gi",
-  );
-  for (const m of reason.matchAll(proseRe)) {
-    const rawLabel = (m[1] ?? "").toLowerCase().replace(/[-\s]+/g, "_");
-    const normalized = rawLabel.replace(/_+/g, "_");
-    const canonical = LABEL_ALIASES[normalized];
-    const value = m[2];
-    if (canonical === undefined || value === undefined) continue;
-    if (out[canonical] !== undefined) continue; // quoted-form already won
-    if (PROSE_BLACKLIST.has(value.toLowerCase())) continue;
-    // Email local-part guard — see the quoted loop above.
-    if (reason.includes(value + "@") || pageText.includes(value + "@")) continue;
-    if (!looksCredentialShape(value)) continue;
-    if (!pageText.includes(value)) continue;
-    out[canonical] = value;
-  }
-
-  return out;
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Keys that the postVerifyLoop's accumulator stores for housekeeping —
-// they're NOT extracted credentials and must NOT count as "we found
-// something" when deciding whether an extract round succeeded.
-const NON_CREDENTIAL_KEYS = new Set<string>([
-  "api_key_truncated", // truncated stub from extractCredentials Pass 1
-  "password", // signup form metadata (email-verification path)
-  "email", // signup form metadata
-]);
-
-// True iff the credentials Record holds at least one extracted value
-// (api_key, username, or any labeled multi-cred field). Excludes
-// metadata + truncated stubs. Used to decide "this extract round
-// produced something — continue the loop / capture a synthetic extract
-// round" vs "every tier missed — try the planner-quoted fallback".
-export function hasAnyExtractedCredential(
-  creds: Record<string, string>,
-): boolean {
-  for (const key of Object.keys(creds)) {
-    if (NON_CREDENTIAL_KEYS.has(key)) continue;
-    return true;
-  }
-  return false;
-}
-
-// True iff the credentials Record contains a multi-credential bundle
-// — anything beyond the legacy single api_key/username pair. Used by
-// the post-verify loop's early-exit so a partial multi-cred capture
-// doesn't return prematurely (Cloudinary's api_key surfaces 4-5
-// rounds before api_secret; the legacy exit fired the moment api_key
-// was set, losing cloud_name + api_secret).
-export function isMultiCredBundle(
-  creds: Record<string, string>,
-): boolean {
-  for (const key of Object.keys(creds)) {
-    if (NON_CREDENTIAL_KEYS.has(key)) continue;
-    if (key === "api_key" || key === "username") continue;
-    return true;
-  }
-  return false;
-}
-
-// DOM-label phrase → canonical credential key. Shared by
-// extractFromDomProximity (which harvests VALUES) and
-// countPresentedCredentialLabels (which counts how many distinct
-// credentials a page PRESENTS, masked included). Kept in lockstep with
-// the Phase E LABEL_ALIASES vocabulary.
-const DOM_LABEL_TO_KEY: Record<string, string> = {
-  "api key": "api_key",
-  "api token": "api_key",
-  "api secret": "api_secret",
-  "secret key": "secret_key",
-  "publishable key": "publishable_key",
-  "access key": "access_key_id",
-  "access key id": "access_key_id",
-  "access token": "access_token",
-  "bearer token": "access_token",
-  "personal access token": "access_token",
-  "auth token": "auth_token",
-  "client id": "client_id",
-  "client secret": "client_secret",
-  "client key": "client_id",
-  "cloud name": "cloud_name",
-  cloudname: "cloud_name",
-  "application id": "application_id",
-  "app id": "application_id",
-  "admin api key": "admin_api_key",
-  "search api key": "search_api_key",
-  "search-only api key": "search_api_key",
-  "monitoring api key": "monitoring_api_key",
-  "account sid": "account_sid",
-  "secret access key": "secret_access_key",
-  "consumer key": "consumer_key",
-  "consumer secret": "consumer_secret",
-  "access token secret": "access_token_secret",
-  "project api key": "project_api_key",
-  "personal api key": "personal_api_key",
-  "organization id": "org_id",
-  "org id": "org_id",
-  "app key": "app_key",
-  "app secret": "app_secret",
-};
-
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
     /\bre_[a-zA-Z0-9_]{20,}\b/, // Resend (key body contains underscores)
@@ -4008,7 +3623,9 @@ export function pickVerificationLink(links: readonly string[]): string | null {
   });
   scored.sort((a, b) => b.score - a.score);
   const top = scored[0];
-  return top !== undefined && top.score > 0 ? top.url : null;
+  return top !== undefined && top.score > 0
+    ? top.url.replace(/&amp;/gi, "&")
+    : null;
 }
 
 // Pick a verification link by its ANCHOR TEXT in the email HTML — the fallback
@@ -5662,6 +5279,23 @@ export class SignupAgent {
     }
   }
 
+  private async captureFormObservationFrame(
+    steps: string[],
+    oauthCandidates: readonly OAuthProviderId[],
+  ): Promise<ObservationFrame> {
+    return captureObservationFrame(this.browser, () => this.buildInventory(steps, oauthCandidates));
+  }
+
+  private async captureTextObservationFrame(): Promise<ObservationFrame> {
+    return captureObservationFrame(this.browser, async () => []);
+  }
+
+  private async capturePostVerifyObservationFrame(
+    steps: string[],
+  ): Promise<ObservationFrame> {
+    return captureObservationFrame(this.browser, () => this.buildInventory(steps, undefined, 80));
+  }
+
   // FORM_FILL_ENGINE path (strangler slice 3) — the same round as
   // planExecuteWithRetry, but every DECISION goes through the pure
   // decideFormFillStep reducer (form-fill.ts); this method owns only the I/O and
@@ -5704,10 +5338,13 @@ export class SignupAgent {
       const dismissed = await this.browser.dismissConsentBanner();
       if (dismissed !== null) steps.push(`Dismissed cookie consent: "${dismissed}"`);
       await saveDebugSnapshot(this.browser, "before-fill");
-      const [browserState, inventory] = await Promise.all([
-        this.browser.getState(),
-        this.buildInventory(steps, oauthCandidates),
-      ]);
+      const frame = await this.captureFormObservationFrame(steps, oauthCandidates);
+      const frameVerdict = classifyObservationFrame(frame);
+      if (process.env.TRUSTY_SQUIRE_OBSERVATION_DEBUG === "1") {
+        steps.push(`Observation :  ()`);
+      }
+      const browserState = frame.state;
+      const inventory = frame.inventory;
 
       // ── C1 pre_plan: gather the observation, then decide ──
       const hasFillableInput = inventory.some(
@@ -6394,24 +6031,16 @@ export class SignupAgent {
     }
   }
 
-  // Which OAuth providers can the bot actually use right now — the UNION of
-  // the logged-in-providers.json marker (a memo) and a LIVE read of the
-  // browser's cookie jar. The cookie jar is ground truth, so a warm session
-  // is never invisible just because the marker drifted (the GitHub-skipped-
-  // for-Google bug). Self-heals the marker for any live session it was
-  // missing. Falls back to the marker alone if the cookie read fails.
+  // Which OAuth providers can the bot actually use right now. The LIVE browser
+  // cookie jar is ground truth; logged-in-providers.json is only a memo used
+  // when the live probe itself fails. A stale marker must not make the bot
+  // prefer OAuth after the provider session expired.
   private async effectiveLoggedInProviders(): Promise<OAuthProviderId[]> {
-    const fromMarker = loggedInProviders();
-    let live: OAuthProviderId[] = [];
-    try {
-      live = await this.browser.detectSessionProviders();
-    } catch {
-      live = [];
-    }
-    for (const p of live) {
-      if (!fromMarker.includes(p)) markProviderLoggedIn(p);
-    }
-    return [...new Set([...fromMarker, ...live])];
+    return new SignupOAuthFlow(this.browser, {
+      loggedInProviders,
+      markProviderLoggedIn,
+      clearProviderLoggedIn,
+    }).effectiveLoggedInProviders();
   }
 
   private async resolveOAuthCandidates(
@@ -9219,10 +8848,7 @@ export class SignupAgent {
     // complete, usable bundle. Require >=2 named (non-metadata) credentials
     // so a lone ID (e.g. just application_id) still fails honestly: an ID
     // without a secret isn't a usable credential.
-    const namedCredCount = Object.keys(credentials).filter(
-      (k) => !NON_CREDENTIAL_KEYS.has(k),
-    ).length;
-    if (credentials.api_key !== undefined || namedCredCount >= 2) {
+    if (hasUsableCredentialBundle(credentials)) {
       return {
         success: true,
         credentials: { ...credentials },
@@ -9237,31 +8863,34 @@ export class SignupAgent {
     // grep. Some services (Koyeb) gate API issuance on a billing
     // confirmation whose visible text doesn't match the regex set
     // but whose planner reason clearly describes the wall.
-    const finalText = await this.browser.extractText().catch(() => "");
-    const paywallCheckText =
-      this.lastPostVerifyDoneReason !== null
-        ? `${finalText}\n${this.lastPostVerifyDoneReason}`
-        : finalText;
+    const finalFrame = await this.captureTextObservationFrame().catch(() => null);
+    const finalText =
+      finalFrame !== null ? finalFrame.visibleText : await this.browser.extractText().catch(() => "");
+    const postSignupGate = classifyNoCredentialPostSignup({
+      service: task.service,
+      frame: finalFrame,
+      fallbackText: finalText,
+      lastDoneReason: this.lastPostVerifyDoneReason,
+    });
     // Closed / invite-only registration — no account can be created at all
     // (turbopuffer: "Sign-ups are closed"). Terminally unservable; label it
     // honestly so the operator dequeues rather than seeing a misleading
     // oauth_onboarding_failed that implies a fixable nav bug.
-    if (isSignupsClosed(paywallCheckText)) {
+    if (postSignupGate.failure?.kind === "signups_closed") {
       return {
         success: false,
-        error:
-          `signups_closed: ${task.service} is not accepting new self-serve sign-ups ` +
-          `(closed / invite-only registration) — no account can be created. Dequeue or sign up manually once open.`,
+        error: postSignupGate.failure.error,
         steps,
         ...this.resultTail(),
       };
     }
-    if (isAtPaywall(paywallCheckText)) {
+    if (
+      postSignupGate.failure?.kind === "payment" ||
+      postSignupGate.failure?.kind === "phone"
+    ) {
       return {
         success: false,
-        error:
-          `onboarding_blocked: ${task.service}'s API key sits behind a billing or ` +
-          `payment-method wall the bot will not cross — finish the signup manually.`,
+        error: postSignupGate.failure.error,
         steps,
         ...this.resultTail(),
       };
@@ -9272,13 +8901,12 @@ export class SignupAgent {
     // reach autonomously. Same terminal onboarding_blocked status as the
     // billing wall so it's a non-demoting human-pile outcome, not a
     // mislabeled oauth_onboarding_failed that wrongly implies a code bug.
-    if (isAtAccountReviewGate(paywallCheckText)) {
+    if (
+      postSignupGate.failure?.kind === "account_review"
+    ) {
       return {
         success: false,
-        error:
-          `onboarding_blocked: ${task.service} put the account into a manual review / ` +
-          `waitlist gate after signup — no API key is obtainable until a human approves ` +
-          `the account. Finish the signup manually once access is granted.`,
+        error: postSignupGate.failure.error,
         steps,
         ...this.resultTail(),
       };
@@ -10304,72 +9932,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // Non-fatal — the planner's explicit extract round will run
       // DOM-proximity again, this is just an opportunistic seed.
     }
-    let loginAttempts = 0;
-    // A5 — on an OAuth run the planner asks to `login` only when it SEES a
-    // login page, which after a good OAuth it shouldn't. Repeated asks
-    // mean the OAuth callback never established a session (the page is
-    // still a social/login screen, e.g. groq's /authenticate). Count them
-    // so the loop can bail with oauth_session_not_persisted instead of
-    // thrashing maxRounds and mislabeling it oauth_onboarding_failed.
-    let oauthLoginRequests = 0;
-    // Consecutive rounds on an OAuth run where the page is STILL a login /
-    // authenticate screen. The planner usually doesn't return {"kind":
-    // "login"} here — it keeps CLICKING "Sign in with Google" (groq,
-    // northflank, amplitude), so the oauthLoginRequests counter above
-    // never trips. But the structural fact is decisive and service-
-    // agnostic: after OAuth, an authenticated bot is on a dashboard, not a
-    // login page. N consecutive login-page rounds ⇒ the callback never
-    // persisted (anti-bot/IP rejection) ⇒ oauth_session_not_persisted, not
-    // a navigation bug. Generalizes without per-service URLs.
-    let consecutiveOauthLoginPageRounds = 0;
-    // Fired once: before declaring the OAuth session dead, reload the page —
-    // an authenticated session whose cookie IS set often shows a transient
-    // login screen (Auth0/WorkOS silent re-auth round-trip, or a slow SPA that
-    // renders the login shell before hydrating the dashboard). A reload lands
-    // the dashboard for those; a genuine callback rejection stays on login
-    // even after reload, so this never masks a real wall.
-    let oauthBounceReloadTried = false;
-    // Consecutive rounds the post-verify page read as a genuine loading shell
-    // (visible loading-text AND a sub-threshold inventory). A real SPA
-    // hydrates within the bounded per-round wait, so a streak means the route
-    // never paints content — burn a navigate-to-root retry, then bail
-    // truthfully rather than re-running the wait every round to run_timeout.
-    // Reset on any non-shell round. Mirrors the consecutiveOauthLoginPageRounds
-    // / oauthBounceReloadTried escape used for the stuck-login case.
-    let shellStreak = 0;
-    let shellRootNavTried = false;
-    let planFailures = 0;
-    // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
-    // gate planFailures (so a transient 502 won't push us into the
-    // terminal stop branch after 4 rounds), but is still bounded so a
-    // permanently-down proxy can't loop forever. Generous because each
-    // blip costs ~5s of network + retry-backoff and the run already
-    // has a 10-min top-level timeout — but tight enough that a truly
-    // dead upstream doesn't burn the whole maxRounds budget on noise.
-    let upstreamBlipRetries = 0;
-    const MAX_UPSTREAM_BLIP_RETRIES = 8;
+    const recovery = new PostSignupRecoveryState();
     const oauth = args.credentials === undefined;
-    // NAV_SEARCH (DEFAULT-ON as of T6): drive the post-verify phase with the
-    // goal-directed nav-search engine, then HAND OFF to the greedy planner if it
-    // couldn't finish. T6 (live, neon) proved the two are complementary:
-    // nav-search is strong at NAVIGATION (it drove through two onboarding wizards
-    // + the dashboard to the exact create-API-key modal, where the greedy planner
-    // often gets lost), but it's nav-only by design — it can't fill+submit a
-    // create-key form. The greedy planner is strong at form-fill but weak at
-    // navigation. So: nav-search navigates to (or near) the key surface; if it
-    // extracts a key, done; if not, we FALL THROUGH to the greedy loop, which
-    // resumes from the current page nav-search reached and completes the local
-    // form-fill + extract. The capture chain continues on the same
-    // this.captureChainRound counter (read below at loop start), so it stays
-    // gap-free for auto-promote.
-    //
-    // Default-on is SAFE because the worst case is the pre-existing behavior: if
-    // nav-search reaches no key, control falls through to the same greedy loop
-    // that was the default before. nav-search only changes outcomes by reaching
-    // key surfaces greedy couldn't — a strict improvement in the cases it helps.
-    // Its LLM tiebreak is budget-capped (MAX_NAV_TIEBREAKS) so the handoff keeps
-    // form-fill budget; the same-site guard keeps it on the app. Opt OUT with
-    // NAV_SEARCH=0/false/off (kept for reversibility — DESIGN A2).
+    // NAV_SEARCH (DEFAULT-ON): drive navigation first, then hand off to the
+    // greedy planner from the reached surface if navigation alone finds no key.
     if (!/^(0|false|off|no)$/i.test(process.env.NAV_SEARCH ?? "")) {
       try {
         const navResult = await this.runNavSearchPhase(args, oauth);
@@ -10380,26 +9946,12 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           "nav-search: no key via navigation alone — handing off to the planner from the current surface",
         );
       } catch (err) {
-        // Default-on safety: nav-search must NEVER crash a signup. Any unexpected
-        // error (a browser-port method throwing, a bad selector, etc.) falls
-        // through to the greedy planner — the pre-existing default behavior — so
-        // the worst case of enabling nav-search is "no better than before".
         args.steps.push(
           `nav-search: errored (${err instanceof Error ? err.message : String(err)}) — falling back to the planner`,
         );
       }
-      // fall through to the greedy planner loop below
     }
-    // Re-plan hint for the next round — set when an `extract` step
-    // found no key, which means the visible key text is masked /
-    // truncated (the S3-class trap: the planner sees a key-shaped
-    // string and keeps asking to extract it forever), or when the
-    // planner's last step was rejected.
     let hint: string | undefined = args.initialHint;
-    // rc.27 — when the email_otp gate handler retrieved a code from
-    // the operator's gmail, seed the FIRST round's hint with the
-    // code + explicit fill+submit instructions. Cleared after one
-    // round so it doesn't echo into unrelated downstream rounds.
     if (this.pendingOtpCode !== null) {
       hint =
         `Operator email-OTP retrieved from gmail: code is "${this.pendingOtpCode}". ` +
@@ -10410,142 +9962,6 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         `"value":"${this.pendingOtpCode}"} on it. NEXT round, click the Verify/Continue/Submit button.`;
       this.pendingOtpCode = null;
     }
-    // Failed-extract counter. The stuck-loop detector below exempts
-    // `extract` on the theory that "extract is its own progress signal"
-    // — true when extract succeeds, FALSE when it returns no key. A
-    // planner that keeps quoting the on-screen token in its reasoning
-    // but extract keeps returning null means the regex library in
-    // extractApiKeyFromText doesn't recognize the shape (Railway: bare
-    // UUID token). Without this counter the loop burns all 12 rounds
-    // re-extracting the same unrecognized value. Two consecutive
-    // failures triggers a re-plan with a hint that steers the planner
-    // toward Copy buttons or `done`.
-    let consecutiveFailedExtracts = 0;
-    // Stuck-loop detector: when the planner returns the SAME action
-    // (kind+selector) two rounds in a row AND the inventory size hasn't
-    // changed, the page is unaffected by the action and the planner
-    // is in a tight loop (Railway: 3x click "Create Token" with no
-    // form-name fill; 5x scroll the same modal whose Accept button
-    // is gated on something else). Track the prior round's signature
-    // and inject a forced "no-progress" hint on the second repeat.
-    let prevSignature: string | null = null;
-    let prevInventorySize = -1;
-    // Selectors the planner has CLICKED while the inventory count has held
-    // steady. A multi-step onboarding wizard (axiom: role → company-size →
-    // plan) advances by clicking distinct radio-style cards that flip an
-    // aria-checked but add/remove no elements, so inventory.length never
-    // moves — and the kind-level stuck detector below would false-positive
-    // on the 2nd DISTINCT selection. We exempt a brand-new selector (wizard
-    // progress) and only call it stuck once a selector REPEATS (the Railway
-    // Create→Focus→Create cycle). Reset whenever the inventory count changes
-    // (genuine page mutation → fresh wizard step / new page).
-    let clickSelectorsSinceInventoryChange = new Set<string>();
-    // rc.39 — wait-loop tracker. Turso's GitHub OAuth handshake
-    // succeeds, then the SSO-callback page stays empty (0 elements)
-    // while a Cloudflare verification widget runs that never clears
-    // for this Chromium fingerprint. The planner kept emitting wait
-    // for all 12 rounds; the run timed out as oauth_onboarding_failed.
-    // Better classification: anti-bot block. Track consecutive wait
-    // rounds with no inventory change and break out with the proper
-    // status before burning the post-verify budget.
-    let consecutiveWaits = 0;
-    // Writer-class hung-redirect tracker. A post-OAuth interstitial
-    // (app.writer.com/redirect-auth?…&registered=true) renders a spinner
-    // SHELL — non-zero interactive elements — that never resolves because the
-    // new account's bootstrap (workspace/org provisioning) hangs. The planner
-    // correctly emits `wait`, but the 0-element guard above never fires (the
-    // shell has elements), so it waits out the entire 600s budget (MEASURED
-    // 2026-06-11: writer). Track consecutive waits on the SAME url regardless
-    // of element count; reload once (the redirect usually completes on a fresh
-    // load), then break with a clean terminal reason.
-    let consecutiveSameUrlWaits = 0;
-    let lastWaitUrl: string | null = null;
-    let waitReloadTried = false;
-    // rc.39 — navigate-loop tracker. Perplexity / Koyeb / Porter all
-    // had post-verify loops where the planner emitted `navigate`
-    // 5-6 rounds in a row and the URL never changed — the service
-    // silently redirected each attempt back to the same onboarding
-    // page. Track the URL state observed BEFORE each navigate; if
-    // two consecutive navigates fire from the same URL, the previous
-    // navigate produced no progress. Inject a hint forcing a CLICK
-    // on something visible in the current inventory.
-    let prevNavigateFromUrl: string | null = null;
-    // Stalled-wizard breaker. Tracks a content signature of the page +
-    // the effect of each executed action, so we can detect an onboarding
-    // wizard that re-presents itself (clicks don't register) and break
-    // out instead of burning every round on it. See isStalledOnActions.
-    let prevContentSig: string | null = null;
-    let lastActionKind: string | null = null;
-    let lastActionSelector: string | null = null;
-    // Fired once: the unique-org-name recovery on a stall whose real cause is
-    // a "name taken" validation (kinde's business_details — the operator's
-    // prior account already used "tsagent", so the pre-filled name collides
-    // and the auto-derived subdomain is rejected, re-presenting the step).
-    let uniqueNameRetried = false;
-    // Fired once: force-click an available Next/submit when the stall is the
-    // planner re-selecting an option (kinde's tech-stack SDK radios) while the
-    // Next button is already enabled — the selection registered in the wizard's
-    // JS state but the planner kept clicking the option instead of advancing.
-    let forcedAdvanceTried = false;
-    const actionEffects: Array<{
-      kind: string;
-      pageUnchanged: boolean;
-      selector: string | null;
-    }> = [];
-    // 0.8.2-rc.10 — escalation for the stuck-loop detector.
-    //
-    // The existing detector injects a re-plan hint when the planner
-    // returns the same kind+selector twice with no inventory change,
-    // but the planner often ignores the "pick a different KIND" hint
-    // and just picks a slightly different SELECTOR for another click.
-    // Anthropic's batch failure (rc.8) showed 6 wasted rounds of this
-    // before a navigate finally broke the cycle: clicking the sidebar
-    // "API Keys" link on a dashboard that wasn't routing to it.
-    //
-    // Escalation strategy: after N stuck-fires within the SAME URL,
-    // try a hard navigate to a guessed API-keys URL (one per origin).
-    // If the URL has already advanced past the stuck zone, reset the
-    // counter. After every fallback URL is exhausted AND we're still
-    // stuck, mark the run [stuck_loop] so the caller surfaces the
-    // dedicated error code instead of the generic
-    // oauth_onboarding_failed.
-    let stuckFiresAtUrl = 0;
-    let lastStuckFireUrl: string | null = null;
-    const triedFallbackUrls = new Set<string>();
-    // Selectors of API-keys nav links already clicked, so the
-    // click-the-real-link escalation doesn't re-click the same link.
-    const clickedKeysLinks = new Set<string>();
-    // Premature-done guard budget. When the planner gives up (`done`)
-    // with zero credentials captured, we navigate to an unvisited
-    // canonical keys URL and re-plan — bounded so a service that
-    // genuinely has no self-serve key doesn't burn the whole run budget
-    // walking every fallback path.
-    let prematureDoneFallbacks = 0;
-    const MAX_PREMATURE_DONE_FALLBACKS = 3;
-    // Navigate budget. A planner that can't find the key page (project-
-    // scoped URLs it can't construct — supabase; or an SPA that ignores
-    // direct navs and stays put — last9) keeps emitting `navigate` round
-    // after round, burning the entire 600s deadline (MEASURED 2026-06-09).
-    // `navigate` is exempt from the stuck-loop detector (it's meant to
-    // change the URL), so cap the TOTAL navigates: a legit dashboard is
-    // reachable in a handful, and past the cap the planner is just guessing.
-    // Past the cap we force non-navigate planning and, if still nothing,
-    // break — converting a 600s hang into a prompt, honest failure.
-    let navigateCount = 0;
-    const MAX_POST_VERIFY_NAVIGATES = 8;
-    // Dead-URL memory. The planner guesses credential-page URLs
-    // (e.g. /user/personal_access_tokens/new) that 404; without memory it
-    // re-guesses the same dead URL round after round — xata and fly each
-    // burned all their post-verify rounds this way. Record any URL that
-    // lands on a 404 and refuse to re-navigate to it, forcing a click-based
-    // re-plan instead. (Separate from triedFallbackUrls, which is the bot's
-    // OWN escalation guesses; this tracks the PLANNER's dead navigates.)
-    const deadUrls = new Set<string>();
-    let lastNavigatedTo: string | null = null;
-    // 0.8.3-rc.1 — per-URL set of wizard-forward escalations attempted.
-    // Used so we only force-click the visible Next/Submit once per page
-    // state; if it didn't unstick, fall through to URL fallbacks.
-    const triedWizardForward = new Set<string>();
     // 0.8.1 — capture chain index is independent of the planner loop
     // round. The loop has two early-`continue` paths (page mid-navigation
     // throw, planner-rejection re-plan) that increment `round` WITHOUT
@@ -10559,38 +9975,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // form-fill phase already captured (captureSignupFormRounds); 0 on the
     // OAuth path, so this is unchanged for OAuth skills.
     let capturedRound = this.captureChainRound;
-    // 0.8.2-rc.12 — multi-cred-aware loop exit. Track the number of
-    // distinct credential keys we've accumulated; if we're in a
-    // multi-cred bundle (cloud_name, api_secret, application_id, …)
-    // keep planning past the first api_key surfacing so siblings can
-    // accumulate. Bounded by `roundsSinceLastNewCredential` so a
-    // page that never produces a sibling doesn't loop forever.
-    let lastCredentialKeyCount = Object.keys(credentials).filter(
-      (k) => !NON_CREDENTIAL_KEYS.has(k),
-    ).length;
-    let roundsSinceLastNewCredential = 0;
-    const MAX_ROUNDS_AWAITING_MORE_CREDENTIALS = 3;
-    // 0.8.2-rc.16 — when the loop's pre-entry seed already had a
-    // credential (Cloudinary's billing/plans page exposes the api_key
-    // via a hidden field that extractCredentials catches), we cannot
-    // trust that result as authoritative for multi-cred: the bot
-    // hasn't navigated to a labeled api-keys page yet, so cloud_name
-    // + api_secret are not yet visible to extractFromDomProximity.
-    // Hold the loop open until the planner has issued at least one
-    // explicit extract step — only then has the bot affirmatively
-    // surveyed the labeled credentials surface.
-    const seedHadCredential =
-      credentials.api_key !== undefined || credentials.username !== undefined;
-    let plannerExtractEmitted = false;
-    // 2026-06-07 — "stops at one" fix. The legacy loop-exit treated a run
-    // as single-cred based on what was ALREADY captured (isMultiCredBundle),
-    // so a page with 3 credentials whose 1st surfaced first — siblings still
-    // masked or missed on the first harvest pass — exited before the rest
-    // were caught. Set once the page is observed to PRESENT >=2 distinct
-    // credentials (masked included); the loop-exit then holds open (bounded
-    // by roundsSinceLastNewCredential) so the reveal pass + DOM harvest get
-    // more rounds to capture the siblings.
-    let pageOffersMultiCred = false;
+    const credentialTracker = new PostSignupCredentialTracker(credentials);
     // Gate URLs we've already polled the operator's gmail for, so a
     // multi-round wait on the same email-OTP page doesn't re-poll.
     const otpPolledUrls = new Set<string>();
@@ -10598,6 +9983,17 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // each planPostVerifyStep call so the (stateless) planner stops
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
+    const credentialExtractionFlow = new CredentialExtractionFlow();
+    const syntheticCapture = new PostSignupSyntheticCapture();
+    const loginFlow = new PostSignupLoginFlow();
+    const recoveryFlow = new PostSignupRecoveryFlow(recovery);
+    const actionExecutor = new PostSignupActionExecutor(
+      this.browser,
+      {
+        extractCredentials: () => this.extractCredentials(),
+        extractFromDomProximity: () => this.extractFromDomProximity(),
+      },
+    );
     for (let round = 0; round < args.maxRounds; round++) {
       // Top-of-round credential sweep (MEASURED 2026-06-13: langfuse). The
       // credential can become visible on the page BETWEEN planner actions —
@@ -10623,66 +10019,14 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       } catch {
         // DOM-proximity miss is non-fatal
       }
-      const currentCredentialKeyCount = Object.keys(credentials).filter(
-        (k) => !NON_CREDENTIAL_KEYS.has(k),
-      ).length;
-      if (currentCredentialKeyCount > lastCredentialKeyCount) {
-        roundsSinceLastNewCredential = 0;
-        lastCredentialKeyCount = currentCredentialKeyCount;
-      } else if (lastCredentialKeyCount > 0) {
-        roundsSinceLastNewCredential += 1;
-      }
-      // Multi-cred services hold the loop open until either the
-      // planner returns `done`, the budget expires, or we've made
-      // no credential progress for MAX_ROUNDS_AWAITING_MORE_CREDENTIALS
-      // consecutive rounds. Single-cred services keep the legacy
-      // behavior of returning the moment api_key surfaces — EXCEPT
-      // when the api_key came from the pre-loop seed and the
-      // planner hasn't yet emitted an explicit extract step. In
-      // that case we let the planner run until extract fires.
-      const inMultiCredMode = isMultiCredBundle(credentials) || pageOffersMultiCred;
-      const haveOnlySeedCredentials = seedHadCredential && !plannerExtractEmitted;
-      if (
-        !inMultiCredMode &&
-        (credentials.api_key !== undefined || credentials.username !== undefined) &&
-        !haveOnlySeedCredentials
-      ) {
-        args.steps.push(`Post-verify: credentials found on round ${round}.`);
-        // 0.8.3-rc.1 — fast-path synthetic capture. When the bot lands
-        // on a page whose pre-loop extractCredentials() already found
-        // the credential (the "fast path" — perplexity-class), the
-        // loop returns here BEFORE any round was captured. Auto-
-        // promote then sees no captures and skips synthesis, so the
-        // next user has no replayable skill. Emit a single
-        // synthetic-extract round so the synthesizer can produce a
-        // minimal-but-correct "navigate + extract" skill. Best-effort
-        // — capture failure must not block returning the credential.
-        await this.writeFastPathSyntheticCapture(
-          args.service,
-          capturedRound,
-          oauth,
-        );
-        return credentials;
-      }
-      if (
-        inMultiCredMode &&
-        roundsSinceLastNewCredential >= MAX_ROUNDS_AWAITING_MORE_CREDENTIALS &&
-        // Pusher-class bundles have NO field literally named api_key
-        // (application_id + app_key + secret), so an api_key/username-only
-        // exit never fired and the loop spun to the LLM budget before the
-        // existing-account fallback rescued it. A stable bundle of >=2 named
-        // credentials is itself a complete, usable result — mirror the final
-        // success gate's namedCredCount>=2 rule here so the loop returns it.
-        (credentials.api_key !== undefined ||
-          credentials.username !== undefined ||
-          currentCredentialKeyCount >= 2)
-      ) {
-        const summary = Object.keys(credentials)
-          .filter((k) => !NON_CREDENTIAL_KEYS.has(k))
-          .join(", ");
-        args.steps.push(
-          `Post-verify: multi-cred bundle stable for ${roundsSinceLastNewCredential} rounds — returning what we have (${summary}).`,
-        );
+      const credentialProgress = credentialTracker.observe(credentials);
+      const credentialExit = credentialTracker.decideEarlyCredentialExit(
+        credentials,
+        credentialProgress,
+        round,
+      );
+      if (credentialExit !== null) {
+        args.steps.push(credentialExit.message);
         await this.writeFastPathSyntheticCapture(
           args.service,
           capturedRound,
@@ -10724,10 +10068,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       let inventory: InteractiveElement[];
       try {
         // PERF: parallel getState + inventory (independent calls).
-        [state, inventory] = await Promise.all([
-          this.browser.getState(),
-          this.buildInventory(args.steps, undefined, 80),
-        ]);
+        {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
       } catch (err) {
         args.steps.push(
           `Post-verify round ${round}: page was mid-navigation ` +
@@ -10758,10 +10103,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         );
         await this.browser.wait(2);
         try {
-          [state, inventory] = await Promise.all([
-            this.browser.getState(),
-            this.buildInventory(args.steps, undefined, 80),
-          ]);
+          {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
         } catch {
           // mid-navigation read after the card click — the next round
           // re-reads, so just fall through to it.
@@ -10800,10 +10146,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         .catch(() => undefined);
       // Re-read after the wait — the page may have hydrated (or redirected).
       try {
-        [state, inventory] = await Promise.all([
-          this.browser.getState(),
-          this.buildInventory(args.steps, undefined, 80),
-        ]);
+        {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
       } catch {
         // mid-navigation read — keep the prior state/inventory; the shell
         // decision below uses whatever count we have.
@@ -10820,27 +10167,24 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           inventory.length,
         );
       if (stillShell) {
-        shellStreak += 1;
-        // On the 2nd consecutive shell round, do the navigate-to-root the
-        // budgeted wait can't fix — a route stuck mid-hydration (a blocked
-        // websocket, an SPA wedged on a stale path) often paints the real
-        // dashboard from origin root. Once only.
-        if (shellStreak >= 2 && !shellRootNavTried) {
-          shellRootNavTried = true;
-          const root = originRoot(state.url);
-          args.steps.push(
-            `Post-verify round ${round}: ${pathOf(state.url)} read as a loading shell for ` +
-              `${shellStreak} consecutive rounds — navigating to origin root once before bailing.`,
-          );
+        const shellDecision = recoveryFlow.decideShell({
+          round,
+          path: pathOf(state.url),
+          rootUrl: originRoot(state.url) ?? state.url,
+          currentUrl: state.url,
+        });
+        if (shellDecision.kind === "navigate_root") {
+          args.steps.push(shellDecision.message);
           try {
-            await this.browser.goto(root ?? state.url);
+            await this.browser.goto(shellDecision.url);
             await this.browser
               .waitForInteractiveDom(SHELL_MAX_ELEMENTS, 15_000)
               .catch(() => undefined);
-            [state, inventory] = await Promise.all([
-              this.browser.getState(),
-              this.buildInventory(args.steps, undefined, 80),
-            ]);
+            {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
           } catch {
             // navigate/read failed — the streak check below bails on the
             // next shell read.
@@ -10853,23 +10197,20 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             inventory.length,
           );
           if (recovered) {
-            shellStreak = 0;
+            recoveryFlow.recordShellRecovered();
           } else {
             throw new SpaNeverHydratedError(
               `spa_never_hydrated: ${args.service}'s post-verify page (${pathOf(state.url)}) ` +
-                `stayed a loading shell across ${shellStreak} rounds and an origin-root reload — ` +
+                `stayed a loading shell across ${recovery.shellStreak} rounds and an origin-root reload — ` +
                 `the SPA never rendered an actionable surface (blocked websocket / wedged hydration). ` +
-                `Not a navigation bug; retry or finish the signup manually.`,
+              `Not a navigation bug; retry or finish the signup manually.`,
             );
           }
         } else {
-          args.steps.push(
-            `Post-verify round ${round}: ${pathOf(state.url)} is a loading shell ` +
-              `(streak ${shellStreak}) — letting the SPA settle one more round`,
-          );
+          args.steps.push(shellDecision.message);
         }
       } else {
-        shellStreak = 0;
+        recoveryFlow.recordNoShell();
       }
       // Stalled-wizard breaker. Build a content signature (URL + each
       // inventory element's selector + label) and judge whether the
@@ -10885,12 +10226,12 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           .map((e) => `${e.selector}·${(e.visibleText ?? e.ariaLabel ?? "").slice(0, 24)}`)
           .join("|")
       ).slice(0, 4000);
-      const pageUnchanged = prevContentSig !== null && contentSig === prevContentSig;
-      if (lastActionKind !== null) {
-        actionEffects.push({ kind: lastActionKind, pageUnchanged, selector: lastActionSelector });
+      const pageUnchanged = recovery.prevContentSig !== null && contentSig === recovery.prevContentSig;
+      if (recovery.lastActionKind !== null) {
+        recovery.actionEffects.push({ kind: recovery.lastActionKind, pageUnchanged, selector: recovery.lastActionSelector });
       }
-      prevContentSig = contentSig;
-      if (isStalledOnActions(actionEffects)) {
+      recovery.prevContentSig = contentSig;
+      if (isStalledOnActions(recovery.actionEffects)) {
         // Unique-name-collision recovery (fires ONCE, before giving up). The
         // stall is often NOT "clicks not registering" but a server-side
         // validation: an org/business/workspace NAME the operator's prior
@@ -10921,8 +10262,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
               )} bodyHas_taken=${bodyLow.includes("taken")}`,
           );
         }
-        if (!uniqueNameRetried && nameField !== null) {
-          uniqueNameRetried = true;
+        if (!recovery.uniqueNameRetried && nameField !== null) {
+          recovery.uniqueNameRetried = true;
           const unique = `tsq${Math.floor(100000 + Math.random() * 900000)}`;
           args.steps.push(
             `Post-verify: stall is a name-taken collision — overwriting ${JSON.stringify(
@@ -10938,8 +10279,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
               await this.browser.wait(2);
             }
             // Reset the stall window so the resubmit gets a fair shot.
-            actionEffects.length = 0;
-            prevContentSig = null;
+            recovery.actionEffects.length = 0;
+            recovery.prevContentSig = null;
             hint = undefined;
             continue;
           } catch (err) {
@@ -10955,7 +10296,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         // of advancing. MEASURED 2026-06-09 (kinde tech-stack: no checked attr,
         // Next not disabled, planner clicked "React" 3×). If a submit/Next that
         // is NOT the just-tried element exists, click it and re-loop.
-        if (!forcedAdvanceTried) {
+        if (!recovery.forcedAdvanceTried) {
           // Read a FULL (uncapped) inventory: a step with many options (kinde's
           // ~29 SDK radios) crowds the Next button out of the ranked/capped
           // post-verify inventory, so pickOnboardingSubmit(inventory) misses it.
@@ -10967,11 +10308,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             console.error(
               `[force-advance-debug] capped=${inventory.length} full=${fullInv.length} ` +
                 `submit=${submit?.visibleText ?? submit?.ariaLabel ?? submit?.id ?? "null"} ` +
-                `lastSel=${lastActionSelector ?? "?"}`,
+                `lastSel=${recovery.lastActionSelector ?? "?"}`,
             );
           }
-          if (submit !== null && submit.selector !== lastActionSelector) {
-            forcedAdvanceTried = true;
+          if (submit !== null && submit.selector !== recovery.lastActionSelector) {
+            recovery.forcedAdvanceTried = true;
             args.steps.push(
               `Post-verify: stalled re-selecting an option while a submit/Next is available — clicking ` +
                 `${JSON.stringify((submit.visibleText ?? submit.ariaLabel ?? "Next").slice(0, 24))} to advance.`,
@@ -10979,8 +10320,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             try {
               await this.browser.click(submit.selector);
               await this.browser.wait(2);
-              actionEffects.length = 0;
-              prevContentSig = null;
+              recovery.actionEffects.length = 0;
+              recovery.prevContentSig = null;
               hint = undefined;
               continue;
             } catch (err) {
@@ -11006,51 +10347,40 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // bot has ALREADY authenticated before this loop, so landing on a
       // login page means the callback was rejected. The planner usually
       // keeps clicking "Sign in with Google" rather than returning a
-      // {"kind":"login"} step, so the oauthLoginRequests counter misses
+      // {"kind":"login"} step, so the explicit login-flow counter misses
       // it — track the structural fact (consecutive login-page rounds)
       // instead. Generalizes across services (groq/northflank/amplitude)
       // without per-service URLs; reclassifies these off the misleading
       // oauth_onboarding_failed label into the truthful (and unwinnable-
       // without-residential-egress) oauth_session_not_persisted wall.
-      if (args.credentials === undefined && isLoginPageUrl(state.url)) {
-        consecutiveOauthLoginPageRounds += 1;
-        if (consecutiveOauthLoginPageRounds >= 3 && !oauthBounceReloadTried) {
-          // One reload before giving up. A set session cookie + a transient
-          // login shell (silent re-auth bounce / slow hydration — measured on
-          // the activeloop/galileo/turbopuffer class) lands the dashboard on a
-          // fresh load; a genuine rejection stays on login and bails below.
-          oauthBounceReloadTried = true;
-          args.steps.push(
-            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
-              `${consecutiveOauthLoginPageRounds} rounds — reloading once before bailing ` +
-              `(a set session cookie often lands the dashboard on reload).`,
-          );
-          try {
-            await this.browser.goto(originRoot(state.url) ?? state.url);
-            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
-          } catch {
-            // reload failed — next login-page round bails below
-          }
-          consecutiveOauthLoginPageRounds = 0;
-          continue;
+      const oauthLoginPageDecision = recoveryFlow.decideOAuthLoginPage({
+        isOAuthRun: args.credentials === undefined,
+        isLoginPage: isLoginPageUrl(state.url),
+        path: pathOf(state.url),
+        rootUrl: originRoot(state.url) ?? state.url,
+        currentUrl: state.url,
+      });
+      if (oauthLoginPageDecision.kind === "reload") {
+        args.steps.push(oauthLoginPageDecision.message);
+        try {
+          await this.browser.goto(oauthLoginPageDecision.url);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        } catch {
+          // reload failed — next login-page round bails below
         }
-        if (consecutiveOauthLoginPageRounds >= 3) {
-          args.steps.push(
-            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
-              `${consecutiveOauthLoginPageRounds} rounds (incl. a reload) — the OAuth callback never persisted; bailing.`,
-          );
-          await this.browser.dumpOAuthDebug(args.service, "callback-not-persisted").catch(() => {});
-          throw new OAuthSessionNotPersistedError(
-            `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
-              `still presents a login screen (${pathOf(state.url)}) after ` +
-              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback was rejected at the ` +
-              `automation/fingerprint layer. NOT an IP issue (FALSIFIED 2026-06-14: a clean ` +
-              `residential IP fails this callback identically — see STATE.md), so residential ` +
-              `egress does NOT fix it. Needs a fingerprint/automation fix or manual signup.`,
-          );
-        }
-      } else {
-        consecutiveOauthLoginPageRounds = 0;
+        continue;
+      }
+      if (oauthLoginPageDecision.kind === "fail") {
+        args.steps.push(oauthLoginPageDecision.message);
+        await this.browser.dumpOAuthDebug(args.service, "callback-not-persisted").catch(() => {});
+        throw new OAuthSessionNotPersistedError(
+          `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
+            `still presents a login screen (${pathOf(state.url)}) after ` +
+            `${oauthLoginPageDecision.rounds} rounds — the OAuth callback was rejected at the ` +
+            `automation/fingerprint layer. NOT an IP issue (FALSIFIED 2026-06-14: a clean ` +
+            `residential IP fails this callback identically — see STATE.md), so residential ` +
+            `egress does NOT fix it. Needs a fingerprint/automation fix or manual signup.`,
+        );
       }
       // Email-OTP gate that surfaced AFTER OAuth (the pre-OAuth signup
       // gate never saw it, so pendingOtpCode is unset). Convex's
@@ -11124,26 +10454,26 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         // threshold is wrong — they're not the planner's fault, the
         // upstream is just temporarily unavailable. We allow these to
         // burn a round (forward progress is impossible without a
-        // planner reply) but don't tick planFailures, so a transient
+        // planner reply) but don't tick recovery.planFailures, so a transient
         // blip can't push us into the terminal stop branch.
         const isUpstreamBlip =
           /\b50[234]\b/.test(reason) ||
           /\bupstream_(?:error|unreachable)\b/i.test(reason) ||
           /\bnetwork error\b/i.test(reason);
         if (isUpstreamBlip) {
-          upstreamBlipRetries += 1;
-          if (upstreamBlipRetries > MAX_UPSTREAM_BLIP_RETRIES) {
+          recovery.upstreamBlipRetries += 1;
+          if (recovery.upstreamBlipRetries > MAX_UPSTREAM_BLIP_RETRIES) {
             args.steps.push(
-              `Post-verify round ${round}: upstream proxy degraded for ${upstreamBlipRetries} rounds — stopping (likely sustained outage).`,
+              `Post-verify round ${round}: upstream proxy degraded for ${recovery.upstreamBlipRetries} rounds — stopping (likely sustained outage).`,
             );
             break;
           }
         } else {
-          planFailures += 1;
+          recovery.planFailures += 1;
         }
-        if (planFailures > 3) {
+        if (recovery.planFailures > 3) {
           args.steps.push(
-            `Post-verify round ${round}: planner failed ${planFailures}x (${reason}) — stopping.`,
+            `Post-verify round ${round}: planner failed ${recovery.planFailures}x (${reason}) — stopping.`,
           );
           break;
         }
@@ -11151,7 +10481,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         args.steps.push(
           `Post-verify round ${round}: ${label} (${reason})` +
             (isUpstreamBlip
-              ? ` — retrying (${upstreamBlipRetries}/${MAX_UPSTREAM_BLIP_RETRIES}).`
+              ? ` — retrying (${recovery.upstreamBlipRetries}/${MAX_UPSTREAM_BLIP_RETRIES}).`
               : " — re-planning."),
         );
         // No re-plan hint on an upstream blip — the planner's previous
@@ -11237,15 +10567,15 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
 
       // Dead-URL memory. If the previous step navigated somewhere and we
       // landed on a 404, remember the target so we never go back.
-      if (lastNavigatedTo !== null) {
+      if (recovery.lastNavigatedTo !== null) {
         const t404 = (state.title ?? "").toLowerCase();
         if (t404.includes("404") || t404.includes("not found")) {
-          deadUrls.add(lastNavigatedTo);
+          recovery.deadUrls.add(recovery.lastNavigatedTo);
           args.steps.push(
-            `Post-verify: navigate to ${lastNavigatedTo} hit a 404 — added to the do-not-revisit list (${deadUrls.size} dead URL(s)).`,
+            `Post-verify: navigate to ${recovery.lastNavigatedTo} hit a 404 — added to the do-not-revisit list (${recovery.deadUrls.size} dead URL(s)).`,
           );
         }
-        lastNavigatedTo = null;
+        recovery.lastNavigatedTo = null;
       }
       // Credential-domain grounding. The OAuth provider (GitHub/GitLab) is
       // the LOGIN method, never the API-key source — but the planner, told to
@@ -11279,91 +10609,37 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
 
       // Refuse to re-navigate to a URL already known to 404 — force a
       // click-based re-plan instead of letting the planner re-guess it.
-      if (nextStep.kind === "navigate" && deadUrls.has(nextStep.url)) {
+      if (nextStep.kind === "navigate" && recovery.deadUrls.has(nextStep.url)) {
         args.steps.push(
           `Post-verify: planner re-picked a known-dead URL (${nextStep.url}) — re-planning.`,
         );
         hint =
           `The URL ${nextStep.url} returns a 404 — do NOT navigate there again. ` +
-          `Dead URLs (404, avoid all): ${[...deadUrls].join(", ")}. ` +
+          `Dead URLs (404, avoid all): ${[...recovery.deadUrls].join(", ")}. ` +
           `Reach the credentials/API-keys page by CLICKING a link in the current ` +
           `inventory (e.g. "API Keys", "Tokens", "Settings"), not by guessing a URL.`;
         continue;
       }
 
-      // rc.39 — navigate-loop detector. Perplexity/Koyeb/Porter spun
-      // 5+ rounds of `navigate` because each navigate landed back at
-      // the same URL — the service redirected past the requested URL.
-      // If THIS plan is also navigate and the URL we're observing now
-      // is the same one we navigated FROM last round, the previous
-      // navigate produced no progress. Inject a hint forcing a click.
-      if (nextStep.kind === "navigate" && prevNavigateFromUrl === state.url) {
-        const candidateClicks = inventory
-          .filter(
-            (e) =>
-              (e.tag === "button" ||
-                e.tag === "a" ||
-                e.role === "button" ||
-                e.role === "link") &&
-              e.interactedThisRun !== true,
-          )
-          .slice(0, 8)
-          .map((e) => {
-            const label =
-              e.visibleText ?? e.ariaLabel ?? e.labelText ?? "(no label)";
-            return `  - ${JSON.stringify(label)} → selector=${e.selector}`;
-          });
-        args.steps.push(
-          `Post-verify: navigate did not advance the page (URL still ${state.url}) — forcing a click on an inventory element.`,
-        );
-        hint =
-          `Your last 'navigate' to a guessed URL did NOT advance the page — the service ` +
-          `redirected you back to ${state.url}. STOP navigating and CLICK an element ` +
-          `from the current inventory below. The page is gating you behind an onboarding ` +
-          `CTA (e.g. "Get started", "Continue", "Activate") or a setup step that must be ` +
-          `clicked before the API console becomes reachable.` +
-          (candidateClicks.length > 0
-            ? `\n\nClickable elements you haven't tried:\n${candidateClicks.join("\n")}`
-            : "");
-        // Don't execute this navigate — re-plan with the hint.
-        prevNavigateFromUrl = null;
-        continue;
-      }
       if (nextStep.kind === "navigate") {
-        navigateCount += 1;
-        if (navigateCount > MAX_POST_VERIFY_NAVIGATES) {
-          // Over budget: the planner is URL-guessing (supabase project-scoped
-          // keys it can't address; last9's SPA that ignores direct navs). One
-          // more shot CLICKING the current inventory, then give up — don't
-          // burn the rest of the 600s deadline on more dead navigates.
-          const clickable = inventory.filter(
-            (e) => e.tag === "button" || e.tag === "a",
-          );
-          if (clickable.length > 0 && navigateCount <= MAX_POST_VERIFY_NAVIGATES + 2) {
-            args.steps.push(
-              `Post-verify: navigate budget (${MAX_POST_VERIFY_NAVIGATES}) exhausted — forcing a click on the current page instead of guessing more URLs.`,
-            );
-            hint =
-              `You have navigated ${navigateCount} times without reaching an API-key page. ` +
-              `STOP navigating to guessed URLs. CLICK an element from the inventory below ` +
-              `to advance the onboarding/dashboard, or emit 'done' if there is genuinely no ` +
-              `key affordance here.`;
-            continue;
-          }
-          this.lastPostVerifyDoneReason =
-            `[stuck_loop] post-verify exhausted the navigate budget (${navigateCount} navigates) without ` +
-            `reaching a credential page — the key is behind onboarding/URL the planner can't address.`;
-          args.steps.push(
-            `Post-verify: navigate budget exhausted (${navigateCount}) with no credential — breaking out instead of burning the run deadline.`,
-          );
+        const navigateDecision = recoveryFlow.decideNavigate({
+          url: state.url,
+          targetUrl: nextStep.url,
+          inventory,
+        });
+        if (navigateDecision.kind === "replan") {
+          args.steps.push(navigateDecision.message);
+          hint = navigateDecision.hint;
+          continue;
+        }
+        if (navigateDecision.kind === "break") {
+          this.lastPostVerifyDoneReason = navigateDecision.doneReason;
+          args.steps.push(navigateDecision.message);
           break;
         }
-        prevNavigateFromUrl = state.url;
-        // Remember where we're going so the next round can blocklist it
-        // if it 404s.
-        lastNavigatedTo = nextStep.url;
+        recoveryFlow.recordNavigateExecution(state.url, nextStep.url);
       } else {
-        prevNavigateFromUrl = null;
+        recoveryFlow.recordNonNavigate();
       }
 
       // Stuck-loop detector. Re-planning steps (done/extract/login/
@@ -11378,8 +10654,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // wizard step or a new page. Reset the per-stable-run click-selector
       // memory so distinct clicks on the NEW state aren't judged against the
       // old one.
-      if (inventory.length !== prevInventorySize) {
-        clickSelectorsSinceInventoryChange = new Set<string>();
+      if (inventory.length !== recovery.prevInventorySize) {
+        recovery.clickSelectorsSinceInventoryChange = new Set<string>();
       }
       if (repeatableKinds.has(nextStep.kind)) {
         const sel = "selector" in nextStep ? (nextStep.selector ?? "<none>") : "<none>";
@@ -11391,7 +10667,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         // (planner cycles through Create, Focus-input, Create again,
         // …). When that happens, force a non-click action.
         const sameSelector =
-          signature === prevSignature && inventory.length === prevInventorySize;
+          signature === recovery.prevSignature && inventory.length === recovery.prevInventorySize;
         // A brand-new click selector (never clicked since the inventory last
         // changed) is wizard PROGRESS, not a cycle — selecting role, then
         // company-size, then a plan flips aria-checked without moving the
@@ -11399,15 +10675,15 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         // selector has already been clicked in this stable-inventory run.
         const clickSelectorIsRepeat =
           nextStep.kind === "click" &&
-          clickSelectorsSinceInventoryChange.has(sel);
+          recovery.clickSelectorsSinceInventoryChange.has(sel);
         const stuckOnKind =
           nextStep.kind === "click" &&
-          prevSignature !== null &&
-          prevSignature.startsWith("click|") &&
-          inventory.length === prevInventorySize &&
+          recovery.prevSignature !== null &&
+          recovery.prevSignature.startsWith("click|") &&
+          inventory.length === recovery.prevInventorySize &&
           clickSelectorIsRepeat;
         if (nextStep.kind === "click") {
-          clickSelectorsSinceInventoryChange.add(sel);
+          recovery.clickSelectorsSinceInventoryChange.add(sel);
         }
         if (sameSelector || stuckOnKind) {
           const emptyInputs = inventory
@@ -11535,11 +10811,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           // can switch tactics once the gentle re-plan hint has clearly
           // failed (the planner refuses to break the cycle on its own,
           // see the Anthropic six-round pattern in rc.8).
-          if (lastStuckFireUrl === state.url) {
-            stuckFiresAtUrl += 1;
+          if (recovery.lastStuckFireUrl === state.url) {
+            recovery.stuckFiresAtUrl += 1;
           } else {
-            stuckFiresAtUrl = 1;
-            lastStuckFireUrl = state.url;
+            recovery.stuckFiresAtUrl = 1;
+            recovery.lastStuckFireUrl = state.url;
           }
           // After two stuck fires at the same URL, escalate to a
           // hardcoded /settings/keys-style navigation. Vendors almost
@@ -11549,7 +10825,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           // ordered most-specific first so a service whose dashboard
           // root happens to share /settings with the API-keys page
           // doesn't land short of the actual page.
-          if (stuckFiresAtUrl >= 2) {
+          if (recovery.stuckFiresAtUrl >= 2) {
             // 0.8.2-rc.12 — when the bot is ALREADY on a URL that names
             // an API-keys page (path contains /keys, /tokens, /api-keys,
             // etc.) AND the page text shows masked-credential markers,
@@ -11601,10 +10877,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
                 WIZARD_FORWARD.test((e.visibleText ?? e.ariaLabel ?? "").trim()) &&
                 e.visible === true,
             );
-            if (wizardBtn !== undefined && !triedWizardForward.has(state.url)) {
-              triedWizardForward.add(state.url);
+            if (wizardBtn !== undefined && !recovery.triedWizardForward.has(state.url)) {
+              recovery.triedWizardForward.add(state.url);
               args.steps.push(
-                `Post-verify: stuck-loop ${stuckFiresAtUrl}x at ${state.url} — wizard-forward escalation: clicking ${JSON.stringify(wizardBtn.visibleText ?? wizardBtn.ariaLabel)}.`,
+                `Post-verify: stuck-loop ${recovery.stuckFiresAtUrl}x at ${state.url} — wizard-forward escalation: clicking ${JSON.stringify(wizardBtn.visibleText ?? wizardBtn.ariaLabel)}.`,
               );
               try {
                 await this.browser.click(wizardBtn.selector);
@@ -11614,21 +10890,21 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
                   `Post-verify: wizard-forward click failed (${err instanceof Error ? err.message : String(err)}) — falling through to URL fallback.`,
                 );
               }
-              prevSignature = null;
-              prevInventorySize = -1;
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
               hint = undefined;
               continue;
             }
             const fallback = pickStuckLoopFallbackUrl(
               state.url,
-              triedFallbackUrls,
+              recovery.triedFallbackUrls,
               args.service,
               this.resolvedSignupUrl,
             );
             if (fallback !== null) {
-              triedFallbackUrls.add(fallback);
+              recovery.triedFallbackUrls.add(fallback);
               args.steps.push(
-                `Post-verify: stuck-loop detected ${stuckFiresAtUrl}x at ${state.url} — escalating to a hardcoded API-key URL: ${fallback}`,
+                `Post-verify: stuck-loop detected ${recovery.stuckFiresAtUrl}x at ${state.url} — escalating to a hardcoded API-key URL: ${fallback}`,
               );
               try {
                 await this.browser.goto(fallback);
@@ -11640,11 +10916,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
               }
               // Reset signature tracking so the next round starts clean
               // against the new URL's inventory. Don't reset
-              // stuckFiresAtUrl here — it's keyed by URL and the URL
+              // recovery.stuckFiresAtUrl here — it's keyed by URL and the URL
               // about to be observed will be different, which naturally
               // resets it on the next loop entry.
-              prevSignature = null;
-              prevInventorySize = -1;
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
               hint = undefined;
               // Don't bump capturedRound — captureOnboardingRound above
               // already wrote a capture for this round (the stuck-loop
@@ -11659,8 +10935,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             // caller surfaces planner_stuck instead of the generic
             // oauth_onboarding_failed, then break out of the loop.
             this.lastPostVerifyDoneReason =
-              `[stuck_loop] planner re-picked the same ${nextStep.kind} step ${stuckFiresAtUrl} times at ${state.url} with no inventory change; ` +
-              `hardcoded API-key URL fallbacks exhausted (tried: ${[...triedFallbackUrls].join(", ") || "none"}). ` +
+              `[stuck_loop] planner re-picked the same ${nextStep.kind} step ${recovery.stuckFiresAtUrl} times at ${state.url} with no inventory change; ` +
+              `hardcoded API-key URL fallbacks exhausted (tried: ${[...recovery.triedFallbackUrls].join(", ") || "none"}). ` +
               `Latest planner reason: ${nextStep.reason}`;
             args.steps.push(
               `Post-verify: stuck-loop unresolvable — breaking out with planner_stuck.`,
@@ -11696,25 +10972,25 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             customComboboxHint +
             uncheckedBoxHint +
             stallHint;
-          prevSignature = signature;
-          prevInventorySize = inventory.length;
+          recovery.prevSignature = signature;
+          recovery.prevInventorySize = inventory.length;
           continue;
         }
-        prevSignature = signature;
-        prevInventorySize = inventory.length;
+        recovery.prevSignature = signature;
+        recovery.prevInventorySize = inventory.length;
       } else {
         // Reset the signature on non-repeatable kinds so a `navigate`
         // followed by a `click` doesn't pattern-match the click against
         // a click before the navigate.
-        prevSignature = null;
-        prevInventorySize = inventory.length;
+        recovery.prevSignature = null;
+        recovery.prevInventorySize = inventory.length;
       }
 
       // Record the kind of the step we're ABOUT to execute (all re-plan
       // `continue` guards are behind us here) so next round can judge
       // whether it changed the page — the stalled-wizard breaker above.
-      lastActionKind = nextStep.kind;
-      lastActionSelector =
+      recovery.lastActionKind = nextStep.kind;
+      recovery.lastActionSelector =
         "selector" in nextStep && typeof nextStep.selector === "string"
           ? nextStep.selector
           : null;
@@ -11751,21 +11027,21 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         // as "no API keys", which sit under Account Settings. Before
         // accepting `done` with zero credentials captured, navigate to an
         // unvisited canonical keys URL (same fallback list the stuck-loop
-        // escalation uses). Bounded by triedFallbackUrls — once every
+        // escalation uses). Bounded by recovery.triedFallbackUrls — once every
         // candidate is exhausted, `done` is honored.
         const capturedCredCount = Object.keys(credentials).filter(
           (k) => !NON_CREDENTIAL_KEYS.has(k),
         ).length;
-        if (capturedCredCount === 0 && prematureDoneFallbacks < MAX_PREMATURE_DONE_FALLBACKS) {
+        if (capturedCredCount === 0 && recovery.prematureDoneFallbacks < MAX_PREMATURE_DONE_FALLBACKS) {
           // Prefer CLICKING a real API-keys nav link over guessing a URL.
           // The dashboard's own sidebar/menu link carries the correct href;
           // guessing /keys, /api-keys, /settings/api-keys 404s on services
           // that host keys at a non-standard path (unify-ai). Only when no
           // such link is in the DOM do we fall through to URL composition.
-          const keysLink = findApiKeysNavLink(inventory, clickedKeysLinks);
+          const keysLink = findApiKeysNavLink(inventory, recovery.clickedKeysLinks);
           if (keysLink !== null) {
-            prematureDoneFallbacks += 1;
-            clickedKeysLinks.add(keysLink.selector);
+            recovery.prematureDoneFallbacks += 1;
+            recovery.clickedKeysLinks.add(keysLink.selector);
             const label =
               (keysLink.visibleText ?? keysLink.ariaLabel ?? keysLink.href ?? keysLink.selector) || keysLink.selector;
             args.steps.push(
@@ -11786,13 +11062,13 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           }
           const fallback = pickStuckLoopFallbackUrl(
             state.url,
-            triedFallbackUrls,
+            recovery.triedFallbackUrls,
             args.service,
             this.resolvedSignupUrl,
           );
           if (fallback !== null) {
-            prematureDoneFallbacks += 1;
-            triedFallbackUrls.add(fallback);
+            recovery.prematureDoneFallbacks += 1;
+            recovery.triedFallbackUrls.add(fallback);
             args.steps.push(
               `Post-verify: planner emitted done with no credential captured — ` +
                 `navigating to an unvisited API-keys URL before giving up: ${fallback}`,
@@ -11812,59 +11088,29 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         this.lastPostVerifyDoneReason = nextStep.reason;
         break;
       }
-      // rc.39 — wait-loop break. The planner is asking us to wait
-      // round after round on an empty page (Turso's Cloudflare SSO
-      // callback). Cap at three consecutive waits with zero inventory
-      // and surface the empty-page reason so the caller can classify.
-      if (nextStep.kind === "wait" && inventory.length === 0) {
-        consecutiveWaits += 1;
-        if (consecutiveWaits >= 3) {
-          this.lastPostVerifyDoneReason =
-            `post-OAuth landing rendered 0 interactive elements for ${consecutiveWaits} rounds — ` +
-            `most recent planner reason: ${nextStep.reason}`;
-          args.steps.push(
-            `Post-verify: wait-loop on an empty page (${consecutiveWaits} consecutive rounds, 0 elements) — breaking out.`,
-          );
+      if (nextStep.kind === "wait") {
+        const waitDecision = recoveryFlow.decideWait({
+          url: state.url,
+          inventoryCount: inventory.length,
+          reason: nextStep.reason,
+        });
+        if (waitDecision.kind === "break") {
+          this.lastPostVerifyDoneReason = waitDecision.doneReason;
+          args.steps.push(waitDecision.message);
           break;
         }
-      } else {
-        consecutiveWaits = 0;
-      }
-      // Writer-class hung post-OAuth redirect: consecutive waits on the SAME
-      // url even though the page has elements (a spinner shell). Reload once
-      // at the 4th, break at the 6th — don't burn the whole budget waiting.
-      if (nextStep.kind === "wait") {
-        if (state.url === lastWaitUrl) {
-          consecutiveSameUrlWaits += 1;
-        } else {
-          consecutiveSameUrlWaits = 1;
-          lastWaitUrl = state.url;
-        }
-        if (consecutiveSameUrlWaits === 4 && !waitReloadTried) {
-          waitReloadTried = true;
-          args.steps.push(
-            `Post-verify: ${consecutiveSameUrlWaits} consecutive waits on ${state.url} — reloading once to unstick a hung post-OAuth redirect.`,
-          );
+        if (waitDecision.kind === "reload") {
+          args.steps.push(waitDecision.message);
           try {
-            await this.browser.goto(state.url);
+            await this.browser.goto(waitDecision.url);
             await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
           } catch {
             // reload failed — next round's wait will reach the break below
           }
           continue;
         }
-        if (consecutiveSameUrlWaits >= 6) {
-          this.lastPostVerifyDoneReason =
-            `post-OAuth interstitial (${state.url}) never resolved after ${consecutiveSameUrlWaits} waits — ` +
-            `likely a hung redirect or onboarding bootstrap for a freshly-created account`;
-          args.steps.push(
-            `Post-verify: wait-loop on ${state.url} (${consecutiveSameUrlWaits} rounds, page has elements but never advances) — breaking out.`,
-          );
-          break;
-        }
       } else {
-        consecutiveSameUrlWaits = 0;
-        lastWaitUrl = null;
+        recoveryFlow.recordNonWait();
       }
       hint = undefined;
       try {
@@ -11875,149 +11121,44 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           // from a hidden field on a billing page" (don't exit) from
           // "api_key came from a labeled credential row the planner
           // just observed" (safe to exit on single-cred services).
-          plannerExtractEmitted = true;
-          // 0.8.2-rc.12 — multi-cred preservation + always-on Phase E.
-          //
-          // Pre-rc.12 the extract step was a tower of "if no api_key,
-          // try Phase E; else done." That short-circuit silently lost
-          // cloud_name + api_secret on Cloudinary-class services whose
-          // api_key is plain-visible to the legacy regex extractor —
-          // the legacy path filled credentials.api_key, the if-branch
-          // skipped Phase E entirely, and the loop's top-of-iter exit
-          // returned a partial bundle.
-          //
-          // New shape: run the legacy extractor, Phase E, the reveal
-          // pass, and DOM-proximity UNCONDITIONALLY on every extract
-          // round, merging each into `credentials` first-wins. A later
-          // pass never clobbers a value an earlier pass labeled. This
-          // mirrors the design doc: Phase E is the multi-cred surface;
-          // single-cred is just multi-cred-with-one-key.
-          const [pageText, inputValues] = await Promise.all([
-            this.browser.extractText().catch(() => ""),
-            this.browser.extractAllInputValues().catch(() => [] as string[]),
-          ]);
-          const verifySource = pageText + "\n" + inputValues.join("\n");
+          credentialTracker.recordPlannerExtract();
+          const extractionRound =
+            await credentialExtractionFlow.runPostSignupExtractionRound({
+              credentials,
+              reason: nextStep.reason,
+              round,
+              maxRounds: args.maxRounds,
+              detectPresentedCredentialLabels:
+                !credentialTracker.hasObservedMultiCredPage(),
+              port: {
+                extractText: () => this.browser.extractText(),
+                extractAllInputValues: () => this.browser.extractAllInputValues(),
+                extractCredentials: () => this.extractCredentials(),
+                extractFromDomProximity: () => this.extractFromDomProximity(),
+                revealMaskedCredentials: () =>
+                  this.browser.revealMaskedCredentials(),
+                extractLabeledCredentialCandidates: () =>
+                  this.browser.extractLabeledCredentialCandidates(),
+                countPresentedCredentialLabels: () =>
+                  this.countPresentedCredentialLabels(),
+              },
+            });
+          args.steps.push(...extractionRound.steps);
 
-          // Tier 1 — legacy single-cred extractor (api_key by shape).
-          // Merge into the running accumulator instead of overwriting;
-          // a Phase E label captured on a prior round wins over a
-          // later legacy regex hit.
-          const legacy = await this.extractCredentials();
-          for (const [k, v] of Object.entries(legacy)) {
-            if (credentials[k] === undefined) credentials[k] = v;
-          }
-
-          // Tier 2 — Phase E labeled-token parser over the planner's
-          // reason. Picks up cloud_name='dlq4xgrca' / api_key='4917…'
-          // / application_id='X' / admin_api_key='…' style narrative.
-          const labeled = extractAllLabeledTokensFromReason(
-            nextStep.reason,
-            verifySource,
-          );
-          const labeledNewKeys = Object.keys(labeled).filter(
-            (k) => credentials[k] === undefined,
-          );
-          if (labeledNewKeys.length > 0) {
-            for (const k of labeledNewKeys) credentials[k] = labeled[k]!;
-            const summary = labeledNewKeys
-              .map((k) => `${k}=${labeled[k]!.slice(0, 4)}…${labeled[k]!.slice(-4)}`)
-              .join(", ");
+          if (
+            extractionRound.presentedCredentialCount !== null &&
+            extractionRound.presentedCredentialCount >= 2 &&
+            credentialTracker.recordPageOffersMultiCred()
+          ) {
             args.steps.push(
-              `Post-verify ${round + 1}/${args.maxRounds}: Phase E surfaced ${labeledNewKeys.length} labeled credential(s) (${summary})`,
+              `Post-verify ${round + 1}/${args.maxRounds}: page presents ${extractionRound.presentedCredentialCount} distinct credentials — holding the loop open to harvest all (not just the first).`,
             );
-          }
-
-          // Tier 2.5 — reveal-then-extract when the planner explicitly
-          // flagged a masked credential. Fires whether or not we
-          // already have other credentials — Cloudinary's api_secret
-          // sits beside an already-visible api_key in the table.
-          const MASKED_HINT =
-            /\b(?:masked|hidden|bullets?|asterisks?|••+|\*{3,}|reveal|unmask)\b/i;
-          if (MASKED_HINT.test(nextStep.reason)) {
-            try {
-              const revealRes = await this.browser.revealMaskedCredentials();
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
-              );
-              if (revealRes.clicked > 0) {
-                const labeledAfter = await this.extractFromDomProximity();
-                const afterNewKeys = Object.keys(labeledAfter).filter(
-                  (k) => credentials[k] === undefined,
-                );
-                if (afterNewKeys.length > 0) {
-                  for (const k of afterNewKeys) credentials[k] = labeledAfter[k]!;
-                  args.steps.push(
-                    `Post-verify ${round + 1}/${args.maxRounds}: post-reveal DOM-proximity extracted ${afterNewKeys.length} more (${afterNewKeys.join(", ")})`,
-                  );
-                } else {
-                  // Diagnostic: which candidates were seen on the page?
-                  // Helps debug "Reveal click landed but the value
-                  // didn't appear in proximity to a known label".
-                  const allLabeled =
-                    await this.browser.extractLabeledCredentialCandidates();
-                  const candSummary = allLabeled
-                    .filter((c) => !c.isMasked)
-                    .slice(0, 8)
-                    .map(
-                      (c) =>
-                        `${c.value.slice(0, 6)}…(${c.value.length}ch)/${c.label ?? "no-label"}`,
-                    )
-                    .join(", ");
-                  args.steps.push(
-                    `Post-verify ${round + 1}/${args.maxRounds}: post-reveal had ${allLabeled.length} candidates; visible: ${candSummary}`,
-                  );
-                }
-              }
-            } catch (err) {
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
-              );
-            }
-          }
-
-          // Tier 3 — DOM-proximity labeled extractor. Walks the
-          // visible DOM, pairs credential-shape strings with their
-          // nearest credential-label text. Catches services whose
-          // planner-reason narrative missed sibling labels but whose
-          // DOM still has them as <td>/<dt> pairs.
-          try {
-            const labeledFromDom = await this.extractFromDomProximity();
-            const domNewKeys = Object.keys(labeledFromDom).filter(
-              (k) => credentials[k] === undefined,
-            );
-            if (domNewKeys.length > 0) {
-              for (const k of domNewKeys) credentials[k] = labeledFromDom[k]!;
-              const summary = domNewKeys
-                .map((k) => `${k}=${labeledFromDom[k]!.slice(0, 4)}…${labeledFromDom[k]!.slice(-4)}`)
-                .join(", ");
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: DOM-proximity surfaced ${domNewKeys.length} more (${summary})`,
-              );
-            }
-          } catch {
-            // best-effort; never abort an extract pass on DOM-proximity
-            // failure (page mid-navigation etc).
-          }
-
-          // "Stops at one" guard: does THIS page present >=2 distinct
-          // credentials (masked included)? If so, hold the loop open past
-          // the first key so the reveal pass + DOM harvest get more rounds
-          // to capture the siblings — even when only one value is in hand
-          // right now. Bounded downstream by roundsSinceLastNewCredential.
-          if (!pageOffersMultiCred) {
-            const presented = await this.countPresentedCredentialLabels();
-            if (presented >= 2) {
-              pageOffersMultiCred = true;
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: page presents ${presented} distinct credentials — holding the loop open to harvest all (not just the first).`,
-              );
-            }
           }
 
           // Anything found across all tiers? hasMultiCredCredentials
           // also catches non-api_key labels (cloud_name, application_id).
-          if (hasAnyExtractedCredential(credentials)) {
-            consecutiveFailedExtracts = 0;
+          if (extractionRound.foundAnyCredential) {
+            recoveryFlow.recordExtractionSuccess();
             continue;
           }
 
@@ -12028,7 +11169,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           {
             const quoted = extractQuotedTokenFromReason(
               nextStep.reason,
-              verifySource,
+              extractionRound.verifySource,
             );
             if (quoted !== null) {
               credentials.api_key = quoted;
@@ -12036,10 +11177,9 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
                 `Post-verify ${round + 1}/${args.maxRounds}: extracted token via ` +
                   `planner-quoted fallback (${quoted.slice(0, 4)}…${quoted.slice(-4)})`,
               );
-              consecutiveFailedExtracts = 0;
+              recoveryFlow.recordExtractionSuccess();
               continue;
             }
-            consecutiveFailedExtracts += 1;
             // Best-effort diagnostic upload: when extract returns
             // null despite the planner asserting a credential is
             // visible, capture the DOM + screenshot so the UI shape
@@ -12068,212 +11208,44 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
                 }
               })();
             }
-            // Two consecutive failed extracts on a DOM the planner
-            // keeps quoting a token from means the value's shape is
-            // not in our regex library (Railway: bare UUID; some
-            // smaller services use opaque alphanumeric tokens with no
-            // recognisable prefix or nearby label). Steer HARD toward
-            // a Copy-button click — the page renders a Copy affordance
-            // far more often than it changes the token's text shape,
-            // and the Copy path is regex-free. Falling back to `done`
-            // is acceptable when the user can copy the token visually.
-            if (consecutiveFailedExtracts >= 2) {
-              args.steps.push(
-                `Post-verify: ${consecutiveFailedExtracts} consecutive failed extracts ` +
-                  `on a page the planner says shows a token — the value's shape is not ` +
-                  `in this build's regex library. Re-planning off extract.`,
-              );
-              hint =
-                "Your last TWO 'extract' attempts returned NO key, even though you " +
-                "said the token is visible. The token's SHAPE is not one this " +
-                "extractor recognises (e.g. a bare UUID with no 'API key:' label " +
-                "nearby). Do NOT issue another 'extract'. Instead: " +
-                "(1) {\"kind\":\"click\"} a 'Copy' / 'Copy token' / 'Copy to clipboard' " +
-                "button near the token — the clipboard path bypasses the regex. " +
-                "(2) If no Copy button exists, issue {\"kind\":\"done\"} — the user " +
-                "will copy the token manually from the screenshot.";
-              consecutiveFailedExtracts = 0;
-            } else {
-              // First failure: keep the existing masked/truncated hint
-              // — most services that fail extract once do so because
-              // the displayed value is dots/ellipsis, and the existing
-              // hint correctly steers to "create a fresh key".
-              hint =
-                "Your last 'extract' found NO key — the key text on the page is " +
-                "masked or truncated (e.g. shows '...' or dots). A masked existing " +
-                "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
-                "generate a fresh one — its full value is shown once, on creation.";
+            const failedExtract = recoveryFlow.decideFailedExtract();
+            if (failedExtract.kind === "replan") {
+              args.steps.push(failedExtract.message);
             }
+            hint = failedExtract.hint;
           }
-        } else if (nextStep.kind === "click") {
-          await this.browser.click(nextStep.selector);
-          // F7 / 0.6.15-rc.11 — Modal-based credential reveals
-          // (OpenRouter, Anthropic, OpenAI Create-Key flows) render
-          // the new key into a modal AFTER a server round-trip — the
-          // prior blind 2s wait was racing the API response. The
-          // implicit-extract that follows this branch then found
-          // nothing, the round ended, and by the next round the modal
-          // had auto-closed. Poll up to 8s for the key to appear in
-          // the post-action DOM. Early-exit as soon as
-          // extractCredentials returns one — typical happy path on
-          // services without modal-delay returns in <1s. Saves both
-          // time (no overshoot wait) and correctness (catches the
-          // modal-render race).
-          // 0.8.2-rc.12 — merge polled extract into the running
-          // credentials accumulator (was previously assigned to a
-          // throwaway `pollExtract` local). On modal-key reveal
-          // flows (OpenRouter, Anthropic, OpenAI) the credential
-          // appears only here, and the legacy assignment was lost
-          // unless the next round's top-of-iter re-read just
-          // happened to find it again — a flaky guarantee.
-          //
-          // 0.8.2-rc.15 — also poll DOM-proximity. A click that
-          // reveals an api_secret next to a known label (Cloudinary
-          // reveal click → api_secret becomes visible next to "API
-          // Secret" text) wouldn't surface in the legacy api_key-
-          // shaped regex, so a multi-cred reveal landed nothing
-          // unless the explicit extract round re-fired afterward.
-          const credentialDeadline = Date.now() + 8000;
-          let alertSeen = "";
-          let alertChecked = false;
-          while (Date.now() < credentialDeadline) {
-            await this.browser.wait(0.5);
-            // Reuse the first 0.5s settle to grab any transient toast/notification
-            // a submit-like click raised (validation error, rate-limit, "operation
-            // failed") before it auto-dismisses — otherwise a failed submit reads
-            // as a SILENT no-op. MEASURED 2026-06-11 (deepseek Sign-up).
-            if (!alertChecked) {
-              alertChecked = true;
-              alertSeen = await this.browser.captureTransientAlert(0);
-            }
-            try {
-              const pollExtract = await this.extractCredentials();
-              for (const [k, v] of Object.entries(pollExtract)) {
-                if (credentials[k] === undefined) credentials[k] = v;
-              }
-              try {
-                const pollLabeled = await this.extractFromDomProximity();
-                for (const [k, v] of Object.entries(pollLabeled)) {
-                  if (credentials[k] === undefined) credentials[k] = v;
-                }
-              } catch {
-                // DOM-proximity failure is non-fatal; we'll retry
-                // the next tick or fall through to the next round.
-              }
-              // Early-exit when we have an api_key — most services'
-              // happy path completes in <1s. Multi-cred siblings
-              // (api_secret, cloud_name) keep accumulating across
-              // subsequent rounds; we don't hold the inner poll for
-              // them here.
-              if (credentials.api_key !== undefined) break;
-            } catch {
-              // Page mid-render — keep polling; next tick may settle.
-            }
-          }
-          // A click that raised a notification but yielded no key — surface the
-          // toast text so the planner addresses the real error instead of
-          // re-clicking the same dead button into a stuck-loop.
-          if (credentials.api_key === undefined && alertSeen.length > 0) {
-            args.steps.push(
-              `Post-verify: the page showed a notification after the click: "${alertSeen}"`,
-            );
-            // Forensic snapshot of the page in its post-click error state.
-            // The before-fill/after-submit snapshots only cover the FIRST
-            // submit; a failure on a post-verify re-submit (e.g. deepseek's
-            // "Submitted failed. Please try again." after the OTP is filled)
-            // was otherwise unobservable. Non-fatal by contract.
-            await saveDebugSnapshot(this.browser, "post-verify-alert");
-            hint =
-              `After your last click the page showed this notification: "${alertSeen}". ` +
-              `It likely explains why the page did not advance — address it (fix the named ` +
-              `field, wait, or choose a different action) rather than repeating the same click.`;
-          }
-        } else if (nextStep.kind === "fill") {
-          await this.browser.type(nextStep.selector, nextStep.value);
-        } else if (nextStep.kind === "select") {
-          await this.browser.selectOption(nextStep.selector, nextStep.option_text);
-          await this.browser.wait(1);
-        } else if (nextStep.kind === "check") {
-          // browser.check force-ticks + scrolls into view + verifies —
-          // a styled TOS checkbox a plain click can't flip.
-          await this.browser.check(nextStep.selector);
-          await this.browser.wait(1);
-        } else if (nextStep.kind === "scroll") {
-          // Drive a ToS modal to the bottom so its gated Accept button
-          // enables. Railway-class flow: planner sees a disabled
-          // "Accept" + a long modal body, asks us to scroll it.
-          const result = await this.browser.scrollToEndOfTOS(nextStep.selector);
-          if (result.reason === "no_container") {
-            args.steps.push(
-              `Post-verify: scroll requested but no scrollable container found — re-planning.`,
-            );
-            hint =
-              "Your last 'scroll' found NO scrollable container on the page. " +
-              "Do NOT return scroll again — try clicking a different element, " +
-              "or return done if the gated button still won't enable.";
-          } else if (result.reason === "already_at_bottom") {
-            args.steps.push(
-              `Post-verify: scroll requested but ${result.container} is already at the bottom — re-planning.`,
-            );
-            hint =
-              "Your last 'scroll' was a no-op — the scrollable container is ALREADY at the " +
-              "bottom. Whatever is keeping the Accept button disabled is NOT scroll position. " +
-              "Re-read the page: look for an unticked agreement checkbox, an unfilled required " +
-              "input (name/email), a sub-tab on the modal that hasn't been visited, or a 'I agree' " +
-              "radio button. Do NOT return scroll again.";
-          } else {
-            args.steps.push(`Post-verify: scrolled ToS container (${result.container}) to bottom.`);
-          }
-          await this.browser.wait(1);
-        } else if (nextStep.kind === "navigate") {
-          await this.browser.goto(nextStep.url);
-          // rc.33 — wait for the SPA to actually render before the
-          // next round reads inventory. waitForFormReady (called at
-          // the top of the next round) handles the basic "DOM
-          // parsed" signal, but Porter / Koyeb's API-tokens pages
-          // load over 5-15 seconds — the planner-driven post-verify
-          // loop was running on the empty initial shell and burning
-          // rounds clicking nothing. Wait for at least 5 interactive
-          // elements (Porter's tokens page has 20+ once rendered).
-          await this.browser.waitForInteractiveDom(5, 20_000);
-        } else if (nextStep.kind === "wait") {
-          await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {
-          if (args.credentials === undefined) {
-            // OAuth run — no password to give. A single ask can be a
-            // transient mid-render read, but a SECOND ask means the page
-            // keeps presenting login: the OAuth session didn't persist.
-            // Bail with the right classification (A5) instead of thrashing
-            // the rest of maxRounds and ending in oauth_onboarding_failed.
-            oauthLoginRequests += 1;
-            if (oauthLoginRequests >= 2) {
-              const st = await this.browser.getState().catch(() => null);
-              args.steps.push(
-                "Post-verify: planner hit a login page twice on an OAuth run — " +
-                  "the OAuth session didn't persist; bailing.",
-              );
-              throw new OAuthSessionNotPersistedError(
-                `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the ` +
-                  `page still presents a login screen (${st !== null ? pathOf(st.url) : "?"}) — the ` +
-                  `OAuth callback never established a session (anti-bot rejection of the callback, ` +
-                  `or a service-side session-storage issue). Finish the signup manually.`,
-              );
-            }
-            args.steps.push(
-              "Post-verify: planner asked to log in on an OAuth run — already " +
-                "authenticated via Google; skipping (1st ask, may be a transient read).",
-            );
-          } else if (loginAttempts >= 2) {
-            args.steps.push("Post-verify: already attempted login twice — stopping.");
-            break;
-          } else {
-            loginAttempts += 1;
-            await this.loginWithCredentials(
-              args.credentials.email,
-              args.credentials.password,
-              args.steps,
+          const loginResult = await loginFlow.handleLoginRequest({
+            ...(args.credentials !== undefined
+              ? { credentials: args.credentials }
+              : {}),
+            steps: args.steps,
+            port: {
+              getState: () => this.browser.getState(),
+              loginWithCredentials: (email, password, steps) =>
+                this.loginWithCredentials(email, password, steps),
+            },
+          });
+          if (loginResult.kind === "oauth_session_not_persisted") {
+            throw new OAuthSessionNotPersistedError(
+              `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the ` +
+                `page still presents a login screen (${loginResult.url !== null ? pathOf(loginResult.url) : "?"}) — the ` +
+                `OAuth callback never established a session (anti-bot rejection of the callback, ` +
+                `or a service-side session-storage issue). Finish the signup manually.`,
             );
           }
+          if (loginResult.kind === "break") {
+            break;
+          }
+        } else {
+          const execution = await actionExecutor.execute({
+            step: nextStep as PostSignupExecutableAction,
+            credentials,
+            snapshotPostClickAlert: () =>
+              saveDebugSnapshot(this.browser, "post-verify-alert"),
+          });
+          args.steps.push(...execution.steps);
+          if (execution.hint !== undefined) hint = execution.hint;
         }
       } catch (err) {
         args.steps.push(
@@ -12281,96 +11253,31 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         );
         // Don't bail — Claude may recover on the next round.
       }
-      // Re-extract — but tolerate the page still navigating from the
-      // step just taken; the next round settles and re-reads.
-      // 0.8.2-rc.12 — MERGE into the running accumulator. The pre-
-      // rc.12 unconditional assignment wiped multi-cred fields the
-      // explicit extract round just accumulated (cloud_name, api_secret,
-      // etc.); on the next round's top-of-iter early-exit, only the
-      // legacy single api_key survived.
-      // 0.8.2-rc.12 — count distinct credential keys before re-extract
-      // so the synthetic-extract trigger fires on ANY new key, not just
-      // the legacy api_key / username pair. A cloudinary reveal click
-      // can produce a fresh api_secret while api_key was already set;
-      // the pre-rc.12 trigger silently skipped the synthetic capture
-      // and the synthesizer then rejected on no_extract_step.
-      const credCountBefore = Object.keys(credentials).filter(
-        (k) => !NON_CREDENTIAL_KEYS.has(k),
-      ).length;
-      try {
-        const reExtract = await this.extractCredentials();
-        for (const [k, v] of Object.entries(reExtract)) {
-          if (credentials[k] === undefined) credentials[k] = v;
-        }
-      } catch {
-        // page mid-navigation — next round's waitForFormReady handles it
-      }
-      // rc.16 — synthetic extract round capture. When the implicit
-      // extractCredentials() above pulls a credential out of the page
-      // *without* the planner ever having picked an `extract` step,
-      // the for-loop's early-return at the next iteration's top fires
-      // before any further capture is written. The chain that
-      // auto-promote sees then has no `observed.kind === "extract"`
-      // round, so promoteToSkill rejects with no_extract_step. Fix:
-      // when an implicit extract just succeeded and the planner's
-      // chosen step this round wasn't already `extract`, write a
-      // synthetic extract round with fresh state+inventory captured
-      // RIGHT NOW (the action just ran, the token row is now visible).
-      // Best-effort — a capture failure must never block returning the
-      // credential we already have.
-      const credCountAfter = Object.keys(credentials).filter(
-        (k) => !NON_CREDENTIAL_KEYS.has(k),
-      ).length;
-      const haveNewCredentials = credCountAfter > credCountBefore;
-      if (haveNewCredentials && nextStep.kind !== "extract") {
-        try {
-          const [postState, postInventory] = await Promise.all([
-            this.browser.getState(),
-            this.buildInventory(args.steps, undefined, 80),
-          ]);
-          const syntheticExtract: PostVerifyStep = {
-            kind: "extract",
-            reason: `implicit extract after ${nextStep.kind} — credentials surfaced on the page`,
-          };
-          captureOnboardingRound({
-            service: args.service,
-            round: capturedRound,
-            oauth,
-            state: postState,
-            inventory: postInventory,
-            observed: syntheticExtract,
-            // Fix C4 — attribute this synthetic round to the planner call
-            // that drove us here (no LLM ran for this implicit extract).
-            ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
-            ...(this.lastResolvedProvider !== undefined ? { resolved_provider: this.lastResolvedProvider } : {}),
-          });
-          capturedRound += 1;
-          if (this.roundUploader !== undefined) {
-            void (async () => {
-              try {
-                await this.roundUploader!({
-                  service: args.service,
-                  round: round + 1,
-                  kind: syntheticExtract.kind,
-                  url: postState.url,
-                  title: postState.title,
-                  inventory_count: postInventory.length,
-                  observed_reason: syntheticExtract.reason,
-                  html: postState.html,
-                  ...(postState.screenshot !== undefined && postState.screenshot.length > 0
-                    ? { screenshot_jpeg_base64: postState.screenshot }
-                    : {}),
-                });
-              } catch {
-                // best-effort
-              }
-            })();
-          }
-        } catch {
-          // best-effort — synthetic capture is auto-promote plumbing,
-          // never load-bearing for the parent signup
-        }
-      }
+      const syntheticResult = await syntheticCapture.afterAction({
+        service: args.service,
+        loopRound: round,
+        capturedRound,
+        oauth,
+        actionKind: nextStep.kind,
+        credentials,
+        steps: args.steps,
+        ...(this.lastResolvedModel !== undefined
+          ? { resolvedModel: this.lastResolvedModel }
+          : {}),
+        ...(this.lastResolvedProvider !== undefined
+          ? { resolvedProvider: this.lastResolvedProvider }
+          : {}),
+        ...(this.roundUploader !== undefined
+          ? { roundUploader: this.roundUploader }
+          : {}),
+        port: {
+          extractCredentials: () => this.extractCredentials(),
+          getState: () => this.browser.getState(),
+          buildInventory: () => this.buildInventory(args.steps, undefined, 80),
+          captureRound: captureOnboardingRound,
+        },
+      });
+      capturedRound = syntheticResult.capturedRound;
     }
     // 0.8.2-rc.10 — existing-account-no-extract classifier. Runs once
     // at loop exit when no credential surfaced AND no more specific

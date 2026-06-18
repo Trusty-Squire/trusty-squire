@@ -46,7 +46,7 @@ import {
 } from "@trusty-squire/skill-schema";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep } from "./agent.js";
-import { extractAllLabeledTokensFromReason } from "./agent.js";
+import { extractAllLabeledTokensFromReason } from "./credential-extraction-flow.js";
 import {
   verifyCaptureChain,
   type OnboardingCaseFile,

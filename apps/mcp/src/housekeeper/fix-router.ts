@@ -24,6 +24,12 @@
 import type { FailureStage } from "../bot/failure-stage.js";
 
 export type FixRoute = "drain" | "wall" | "fix" | "capability_gap";
+export type FailureOwner = "code" | "retry" | "capability" | "external";
+export type FailureDisposition =
+  | "attempt_fix"
+  | "retry_later"
+  | "blocked_wall"
+  | "needs_capability";
 
 export interface RouterInput {
   service: string;
@@ -33,7 +39,7 @@ export interface RouterInput {
   stage: FailureStage;
   /** Fraction of recent runs for this service that went GREEN (0..1). High =
    *  flaky (it flips), so a re-run — not a code fix — is the move. */
-  retryVariance: number;
+  recentGreenRate: number;
   /** The signup domain resolves. False = dead host → wall. */
   dnsAlive: boolean;
   /** Curated `needs-manual` flag (operator-confirmed unservable). */
@@ -42,6 +48,8 @@ export interface RouterInput {
 
 export interface RouterVerdict {
   route: FixRoute;
+  owner: FailureOwner;
+  disposition: FailureDisposition;
   reason: string;
 }
 
@@ -67,41 +75,57 @@ const CAPABILITY_WALL_STAGES: ReadonlySet<FailureStage> = new Set<FailureStage>(
 
 // A service that goes green this often on retry is flaky, not deterministically
 // broken — leave it to the drain clock.
-export const RETRY_VARIANCE_FLAKY = 0.2;
+export const RECENT_GREEN_RATE_FLAKY = 0.2;
+
+function verdict(
+  route: FixRoute,
+  reason: string,
+): RouterVerdict {
+  switch (route) {
+    case "fix":
+      return { route, owner: "code", disposition: "attempt_fix", reason };
+    case "drain":
+      return { route, owner: "retry", disposition: "retry_later", reason };
+    case "wall":
+      return { route, owner: "external", disposition: "blocked_wall", reason };
+    case "capability_gap":
+      return { route, owner: "capability", disposition: "needs_capability", reason };
+  }
+}
 
 export function classifyCluster(i: RouterInput): RouterVerdict {
   // Mechanical walls first — operator curation, then a dead host.
   if (i.curatedNeedsManual) {
-    return { route: "wall", reason: "curated needs-manual (operator-confirmed unservable)" };
+    return verdict("wall", "curated needs-manual (operator-confirmed unservable)");
   }
   if (!i.dnsAlive) {
-    return { route: "wall", reason: "signup domain does not resolve (DNS dead)" };
+    return verdict("wall", "signup domain does not resolve (DNS dead)");
   }
   // Flaky overrides stage: if it flips green on retry, a fix would chase noise.
-  if (i.retryVariance >= RETRY_VARIANCE_FLAKY) {
-    return {
-      route: "drain",
-      reason: `flaky — ${Math.round(i.retryVariance * 100)}% of recent runs green; retry, no fix`,
-    };
+  if (i.recentGreenRate >= RECENT_GREEN_RATE_FLAKY) {
+    return verdict(
+      "drain",
+      `flaky — ${Math.round(i.recentGreenRate * 100)}% of recent runs green; retry, no fix`,
+    );
   }
   // Deterministic + inside the fence → the one route that spends a fix.
   if (IN_FENCE_STAGES.has(i.stage)) {
-    return {
-      route: "fix",
-      reason: `deterministic post-OAuth nav failure (stage=${i.stage}) — inside the fix-agent fence`,
-    };
+    return verdict(
+      "fix",
+      `deterministic post-OAuth nav failure (stage=${i.stage}) — inside the fix-agent fence`,
+    );
   }
   // Deterministic but a timing/env stage → still a retry, not a fix.
   if (FLAKY_STAGES.has(i.stage)) {
-    return { route: "drain", reason: `timing/env stage=${i.stage} — retry` };
+    return verdict("drain", `timing/env stage=${i.stage} — retry`);
   }
   // Needs a faculty the bot lacks → unservable autonomously.
   if (CAPABILITY_WALL_STAGES.has(i.stage)) {
-    return { route: "wall", reason: `needs a faculty the bot lacks (stage=${i.stage})` };
+    return verdict("wall", `needs a faculty the bot lacks (stage=${i.stage})`);
   }
   // Deterministic, real, but OUTSIDE the fence — surface, don't hack.
-  return {
-    route: "capability_gap",
-    reason: `deterministic but out-of-fence (stage=${i.stage}) — needs eval coverage before an autonomous fix`,
-  };
+  return verdict(
+    "capability_gap",
+    `deterministic but out-of-fence (stage=${i.stage}) — needs eval coverage before an autonomous fix`,
+  );
 }

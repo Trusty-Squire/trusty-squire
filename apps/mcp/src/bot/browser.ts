@@ -913,6 +913,17 @@ export class BrowserController {
     this.launchedContext = true;
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
+    // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
+    // calls to its `__name(fn, "name")` helper into functions passed to
+    // page.evaluate/addInitScript. Those functions execute in the browser page,
+    // where Node's helper does not exist, causing an immediate
+    // `ReferenceError: __name is not defined` before the real signup even
+    // starts. Define the same no-op helper in every document. Built `dist`
+    // should not emit these calls, but the helper is harmless there too.
+    await context.addInitScript({
+      content:
+        'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });',
+    });
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
@@ -940,18 +951,17 @@ export class BrowserController {
     //     at 1.0. Idempotent via a marker so the per-nav re-apply is cheap, and
     //     getParameter.toString() is masked to the original native source so
     //     the patch itself isn't a tell. Only strings change, not rendering.
-    const installWebglSpoof = (): void => {
+    const installWebglSpoofScript = String.raw`(() => {
       const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
       const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
-      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext): void => {
+      const spoof = (proto) => {
         // The marker lives on the prototype so re-application is a no-op; the
         // cast is the one typed-alternative-exhausted spot (adding an ad-hoc
         // brand to a DOM prototype).
-        const marked = proto as WebGLRenderingContext & { __tsWebglPatched?: boolean };
-        if (marked.__tsWebglPatched === true) return;
+        if (proto.__tsWebglPatched === true) return;
         const orig = proto.getParameter;
         const native = orig.toString();
-        proto.getParameter = function (this: typeof proto, p: number) {
+        proto.getParameter = function (p) {
           if (p === VENDOR_WEBGL) return "Google Inc. (Intel)";
           if (p === RENDERER_WEBGL) {
             return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)";
@@ -963,7 +973,7 @@ export class BrowserController {
           configurable: true,
           writable: true,
         });
-        marked.__tsWebglPatched = true;
+        proto.__tsWebglPatched = true;
       };
       if (typeof WebGLRenderingContext !== "undefined") {
         spoof(WebGLRenderingContext.prototype);
@@ -983,7 +993,7 @@ export class BrowserController {
       // (seconds in), so the framenavigated re-apply wins the race. Defined on
       // Navigator.prototype (where the native getters live) so there's no own-
       // property tell on the instance.
-      const navProto = Navigator.prototype as Navigator & { __tsDevicePatched?: boolean };
+      const navProto = Navigator.prototype;
       if (navProto.__tsDevicePatched !== true) {
         try {
           Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
@@ -1015,8 +1025,8 @@ export class BrowserController {
           // descriptor already locked by something else — leave it.
         }
       }
-    };
-    await context.addInitScript(installWebglSpoof);
+    })();`;
+    await context.addInitScript({ content: installWebglSpoofScript });
     this.page = context.pages()[0] ?? (await context.newPage());
     // Re-apply on every navigation — the main-world reach patchright's isolated
     // init world denies us. framenavigated fires at navigation-commit (before
@@ -1025,7 +1035,7 @@ export class BrowserController {
     const reapplyWebglSpoof = (): void => {
       const pg = this.page;
       if (pg === null) return;
-      void pg.evaluate(installWebglSpoof).catch(() => {
+      void pg.evaluate(installWebglSpoofScript).catch(() => {
         // mid-navigation / closed page — the next navigation re-applies.
       });
     };
@@ -4199,34 +4209,39 @@ export class BrowserController {
   // provider/sign-up button) is present yet. Best-effort — never throws.
   async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
     if (!this.page) return;
+    const authWidgetHydrationProbe = String.raw`(() => {
+      const vis = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const anyVis = (sel) =>
+        Array.from(document.querySelectorAll(sel)).some(vis);
+      const hasAuthInput = anyVis(
+        'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
+      );
+      let hasAuthButton = false;
+      const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
+      for (const el of Array.from(
+        document.querySelectorAll('button,a[href],[role="button"]'),
+      )) {
+        if (!vis(el)) continue;
+        if (re.test((el.textContent ?? "").trim())) {
+          hasAuthButton = true;
+          break;
+        }
+      }
+      const spinnerVisible = anyVis(
+        '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
+      );
+      return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
+    })()`;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const state = await this.page.evaluate(() => {
-          const vis = (el: Element): boolean => {
-            const r = (el as HTMLElement).getBoundingClientRect();
-            return r.width > 0 && r.height > 0;
-          };
-          const anyVis = (sel: string): boolean =>
-            Array.from(document.querySelectorAll(sel)).some(vis);
-          // Auth signal: a real form input or a recognizable provider /
-          // signup affordance.
-          const hasAuthInput = anyVis(
-            'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
-          );
-          let hasAuthButton = false;
-          const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
-          for (const el of Array.from(
-            document.querySelectorAll('button,a[href],[role="button"]'),
-          )) {
-            if (!vis(el)) continue;
-            if (re.test((el.textContent ?? "").trim())) { hasAuthButton = true; break; }
-          }
-          const spinnerVisible = anyVis(
-            '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
-          );
-          return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
-        });
+        const state = (await this.page.evaluate(authWidgetHydrationProbe)) as {
+          hasAuth: boolean;
+          spinnerVisible: boolean;
+        };
         // Done the moment an auth signal appears, or once nothing is
         // spinning anymore (no point waiting on a page that simply has
         // no auth widget — a true OAuth-less/blank page bails honestly).

@@ -4,7 +4,7 @@
 import { describe, it, expect } from "vitest";
 import {
   classifyCluster,
-  RETRY_VARIANCE_FLAKY,
+  RECENT_GREEN_RATE_FLAKY,
   type RouterInput,
 } from "../fix-router.js";
 
@@ -12,7 +12,7 @@ const base: RouterInput = {
   service: "svc",
   coarseKind: "oauth_onboarding_failed",
   stage: "planner_loop",
-  retryVariance: 0,
+  recentGreenRate: 0,
   dnsAlive: true,
   curatedNeedsManual: false,
 };
@@ -27,13 +27,16 @@ describe("classifyCluster", () => {
   });
 
   it("flaky (retry-variance high) → drain, overriding an in-fence stage", () => {
-    const v = classifyCluster({ ...base, retryVariance: 0.5 });
+    const v = classifyCluster({ ...base, recentGreenRate: 0.5 });
     expect(v.route).toBe("drain");
     expect(v.reason).toMatch(/flaky/);
   });
 
   it("deterministic post-OAuth nav (planner_loop) → fix", () => {
-    expect(classifyCluster({ ...base, stage: "planner_loop" }).route).toBe("fix");
+    const v = classifyCluster({ ...base, stage: "planner_loop" });
+    expect(v.route).toBe("fix");
+    expect(v.owner).toBe("code");
+    expect(v.disposition).toBe("attempt_fix");
   });
 
   it("deterministic extract-stage (reached key page, no credential) → fix", () => {
@@ -65,17 +68,31 @@ describe("classifyCluster", () => {
     ] as const) {
       const v = classifyCluster({ ...base, stage });
       expect(v.route).toBe("capability_gap");
+      expect(v.owner).toBe("capability");
+      expect(v.disposition).toBe("needs_capability");
       expect(v.reason).toMatch(/out-of-fence/);
     }
+  });
+
+  it("routes retry and wall classes to explicit owners", () => {
+    const drain = classifyCluster({ ...base, stage: "run_timeout" });
+    expect(drain.route).toBe("drain");
+    expect(drain.owner).toBe("retry");
+    expect(drain.disposition).toBe("retry_later");
+
+    const wall = classifyCluster({ ...base, stage: "payment" });
+    expect(wall.route).toBe("wall");
+    expect(wall.owner).toBe("external");
+    expect(wall.disposition).toBe("blocked_wall");
   });
 
   it("the flaky threshold is exclusive-below / inclusive-at", () => {
     // Just under the threshold + an in-fence stage → fix (deterministic enough).
     expect(
-      classifyCluster({ ...base, retryVariance: RETRY_VARIANCE_FLAKY - 0.01 }).route,
+      classifyCluster({ ...base, recentGreenRate: RECENT_GREEN_RATE_FLAKY - 0.01 }).route,
     ).toBe("fix");
     // At the threshold → drain.
-    expect(classifyCluster({ ...base, retryVariance: RETRY_VARIANCE_FLAKY }).route).toBe(
+    expect(classifyCluster({ ...base, recentGreenRate: RECENT_GREEN_RATE_FLAKY }).route).toBe(
       "drain",
     );
   });

@@ -39,7 +39,17 @@ import type { EvalGateResult } from "../bot/eval-gate.js";
 import type { PostVerifyStep } from "../bot/agent.js";
 import { assertStagingPrerelease, computeNextRc } from "./release-guard.js";
 import type { FixBatch, FixBatchFailure } from "./fix-batch.js";
-import { classifyCluster } from "./fix-router.js";
+import {
+  buildRouterInput,
+  type ServiceRoutingFacts,
+} from "./fix-router-input.js";
+import {
+  classifyCluster,
+  type FailureDisposition,
+  type FailureOwner,
+  type FixRoute,
+  type RouterVerdict,
+} from "./fix-router.js";
 
 // Default give-up bound per cluster (decision: K = 3).
 export const DEFAULT_MAX_ATTEMPTS = 3;
@@ -130,6 +140,7 @@ export interface FixAgentOpts {
   // Posture (a): the gated surfaces the agent may touch. A proposal touching
   // anything outside these (or under corpus/eval) is parked, never committed.
   allowedPaths: readonly string[];
+  routerFacts?: ServiceRoutingFacts;
   maxAttemptsPerCluster?: number;
   log?: (line: string) => void;
 }
@@ -140,6 +151,17 @@ export interface WallCandidate {
   services: string[];
   signature: string;
   attempts: number;
+  reason: string;
+}
+
+export interface RoutedCluster {
+  cluster_id: string;
+  failure_stage: FailureStage;
+  services: string[];
+  signature: string;
+  route: FixRoute;
+  owner: FailureOwner;
+  disposition: FailureDisposition;
   reason: string;
 }
 
@@ -155,6 +177,7 @@ export interface FixAgentResult {
   }>;
   walls: WallCandidate[];
   parked: Array<{ cluster_id: string; reason: string; touched_paths: string[] }>;
+  routed: RoutedCluster[];
 }
 
 // ── Clustering (pure) ───────────────────────────────────────────────
@@ -290,7 +313,7 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
   let nextVersion = computeNextRc(opts.currentVersion);
   assertStagingPrerelease({ branch: opts.branch, version: nextVersion });
 
-  const result: FixAgentResult = { committed: [], walls: [], parked: [] };
+  const result: FixAgentResult = { committed: [], walls: [], parked: [], routed: [] };
   const clusters = clusterFailures(opts.batch);
   log(`batch ${opts.batch.batch_id}: ${opts.batch.failures.length} failure(s) → ${clusters.length} cluster(s)`);
 
@@ -318,17 +341,11 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
     // burning a `claude -p` attempt: `wall` for genuine dead-ends (phone /
     // payment / dead host), parked-for-retry/surface for `drain` (timing) +
     // `capability_gap` (deterministic but out-of-fence). We gate on STAGE — the
-    // fence truth — with conservative inputs (retryVariance/dnsAlive/curated
+    // fence truth — with conservative inputs (recentGreenRate/dnsAlive/curated
     // default safe so we never wall on absent data). This is what keeps a lap
     // from spending 3 attempts each on anti_bot/oauth/phone clusters it can't fix.
-    const route = classifyCluster({
-      service: cluster.services[0] ?? "unknown",
-      coarseKind: cluster.failure_stage,
-      stage: cluster.failure_stage,
-      retryVariance: 0,
-      dnsAlive: true,
-      curatedNeedsManual: false,
-    });
+    const route = classifyCluster(buildRouterInput(cluster, opts.batch, opts.routerFacts));
+    result.routed.push(routedWith(cluster, route));
     if (route.route !== "fix") {
       if (route.route === "wall") {
         result.walls.push(wallWith(cluster, 0, `router: ${route.reason}`));
@@ -499,5 +516,18 @@ function wallWith(cluster: FixCluster, attempts: number, reason: string): WallCa
     signature: cluster.signature,
     attempts,
     reason,
+  };
+}
+
+function routedWith(cluster: FixCluster, route: RouterVerdict): RoutedCluster {
+  return {
+    cluster_id: cluster.id,
+    failure_stage: cluster.failure_stage,
+    services: cluster.services,
+    signature: cluster.signature,
+    route: route.route,
+    owner: route.owner,
+    disposition: route.disposition,
+    reason: route.reason,
   };
 }

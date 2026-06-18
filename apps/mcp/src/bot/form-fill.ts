@@ -1,3 +1,5 @@
+import { keepStage, patchStage, type FlowStageStep } from "./flow-engine.js";
+
 // form-fill.ts — pure decision primitives of the signup FORM-FILL phase, carved
 // out of planExecuteWithRetry (strangler slice 3 — see DESIGN-form-fill-engine.md).
 // Browser-free + unit-tested. This commit is the no-progress / stuck-loop
@@ -253,10 +255,7 @@ export type FormFillHintKind =
   | "submit_went_stale" // C4 submit selector vanished (page advanced)
   | "post_submit_validation"; // C4 validation errors after submit
 
-export interface FormFillStep {
-  action: FormFillAction;
-  nextState: FormFillState;
-}
+export type FormFillStep = FlowStageStep<FormFillState, FormFillAction>;
 
 const B = FORM_FILL_BUDGETS;
 
@@ -266,11 +265,9 @@ export function decideFormFillStep(
   state: FormFillState,
   obs: FormFillObservation,
 ): FormFillStep {
-  const keep = (action: FormFillAction): FormFillStep => ({ action, nextState: state });
-  const next = (action: FormFillAction, patch: Partial<FormFillState>): FormFillStep => ({
-    action,
-    nextState: { ...state, ...patch },
-  });
+  const keep = (action: FormFillAction): FormFillStep => keepStage(state, action);
+  const next = (action: FormFillAction, patch: Partial<FormFillState>): FormFillStep =>
+    patchStage(state, action, patch);
   const terminal = (outcome: FormFillOutcome): FormFillStep => keep({ kind: "terminal", outcome });
 
   switch (obs.checkpoint) {

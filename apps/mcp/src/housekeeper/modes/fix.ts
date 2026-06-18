@@ -6,8 +6,10 @@
 // Operator-only; never shipped (housekeeper/ is excluded from the npm tarball).
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { lookup } from "node:dns/promises";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { resolveCaptureDir } from "../../bot/onboarding-capture.js";
 import { readFixBatch } from "../fix-batch.js";
 import {
@@ -16,6 +18,7 @@ import {
   type FixCluster,
 } from "../fix-agent.js";
 import { appendFixAttempts } from "../fix-ledger.js";
+import type { ServiceRoutingFacts } from "../fix-router-input.js";
 import {
   codingAgentProposer,
   gitCommitter,
@@ -26,7 +29,12 @@ import {
 // Posture (a): the fix-agent may only touch the gated post-OAuth navigation
 // planner. agent.ts holds planPostVerifyStep + its prompt. Anything else
 // (form-fill, other packages) is parked for human review.
-const DEFAULT_ALLOWED_PATHS = ["apps/mcp/src/bot/agent.ts"] as const;
+const DEFAULT_ALLOWED_PATHS = [
+  "apps/mcp/src/bot/agent.ts",
+  "apps/mcp/src/bot/terminal-gate.ts",
+  "apps/mcp/src/bot/state-classifier.ts",
+] as const;
+const DEFAULT_SERVICE_FACTS_PATH = "tools/housekeeper-services.yaml";
 
 const NAMED_AGENT_COMMANDS = {
   claude: ["claude", "-p"],
@@ -53,6 +61,72 @@ function splitCliCommand(raw: string): string[] {
 
 function isNamedFixAgent(v: string): v is NamedFixAgent {
   return v === "claude" || v === "codex";
+}
+
+interface YamlServiceFactEntry {
+  slug?: string;
+  status?: string;
+  signup_url?: string;
+}
+
+interface YamlServiceFactFile {
+  services?: YamlServiceFactEntry[];
+}
+
+function serviceFactPath(repoRoot: string): string | null {
+  const raw = process.env.TRUSTY_SQUIRE_FIX_SERVICE_FACTS_YAML;
+  if (raw !== undefined) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0 || trimmed === "off" || trimmed === "0") return null;
+    return trimmed;
+  }
+  const candidate = join(repoRoot, DEFAULT_SERVICE_FACTS_PATH);
+  return existsSync(candidate) ? candidate : null;
+}
+
+function hostnameOf(raw: string | undefined): string | null {
+  if (raw === undefined || raw.trim().length === 0) return null;
+  try {
+    return new URL(raw).hostname;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveServiceRoutingFacts(
+  repoRoot: string,
+  services: readonly string[],
+): Promise<ServiceRoutingFacts> {
+  const path = serviceFactPath(repoRoot);
+  if (path === null) return {};
+  let entries: YamlServiceFactEntry[];
+  try {
+    const parsed = parseYaml(readFileSync(path, "utf8")) as YamlServiceFactFile | YamlServiceFactEntry[];
+    entries = Array.isArray(parsed) ? parsed : (parsed.services ?? []);
+  } catch {
+    return {};
+  }
+  const wanted = new Set(services.map((s) => s.toLowerCase()));
+  const facts: Record<string, { dnsAlive?: boolean; curatedNeedsManual?: boolean }> = {};
+  await Promise.all(entries.map(async (entry) => {
+    if (typeof entry.slug !== "string") return;
+    const service = entry.slug.toLowerCase();
+    if (!wanted.has(service)) return;
+    const status = typeof entry.status === "string" ? entry.status.toLowerCase() : "";
+    const fact = facts[service] ?? {};
+    if (status === "needs-manual" || status === "manual") fact.curatedNeedsManual = true;
+    const host = hostnameOf(entry.signup_url);
+    if (host !== null) {
+      try {
+        await lookup(host);
+        fact.dnsAlive = true;
+      } catch {
+        fact.dnsAlive = false;
+      }
+    }
+    facts[service] = fact;
+  }));
+  return facts;
 }
 
 export function resolveFixAgentCommand(agent: string | undefined): {
@@ -108,6 +182,7 @@ export async function runFixMode(opts: {
   // passes the live gate. The autoloop builds this (canary baseline measured
   // once); a plain --mode=fix run leaves it undefined (offline-only).
   liveGate?: (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }>;
+  routerFacts?: ServiceRoutingFacts;
 }): Promise<FixAgentResult | null> {
   const log = opts.log ?? ((line: string) => console.log(`[fix] ${line}`));
   const sinceMs = opts.sinceMs ?? defaultSinceMs();
@@ -154,12 +229,16 @@ export async function runFixMode(opts: {
 
   if (batch.failures.length === 0) {
     log("no failures in the batch — nothing to fix");
-    return { committed: [], walls: [], parked: [] };
+    return { committed: [], walls: [], parked: [], routed: [] };
   }
 
   const cliCommand = resolveFixAgentCommand(opts.agent);
   const push = isTruthy(process.env.TRUSTY_SQUIRE_FIX_AGENT_PUSH);
   const commandProblem = checkFixAgentCommand(cliCommand.command);
+  const routerFacts = opts.routerFacts ?? await resolveServiceRoutingFacts(
+    repoRoot,
+    [...new Set(batch.failures.map((f) => f.service))],
+  );
 
   log(
     `fix pass: ${batch.failures.length} failure(s), bot=${botVersion}, branch=${branch}, agent=${cliCommand.label}, push=${push}`,
@@ -169,6 +248,7 @@ export async function runFixMode(opts: {
     return {
       committed: [],
       walls: [],
+      routed: [],
       parked: [{ cluster_id: "proposer", reason: commandProblem, touched_paths: [] }],
     };
   }
@@ -178,6 +258,7 @@ export async function runFixMode(opts: {
     branch,
     currentVersion: botVersion,
     allowedPaths: DEFAULT_ALLOWED_PATHS,
+    routerFacts,
     propose: codingAgentProposer({ repoRoot, cliCommand: cliCommand.command, log }),
     gate: makeEvalGateRunner({ repoRoot }),
     replay: makeClusterReplayRunner({ repoRoot }),

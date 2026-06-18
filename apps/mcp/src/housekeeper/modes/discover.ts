@@ -41,9 +41,8 @@ import {
   loadUsage,
   pickUnspentIdentities,
   recordSpent,
-  claimIdentity,
+  acquireIdentityLease,
   releaseIdentity,
-  isIdentityClaimed,
   type VerifyIdentity,
 } from "../identity-pool.js";
 import {
@@ -70,12 +69,12 @@ function defaultIdentityPool(): IdentityPoolPort {
   return {
     // Discover OAuth is Google-only (the robots are Cloud Identity Free Google
     // accounts; github discover keeps the shared-profile fallback).
-    // Exclude robots a concurrent slot has already claimed (over-fetch then
-    // filter, so concurrent claims don't starve the pick).
+    // Return unspent candidates only; resolveProfilePlan owns the actual
+    // in-flight lease acquisition. Keeping the lease boundary there means a
+    // contested identity becomes a typed discovery outcome, not a silent
+    // continuation on a shared robot/profile.
     pick: (service, n) =>
-      pickUnspentIdentities(loadIdentities(), loadUsage(), service, "google", n + 8)
-        .filter((i) => !isIdentityClaimed(i.id))
-        .slice(0, n),
+      pickUnspentIdentities(loadIdentities(), loadUsage(), service, "google", n),
     markSpent: (identityId, service) =>
       recordSpent(identityId, service, new Date().toISOString()),
   };
@@ -402,6 +401,7 @@ export async function runDiscover(
         identityId?: string;
       }
     | { exhausted: true }
+    | { leaseConflict: string }
   > => {
     if (isGoogleOAuth) {
       // BOT_FORCE_IDENTITY pins a specific robot regardless of spent-state —
@@ -413,7 +413,8 @@ export async function runDiscover(
       if (forced !== undefined && forced.length > 0) {
         const pinned = loadIdentities().find((i) => i.id === forced);
         if (pinned !== undefined && !excludeIdentityIds.includes(pinned.id)) {
-          claimIdentity(pinned.id);
+          const lease = acquireIdentityLease(pinned.id);
+          if (!lease.ok) return { leaseConflict: pinned.id };
           return {
             profileDir: pinned.profileDir,
             oauthAccountEmail: pinned.email,
@@ -424,13 +425,21 @@ export async function runDiscover(
       // Pick a few unspent so we can skip any already used this invocation
       // (the picker is pool-wide; usedIdentityIds is the in-run exclusion).
       const candidates = pool
-        .pick(input.service, excludeIdentityIds.length + 1)
+        .pick(input.service, excludeIdentityIds.length + 8)
         .filter((i) => !excludeIdentityIds.includes(i.id));
-      const identity = candidates[0];
-      if (identity === undefined) return { exhausted: true };
-      // Reserve it so concurrent discover slots take a DIFFERENT robot (the
-      // pick→claim is synchronous here — no await between — so it's atomic).
-      claimIdentity(identity.id);
+      let sawLeaseConflict = false;
+      let identity: VerifyIdentity | undefined;
+      for (const candidate of candidates) {
+        const lease = acquireIdentityLease(candidate.id);
+        if (lease.ok) {
+          identity = candidate;
+          break;
+        }
+        sawLeaseConflict = true;
+      }
+      if (identity === undefined) {
+        return sawLeaseConflict ? { leaseConflict: "all_candidates_claimed" } : { exhausted: true };
+      }
       return {
         profileDir: identity.profileDir,
         oauthAccountEmail: identity.email,
@@ -453,7 +462,9 @@ export async function runDiscover(
     oauthAccountEmail?: string;
     identityId?: string;
   }): Promise<{ result: SignupResult } | { crash: string }> => {
-    if (plan.identityId !== undefined) usedIdentityIds.push(plan.identityId);
+    if (plan.identityId !== undefined && !usedIdentityIds.includes(plan.identityId)) {
+      usedIdentityIds.push(plan.identityId);
+    }
     try {
       const result = await bot.signup({
         service: input.service,
@@ -528,6 +539,14 @@ export async function runDiscover(
         reason: `insufficient_identities: no unspent Google verify-pool robot left for ${input.service} — refill the pool`,
       };
     }
+    if ("leaseConflict" in firstPlan) {
+      return {
+        kind: "failed",
+        reason:
+          `identity_lease_conflict: Google verify-pool robot ${firstPlan.leaseConflict} ` +
+          `is already leased by another in-flight discover slot for ${input.service}`,
+      };
+    }
 
     const first = await attemptSignup(firstPlan);
     if ("crash" in first) {
@@ -555,6 +574,10 @@ export async function runDiscover(
       if ("exhausted" in retryPlan) {
         stepsSink.push(
           `[discovery] D1 clean-state retry skipped: no second unspent robot to rotate to for ${input.service}`,
+        );
+      } else if ("leaseConflict" in retryPlan) {
+        stepsSink.push(
+          `[discovery] D1 clean-state retry skipped: identity lease conflict (${retryPlan.leaseConflict})`,
         );
       } else {
         stepsSink.push(

@@ -15,7 +15,14 @@
 // orchestration (launch N, compare outcomes) and the registry 2-of-N gate are
 // separate. NO containers — a profile + a per-launch proxy give the isolation.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  renameSync,
+  rmdirSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -53,6 +60,9 @@ function poolPath(): string {
 function usagePath(): string {
   return join(baseDir(), "identity-usage.json");
 }
+function usageLockPath(): string {
+  return join(baseDir(), "identity-usage.lock");
+}
 
 // Expand a leading ~ in a configured profile path so the operator can write
 // "~/.trusty-squire/profiles/verify-01" in the config.
@@ -65,6 +75,32 @@ function readJson<T>(path: string, fallback: T): T {
     return JSON.parse(readFileSync(path, "utf8")) as T;
   } catch {
     return fallback; // missing / unparseable → empty
+  }
+}
+
+function withUsageLock<T>(fn: () => T): T {
+  const lockPath = usageLockPath();
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    try {
+      mkdirSync(lockPath);
+      break;
+    } catch (err) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for identity usage lock at ${lockPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    rmdirSync(lockPath);
   }
 }
 
@@ -113,6 +149,15 @@ export function claimIdentity(id: string): boolean {
   inFlightClaims.add(id);
   return true;
 }
+export type IdentityLease =
+  | { ok: true; identityId: string }
+  | { ok: false; reason: "already_claimed"; identityId: string };
+
+export function acquireIdentityLease(id: string): IdentityLease {
+  return claimIdentity(id)
+    ? { ok: true, identityId: id }
+    : { ok: false, reason: "already_claimed", identityId: id };
+}
 export function releaseIdentity(id: string): void {
   inFlightClaims.delete(id);
 }
@@ -155,14 +200,16 @@ export function verifyPoolConfigured(): boolean {
 // Append a spent (identity, service) record. `at` is injected (callers in the
 // MCP runtime pass new Date().toISOString(); tests pass a fixed stamp).
 export function recordSpent(identityId: string, service: string, at: string): void {
-  const usage = loadUsage();
-  if (isSpent(usage, identityId, service)) return; // idempotent
-  usage.push({ identityId, service, at });
-  const path = usagePath();
-  mkdirSync(dirname(path), { recursive: true });
-  // Write to a temp sibling then rename would be ideal; a single write is fine
-  // here (one writer — the serial housekeeper) and keeps it simple.
-  writeFileSync(path, `${JSON.stringify({ spent: usage }, null, 2)}\n`);
+  withUsageLock(() => {
+    const usage = loadUsage();
+    if (isSpent(usage, identityId, service)) return; // idempotent
+    usage.push({ identityId, service, at });
+    const path = usagePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ spent: usage }, null, 2)}\n`);
+    renameSync(tmp, path);
+  });
 }
 
 // Exposed so the housekeeper can log where it's reading the fleet from.

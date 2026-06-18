@@ -51,6 +51,15 @@ describe("pickVerificationLink", () => {
     const links = ["https://example.com/verify/unsubscribe"];
     expect(pickVerificationLink(links)).toBeNull();
   });
+
+  it("decodes HTML-escaped query separators before navigation", () => {
+    const links = [
+      "https://clerk.example.com/v1/verify?_clerk_js_version=1&amp;token=abc",
+    ];
+    expect(pickVerificationLink(links)).toBe(
+      "https://clerk.example.com/v1/verify?_clerk_js_version=1&token=abc",
+    );
+  });
 });
 
 describe("pickVerificationLinkFromHtml (anchor-text fallback for tracker-wrapped links)", () => {

@@ -19,6 +19,7 @@ import {
   resolveFixAgentCommand,
   runFixMode,
 } from "./fix.js";
+import type { FailureOwner } from "../fix-router.js";
 import {
   discoverLiveRunner,
   makeDistBuilder,
@@ -28,11 +29,19 @@ import { measureCanaryBaseline } from "../live-gate.js";
 
 const DEFAULT_CANARY = ["ipinfo", "clickhouse-cloud", "instant-db", "langfuse"];
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
+const OWNER_ORDER: FailureOwner[] = ["code", "retry", "capability", "external"];
 
 function liveGateConcurrencyFromEnv(): number {
   const raw = Number(process.env.TRUSTY_SQUIRE_LIVE_GATE_CONCURRENCY ?? "1");
   if (!Number.isFinite(raw) || raw < 1) return 1;
   return Math.floor(raw);
+}
+
+function formatOwnerCounts(routed: readonly { owner: FailureOwner }[]): string {
+  const counts = new Map<FailureOwner, number>();
+  for (const owner of OWNER_ORDER) counts.set(owner, 0);
+  for (const r of routed) counts.set(r.owner, (counts.get(r.owner) ?? 0) + 1);
+  return OWNER_ORDER.map((owner) => `${owner}=${counts.get(owner) ?? 0}`).join(" ");
 }
 
 export async function runAutoloop(opts: {
@@ -107,6 +116,7 @@ export async function runAutoloop(opts: {
     const committed = result?.committed.length ?? 0;
     const walls = result?.walls.length ?? 0;
     const parked = result?.parked.length ?? 0;
+    const ownerCounts = formatOwnerCounts(result?.routed ?? []);
     const proposerBlocked = (result?.parked ?? []).some((p) =>
       p.reason.startsWith("proposer error:") ||
       p.reason.includes("proposer command not found"),
@@ -115,7 +125,7 @@ export async function runAutoloop(opts: {
       w.reason.includes("no fix both held the gate"),
     );
     totalCommitted += committed;
-    log(`LAP ${lap}: committed=${committed} walls=${walls} parked=${parked}`);
+    log(`LAP ${lap}: committed=${committed} walls=${walls} parked=${parked} owners(${ownerCounts})`);
     for (const c of result?.committed ?? []) {
       log(`  ✅ ${c.cluster_id} → ${c.version}: ${c.summary}`);
     }
