@@ -459,6 +459,47 @@ describe("runFixAgent", () => {
     expect(commit).toHaveBeenCalledOnce();
   });
 
+  it("router gate: out-of-fence clusters route away WITHOUT spending the coding agent", async () => {
+    const propose = vi.fn(async () => proposal(["apps/mcp/src/bot/agent.ts"]));
+    const commit = vi.fn(async () => undefined);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([
+        // phone → wall route; run_timeout → drain route; oauth_handshake →
+        // capability_gap route. None may reach the proposer.
+        failure({ service: "p", signature: "s-p", failure_stage: "phone" }),
+        failure({ service: "t", signature: "s-t", failure_stage: "run_timeout" }),
+        failure({ service: "o", signature: "s-o", failure_stage: "oauth_handshake" }),
+      ]),
+      propose,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit,
+      log: () => undefined,
+    });
+    expect(propose).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    // phone → wall; run_timeout + oauth_handshake → parked (router-drain / -capability_gap).
+    expect(res.walls.some((w) => w.reason.startsWith("router:"))).toBe(true);
+    expect(res.parked.filter((p) => p.reason.startsWith("router-")).length).toBe(2);
+  });
+
+  it("router gate: in-fence (planner_loop / extract) clusters still reach the coding agent", async () => {
+    const propose = vi.fn(async () => proposal(["apps/mcp/src/bot/agent.ts"]));
+    const commit = vi.fn(async () => undefined);
+    await runFixAgent({
+      ...base,
+      batch: batch([failure({ failure_stage: "extract" })]),
+      propose,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 }), gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit,
+      log: () => undefined,
+    });
+    expect(propose).toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
   it("bumps the rc per committed cluster", async () => {
     const versions: string[] = [];
     await runFixAgent({

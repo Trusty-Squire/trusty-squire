@@ -39,6 +39,7 @@ import type { EvalGateResult } from "../bot/eval-gate.js";
 import type { PostVerifyStep } from "../bot/agent.js";
 import { assertStagingPrerelease, computeNextRc } from "./release-guard.js";
 import type { FixBatch, FixBatchFailure } from "./fix-batch.js";
+import { classifyCluster } from "./fix-router.js";
 
 // Default give-up bound per cluster (decision: K = 3).
 export const DEFAULT_MAX_ATTEMPTS = 3;
@@ -314,6 +315,38 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
   }
 
   for (const cluster of clusters) {
+    // Router gate (Phase 1) — the structural pre-filter. ONLY clusters the
+    // path-fence can actually move (post-OAuth nav planner: planner_loop /
+    // extract) earn a coding-agent spend. Everything else is routed away WITHOUT
+    // burning a `claude -p` attempt: `wall` for genuine dead-ends (phone /
+    // payment / dead host), parked-for-retry/surface for `drain` (timing) +
+    // `capability_gap` (deterministic but out-of-fence). We gate on STAGE — the
+    // fence truth — with conservative inputs (retryVariance/dnsAlive/curated
+    // default safe so we never wall on absent data). This is what keeps a lap
+    // from spending 3 attempts each on anti_bot/oauth/phone clusters it can't fix.
+    const route = classifyCluster({
+      service: cluster.services[0] ?? "unknown",
+      coarseKind: cluster.failure_stage,
+      stage: cluster.failure_stage,
+      retryVariance: 0,
+      dnsAlive: true,
+      curatedNeedsManual: false,
+    });
+    if (route.route !== "fix") {
+      if (route.route === "wall") {
+        result.walls.push(wallWith(cluster, 0, `router: ${route.reason}`));
+        log(`cluster ${cluster.id}: ROUTED → wall (no coding-agent spend) — ${route.reason}`);
+      } else {
+        result.parked.push({
+          cluster_id: cluster.id,
+          reason: `router-${route.route}: ${route.reason}`,
+          touched_paths: [],
+        });
+        log(`cluster ${cluster.id}: ROUTED → ${route.route} (no coding-agent spend) — ${route.reason}`);
+      }
+      continue;
+    }
+
     // Can't verify a fix with no captured page — don't commit blind. Park as a
     // wall-candidate (the honest "we can't confirm a fix here today"), and skip
     // burning the coding agent on something we couldn't prove either way.
