@@ -299,8 +299,18 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
   // Baseline the gate ONCE so "holdout didn't drop" is measured against the
   // pre-fix state, not re-derived per attempt.
   const baseline = await opts.gate();
+  const hasLiveOracle = opts.liveGate !== undefined;
   if (baseline.emptyRegress) {
-    log("WARNING: regress corpus is empty — the gate is not meaningful; nothing will be committed");
+    if (hasLiveOracle) {
+      // The offline regress corpus is only the CHEAP pre-filter. When it's empty
+      // (the expected state until captures grow A2 sidecars) the LIVE oracle
+      // (Guard 3) is the authoritative commit gate — so an empty corpus is a
+      // skipped filter, not a veto. Without a live oracle there's nothing to
+      // verify against, so empty still blocks (see Guard 1).
+      log("NOTE: regress corpus is empty — deferring the commit decision to the LIVE oracle (Guard 3)");
+    } else {
+      log("WARNING: regress corpus is empty and no live oracle is wired — the gate is not meaningful; nothing will be committed");
+    }
   }
 
   for (const cluster of clusters) {
@@ -328,7 +338,19 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
           wallReason = err.reason;
           break;
         }
-        throw err;
+        // A proposer failure (coding-agent crash, timeout, exhausted rate-limit
+        // backoff) is an INFRA failure on THIS cluster — NOT a reason to kill the
+        // whole lap and lose its already-committed fixes. Park it (the next lap
+        // retries) and move on. The proposer guarantees a clean tree on throw, so
+        // the next cluster's clean-tree assertion still holds.
+        const reason = err instanceof Error ? err.message : String(err);
+        log(`cluster ${cluster.id}: proposer error — parking, continuing lap: ${reason}`);
+        result.parked.push({
+          cluster_id: cluster.id,
+          reason: `proposer error: ${reason}`,
+          touched_paths: [],
+        });
+        break;
       }
       if (proposal === null) {
         priorFeedback = "proposer returned no change";
@@ -350,13 +372,20 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
 
       await proposal.apply();
 
-      // Guard 1 — didn't break known-good. The empty-regress gate is vacuously
-      // green; refuse to commit against a meaningless gate.
+      // Guard 1 — didn't break known-good. The regress corpus is the cheap
+      // offline pre-filter. When it's NON-empty it must stay green and the
+      // holdout must not drop. When it's EMPTY the filter is vacuous: with a
+      // live oracle (Guard 3) we defer to the real key and skip this filter;
+      // without one, committing blind is wrong, so empty still blocks.
       const verdict = await opts.gate();
-      const regressOk = verdict.regressPassed && !verdict.emptyRegress;
-      if (!regressOk || !holdoutHeld(verdict, baseline)) {
+      const regressOk = verdict.emptyRegress
+        ? hasLiveOracle
+        : verdict.regressPassed && holdoutHeld(verdict, baseline);
+      if (!regressOk) {
         await proposal.revert();
-        priorFeedback = gateFeedback(verdict, baseline);
+        priorFeedback = verdict.emptyRegress
+          ? "regress corpus empty and no live oracle configured — cannot verify; refusing to commit blind"
+          : gateFeedback(verdict, baseline);
         log(`cluster ${cluster.id}: attempt ${attempt}/${K} red (regression) — ${priorFeedback}`);
         continue;
       }

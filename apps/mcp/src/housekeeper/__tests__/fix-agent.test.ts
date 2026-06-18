@@ -385,6 +385,80 @@ describe("runFixAgent", () => {
     expect(res.committed).toHaveLength(0);
   });
 
+  it("commits on an empty regress corpus WHEN a live oracle is wired (the live key is the gate)", async () => {
+    const commit = vi.fn(async () => undefined);
+    const prop = proposal(["apps/mcp/src/bot/agent.ts"]);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose: async () => prop,
+      // Empty corpus both at baseline and per-attempt: the offline filter is
+      // vacuous, so Guard 1 must defer to the live oracle rather than veto.
+      gate: scriptedGate([
+        gate({ regressPassed: true, holdout: 5, empty: true }),
+        gate({ regressPassed: true, holdout: 5, empty: true }),
+      ]),
+      replay: replayMoved,
+      liveGate: async () => ({ passed: true, reason: "2/3 cluster green live, canary held" }),
+      commit,
+      log: () => undefined,
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(res.committed).toHaveLength(1);
+    expect(prop.revert).not.toHaveBeenCalled();
+  });
+
+  it("still blocks on an empty corpus when the live oracle REJECTS (no blind commit)", async () => {
+    const commit = vi.fn(async () => undefined);
+    const prop = proposal(["apps/mcp/src/bot/agent.ts"]);
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose: async () => prop,
+      gate: scriptedGate([
+        gate({ regressPassed: true, holdout: 5, empty: true }),
+        gate({ regressPassed: true, holdout: 5, empty: true }),
+        gate({ regressPassed: true, holdout: 5, empty: true }),
+        gate({ regressPassed: true, holdout: 5, empty: true }),
+      ]),
+      replay: replayMoved,
+      liveGate: async () => ({ passed: false, reason: "0/3 cluster green live" }),
+      commit,
+      maxAttemptsPerCluster: 3,
+      log: () => undefined,
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(res.committed).toHaveLength(0);
+  });
+
+  it("parks (does NOT crash the lap) when the proposer throws a non-Wall error; keeps committing other clusters", async () => {
+    const commit = vi.fn(async () => undefined);
+    // Two clusters: the first proposer throws (e.g. rate-limit exhaustion), the
+    // second is healthy. The lap must survive the first and still commit the
+    // second.
+    let call = 0;
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([
+        failure({ service: "a", signature: "sig-1", failure_stage: "planner_loop" }),
+        failure({ service: "b", signature: "sig-2", failure_stage: "extract" }),
+      ]),
+      propose: async () => {
+        call += 1;
+        if (call === 1) throw new Error("Command failed: claude -p … usage limit reached");
+        return proposal(["apps/mcp/src/bot/agent.ts"]);
+      },
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 }), gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit,
+      log: () => undefined,
+    });
+    // First cluster parked, lap continued, second cluster committed.
+    expect(res.parked.some((p) => p.reason.includes("proposer error"))).toBe(true);
+    expect(res.committed).toHaveLength(1);
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
   it("bumps the rc per committed cluster", async () => {
     const versions: string[] = [];
     await runFixAgent({

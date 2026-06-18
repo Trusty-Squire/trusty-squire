@@ -169,12 +169,29 @@ function clusterPrompt(cluster: FixCluster): string {
 // `cliCommand` is split argv (e.g. ["claude","-p"]) — the prompt is appended as
 // the final arg. The operator wires the actual coding CLI; this module only
 // orchestrates it.
+// Coding-agent invocations rate-limit (per-minute 429s, or a usage-window cap)
+// — the CLI exits non-zero with one of these in its output. The serial fix loop
+// is naturally paced by the live gate, but a back-to-back retry burst (offline
+// rejects → re-propose) or a usage-window cap can still trip it. We detect the
+// shape and back off rather than crash the lap.
+const RATE_LIMIT_RE = /rate.?limit|\b429\b|usage limit|too many requests|overloaded|quota exceeded|exceeded your/i;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 export function codingAgentProposer(config: {
   repoRoot: string;
   cliCommand: readonly string[];
   log?: (line: string) => void;
+  // Hard ceiling on one coding-agent invocation — a hung agent must not block
+  // the lap forever. Default 15 min (agentic sessions read many sidecars).
+  timeoutMs?: number;
+  // Rate-limit backoff retries before giving up on this cluster. Default 4
+  // (1→2→4→8 min, capped 10).
+  maxRateRetries?: number;
 }): FixProposer {
   const log = config.log ?? (() => undefined);
+  const timeoutMs = config.timeoutMs ?? 15 * 60 * 1000;
+  const maxRateRetries = config.maxRateRetries ?? 4;
   return async (cluster: FixCluster): Promise<FixProposal | null> => {
     // Start from a clean tree so changedPaths attributes only this attempt.
     const before = await changedPaths(config.repoRoot);
@@ -185,10 +202,42 @@ export function codingAgentProposer(config: {
     }
     const [cmd, ...rest] = config.cliCommand;
     if (cmd === undefined) throw new Error("fix-agent: empty cliCommand");
-    await exec(cmd, [...rest, clusterPrompt(cluster)], {
-      cwd: config.repoRoot,
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await exec(cmd, [...rest, clusterPrompt(cluster)], {
+            cwd: config.repoRoot,
+            maxBuffer: 64 * 1024 * 1024,
+            timeout: timeoutMs,
+          });
+          break;
+        } catch (err) {
+          const e = err as { message?: string; stderr?: string; stdout?: string };
+          const blob = `${e.message ?? ""}\n${e.stderr ?? ""}\n${e.stdout ?? ""}`;
+          if (RATE_LIMIT_RE.test(blob) && attempt < maxRateRetries) {
+            // Drop any partial edits so the retry attributes cleanly.
+            await git(config.repoRoot, ["checkout", "--", "."]).catch(() => undefined);
+            await git(config.repoRoot, ["clean", "-fd"]).catch(() => undefined);
+            const waitMs = Math.min(10 * 60 * 1000, 60 * 1000 * 2 ** attempt);
+            log(
+              `cluster ${cluster.id}: coding agent rate-limited — backing off ${Math.round(
+                waitMs / 1000,
+              )}s (retry ${attempt + 1}/${maxRateRetries})`,
+            );
+            await sleep(waitMs);
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      // Any terminal proposer failure (non-rate crash, timeout, exhausted
+      // backoff) must leave a CLEAN tree so the next cluster's clean-tree
+      // assertion holds — then rethrow for the orchestrator to park.
+      await git(config.repoRoot, ["checkout", "--", "."]).catch(() => undefined);
+      await git(config.repoRoot, ["clean", "-fd"]).catch(() => undefined);
+      throw err;
+    }
     const touched = await changedPaths(config.repoRoot);
     if (touched.length === 0) {
       log(`cluster ${cluster.id}: coding agent made no change`);
