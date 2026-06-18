@@ -4,7 +4,7 @@
 // fall back to links[0], navigating the bot to an unsubscribe URL.
 
 import { describe, expect, it } from "vitest";
-import { pickVerificationLink, pickVerificationLinkFromHtml } from "../agent.js";
+import { pickServiceDomainLink, pickVerificationLink, pickVerificationLinkFromHtml } from "../agent.js";
 
 describe("pickVerificationLink", () => {
   it("picks the verify link over a marketing link", () => {
@@ -60,6 +60,15 @@ describe("pickVerificationLink", () => {
       "https://clerk.example.com/v1/verify?_clerk_js_version=1&token=abc",
     );
   });
+
+  it("does not treat static email image assets as verification links", () => {
+    const links = [
+      "https://static.langfuse.com/langfuse_logo_transactional_email.png",
+      "https://cloud.langfuse.com/auth/verify?token=abc",
+    ];
+    expect(pickVerificationLink(links)).toBe("https://cloud.langfuse.com/auth/verify?token=abc");
+    expect(pickVerificationLink(["https://static.langfuse.com/langfuse_logo_transactional_email.png"])).toBeNull();
+  });
 });
 
 describe("pickVerificationLinkFromHtml (anchor-text fallback for tracker-wrapped links)", () => {
@@ -82,6 +91,29 @@ describe("pickVerificationLinkFromHtml (anchor-text fallback for tracker-wrapped
   it("returns null when no anchor text is verification-shaped", () => {
     expect(pickVerificationLinkFromHtml(`<a href="https://x.io/home">Go to dashboard</a><a href="https://x.io/u">Unsubscribe</a>`)).toBeNull();
     expect(pickVerificationLinkFromHtml("")).toBeNull();
+  });
+});
+
+describe("pickServiceDomainLink", () => {
+  it("skips same-domain static image assets before falling back to a service-domain link", () => {
+    expect(
+      pickServiceDomainLink(
+        [
+          "https://static.langfuse.com/langfuse_logo_transactional_email.png",
+          "https://cloud.langfuse.com/auth/callback?token=abc",
+        ],
+        "cloud.langfuse.com",
+      ),
+    ).toBe("https://cloud.langfuse.com/auth/callback?token=abc");
+  });
+
+  it("returns null when the only same-domain link is a static asset", () => {
+    expect(
+      pickServiceDomainLink(
+        ["https://static.langfuse.com/langfuse_logo_transactional_email.png"],
+        "cloud.langfuse.com",
+      ),
+    ).toBeNull();
   });
 });
 
@@ -148,8 +180,6 @@ describe("extractQuotedTokenFromReason — base64-style keys (with /)", () => {
     ).toBeNull();
   });
 });
-
-import { pickServiceDomainLink } from "../agent.js";
 
 describe("pickServiceDomainLink — same-domain confirm link fallback (arize)", () => {
   it("picks the link on the service's registrable domain (app.arize.com ~ arize.com)", () => {

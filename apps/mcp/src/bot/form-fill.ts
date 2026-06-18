@@ -88,7 +88,113 @@ export const FORM_FILL_BUDGETS = {
   MAX_OAUTH_SHELL_RELOADS: 1,
   MAX_UPSTREAM_BLIP_RETRIES: 8,
   MAX_SIGN_IN_ADVANCE_CLICKS: 2,
+  MAX_SIGNUP_LINK_ADVANCE_CLICKS: 2,
 } as const;
+
+export interface FormFillElement {
+  tag: string;
+  type?: string | null;
+  selector: string;
+  visible?: boolean;
+  inViewport?: boolean;
+  visibleText?: string | null;
+  ariaLabel?: string | null;
+  labelText?: string | null;
+  placeholder?: string | null;
+  href?: string | null;
+  role?: string | null;
+}
+
+function elementLabel(el: FormFillElement): string {
+  return [
+    el.visibleText,
+    el.ariaLabel,
+    el.labelText,
+    el.placeholder,
+  ].filter((v): v is string => typeof v === "string" && v.trim().length > 0).join(" ");
+}
+
+function pageText(input: { title?: string | null | undefined; htmlOrText?: string | null | undefined }): string {
+  return `${input.title ?? ""}\n${input.htmlOrText ?? ""}`.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function findSignupLinkOnLoginPage(input: {
+  inventory: readonly FormFillElement[];
+  url?: string | null;
+  title?: string | null;
+  htmlOrText?: string | null;
+}): FormFillElement | null {
+  const text = pageText(input).toLowerCase();
+  const path = (() => {
+    try {
+      return input.url !== undefined && input.url !== null ? new URL(input.url).pathname.toLowerCase() : "";
+    } catch {
+      return "";
+    }
+  })();
+  if (/sign[-_/ ]?up|register|create[-_/ ]?account/.test(path)) return null;
+  const looksLikeLogin =
+    /\b(sign in|log in|login)\b/.test(text) &&
+    /\b(no account|no account yet|don't have an account|do not have an account|new to|sign up|register|create account)\b/.test(text);
+  if (!looksLikeLogin) return null;
+
+  const candidates = input.inventory
+    .filter((el) => el.visible !== false)
+    .filter((el) => el.tag === "a" || el.tag === "button" || el.role === "button")
+    .map((el) => {
+      const label = elementLabel(el).toLowerCase();
+      let score = 0;
+      if (/\bsign up\b/.test(label)) score += 30;
+      if (/\b(register|create account|get started|start free)\b/.test(label)) score += 20;
+      if (el.tag === "a" && typeof el.href === "string" && /sign[-_/]?up|register|signup/.test(el.href)) score += 15;
+      if (/\b(sign in|log in|login|google|github|sso)\b/.test(label)) score -= 40;
+      if (typeof el.href === "string" && /oauth|sso|google|github|microsoft/.test(el.href)) score -= 40;
+      if (el.inViewport === true) score += 2;
+      return { el, score };
+    })
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return candidates[0]?.el ?? null;
+}
+
+export function pickEmailCodeSubmitSelector(input: {
+  inventory: readonly FormFillElement[];
+  htmlOrText?: string | null;
+  currentSubmitSelector: string;
+}): string | null {
+  const text = pageText({ htmlOrText: input.htmlOrText }).toLowerCase();
+  const isEmailCodeFlow =
+    /\b(send code|send verification code|verification code|we.?ll send you a code|we.?ll send you a verification code|email code|magic code)\b/.test(text);
+  if (!isEmailCodeFlow) return null;
+
+  const candidates = input.inventory
+    .filter((el) => el.visible !== false)
+    .filter((el) => el.tag === "button" || el.tag === "input" || el.tag === "a" || el.role === "button")
+    .map((el) => {
+      const label = elementLabel(el).toLowerCase();
+      let score = 0;
+      if (/\bsend (?:verification )?code\b/.test(label)) score += 50;
+      if (/\bsend code\b/.test(label)) score += 50;
+      if (/\bcontinue\b/.test(label)) score += 12;
+      if (/\bemail\b/.test(label)) score += 8;
+      if (el.tag === "button" || el.role === "button") score += 8;
+      if (el.tag === "input" && (el.type === "submit" || el.type === "button")) score += 8;
+      if (el.selector === input.currentSubmitSelector) score += 1;
+      if (el.inViewport === true) score += 2;
+      if (/\b(sign up now|sign in|log in|google|github|microsoft|pricing|docs|product)\b/.test(label)) score -= 50;
+      if (el.tag === "a" && typeof el.href === "string" && /\/(?:dash|dashboard|docs|pricing|blog)(?:\/|$)/.test(el.href)) {
+        score -= 40;
+      }
+      return { el, score };
+    })
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  const best = candidates[0]?.el ?? null;
+  if (best === null || best.selector === input.currentSubmitSelector) return null;
+  return best.selector;
+}
 
 // Loop-carried DECISION state — every var that survives across loop passes
 // (agent.ts:4591–4645). I/O-timing-only state stays in the executor; everything
@@ -103,6 +209,7 @@ export interface FormFillState {
   oauthScanRetries: number; // async-render waits for a late OAuth button
   oauthShellReloads: number; // one reload to unstick a wedged loading-shell SPA
   signInAdvanceClicks: number; // click-throughs of a generic "Sign In to Continue" gate
+  signupLinkAdvanceClicks: number; // click-throughs from a login page to the signup form
   // page-fingerprint memory (the F14 stuck detector's inputs):
   lastRoundPageSig: string | null;
   lastNoProgressClickSelectors: ReadonlySet<string>;
@@ -122,6 +229,7 @@ export function initialFormFillState(forceFormFill = false): FormFillState {
     oauthScanRetries: 0,
     oauthShellReloads: 0,
     signInAdvanceClicks: 0,
+    signupLinkAdvanceClicks: 0,
     lastRoundPageSig: null,
     lastNoProgressClickSelectors: new Set(),
     committedToEmailPath: forceFormFill,
@@ -162,6 +270,7 @@ export interface PrePlanObservation {
   oauthScanShell: boolean; // loading-shell / ≤1 element / no credential input
   alreadySignedIn: boolean; // dashboard markers + no credential form
   signInAdvancePresent: boolean; // a generic "Sign In to Continue" interstitial
+  signupLinkOnLoginPage: boolean; // login form exposes a same-site Sign up/Register link
   // terminal classifiers:
   antiBotVendor: string | null; // detectAntiBotBlock when inventory < 10
   oauthOnly: boolean; // isOauthOnlyChooser — nothing fillable, no email option
@@ -232,6 +341,7 @@ export type FormFillAction =
   | { kind: "oauth_scan_wait" } // wait for async render; retry++
   | { kind: "oauth_shell_reload" } // reload once to unstick the SPA; reset scan retries
   | { kind: "sign_in_advance" } // click the "Sign In to Continue" gate; reset scan retries
+  | { kind: "signup_link_advance" } // click from login/sign-in page to the signup form
   // C1 verify-email wall → route to the inbox-poll path (executor does the resend):
   | { kind: "route_to_verification" }
   // proceed to the next checkpoint's I/O (no terminal, no replan):
@@ -314,6 +424,19 @@ export function decideFormFillStep(
           );
         }
         // no usable provider affordance — fall through to form-fill. [4903]
+      }
+      if (
+        obs.signupLinkOnLoginPage &&
+        state.signupLinkAdvanceClicks < B.MAX_SIGNUP_LINK_ADVANCE_CLICKS
+      ) {
+        return next(
+          { kind: "signup_link_advance" },
+          {
+            signupLinkAdvanceClicks: state.signupLinkAdvanceClicks + 1,
+            oauthScanRetries: 0,
+            committedToEmailPath: true,
+          },
+        );
       }
       // Anti-bot interstitial that wouldn't clear (tiny inventory). [4932]
       if (obs.antiBotVendor !== null) {

@@ -6,11 +6,13 @@ import { describe, expect, it } from "vitest";
 import {
   computePageSig,
   decideFormFillStep,
+  findSignupLinkOnLoginPage,
   FORM_FILL_BUDGETS as B,
   initialFormFillState,
   isStuckRepeat,
   nextNoProgressSet,
   pageMovedSince,
+  pickEmailCodeSubmitSelector,
   type FormFillObservation,
   type FormFillState,
 } from "../form-fill.js";
@@ -73,6 +75,7 @@ const PRE: FormFillObservation = {
   oauthScanShell: false,
   alreadySignedIn: false,
   signInAdvancePresent: false,
+  signupLinkOnLoginPage: false,
   antiBotVendor: null,
   oauthOnly: false,
   oauthOnlyMissingProviders: [],
@@ -177,6 +180,18 @@ describe("decideFormFillStep — C1 pre_plan", () => {
       ...PRE, oauthCandidatesPresent: true, signInAdvancePresent: true,
     }).action.kind).toBe("run_planner");
   });
+  it("login page with a signup link advances to signup before filling credentials", () => {
+    const step = decideFormFillStep(S(), { ...PRE, signupLinkOnLoginPage: true });
+    expect(step.action).toEqual({ kind: "signup_link_advance" });
+    expect(step.nextState.signupLinkAdvanceClicks).toBe(1);
+    expect(step.nextState.committedToEmailPath).toBe(true);
+    expect(
+      decideFormFillStep(S({ signupLinkAdvanceClicks: B.MAX_SIGNUP_LINK_ADVANCE_CLICKS }), {
+        ...PRE,
+        signupLinkOnLoginPage: true,
+      }).action,
+    ).toEqual({ kind: "run_planner" });
+  });
   it("anti-bot interstitial → anti_bot_blocked with the vendor", () => {
     expect(decideFormFillStep(S(), { ...PRE, antiBotVendor: "Cloudflare" }).action).toEqual({
       kind: "terminal",
@@ -200,6 +215,34 @@ describe("decideFormFillStep — C1 pre_plan", () => {
   });
   it("nothing short-circuits → run the planner", () => {
     expect(decideFormFillStep(S(), PRE).action).toEqual({ kind: "run_planner" });
+  });
+});
+
+describe("form-fill selector helpers", () => {
+  it("detects the signup link on a login page without picking the sign-in submit", () => {
+    const hit = findSignupLinkOnLoginPage({
+      url: "https://cloud.langfuse.com/",
+      title: "Sign in | Langfuse",
+      htmlOrText: "Sign in to your account. No account yet? Sign up",
+      inventory: [
+        { tag: "button", selector: "#signin", visibleText: "Sign in", visible: true },
+        { tag: "a", selector: "#signup", visibleText: "Sign up", href: "/auth/sign-up", visible: true },
+      ],
+    });
+    expect(hit?.selector).toBe("#signup");
+  });
+
+  it("prefers Send Code over a marketing Sign up now anchor on email-code pages", () => {
+    expect(
+      pickEmailCodeSubmitSelector({
+        htmlOrText: "Enter your email, and we'll send you a verification code.",
+        currentSubmitSelector: "#marketing",
+        inventory: [
+          { tag: "a", selector: "#marketing", visibleText: "Sign up now", href: "/dash", visible: true },
+          { tag: "button", selector: "#send", visibleText: "Send Code", visible: true, inViewport: true },
+        ],
+      }),
+    ).toBe("#send");
   });
 });
 

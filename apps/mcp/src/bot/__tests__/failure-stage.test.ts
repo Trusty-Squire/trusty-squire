@@ -35,7 +35,9 @@ describe("classifyFailureStage (B1 taxonomy)", () => {
     ["Clerk never finished hydration", false, "hydration"],
     ["verification_not_sent", false, "verify_email"],
     ["email_otp_required", false, "verify_email"],
+    ["verification code required", false, "verify_email"],
     ["phone verification gate", false, "phone"],
+    ["sms code required", false, "phone"],
     ["payment_required", false, "payment"],
     ["quota exceeded", false, "payment"],
     ["manual_signup_required: Clerk SPA won't automate", false, "manual"], // AB6

@@ -101,8 +101,16 @@ export function classifyFailureStage(
   }
   if (has("hydrat", "clerk", "stytch", "not loaded", "spa ")) return "hydration";
   // phone before verify_email: a "phone verification" gate is more specific
-  // than the generic email/OTP verification bucket.
-  if (has("phone", "sms")) return "phone";
+  // than the generic email/OTP verification bucket. Keep this intentionally
+  // strict; passwordless email flows also say "verification code".
+  if (
+    /\b(phone|mobile) (?:number|verification|verify|code)\b/.test(err) ||
+    /\b(?:verify|enter|confirm).{0,24}\b(phone|mobile)\b/.test(err) ||
+    /\bsms (?:code|verification|message)\b/.test(err) ||
+    /\btext message\b/.test(err)
+  ) {
+    return "phone";
+  }
   if (has("email_otp", "verification_not_sent", "verify", "verification", "otp")) return "verify_email";
   if (has("payment", "quota", "billing")) return "payment";
   if (has("extract", "no key", "masked", "copy button", "copy-button")) return "extract";

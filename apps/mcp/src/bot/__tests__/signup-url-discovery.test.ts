@@ -151,8 +151,8 @@ describe("resolveSignupUrl", () => {
   it("uses canonical canary URLs before spending LLM calls", async () => {
     const calls = { n: 0 };
     const llm = stubLLM("https://console.cloud.clickhouse.com/signup", calls);
-    const url = await resolveSignupUrl("clickhouse-cloud", llm);
-    expect(url).toBe("https://console.clickhouse.cloud/signup");
+    expect(await resolveSignupUrl("clickhouse-cloud", llm)).toBe("https://console.clickhouse.cloud/signup");
+    expect(await resolveSignupUrl("langfuse", llm)).toBe("https://cloud.langfuse.com/auth/sign-up");
     expect(calls.n).toBe(0);
   });
 

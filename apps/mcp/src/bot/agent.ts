@@ -29,7 +29,9 @@ import { decideOAuthStep } from "./oauth-flow.js";
 import {
   decideFormFillStep,
   FORM_FILL_BUDGETS as B_FF,
+  findSignupLinkOnLoginPage,
   initialFormFillState,
+  pickEmailCodeSubmitSelector,
   type FormFillObservation,
   type FormFillOutcome,
   type FormFillState,
@@ -797,6 +799,9 @@ const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
   // console.cloud.clickhouse.com, which no longer resolves. ClickHouse's own
   // docs and current console use console.clickhouse.cloud.
   clickhousecloud: "https://console.clickhouse.cloud/signup",
+  // The model repeatedly guesses /auth/signup, which Langfuse serves as a
+  // Next.js 404. The actual Clerk/Auth.js registration route uses sign-up.
+  langfuse: "https://cloud.langfuse.com/auth/sign-up",
 };
 
 function canonicalSignupUrl(service: string): string | null {
@@ -3708,6 +3713,7 @@ export function pickVerificationLink(links: readonly string[]): string | null {
   const scored = links.map((url) => {
     const lower = url.toLowerCase();
     let score = 0;
+    if (isEmailAssetLink(lower)) score -= 50;
     if (lower.includes("verify") || lower.includes("confirm")) score += 10;
     if (lower.includes("activate")) score += 8;
     if (lower.includes("welcome")) score += 3;
@@ -3719,6 +3725,21 @@ export function pickVerificationLink(links: readonly string[]): string | null {
   return top !== undefined && top.score > 0
     ? top.url.replace(/&amp;/gi, "&")
     : null;
+}
+
+function isEmailAssetLink(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl.replace(/&amp;/g, "&"));
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+    return (
+      /\.(?:png|jpe?g|gif|webp|svg|ico|css|woff2?|ttf|otf)(?:$|[?#])/.test(path) ||
+      /^(?:static|cdn|assets|images|img|media)\./.test(host) ||
+      /\/(?:static|assets|images|img|media)\//.test(path)
+    );
+  } catch {
+    return false;
+  }
 }
 
 // Pick a verification link by its ANCHOR TEXT in the email HTML — the fallback
@@ -3792,6 +3813,7 @@ export function pickServiceDomainLink(
     }
     if (u.protocol !== "https:" && u.protocol !== "http:") continue;
     if (SKIP.test(raw)) continue;
+    if (isEmailAssetLink(raw)) continue;
     if (base(u.hostname) === target) return u.href;
   }
   return null;
@@ -5474,6 +5496,12 @@ export class SignupAgent {
           !hasCredentialInput ||
           isLoadingShellText(await this.browser.extractText().catch(() => "")));
       const signInAdvance = findSignInAdvanceButton(inventory, oauthCandidates);
+      const signupLinkOnLoginPage = findSignupLinkOnLoginPage({
+        inventory,
+        url: browserState.url,
+        title: browserState.title,
+        htmlOrText: browserState.html,
+      });
       const antiBotVendor = inventory.length < 10 ? detectAntiBotBlock(browserState.html) : null;
       const oauthOnly = isOauthOnlyChooser(inventory);
       let missingProviders: readonly OAuthProviderId[] = [];
@@ -5496,6 +5524,7 @@ export class SignupAgent {
         oauthScanShell,
         alreadySignedIn: detectAlreadySignedIn({ inventory, url: browserState.url }),
         signInAdvancePresent: signInAdvance !== null,
+        signupLinkOnLoginPage: signupLinkOnLoginPage !== null,
         antiBotVendor,
         oauthOnly,
         oauthOnlyMissingProviders: missingProviders,
@@ -5574,6 +5603,23 @@ export class SignupAgent {
         } catch (err) {
           steps.push(
             `OAuth-first[engine]: sign-in advance click failed (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
+        continue;
+      }
+      if (preAct.kind === "signup_link_advance" && signupLinkOnLoginPage !== null) {
+        steps.push(
+          `Form: login page exposes a signup affordance ` +
+            `(${JSON.stringify(signupLinkOnLoginPage.visibleText ?? signupLinkOnLoginPage.ariaLabel ?? signupLinkOnLoginPage.href ?? "")}) ` +
+            `— clicking it before filling credentials ` +
+            `(${state.signupLinkAdvanceClicks}/${B_FF.MAX_SIGNUP_LINK_ADVANCE_CLICKS})`,
+        );
+        try {
+          await this.browser.click(signupLinkOnLoginPage.selector);
+          await this.browser.waitForFormReady();
+        } catch (err) {
+          steps.push(
+            `Form[engine]: signup-link advance click failed (${err instanceof Error ? err.message : String(err)})`,
           );
         }
         continue;
@@ -5712,9 +5758,18 @@ export class SignupAgent {
       let postGateKind = "";
       let validationFailure = false;
       if (!preGate.blocked) {
-        steps.push(`Submit → ${plan.submit_selector}`);
+        const submitSelector =
+          pickEmailCodeSubmitSelector({
+            inventory,
+            htmlOrText: browserState.html,
+            currentSubmitSelector: plan.submit_selector,
+          }) ?? plan.submit_selector;
+        if (submitSelector !== plan.submit_selector) {
+          steps.push(`Form: corrected email-code submit selector ${plan.submit_selector} → ${submitSelector}`);
+        }
+        steps.push(`Submit → ${submitSelector}`);
         try {
-          await this.browser.clickSubmit(plan.submit_selector);
+          await this.browser.clickSubmit(submitSelector);
         } catch (err) {
           submitError = err instanceof Error ? err.message : String(err);
           submitDisabled = submitError.startsWith("submit_disabled");
@@ -5727,7 +5782,7 @@ export class SignupAgent {
           postGateKind = postGate.kind;
           if (!postGate.blocked && postGate.found && postGate.solved) {
             try {
-              await this.browser.click(plan.submit_selector);
+              await this.browser.click(submitSelector);
               await this.browser.wait(3);
             } catch (err) {
               steps.push(
