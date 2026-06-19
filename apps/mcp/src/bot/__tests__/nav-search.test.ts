@@ -470,6 +470,32 @@ describe("runNavSearch", () => {
     expect(logs.some((line) => line.includes("sterile key surface https://fly.test/tokens"))).toBe(true);
   });
 
+  it("does not mark a key surface sterile when the page already shows a token-like value", async () => {
+    const dashboard: FakePage = {
+      url: "https://ipinfo.test/dashboard",
+      text: "Dashboard",
+      inv: [el({ tag: "a", visibleText: "API", href: "/dashboard/token", selector: "#api" })],
+    };
+    const tokenPage: FakePage = {
+      url: "https://ipinfo.test/dashboard/token",
+      text: "API Access REST API integration API Token c5e7ab24c3d998 Copy",
+      inv: [el({ tag: "button", visibleText: "Save Token Settings", selector: "#save" })],
+    };
+    const browser = new FakeBrowser(dashboard, {
+      "https://ipinfo.test/dashboard/token": tokenPage,
+      "https://ipinfo.test/dashboard": dashboard,
+    });
+    const logs: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () => null,
+      log: (line) => logs.push(line),
+      maxSteps: 4,
+    });
+    expect(res).toEqual({ kind: "no_self_serve_key" });
+    expect(logs.some((line) => line.includes("sterile key surface"))).toBe(false);
+    expect(logs.some((line) => line.includes("url=https://ipinfo.test/dashboard/token"))).toBe(true);
+  });
+
   it("calls captureRound each step (capture-chain parity, A2/OF#1)", async () => {
     const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
     const browser = new FakeBrowser(

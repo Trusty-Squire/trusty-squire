@@ -132,7 +132,7 @@ describe("runDiscover — Fix B: OAuth profile isolation", () => {
 
     expect(outcome.kind).toBe("ok");
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.oauthProvider).toBe("google");
+    expect(requests[0]?.oauthProvider).toBeUndefined();
     expect(requests[0]?.profileDir).toBe("/tmp/profiles/verify-01");
     expect(requests[0]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
     expect(spent).toEqual([{ id: "verify-01", service: "fly-io" }]);
@@ -187,13 +187,13 @@ describe("runDiscover — Fix B: OAuth profile isolation", () => {
   });
 });
 
-describe("runDiscover — Fix B: email/password ephemeral profile", () => {
-  it("uses an ephemeral profileDir, no oauthAccountEmail, and reaps the dir afterward", async () => {
+describe("runDiscover — auto OAuth-capable profile", () => {
+  it("uses a robot profile without forcing an oauthProvider override", async () => {
     const { port } = fakePool([identity("verify-01")]);
     const { requests, bot } = recordingBot([ok]);
 
     const outcome = await runDiscover(
-      { service: "ipinfo" }, // no oauthProvider → email/password path
+      { service: "ipinfo" }, // no oauthProvider → auto-detect on the signup page
       {
         machineToken: "tok",
         accountId: "acct",
@@ -205,15 +205,12 @@ describe("runDiscover — Fix B: email/password ephemeral profile", () => {
     );
 
     expect(outcome.kind).toBe("ok");
-    expect(requests[0]?.oauthAccountEmail).toBeUndefined();
-    const dir = requests[0]?.profileDir;
-    expect(dir).toBeDefined();
-    expect(dir).toMatch(/profiles\/discover-ipinfo-/);
+    expect(requests[0]?.oauthProvider).toBeUndefined();
+    expect(requests[0]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+    expect(requests[0]?.profileDir).toBe("/tmp/profiles/verify-01");
     expect(requests[0]?.stepsSink).toContain(
-      `[discovery] profile-plan service=ipinfo mode=ephemeral oauth_provider=none identity_id=none oauth_account=none profile_dir=${dir}`,
+      "[discovery] profile-plan service=ipinfo mode=robot oauth_provider=auto identity_id=verify-01 oauth_account=verify-01@trustysquire.ai profile_dir=/tmp/profiles/verify-01",
     );
-    // Cleanup ran in the finally — the throwaway dir no longer exists.
-    expect(existsSync(dir!)).toBe(false);
   });
 });
 
@@ -305,12 +302,12 @@ describe("runDiscover — Fix D1: clean-state retry on the anti-bot tail", () =>
     expect(requests).toHaveLength(1); // no retry
   });
 
-  it("D1 retry reaps BOTH ephemeral dirs for email/password services", async () => {
-    const { port } = fakePool([]);
+  it("D1 retry rotates auto-mode robot identities", async () => {
+    const { port } = fakePool([identity("verify-01"), identity("verify-02")]);
     const { requests, bot } = recordingBot([antiBot, ok]);
 
     const outcome = await runDiscover(
-      { service: "ipinfo" }, // email/password → ephemeral dirs
+      { service: "ipinfo" }, // no provider override → auto-mode robot profile
       {
         machineToken: "tok",
         accountId: "acct",
@@ -323,14 +320,10 @@ describe("runDiscover — Fix D1: clean-state retry on the anti-bot tail", () =>
 
     expect(outcome.kind).toBe("ok");
     expect(requests).toHaveLength(2);
-    // Two distinct ephemeral dirs, both gone after the run.
-    const dir1 = requests[0]?.profileDir;
-    const dir2 = requests[1]?.profileDir;
-    expect(dir1).toBeDefined();
-    expect(dir2).toBeDefined();
-    expect(dir1).not.toBe(dir2);
-    expect(existsSync(dir1!)).toBe(false);
-    expect(existsSync(dir2!)).toBe(false);
+    expect(requests[0]?.profileDir).toBe("/tmp/profiles/verify-01");
+    expect(requests[1]?.profileDir).toBe("/tmp/profiles/verify-02");
+    expect(requests[0]?.oauthProvider).toBeUndefined();
+    expect(requests[1]?.oauthProvider).toBeUndefined();
   });
 });
 

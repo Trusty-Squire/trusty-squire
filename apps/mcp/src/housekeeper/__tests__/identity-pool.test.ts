@@ -117,4 +117,31 @@ describe("notebook I/O (temp dir)", () => {
     const onDisk = JSON.parse(readFileSync(join(dir, "identity-usage.json"), "utf8"));
     expect(onDisk.spent).toHaveLength(1);
   });
+
+  it("loadUsage preserves spent pairs from backup ledgers", () => {
+    writeFileSync(
+      join(dir, "identity-usage.json"),
+      JSON.stringify({
+        spent: [{ identityId: "verify-02", service: "sentry", at: "new" }],
+      }),
+    );
+    writeFileSync(
+      join(dir, "identity-usage.json.bak-1"),
+      JSON.stringify({
+        spent: [
+          { identityId: "verify-01", service: "sentry", at: "old" },
+          { identityId: "verify-02", service: "sentry", at: "older-duplicate" },
+        ],
+      }),
+    );
+
+    const usage = loadUsage();
+    expect(usage.map((u) => `${u.identityId}:${u.service}`).sort()).toEqual([
+      "verify-01:sentry",
+      "verify-02:sentry",
+    ]);
+    expect(pickUnspentIdentities(POOL, usage, "sentry", "google", 3).map((p) => p.id)).toEqual([
+      "verify-03",
+    ]);
+  });
 });

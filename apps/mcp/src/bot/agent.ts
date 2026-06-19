@@ -1376,6 +1376,111 @@ const FILL_VALUE_KINDS = [
 ] as const;
 type FillValueKind = (typeof FILL_VALUE_KINDS)[number];
 
+const HUMAN_FIRST_NAMES = [
+  "Alex",
+  "Jordan",
+  "Taylor",
+  "Casey",
+  "Morgan",
+  "Riley",
+  "Jamie",
+  "Cameron",
+  "Avery",
+  "Quinn",
+] as const;
+
+const HUMAN_LAST_NAMES = [
+  "Miller",
+  "Parker",
+  "Reed",
+  "Brooks",
+  "Hayes",
+  "Bennett",
+  "Carter",
+  "Foster",
+  "Morgan",
+  "Spencer",
+] as const;
+
+interface SignupIdentity {
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  username: string;
+}
+
+function stableHash(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function titleCaseNameToken(token: string): string {
+  const lower = token.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function safeNameToken(token: string | undefined): string | null {
+  if (token === undefined) return null;
+  const cleaned = token.replace(/[^a-z]/gi, "");
+  if (cleaned.length < 2) return null;
+  if (/^(?:trusty|squire|bot|test|demo|admin|user|verify)$/i.test(cleaned)) return null;
+  return titleCaseNameToken(cleaned);
+}
+
+function identityFromEmail(email: string): SignupIdentity {
+  const local = email.split("@", 1)[0] ?? "";
+  const tokens = local.split(/[^a-z]+/i).map(safeNameToken).filter((token): token is string => token !== null);
+  const hash = stableHash(email);
+  const firstName = tokens[0] ?? HUMAN_FIRST_NAMES[hash % HUMAN_FIRST_NAMES.length]!;
+  const lastName = tokens[1] ?? HUMAN_LAST_NAMES[Math.floor(hash / HUMAN_FIRST_NAMES.length) % HUMAN_LAST_NAMES.length]!;
+  const suffix = String(hash % 10_000).padStart(4, "0");
+  const username = `${firstName}.${lastName}.${suffix}`.toLowerCase();
+  return {
+    firstName,
+    lastName,
+    displayName: `${firstName} ${lastName}`,
+    username,
+  };
+}
+
+function elementTextForFieldKind(el: InteractiveElement | undefined): string {
+  if (el === undefined) return "";
+  return [
+    el.name,
+    el.id,
+    el.placeholder,
+    el.ariaLabel,
+    el.labelText,
+    el.visibleText,
+  ]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+}
+
+function resolvePlannedFillValue(
+  action: FillAction & { kind: "fill" },
+  fillValues: Record<FillValueKind, string>,
+  el: InteractiveElement | undefined,
+  identity: SignupIdentity,
+): string {
+  if (action.value_kind === "literal") return action.literal ?? "";
+  if (action.value_kind !== "name") return fillValues[action.value_kind];
+
+  const fieldText = elementTextForFieldKind(el);
+  if (/\b(?:first|given|forename)\b|first[_-]?name|given[_-]?name/.test(fieldText)) {
+    return identity.firstName;
+  }
+  if (/\b(?:last|family|surname)\b|last[_-]?name|family[_-]?name/.test(fieldText)) {
+    return identity.lastName;
+  }
+  return identity.displayName;
+}
+
 // Parsers/validators live at module scope so callLLM() can pass them
 // as plain functions. Each parser MUST throw on any malformed reply —
 // the throw is the signal callLLM uses to trigger the premium-fallback
@@ -3285,8 +3390,7 @@ export function orderOAuthCandidates(
 }
 
 export function defaultOAuthProviderForService(service: string): OAuthProviderId | undefined {
-  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (slug === "flyio" || slug === "clarifai" || slug === "nomic") return "google";
+  void service;
   return undefined;
 }
 
@@ -4568,6 +4672,7 @@ export class SignupAgent {
   private async executePlan(
     plan: SignupPlan,
     fillValues: Record<FillValueKind, string>,
+    identity: SignupIdentity,
     steps: string[],
     bySelector: Map<string, InteractiveElement>,
   ): Promise<void> {
@@ -4582,11 +4687,7 @@ export class SignupAgent {
       }
       try {
         if (action.kind === "fill") {
-          // `literal` is per-action; everything else is a fixed value.
-          const value =
-            action.value_kind === "literal"
-              ? action.literal ?? ""
-              : fillValues[action.value_kind];
+          const value = resolvePlannedFillValue(action, fillValues, el, identity);
           if (el !== undefined && el.tag === "select") {
             // A <select> needs selectOption, not type() (Sentry bug).
             steps.push(`Select ${action.selector}`);
@@ -5180,7 +5281,7 @@ export class SignupAgent {
         continue;
       }
 
-      await this.executePlan(plan, fillValues, steps, bySelector);
+      await this.executePlan(plan, fillValues, identityFromEmail(task.email), steps, bySelector);
 
       // rc.31 — flag the email-path commitment once we've executed a
       // click whose reason explicitly targets an "email" affordance
@@ -5763,7 +5864,7 @@ export class SignupAgent {
         continue;
       }
       // post.action.kind === "execute_plan"
-      await this.executePlan(plan, fillValues, steps, bySelector);
+      await this.executePlan(plan, fillValues, identityFromEmail(task.email), steps, bySelector);
 
       // ── C4 post_execute ──
       const hadFill = plan.actions.some((a) => a.kind === "fill");
@@ -6264,7 +6365,7 @@ export class SignupAgent {
       );
       return [];
     }
-    const provider = task.oauthProvider ?? defaultOAuthProviderForService(task.service);
+    const provider = task.oauthProvider;
     const ordered = orderOAuthCandidates(
       provider,
       await this.effectiveLoggedInProviders(),
@@ -6632,8 +6733,7 @@ export class SignupAgent {
 
   private async runSignup(task: SignupTask, steps: string[]): Promise<SignupResult> {
     const password = task.generatePassword();
-    const displayName = "Trusty Squire Bot";
-    const username = `tsbot${Date.now().toString().slice(-7)}`;
+    const identity = identityFromEmail(task.email);
 
     // F13 diagnostic: which Chrome launch mode start() chose, and
     // whether egress went through the configured proxy. Lets us tell
@@ -6978,9 +7078,9 @@ export class SignupAgent {
       const fillValues: Record<FillValueKind, string> = {
         email: task.email,
         password,
-        name: displayName,
-        username,
-        company: "Trusty Squire",
+        name: identity.displayName,
+        username: identity.username,
+        company: `${identity.lastName} Labs`,
         // `literal` has no fixed value — resolved per-action.
         literal: "",
       };

@@ -24,7 +24,6 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { UniversalSignupBot, type SignupResult } from "../../bot/index.js";
-import { defaultOAuthProviderForService } from "../../bot/agent.js";
 import { pickLLMPair } from "../../bot/llm-client.js";
 import { InboxClient } from "../../bot/inbox-client.js";
 import {
@@ -51,6 +50,7 @@ import {
   unknownStateSignature,
   type ProvisionState,
 } from "@trusty-squire/skill-schema";
+import { replenishVerifyPool } from "../robot-replenish.js";
 
 // The verify identity pool, abstracted behind a seam so tests can inject a
 // deterministic fleet + usage notebook without touching the operator's
@@ -353,6 +353,7 @@ export async function runDiscover(
 
   const bot = cfg.bot ?? new UniversalSignupBot();
   const pool = cfg.identityPool ?? defaultIdentityPool();
+  const usingDefaultIdentityPool = cfg.identityPool === undefined;
   const warmIdentity = cfg.warmIdentity ?? defaultWarmIdentity();
   // Telemetry correlation + duration baseline — shared by the success,
   // failure, and crash emits below.
@@ -381,10 +382,10 @@ export async function runDiscover(
   //   • email/password services → a throwaway ephemeral profile, torn down
   //     after the run so thousands of small dirs don't accumulate.
   // github-OAuth keeps the shared-profile fallback (the robot fleet is Google).
-  const effectiveOAuthProvider =
-    input.oauthProvider ?? defaultOAuthProviderForService(input.service);
-  const isGoogleOAuth = effectiveOAuthProvider === "google";
-  const isGithubOAuth = effectiveOAuthProvider === "github";
+  const explicitOAuthProvider = input.oauthProvider;
+  const autoOAuth = explicitOAuthProvider === undefined;
+  const isGoogleOAuth = explicitOAuthProvider === "google" || autoOAuth;
+  const isGithubOAuth = explicitOAuthProvider === "github";
 
   // Tracks every ephemeral dir we created so the `finally` reaps them even when
   // a retry created a second one.
@@ -484,7 +485,7 @@ export async function runDiscover(
     return [
       `[discovery] profile-plan service=${input.service}`,
       `mode=${mode}`,
-      `oauth_provider=${effectiveOAuthProvider ?? "none"}`,
+      `oauth_provider=${explicitOAuthProvider ?? "auto"}`,
       `identity_id=${plan.identityId ?? "none"}`,
       `oauth_account=${plan.oauthAccountEmail ?? "none"}`,
       `profile_dir=${plan.profileDir ?? "shared"}`,
@@ -531,8 +532,8 @@ export async function runDiscover(
         // on the bot profile's logged-in-providers cache, which is
         // often empty (the cache only writes after a successful prior
         // OAuth handshake — chicken-and-egg for fresh services).
-        ...(effectiveOAuthProvider !== undefined
-          ? { oauthProvider: effectiveOAuthProvider }
+        ...(explicitOAuthProvider !== undefined
+          ? { oauthProvider: explicitOAuthProvider }
           : {}),
         // YAML-declared signup URL overrides guessSignupUrl(slug). The
         // guess defaults to https://<slug>.com/signup which gets the
@@ -563,12 +564,31 @@ export async function runDiscover(
   // ── Run the attempt(s), then reap ephemeral profiles in `finally`. ───
   let result: SignupResult;
   try {
-    const firstPlan = await resolveProfilePlan([]);
+    let firstPlan = await resolveProfilePlan([]);
     if ("exhausted" in firstPlan) {
-      // Pool exhausted for this service — every robot has already signed up
-      // here. Surface a clear status (like fresh-verify's not_configured) so
-      // the operator refills the pool; don't fall back to the blind shared
-      // profile (that's the very nondeterminism Fix B removes).
+      if (usingDefaultIdentityPool) {
+        stepsSink.push(
+          `[discovery] insufficient_identities for ${input.service} — attempting on-demand verify-pool replenish`,
+        );
+        await replenishVerifyPool({
+          log: (line) => stepsSink.push(`[discovery] ${line}`),
+          force: true,
+          maxPerPass: 1,
+        }).catch((err) => {
+          stepsSink.push(
+            `[discovery] pool replenish failed (non-fatal): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          return "";
+        });
+        firstPlan = await resolveProfilePlan([]);
+      }
+    }
+    if ("exhausted" in firstPlan) {
+      // Pool exhausted for this service after an on-demand replenish attempt —
+      // every robot has already signed up here, or replenishment could not run.
+      // Surface a clear status; never fall back to the blind shared profile.
       return {
         kind: "failed",
         reason: `insufficient_identities: no unspent Google verify-pool robot left for ${input.service} — refill the pool`,

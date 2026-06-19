@@ -125,6 +125,16 @@ const KEYS_TEXT_STRONG = /\b(?:api|access|secret|auth|personal\s+access)\s*(?:ke
 const KEYS_TEXT_WEAK = /\b(?:developers?|settings|account)\b/i;
 const NEG_TEXT =
   /\b(?:billing|invoices?|docs|documentation|pricing|log\s*out|sign\s*out|keyboard\s+shortcuts)\b/i;
+const TOKEN_CONTEXT_TEXT =
+  /\b(?:api|access|auth|personal\s+access|secret|bearer)\s*(?:keys?|tokens?)\b/i;
+const OBVIOUS_TOKEN_VALUE =
+  /\b(?:sk|pk|rk|ghp|github_pat|pat|flyv1)[a-z0-9_./+=:-]{8,}\b/i;
+const LONG_HEX_VALUE = /\b[a-f0-9]{12,}\b/i;
+
+export function hasVisibleCredentialSignal(pageText: string): boolean {
+  if (OBVIOUS_TOKEN_VALUE.test(pageText)) return true;
+  return TOKEN_CONTEXT_TEXT.test(pageText) && LONG_HEX_VALUE.test(pageText);
+}
 
 export function scoreCandidate(c: NavCandidate): number {
   if (NEG_TEXT.test(c.text)) return 0;
@@ -515,7 +525,8 @@ export async function runNavSearch(
         KEYS_DESTINATION_URL.test(url) &&
         lastContainerUrl !== null &&
         navUrlKey(lastContainerUrl) !== navUrlKey(url) &&
-        !sterileKeyUrls.has(navUrlKey(url))
+        !sterileKeyUrls.has(navUrlKey(url)) &&
+        !hasVisibleCredentialSignal(text)
       ) {
         sterileKeyUrls.add(navUrlKey(url));
         log(

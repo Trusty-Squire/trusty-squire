@@ -34,11 +34,7 @@ import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
 import { gradeLedgerAgainstPass, describeGrade } from "./fix-ledger.js";
 import { VERSION } from "../version.js";
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { loadIdentities, loadUsage } from "./identity-pool.js";
+import { replenishVerifyPool } from "./robot-replenish.js";
 
 export type { ReplayMode, ReplayRunner, SignupProbeRunner, FreshVerifyRunner } from "./modes/verify.js";
 export type { DiscoveryBotRunner } from "./modes/discover.js";
@@ -314,72 +310,6 @@ export interface HealPassOpts {
   log?: (line: string) => void;
 }
 
-// Auto-replenish the verify-robot pool during a heal pass so the loop runs for
-// weeks without the operator manually rotating (the one thing that kept the
-// "autonomous" loop from being autonomous — see HOUSEKEEPER-OPERATIONS.md). The
-// robots are 2SV-OFF, so minting + warming is fully scriptable with NO 2FA and no
-// human. Cost-FLAT: `rotate --make-room=N` is delete-before-create, so the active
-// seat count never rises. Opt-IN (ROBOT_AUTO_REPLENISH=1) and gated on an
-// unattended admin token existing — a no-op until the operator sets that up, so
-// it's safe to ship default-off. Capped per pass (warming a robot is ~minutes)
-// and best-effort: a replenish failure NEVER breaks the heal. Returns a digest
-// fragment ("" when it did nothing).
-async function autoReplenishVerifyPool(log: (l: string) => void): Promise<string> {
-  if (!/^(1|true|on)$/i.test(process.env.ROBOT_AUTO_REPLENISH ?? "")) return "";
-  const tsDir = join(homedir(), ".trusty-squire");
-  if (!existsSync(join(tsDir, "admin-oauth.json")) && !existsSync(join(tsDir, "admin-sa.json"))) {
-    log(
-      "pool replenish: skipped — no unattended admin token " +
-        "(~/.trusty-squire/admin-oauth.json). See HOUSEKEEPER-OPERATIONS.md.",
-    );
-    return "";
-  }
-  // A robot is "worn" once it's spent at >= this many distinct services (each
-  // robot is one-shot per service). Retire the most-spent, mint fresh.
-  const spentGe = Number(process.env.ROBOT_REPLENISH_SPENT_GE ?? 8);
-  const maxPerPass = Number(process.env.ROBOT_REPLENISH_MAX_PER_PASS ?? 2);
-  let worn = 0;
-  try {
-    const ids = loadIdentities();
-    const usage = loadUsage();
-    worn = ids.filter(
-      (i) => new Set(usage.filter((u) => u.identityId === i.id).map((u) => u.service)).size >= spentGe,
-    ).length;
-  } catch (err) {
-    log(`pool replenish: pool read failed (non-fatal) — ${err instanceof Error ? err.message : String(err)}`);
-    return "";
-  }
-  if (worn === 0) return "";
-  const n = Math.min(worn, maxPerPass);
-  log(`pool replenish: ${worn} robot(s) spent at >=${spentGe} services — rotating ${n} (cost-flat, delete-before-create)`);
-  const cwd = process.cwd();
-  let fresh: string[] = [];
-  try {
-    const out = execFileSync("node", ["tools/provision-verify-robot.mjs", "rotate", `--make-room=${n}`], {
-      cwd,
-      encoding: "utf8",
-      timeout: 180_000,
-    });
-    // Parse ONLY the "warm verify-NN" suggestions (the freshly-minted ids) — NOT
-    // the "retire: verify-NN" line (those were just deleted).
-    fresh = [...new Set([...out.matchAll(/warm (verify-\d+)/g)].map((m) => m[1] as string))];
-  } catch (err) {
-    log(`pool replenish: rotate failed (non-fatal) — ${err instanceof Error ? err.message : String(err)}`);
-    return "";
-  }
-  let warmed = 0;
-  for (const id of fresh) {
-    try {
-      execFileSync("node", ["tools/google-login-fleet.mjs", id], { cwd, encoding: "utf8", timeout: 240_000 });
-      warmed += 1;
-    } catch (err) {
-      log(`pool replenish: warm ${id} failed (non-fatal) — ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  log(`pool replenish: rotated ${n}, warmed ${warmed}/${fresh.length} fresh robot(s)`);
-  return ` · pool +${warmed} fresh`;
-}
-
 export async function runHealPass(opts: HealPassOpts): Promise<{
   verify: HousekeeperBatchSummary;
   discover: HousekeeperBatchSummary;
@@ -397,7 +327,7 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   log("heal pass — phase 2/3: replenish verify-robot pool (cost-flat rotate + warm)");
   let poolLine = "";
   try {
-    poolLine = await autoReplenishVerifyPool(log);
+    poolLine = await replenishVerifyPool({ log });
   } catch (err) {
     log(`pool replenish failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
   }

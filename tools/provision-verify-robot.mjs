@@ -35,7 +35,7 @@
 // what create/rotate/delete WOULD do, computed from the local pool. Use it to
 // sanity-check before the SA key is in place.
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -74,7 +74,23 @@ function loadPool() {
   return readJson(POOL_PATH, { identities: [] });
 }
 function loadUsage() {
-  return readJson(USAGE_PATH, { spent: [] });
+  const paths = [USAGE_PATH];
+  try {
+    for (const name of readdirSync(BASE)) {
+      if (/^identity-usage\.json\.bak-/.test(name)) paths.push(join(BASE, name));
+    }
+  } catch {
+    // Missing/unreadable base falls through to primary-only fallback.
+  }
+  const byPair = new Map();
+  for (const path of paths) {
+    const usage = readJson(path, { spent: [] });
+    for (const row of usage.spent ?? []) {
+      const key = `${row.identityId}\u0000${row.service}`;
+      if (!byPair.has(key)) byPair.set(key, row);
+    }
+  }
+  return { spent: [...byPair.values()] };
 }
 
 // Distinct services each robot id has been spent at.
@@ -188,10 +204,14 @@ async function listDomainUsers(token) {
 
 // The set of verify-NN numbers already taken — locally AND in Google — so we
 // never collide with a half-provisioned account.
-function takenNumbers(pool, domainUsers) {
+function takenNumbers(pool, domainUsers, usage = { spent: [] }) {
   const taken = new Set();
   for (const e of pool.identities ?? []) {
     const n = robotNum(e.id);
+    if (!Number.isNaN(n)) taken.add(n);
+  }
+  for (const r of usage.spent ?? []) {
+    const n = robotNum(r.identityId);
     if (!Number.isNaN(n)) taken.add(n);
   }
   for (const u of domainUsers ?? []) {
@@ -263,7 +283,7 @@ async function cmdLicenses(apply) {
 async function cmdCreate(count, dryRun, allowGrow = false) {
   const pool = loadPool();
   if (dryRun) {
-    const taken = takenNumbers(pool, []);
+    const taken = takenNumbers(pool, [], loadUsage());
     const nums = nextFreeNumbers(taken, count);
     const over = !allowGrow && pool.identities.length + count > POOL_CAP;
     console.log(`[dry-run] would create ${count} robot(s): ${nums.map(idFor).join(", ")}`);
@@ -294,7 +314,7 @@ async function cmdCreate(count, dryRun, allowGrow = false) {
         `Rotate fully-spent robots out first: node tools/provision-verify-robot.mjs rotate`,
     );
   }
-  const taken = takenNumbers(pool, domainUsers);
+  const taken = takenNumbers(pool, domainUsers, loadUsage());
   const nums = nextFreeNumbers(taken, count);
   const pw = readJson(PW_PATH, {});
   const created = [];

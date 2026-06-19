@@ -22,6 +22,7 @@ import {
   existsSync,
   renameSync,
   rmdirSync,
+  readdirSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -187,7 +188,27 @@ export function loadIdentities(): VerifyIdentity[] {
 }
 
 export function loadUsage(): UsageRecord[] {
-  return readJson<UsageFile>(usagePath(), { spent: [] }).spent ?? [];
+  const dir = baseDir();
+  const primary = usagePath();
+  const paths = [primary];
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!/^identity-usage\.json\.bak-/.test(name)) continue;
+      paths.push(join(dir, name));
+    }
+  } catch {
+    // Missing/unreadable directory falls through to the primary read fallback.
+  }
+
+  const byPair = new Map<string, UsageRecord>();
+  for (const path of paths) {
+    const records = readJson<UsageFile>(path, { spent: [] }).spent ?? [];
+    for (const record of records) {
+      const key = `${record.identityId}\u0000${record.service}`;
+      if (!byPair.has(key)) byPair.set(key, record);
+    }
+  }
+  return [...byPair.values()];
 }
 
 // True once the operator has configured a non-empty pool — the housekeeper

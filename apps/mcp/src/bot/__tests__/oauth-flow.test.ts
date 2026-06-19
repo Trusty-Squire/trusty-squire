@@ -569,11 +569,11 @@ describe("orderOAuthCandidates", () => {
 });
 
 describe("defaultOAuthProviderForService", () => {
-  it("defaults services with proven broken email/signup paths to Google OAuth", () => {
-    expect(defaultOAuthProviderForService("fly-io")).toBe("google");
-    expect(defaultOAuthProviderForService("fly.io")).toBe("google");
-    expect(defaultOAuthProviderForService("clarifai")).toBe("google");
-    expect(defaultOAuthProviderForService("nomic")).toBe("google");
+  it("does not preselect an OAuth route by service slug", () => {
+    expect(defaultOAuthProviderForService("fly-io")).toBeUndefined();
+    expect(defaultOAuthProviderForService("fly.io")).toBeUndefined();
+    expect(defaultOAuthProviderForService("clarifai")).toBeUndefined();
+    expect(defaultOAuthProviderForService("nomic")).toBeUndefined();
     expect(defaultOAuthProviderForService("langfuse")).toBeUndefined();
   });
 });
