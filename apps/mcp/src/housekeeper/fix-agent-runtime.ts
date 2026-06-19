@@ -6,7 +6,7 @@
 //
 // Operator-only (housekeeper/, excluded from the npm tarball).
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -57,6 +57,93 @@ async function runCapturing(
     }
     throw err;
   }
+}
+
+interface SpawnResult {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+}
+
+function tailForLog(text: string, maxLines = 8): string {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(-maxLines)
+    .join(" | ")
+    .slice(0, 1800);
+}
+
+function runProcessGroup(
+  cmd: string,
+  args: readonly string[],
+  opts: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    maxBuffer: number;
+  },
+): Promise<SpawnResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const append = (which: "stdout" | "stderr", chunk: Buffer): void => {
+      const next = chunk.toString("utf8");
+      if (which === "stdout") {
+        stdout = (stdout + next).slice(-opts.maxBuffer);
+      } else {
+        stderr = (stderr + next).slice(-opts.maxBuffer);
+      }
+    };
+    child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
+    child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
+    child.on("error", reject);
+
+    let killTimer: NodeJS.Timeout | undefined;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch {
+          try {
+            process.kill(child.pid, "SIGTERM");
+          } catch {
+            // process already exited
+          }
+        }
+        killTimer = setTimeout(() => {
+          try {
+            process.kill(-child.pid!, "SIGKILL");
+          } catch {
+            try {
+              process.kill(child.pid!, "SIGKILL");
+            } catch {
+              // process already exited
+            }
+          }
+        }, 5_000);
+        killTimer.unref();
+      }
+    }, opts.timeoutMs);
+    timeout.unref();
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      resolve({ stdout, stderr, code, signal, timedOut });
+    });
+  });
 }
 
 // Parse the eval-gate's stdout into a structured verdict. The harness prints
@@ -333,22 +420,33 @@ export function discoverLiveRunner(config: {
   const timeout = config.timeoutMs ?? 9 * 60 * 1000;
   return async (service) => {
     try {
-      const { stdout, stderr } = await exec(
+      const { stdout, stderr, code, signal, timedOut } = await runProcessGroup(
         "node",
         ["apps/mcp/dist/bin.js", "housekeeper", `--service=${service}`, "--once"],
         {
           cwd: config.repoRoot,
           maxBuffer: 64 * 1024 * 1024,
-          timeout,
+          timeoutMs: timeout,
           env: { ...process.env, HOUSEKEEPER_CONCURRENCY: "1" },
         },
       );
       const out = `${stdout}\n${stderr}`;
       const green = /extracted \d+ credential|outcome=ok|→ ok \(/i.test(out);
-      config.log?.(`live: ${service} → ${green ? "green" : "red"}`);
+      if (green) {
+        config.log?.(`live: ${service} → green`);
+      } else {
+        const tail = tailForLog(out);
+        config.log?.(
+          `live: ${service} → red (exit=${code ?? "null"} signal=${signal ?? "none"}${
+            timedOut ? " timeout=1" : ""
+          }${tail.length > 0 ? ` tail=${tail}` : ""})`,
+        );
+      }
       return { green };
-    } catch {
-      config.log?.(`live: ${service} → red (crash/timeout)`);
+    } catch (err) {
+      config.log?.(
+        `live: ${service} → red (spawn_error=${err instanceof Error ? err.message : String(err)})`,
+      );
       return { green: false };
     }
   };
