@@ -14,11 +14,13 @@
 // The offline gate is the cheap inner filter; the live key is the oracle. The
 // canary baseline is the silent-collapse tripwire. Operator-only.
 
+import { execFileSync } from "node:child_process";
 import {
   checkFixAgentCommand,
   resolveFixAgentCommand,
   runFixMode,
 } from "./fix.js";
+import type { FixCluster, StaleClusterGateResult } from "../fix-agent.js";
 import type { FailureOwner } from "../fix-router.js";
 import {
   discoverLiveRunner,
@@ -58,6 +60,71 @@ function formatOwnerCounts(routed: readonly { owner: FailureOwner }[]): string {
   return OWNER_ORDER.map((owner) => `${owner}=${counts.get(owner) ?? 0}`).join(" ");
 }
 
+function currentGitCommit(repoRoot: string): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function staleReproBudgetFromEnv(): number {
+  const raw = Number(process.env.TRUSTY_SQUIRE_STALE_REPRO_BUDGET ?? "4");
+  if (!Number.isFinite(raw) || raw < 0) return 4;
+  return Math.floor(raw);
+}
+
+function staleCommitSummary(cluster: FixCluster, currentCommit: string): string {
+  const commits = [...new Set(cluster.failures.map((f) => f.source_commit ?? "legacy"))];
+  return `${commits.map((c) => (c === "legacy" ? c : c.slice(0, 8))).join(",")} != ${currentCommit.slice(0, 8)}`;
+}
+
+function makeStaleClusterGate(input: {
+  currentCommit: string | undefined;
+  runner: ReturnType<typeof discoverLiveRunner>;
+  log: (line: string) => void;
+}): (cluster: FixCluster) => Promise<StaleClusterGateResult> {
+  let remaining = staleReproBudgetFromEnv();
+  return async (cluster: FixCluster): Promise<StaleClusterGateResult> => {
+    const currentCommit = input.currentCommit;
+    if (currentCommit === undefined) {
+      return { proceed: true, reason: "current git commit unavailable; freshness gate skipped" };
+    }
+    const stale = cluster.failures.some((f) => f.source_commit !== currentCommit);
+    if (!stale) return { proceed: true, reason: "failure captured at current commit" };
+    if (remaining <= 0) {
+      return {
+        proceed: false,
+        reason: `stale-deferred: repro budget exhausted for this lap (${staleCommitSummary(cluster, currentCommit)})`,
+      };
+    }
+    remaining -= 1;
+    input.log(
+      `cluster ${cluster.id}: stale capture commit (${staleCommitSummary(cluster, currentCommit)}) — fresh repro before proposer`,
+    );
+    const red: string[] = [];
+    for (const service of [...new Set(cluster.services)]) {
+      const result = await input.runner(service);
+      if (!result.green) red.push(service);
+    }
+    if (red.length === 0) {
+      return {
+        proceed: false,
+        reason: "stale-resolved: fresh repro green at current commit; old failure ignored",
+      };
+    }
+    return {
+      proceed: false,
+      reason: `stale-recaptured: fresh repro still red for ${red.join(", ")}; next lap will use current-commit capture`,
+    };
+  };
+}
+
 export async function runAutoloop(opts: {
   log?: (line: string) => void;
   maxLaps?: number;
@@ -84,6 +151,12 @@ export async function runAutoloop(opts: {
 
   const runner = discoverLiveRunner({ repoRoot, log });
   const build = makeDistBuilder({ repoRoot });
+  const currentCommit = currentGitCommit(repoRoot);
+  if (currentCommit !== undefined) {
+    log(`current commit for freshness gate: ${currentCommit.slice(0, 12)}`);
+  } else {
+    log("WARN: current commit unavailable — stale-failure freshness gate will be skipped");
+  }
 
   // The canary baseline — measured ONCE, live, before any fix. The live gate
   // rejects any fix that drops the canary below this. Measured against the
@@ -127,6 +200,8 @@ export async function runAutoloop(opts: {
       // just the last 24h.
       sinceMs: Date.now() - SIXTY_DAYS_MS,
       liveGate,
+      ...(currentCommit !== undefined ? { currentCommit } : {}),
+      staleClusterGate: makeStaleClusterGate({ currentCommit, runner, log }),
       log,
       ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     });
@@ -138,6 +213,9 @@ export async function runAutoloop(opts: {
       p.reason.startsWith("proposer error:") ||
       p.reason.includes("proposer command not found"),
     );
+    const madeFreshnessProgress = (result?.parked ?? []).some(
+      (p) => p.reason.startsWith("stale-resolved:") || p.reason.startsWith("stale-recaptured:"),
+    );
     const exhaustedFixes = (result?.walls ?? []).some((w) =>
       w.reason.includes("no fix both held the gate"),
     );
@@ -147,7 +225,10 @@ export async function runAutoloop(opts: {
       log(`  ✅ ${c.cluster_id} → ${c.version}: ${c.summary}`);
     }
     if (committed === 0) {
-      if (proposerBlocked) {
+      if (madeFreshnessProgress) {
+        log("stale failures were reprobed; continuing so current-commit outcomes can replace old evidence.");
+        continue;
+      } else if (proposerBlocked) {
         log(`STOPPED at lap ${lap}: proposer failed; not converged.`);
       } else if (exhaustedFixes) {
         log(`STOPPED at lap ${lap}: fixable clusters exhausted without a passing candidate; not converged.`);

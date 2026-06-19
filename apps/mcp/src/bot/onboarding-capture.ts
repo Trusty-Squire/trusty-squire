@@ -37,6 +37,7 @@
 // set it to `off` to opt out entirely.
 
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -264,7 +265,25 @@ export interface OnboardingOutcomeFile {
   capture_format_version: typeof CAPTURE_FORMAT_VERSION;
   service: string;
   run_id: string;
+  // Git commit of the bot code that produced this outcome. Older captures do
+  // not have it; autoloop treats missing/non-current commits as stale.
+  source_commit?: string;
   outcome: RunOutcomeRecord;
+}
+
+function currentSourceCommit(): string | undefined {
+  const env = process.env.TRUSTY_SQUIRE_SOURCE_COMMIT?.trim();
+  if (env !== undefined && env.length > 0) return env;
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+  } catch {
+    return undefined;
+  }
 }
 
 // True when this run captured at least one post-verify round. Lets the
@@ -308,10 +327,12 @@ export function captureRunOutcome(service: string, result: SignupResult): void {
     mkdirSync(dir, { recursive: true });
     const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const file = join(dir, `${slug}-${runId}.outcome.json`);
+    const sourceCommit = currentSourceCommit();
     const record: OnboardingOutcomeFile = {
       capture_format_version: CAPTURE_FORMAT_VERSION,
       service,
       run_id: runId,
+      ...(sourceCommit !== undefined ? { source_commit: sourceCommit } : {}),
       outcome: summarizeRunOutcome(result, lastRound !== undefined, lastRound ?? null),
     };
     writeFileSync(file, JSON.stringify(record, null, 2));

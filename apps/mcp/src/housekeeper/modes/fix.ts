@@ -16,6 +16,7 @@ import {
   runFixAgent,
   type FixAgentResult,
   type FixCluster,
+  type StaleClusterGateResult,
 } from "../fix-agent.js";
 import { appendFixAttempts } from "../fix-ledger.js";
 import type { ServiceRoutingFacts } from "../fix-router-input.js";
@@ -183,6 +184,8 @@ export async function runFixMode(opts: {
   // once); a plain --mode=fix run leaves it undefined (offline-only).
   liveGate?: (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }>;
   routerFacts?: ServiceRoutingFacts;
+  currentCommit?: string;
+  staleClusterGate?: (cluster: FixCluster) => Promise<StaleClusterGateResult>;
 }): Promise<FixAgentResult | null> {
   const log = opts.log ?? ((line: string) => console.log(`[fix] ${line}`));
   const sinceMs = opts.sinceMs ?? defaultSinceMs();
@@ -225,6 +228,7 @@ export async function runFixMode(opts: {
       generatedAt: new Date().toISOString(),
     },
     sinceMs,
+    opts.currentCommit !== undefined ? { currentCommit: opts.currentCommit } : {},
   );
 
   if (batch.failures.length === 0) {
@@ -263,6 +267,7 @@ export async function runFixMode(opts: {
     gate: makeEvalGateRunner({ repoRoot }),
     replay: makeClusterReplayRunner({ repoRoot }),
     ...(opts.liveGate !== undefined ? { liveGate: opts.liveGate } : {}),
+    ...(opts.staleClusterGate !== undefined ? { staleClusterGate: opts.staleClusterGate } : {}),
     commit: gitCommitter({ repoRoot, push, log }),
     log,
   });

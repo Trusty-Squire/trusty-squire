@@ -44,11 +44,13 @@ function outcome(
   ok: boolean,
   stage: OnboardingOutcomeFile["outcome"]["failure_stage"],
   terminalRound: number | null = 0,
+  sourceCommit?: string,
 ): OnboardingOutcomeFile {
   return {
     capture_format_version: 1,
     service,
     run_id: runId,
+    ...(sourceCommit !== undefined ? { source_commit: sourceCommit } : {}),
     outcome: {
       ok,
       credential_present: ok,
@@ -106,8 +108,9 @@ describe("buildFixBatch", () => {
   });
 
   it("carries signature, capture refs and planner reasoning", () => {
-    const batch = buildFixBatch([outcome("b", "r2", false, "extract")], META, resolve);
+    const batch = buildFixBatch([outcome("b", "r2", false, "extract", 0, "abc123")], META, resolve);
     const f = batch.failures[0]!;
+    expect(f.source_commit).toBe("abc123");
     expect(f.capture_refs).toEqual(["/cap/b-r2-r0.json"]);
     expect(f.planner_reasoning).toBe("click: open keys");
     expect(f.signature).toHaveLength(16);
@@ -169,5 +172,39 @@ describe("readFixBatch (IO)", () => {
     const f = batch.failures[0]!;
     expect(f.capture_refs).toHaveLength(2);
     expect(f.planner_reasoning).toBe("click: round 1");
+  });
+
+  it("lets current-commit outcomes supersede stale failures for the same service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "svc-old.outcome.json"),
+      JSON.stringify(outcome("svc", "old", false, "planner_loop", null, "old-commit")),
+    );
+    writeFileSync(
+      join(dir, "svc-new.outcome.json"),
+      JSON.stringify(outcome("svc", "new", true, "none", null, "new-commit")),
+    );
+
+    const batch = readFixBatch(dir, META, undefined, { currentCommit: "new-commit" });
+    expect(batch.failures).toEqual([]);
+  });
+
+  it("keeps the current-commit failure and drops stale failures for that service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "svc-old.outcome.json"),
+      JSON.stringify(outcome("svc", "old", false, "planner_loop", null, "old-commit")),
+    );
+    writeFileSync(
+      join(dir, "svc-new.outcome.json"),
+      JSON.stringify(outcome("svc", "new", false, "extract", null, "new-commit")),
+    );
+
+    const batch = readFixBatch(dir, META, undefined, { currentCommit: "new-commit" });
+    expect(batch.failures.map((f) => [f.run_id, f.source_commit])).toEqual([["new", "new-commit"]]);
   });
 });

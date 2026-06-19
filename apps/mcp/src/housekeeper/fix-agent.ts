@@ -120,6 +120,11 @@ export type Committer = (input: {
   version: string;
 }) => Promise<void>;
 
+export interface StaleClusterGateResult {
+  proceed: boolean;
+  reason: string;
+}
+
 export interface FixAgentOpts {
   batch: FixBatch;
   propose: FixProposer;
@@ -141,6 +146,7 @@ export interface FixAgentOpts {
   // anything outside these (or under corpus/eval) is parked, never committed.
   allowedPaths: readonly string[];
   routerFacts?: ServiceRoutingFacts;
+  staleClusterGate?: (cluster: FixCluster) => Promise<StaleClusterGateResult>;
   maxAttemptsPerCluster?: number;
   log?: (line: string) => void;
 }
@@ -359,6 +365,17 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
         touched_paths: [],
       });
       log(`cluster ${cluster.id}: ROUTED → ${route.route} (no coding-agent spend) — ${route.reason}`);
+      continue;
+    }
+
+    const freshness = await opts.staleClusterGate?.(cluster);
+    if (freshness !== undefined && !freshness.proceed) {
+      result.parked.push({
+        cluster_id: cluster.id,
+        reason: freshness.reason,
+        touched_paths: [],
+      });
+      log(`cluster ${cluster.id}: parked — ${freshness.reason}`);
       continue;
     }
 

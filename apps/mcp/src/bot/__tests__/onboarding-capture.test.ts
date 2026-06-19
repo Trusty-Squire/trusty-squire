@@ -472,36 +472,47 @@ describe("summarizeRunOutcome — redaction (R3)", () => {
 
 describe("captureRunOutcome — sidecar file", () => {
   it("writes <slug>-<runId>.outcome.json joined to the run's rounds", () => {
-    withCaptureDir((dir) => {
-      resetCaptureChain();
-      const service = uniqueService();
-      captureOnboardingRound(mockRound(0, service));
-      captureOnboardingRound(mockRound(1, service));
-      captureRunOutcome(service, mockResult({ success: true, credentials: { api_key: "sk-live-xyz" } }));
+    const previousCommit = process.env.TRUSTY_SQUIRE_SOURCE_COMMIT;
+    process.env.TRUSTY_SQUIRE_SOURCE_COMMIT = "test-source-commit";
+    try {
+      withCaptureDir((dir) => {
+        resetCaptureChain();
+        const service = uniqueService();
+        captureOnboardingRound(mockRound(0, service));
+        captureOnboardingRound(mockRound(1, service));
+        captureRunOutcome(service, mockResult({ success: true, credentials: { api_key: "sk-live-xyz" } }));
 
-      const outcomeFiles = readdirSync(dir).filter((f) => f.endsWith(".outcome.json"));
-      expect(outcomeFiles).toHaveLength(1);
+        const outcomeFiles = readdirSync(dir).filter((f) => f.endsWith(".outcome.json"));
+        expect(outcomeFiles).toHaveLength(1);
 
-      const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      const roundFiles = readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".outcome.json"));
-      // the sidecar shares the <slug>-<runId> stem with the round files
-      const stem = outcomeFiles[0]!.slice(0, -".outcome.json".length);
-      expect(stem.startsWith(`${slug}-`)).toBe(true);
-      expect(roundFiles.every((f) => f.startsWith(`${stem}-r`))).toBe(true);
+        const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        const roundFiles = readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".outcome.json"));
+        // the sidecar shares the <slug>-<runId> stem with the round files
+        const stem = outcomeFiles[0]!.slice(0, -".outcome.json".length);
+        expect(stem.startsWith(`${slug}-`)).toBe(true);
+        expect(roundFiles.every((f) => f.startsWith(`${stem}-r`))).toBe(true);
 
-      const written = JSON.parse(readFileSync(join(dir, outcomeFiles[0]!), "utf8")) as OnboardingOutcomeFile;
-      expect(written.capture_format_version).toBe(CAPTURE_FORMAT_VERSION);
-      expect(written.service).toBe(service);
-      expect(written.outcome.ok).toBe(true);
-      expect(written.outcome.terminal_round).toBe(1);
-      expect(written.outcome.failure_stage).toBe("none");
-      // the chain verifier must NOT pick up the sidecar as a round
-      const verified = verifyCaptureChain(dir, service, written.run_id);
-      expect(verified.ok).toBe(true);
-      if (verified.ok) expect(verified.rounds).toHaveLength(2);
-      // secret never lands on disk
-      expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-live-xyz");
-    });
+        const written = JSON.parse(readFileSync(join(dir, outcomeFiles[0]!), "utf8")) as OnboardingOutcomeFile;
+        expect(written.capture_format_version).toBe(CAPTURE_FORMAT_VERSION);
+        expect(written.service).toBe(service);
+        expect(written.source_commit).toBe("test-source-commit");
+        expect(written.outcome.ok).toBe(true);
+        expect(written.outcome.terminal_round).toBe(1);
+        expect(written.outcome.failure_stage).toBe("none");
+        // the chain verifier must NOT pick up the sidecar as a round
+        const verified = verifyCaptureChain(dir, service, written.run_id);
+        expect(verified.ok).toBe(true);
+        if (verified.ok) expect(verified.rounds).toHaveLength(2);
+        // secret never lands on disk
+        expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-live-xyz");
+      });
+    } finally {
+      if (previousCommit === undefined) {
+        delete process.env.TRUSTY_SQUIRE_SOURCE_COMMIT;
+      } else {
+        process.env.TRUSTY_SQUIRE_SOURCE_COMMIT = previousCommit;
+      }
+    }
   });
 
   it("no-ops when the run captured no rounds", () => {
