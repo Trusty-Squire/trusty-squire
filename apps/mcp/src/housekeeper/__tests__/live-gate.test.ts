@@ -90,6 +90,82 @@ describe("runLiveGate — the oracle", () => {
     expect(await measureCanaryBaseline(run, CANARY)).toBe(2);
   });
 
+  it("treats a service as green when any retryable best-of-N attempt succeeds", async () => {
+    const seen: string[] = [];
+    const run: LiveRunner = async (service, attempt) => {
+      seen.push(`${service}:${attempt?.attempt ?? 1}/${attempt?.maxAttempts ?? 1}`);
+      return {
+        green: service === "a" && attempt?.attempt === 2,
+        retryable: attempt?.attempt === 1,
+      };
+    };
+
+    const v = await runLiveGate(run, {
+      cluster: ["a"],
+      canary: [],
+      baselineCanaryGreen: 0,
+      minClusterMove: 1,
+      maxAttempts: 3,
+    });
+
+    expect(v.passed).toBe(true);
+    expect(v.clusterGreen).toBe(1);
+    expect(seen).toEqual(["a:1/3", "a:2/3"]);
+  });
+
+  it("tries all best-of-N attempts while failures are retryable", async () => {
+    const seen: string[] = [];
+    const run: LiveRunner = async (service, attempt) => {
+      seen.push(`${service}:${attempt?.attempt ?? 1}/${attempt?.maxAttempts ?? 1}`);
+      return { green: false, retryable: true };
+    };
+
+    const v = await runLiveGate(run, {
+      cluster: ["a"],
+      canary: [],
+      baselineCanaryGreen: 0,
+      minClusterMove: 1,
+      maxAttempts: 3,
+    });
+
+    expect(v.passed).toBe(false);
+    expect(v.clusterGreen).toBe(0);
+    expect(seen).toEqual(["a:1/3", "a:2/3", "a:3/3"]);
+  });
+
+  it("does not retry non-retryable failures", async () => {
+    const seen: string[] = [];
+    const run: LiveRunner = async (service, attempt) => {
+      seen.push(`${service}:${attempt?.attempt ?? 1}/${attempt?.maxAttempts ?? 1}`);
+      return { green: false, retryable: false };
+    };
+
+    const v = await runLiveGate(run, {
+      cluster: ["a"],
+      canary: [],
+      baselineCanaryGreen: 0,
+      minClusterMove: 1,
+      maxAttempts: 3,
+    });
+
+    expect(v.passed).toBe(false);
+    expect(seen).toEqual(["a:1/3"]);
+  });
+
+  it("measureCanaryBaseline uses best-of-N attempts", async () => {
+    const calls: Record<string, number> = {};
+    const run: LiveRunner = async (service) => {
+      calls[service] = (calls[service] ?? 0) + 1;
+      return {
+        green: service === "ipinfo" && calls[service] === 2,
+        retryable: true,
+      };
+    };
+
+    expect(await measureCanaryBaseline(run, ["ipinfo", "neon"], 1, 3)).toBe(1);
+    expect(calls).toEqual({ ipinfo: 2, neon: 3 });
+  });
+
   it("bounds live runner concurrency", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
@@ -111,6 +187,30 @@ describe("runLiveGate — the oracle", () => {
 
     expect(v.passed).toBe(true);
     // The cap is global across cluster + canary services.
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
+  it("best-of-N does not multiply concurrent service workers", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const run: LiveRunner = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return { green: false, retryable: true };
+    };
+
+    const v = await runLiveGate(run, {
+      cluster: ["a", "b", "c", "d"],
+      canary: [],
+      baselineCanaryGreen: 0,
+      minClusterMove: 1,
+      concurrency: 2,
+      maxAttempts: 3,
+    });
+
+    expect(v.passed).toBe(false);
     expect(maxInFlight).toBeLessThanOrEqual(2);
   });
 });

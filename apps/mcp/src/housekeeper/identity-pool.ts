@@ -43,12 +43,25 @@ export interface UsageRecord {
   at: string; // ISO timestamp, stamped by the caller
 }
 
+export interface IdentityLeaseRecord {
+  identityId: string;
+  service: string;
+  runId: string;
+  pid: number;
+  startedAt: string;
+  expiresAt: string;
+}
+
 interface PoolFile {
   identities: VerifyIdentity[];
 }
 
 interface UsageFile {
   spent: UsageRecord[];
+}
+
+interface LeaseFile {
+  leases: IdentityLeaseRecord[];
 }
 
 // Base dir is overridable for tests + alternate operator homes.
@@ -63,6 +76,9 @@ function usagePath(): string {
 }
 function usageLockPath(): string {
   return join(baseDir(), "identity-usage.lock");
+}
+function leasePath(): string {
+  return join(baseDir(), "identity-leases.json");
 }
 
 // Expand a leading ~ in a configured profile path so the operator can write
@@ -164,6 +180,79 @@ export function releaseIdentity(id: string): void {
 }
 export function isIdentityClaimed(id: string): boolean {
   return inFlightClaims.has(id);
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function activeLeases(now = Date.now()): IdentityLeaseRecord[] {
+  return (readJson<LeaseFile>(leasePath(), { leases: [] }).leases ?? []).filter((lease) => {
+    const expiresAt = Date.parse(lease.expiresAt);
+    return Number.isFinite(expiresAt) && expiresAt > now && processIsAlive(lease.pid);
+  });
+}
+
+function writeLeases(leases: readonly IdentityLeaseRecord[]): void {
+  const path = leasePath();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ leases }, null, 2)}\n`);
+  renameSync(tmp, path);
+}
+
+export function reserveIdentityForService(input: {
+  service: string;
+  provider: IdentityProvider;
+  runId: string;
+  excludeIdentityIds?: readonly string[];
+  ttlMs?: number;
+}): VerifyIdentity | null {
+  return withUsageLock(() => {
+    const now = Date.now();
+    const identities = loadIdentities();
+    const usage = loadUsage();
+    const leases = activeLeases(now);
+    const excluded = new Set(input.excludeIdentityIds ?? []);
+    const leased = new Set(leases.map((lease) => lease.identityId));
+    const picked = pickUnspentIdentities(
+      identities,
+      usage,
+      input.service,
+      input.provider,
+      identities.length,
+    ).find((identity) => !excluded.has(identity.id) && !leased.has(identity.id));
+    if (picked === undefined) {
+      writeLeases(leases);
+      return null;
+    }
+    const startedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + (input.ttlMs ?? 15 * 60 * 1000)).toISOString();
+    writeLeases([
+      ...leases,
+      {
+        identityId: picked.id,
+        service: input.service,
+        runId: input.runId,
+        pid: process.pid,
+        startedAt,
+        expiresAt,
+      },
+    ]);
+    return picked;
+  });
+}
+
+export function releaseIdentityLease(runId: string): void {
+  withUsageLock(() => {
+    writeLeases(activeLeases().filter((lease) => lease.runId !== runId));
+  });
 }
 
 // How many fresh (identity, service) verifications remain possible for a service

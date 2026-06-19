@@ -8,6 +8,7 @@ export interface ReplenishVerifyPoolOpts {
   log: (line: string) => void;
   force?: boolean;
   maxPerPass?: number;
+  rotateAll?: boolean;
 }
 
 // Replenish the verify-robot pool by rotating worn identities out and warming
@@ -31,24 +32,35 @@ export async function replenishVerifyPool(opts: ReplenishVerifyPoolOpts): Promis
 
   const spentGe = Number(process.env.ROBOT_REPLENISH_SPENT_GE ?? 8);
   const maxPerPass = opts.maxPerPass ?? Number(process.env.ROBOT_REPLENISH_MAX_PER_PASS ?? 2);
+  const rotateAll = opts.rotateAll === true;
   let worn = 0;
   try {
     const ids = loadIdentities();
     const usage = loadUsage();
-    worn = ids.filter(
-      (i) => new Set(usage.filter((u) => u.identityId === i.id).map((u) => u.service)).size >= spentGe,
-    ).length;
+    worn = rotateAll
+      ? ids.length
+      : ids.filter(
+          (i) => new Set(usage.filter((u) => u.identityId === i.id).map((u) => u.service)).size >= spentGe,
+        ).length;
   } catch (err) {
     log(`pool replenish: pool read failed (non-fatal) — ${err instanceof Error ? err.message : String(err)}`);
     return "";
   }
   if (worn === 0) {
-    log(`pool replenish: skipped — no robot is worn at >=${spentGe} services`);
+    log(
+      rotateAll
+        ? "pool replenish: skipped — verify pool is empty"
+        : `pool replenish: skipped — no robot is worn at >=${spentGe} services`,
+    );
     return "";
   }
 
   const n = Math.min(worn, maxPerPass);
-  log(`pool replenish: ${worn} robot(s) spent at >=${spentGe} services — rotating ${n} (cost-flat, delete-before-create)`);
+  log(
+    rotateAll
+      ? `pool replenish: no fresh service robot available — rotating ${n}/${worn} robot(s) (cost-flat, delete-before-create)`
+      : `pool replenish: ${worn} robot(s) spent at >=${spentGe} services — rotating ${n} (cost-flat, delete-before-create)`,
+  );
   const cwd = process.cwd();
   let fresh: string[] = [];
   try {

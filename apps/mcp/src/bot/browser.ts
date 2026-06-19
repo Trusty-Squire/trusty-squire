@@ -26,10 +26,17 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, reapLeakedProfileHolder, waitForProfileFree } from "./profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  clearStaleSingletonLock,
+  launchWithProfileGate,
+  ProfileBusyError,
+  reapLeakedProfileHolder,
+  waitForProfileFree,
+} from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
@@ -391,6 +398,41 @@ async function waitForDevtools(port: number, deadlineMs: number): Promise<string
   throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
 }
 
+async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
+  const lockDir = "/tmp/trusty-squire-chrome-start.lock";
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      mkdirSync(lockDir);
+      break;
+    } catch (err) {
+      try {
+        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
+        if (ageMs > 120_000) {
+          rmSync(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for Chrome startup lock at ${lockDir}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+}
+
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -573,36 +615,64 @@ export class BrowserController {
     env: NodeJS.ProcessEnv;
     window: { width: number; height: number };
   }): Promise<BrowserContext> {
-    const port = await findFreePort();
-    const argv = [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${this.profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--password-store=basic",
-      "--window-position=0,0",
-      `--window-size=${params.window.width},${params.window.height}`,
-      "--lang=en-US",
-      ...params.args,
-      ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-      ...(params.headless ? ["--headless=new"] : []),
-      "about:blank",
-    ];
-    const child = spawn(params.binary, argv, { env: params.env, stdio: "ignore" });
-    this.childChrome = child;
-    let endpoint: string;
-    try {
-      endpoint = await waitForDevtools(port, 30_000);
-    } catch (err) {
+    const endpoint = await withChromeStartupLock(async () => {
+      const port = await findFreePort();
+      clearStaleSingletonLock(this.profileDir);
+      const argv = [
+        `--remote-debugging-port=${port}`,
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${this.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...params.args,
+        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+        ...(params.headless ? ["--headless=new"] : []),
+        "about:blank",
+      ];
+      const child = spawn(params.binary, argv, { env: params.env, stdio: ["ignore", "ignore", "pipe"] });
+      this.childChrome = child;
+      let chromeStderr = "";
+      let chromeExit = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
+      child.on("exit", (code, signal) => {
+        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
+      });
       try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
+        return await waitForDevtools(port, 30_000);
+      } catch (err) {
+        const alive =
+          child.pid !== undefined
+            ? (() => {
+                try {
+                  process.kill(child.pid!, 0);
+                  return true;
+                } catch {
+                  return false;
+                }
+              })()
+            : false;
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        reapLeakedProfileHolder(this.profileDir);
+        this.childChrome = null;
+        const detail = chromeStderr.trim();
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
+            `${chromeExit}${
+          detail.length > 0 ? `; Chrome stderr: ${detail}` : ""
+        }`,
+      );
       }
-      this.childChrome = null;
-      throw err;
-    }
+    });
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here
@@ -1093,6 +1163,20 @@ export class BrowserController {
     channel: string | null,
     proxy: ProxySettings | null,
   ): Promise<EgressGeo | null> {
+    if (proxy === null) {
+      try {
+        const resp = await fetch("https://ipinfo.io/json", { signal: AbortSignal.timeout(10_000) });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return parseEgressGeo(await resp.text());
+      } catch (err) {
+        console.error(
+          `[universal-bot] egress geo probe failed — using default ` +
+            `timezone: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }
+    }
+
     let probe: Browser | undefined;
     try {
       probe = await getChromium().launch({

@@ -7,7 +7,7 @@
 // Operator-only (housekeeper/, excluded from the npm tarball).
 
 import { execFile, spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { PostVerifyStep } from "../bot/agent.js";
@@ -22,7 +22,14 @@ import type {
   GateRunner,
 } from "./fix-agent.js";
 
-import { runLiveGate, type LiveRunner } from "./live-gate.js";
+import { runLiveGate, type LiveRunAttempt, type LiveRunner } from "./live-gate.js";
+import {
+  recordSpent,
+  releaseIdentityLease,
+  reserveIdentityForService,
+  type VerifyIdentity,
+} from "./identity-pool.js";
+import { replenishVerifyPool } from "./robot-replenish.js";
 
 const exec = promisify(execFile);
 
@@ -75,6 +82,87 @@ function tailForLog(text: string, maxLines = 8): string {
     .slice(-maxLines)
     .join(" | ")
     .slice(0, 1800);
+}
+
+function safeSegment(raw: string): string {
+  const cleaned = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return cleaned.length > 0 ? cleaned.slice(0, 80) : "run";
+}
+
+export interface LocalLiveRunLease {
+  runId: string;
+  debugDir: string;
+  tmpDir: string;
+  attemptLabel: string;
+  env: NodeJS.ProcessEnv;
+  identity?: VerifyIdentity;
+}
+
+export function leaseLocalLiveRun(config: {
+  repoRoot: string;
+  service: string;
+  attempt?: LiveRunAttempt;
+  excludeIdentityIds?: readonly string[];
+  baseEnv?: NodeJS.ProcessEnv;
+}): LocalLiveRunLease {
+  const baseEnv = config.baseEnv ?? process.env;
+  const attemptNumber = config.attempt?.attempt ?? 1;
+  const maxAttempts = config.attempt?.maxAttempts ?? 1;
+  const runId = [
+    "live",
+    safeSegment(config.service),
+    `a${attemptNumber}-of-${maxAttempts}`,
+    `${process.pid}`,
+    `${Date.now().toString(36)}`,
+    Math.random().toString(36).slice(2, 8),
+  ].join("-");
+  const root = join(config.repoRoot, ".debug", "live-runs", runId);
+  const debugDir = join(root, "snapshots");
+  const tmpDir = join(root, "tmp");
+  mkdirSync(debugDir, { recursive: true });
+  mkdirSync(tmpDir, { recursive: true });
+  const identity = reserveIdentityForService({
+    service: config.service,
+    provider: "google",
+    runId,
+    ...(config.excludeIdentityIds !== undefined
+      ? { excludeIdentityIds: config.excludeIdentityIds }
+      : {}),
+  });
+  if (identity === null) {
+    return {
+      runId,
+      debugDir,
+      tmpDir,
+      attemptLabel: `${attemptNumber}/${maxAttempts}`,
+      env: {
+      ...baseEnv,
+      HOUSEKEEPER_CONCURRENCY: "1",
+      UNIVERSAL_BOT_RUN_ID: runId,
+      UNIVERSAL_BOT_DEBUG_DIR: debugDir,
+    },
+    };
+  }
+  return {
+    runId,
+    debugDir,
+    tmpDir,
+    attemptLabel: `${attemptNumber}/${maxAttempts}`,
+    identity,
+    env: {
+      ...baseEnv,
+      HOUSEKEEPER_CONCURRENCY: "1",
+      UNIVERSAL_BOT_RUN_ID: runId,
+      UNIVERSAL_BOT_DEBUG_DIR: debugDir,
+      BOT_FORCE_IDENTITY: identity.id,
+    },
+  };
+}
+
+function liveFailureIsRetryable(text: string): boolean {
+  return /Chrome DevTools endpoint never came up|bot crash|SIGTRAP|browser.*crash|timed out|timeout=1|account already exists|already have an account|password reset|reset your password|wrong.*account|oauth_session_not_persisted|needs_login/i.test(
+    text,
+  );
 }
 
 function runProcessGroup(
@@ -418,7 +506,45 @@ export function discoverLiveRunner(config: {
   log?: (line: string) => void;
 }): LiveRunner {
   const timeout = config.timeoutMs ?? 9 * 60 * 1000;
-  return async (service) => {
+  const usedByService = new Map<string, string[]>();
+  return async (service, attempt) => {
+    const used = usedByService.get(service) ?? [];
+    let lease = leaseLocalLiveRun({
+      repoRoot: config.repoRoot,
+      service,
+      ...(attempt !== undefined ? { attempt } : {}),
+      excludeIdentityIds: used,
+    });
+    if (lease.identity === undefined) {
+      config.log?.(`live: ${service}: no fresh robot available — replenishing verify fleet`);
+      await replenishVerifyPool({
+        force: true,
+        rotateAll: true,
+        maxPerPass: Number(process.env.ROBOT_REPLENISH_ON_EXHAUSTION_MAX ?? "9999"),
+        log: (line) => config.log?.(`live: ${service}: ${line}`),
+      }).catch((err) => {
+        config.log?.(
+          `live: ${service}: fleet replenish failed (non-fatal): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return "";
+      });
+      lease = leaseLocalLiveRun({
+        repoRoot: config.repoRoot,
+        service,
+        ...(attempt !== undefined ? { attempt } : {}),
+        excludeIdentityIds: used,
+      });
+      if (lease.identity === undefined) {
+        config.log?.(
+          `live: ${service} → red (run_id=${lease.runId} retryable=0 no fresh robot available after replenish)`,
+        );
+        return { green: false, retryable: false };
+      }
+    }
+    used.push(lease.identity.id);
+    usedByService.set(service, used);
     try {
       const { stdout, stderr, code, signal, timedOut } = await runProcessGroup(
         "node",
@@ -427,27 +553,58 @@ export function discoverLiveRunner(config: {
           cwd: config.repoRoot,
           maxBuffer: 64 * 1024 * 1024,
           timeoutMs: timeout,
-          env: { ...process.env, HOUSEKEEPER_CONCURRENCY: "1" },
+          env: lease.env,
         },
       );
       const out = `${stdout}\n${stderr}`;
       const green = /extracted \d+ credential|outcome=ok|→ ok \(/i.test(out);
       if (green) {
-        config.log?.(`live: ${service} → green`);
+        config.log?.(`live: ${service} → green (try ${lease.attemptLabel})`);
       } else {
         const tail = tailForLog(out);
+        const retryable = timedOut || liveFailureIsRetryable(out);
+        const terminal = attempt === undefined || attempt.attempt >= attempt.maxAttempts;
+        const prefix = terminal
+          ? `live: ${service} → red`
+          : `live: ${service} try ${lease.attemptLabel} → red`;
         config.log?.(
-          `live: ${service} → red (exit=${code ?? "null"} signal=${signal ?? "none"}${
+          `${prefix} (run_id=${lease.runId} retryable=${retryable ? 1 : 0} identity=${lease.identity.id} exit=${code ?? "null"} signal=${signal ?? "none"}${
             timedOut ? " timeout=1" : ""
           }${tail.length > 0 ? ` tail=${tail}` : ""})`,
         );
+        return { green, retryable };
       }
       return { green };
     } catch (err) {
+      const terminal = attempt === undefined || attempt.attempt >= attempt.maxAttempts;
+      const prefix = terminal
+        ? `live: ${service} → red`
+        : `live: ${service} try ${lease.attemptLabel} → red`;
       config.log?.(
-        `live: ${service} → red (spawn_error=${err instanceof Error ? err.message : String(err)})`,
+        `${prefix} (run_id=${lease.runId} retryable=1 identity=${lease.identity.id} spawn_error=${
+          err instanceof Error ? err.message : String(err)
+        })`,
       );
-      return { green: false };
+      return { green: false, retryable: true };
+    } finally {
+      try {
+        recordSpent(lease.identity.id, service, new Date().toISOString());
+      } catch (err) {
+        config.log?.(
+          `live: ${service} spend ${lease.identity.id} failed (non-fatal): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      try {
+        releaseIdentityLease(lease.runId);
+      } catch (err) {
+        config.log?.(
+          `live: ${service} release ${lease.identity.id} failed (non-fatal): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
   };
 }
@@ -462,6 +619,7 @@ export function makeLiveGate(config: {
   baselineCanaryGreen: number;
   minClusterMove: number;
   concurrency?: number;
+  maxAttempts?: number;
   runner: LiveRunner;
   build: () => Promise<void>;
   log?: (line: string) => void;
@@ -475,6 +633,7 @@ export function makeLiveGate(config: {
       baselineCanaryGreen: config.baselineCanaryGreen,
       minClusterMove: config.minClusterMove,
       ...(config.concurrency !== undefined ? { concurrency: config.concurrency } : {}),
+      ...(config.maxAttempts !== undefined ? { maxAttempts: config.maxAttempts } : {}),
     });
     return { passed: v.passed, reason: v.reason };
   };

@@ -9,6 +9,8 @@ import {
   loadIdentities,
   loadUsage,
   recordSpent,
+  releaseIdentityLease,
+  reserveIdentityForService,
   verifyPoolConfigured,
   type VerifyIdentity,
   type UsageRecord,
@@ -143,5 +145,66 @@ describe("notebook I/O (temp dir)", () => {
     expect(pickUnspentIdentities(POOL, usage, "sentry", "google", 3).map((p) => p.id)).toEqual([
       "verify-03",
     ]);
+  });
+
+  it("reserves identities in a file-backed lease table and excludes active leases", () => {
+    writeFileSync(
+      join(dir, "verify-identities.json"),
+      JSON.stringify({
+        identities: [
+          { id: "verify-01", email: "verify-01@trustysquire.ai", profileDir: "/p/1", providers: ["google"] },
+          { id: "verify-02", email: "verify-02@trustysquire.ai", profileDir: "/p/2", providers: ["google"] },
+        ],
+      }),
+    );
+
+    const first = reserveIdentityForService({
+      service: "ipinfo",
+      provider: "google",
+      runId: "run-1",
+    });
+    const second = reserveIdentityForService({
+      service: "instant-db",
+      provider: "google",
+      runId: "run-2",
+    });
+    const third = reserveIdentityForService({
+      service: "langfuse",
+      provider: "google",
+      runId: "run-3",
+    });
+
+    expect(first?.id).toBe("verify-01");
+    expect(second?.id).toBe("verify-02");
+    expect(third).toBeNull();
+
+    releaseIdentityLease("run-1");
+    const fourth = reserveIdentityForService({
+      service: "langfuse",
+      provider: "google",
+      runId: "run-4",
+    });
+    expect(fourth?.id).toBe("verify-01");
+  });
+
+  it("does not reserve an identity already spent at that service", () => {
+    writeFileSync(
+      join(dir, "verify-identities.json"),
+      JSON.stringify({
+        identities: [
+          { id: "verify-01", email: "verify-01@trustysquire.ai", profileDir: "/p/1", providers: ["google"] },
+          { id: "verify-02", email: "verify-02@trustysquire.ai", profileDir: "/p/2", providers: ["google"] },
+        ],
+      }),
+    );
+    recordSpent("verify-01", "ipinfo", "2026-06-19T00:00:00Z");
+
+    const picked = reserveIdentityForService({
+      service: "ipinfo",
+      provider: "google",
+      runId: "run-spent",
+    });
+
+    expect(picked?.id).toBe("verify-02");
   });
 });

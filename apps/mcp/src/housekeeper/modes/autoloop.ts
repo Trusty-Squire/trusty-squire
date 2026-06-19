@@ -37,6 +37,20 @@ function liveGateConcurrencyFromEnv(): number {
   return Math.floor(raw);
 }
 
+function liveRetryBudgetFromEnv(): number {
+  const raw = Number(process.env.TRUSTY_SQUIRE_LIVE_RETRY_BUDGET ?? "1");
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  return Math.floor(raw);
+}
+
+function legacyBestOfFromEnv(): number | undefined {
+  const rawEnv = process.env.TRUSTY_SQUIRE_LIVE_BEST_OF;
+  if (rawEnv === undefined) return undefined;
+  const raw = Number(rawEnv);
+  if (!Number.isFinite(raw) || raw < 1) return 1;
+  return Math.floor(raw);
+}
+
 function formatOwnerCounts(routed: readonly { owner: FailureOwner }[]): string {
   const counts = new Map<FailureOwner, number>();
   for (const owner of OWNER_ORDER) counts.set(owner, 0);
@@ -66,6 +80,7 @@ export async function runAutoloop(opts: {
     .filter((s) => s.length > 0);
   const minClusterMove = Number(process.env.TRUSTY_SQUIRE_FIX_MIN_MOVE ?? "2") || 2;
   const liveGateConcurrency = liveGateConcurrencyFromEnv();
+  const liveGateMaxAttempts = legacyBestOfFromEnv() ?? liveRetryBudgetFromEnv() + 1;
 
   const runner = discoverLiveRunner({ repoRoot, log });
   const build = makeDistBuilder({ repoRoot });
@@ -74,12 +89,13 @@ export async function runAutoloop(opts: {
   // rejects any fix that drops the canary below this. Measured against the
   // CURRENT (pre-loop) code, so it reflects reality at the start of the run.
   log(
-    `measuring canary baseline (live, concurrency=${liveGateConcurrency}): ${canary.join(", ")}…`,
+    `measuring canary baseline (live, concurrency=${liveGateConcurrency}, retry_budget=${liveGateMaxAttempts - 1}): ${canary.join(", ")}…`,
   );
   const baselineCanaryGreen = await measureCanaryBaseline(
     runner,
     canary,
     liveGateConcurrency,
+    liveGateMaxAttempts,
   );
   log(`canary baseline: ${baselineCanaryGreen}/${canary.length} green`);
   if (baselineCanaryGreen === 0) {
@@ -97,6 +113,7 @@ export async function runAutoloop(opts: {
     baselineCanaryGreen,
     minClusterMove,
     concurrency: liveGateConcurrency,
+    maxAttempts: liveGateMaxAttempts,
     runner,
     build,
     log,

@@ -15,7 +15,23 @@
 // tests fake it), so the gate logic is unit-tested with zero browsers.
 
 // Run ONE service live; report whether it produced a working credential.
-export type LiveRunner = (service: string) => Promise<{ green: boolean }>;
+export type LiveRunAttempt = {
+  /** 1-based attempt number for this service within a best-of-N live check. */
+  attempt: number;
+  /** Maximum attempts the oracle will make for this service. */
+  maxAttempts: number;
+};
+
+export interface LiveRunResult {
+  green: boolean;
+  /** Whether this red outcome is worth retrying with a fresh identity. */
+  retryable?: boolean;
+}
+
+export type LiveRunner = (
+  service: string,
+  attempt?: LiveRunAttempt,
+) => Promise<LiveRunResult>;
 
 export interface LiveGateInput {
   /** The cluster's services (the fix targets these). */
@@ -28,6 +44,8 @@ export interface LiveGateInput {
   minClusterMove: number;
   /** Maximum live service runs in flight. Defaults to 1. */
   concurrency?: number;
+  /** Per-service best-of-N attempts. Defaults to 1; autoloop defaults this to 3. */
+  maxAttempts?: number;
 }
 
 export interface LiveGateVerdict {
@@ -49,10 +67,33 @@ function normalizeConcurrency(raw: number | undefined): number {
   return Math.floor(raw);
 }
 
+function normalizeMaxAttempts(raw: number | undefined): number {
+  if (raw === undefined || !Number.isFinite(raw) || raw < 1) return 1;
+  return Math.floor(raw);
+}
+
+async function runBestOf(
+  run: LiveRunner,
+  service: string,
+  maxAttempts: number,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await run(service, { attempt, maxAttempts });
+      if (result.green) return true;
+      if (result.retryable !== true) return false;
+    } catch {
+      // a crash is a non-green attempt, not a gate error
+    }
+  }
+  return false;
+}
+
 async function countGreen(
   run: LiveRunner,
   services: readonly string[],
   concurrency: number = 1,
+  maxAttempts: number = 1,
 ): Promise<number> {
   // Sequential by default. When enabled, concurrency is bounded because each
   // service run may consume a browser, identity, proxy slot, and signup quota.
@@ -65,11 +106,7 @@ async function countGreen(
         const i = next++;
         const service = services[i];
         if (service === undefined) return;
-        try {
-          if ((await run(service)).green) green += 1;
-        } catch {
-          // a crash is a non-green outcome, not a gate error
-        }
+        if (await runBestOf(run, service, maxAttempts)) green += 1;
       }
     }
   );
@@ -83,6 +120,7 @@ async function countGateGroups(
   run: LiveRunner,
   tasks: readonly LiveGateTask[],
   concurrency: number,
+  maxAttempts: number,
 ): Promise<{ clusterGreen: number; canaryGreen: number }> {
   let clusterGreen = 0;
   let canaryGreen = 0;
@@ -94,14 +132,9 @@ async function countGateGroups(
         const i = next++;
         const task = tasks[i];
         if (task === undefined) return;
-        try {
-          const result = await run(task.service);
-          if (result.green) {
-            if (task.group === "cluster") clusterGreen += 1;
-            else canaryGreen += 1;
-          }
-        } catch {
-          // a crash is a non-green outcome, not a gate error
+        if (await runBestOf(run, task.service, maxAttempts)) {
+          if (task.group === "cluster") clusterGreen += 1;
+          else canaryGreen += 1;
         }
       }
     }
@@ -115,6 +148,7 @@ export async function runLiveGate(
   input: LiveGateInput,
 ): Promise<LiveGateVerdict> {
   const concurrency = normalizeConcurrency(input.concurrency);
+  const maxAttempts = normalizeMaxAttempts(input.maxAttempts);
   const { clusterGreen, canaryGreen } = await countGateGroups(
     run,
     [
@@ -122,6 +156,7 @@ export async function runLiveGate(
       ...input.canary.map((service) => ({ group: "canary" as const, service })),
     ],
     concurrency,
+    maxAttempts,
   );
 
   const clusterMoved = clusterGreen >= input.minClusterMove;
@@ -154,6 +189,12 @@ export async function measureCanaryBaseline(
   run: LiveRunner,
   canary: readonly string[],
   concurrency?: number,
+  maxAttempts?: number,
 ): Promise<number> {
-  return countGreen(run, canary, normalizeConcurrency(concurrency));
+  return countGreen(
+    run,
+    canary,
+    normalizeConcurrency(concurrency),
+    normalizeMaxAttempts(maxAttempts),
+  );
 }
