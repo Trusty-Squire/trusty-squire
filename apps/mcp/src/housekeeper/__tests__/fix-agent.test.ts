@@ -111,7 +111,7 @@ describe("sameAction", () => {
 // ── clustering ───────────────────────────────────────────────────────
 
 describe("clusterFailures", () => {
-  it("collapses failures sharing stage+action-kind+signature across services", () => {
+  it("keeps same-shape failures service-local so regressions get live proof per service", () => {
     const clusters = clusterFailures(
       batch([
         failure({ service: "groq", signature: "sig-x" }),
@@ -119,9 +119,9 @@ describe("clusterFailures", () => {
         failure({ service: "kinde", signature: "sig-x" }),
       ]),
     );
-    expect(clusters).toHaveLength(1);
-    expect(clusters[0]!.services.sort()).toEqual(["groq", "kinde", "render"]);
-    expect(clusters[0]!.pages).toHaveLength(3);
+    expect(clusters).toHaveLength(3);
+    expect(clusters.map((c) => c.services[0]).sort()).toEqual(["groq", "kinde", "render"]);
+    expect(clusters.every((c) => c.pages.length === 1)).toBe(true);
   });
 
   it("separates same stage+action failures with different page signatures", () => {
@@ -266,8 +266,9 @@ describe("runFixAgent", () => {
       log: () => undefined,
     });
     expect(commit).not.toHaveBeenCalled();
-    expect(res.walls).toHaveLength(1);
-    expect(res.walls[0]!.reason).toMatch(/unstuck the page/);
+    expect(res.walls).toHaveLength(0);
+    expect(res.parked).toHaveLength(1);
+    expect(res.parked[0]!.reason).toMatch(/unstuck the page|recapture required|no fix/);
     // reverted every attempt (3)
     expect((prop.revert as ReturnType<typeof vi.fn>).mock.calls.length).toBe(3);
   });
@@ -289,7 +290,7 @@ describe("runFixAgent", () => {
     expect(res.committed).toHaveLength(1);
   });
 
-  it("parks an unverifiable cluster (no captured page) without proposing", async () => {
+  it("parks an unverifiable cluster (no captured page) without proposing or walling", async () => {
     const propose = vi.fn(async () => proposal(["apps/mcp/src/bot/agent.ts"]));
     const res = await runFixAgent({
       ...base,
@@ -301,8 +302,8 @@ describe("runFixAgent", () => {
       log: () => undefined,
     });
     expect(propose).not.toHaveBeenCalled();
-    expect(res.walls).toHaveLength(1);
-    expect(res.walls[0]!.reason).toMatch(/no captured page/);
+    expect(res.walls).toHaveLength(0);
+    expect(res.parked[0]!.reason).toMatch(/no captured page/);
   });
 
   it("iterates on a red gate then commits when green; reverts the failed attempt", async () => {
@@ -327,7 +328,7 @@ describe("runFixAgent", () => {
     expect(commit).toHaveBeenCalledOnce();
   });
 
-  it("records a genuine wall with the proposer's concrete reason", async () => {
+  it("rejects proposer wall claims and parks instead", async () => {
     const res = await runFixAgent({
       ...base,
       batch: batch([failure({})]),
@@ -339,7 +340,8 @@ describe("runFixAgent", () => {
       commit: async () => undefined,
       log: () => undefined,
     });
-    expect(res.walls[0]!.reason).toMatch(/phone verification required/);
+    expect(res.walls).toHaveLength(0);
+    expect(res.parked[0]!.reason).toMatch(/wall claim rejected|proposer claimed wall/);
   });
 
   it("parks (does not apply or commit) a fix that touches an out-of-bounds path", async () => {
@@ -472,7 +474,7 @@ describe("runFixAgent", () => {
     const res = await runFixAgent({
       ...base,
       batch: batch([
-        // phone → wall route; run_timeout → drain route; oauth_handshake →
+        // phone → capability_gap; run_timeout → drain route; oauth_handshake →
         // capability_gap route. None may reach the proposer.
         failure({ service: "p", signature: "s-p", failure_stage: "phone" }),
         failure({ service: "t", signature: "s-t", failure_stage: "run_timeout" }),
@@ -486,11 +488,10 @@ describe("runFixAgent", () => {
     });
     expect(propose).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
-    // phone → wall; run_timeout + oauth_handshake → parked (router-drain / -capability_gap).
-    expect(res.walls.some((w) => w.reason.startsWith("router:"))).toBe(true);
-    expect(res.parked.filter((p) => p.reason.startsWith("router-")).length).toBe(2);
+    expect(res.walls).toHaveLength(0);
+    expect(res.parked.filter((p) => p.reason.startsWith("router-")).length).toBe(3);
     expect(res.routed.map((r) => [r.route, r.owner, r.disposition])).toEqual([
-      ["wall", "external", "blocked_wall"],
+      ["capability_gap", "capability", "needs_capability"],
       ["drain", "retry", "retry_later"],
       ["capability_gap", "capability", "needs_capability"],
     ]);
@@ -512,7 +513,7 @@ describe("runFixAgent", () => {
     expect(commit).toHaveBeenCalledOnce();
   });
 
-  it("router gate: curated manual facts wall even in-fence clusters before proposer spend", async () => {
+  it("router gate: curated manual facts do not wall in-fence clusters", async () => {
     const propose = vi.fn(async () => proposal(["apps/mcp/src/bot/agent.ts"]));
     const res = await runFixAgent({
       ...base,
@@ -524,9 +525,9 @@ describe("runFixAgent", () => {
       commit: async () => undefined,
       log: () => undefined,
     });
-    expect(propose).not.toHaveBeenCalled();
-    expect(res.walls[0]!.reason).toMatch(/curated needs-manual/);
-    expect(res.routed[0]!.owner).toBe("external");
+    expect(propose).toHaveBeenCalled();
+    expect(res.walls).toHaveLength(0);
+    expect(res.routed[0]!.owner).toBe("code");
   });
 
   it("bumps the rc per committed cluster", async () => {

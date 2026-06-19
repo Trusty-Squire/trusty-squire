@@ -651,10 +651,32 @@ function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
 // verification/OTP step. Both signals are required — a 4-8 digit value
 // alone could be a postal code or an all-numeric project name, and a
 // "code"-mentioning reason alone could be a coupon field.
-function isOtpCodeFill(observed: PostVerifyStep): boolean {
+function isOtpCodeFill(
+  observed: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): boolean {
   if (observed.kind !== "fill") return false;
   const value = observed.value.trim();
   if (!/^\d{4,8}$/.test(value)) return false;
+  const target = inventory.find((e) => e.selector === observed.selector);
+  const targetText = [
+    target?.id,
+    target?.name,
+    target?.placeholder,
+    target?.ariaLabel,
+    target?.labelText,
+    target?.visibleText,
+    target?.testId,
+  ]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (/\b(?:zip|postal|postcode|billing\s+(?:zip|postal|code)|country)\b/.test(targetText)) {
+    return false;
+  }
+  if (/\b(?:zip|postal|postcode|billing\s+(?:zip|postal|code)|country)\b/i.test(observed.reason)) {
+    return false;
+  }
   return /\b(verif|otp|one[\s-]?time|code|2fa|mfa)\b/i.test(observed.reason);
 }
 
@@ -730,7 +752,7 @@ function translateStep(
       // synthesizing). The await_email_code step re-fetches a fresh code at
       // replay time and finds the input heuristically. label_hint is
       // best-effort — included only when the field happens to be labeled.
-      if (isOtpCodeFill(observed)) {
+      if (isOtpCodeFill(observed, inventory)) {
         const otpHint = resolveLabelHint(observed.selector, inventory, roundIndex);
         return {
           kind: "ok",
@@ -1090,7 +1112,10 @@ function resolveClickHint(
   // the modal context — exactly the same shape pickRowDisambiguator
   // already handles for fill/select.
   const duplicates = inventory.filter(
-    (e) => pickClickText(e) === hint && e.selector !== selector,
+    (e) =>
+      pickClickText(e) === hint &&
+      e.selector !== selector &&
+      !isOwnFormControlLabelEcho(match, e, hint),
   );
   const role = inferRoleHint(match);
   const hrefHint = pickHrefHint(match);
@@ -1123,6 +1148,24 @@ function resolveClickHint(
   const domHint = pickStableDomHint(match);
   if (domHint !== undefined) result.dom_hint = domHint;
   return result;
+}
+
+function isOwnFormControlLabelEcho(
+  target: InteractiveElement,
+  candidate: InteractiveElement,
+  hint: string,
+): boolean {
+  if (
+    target.tag !== "input" ||
+    (target.type !== "radio" && target.type !== "checkbox")
+  ) {
+    return false;
+  }
+  if (candidate.tag !== "label") return false;
+  return (
+    (target.labelText ?? "").trim() === hint &&
+    (candidate.visibleText ?? candidate.labelText ?? "").trim() === hint
+  );
 }
 
 // 0.8.3-rc.1 — does this fill target look like an API-key / token
@@ -1165,6 +1208,19 @@ function looksLikeTokenNameInput(el: InteractiveElement): boolean {
 }
 
 function pickClickText(el: InteractiveElement): string | null {
+  // Radio/checkbox inputs are often visually represented by their
+  // attached <label>, while their stable `name` is shared by every
+  // option in the group (Sentry: two radios named "subscribe"). For
+  // replay, the user-visible option label is the semantic target; using
+  // the shared name collapses distinct choices into an ambiguous hint.
+  if (
+    el.tag === "input" &&
+    (el.type === "radio" || el.type === "checkbox") &&
+    (el.labelText ?? "").trim().length > 0
+  ) {
+    const label = el.labelText!.trim();
+    return label.length > 80 ? label.slice(0, 80) : label;
+  }
   // Prefer visibleText (what humans read); fall back through ariaLabel,
   // title, and iconLabel for icon-only buttons. iconLabel is the most
   // common surface for modern dashboards that ship "Sign in with X"

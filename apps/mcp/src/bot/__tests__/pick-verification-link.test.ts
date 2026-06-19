@@ -85,6 +85,22 @@ describe("pickVerificationLinkFromHtml (anchor-text fallback for tracker-wrapped
     expect(pickVerificationLinkFromHtml(`<a href="https://t.co/x">Verify your email</a>`)).toBe("https://t.co/x");
     expect(pickVerificationLinkFromHtml(`<a href="https://t.co/y">Confirm email address</a>`)).toBe("https://t.co/y");
   });
+  it("picks confirmation-instructions action text over a root marketing link", () => {
+    expect(
+      pickVerificationLinkFromHtml(
+        `<a href="https://stackblitz.com/">StackBlitz</a>` +
+          `<a href="https://stackblitz.com/users/confirmation?confirmation_token=abc">Confirmation instructions</a>`,
+      ),
+    ).toBe("https://stackblitz.com/users/confirmation?confirmation_token=abc");
+  });
+  it("accepts single-quoted hrefs in confirmation emails", () => {
+    expect(
+      pickVerificationLinkFromHtml(
+        `<a href='https://stackblitz.com/'>StackBlitz</a>` +
+          `<a class='button' href='https://stackblitz.com/users/confirmation?confirmation_token=abc'>Confirm my account</a>`,
+      ),
+    ).toBe("https://stackblitz.com/users/confirmation?confirmation_token=abc");
+  });
   it("decodes &amp; in the href", () => {
     expect(pickVerificationLinkFromHtml(`<a href="https://x.io/v?a=1&amp;b=2">Activate</a>`)).toBe("https://x.io/v?a=1&b=2");
   });
@@ -114,6 +130,18 @@ describe("pickServiceDomainLink", () => {
         "cloud.langfuse.com",
       ),
     ).toBeNull();
+  });
+
+  it("skips a same-domain root link before using a deeper service-domain action", () => {
+    expect(
+      pickServiceDomainLink(
+        [
+          "https://stackblitz.com/",
+          "https://stackblitz.com/users/confirmation?confirmation_token=abc",
+        ],
+        "stackblitz.com",
+      ),
+    ).toBe("https://stackblitz.com/users/confirmation?confirmation_token=abc");
   });
 });
 

@@ -593,6 +593,30 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // lifecycle lives in modes/verify.ts; this just wires it.
   const replay = createReplayRunner();
 
+  // Fresh-identity verifier — default verifier mode must use the same robot
+  // fleet as heal mode. Without this wiring, `mcp housekeeper --once` routes
+  // OAuth pending-review skills through createReplayRunner(), which uses the
+  // shared default Chrome profile and produces false needs_login/profile-lock
+  // failures under concurrency.
+  let freshVerify: FreshVerifyRunner | undefined;
+  if (queue.name === "verifier" && verifyPoolConfigured()) {
+    const { runFreshVerify } = await import("./modes/fresh-verify.js");
+    freshVerify = (input) =>
+      runFreshVerify({
+        service: input.service,
+        skillId: input.skillId,
+        ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
+        ...(input.oauthProvider !== undefined ? { oauthProvider: input.oauthProvider } : {}),
+      });
+    console.error(
+      "[housekeeper] verify: identity pool configured — OAuth verifier tasks use fresh-identity confidence sampler",
+    );
+  } else if (queue.name === "verifier") {
+    console.error(
+      "[housekeeper] verify: no identity pool — verifier stays on single-account replay",
+    );
+  }
+
   // Auto-probe-before-retire runner — invoked by handleReplay when a replay
   // failure would otherwise count toward demotion, to tell brittleness from rot.
   const probe = createProbeRunner();
@@ -623,6 +647,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     replayMode: args.replayMode,
     once: args.once,
     notifiers,
+    ...(freshVerify !== undefined ? { freshVerify } : {}),
     ...(discover !== undefined ? { discover } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
     ...(args.intervalSeconds !== undefined

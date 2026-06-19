@@ -163,6 +163,21 @@ export function rankCandidates(candidates: readonly NavCandidate[]): RankResult 
   return { ranked, needsTiebreak };
 }
 
+function navUrlKey(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return url;
+  }
+}
+
+function candidateUrlKey(candidate: NavCandidate, currentUrl: string): string | null {
+  const target = resolveNavHref(candidate.href, currentUrl);
+  return target === null ? null : navUrlKey(target);
+}
+
 // Goal assessment for the current page. PURE over the page signals. Distinguishes
 // "we've ARRIVED at a key surface" from "this is the START of a gated create flow"
 // (a 'Create API key' button is a subgoal, not arrival — outside-voice #3) from
@@ -373,6 +388,8 @@ export async function runNavSearch(
   const log = deps.log ?? (() => {});
   const tried = new Set<string>(); // affordance selectors already clicked
   const overlayTried = new Set<string>(); // overlay controls already actioned
+  const sterileKeyUrls = new Set<string>(); // key-looking pages that yielded no progress
+  let lastContainerUrl: string | null = null;
 
   const capture = async (
     action: "navigate" | "create_key" | "overlay_dismiss" | "overlay_advance" | "extract",
@@ -431,6 +448,9 @@ export async function runNavSearch(
     const url = browser.currentUrl();
     const text = await browser.extractText().catch(() => "");
     const goal = assessKeyGoal({ url, pageText: text, inventory: inv });
+    if (!KEYS_DESTINATION_URL.test(url)) {
+      lastContainerUrl = url;
+    }
     if (goal.kind === "on_key_surface" || goal.kind === "create_gated") {
       const creds = await deps.extractKey().catch(() => null);
       if (creds !== null && Object.keys(creds).length > 0) {
@@ -476,7 +496,13 @@ export async function runNavSearch(
     // Drop already-tried AND off-site anchors: the key always lives inside the
     // authenticated app, never on its marketing/docs domain.
     const candidates = enumerateCandidates(mergedInv).filter(
-      (c) => !tried.has(c.selector) && !isOffSiteHref(url, c.href),
+      (c) =>
+        !tried.has(c.selector) &&
+        !isOffSiteHref(url, c.href) &&
+        !(
+          candidateUrlKey(c, url) !== null &&
+          sterileKeyUrls.has(candidateUrlKey(c, url)!)
+        ),
     );
     const rank = rankCandidates(candidates);
     let pick: string | null = rank.ranked[0]?.selector ?? null;
@@ -485,6 +511,20 @@ export async function runNavSearch(
       if (pick !== null && tried.has(pick)) pick = null;
     }
     if (pick === null) {
+      if (
+        KEYS_DESTINATION_URL.test(url) &&
+        lastContainerUrl !== null &&
+        navUrlKey(lastContainerUrl) !== navUrlKey(url) &&
+        !sterileKeyUrls.has(navUrlKey(url))
+      ) {
+        sterileKeyUrls.add(navUrlKey(url));
+        log(
+          `nav-search: sterile key surface ${url} — no credential/create progress; ` +
+            `returning to ${lastContainerUrl} to try an alternate path`,
+        );
+        await browser.navigate(lastContainerUrl).catch(() => {});
+        continue;
+      }
       // No rankable nav — but a gating onboarding CHOICE step (role/usage
       // picker) blocks the dashboard. Satisfy the minimal step to advance.
       const choice = planOnboardingChoice({ url, pageText: text, inventory: inv });

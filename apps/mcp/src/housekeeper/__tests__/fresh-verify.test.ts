@@ -10,7 +10,11 @@ import {
   DEFAULT_REJECT_CEILING,
   DEFAULT_MAX_SAMPLES,
 } from "../fresh-verify.js";
-import type { VerifyIdentity } from "../identity-pool.js";
+import {
+  claimIdentity,
+  releaseIdentity,
+  type VerifyIdentity,
+} from "../identity-pool.js";
 
 const ID = (id: string): VerifyIdentity => ({
   id,
@@ -252,6 +256,29 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(res.available).toBe(0);
     expect(res.verdict).toBe("hold");
     expect(runSignup).not.toHaveBeenCalled();
+  });
+
+  it("does not use an identity that is already leased by another verifier task", async () => {
+    expect(claimIdentity("verify-01")).toBe(true);
+    try {
+      const used: string[] = [];
+      const res = await freshVerifyService({
+        service: "sentry",
+        provider: "google",
+        identities: POOL,
+        usage: [],
+        runSignup: async (i) => {
+          used.push(i.id);
+          return { success: true, credential: `key-${i.id}` };
+        },
+        markSpent: () => undefined,
+      });
+      expect(res.kind).toBe("verified");
+      expect(used).not.toContain("verify-01");
+      expect(used[0]).toBe("verify-02");
+    } finally {
+      releaseIdentity("verify-01");
+    }
   });
 
   it("custom confidence bounds are honored", async () => {

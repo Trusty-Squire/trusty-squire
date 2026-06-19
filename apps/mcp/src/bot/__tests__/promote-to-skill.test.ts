@@ -2807,6 +2807,63 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
     if (result.kind !== "rejected") return;
     expect(result.error_kind).toBe("incomplete_replay_graph");
   });
+
+  it("does not synthesize a billing ZIP code fill as await_email_code", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://console.perplexity.ai/account/setup",
+          title: "Set up your API account",
+          html: "<html><body>Billing zip code <input placeholder='94102'></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "input",
+            placeholder: "94102",
+            ariaLabel: "Billing zip code",
+            selector: "input.zip",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input.zip",
+          value: "94102",
+          reason: "Fill in the billing zip code.",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://console.perplexity.ai/group/abc/settings",
+          title: "API Keys",
+          html: "<html><body>API Key pplx-abcdefghijklmnopqrstuvwxyz0123456789</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [],
+        observed: {
+          kind: "extract",
+          reason: "API key pplx-abcdefghijklmnopqrstuvwxyz0123456789 is visible.",
+        },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.steps.map((s) => s.kind)).not.toContain("await_email_code");
+    const zipFill = result.skill.steps.find(
+      (s) => s.kind === "fill" && s.value_template === "94102",
+    );
+    expect(zipFill).toBeDefined();
+  });
 });
 
 // ── Duplicate generic placeholder → unique stable name/id ───────────

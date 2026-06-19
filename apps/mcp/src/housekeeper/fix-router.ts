@@ -5,7 +5,9 @@
 // failures it can safely fix, and routes everything else away:
 //
 //   drain          — flaky / timing; a re-run resolves it, no code fix
-//   wall           — genuinely unservable (dead domain, phone/payment/manual)
+//   wall           — deprecated/no-op in autonomous mode. We do not predeclare
+//                    walls from stale failure prose; regressions are either
+//                    fixed, retried, or parked for capability work.
 //   fix            — DETERMINISTIC and inside the fix-agent's path-fence
 //                    (the post-OAuth nav planner: planner_loop / extract).
 //                    The ONLY route that spends an autonomous code fix.
@@ -66,7 +68,10 @@ const FLAKY_STAGES: ReadonlySet<FailureStage> = new Set<FailureStage>([
   "hydration",
 ]);
 
-// Stages that need a faculty the bot doesn't have → unservable autonomously.
+// Stages that need a faculty outside the current code fence. These are parked
+// as capability gaps, not walls; prior-green regressions have repeatedly looked
+// like "manual"/"payment"/"phone" in stale prose before a code fix recovered
+// them.
 const CAPABILITY_WALL_STAGES: ReadonlySet<FailureStage> = new Set<FailureStage>([
   "phone",
   "payment",
@@ -94,12 +99,18 @@ function verdict(
 }
 
 export function classifyCluster(i: RouterInput): RouterVerdict {
-  // Mechanical walls first — operator curation, then a dead host.
+  // No automatic walls. Operator curation and dead-DNS observations can be stale
+  // or a URL-resolution regression; route in-fence stages to the fixer and park
+  // out-of-fence stages as capability work.
   if (i.curatedNeedsManual) {
-    return verdict("wall", "curated needs-manual (operator-confirmed unservable)");
+    return IN_FENCE_STAGES.has(i.stage)
+      ? verdict("fix", "curated/manual marker present, but in-fence regression — attempt fix")
+      : verdict("capability_gap", "curated/manual marker present — requires explicit capability handling");
   }
   if (!i.dnsAlive) {
-    return verdict("wall", "signup domain does not resolve (DNS dead)");
+    return IN_FENCE_STAGES.has(i.stage)
+      ? verdict("fix", "signup domain probe failed, but in-fence regression may be URL resolution — attempt fix")
+      : verdict("capability_gap", "signup domain probe failed — requires URL/capability investigation");
   }
   // Flaky overrides stage: if it flips green on retry, a fix would chase noise.
   if (i.recentGreenRate >= RECENT_GREEN_RATE_FLAKY) {
@@ -119,9 +130,9 @@ export function classifyCluster(i: RouterInput): RouterVerdict {
   if (FLAKY_STAGES.has(i.stage)) {
     return verdict("drain", `timing/env stage=${i.stage} — retry`);
   }
-  // Needs a faculty the bot lacks → unservable autonomously.
+  // Needs a faculty outside the current fence → surface, don't call it a wall.
   if (CAPABILITY_WALL_STAGES.has(i.stage)) {
-    return verdict("wall", `needs a faculty the bot lacks (stage=${i.stage})`);
+    return verdict("capability_gap", `out-of-fence capability stage=${i.stage} — no wall routing`);
   }
   // Deterministic, real, but OUTSIDE the fence — surface, don't hack.
   return verdict(

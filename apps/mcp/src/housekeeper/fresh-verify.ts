@@ -28,7 +28,9 @@
 // through the identity's profile/proxy.
 
 import {
+  acquireIdentityLease,
   pickUnspentIdentities,
+  releaseIdentity,
   type IdentityProvider,
   type UsageRecord,
   type VerifyIdentity,
@@ -245,19 +247,18 @@ export async function freshVerifyService(opts: {
   // the fleet while still letting a couple of flakes be re-drawn.
   const flakeAllowance = confidence.maxSamples; // up to 1 redraw per informative slot
   const maxPull = confidence.maxSamples + flakeAllowance;
-  const pool = pickUnspentIdentities(
+  const candidates = pickUnspentIdentities(
     opts.identities,
     opts.usage,
     opts.service,
     opts.provider,
     maxPull,
   );
-
   // Need at least ONE identity to gather any signal. (The old code required
   // `agreement` here; with the sampler, a single informative attempt is enough
   // to start moving the posterior — and a 1-identity 0/1 still HOLDs rather than
   // rejecting on no signal.)
-  if (pool.length === 0) {
+  if (candidates.length === 0) {
     log(
       `[fresh-verify] ${opts.service}: no unspent ${opts.provider} identities — pool ` +
         `exhausted for this service; mint more robots or fall back to refetch`,
@@ -272,7 +273,7 @@ export async function freshVerifyService(opts: {
       samples: 0,
       passRateLcb: 0,
       passRateUcb: 1,
-      available: pool.length,
+      available: candidates.length,
       outcomes: [],
     };
   }
@@ -283,18 +284,34 @@ export async function freshVerifyService(opts: {
   let failureKind: string | undefined;
   let lastEval = evaluateConfidence(0, 0, { ...confidence, drawsRemaining: 1 });
 
-  for (let i = 0; i < pool.length; i++) {
-    const identity = pool[i]!;
+  let attemptedAnyIdentity = false;
+  for (let i = 0; i < candidates.length; i++) {
+    const identity = candidates[i]!;
+    const lease = acquireIdentityLease(identity.id);
+    if (!lease.ok) {
+      log(
+        `[fresh-verify] ${opts.service}: ${identity.id} is already leased by another verifier task — skipping this pass`,
+      );
+      continue;
+    }
+    attemptedAnyIdentity = true;
     log(`[fresh-verify] ${opts.service}: signing up as ${identity.id} (${identity.email})`);
     let res: { success: boolean; credential?: string; reason?: string };
+    // Robot scratchpad: once a robot is assigned to a service trial, record the
+    // (identity, service) pair BEFORE launching the browser. If the process is
+    // killed, Chrome hangs, or the machine reboots mid-run, the robot may have
+    // reached the service and become a returning user; reusing it for the same
+    // service would violate the fresh-identity invariant. recordSpent is
+    // idempotent, so recording up-front is safe and makes interrupted trials
+    // visible to later verifier passes.
+    opts.markSpent(identity.id, opts.service);
     try {
       res = await opts.runSignup(identity);
     } catch (err) {
       res = { success: false, reason: err instanceof Error ? err.message : String(err) };
+    } finally {
+      releaseIdentity(identity.id);
     }
-    // One-shot: this identity is now a returning user at the service, recorded
-    // even on failure (it still created/attempted an account there).
-    opts.markSpent(identity.id, opts.service);
 
     const observation = classifyAttempt(res);
     outcomes.push({
@@ -350,7 +367,7 @@ export async function freshVerifyService(opts: {
 
     // How many MORE informative draws could the remaining pool afford? (An
     // over-estimate is fine — evaluateConfidence also caps on maxSamples.)
-    const drawsRemaining = pool.length - (i + 1);
+    const drawsRemaining = candidates.length - (i + 1);
     lastEval = evaluateConfidence(successes, failures, {
       ...confidence,
       drawsRemaining,
@@ -358,6 +375,25 @@ export async function freshVerifyService(opts: {
     if (lastEval.verdict === "promote" || lastEval.verdict === "reject") break;
     // hold also stops (budget/pool exhausted); sample_more continues the loop.
     if (lastEval.verdict === "hold") break;
+  }
+
+  if (!attemptedAnyIdentity) {
+    log(
+      `[fresh-verify] ${opts.service}: all unspent ${opts.provider} identities are currently leased by other verifier tasks`,
+    );
+    return {
+      kind: "insufficient_identities",
+      service: opts.service,
+      verdict: "hold",
+      promoted: false,
+      successes: 0,
+      failures: 0,
+      samples: 0,
+      passRateLcb: 0,
+      passRateUcb: 1,
+      available: 0,
+      outcomes: [],
+    };
   }
 
   // Re-evaluate with no draws remaining so a loop that simply ran out of pool

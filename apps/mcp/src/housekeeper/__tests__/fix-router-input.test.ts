@@ -47,13 +47,15 @@ describe("buildRouterInput", () => {
     expect(buildRouterInput(cluster, b).recentGreenRate).toBeCloseTo(1 / 3);
   });
 
-  it("uses the most conservative green rate across a mixed cluster", () => {
+  it("uses each service's own green rate now that clusters are service-local", () => {
     const b = batch([
       failure({ service: "flaky", signature: "sig-shared" }),
       failure({ service: "deterministic", signature: "sig-shared" }),
     ]);
-    const cluster = clusterFailures(b)[0]!;
-    expect(buildRouterInput(cluster, b).recentGreenRate).toBe(0);
+    const clusters = clusterFailures(b);
+    const byService = new Map(clusters.map((c) => [c.services[0], buildRouterInput(c, b).recentGreenRate]));
+    expect(byService.get("flaky")).toBeCloseTo(1 / 3);
+    expect(byService.get("deterministic")).toBe(0);
   });
 
   it("folds explicit service facts into router input", () => {

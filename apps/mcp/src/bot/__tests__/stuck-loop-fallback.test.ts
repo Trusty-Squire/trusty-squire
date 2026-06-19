@@ -127,6 +127,15 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://app.launchdarkly.com/settings/authorization");
   });
 
+  it("tries Sentry's auth-token path before generic 404-prone settings paths", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://trustysquire-m3.sentry.io/onboarding/setup-docs/",
+      new Set(),
+      "sentry",
+    );
+    expect(fallback).toBe("https://trustysquire-m3.sentry.io/settings/account/api/auth-tokens/");
+  });
+
   it("does NOT compose a curated path onto an unrelated host (host gate)", () => {
     // The bot wandered onto an OAuth provider; the groq curated paths
     // must not be glued onto accounts.google.com. Falls back to the

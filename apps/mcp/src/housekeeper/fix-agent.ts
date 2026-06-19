@@ -191,7 +191,13 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
   const baseCounts = new Map<string, number>();
   for (const f of batch.failures) {
     const observedKind = f.terminal_page?.observed.kind ?? "none";
-    const baseKey = `${f.failure_stage}:${observedKind}:${f.signature}`;
+    // Service is part of the fix unit. Cross-service shape collisions produced
+    // huge heterogeneous clusters (e.g. fly/braintrust/clarifai/nomic/
+    // stackblitz/unify) whose shared "planner_loop" label hid distinct
+    // regressions and let a proposer declare a false wall for known-green
+    // services. Keep the signature useful for ordering, but require the live
+    // oracle to prove each service independently.
+    const baseKey = `${f.service}:${f.failure_stage}:${observedKind}:${f.signature}`;
     const page =
       f.terminal_capture_ref !== undefined && f.terminal_page !== undefined
         ? { service: f.service, captureRef: f.terminal_capture_ref, observed: f.terminal_page.observed }
@@ -347,28 +353,24 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
     const route = classifyCluster(buildRouterInput(cluster, opts.batch, opts.routerFacts));
     result.routed.push(routedWith(cluster, route));
     if (route.route !== "fix") {
-      if (route.route === "wall") {
-        result.walls.push(wallWith(cluster, 0, `router: ${route.reason}`));
-        log(`cluster ${cluster.id}: ROUTED → wall (no coding-agent spend) — ${route.reason}`);
-      } else {
-        result.parked.push({
-          cluster_id: cluster.id,
-          reason: `router-${route.route}: ${route.reason}`,
-          touched_paths: [],
-        });
-        log(`cluster ${cluster.id}: ROUTED → ${route.route} (no coding-agent spend) — ${route.reason}`);
-      }
+      result.parked.push({
+        cluster_id: cluster.id,
+        reason: `router-${route.route}: ${route.reason}`,
+        touched_paths: [],
+      });
+      log(`cluster ${cluster.id}: ROUTED → ${route.route} (no coding-agent spend) — ${route.reason}`);
       continue;
     }
 
-    // Can't verify a fix with no captured page — don't commit blind. Park as a
-    // wall-candidate (the honest "we can't confirm a fix here today"), and skip
-    // burning the coding agent on something we couldn't prove either way.
+    // Can't verify a fix with no captured page — don't commit blind. Park it for
+    // recapture/live repro, but do not call it a wall.
     if (cluster.pages.length === 0) {
-      result.walls.push(
-        wallWith(cluster, 0, "no captured page to verify a fix against — cannot confirm a fix today"),
-      );
-      log(`cluster ${cluster.id}: WALL-candidate — unverifiable (no captured page)`);
+      result.parked.push({
+        cluster_id: cluster.id,
+        reason: "no captured page to verify a fix against — recapture required",
+        touched_paths: [],
+      });
+      log(`cluster ${cluster.id}: parked — unverifiable (no captured page)`);
       continue;
     }
 
@@ -383,7 +385,10 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
       } catch (err) {
         if (err instanceof WallError) {
           wallReason = err.reason;
-          break;
+          priorFeedback =
+            `Do not classify this cluster as a wall. Treat this as a regression; ` +
+            `previous wall claim was: ${err.reason}`;
+          continue;
         }
         // A proposer failure (coding-agent crash, timeout, exhausted rate-limit
         // backoff) is an INFRA failure on THIS cluster — NOT a reason to kill the
@@ -483,12 +488,16 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
 
     if (!committed) {
       if (wallReason !== undefined) {
-        result.walls.push(wallWith(cluster, K, wallReason));
-        log(`cluster ${cluster.id}: WALL — ${wallReason}`);
+        result.parked.push({
+          cluster_id: cluster.id,
+          reason: `proposer claimed wall after ${K} attempt(s), rejected by no-wall policy: ${wallReason}`,
+          touched_paths: [],
+        });
+        log(`cluster ${cluster.id}: parked — proposer wall claim rejected: ${wallReason}`);
       } else if (!result.parked.some((p) => p.cluster_id === cluster.id)) {
-        const reason = `no fix both held the gate AND unstuck the page after ${K} attempt(s); no articulable infra reason`;
-        result.walls.push(wallWith(cluster, K, reason));
-        log(`cluster ${cluster.id}: WALL-candidate — ${reason}`);
+        const reason = `no fix both held the gate AND unstuck the page after ${K} attempt(s); rerun/recapture required`;
+        result.parked.push({ cluster_id: cluster.id, reason, touched_paths: [] });
+        log(`cluster ${cluster.id}: parked — ${reason}`);
       }
     }
   }

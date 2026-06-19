@@ -436,6 +436,40 @@ describe("runNavSearch", () => {
     expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_acct" } });
   });
 
+  it("recovers from a plausible but sterile token page and tries an alternate sibling path", async () => {
+    const dashboard: FakePage = {
+      url: "https://fly.test/dashboard",
+      text: "Dashboard",
+      inv: [
+        el({ tag: "a", visibleText: "Access Tokens", href: "/tokens", selector: "#global" }),
+        el({ tag: "a", visibleText: "Org Tokens", href: "/dashboard/org/tokens", selector: "#org" }),
+      ],
+    };
+    const sterileGlobalTokens: FakePage = {
+      url: "https://fly.test/tokens",
+      text: "Access Tokens No organization tokens here",
+      inv: [],
+    };
+    const orgTokens: FakePage = {
+      url: "https://fly.test/dashboard/org/tokens",
+      text: "Organization token FlyV1",
+      inv: [],
+    };
+    const browser = new FakeBrowser(dashboard, {
+      "https://fly.test/tokens": sterileGlobalTokens,
+      "https://fly.test/dashboard": dashboard,
+      "https://fly.test/dashboard/org/tokens": orgTokens,
+    });
+    const logs: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () =>
+        browser.currentUrl().includes("/dashboard/org/tokens") ? { api_key: "FlyV1 test" } : null,
+      log: (line) => logs.push(line),
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "FlyV1 test" } });
+    expect(logs.some((line) => line.includes("sterile key surface https://fly.test/tokens"))).toBe(true);
+  });
+
   it("calls captureRound each step (capture-chain parity, A2/OF#1)", async () => {
     const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "key", inv: [] };
     const browser = new FakeBrowser(

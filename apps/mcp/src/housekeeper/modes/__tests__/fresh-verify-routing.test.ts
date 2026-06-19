@@ -172,6 +172,213 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
     expect(res.reason).not.toContain("fresh-verify");
   });
 
+  it("skips instead of falling back to shared-profile replay when the fresh pool is exhausted", async () => {
+    const freshVerify: FreshVerifyRunner = vi.fn(
+      async (): Promise<RunFreshVerifyResult> => ({
+        kind: "insufficient_identities",
+        service: "fresh-svc",
+        verdict: "hold",
+        promoted: false,
+        successes: 0,
+        failures: 0,
+        samples: 0,
+        passRateLcb: 0,
+        passRateUcb: 1,
+        available: 0,
+        outcomes: [],
+      }),
+    );
+    const opts = baseOpts({ freshVerify });
+    const res = await handleReplay(TASK, opts, noLog);
+    expect(freshVerify).toHaveBeenCalledOnce();
+    expect(opts.replay).not.toHaveBeenCalled();
+    expect(res).toBe("skipped");
+  });
+
+  it("routes legacy skills through fresh-verify when oauth_provider is null but the graph has click_oauth_button", async () => {
+    const skill: Skill = {
+      ...oauthSkill(null),
+      steps: [
+        {
+          kind: "click_oauth_button",
+          provider: "google",
+          text_match: "Continue with Google",
+          provenance: { run_id: "r1", round_index: 0 },
+        },
+        {
+          kind: "extract_via_copy_button",
+          near_text_hint: "Copy",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      ],
+    };
+    const client = {
+      fetchSkill: vi.fn(async () => skill),
+      postOutcome: vi.fn(async () => ({
+        transition: "none" as const,
+        status: "pending-review",
+        verifier_succeeded: 0,
+        verifier_failed: 0,
+        consecutive_verifier_failures: 0,
+        next_freshness_due_at: null,
+      })),
+    } as unknown as HousekeeperOpts["client"];
+    const freshVerify: FreshVerifyRunner = vi.fn(
+      async (): Promise<RunFreshVerifyResult> => ({
+        kind: "verified",
+        service: "fresh-svc",
+        verdict: "promote",
+        promoted: true,
+        successes: 2,
+        failures: 0,
+        samples: 2,
+        passRateLcb: 0.34,
+        passRateUcb: 1,
+        outcomes: [],
+        transition: "promoted",
+      }),
+    );
+    const replay = vi.fn(
+      async (): Promise<ReplayOutcome> => ({ kind: "ok", via: "copy_button", credential: "k".repeat(20) }),
+    );
+    const res = await handleReplay(
+      TASK,
+      {
+        queue: { name: "verifier", fetch: async () => [] },
+        client,
+        replay,
+        freshVerify,
+      },
+      noLog,
+    );
+    expect(freshVerify).toHaveBeenCalledWith({
+      service: "fresh-svc",
+      skillId: TASK.queueItem.skill_id,
+      signupUrl: skill.signup_url,
+      oauthProvider: "google",
+    });
+    expect(replay).not.toHaveBeenCalled();
+    if (res === "skipped") throw new Error("unreachable");
+    expect(res.outcome).toBe("success");
+  });
+
+  it("reroutes through fresh-verify when stale replay discovers needs_login", async () => {
+    const freshVerify: FreshVerifyRunner = vi.fn(
+      async (): Promise<RunFreshVerifyResult> => ({
+        kind: "verified",
+        service: "fresh-svc",
+        verdict: "promote",
+        promoted: true,
+        successes: 2,
+        failures: 0,
+        samples: 2,
+        passRateLcb: 0.34,
+        passRateUcb: 1,
+        outcomes: [],
+        transition: "promoted",
+      }),
+    );
+    const replay = vi.fn(
+      async (): Promise<ReplayOutcome> => ({
+        kind: "needs_login",
+        provider: "google",
+        stepIndex: 0,
+      }),
+    );
+    const skill = oauthSkill(null);
+    const client = {
+      fetchSkill: vi.fn(async () => skill),
+      postOutcome: vi.fn(async () => ({
+        transition: "none" as const,
+        status: "pending-review",
+        verifier_succeeded: 0,
+        verifier_failed: 0,
+        consecutive_verifier_failures: 0,
+        next_freshness_due_at: null,
+      })),
+    } as unknown as HousekeeperOpts["client"];
+    const opts: HousekeeperOpts = {
+      queue: { name: "verifier", fetch: async () => [] },
+      client,
+      replay,
+      freshVerify,
+    };
+    const res = await handleReplay(TASK, opts, noLog);
+    expect(replay).toHaveBeenCalledOnce();
+    expect(freshVerify).toHaveBeenCalledWith({
+      service: "fresh-svc",
+      skillId: TASK.queueItem.skill_id,
+      signupUrl: "https://fresh.example/signup",
+      oauthProvider: "google",
+    });
+    if (res === "skipped") throw new Error("unreachable");
+    expect(res.outcome).toBe("success");
+    expect(res.transition).toBe("promoted");
+  });
+
+  it("reroutes returning-user replay divergence through fresh-verify", async () => {
+    const freshVerify: FreshVerifyRunner = vi.fn(
+      async (): Promise<RunFreshVerifyResult> => ({
+        kind: "verified",
+        service: "fresh-svc",
+        verdict: "promote",
+        promoted: true,
+        successes: 2,
+        failures: 0,
+        samples: 2,
+        passRateLcb: 0.34,
+        passRateUcb: 1,
+        outcomes: [],
+        transition: "promoted",
+      }),
+    );
+    const replay = vi.fn(
+      async (): Promise<ReplayOutcome> => ({
+        kind: "step_failed",
+        stepIndex: 18,
+        reason:
+          'No element matches text_match="Save". [returning-user: authenticated session diverged from fresh-signup capture (onboarding/nav element absent — not rot)]',
+        capturedStep: {
+          kind: "click",
+          text_match: "Save",
+          provenance: { run_id: "r1", round_index: 18 },
+        },
+      }),
+    );
+    const skill = oauthSkill(null);
+    const client = {
+      fetchSkill: vi.fn(async () => skill),
+      postOutcome: vi.fn(async () => ({
+        transition: "none" as const,
+        status: "pending-review",
+        verifier_succeeded: 0,
+        verifier_failed: 0,
+        consecutive_verifier_failures: 0,
+        next_freshness_due_at: null,
+      })),
+    } as unknown as HousekeeperOpts["client"];
+    const res = await handleReplay(
+      TASK,
+      {
+        queue: { name: "verifier", fetch: async () => [] },
+        client,
+        replay,
+        freshVerify,
+      },
+      noLog,
+    );
+    expect(replay).toHaveBeenCalledOnce();
+    expect(freshVerify).toHaveBeenCalledWith({
+      service: "fresh-svc",
+      skillId: TASK.queueItem.skill_id,
+      signupUrl: "https://fresh.example/signup",
+      oauthProvider: "google",
+    });
+    if (res === "skipped") throw new Error("unreachable");
+    expect(res.outcome).toBe("success");
+    expect(res.transition).toBe("promoted");
+  });
+
   it("does NOT route an email-only (oauth_provider=null) skill through fresh-verify", async () => {
     const skill = oauthSkill(null);
     const client = {

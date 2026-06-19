@@ -60,8 +60,14 @@ describe("google-login env helpers", () => {
   it("hasDisplay returns true on Linux only when DISPLAY is set", () => {
     const savedDisplay = process.env.DISPLAY;
     const savedPlatform = process.platform;
+    const savedSshConnection = process.env.SSH_CONNECTION;
+    const savedSshTty = process.env.SSH_TTY;
+    const savedSessionType = process.env.XDG_SESSION_TYPE;
     Object.defineProperty(process, "platform", { value: "linux" });
     try {
+      delete process.env.SSH_CONNECTION;
+      delete process.env.SSH_TTY;
+      delete process.env.XDG_SESSION_TYPE;
       delete process.env.DISPLAY;
       expect(hasDisplay()).toBe(false);
       process.env.DISPLAY = ":0";
@@ -70,6 +76,40 @@ describe("google-login env helpers", () => {
       Object.defineProperty(process, "platform", { value: savedPlatform });
       if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
       else delete process.env.DISPLAY;
+      if (savedSshConnection !== undefined) process.env.SSH_CONNECTION = savedSshConnection;
+      else delete process.env.SSH_CONNECTION;
+      if (savedSshTty !== undefined) process.env.SSH_TTY = savedSshTty;
+      else delete process.env.SSH_TTY;
+      if (savedSessionType !== undefined) process.env.XDG_SESSION_TYPE = savedSessionType;
+      else delete process.env.XDG_SESSION_TYPE;
+    }
+  });
+
+  it("hasDisplay routes SSH/TTY Linux sessions to noVNC even when DISPLAY is set", () => {
+    const savedDisplay = process.env.DISPLAY;
+    const savedPlatform = process.platform;
+    const savedSshConnection = process.env.SSH_CONNECTION;
+    const savedSessionType = process.env.XDG_SESSION_TYPE;
+    const savedForceDisplay = process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    try {
+      process.env.DISPLAY = ":99";
+      process.env.SSH_CONNECTION = "203.0.113.1 12345 203.0.113.2 22";
+      process.env.XDG_SESSION_TYPE = "tty";
+      delete process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
+      expect(hasDisplay()).toBe(false);
+      process.env.TRUSTY_SQUIRE_FORCE_DISPLAY = "true";
+      expect(hasDisplay()).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", { value: savedPlatform });
+      if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
+      else delete process.env.DISPLAY;
+      if (savedSshConnection !== undefined) process.env.SSH_CONNECTION = savedSshConnection;
+      else delete process.env.SSH_CONNECTION;
+      if (savedSessionType !== undefined) process.env.XDG_SESSION_TYPE = savedSessionType;
+      else delete process.env.XDG_SESSION_TYPE;
+      if (savedForceDisplay !== undefined) process.env.TRUSTY_SQUIRE_FORCE_DISPLAY = savedForceDisplay;
+      else delete process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
     }
   });
 });

@@ -108,7 +108,34 @@ describe("runDiscover — Fix B: OAuth profile isolation", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.profileDir).toBe("/tmp/profiles/verify-01");
     expect(requests[0]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+    expect(requests[0]?.stepsSink).toContain(
+      "[discovery] profile-plan service=sentry mode=robot oauth_provider=google identity_id=verify-01 oauth_account=verify-01@trustysquire.ai profile_dir=/tmp/profiles/verify-01",
+    );
     expect(spent).toEqual([{ id: "verify-01", service: "sentry" }]);
+  });
+
+  it("uses the service default OAuth provider for profile isolation and bot input", async () => {
+    const { port, spent } = fakePool([identity("verify-01"), identity("verify-02")]);
+    const { requests, bot } = recordingBot([ok]);
+
+    const outcome = await runDiscover(
+      { service: "fly-io" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot,
+        identityPool: port,
+        skipAutoPromote: true,
+      },
+    );
+
+    expect(outcome.kind).toBe("ok");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.oauthProvider).toBe("google");
+    expect(requests[0]?.profileDir).toBe("/tmp/profiles/verify-01");
+    expect(requests[0]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+    expect(spent).toEqual([{ id: "verify-01", service: "fly-io" }]);
   });
 
   it("surfaces insufficient_identities when the pool is exhausted (no blind fallback)", async () => {
@@ -151,8 +178,11 @@ describe("runDiscover — Fix B: OAuth profile isolation", () => {
 
     expect(outcome.kind).toBe("ok");
     expect(requests[0]?.oauthAccountEmail).toBeUndefined();
-    // github → ephemeral throwaway dir (clean state), not a pool robot.
-    expect(requests[0]?.profileDir).toMatch(/profiles\/discover-vercel-/);
+    // github → shared profile, where `mcp login --provider=github` persists.
+    expect(requests[0]?.profileDir).toBeUndefined();
+    expect(requests[0]?.stepsSink).toContain(
+      "[discovery] profile-plan service=vercel mode=shared-github oauth_provider=github identity_id=none oauth_account=none profile_dir=shared",
+    );
     expect(spent).toEqual([]); // no robot consumed
   });
 });
@@ -179,6 +209,9 @@ describe("runDiscover — Fix B: email/password ephemeral profile", () => {
     const dir = requests[0]?.profileDir;
     expect(dir).toBeDefined();
     expect(dir).toMatch(/profiles\/discover-ipinfo-/);
+    expect(requests[0]?.stepsSink).toContain(
+      `[discovery] profile-plan service=ipinfo mode=ephemeral oauth_provider=none identity_id=none oauth_account=none profile_dir=${dir}`,
+    );
     // Cleanup ran in the finally — the throwaway dir no longer exists.
     expect(existsSync(dir!)).toBe(false);
   });

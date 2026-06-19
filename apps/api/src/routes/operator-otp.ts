@@ -16,9 +16,11 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { extractMachineToken } from "./install.js";
 import {
   OperatorOtpPoller,
+  extractOtp,
   type OtpPollInput,
   type OtpPollResult,
 } from "../services/operator-otp-poller.js";
+import { WorkspaceInboxPoller } from "../services/workspace-inbox-poller.js";
 import type { MachineTokenStore } from "../services/machine-tokens.js";
 
 export interface OperatorOtpRouteDeps {
@@ -57,6 +59,31 @@ export async function registerOperatorOtpRoute(
       return;
     }
 
+    if (input.to_address !== undefined && input.to_address.length > 0) {
+      const poller = new WorkspaceInboxPoller(cfg);
+      const result = await poller.poll({
+        to_address: input.to_address,
+        since_seconds: input.since_seconds,
+      });
+      if (result.email === null) {
+        reply.code(200).send({
+          code: null,
+          reason: result.reason,
+          scanned: result.scanned,
+        } satisfies OtpPollResult);
+        return;
+      }
+      const code =
+        result.email.parsed_codes[0] ??
+        extractOtp(`${result.email.body_text}\n${result.email.body_html}`);
+      reply.code(200).send({
+        code,
+        reason: code === null ? "no_match" : "found",
+        scanned: result.scanned,
+      } satisfies OtpPollResult);
+      return;
+    }
+
     const poller = new OperatorOtpPoller(cfg);
     const result = await poller.poll(input);
     reply.code(200).send(result);
@@ -68,8 +95,14 @@ export async function registerOperatorOtpRoute(
 // secret keeps working through the migration (the consolidation onto one
 // Workspace inbox, lunchbox@trustysquire.ai).
 function readOperatorImapConfig(): { imapUser: string; imapAppPassword: string } | null {
-  const u = process.env.OPERATOR_IMAP_USER ?? process.env.GMAIL_USER;
-  const p = process.env.OPERATOR_IMAP_PASSWORD ?? process.env.GMAIL_APP_PASSWORD;
+  const u =
+    process.env.OPERATOR_IMAP_USER ??
+    process.env.WORKSPACE_IMAP_USER ??
+    process.env.GMAIL_USER;
+  const p =
+    process.env.OPERATOR_IMAP_PASSWORD ??
+    process.env.WORKSPACE_IMAP_PASSWORD ??
+    process.env.GMAIL_APP_PASSWORD;
   if (typeof u !== "string" || u.length === 0) return null;
   if (typeof p !== "string" || p.length === 0) return null;
   return { imapUser: u, imapAppPassword: p };
@@ -84,6 +117,9 @@ function parseBody(req: FastifyRequest): OtpPollInput | null {
   const out: OtpPollInput = { since_seconds: Math.floor(sinceRaw) };
   if (typeof obj["from_domain"] === "string" && obj["from_domain"].length > 0) {
     out.from_domain = obj["from_domain"];
+  }
+  if (typeof obj["to_address"] === "string" && obj["to_address"].length > 0) {
+    out.to_address = obj["to_address"];
   }
   if (typeof obj["otp_pattern"] === "string" && obj["otp_pattern"].length > 0) {
     out.otp_pattern = obj["otp_pattern"];

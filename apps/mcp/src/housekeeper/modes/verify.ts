@@ -19,6 +19,9 @@ import {
   ACCOUNT_EXISTS_KIND,
   failureCountsTowardDemotion,
 } from "@trusty-squire/skill-schema";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   probeShowsServable,
   BRITTLE_PROBE_KIND,
@@ -105,7 +108,14 @@ export function createReplayRunner(): ReplayRunner {
     mode: "dry" | "full";
     bypassStatusGuard?: boolean;
   }): Promise<ReplayOutcome> => {
-    const browser = new BrowserController({});
+    const requiresProviderSession =
+      input.skill.oauth_provider !== null || inferOAuthProviderFromSteps(input.skill) !== null;
+    const tempProfileDir = requiresProviderSession
+      ? undefined
+      : mkdtempSync(join(tmpdir(), "ts-verifier-replay-"));
+    const browser = new BrowserController(
+      tempProfileDir !== undefined ? { profileDir: tempProfileDir } : {},
+    );
     try {
       await browser.start();
       // 0.8.2-rc.22 — synthesize template values for verifier replays.
@@ -194,6 +204,13 @@ export function createReplayRunner(): ReplayRunner {
       } catch {
         // shutdown noise — replay outcome is already captured
       }
+      if (tempProfileDir !== undefined) {
+        try {
+          rmSync(tempProfileDir, { recursive: true, force: true });
+        } catch {
+          // temp-profile cleanup noise — replay outcome is already captured
+        }
+      }
     }
   };
 }
@@ -275,8 +292,9 @@ export async function handleReplay(
   // unwired runs fall through to single-account replay below. This is the
   // promotion trust signal: "the lower-confidence-bound pass-rate over N
   // independent fresh signups is high", not "replayed once as a returning user".
-  if (opts.freshVerify !== undefined && skill.oauth_provider !== null) {
-    const fresh = await runFreshIdentityVerify(task, skill, opts, log, startMs);
+  const freshProvider = skill.oauth_provider ?? inferOAuthProviderFromSteps(skill);
+  if (opts.freshVerify !== undefined && freshProvider !== null) {
+    const fresh = await runFreshIdentityVerify(task, skill, freshProvider, opts, log, startMs);
     if (fresh !== "fallback") return fresh;
     // "fallback" → the fresh path couldn't run (no pool / pool exhausted);
     // fall through to single-account replay so the skill still gets verified.
@@ -301,9 +319,54 @@ export async function handleReplay(
     });
     const isOk =
       replay.kind === "ok" || replay.kind === "ok_multi" || replay.kind === "dry_pass";
+
+    // Legacy/stale skills may be missing oauth_provider metadata and may have
+    // no click_oauth_button step because the capture started after auth. The
+    // first time we learn they require a warm provider session is replay's
+    // needs_login outcome. If the fresh-identity verifier is wired, do not post
+    // that as a verifier failure from the shared/single-account path; reroute
+    // through the robot fleet using the provider replay discovered.
+    if (!isOk && replay.kind === "needs_login" && opts.freshVerify !== undefined) {
+      const fresh = await runFreshIdentityVerify(
+        task,
+        skill,
+        replay.provider,
+        opts,
+        log,
+        startMs,
+      );
+      if (fresh !== "fallback") return fresh;
+    }
+
+    // Returning-user divergence is exactly what the robot fleet was built to
+    // avoid: replaying a fresh-signup capture against an already-known account
+    // makes onboarding elements disappear, then a later selector fails. If the
+    // fresh verifier is available, do not score that replay as evidence. Retry
+    // the service as a never-before-used robot identity. Older skills often
+    // lack oauth_provider metadata, so default to Google: the verify fleet is a
+    // Google robot fleet, and if the service truly has no Google path the fresh
+    // signup will return an explicit non-observation/wall instead of a false
+    // returning-user replay failure.
+    const replayReason = describeReplayOutcome(replay);
+    if (
+      !isOk &&
+      opts.freshVerify !== undefined &&
+      isReturningUserDivergence(replayReason)
+    ) {
+      const fresh = await runFreshIdentityVerify(
+        task,
+        skill,
+        freshProvider ?? "google",
+        opts,
+        log,
+        startMs,
+      );
+      if (fresh !== "fallback") return fresh;
+    }
+
     outcomeKind = isOk ? "success" : "failure";
     failureKind = isOk ? undefined : replay.kind;
-    outcomeReason = describeReplayOutcome(replay);
+    outcomeReason = replayReason;
 
     // A page-never-loaded failure (proxy blip / cold tunnel / DNS / TLS /
     // connection reset) surfaces as step_failed — the same rot kind as a
@@ -450,12 +513,12 @@ async function tryBrittleProbeDowngrade(args: {
 async function runFreshIdentityVerify(
   task: Extract<HousekeeperTask, { kind: "replay" }>,
   skill: Skill,
+  provider: "google" | "github",
   opts: HousekeeperOpts,
   log: (line: string) => void,
   startMs: number,
 ): Promise<ReplayResult | "fallback"> {
   const item = task.queueItem;
-  const provider = skill.oauth_provider; // non-null per the caller's guard
   log(`fresh-verify start: ${item.service} (skill_id=${item.skill_id}, oauth=${provider})`);
   let fresh: RunFreshVerifyResult;
   try {
@@ -479,9 +542,9 @@ async function runFreshIdentityVerify(
   }
   if (fresh.kind === "insufficient_identities") {
     log(
-      `fresh-verify: ${item.service} — pool exhausted (${fresh.available ?? 0} unspent); falling back to single-account replay`,
+      `fresh-verify: ${item.service} — pool exhausted or leased (${fresh.available ?? 0} available); skipping single-account replay to avoid shared-profile false failures`,
     );
-    return "fallback";
+    return "skipped";
   }
 
   // A converged verdict. runFreshVerify already posted it to the registry (when
@@ -500,6 +563,13 @@ async function runFreshIdentityVerify(
     reason,
     transition: fresh.transition ?? "none",
   };
+}
+
+function inferOAuthProviderFromSteps(skill: Skill): "google" | "github" | null {
+  for (const step of skill.steps) {
+    if (step.kind === "click_oauth_button") return step.provider;
+  }
+  return null;
 }
 
 function describeReplayOutcome(outcome: ReplayOutcome): string {

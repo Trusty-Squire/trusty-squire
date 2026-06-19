@@ -153,6 +153,12 @@ describe("resolveSignupUrl", () => {
     const llm = stubLLM("https://console.cloud.clickhouse.com/signup", calls);
     expect(await resolveSignupUrl("clickhouse-cloud", llm)).toBe("https://console.clickhouse.cloud/signup");
     expect(await resolveSignupUrl("langfuse", llm)).toBe("https://cloud.langfuse.com/auth/sign-up");
+    expect(await resolveSignupUrl("fly-io", llm)).toBe("https://fly.io/app/sign-up");
+    expect(await resolveSignupUrl("braintrust", llm)).toBe("https://www.braintrust.dev/signup");
+    expect(await resolveSignupUrl("nomic", llm)).toContain(
+      "https://nomicai-production.us.auth0.com/u/login",
+    );
+    expect(await resolveSignupUrl("stackblitz", llm)).toBe("https://stackblitz.com/register");
     expect(calls.n).toBe(0);
   });
 

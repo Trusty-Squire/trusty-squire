@@ -375,6 +375,7 @@ export function extractGoogleNumberMatch(text: string): string | null {
 // --- environment helpers ----------------------------------------------
 export function hasDisplay(): boolean {
   if (process.env.TRUSTY_SQUIRE_FORCE_HEADLESS === "true") return false;
+  if (process.env.TRUSTY_SQUIRE_FORCE_DISPLAY === "true") return true;
   // macOS (Aqua) and Windows (Win32) have native windowing — Chrome
   // opens a real window without an X server. DISPLAY is a Unix concept
   // they don't set, so a DISPLAY-only check would have wrongly routed
@@ -383,8 +384,16 @@ export function hasDisplay(): boolean {
   // platforms).
   if (process.platform === "darwin" || process.platform === "win32") return true;
   // Linux: a non-empty DISPLAY means there's an X server we can draw to.
-  // Headless boxes (Hetzner, Codespaces, Docker, SSH) won't have it
-  // and fall through to the noVNC path.
+  // Headless boxes often inherit an automation/Xvfb DISPLAY over SSH, though;
+  // that is NOT a human-visible desktop. Prefer noVNC for SSH/TTY Linux
+  // sessions unless explicitly overridden with TRUSTY_SQUIRE_FORCE_DISPLAY.
+  if (
+    process.env.SSH_CONNECTION !== undefined ||
+    process.env.SSH_TTY !== undefined ||
+    process.env.XDG_SESSION_TYPE === "tty"
+  ) {
+    return false;
+  }
   return typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0;
 }
 

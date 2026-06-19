@@ -20,6 +20,7 @@ import {
   findOAuthButton,
   findFirstOAuthButton,
   findSignInAdvanceButton,
+  defaultOAuthProviderForService,
   orderOAuthCandidates,
   isLoginLoopState,
   parsePostVerifyStep,
@@ -567,6 +568,16 @@ describe("orderOAuthCandidates", () => {
   });
 });
 
+describe("defaultOAuthProviderForService", () => {
+  it("defaults services with proven broken email/signup paths to Google OAuth", () => {
+    expect(defaultOAuthProviderForService("fly-io")).toBe("google");
+    expect(defaultOAuthProviderForService("fly.io")).toBe("google");
+    expect(defaultOAuthProviderForService("clarifai")).toBe("google");
+    expect(defaultOAuthProviderForService("nomic")).toBe("google");
+    expect(defaultOAuthProviderForService("langfuse")).toBeUndefined();
+  });
+});
+
 // ───────────────────── isLoginLoopState (rc.20) ─────────────────────
 
 describe("isLoginLoopState", () => {
@@ -726,6 +737,31 @@ describe("detectEmailOtpGate (rc.24)", () => {
     expect(
       detectEmailOtpGate("https://x.com/dashboard", "Dashboard", "Your email is configured."),
     ).toBe(false);
+  });
+
+  it("does not fire on Anthropic's normal onboarding form just because it shows the OAuth email", () => {
+    expect(
+      detectEmailOtpGate(
+        "https://console.anthropic.com/onboarding",
+        "Onboarding | Claude Platform",
+        "Display name I am at least 18 years old and agree to Commercial Terms. Don’t want to use verify-12@trustysquire.ai? Log in with another email.",
+        [
+          mk({ tag: "input", name: "displayname", placeholder: "e.g. Claude, CS, Claudius" }),
+          mk({ tag: "input", type: "checkbox", ariaLabel: "Accept terms" }),
+        ],
+      ),
+    ).toBe(false);
+  });
+
+  it("fires on generic page-text code gates only when an OTP-like input exists", () => {
+    expect(
+      detectEmailOtpGate(
+        "https://x.com/onboarding",
+        "Continue",
+        "We sent a 6-digit verification code to verify-12@trustysquire.ai",
+        [mk({ tag: "input", name: "code", placeholder: "Verification code" })],
+      ),
+    ).toBe(true);
   });
 
   it("fires on Convex's post-OAuth radar-challenge 'Enter the code sent to' wall (0.8.10)", () => {

@@ -434,6 +434,10 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // northflank hosts user API keys under the account menu, not a
   // top-level /settings/keys.
   northflank: ["/account/api", "/settings/api"],
+  // Sentry's personal auth-token UI lives here. The generic fallback
+  // order hits three unrelated 404s before this path and the recovery
+  // walker aborts after 3 consecutive 404s, so pin the documented path.
+  sentry: ["/settings/account/api/auth-tokens/"],
 };
 
 // Normalize a service name to the slug used as a SERVICE_KEYS_PATHS key:
@@ -802,6 +806,17 @@ const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
   // The model repeatedly guesses /auth/signup, which Langfuse serves as a
   // Next.js 404. The actual Clerk/Auth.js registration route uses sign-up.
   langfuse: "https://cloud.langfuse.com/auth/sign-up",
+  // The model guesses /app/signup, but Fly's current route is /app/sign-up.
+  flyio: "https://fly.io/app/sign-up",
+  // "Braintrust" is ambiguous in search/model results: usebraintrust.com is a
+  // talent marketplace, while the API-key product is the AI observability app.
+  braintrust: "https://www.braintrust.dev/signup",
+  // Nomic's public Atlas routes now redirect to a marketing/developer page.
+  // The self-serve account surface lives behind Auth0's universal login.
+  nomic:
+    "https://nomicai-production.us.auth0.com/u/login?state=hKFo2SA2XzhiVGRXMUR4X283bFYtUjQ1T2Q1NXBOZ095RmQ5c6Fur3VuaXZlcnNhbC1sb2dpbqN0aWTZIDdzTWlnTTZKVUZ5WnVDMjZldktEMlNMS0pZRmRfYnZOo2NpZNkgVkY0MURxZEV5UzJBYXE2NHExSW9PMUVPemRwanBsbnY",
+  // /signup is now a 404; StackBlitz's account creation route is /register.
+  stackblitz: "https://stackblitz.com/register",
 };
 
 function canonicalSignupUrl(service: string): string | null {
@@ -2976,6 +2991,7 @@ export function detectEmailOtpGate(
   url: string,
   title: string,
   pageText: string,
+  inventory?: readonly InteractiveElement[],
 ): boolean {
   let path: string;
   try {
@@ -2998,10 +3014,33 @@ export function detectEmailOtpGate(
   // phrasing — must include a "we sent … code … to" or "enter …
   // code … sent" shape with a bounded gap.
   const lower = pageText.toLowerCase();
+  if (inventory !== undefined && !hasOtpInput(inventory)) {
+    return false;
+  }
   return (
     /we sent[^.]{0,60}\bcode\b[^.]{0,40}to\b/.test(lower) ||
     /enter[^.]{0,40}\bcode\b[^.]{0,40}\b(?:sent|email)/.test(lower)
   );
+}
+
+function hasOtpInput(inventory: readonly InteractiveElement[]): boolean {
+  return inventory.some((e) => {
+    if (e.tag !== "input" && e.tag !== "textarea") return false;
+    const text = [
+      e.type,
+      e.id,
+      e.name,
+      e.placeholder,
+      e.ariaLabel,
+      e.labelText,
+      e.visibleText,
+      e.testId,
+    ]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join(" ")
+      .toLowerCase();
+    return /\b(?:otp|code|verification|verify|one[\s-]?time|pin)\b/.test(text);
+  });
 }
 
 // (c) SSO restriction (Fly.io class). Service rejects token-creation
@@ -3243,6 +3282,12 @@ export function orderOAuthCandidates(
     return [pinned];
   }
   return [...loggedIn];
+}
+
+export function defaultOAuthProviderForService(service: string): OAuthProviderId | undefined {
+  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (slug === "flyio" || slug === "clarifai" || slug === "nomic") return "google";
+  return undefined;
 }
 
 // Parse a post-verify step. When `allowedSelectors` is supplied, a
@@ -3751,13 +3796,13 @@ function isEmailAssetLink(rawUrl: string): boolean {
 // year "2025"). The anchor TEXT still reads "Activate account". Pure + exported
 // for unit tests.
 export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
-  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const anchorRe = /<a\b[^>]*href\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
   let best: { url: string; score: number } | null = null;
   let m: RegExpExecArray | null;
   while ((m = anchorRe.exec(bodyHtml)) !== null) {
-    const href = (m[1] ?? "").replace(/&amp;/g, "&");
+    const href = (m[2] ?? "").replace(/&amp;/g, "&");
     if (!/^https?:\/\//i.test(href)) continue;
-    const text = (m[2] ?? "")
+    const text = (m[3] ?? "")
       .replace(/<[^>]+>/g, " ")
       .replace(/&[a-z]+;/gi, " ")
       .replace(/\s+/g, " ")
@@ -3772,7 +3817,22 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
     ) {
       score += 5;
     }
-    if (/get started|finish setting up/.test(text)) score += 3;
+    if (
+      /confirmation instructions|confirm (?:my |your )?account|confirm (?:my |your )?email address|verify (?:my |your )?account|accept confirmation/.test(
+        text,
+      )
+    ) {
+      score += 8;
+    }
+    if (/get started|finish setting up|continue|open stackblitz/.test(text)) score += 3;
+    try {
+      const u = new URL(href);
+      if ((u.pathname === "/" || u.pathname === "") && u.search === "" && u.hash === "") {
+        score -= 8;
+      }
+    } catch {
+      /* already validated as http(s), leave score unchanged */
+    }
     if (
       /unsubscribe|preferences|manage|view (?:in|this) (?:browser|email)|privacy|terms/.test(
         text,
@@ -3812,6 +3872,7 @@ export function pickServiceDomainLink(
       continue;
     }
     if (u.protocol !== "https:" && u.protocol !== "http:") continue;
+    if ((u.pathname === "/" || u.pathname === "") && u.search === "" && u.hash === "") continue;
     if (SKIP.test(raw)) continue;
     if (isEmailAssetLink(raw)) continue;
     if (base(u.hostname) === target) return u.href;
@@ -6203,16 +6264,17 @@ export class SignupAgent {
       );
       return [];
     }
+    const provider = task.oauthProvider ?? defaultOAuthProviderForService(task.service);
     const ordered = orderOAuthCandidates(
-      task.oauthProvider,
+      provider,
       await this.effectiveLoggedInProviders(),
     );
     if (ordered.length === 0) return [];
     const pinNote =
-      task.oauthProvider !== undefined &&
-      task.oauthProvider !== "google" &&
+      provider !== undefined &&
+      provider !== "google" &&
       ordered[0] === "google"
-        ? ` (pinned ${task.oauthProvider}, but Google session present — Google blocks less hard, so it leads; ${task.oauthProvider} is the fallback)`
+        ? ` (pinned ${provider}, but Google session present — Google blocks less hard, so it leads; ${provider} is the fallback)`
         : "";
     steps.push(
       `Auto-OAuth: candidates [${ordered.join(", ")}]${pinNote} — using whichever the page offers`,
@@ -8630,6 +8692,34 @@ export class SignupAgent {
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
     );
 
+    // Sentry's Google OAuth returns to /extensions/google/setup/ with a
+    // "New Identity" bridge: "Account Settings" links to a login/recovery
+    // dead-end, while the submit button "New Account" is the actual signup
+    // continuation. Generic nav-search used to prefer the settings link and
+    // burn the run. Prefer the continuation button when that exact bridge is
+    // visible, then let the normal post-verify loop handle the org form.
+    {
+      const bridgeState = await this.browser.getState().catch(() => null);
+      const bridgeText = await this.browser.extractVisibleText().catch(() => "");
+      if (
+        bridgeState !== null &&
+        /sentry\.io$/i.test(new URL(bridgeState.url).hostname) &&
+        /\/extensions\/google\/setup\/?/i.test(new URL(bridgeState.url).pathname) &&
+        /new identity/i.test(`${bridgeState.title}\n${bridgeText}`)
+      ) {
+        const inv = await this.browser.extractInteractiveElements().catch(() => [] as InteractiveElement[]);
+        const newAccount = inv.find((e) => {
+          const label = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+          return (e.tag === "button" || e.role === "button") && /^new account$/i.test(label);
+        });
+        if (newAccount !== undefined) {
+          steps.push('OAuth: Sentry New Identity bridge — clicking "New Account" instead of Account Settings.');
+          await this.browser.click(newAccount.selector);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        }
+      }
+    }
+
     // amplitude class — OAuth drops the bot into the service's READ-ONLY DEMO
     // sandbox (app.amplitude.com/analytics/demo) instead of a real account: it
     // has NO API key, and the only route to a real org is the prominent
@@ -8823,7 +8913,7 @@ export class SignupAgent {
       // POST /v1/inbox/poll-operator-otp. If a code arrives, push a
       // step trail hint and continue to the post-verify loop —
       // the planner sees the hint and fills the input.
-      if (detectEmailOtpGate(gateState.url, gateState.title, gateText)) {
+      if (detectEmailOtpGate(gateState.url, gateState.title, gateText, gateInv)) {
         const domain = fromDomainFromUrl(gateState.url);
         const machineToken = task.machineToken;
         let otpResult: { code: string | null; reason: string };
@@ -8841,6 +8931,9 @@ export class SignupAgent {
             machineToken,
             ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
             ...(domain !== null ? { fromDomain: domain } : {}),
+            ...(task.oauthAccountEmail !== undefined
+              ? { toAddress: task.oauthAccountEmail }
+              : {}),
             maxWaitSeconds: 90,
           });
         }
@@ -10262,6 +10355,26 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         }
         continue;
       }
+      if (/sentry/i.test(args.service)) {
+        const skipSetup = inventory.find((e) => {
+          return [e.visibleText, e.ariaLabel, e.title, e.labelText]
+            .some((label) => /^skip setup$/i.test((label ?? "").trim()));
+        });
+        if (skipSetup !== undefined) {
+          args.steps.push(
+            `Post-verify round ${round}: Sentry onboarding — clicking "Skip setup" to reach the dashboard/API-token surface.`,
+          );
+          try {
+            await this.browser.click(skipSetup.selector);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch (err) {
+            args.steps.push(
+              `Post-verify round ${round}: Sentry Skip setup click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+            );
+          }
+          continue;
+        }
+      }
       // SPA hydration guard. A post-OAuth dashboard (northflank's
       // /settings/access-tokens, PostHog) can render a "Connecting"/loading
       // shell while its JS bundle + websocket finish — slow over a
@@ -10302,6 +10415,26 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       } catch {
         // mid-navigation read — keep the prior state/inventory; the shell
         // decision below uses whatever count we have.
+      }
+      if (/sentry/i.test(args.service)) {
+        const skipSetup = inventory.find((e) => {
+          return [e.visibleText, e.ariaLabel, e.title, e.labelText]
+            .some((label) => /^skip setup$/i.test((label ?? "").trim()));
+        });
+        if (skipSetup !== undefined) {
+          args.steps.push(
+            `Post-verify round ${round}: Sentry onboarding — clicking "Skip setup" after hydration to reach the dashboard/API-token surface.`,
+          );
+          try {
+            await this.browser.click(skipSetup.selector);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch (err) {
+            args.steps.push(
+              `Post-verify round ${round}: Sentry Skip setup click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+            );
+          }
+          continue;
+        }
       }
       // Negative-side decision, now visibility- AND inventory-aware: a shell
       // requires loading-text in the VISIBLE text AND a sub-threshold
@@ -10543,7 +10676,12 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         args.machineToken !== undefined &&
         args.machineToken.length > 0 &&
         !otpPolledUrls.has(state.url) &&
-        detectEmailOtpGate(state.url, state.title, await this.browser.extractText().catch(() => ""))
+        detectEmailOtpGate(
+          state.url,
+          state.title,
+          await this.browser.extractText().catch(() => ""),
+          inventory,
+        )
       ) {
         otpPolledUrls.add(state.url);
         const domain = fromDomainFromUrl(state.url);
@@ -10555,6 +10693,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           machineToken: args.machineToken,
           ...(args.apiBase !== undefined ? { apiBase: args.apiBase } : {}),
           ...(domain !== null ? { fromDomain: domain } : {}),
+          ...(args.oauthAccountEmail !== undefined ? { toAddress: args.oauthAccountEmail } : {}),
           maxWaitSeconds: 90,
         });
         if (otp.code !== null) {
@@ -11482,6 +11621,12 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         args.steps.push(
           "Post-verify: existing-account / already-signed-in dashboard recovered — minted/extracted a usable key instead of bailing.",
         );
+        await this.writeFastPathSyntheticCapture(
+          args.service,
+          capturedRound,
+          oauth,
+          "existing-account recovery synthetic extract — credentials were minted/extracted after the planner loop",
+        );
         return credentials;
       }
 
@@ -11534,6 +11679,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     service: string,
     capturedRound: number,
     oauth: boolean,
+    reason =
+      "fast-path synthetic extract — credentials were already on the page before any planner round ran",
   ): Promise<void> {
     try {
       const [state, inventory] = await Promise.all([
@@ -11548,8 +11695,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         inventory,
         observed: {
           kind: "extract",
-          reason:
-            "fast-path synthetic extract — credentials were already on the page before any planner round ran",
+          reason,
         },
       });
     } catch {

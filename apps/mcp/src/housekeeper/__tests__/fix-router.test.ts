@@ -18,12 +18,16 @@ const base: RouterInput = {
 };
 
 describe("classifyCluster", () => {
-  it("curated needs-manual → wall (highest precedence)", () => {
-    expect(classifyCluster({ ...base, curatedNeedsManual: true }).route).toBe("wall");
+  it("curated needs-manual does not wall an in-fence regression", () => {
+    const v = classifyCluster({ ...base, curatedNeedsManual: true });
+    expect(v.route).toBe("fix");
+    expect(v.reason).toMatch(/attempt fix/);
   });
 
-  it("dead DNS → wall (even for an in-fence stage)", () => {
-    expect(classifyCluster({ ...base, dnsAlive: false }).route).toBe("wall");
+  it("dead DNS does not wall an in-fence regression", () => {
+    const v = classifyCluster({ ...base, dnsAlive: false });
+    expect(v.route).toBe("fix");
+    expect(v.reason).toMatch(/URL resolution/);
   });
 
   it("flaky (retry-variance high) → drain, overriding an in-fence stage", () => {
@@ -49,9 +53,9 @@ describe("classifyCluster", () => {
     }
   });
 
-  it("faculty-needed stages → wall", () => {
+  it("faculty-needed stages → capability_gap, not wall", () => {
     for (const stage of ["phone", "payment", "manual"] as const) {
-      expect(classifyCluster({ ...base, stage }).route).toBe("wall");
+      expect(classifyCluster({ ...base, stage }).route).toBe("capability_gap");
     }
   });
 
@@ -74,16 +78,16 @@ describe("classifyCluster", () => {
     }
   });
 
-  it("routes retry and wall classes to explicit owners", () => {
+  it("routes retry and capability classes to explicit owners", () => {
     const drain = classifyCluster({ ...base, stage: "run_timeout" });
     expect(drain.route).toBe("drain");
     expect(drain.owner).toBe("retry");
     expect(drain.disposition).toBe("retry_later");
 
-    const wall = classifyCluster({ ...base, stage: "payment" });
-    expect(wall.route).toBe("wall");
-    expect(wall.owner).toBe("external");
-    expect(wall.disposition).toBe("blocked_wall");
+    const cap = classifyCluster({ ...base, stage: "payment" });
+    expect(cap.route).toBe("capability_gap");
+    expect(cap.owner).toBe("capability");
+    expect(cap.disposition).toBe("needs_capability");
   });
 
   it("the flaky threshold is exclusive-below / inclusive-at", () => {

@@ -24,6 +24,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { UniversalSignupBot, type SignupResult } from "../../bot/index.js";
+import { defaultOAuthProviderForService } from "../../bot/agent.js";
 import { pickLLMPair } from "../../bot/llm-client.js";
 import { InboxClient } from "../../bot/inbox-client.js";
 import {
@@ -380,7 +381,10 @@ export async function runDiscover(
   //   • email/password services → a throwaway ephemeral profile, torn down
   //     after the run so thousands of small dirs don't accumulate.
   // github-OAuth keeps the shared-profile fallback (the robot fleet is Google).
-  const isGoogleOAuth = input.oauthProvider === "google";
+  const effectiveOAuthProvider =
+    input.oauthProvider ?? defaultOAuthProviderForService(input.service);
+  const isGoogleOAuth = effectiveOAuthProvider === "google";
+  const isGithubOAuth = effectiveOAuthProvider === "github";
 
   // Tracks every ephemeral dir we created so the `finally` reaps them even when
   // a retry created a second one.
@@ -446,6 +450,13 @@ export async function runDiscover(
         identityId: identity.id,
       };
     }
+    if (isGithubOAuth) {
+      // GitHub OAuth uses the operator-maintained shared profile. The login
+      // command stores the github.com session there; putting GitHub discover
+      // in an ephemeral profile makes every curated GitHub service look logged
+      // out even after `mcp login --provider=github` succeeds.
+      return {};
+    }
     // email/password (and the no-provider default): a throwaway profile so the
     // run starts from clean state with no accumulated cross-service sessions.
     const root = join(homedir(), ".trusty-squire", "profiles");
@@ -457,6 +468,29 @@ export async function runDiscover(
 
   // One signup attempt against a resolved profile plan. Returns the bot's
   // SignupResult, or a sentinel on crash (mapped to a failed outcome upstream).
+  const describeProfilePlan = (plan: {
+    profileDir?: string;
+    oauthAccountEmail?: string;
+    identityId?: string;
+  }): string => {
+    const mode =
+      plan.identityId !== undefined
+        ? "robot"
+        : plan.profileDir !== undefined
+          ? "ephemeral"
+          : isGithubOAuth
+            ? "shared-github"
+            : "shared-default";
+    return [
+      `[discovery] profile-plan service=${input.service}`,
+      `mode=${mode}`,
+      `oauth_provider=${effectiveOAuthProvider ?? "none"}`,
+      `identity_id=${plan.identityId ?? "none"}`,
+      `oauth_account=${plan.oauthAccountEmail ?? "none"}`,
+      `profile_dir=${plan.profileDir ?? "shared"}`,
+    ].join(" ");
+  };
+
   const attemptSignup = async (plan: {
     profileDir?: string;
     oauthAccountEmail?: string;
@@ -465,6 +499,7 @@ export async function runDiscover(
     if (plan.identityId !== undefined && !usedIdentityIds.includes(plan.identityId)) {
       usedIdentityIds.push(plan.identityId);
     }
+    stepsSink.push(describeProfilePlan(plan));
     try {
       const result = await bot.signup({
         service: input.service,
@@ -496,8 +531,8 @@ export async function runDiscover(
         // on the bot profile's logged-in-providers cache, which is
         // often empty (the cache only writes after a successful prior
         // OAuth handshake — chicken-and-egg for fresh services).
-        ...(input.oauthProvider !== undefined
-          ? { oauthProvider: input.oauthProvider }
+        ...(effectiveOAuthProvider !== undefined
+          ? { oauthProvider: effectiveOAuthProvider }
           : {}),
         // YAML-declared signup URL overrides guessSignupUrl(slug). The
         // guess defaults to https://<slug>.com/signup which gets the

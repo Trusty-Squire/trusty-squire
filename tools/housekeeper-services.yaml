@@ -271,11 +271,13 @@
     '
 - slug: perplexity
   name: Perplexity API
-  signup_url: https://www.perplexity.ai/settings/api
+  signup_url: https://console.perplexity.ai
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: 'Perplexity''s web app uses Google OAuth; API access requires
+  notes: 'Perplexity''s API platform now starts at console.perplexity.ai
+    from the public API Platform "Start Building" CTA; old /settings/api
+    renders as a non-signup page. Perplexity''s web app uses Google OAuth; API access requires
 
     payment-method-on-file before keys issue. Likely onboarding_blocked
 
@@ -899,20 +901,26 @@
     '
 - slug: growthbook
   name: GrowthBook Cloud
-  signup_url: https://app.growthbook.io/auth/signup
+  signup_url: https://app.growthbook.io/
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: 'Feature flags + experimentation. Google + GitHub OAuth.
+  notes: 'Feature flags + experimentation. Google + GitHub OAuth. Current app
+
+    root redirects to Auth0 and renders the Register form; old
+
+    /auth/signup route 404s.
 
     '
 - slug: flagsmith
   name: Flagsmith
-  signup_url: https://app.flagsmith.com/signup
+  signup_url: https://www.flagsmith.com/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: 'Feature flags. Google + GitHub OAuth.
+  notes: 'Feature flags. Google + GitHub OAuth. App /signup is a 404;
+
+    marketing /sign-up is the current live entry.
 
     '
 - slug: e2b
@@ -955,11 +963,15 @@
     '
 - slug: stackblitz
   name: StackBlitz
-  signup_url: https://stackblitz.com/login
-  oauth_provider: github
+  signup_url: https://stackblitz.com/register
+  oauth_provider: google
   scope_hint: null
   status: pending
   notes: 'Browser dev environment (WebContainers). GitHub + Google OAuth.
+
+    /login is a 404; /register is the current signup route. Google
+
+    OAuth reaches the authenticated dashboard.
 
     '
 - slug: circleci
@@ -1045,11 +1057,13 @@
     '
 - slug: tally
   name: Tally
-  signup_url: https://tally.so/signin
+  signup_url: https://tally.so/signup
   oauth_provider: google
   scope_hint: null
   status: pending
-  notes: 'Forms. Google + Apple + email OAuth. API token in workspace
+  notes: 'Forms. Google + Apple + email OAuth. /signin is a 404; /signup
+
+    is the current live signup route. API token in workspace
 
     settings.
 
@@ -1105,17 +1119,6 @@
   notes: 'Headless browser-as-a-service for AI agents. Google + GitHub
 
     OAuth. API key in project settings.
-
-    '
-- slug: ipdata
-  name: ipdata
-  signup_url: https://dashboard.ipdata.co/sign-up.html
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'IP geolocation API. Google OAuth. Free 1.5k req/day; key
-
-    on dashboard.
 
     '
 - slug: betterstack-uptime
@@ -1178,7 +1181,7 @@
     '
 - slug: lambda-labs
   name: Lambda Labs API
-  signup_url: https://cloud.lambdalabs.com/sign-up
+  signup_url: https://cloud.lambda.ai/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending
