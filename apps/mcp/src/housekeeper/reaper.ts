@@ -87,9 +87,14 @@ export function isHousekeeper(cmdline: string): boolean {
 }
 
 // Exported for tests. A full heal pass legitimately runs for hours; a single
-// service / discover run does not.
+// service / discover run does not. Autoloop is also long-running: it measures
+// live canaries, reprobes stale clusters, and may spawn many detached
+// housekeeper children. Those children run this reaper at startup; if autoloop
+// used the 25min single-run ceiling, a child could kill its own parent mid-lap.
 export function ceilingFor(cmdline: string): number {
-  return /--mode=heal/.test(cmdline) ? HEAL_CEILING_S : SINGLE_RUN_CEILING_S;
+  return /--mode=heal|\bhousekeeper\s+autoloop\b/.test(cmdline)
+    ? HEAL_CEILING_S
+    : SINGLE_RUN_CEILING_S;
 }
 
 export interface ReapResult {

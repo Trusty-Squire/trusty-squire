@@ -28,6 +28,10 @@ describe("ceilingFor", () => {
     expect(ceilingFor("node bin.js housekeeper --mode=heal --once")).toBe(4 * 60 * 60);
   });
 
+  it("gives autoloop the loose 4h backstop so child reapers do not kill their parent", () => {
+    expect(ceilingFor("node apps/mcp/dist/bin.js housekeeper autoloop --agent=codex")).toBe(4 * 60 * 60);
+  });
+
   it("gives a single-service / discover run the tight 25min ceiling", () => {
     expect(ceilingFor("node bin.js housekeeper --mode=discover --service=exa")).toBe(25 * 60);
     expect(ceilingFor("node bin.js housekeeper --mode=verify")).toBe(25 * 60);
