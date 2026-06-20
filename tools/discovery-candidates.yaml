@@ -72,7 +72,7 @@
 - { slug: zilliz, name: Zilliz Cloud, signup_url: https://cloud.zilliz.com/signup, oauth_provider: google }
 - { slug: typesense, name: Typesense Cloud, signup_url: https://cloud.typesense.org/, oauth_provider: github, status: needs-manual }  # unservable: GitHub sudo-mode 2FA gate to mint a PAT (discover 2026-06-11)
 - { slug: meilisearch, name: Meilisearch Cloud, signup_url: https://cloud.meilisearch.com/register, oauth_provider: github }
-- { slug: turbopuffer, name: Turbopuffer, signup_url: https://turbopuffer.com/join, oauth_provider: google, status: needs-manual, last_probed: 2026-06-14 }  # unservable: "Sign-ups are closed" — registration disabled, no account creatable (live 3/3 discover 2026-06-14)
+- { slug: turbopuffer, name: Turbopuffer, signup_url: https://turbopuffer.com/login, oauth_provider: google, status: needs-manual, last_probed: 2026-06-19 }  # unservable: /signup is 404; /login is the live WorkOS entrypoint but returns "Sign-ups are not allowed for this domain" for fresh robots.
 - { slug: marqo, name: Marqo, signup_url: https://cloud.marqo.ai/, oauth_provider: google, status: needs-manual }  # unservable: demo-gated ("request a demo for access") (discover 2026-06-11)
 - { slug: lancedb, name: LanceDB, signup_url: https://accounts.lancedb.com/sign-up, oauth_provider: google }
 - { slug: vectorize, name: Vectorize, signup_url: https://platform.vectorize.io/, oauth_provider: google }

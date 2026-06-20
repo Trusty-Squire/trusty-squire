@@ -48,6 +48,10 @@ import {
 import { LogNotifier, type Notifier } from "./notifier.js";
 
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
+const DEFAULT_AD_HOC_SERVICE_METADATA = [
+  "tools/housekeeper-services.yaml",
+  "tools/discovery-candidates.yaml",
+] as const;
 
 // Two runners: verify (skill replay) and discover (universal bot).
 // 'discover' is fed by either telemetry candidates or a curated YAML
@@ -144,6 +148,21 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     }
   }
   return args;
+}
+
+async function lookupAdHocServiceMetadata(
+  explicitSeedPath: string | undefined,
+  service: string,
+) {
+  const paths =
+    explicitSeedPath !== undefined && explicitSeedPath.length > 0
+      ? [explicitSeedPath]
+      : DEFAULT_AD_HOC_SERVICE_METADATA;
+  for (const path of paths) {
+    const yamlEntry = await lookupServiceInYaml(path, service);
+    if (yamlEntry !== null) return yamlEntry;
+  }
+  return null;
 }
 
 function printHelp(): void {
@@ -553,28 +572,26 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     let signupUrl: string | undefined;
     let oauthProvider = args.oauthProvider;
     let allowExtraOAuthScopes: readonly string[] | undefined;
-    if (args.seedPath !== undefined && args.seedPath.length > 0) {
-      const yamlEntry = await lookupServiceInYaml(args.seedPath, args.service);
-      if (yamlEntry !== null) {
-        if (
-          signupUrl === undefined &&
-          typeof yamlEntry.signup_url === "string" &&
-          yamlEntry.signup_url.length > 0
-        ) {
-          signupUrl = yamlEntry.signup_url;
-        }
-        if (
-          oauthProvider === undefined &&
-          (yamlEntry.oauth_provider === "google" || yamlEntry.oauth_provider === "github")
-        ) {
-          oauthProvider = yamlEntry.oauth_provider;
-        }
-        if (
-          Array.isArray(yamlEntry.allow_extra_oauth_scopes) &&
-          yamlEntry.allow_extra_oauth_scopes.length > 0
-        ) {
-          allowExtraOAuthScopes = yamlEntry.allow_extra_oauth_scopes;
-        }
+    const yamlEntry = await lookupAdHocServiceMetadata(args.seedPath, args.service);
+    if (yamlEntry !== null) {
+      if (
+        signupUrl === undefined &&
+        typeof yamlEntry.signup_url === "string" &&
+        yamlEntry.signup_url.length > 0
+      ) {
+        signupUrl = yamlEntry.signup_url;
+      }
+      if (
+        oauthProvider === undefined &&
+        (yamlEntry.oauth_provider === "google" || yamlEntry.oauth_provider === "github")
+      ) {
+        oauthProvider = yamlEntry.oauth_provider;
+      }
+      if (
+        Array.isArray(yamlEntry.allow_extra_oauth_scopes) &&
+        yamlEntry.allow_extra_oauth_scopes.length > 0
+      ) {
+        allowExtraOAuthScopes = yamlEntry.allow_extra_oauth_scopes;
       }
     }
     queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl, allowExtraOAuthScopes);
