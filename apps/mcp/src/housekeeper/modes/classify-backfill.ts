@@ -23,6 +23,7 @@ function currentGitCommit(repoRoot: string): string | undefined {
 export function runClassificationBackfill(opts: {
   log?: (line: string) => void;
   outPath?: string;
+  markStale?: boolean;
 } = {}): number {
   const log = opts.log ?? ((line: string) => console.log(`[classify-backfill] ${line}`));
   const captureDir = resolveCaptureDir();
@@ -31,7 +32,7 @@ export function runClassificationBackfill(opts: {
     return 1;
   }
   const repoRoot = process.cwd();
-  const currentCommit = currentGitCommit(repoRoot);
+  const currentCommit = opts.markStale === true ? currentGitCommit(repoRoot) : undefined;
   const generatedAt = new Date().toISOString();
   const batch = readFixBatch(
     captureDir,
