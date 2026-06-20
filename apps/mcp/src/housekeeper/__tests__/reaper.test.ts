@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ceilingFor, isHousekeeper, reapStaleHousekeepers } from "../reaper.js";
+import {
+  ceilingFor,
+  classifyHousekeeperRun,
+  isHousekeeper,
+  reapStaleHousekeepers,
+} from "../reaper.js";
 
 // The reaper is the external backstop the in-process signup-lock watchdog can't
 // be: it kills stale sibling housekeeper runs (old dist / hung-in-teardown /
@@ -10,16 +15,46 @@ describe("isHousekeeper", () => {
   it("matches a real housekeeper invocation", () => {
     expect(isHousekeeper("node apps/mcp/dist/bin.js housekeeper --mode=discover --service=exa")).toBe(true);
     expect(isHousekeeper("node /home/x/proj-ts/apps/mcp/dist/bin.js housekeeper --mode=heal --once")).toBe(true);
+    expect(isHousekeeper("node apps/mcp/dist/bin.js housekeeper autoloop --agent=codex")).toBe(true);
   });
 
   it("does NOT match the MCP server or unrelated node processes", () => {
     expect(isHousekeeper("node apps/mcp/dist/bin.js server")).toBe(false);
     expect(isHousekeeper("node some/other/script.js")).toBe(false);
     expect(isHousekeeper("/usr/bin/google-chrome --headless")).toBe(false);
+    expect(isHousekeeper("node script.js --message='housekeeper autoloop'")).toBe(false);
   });
 
   it("does NOT match a non-node process that merely mentions housekeeper", () => {
     expect(isHousekeeper("grep housekeeper cli.ts")).toBe(false);
+  });
+});
+
+describe("classifyHousekeeperRun", () => {
+  it("classifies autoloop and heal as long-running", () => {
+    expect(classifyHousekeeperRun("node apps/mcp/dist/bin.js housekeeper autoloop --agent=codex")).toEqual({
+      kind: "long",
+      ceilingS: 4 * 60 * 60,
+    });
+    expect(classifyHousekeeperRun("node apps/mcp/dist/bin.js housekeeper --mode=heal --once")).toEqual({
+      kind: "long",
+      ceilingS: 4 * 60 * 60,
+    });
+  });
+
+  it("classifies service/discover invocations as single runs", () => {
+    expect(classifyHousekeeperRun("node apps/mcp/dist/bin.js housekeeper --service=kinde --once")).toEqual({
+      kind: "single",
+      ceilingS: 25 * 60,
+    });
+    expect(classifyHousekeeperRun("node apps/mcp/dist/bin.js housekeeper --mode=discover --service=exa")).toEqual({
+      kind: "single",
+      ceilingS: 25 * 60,
+    });
+  });
+
+  it("returns null for text that only mentions housekeeper", () => {
+    expect(classifyHousekeeperRun("node script.js --message='housekeeper autoloop'")).toBeNull();
   });
 });
 
