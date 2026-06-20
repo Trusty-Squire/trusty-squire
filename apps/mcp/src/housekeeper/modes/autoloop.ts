@@ -109,8 +109,15 @@ function makeStaleClusterGate(input: {
     );
     const red: string[] = [];
     for (const service of [...new Set(cluster.services)]) {
-      const result = await input.runner(service);
-      if (!result.green) red.push(service);
+      try {
+        const result = await input.runner(service);
+        if (!result.green) red.push(service);
+      } catch (err) {
+        return {
+          proceed: false,
+          reason: `stale-repro-error: ${service}: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
     }
     if (red.length === 0) {
       return {
