@@ -64,6 +64,11 @@ export const FORBIDDEN_PATH_FRAGMENTS = ["corpus/eval"] as const;
 // patch per service.
 export interface FixCluster {
   id: string;
+  // Service-agnostic problem family. Execution clusters stay service-local so
+  // the live oracle proves each service independently, but family_id lets logs
+  // and future scheduling show how many broader problems those execution units
+  // collapse into.
+  family_id: string;
   failure_stage: FailureStage;
   signature: string;
   services: string[];
@@ -197,13 +202,14 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
   const baseCounts = new Map<string, number>();
   for (const f of batch.failures) {
     const observedKind = f.terminal_page?.observed.kind ?? "none";
+    const familyKey = `${f.failure_stage}:${observedKind}:${f.signature}`;
     // Service is part of the fix unit. Cross-service shape collisions produced
     // huge heterogeneous clusters (e.g. fly/braintrust/clarifai/nomic/
     // stackblitz/unify) whose shared "planner_loop" label hid distinct
     // regressions and let a proposer declare a false wall for known-green
     // services. Keep the signature useful for ordering, but require the live
     // oracle to prove each service independently.
-    const baseKey = `${f.service}:${f.failure_stage}:${observedKind}:${f.signature}`;
+    const baseKey = `${f.service}:${familyKey}`;
     const page =
       f.terminal_capture_ref !== undefined && f.terminal_page !== undefined
         ? { service: f.service, captureRef: f.terminal_capture_ref, observed: f.terminal_page.observed }
@@ -216,6 +222,7 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
     if (existing === undefined) {
       byKey.set(key, {
         id: key,
+        family_id: familyKey,
         failure_stage: f.failure_stage,
         signature: f.signature,
         services: [f.service],
@@ -236,6 +243,30 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
   return [...byKey.values()].sort(
     (a, b) => b.services.length - a.services.length || b.failures.length - a.failures.length,
   );
+}
+
+function summarizeClusterFamilies(clusters: readonly FixCluster[]): string {
+  const byFamily = new Map<string, { clusters: number; services: Set<string>; failures: number }>();
+  for (const cluster of clusters) {
+    const entry = byFamily.get(cluster.family_id) ?? {
+      clusters: 0,
+      services: new Set<string>(),
+      failures: 0,
+    };
+    entry.clusters += 1;
+    entry.failures += cluster.failures.length;
+    for (const service of cluster.services) entry.services.add(service);
+    byFamily.set(cluster.family_id, entry);
+  }
+  const top = [...byFamily.entries()]
+    .sort((a, b) => b[1].clusters - a[1].clusters || b[1].failures - a[1].failures)
+    .slice(0, 5)
+    .map(
+      ([family, entry]) =>
+        `${family}=${entry.clusters} cluster(s)/${entry.services.size} service(s)/${entry.failures} failure(s)`,
+    )
+    .join("; ");
+  return `${byFamily.size} problem family(ies)` + (top.length > 0 ? `; top: ${top}` : "");
 }
 
 // ── Path fence (pure) ───────────────────────────────────────────────
@@ -328,6 +359,7 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
   const result: FixAgentResult = { committed: [], walls: [], parked: [], routed: [] };
   const clusters = clusterFailures(opts.batch);
   log(`batch ${opts.batch.batch_id}: ${opts.batch.failures.length} failure(s) → ${clusters.length} cluster(s)`);
+  log(`cluster families: ${summarizeClusterFamilies(clusters)}`);
 
   // Baseline the gate ONCE so "holdout didn't drop" is measured against the
   // pre-fix state, not re-derived per attempt.

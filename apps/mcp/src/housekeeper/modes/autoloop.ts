@@ -15,6 +15,9 @@
 // canary baseline is the silent-collapse tripwire. Operator-only.
 
 import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   checkFixAgentCommand,
   resolveFixAgentCommand,
@@ -32,6 +35,94 @@ import { measureCanaryBaseline } from "../live-gate.js";
 const DEFAULT_CANARY = ["ipinfo", "clickhouse-cloud", "instant-db", "langfuse"];
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000;
 const OWNER_ORDER: FailureOwner[] = ["code", "retry", "capability", "external"];
+const RECENT_LOG_LIMIT = 160;
+
+interface AutoloopProgress {
+  runId: string;
+  phase: string;
+  lap?: number;
+  maxLaps?: number;
+  agent?: string;
+  currentCommit?: string;
+  recentLogLines: string[];
+}
+
+interface SerializedError {
+  name: string;
+  message: string;
+  stack?: string;
+  cause?: string;
+}
+
+export interface AutoloopCrashReport {
+  schema_version: 1;
+  kind: "autoloop_crash";
+  run_id: string;
+  timestamp: string;
+  cwd: string;
+  phase: string;
+  lap?: number;
+  max_laps?: number;
+  agent?: string;
+  current_commit?: string;
+  pid: number;
+  error: SerializedError;
+  recent_log_lines: string[];
+}
+
+function defaultCrashDir(): string {
+  return join(homedir(), ".trusty-squire", "autoloop-crashes");
+}
+
+function safeFileSegment(raw: string): string {
+  const cleaned = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return cleaned.length > 0 ? cleaned.slice(0, 120) : "autoloop";
+}
+
+function serializeError(err: unknown): SerializedError {
+  if (err instanceof Error) {
+    const out: SerializedError = {
+      name: err.name,
+      message: err.message,
+    };
+    if (typeof err.stack === "string") out.stack = err.stack;
+    if ("cause" in err && err.cause !== undefined) out.cause = String(err.cause);
+    return out;
+  }
+  return { name: "NonError", message: String(err) };
+}
+
+export function writeAutoloopCrashReport(
+  progress: AutoloopProgress,
+  err: unknown,
+  crashDir = defaultCrashDir(),
+): string {
+  mkdirSync(crashDir, { recursive: true });
+  const timestamp = new Date().toISOString();
+  const report: AutoloopCrashReport = {
+    schema_version: 1,
+    kind: "autoloop_crash",
+    run_id: progress.runId,
+    timestamp,
+    cwd: process.cwd(),
+    phase: progress.phase,
+    ...(progress.lap !== undefined ? { lap: progress.lap } : {}),
+    ...(progress.maxLaps !== undefined ? { max_laps: progress.maxLaps } : {}),
+    ...(progress.agent !== undefined ? { agent: progress.agent } : {}),
+    ...(progress.currentCommit !== undefined ? { current_commit: progress.currentCommit } : {}),
+    pid: process.pid,
+    error: serializeError(err),
+    recent_log_lines: [...progress.recentLogLines],
+  };
+  const file = join(
+    crashDir,
+    `${timestamp.replace(/[:.]/g, "-")}-${safeFileSegment(progress.runId)}.json`,
+  );
+  const body = `${JSON.stringify(report, null, 2)}\n`;
+  writeFileSync(file, body);
+  writeFileSync(join(crashDir, "latest.json"), body);
+  return file;
+}
 
 function liveGateConcurrencyFromEnv(): number {
   const raw = Number(process.env.TRUSTY_SQUIRE_LIVE_GATE_CONCURRENCY ?? "1");
@@ -137,113 +228,146 @@ export async function runAutoloop(opts: {
   maxLaps?: number;
   agent?: string;
 }): Promise<void> {
-  const log = opts.log ?? ((l: string) => console.log(`[autoloop] ${l}`));
+  const rawLog = opts.log ?? ((l: string) => console.log(`[autoloop] ${l}`));
+  const progress: AutoloopProgress = {
+    runId: `autoloop-${process.pid}-${Date.now().toString(36)}`,
+    phase: "startup",
+    recentLogLines: [],
+  };
+  const log = (line: string): void => {
+    progress.recentLogLines.push(`${new Date().toISOString()} ${line}`);
+    if (progress.recentLogLines.length > RECENT_LOG_LIMIT) progress.recentLogLines.shift();
+    rawLog(line);
+  };
   const repoRoot = process.cwd();
   const maxLaps = opts.maxLaps ?? (Number(process.env.AUTOLOOP_MAX_LAPS ?? "6") || 6);
-  const cliCommand = resolveFixAgentCommand(opts.agent);
-  const commandProblem = checkFixAgentCommand(cliCommand.command);
-  if (commandProblem !== null) {
-    log(`ABORT: ${commandProblem}`);
-    return;
-  }
-  log(`using fix proposer agent=${cliCommand.label}`);
+  progress.maxLaps = maxLaps;
+  try {
+    const cliCommand = resolveFixAgentCommand(opts.agent);
+    progress.agent = cliCommand.label;
+    const commandProblem = checkFixAgentCommand(cliCommand.command);
+    if (commandProblem !== null) {
+      log(`ABORT: ${commandProblem}`);
+      return;
+    }
+    log(`using fix proposer agent=${cliCommand.label}`);
 
-  const canary = (process.env.TRUSTY_SQUIRE_FIX_CANARY ?? DEFAULT_CANARY.join(","))
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const minClusterMove = Number(process.env.TRUSTY_SQUIRE_FIX_MIN_MOVE ?? "2") || 2;
-  const liveGateConcurrency = liveGateConcurrencyFromEnv();
-  const liveGateMaxAttempts = legacyBestOfFromEnv() ?? liveRetryBudgetFromEnv() + 1;
+    const canary = (process.env.TRUSTY_SQUIRE_FIX_CANARY ?? DEFAULT_CANARY.join(","))
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const minClusterMove = Number(process.env.TRUSTY_SQUIRE_FIX_MIN_MOVE ?? "2") || 2;
+    const liveGateConcurrency = liveGateConcurrencyFromEnv();
+    const liveGateMaxAttempts = legacyBestOfFromEnv() ?? liveRetryBudgetFromEnv() + 1;
 
-  const runner = discoverLiveRunner({ repoRoot, log });
-  const build = makeDistBuilder({ repoRoot });
-  const currentCommit = currentGitCommit(repoRoot);
-  if (currentCommit !== undefined) {
-    log(`current commit for freshness gate: ${currentCommit.slice(0, 12)}`);
-  } else {
-    log("WARN: current commit unavailable — stale-failure freshness gate will be skipped");
-  }
+    progress.phase = "init-live-runner";
+    const runner = discoverLiveRunner({ repoRoot, log });
+    const build = makeDistBuilder({ repoRoot });
+    const currentCommit = currentGitCommit(repoRoot);
+    if (currentCommit !== undefined) {
+      progress.currentCommit = currentCommit;
+      log(`current commit for freshness gate: ${currentCommit.slice(0, 12)}`);
+    } else {
+      log("WARN: current commit unavailable — stale-failure freshness gate will be skipped");
+    }
 
-  // The canary baseline — measured ONCE, live, before any fix. The live gate
-  // rejects any fix that drops the canary below this. Measured against the
-  // CURRENT (pre-loop) code, so it reflects reality at the start of the run.
-  log(
-    `measuring canary baseline (live, concurrency=${liveGateConcurrency}, retry_budget=${liveGateMaxAttempts - 1}): ${canary.join(", ")}…`,
-  );
-  const baselineCanaryGreen = await measureCanaryBaseline(
-    runner,
-    canary,
-    liveGateConcurrency,
-    liveGateMaxAttempts,
-  );
-  log(`canary baseline: ${baselineCanaryGreen}/${canary.length} green`);
-  if (baselineCanaryGreen === 0) {
+    // The canary baseline — measured ONCE, live, before any fix. The live gate
+    // rejects any fix that drops the canary below this. Measured against the
+    // CURRENT (pre-loop) code, so it reflects reality at the start of the run.
+    progress.phase = "canary-baseline";
     log(
-      "ABORT: canary baseline is 0/" +
-        canary.length +
-        " — the pool or env is broken; a live gate would pass everything. Fix the canary first.",
+      `measuring canary baseline (live, concurrency=${liveGateConcurrency}, retry_budget=${liveGateMaxAttempts - 1}): ${canary.join(", ")}…`,
     );
-    return;
-  }
+    const baselineCanaryGreen = await measureCanaryBaseline(
+      runner,
+      canary,
+      liveGateConcurrency,
+      liveGateMaxAttempts,
+    );
+    log(`canary baseline: ${baselineCanaryGreen}/${canary.length} green`);
+    if (baselineCanaryGreen === 0) {
+      log(
+        "ABORT: canary baseline is 0/" +
+          canary.length +
+          " — the pool or env is broken; a live gate would pass everything. Fix the canary first.",
+      );
+      return;
+    }
 
-  const liveGate = makeLiveGate({
-    repoRoot,
-    canary,
-    baselineCanaryGreen,
-    minClusterMove,
-    concurrency: liveGateConcurrency,
-    maxAttempts: liveGateMaxAttempts,
-    runner,
-    build,
-    log,
-  });
-
-  let totalCommitted = 0;
-  for (let lap = 1; lap <= maxLaps; lap++) {
-    log(`========== LAP ${lap}/${maxLaps} ==========`);
-    const result = await runFixMode({
-      // Wide window: the autoloop fixes the accumulated ledger backlog, not
-      // just the last 24h.
-      sinceMs: Date.now() - SIXTY_DAYS_MS,
-      liveGate,
-      ...(currentCommit !== undefined ? { currentCommit } : {}),
-      staleClusterGate: makeStaleClusterGate({ currentCommit, runner, log }),
+    progress.phase = "live-gate-setup";
+    const liveGate = makeLiveGate({
+      repoRoot,
+      canary,
+      baselineCanaryGreen,
+      minClusterMove,
+      concurrency: liveGateConcurrency,
+      maxAttempts: liveGateMaxAttempts,
+      runner,
+      build,
       log,
-      ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     });
-    const committed = result?.committed.length ?? 0;
-    const walls = result?.walls.length ?? 0;
-    const parked = result?.parked.length ?? 0;
-    const ownerCounts = formatOwnerCounts(result?.routed ?? []);
-    const proposerBlocked = (result?.parked ?? []).some((p) =>
-      p.reason.startsWith("proposer error:") ||
-      p.reason.includes("proposer command not found"),
-    );
-    const madeFreshnessProgress = (result?.parked ?? []).some(
-      (p) => p.reason.startsWith("stale-resolved:") || p.reason.startsWith("stale-recaptured:"),
-    );
-    const exhaustedFixes = (result?.walls ?? []).some((w) =>
-      w.reason.includes("no fix both held the gate"),
-    );
-    totalCommitted += committed;
-    log(`LAP ${lap}: committed=${committed} walls=${walls} parked=${parked} owners(${ownerCounts})`);
-    for (const c of result?.committed ?? []) {
-      log(`  ✅ ${c.cluster_id} → ${c.version}: ${c.summary}`);
-    }
-    if (committed === 0) {
-      if (madeFreshnessProgress) {
-        log("stale failures were reprobed; continuing so current-commit outcomes can replace old evidence.");
-        continue;
-      } else if (proposerBlocked) {
-        log(`STOPPED at lap ${lap}: proposer failed; not converged.`);
-      } else if (exhaustedFixes) {
-        log(`STOPPED at lap ${lap}: fixable clusters exhausted without a passing candidate; not converged.`);
-      } else {
-        log(`CONVERGED at lap ${lap}: no commit-worthy fixable clusters remained.`);
+
+    let totalCommitted = 0;
+    for (let lap = 1; lap <= maxLaps; lap++) {
+      progress.lap = lap;
+      progress.phase = "fix-pass";
+      log(`========== LAP ${lap}/${maxLaps} ==========`);
+      const result = await runFixMode({
+        // Wide window: the autoloop fixes the accumulated ledger backlog, not
+        // just the last 24h.
+        sinceMs: Date.now() - SIXTY_DAYS_MS,
+        liveGate,
+        ...(currentCommit !== undefined ? { currentCommit } : {}),
+        staleClusterGate: makeStaleClusterGate({ currentCommit, runner, log }),
+        log,
+        ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+      });
+      const committed = result?.committed.length ?? 0;
+      const walls = result?.walls.length ?? 0;
+      const parked = result?.parked.length ?? 0;
+      const ownerCounts = formatOwnerCounts(result?.routed ?? []);
+      const proposerBlocked = (result?.parked ?? []).some((p) =>
+        p.reason.startsWith("proposer error:") ||
+        p.reason.includes("proposer command not found"),
+      );
+      const madeFreshnessProgress = (result?.parked ?? []).some(
+        (p) => p.reason.startsWith("stale-resolved:") || p.reason.startsWith("stale-recaptured:"),
+      );
+      const exhaustedFixes = (result?.walls ?? []).some((w) =>
+        w.reason.includes("no fix both held the gate"),
+      );
+      totalCommitted += committed;
+      log(`LAP ${lap}: committed=${committed} walls=${walls} parked=${parked} owners(${ownerCounts})`);
+      for (const c of result?.committed ?? []) {
+        log(`  ✅ ${c.cluster_id} → ${c.version}: ${c.summary}`);
       }
-      break;
+      if (committed === 0) {
+        if (madeFreshnessProgress) {
+          log("stale failures were reprobed; continuing so current-commit outcomes can replace old evidence.");
+          continue;
+        } else if (proposerBlocked) {
+          log(`STOPPED at lap ${lap}: proposer failed; not converged.`);
+        } else if (exhaustedFixes) {
+          log(`STOPPED at lap ${lap}: fixable clusters exhausted without a passing candidate; not converged.`);
+        } else {
+          log(`CONVERGED at lap ${lap}: no commit-worthy fixable clusters remained.`);
+        }
+        break;
+      }
     }
+    progress.phase = "done";
+    log(`========== AUTOLOOP DONE — ${totalCommitted} fix(es) committed total ==========`);
+  } catch (err) {
+    try {
+      const crashPath = writeAutoloopCrashReport(progress, err);
+      log(`CRASH: wrote autoloop crash report: ${crashPath}`);
+    } catch (writeErr) {
+      log(
+        `CRASH: failed to write autoloop crash report: ${
+          writeErr instanceof Error ? writeErr.message : String(writeErr)
+        }`,
+      );
+    }
+    throw err;
   }
-  log(`========== AUTOLOOP DONE — ${totalCommitted} fix(es) committed total ==========`);
 }

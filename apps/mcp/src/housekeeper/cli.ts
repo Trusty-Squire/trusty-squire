@@ -314,8 +314,15 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   if (argv[0] === "autoloop") {
     const { runAutoloop } = await import("./modes/autoloop.js");
     const agent = parseAutoloopAgent(argv.slice(1));
-    await runAutoloop(agent !== undefined ? { agent } : {});
-    return 0;
+    try {
+      await runAutoloop(agent !== undefined ? { agent } : {});
+      return 0;
+    } catch (err) {
+      console.error(
+        `housekeeper: autoloop fatal: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
   }
 
   const args = parseArgs(argv);

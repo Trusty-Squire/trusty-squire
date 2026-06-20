@@ -122,6 +122,7 @@ describe("clusterFailures", () => {
     expect(clusters).toHaveLength(3);
     expect(clusters.map((c) => c.services[0]).sort()).toEqual(["groq", "kinde", "render"]);
     expect(clusters.every((c) => c.pages.length === 1)).toBe(true);
+    expect(new Set(clusters.map((c) => c.family_id)).size).toBe(1);
   });
 
   it("separates same stage+action failures with different page signatures", () => {
