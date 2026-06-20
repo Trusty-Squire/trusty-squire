@@ -309,6 +309,11 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     return await runLedgerCli(argv);
   }
 
+  if (argv[0] === "classify-backfill") {
+    const { runClassificationBackfill } = await import("./modes/classify-backfill.js");
+    return runClassificationBackfill();
+  }
+
   // autonomous-fix-loop Phase 3 — the conductor: live-gated fix-agent looped to
   // convergence. Operator-only, long-running.
   if (argv[0] === "autoloop") {

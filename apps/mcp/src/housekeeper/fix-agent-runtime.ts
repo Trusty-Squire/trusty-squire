@@ -20,7 +20,9 @@ import type {
   FixProposal,
   FixProposer,
   GateRunner,
+  NoChangeClassification,
 } from "./fix-agent.js";
+import { NoChangeProposalError } from "./fix-agent.js";
 
 import { runLiveGate, type LiveRunAttempt, type LiveRunner } from "./live-gate.js";
 import {
@@ -87,6 +89,80 @@ function tailForLog(text: string, maxLines = 8): string {
 function safeSegment(raw: string): string {
   const cleaned = raw.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return cleaned.length > 0 ? cleaned.slice(0, 80) : "run";
+}
+
+function transcriptExcerpt(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(-8)
+    .join(" | ")
+    .slice(0, 900);
+}
+
+function classifyNoChange(text: string): NoChangeClassification {
+  if (
+    /not fixable|cannot be fixed|can't be fixed|requires human|manual review|phone|card|payment|captcha|anti.?bot|ip reputation|blocked by/i.test(
+      text,
+    )
+  ) {
+    return "wall";
+  }
+  if (
+    /outside (the )?(allowed|permitted) (surface|paths?)|out.of.fence|need(s)? to edit|requires changes? (outside|in another)|not in allowed/i.test(
+      text,
+    )
+  ) {
+    return "out_of_fence";
+  }
+  return "confused";
+}
+
+function writeProposerTranscript(input: {
+  repoRoot: string;
+  runId: string;
+  cluster: FixCluster;
+  attemptNumber: number;
+  rateAttempt: number;
+  prompt: string;
+  stdout: string;
+  stderr: string;
+  exit: "ok" | "error";
+  error?: string;
+}): string {
+  const dir = join(
+    input.repoRoot,
+    ".debug",
+    "fix-agent",
+    input.runId,
+    safeSegment(input.cluster.id),
+  );
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `attempt-${input.attemptNumber}-try-${input.rateAttempt}.json`);
+  writeFileSync(
+    file,
+    `${JSON.stringify(
+      {
+        schema_version: 1,
+        cluster_id: input.cluster.id,
+        family_id: input.cluster.family_id,
+        services: input.cluster.services,
+        failure_stage: input.cluster.failure_stage,
+        signature: input.cluster.signature,
+        attempt: input.attemptNumber,
+        rate_attempt: input.rateAttempt,
+        exit: input.exit,
+        ...(input.error !== undefined ? { error: input.error } : {}),
+        prompt: input.prompt,
+        stdout: input.stdout,
+        stderr: input.stderr,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return file;
 }
 
 export interface LocalLiveRunLease {
@@ -382,6 +458,7 @@ export function codingAgentProposer(config: {
   repoRoot: string;
   cliCommand: readonly string[];
   log?: (line: string) => void;
+  runId?: string;
   // Hard ceiling on one coding-agent invocation — a hung agent must not block
   // the lap forever. Default 15 min (agentic sessions read many sidecars).
   timeoutMs?: number;
@@ -390,6 +467,7 @@ export function codingAgentProposer(config: {
   maxRateRetries?: number;
 }): FixProposer {
   const log = config.log ?? (() => undefined);
+  const runId = config.runId ?? `fix-agent-${process.pid}-${Date.now().toString(36)}`;
   const timeoutMs = config.timeoutMs ?? 15 * 60 * 1000;
   const maxRateRetries = config.maxRateRetries ?? 4;
   return async (
@@ -406,18 +484,46 @@ export function codingAgentProposer(config: {
     }
     const [cmd, ...rest] = config.cliCommand;
     if (cmd === undefined) throw new Error("fix-agent: empty cliCommand");
+    let lastTranscriptPath: string | undefined;
+    let lastOutput = "";
     try {
       for (let attempt = 0; ; attempt++) {
+        const prompt = clusterPrompt(cluster, attemptNumber, priorFeedback);
         try {
-          await exec(cmd, [...rest, clusterPrompt(cluster, attemptNumber, priorFeedback)], {
+          const result = await exec(cmd, [...rest, prompt], {
             cwd: config.repoRoot,
             maxBuffer: 64 * 1024 * 1024,
             timeout: timeoutMs,
+          });
+          lastOutput = `${result.stdout}\n${result.stderr}`;
+          lastTranscriptPath = writeProposerTranscript({
+            repoRoot: config.repoRoot,
+            runId,
+            cluster,
+            attemptNumber,
+            rateAttempt: attempt + 1,
+            prompt,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exit: "ok",
           });
           break;
         } catch (err) {
           const e = err as { message?: string; stderr?: string; stdout?: string };
           const blob = `${e.message ?? ""}\n${e.stderr ?? ""}\n${e.stdout ?? ""}`;
+          lastOutput = blob;
+          lastTranscriptPath = writeProposerTranscript({
+            repoRoot: config.repoRoot,
+            runId,
+            cluster,
+            attemptNumber,
+            rateAttempt: attempt + 1,
+            prompt,
+            stdout: e.stdout ?? "",
+            stderr: e.stderr ?? "",
+            exit: "error",
+            error: e.message ?? String(err),
+          });
           if (RATE_LIMIT_RE.test(blob) && attempt < maxRateRetries) {
             // Drop any partial edits so the retry attributes cleanly.
             await git(config.repoRoot, ["checkout", "--", "."]).catch(() => undefined);
@@ -444,8 +550,13 @@ export function codingAgentProposer(config: {
     }
     const touched = await changedPaths(config.repoRoot);
     if (touched.length === 0) {
-      log(`cluster ${cluster.id}: coding agent made no change`);
-      return null;
+      const classification = classifyNoChange(lastOutput);
+      const transcriptPath = lastTranscriptPath ?? "missing-transcript";
+      const excerpt = transcriptExcerpt(lastOutput) || "no proposer output";
+      log(
+        `cluster ${cluster.id}: coding agent made no change (${classification}); transcript=${transcriptPath}`,
+      );
+      throw new NoChangeProposalError(classification, transcriptPath, excerpt);
     }
     return {
       summary: `auto-fix ${cluster.failure_stage} on ${cluster.services.join("/")}`,

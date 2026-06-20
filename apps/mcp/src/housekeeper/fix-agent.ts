@@ -101,6 +101,19 @@ export class WallError extends Error {
   }
 }
 
+export type NoChangeClassification = "wall" | "out_of_fence" | "confused";
+
+export class NoChangeProposalError extends Error {
+  constructor(
+    public readonly classification: NoChangeClassification,
+    public readonly transcriptPath: string,
+    public readonly excerpt: string,
+  ) {
+    super(`no code change (${classification}); transcript=${transcriptPath}`);
+    this.name = "NoChangeProposalError";
+  }
+}
+
 // Propose a fix for a cluster (or null = "nothing this attempt"). Throw a
 // WallError to park it as a genuine wall with a concrete reason.
 export type FixProposer = (
@@ -432,6 +445,19 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
       try {
         proposal = await opts.propose(cluster, attempt, priorFeedback);
       } catch (err) {
+        if (err instanceof NoChangeProposalError) {
+          result.parked.push({
+            cluster_id: cluster.id,
+            reason:
+              `no-change-${err.classification}: ${err.excerpt}; ` +
+              `transcript=${err.transcriptPath}`,
+            touched_paths: [],
+          });
+          log(
+            `cluster ${cluster.id}: parked — no code change (${err.classification}); transcript=${err.transcriptPath}`,
+          );
+          break;
+        }
         if (err instanceof WallError) {
           wallReason = err.reason;
           priorFeedback =

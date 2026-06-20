@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   clusterFailures,
   firstOutOfBoundsPath,
+  NoChangeProposalError,
   runFixAgent,
   sameAction,
   WallError,
@@ -305,6 +306,26 @@ describe("runFixAgent", () => {
     expect(propose).not.toHaveBeenCalled();
     expect(res.walls).toHaveLength(0);
     expect(res.parked[0]!.reason).toMatch(/no captured page/);
+  });
+
+  it("parks a no-change proposer result immediately instead of retrying blindly", async () => {
+    const propose = vi.fn(async () => {
+      throw new NoChangeProposalError("confused", ".debug/fix-agent/c/attempt-1.json", "no useful edit");
+    });
+    const res = await runFixAgent({
+      ...base,
+      batch: batch([failure({})]),
+      propose,
+      gate: scriptedGate([gate({ regressPassed: true, holdout: 5 })]),
+      replay: replayMoved,
+      commit: async () => undefined,
+      maxAttemptsPerCluster: 3,
+      log: () => undefined,
+    });
+    expect(propose).toHaveBeenCalledOnce();
+    expect(res.parked).toHaveLength(1);
+    expect(res.parked[0]!.reason).toContain("no-change-confused");
+    expect(res.parked[0]!.reason).toContain(".debug/fix-agent/c/attempt-1.json");
   });
 
   it("iterates on a red gate then commits when green; reverts the failed attempt", async () => {
