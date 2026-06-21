@@ -435,8 +435,6 @@ export async function freshVerifyService(opts: {
 // emits. (Unchanged set; now the input to classifyAttempt's HARD-WALL branch.)
 const HARD_FAILURE_CODES = [
   "no_signup_link",
-  "needs_login",
-  "needs_oauth_provider_session",
   "sso_restricted",
   "oauth_required",
   "payment_required",
@@ -457,6 +455,10 @@ export function isHardFailure(reason: string | undefined): boolean {
 // demotes". Anything that is neither a hard wall nor a known transient is taken
 // as an INFORMATIVE genuine-rot failure (it moves the posterior down).
 const NON_OBSERVATION_CODES = [
+  // Verifier robot/session health, not a service verdict. A profile may be
+  // stale, unwarmed, or logged out; re-draw another robot instead of demoting.
+  "needs_login",
+  "needs_oauth_provider_session",
   // Genuine per-run OAuth variance — real promotions came from re-drawing these
   // (gladia, clarifai). MUST stay non-informative.
   "oauth_loop_detected",

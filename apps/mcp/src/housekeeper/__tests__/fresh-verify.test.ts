@@ -115,9 +115,6 @@ describe("classifyAttempt", () => {
     expect(classifyAttempt({ success: false, reason: "anti_bot_blocked: turnstile" })).toBe(
       "hard_wall",
     );
-    expect(classifyAttempt({ success: false, reason: "needs_login: session gone" })).toBe(
-      "hard_wall",
-    );
     expect(
       classifyAttempt({ success: false, reason: "onboarding_blocked: manual approval" }),
     ).toBe("hard_wall");
@@ -137,6 +134,12 @@ describe("classifyAttempt", () => {
     ).toBe("non_observation");
     expect(
       classifyAttempt({ success: false, reason: "verification_not_sent: email did not arrive in time" }),
+    ).toBe("non_observation");
+    expect(classifyAttempt({ success: false, reason: "needs_login: session gone" })).toBe(
+      "non_observation",
+    );
+    expect(
+      classifyAttempt({ success: false, reason: "needs_oauth_provider_session: google profile stale" }),
     ).toBe("non_observation");
     expect(classifyAttempt({ success: false, reason: "run_timeout: exceeded 600s" })).toBe(
       "non_observation",
@@ -321,7 +324,6 @@ describe("freshVerifyService (sampler-driven)", () => {
 describe("isHardFailure", () => {
   it("treats deterministic walls as hard", () => {
     expect(isHardFailure("anti_bot_blocked: turnstile")).toBe(true);
-    expect(isHardFailure("needs_login: session gone")).toBe(true);
     expect(isHardFailure("no_signup_link")).toBe(true);
     expect(isHardFailure("captcha_blocked")).toBe(true);
     expect(isHardFailure("oauth_required")).toBe(true);
@@ -330,6 +332,7 @@ describe("isHardFailure", () => {
     expect(isHardFailure("form drift mid-fill")).toBe(false);
     expect(isHardFailure("oauth_onboarding_failed: could not reach an API key")).toBe(false);
     expect(isHardFailure("verification_not_sent: email did not arrive")).toBe(false);
+    expect(isHardFailure("needs_login: session gone")).toBe(false);
     expect(isHardFailure("step_failed: button gone")).toBe(false);
     expect(isHardFailure(undefined)).toBe(false);
   });
@@ -337,6 +340,8 @@ describe("isHardFailure", () => {
 
 describe("isNonObservation", () => {
   it("variance-prone OAuth codes are non-observations (real promotions came from re-drawing)", () => {
+    expect(isNonObservation("needs_login: profile signed out")).toBe(true);
+    expect(isNonObservation("needs_oauth_provider_session: google profile stale")).toBe(true);
     expect(isNonObservation("oauth_loop_detected: redirect bounce")).toBe(true);
     expect(isNonObservation("oauth_session_not_persisted: callback never settled")).toBe(true);
     expect(isNonObservation("oauth_consent_needs_review: re-check")).toBe(true);
