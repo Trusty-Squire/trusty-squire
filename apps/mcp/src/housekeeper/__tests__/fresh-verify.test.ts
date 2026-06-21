@@ -118,6 +118,9 @@ describe("classifyAttempt", () => {
     expect(classifyAttempt({ success: false, reason: "needs_login: session gone" })).toBe(
       "hard_wall",
     );
+    expect(
+      classifyAttempt({ success: false, reason: "onboarding_blocked: manual approval" }),
+    ).toBe("hard_wall");
   });
   it("a transient flake is a non-observation", () => {
     expect(classifyAttempt({ success: false, reason: "form drift mid-fill" })).toBe(

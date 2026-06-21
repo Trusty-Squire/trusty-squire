@@ -440,6 +440,7 @@ const HARD_FAILURE_CODES = [
   "sso_restricted",
   "oauth_required",
   "payment_required",
+  "onboarding_blocked",
   "anti_bot_blocked",
   "captcha_blocked",
   "unservable",

@@ -14,6 +14,7 @@ describe("classifyFailure", () => {
     expect(classifyFailure("captcha_blocked")).toBe("wall");
     expect(classifyFailure("anti_bot_blocked")).toBe("wall");
     expect(classifyFailure("captcha")).toBe("wall");
+    expect(classifyFailure("onboarding_blocked")).toBe("wall");
   });
 
   it("classifies our-side inbox/delivery failures as infra", () => {
@@ -85,6 +86,7 @@ describe("classifyFailure", () => {
 
   it("isWallFailure flags only walls", () => {
     expect(isWallFailure("anti_bot_blocked")).toBe(true);
+    expect(isWallFailure("onboarding_blocked: manual approval")).toBe(true);
     expect(isWallFailure("step_failed")).toBe(false);
     expect(isWallFailure("verification_not_sent")).toBe(false);
   });
