@@ -453,6 +453,13 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // API Keys. Generic settings guesses can leave an unfinished welcome wizard
   // in place, so try the dashboard/developer surface first.
   cloudinary: ["/pm/developer-dashboard", "/settings/api-keys", "/app/settings/api-keys"],
+  // Luma's docs link the API key page on the marketing/apex host, while OAuth
+  // can settle inside app.lumalabs.ai or an app NotFound shell. This cannot be
+  // discovered by same-origin guesses.
+  lumaai: ["https://lumalabs.ai/dream-machine/api/keys", "https://lumalabs.ai/api/keys"],
+  // WorkOS documents the dashboard API key page directly; post-OAuth can land
+  // on product/onboarding surfaces that do not expose the sidebar path.
+  workos: ["https://dashboard.workos.com/api-keys"],
   // Paddle's dashboard exposes API keys under Developer Tools >
   // Authentication. The sidebar route is /authentication-v2; generic
   // /settings/* and /api-keys guesses miss it and the planner can get stuck
@@ -790,23 +797,29 @@ export function pickStuckLoopFallbackUrl(
   // unrelated origin the bot wandered onto (e.g. an OAuth provider or
   // a redirect to a marketing domain).
   const slug = service !== undefined ? serviceSlug(service) : "";
-  const curated =
-    slug !== "" &&
-    SERVICE_KEYS_PATHS[slug] !== undefined &&
-    composeBase.hostname.toLowerCase().includes(slug)
+  const servicePaths =
+    slug !== "" && SERVICE_KEYS_PATHS[slug] !== undefined
       ? SERVICE_KEYS_PATHS[slug]
+      : undefined;
+  const hasAbsoluteServicePath =
+    servicePaths?.some((path) => /^https?:\/\//i.test(path)) === true;
+  const curated =
+    servicePaths !== undefined &&
+    (hasAbsoluteServicePath || composeBase.hostname.toLowerCase().includes(slug))
+      ? servicePaths
       : [];
 
   // Curated paths lead; the generic list follows. De-dup so a path that
   // appears in both (groq's /keys, /settings/keys) isn't offered twice.
   const seen = new Set<string>();
   for (const path of [...curated, ...STUCK_LOOP_FALLBACK_PATHS]) {
-    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
+    const candidate =
+      /^https?:\/\//i.test(path) ? path : `${origin}${path}`;
+    const candidatePath = candidate.replace(/\/+$/, "").toLowerCase();
     if (seen.has(candidatePath)) continue;
     seen.add(candidatePath);
-    const candidate = `${origin}${path}`;
     if (alreadyTried.has(candidate)) continue;
-    if (`${origin}${path}`.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
+    if (candidate.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
     return candidate;
   }
   return null;
@@ -10334,6 +10347,7 @@ ${formatInventory(input.inventory)}`,
   // the safety net.
   private async attemptMintNewKey(
     steps: string[],
+    service?: string,
   ): Promise<Record<string, string> | null> {
     // The set of keys-page URLs we've navigated, so the fallback walk
     // doesn't revisit one and the create-affordance search doesn't
@@ -10532,7 +10546,7 @@ ${formatInventory(input.inventory)}`,
       const fallback = pickStuckLoopFallbackUrl(
         currentUrl,
         visitedKeysUrls,
-        undefined,
+        service,
         this.resolvedSignupUrl,
       );
       if (fallback === null) break;
@@ -10648,7 +10662,7 @@ ${formatInventory(input.inventory)}`,
       // this, nav-search only bare-clicks "Create API Key" and never submits
       // the resulting modal (groq's virgin /keys flow).
       mintKey: async () => {
-        const c = await this.attemptMintNewKey(args.steps);
+        const c = await this.attemptMintNewKey(args.steps, args.service);
         return c !== null && hasRealKey(c) ? c : null;
       },
       // Capture-chain parity (A2 / OF#1): one sequential round per step, full
@@ -12246,7 +12260,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // honest bail.
       let minted: Record<string, string> | null = null;
       try {
-        minted = await this.attemptMintNewKey(args.steps);
+        minted = await this.attemptMintNewKey(args.steps, args.service);
       } catch {
         // best-effort — degrade to the existing classifier below
       }

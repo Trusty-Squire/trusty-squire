@@ -212,16 +212,35 @@ describe("pickStuckLoopFallbackUrl", () => {
 
   it("composes onto the APP origin, not the auth/IdP origin the run is stuck on", () => {
     // luma's real bug: post-OAuth the stuck URL is the auth subdomain
-    // (auth.lumalabs.ai), which has no settings pages — every guess there
-    // 404s. The app URL the bot navigated to is on lumalabs.ai, so the
-    // fallback must be composed against THAT origin.
+    // (auth.lumalabs.ai) or app.lumalabs.ai, while the documented API-key
+    // URL lives on lumalabs.ai/dream-machine/api/keys.
     const fallback = pickStuckLoopFallbackUrl(
       "https://auth.lumalabs.ai/sign-up",
       new Set(),
       "luma-ai",
       "https://lumalabs.ai/dream-machine",
     );
-    expect(fallback).toBe("https://lumalabs.ai/settings/keys");
+    expect(fallback).toBe("https://lumalabs.ai/dream-machine/api/keys");
+  });
+
+  it("can return an absolute curated URL when the service slug is not in the host", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.lumalabs.ai/",
+      new Set(),
+      "luma-ai",
+      "https://app.lumalabs.ai/",
+    );
+    expect(fallback).toBe("https://lumalabs.ai/dream-machine/api/keys");
+  });
+
+  it("tries WorkOS' documented dashboard API-key URL first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://workos.com/onboarding",
+      new Set(),
+      "workos",
+      "https://workos.com/",
+    );
+    expect(fallback).toBe("https://dashboard.workos.com/api-keys");
   });
 
   it("uses the app origin's host for the curated-path gate", () => {
