@@ -243,6 +243,56 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://dashboard.workos.com/api-keys");
   });
 
+  it("tries Cloudinary's console credential surface before marketing-host guesses", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://cloudinary.com/users/register_free",
+      new Set(),
+      "cloudinary",
+      "https://cloudinary.com/users/register_free",
+    );
+    expect(fallback).toBe("https://console.cloudinary.com/pm/developer-dashboard");
+  });
+
+  it("tries Mistral's organization API-key page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.mistral.ai/",
+      new Set(),
+      "mistral",
+      "https://console.mistral.ai/",
+    );
+    expect(fallback).toBe("https://admin.mistral.ai/organization/api-keys");
+  });
+
+  it("tries Baseten's settings API-key page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.baseten.co/",
+      new Set(),
+      "baseten",
+      "https://app.baseten.co/",
+    );
+    expect(fallback).toBe("https://app.baseten.co/settings/api-keys");
+  });
+
+  it("tries Val Town's new API-token page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://www.val.town/settings/api",
+      new Set(),
+      "val-town",
+      "https://www.val.town/",
+    );
+    expect(fallback).toBe("https://www.val.town/settings/api/new");
+  });
+
+  it("tries Langfuse's cloud API-key settings entrypoint first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://cloud.langfuse.com/onboarding",
+      new Set(),
+      "langfuse",
+      "https://cloud.langfuse.com/",
+    );
+    expect(fallback).toBe("https://cloud.langfuse.com/settings/api-keys");
+  });
+
   it("uses the app origin's host for the curated-path gate", () => {
     // Stuck on accounts.google.com (OAuth), but the app is console.groq.com.
     // The curated groq path must compose onto the app host, not the IdP.

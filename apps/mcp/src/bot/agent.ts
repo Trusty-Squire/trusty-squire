@@ -452,11 +452,34 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // cloud/API credentials, with key management under Console Settings >
   // API Keys. Generic settings guesses can leave an unfinished welcome wizard
   // in place, so try the dashboard/developer surface first.
-  cloudinary: ["/pm/developer-dashboard", "/settings/api-keys", "/app/settings/api-keys"],
+  cloudinary: [
+    "https://console.cloudinary.com/pm/developer-dashboard",
+    "https://console.cloudinary.com/settings/api-keys",
+    "https://console.cloudinary.com/app/settings/api-keys",
+    "/pm/developer-dashboard",
+    "/settings/api-keys",
+    "/app/settings/api-keys",
+  ],
   // Luma's docs link the API key page on the marketing/apex host, while OAuth
   // can settle inside app.lumalabs.ai or an app NotFound shell. This cannot be
   // discovered by same-origin guesses.
   lumaai: ["https://lumalabs.ai/dream-machine/api/keys", "https://lumalabs.ai/api/keys"],
+  // Mistral's current API-key surface is on admin.mistral.ai; generic guesses
+  // from console.mistral.ai can miss the organization-scoped key page.
+  mistral: [
+    "https://admin.mistral.ai/organization/api-keys",
+    "https://console.mistral.ai/api-keys",
+    "https://console.mistral.ai/home?workspace_dialog=apiKeys",
+  ],
+  // Baseten documents API keys under app settings. If signup lands in a model
+  // catalog/onboarding surface, go straight to the settings route.
+  baseten: ["https://app.baseten.co/settings/api-keys"],
+  // Val Town's docs link API tokens here; /new opens the token-creation flow
+  // directly, avoiding disabled list-page actions.
+  valtown: ["https://www.val.town/settings/api/new", "https://www.val.town/settings/api"],
+  // Langfuse project ids are dynamic, but the cloud root/settings route is the
+  // stable entry to project settings/API keys after signup.
+  langfuse: ["https://cloud.langfuse.com/settings/api-keys", "https://us.cloud.langfuse.com/settings/api-keys"],
   // WorkOS documents the dashboard API key page directly; post-OAuth can land
   // on product/onboarding surfaces that do not expose the sidebar path.
   workos: ["https://dashboard.workos.com/api-keys"],
