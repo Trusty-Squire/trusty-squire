@@ -480,6 +480,10 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // Langfuse project ids are dynamic, but the cloud root/settings route is the
   // stable entry to project settings/API keys after signup.
   langfuse: ["https://cloud.langfuse.com/settings/api-keys", "https://us.cloud.langfuse.com/settings/api-keys"],
+  // Kinde docs direct API-key troubleshooting to Settings > API Keys.
+  // The feature can be paid-plan gated; reaching the route lets terminal-gate
+  // classification see that wall instead of a generic no-key dashboard miss.
+  kinde: ["https://app.kinde.com/settings/api-keys", "/settings/api-keys"],
   // WorkOS documents the dashboard API key page directly; post-OAuth can land
   // on product/onboarding surfaces that do not expose the sidebar path.
   workos: ["https://dashboard.workos.com/api-keys"],

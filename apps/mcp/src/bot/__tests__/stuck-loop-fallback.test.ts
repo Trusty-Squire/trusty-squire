@@ -293,6 +293,16 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://cloud.langfuse.com/settings/api-keys");
   });
 
+  it("tries Kinde's Settings > API Keys route first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.kinde.com/",
+      new Set(),
+      "kinde",
+      "https://app.kinde.com/",
+    );
+    expect(fallback).toBe("https://app.kinde.com/settings/api-keys");
+  });
+
   it("uses the app origin's host for the curated-path gate", () => {
     // Stuck on accounts.google.com (OAuth), but the app is console.groq.com.
     // The curated groq path must compose onto the app host, not the IdP.
