@@ -122,6 +122,19 @@ describe("findCreateKeyAffordance", () => {
     expect(findCreateKeyAffordance(inv)).toBeNull();
   });
 
+  it("does not match large announcement cards with distant 'new' and 'keys' words", () => {
+    const inv = [
+      el({
+        visibleText:
+          "What's new User budgets for AI usage Admins can set monthly budgets " +
+          "covering model spend through provider keys and exports. Learn more",
+        selector: "#whats-new",
+      }),
+      el({ visibleText: "New token", selector: "#new-token" }),
+    ];
+    expect(findCreateKeyAffordance(inv)?.selector).toBe("#new-token");
+  });
+
   it("returns null on an empty inventory", () => {
     expect(findCreateKeyAffordance([])).toBeNull();
   });
@@ -247,11 +260,13 @@ interface FakeBrowserConfig {
   // revealMaskedCredentials result.
   revealClicked?: number;
   pageText?: string;
+  waitForInteractiveDomHangs?: boolean;
 }
 
 class FakeBrowser {
   public clicks: string[] = [];
   public gotos: string[] = [];
+  public interactiveWaits = 0;
   private created = false;
   constructor(private readonly cfg: FakeBrowserConfig) {}
 
@@ -298,7 +313,12 @@ class FakeBrowser {
     this.gotos.push(url);
     this.cfg.url = url;
   }
-  async waitForInteractiveDom(_a: number, _b: number): Promise<void> {}
+  async waitForInteractiveDom(_a: number, _b: number): Promise<void> {
+    this.interactiveWaits += 1;
+    if (this.cfg.waitForInteractiveDomHangs === true) {
+      await new Promise(() => {});
+    }
+  }
 }
 
 function agentWith(browser: FakeBrowser): SignupAgent {
@@ -388,5 +408,22 @@ describe("SignupAgent.attemptMintNewKey", () => {
     expect(out).toBeNull();
     // No create affordance → never clicked one.
     expect(browser.clicks).toHaveLength(0);
+  });
+
+  it("aborts guessed key URL walking on SPA 404 copy before a hanging readiness wait", async () => {
+    const browser = new FakeBrowser({
+      url: "https://cloud.temporal.io/login",
+      pageText: "404 Uh oh. There's an error. Not found: /settings/api_keys",
+      inventory: [],
+      waitForInteractiveDomHangs: true,
+    });
+    const agent = agentWith(browser);
+    const steps: string[] = [];
+    const out = await mint(agent, steps);
+
+    expect(out).toBeNull();
+    expect(browser.interactiveWaits).toBe(0);
+    expect(browser.gotos).toHaveLength(3);
+    expect(steps.some((s) => s.includes("3 consecutive 404s on guessed keys URLs"))).toBe(true);
   });
 });

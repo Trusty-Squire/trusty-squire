@@ -239,7 +239,7 @@
     visit to dashboard.cohere.com.
 - slug: baseten
   name: Baseten
-  signup_url: https://app.baseten.co/login
+  signup_url: https://app.baseten.co/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending

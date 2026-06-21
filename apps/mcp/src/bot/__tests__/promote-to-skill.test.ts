@@ -25,6 +25,7 @@ import {
   hasEphemeralPathSegment,
   generalizeCapturedUrl,
   isIdentityProviderUrl,
+  isUnstableSignupEntryUrl,
 } from "../promote-to-skill.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -92,6 +93,21 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     expect(isIdentityProviderUrl("https://mygoogle.com.evil.io/x")).toBe(false);
     // Malformed / relative → not an IdP entry.
     expect(isIdentityProviderUrl("/signup")).toBe(false);
+  });
+
+  it("isUnstableSignupEntryUrl rejects stale transaction entries, not valid deep key pages", () => {
+    expect(isUnstableSignupEntryUrl("https://app.baseten.co/overview")).toBe(true);
+    expect(isUnstableSignupEntryUrl("https://app.kinde.com/auth/cx/_:nav&m:login")).toBe(true);
+    expect(
+      isUnstableSignupEntryUrl(
+        "https://console.anyscale.com/register/create-user-new-org-confirmation",
+      ),
+    ).toBe(true);
+    expect(isUnstableSignupEntryUrl("https://replit.com/~")).toBe(true);
+
+    expect(isUnstableSignupEntryUrl("https://railway.com/account/tokens")).toBe(false);
+    expect(isUnstableSignupEntryUrl("https://ipinfo.io/account/token")).toBe(false);
+    expect(isUnstableSignupEntryUrl("https://example.com/signup")).toBe(false);
   });
 });
 

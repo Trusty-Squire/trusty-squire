@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -206,5 +206,37 @@ describe("readFixBatch (IO)", () => {
 
     const batch = readFixBatch(dir, META, undefined, { currentCommit: "new-commit" });
     expect(batch.failures.map((f) => [f.run_id, f.source_commit])).toEqual([["new", "new-commit"]]);
+  });
+
+  it("drops historical failures once a later success exists for the same service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    const oldFailure = join(dir, "svc-old.outcome.json");
+    const laterSuccess = join(dir, "svc-new.outcome.json");
+    writeFileSync(oldFailure, JSON.stringify(outcome("svc", "old", false, "planner_loop")));
+    writeFileSync(laterSuccess, JSON.stringify(outcome("svc", "new", true, "none")));
+    utimesSync(oldFailure, new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-01T00:00:00.000Z"));
+    utimesSync(laterSuccess, new Date("2026-06-02T00:00:00.000Z"), new Date("2026-06-02T00:00:00.000Z"));
+
+    const batch = readFixBatch(dir, META);
+    expect(batch.failures).toEqual([]);
+    expect(batch.stats.totalRuns).toBe(1);
+  });
+
+  it("keeps failures that occur after the latest success for the same service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    const firstSuccess = join(dir, "svc-good.outcome.json");
+    const laterFailure = join(dir, "svc-bad.outcome.json");
+    writeFileSync(firstSuccess, JSON.stringify(outcome("svc", "good", true, "none")));
+    writeFileSync(laterFailure, JSON.stringify(outcome("svc", "bad", false, "extract")));
+    utimesSync(firstSuccess, new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-01T00:00:00.000Z"));
+    utimesSync(laterFailure, new Date("2026-06-02T00:00:00.000Z"), new Date("2026-06-02T00:00:00.000Z"));
+
+    const batch = readFixBatch(dir, META);
+    expect(batch.failures.map((f) => f.run_id)).toEqual(["bad"]);
+    expect(batch.stats.totalRuns).toBe(2);
   });
 });

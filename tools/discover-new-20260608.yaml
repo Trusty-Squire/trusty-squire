@@ -337,10 +337,14 @@
   signup_url: https://replit.com/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: 'Browser dev environment. Google + GitHub + Apple OAuth. API token
-
-    in account settings.
+  status: needs-manual
+  last_probed: 2026-06-20
+  notes: 'Browser dev environment. Google + GitHub + Apple OAuth. Current
+    authenticated captures reached Replit, but /settings/api_keys returned
+    "Replit - 404 - Replit" and account settings exposed no account-level token.
+    Replit docs describe app/project Secrets and managed integrations rather
+    than a self-serve account API key; treat as no_account_api_key_wall unless a
+    new credential path is proven.
 
     '
 - slug: codesandbox
@@ -357,8 +361,14 @@
   signup_url: https://stackblitz.com/login
   oauth_provider: github
   scope_hint: null
-  status: pending
+  status: needs-manual
+  last_probed: 2026-06-20
   notes: 'Browser dev environment (WebContainers). GitHub + Google OAuth.
+    Current service docs expose project/repository-scoped environment variables
+    and WebContainer/embed APIs, not a self-serve account-level API token usable
+    as a Trusty Squire credential. Prior discovery also found no user API key
+    exposed in the web UI. Treat as no_account_api_key_wall unless a new account
+    token path is proven.
 
     '
 - slug: circleci

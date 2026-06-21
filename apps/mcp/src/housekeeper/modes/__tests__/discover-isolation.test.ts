@@ -114,6 +114,33 @@ describe("runDiscover — Fix B: OAuth profile isolation", () => {
     expect(spent).toEqual([{ id: "verify-01", service: "sentry" }]);
   });
 
+  it("records a picked identity spent before signup so crashes cannot reuse it", async () => {
+    const { port, spent } = fakePool([identity("verify-01"), identity("verify-02")]);
+    const requests: UniversalSignupRequest[] = [];
+
+    const outcome = await runDiscover(
+      { service: "paddle", oauthProvider: "google" },
+      {
+        machineToken: "tok",
+        accountId: "acct",
+        inboxClient: stubInbox(),
+        bot: {
+          signup: async (req: UniversalSignupRequest): Promise<SignupResult> => {
+            requests.push(req);
+            throw new Error("browser crashed");
+          },
+        },
+        identityPool: port,
+        skipAutoPromote: true,
+      },
+    );
+
+    expect(outcome.kind).toBe("failed");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.profileDir).toBe("/tmp/profiles/verify-01");
+    expect(spent).toEqual([{ id: "verify-01", service: "paddle" }]);
+  });
+
   it("uses the service default OAuth provider for profile isolation and bot input", async () => {
     const { port, spent } = fakePool([identity("verify-01"), identity("verify-02")]);
     const { requests, bot } = recordingBot([ok]);

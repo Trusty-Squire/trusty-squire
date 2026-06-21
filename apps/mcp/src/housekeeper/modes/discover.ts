@@ -393,6 +393,24 @@ export async function runDiscover(
   // Tracks the (identity) robots actually used so we recordSpent EXACTLY the
   // ones we consumed — and so the retry can pick a DIFFERENT one (rotation).
   const usedIdentityIds: string[] = [];
+  const spentRecordedIdentityIds = new Set<string>();
+
+  const recordIdentitySpent = (identityId: string, phase: "before_signup" | "finalize"): void => {
+    if (spentRecordedIdentityIds.has(identityId)) return;
+    try {
+      pool.markSpent(identityId, input.service);
+      spentRecordedIdentityIds.add(identityId);
+      stepsSink.push(
+        `[discovery] recordSpent(${identityId}, ${input.service}) phase=${phase}`,
+      );
+    } catch (err) {
+      stepsSink.push(
+        `[discovery] recordSpent(${identityId}, ${input.service}) failed (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
 
   // Resolve the profile binding for one attempt. `excludeIdentityIds` lets the
   // D1 retry rotate to a fresh robot. Returns null on pool exhaustion so the
@@ -499,6 +517,12 @@ export async function runDiscover(
   }): Promise<{ result: SignupResult } | { crash: string }> => {
     if (plan.identityId !== undefined && !usedIdentityIds.includes(plan.identityId)) {
       usedIdentityIds.push(plan.identityId);
+    }
+    if (plan.identityId !== undefined) {
+      // Burn the robot for this service before the browser begins. If the
+      // process is killed or times out mid-signup, the next run must not reuse
+      // a half-mutated profile for the same service.
+      recordIdentitySpent(plan.identityId, "before_signup");
     }
     stepsSink.push(describeProfilePlan(plan));
     try {
@@ -702,15 +726,7 @@ export async function runDiscover(
     // account (TRUSTY_SQUIRE_ACCOUNT_ID) — the robot identity is purely the
     // Google login used to sign up at the service, not the skill owner.
     for (const id of usedIdentityIds) {
-      try {
-        pool.markSpent(id, input.service);
-      } catch (err) {
-        stepsSink.push(
-          `[discovery] recordSpent(${id}, ${input.service}) failed (non-fatal): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
+      recordIdentitySpent(id, "finalize");
       // Release the in-flight claim so the robot is available to a later slot
       // (it's now recorded spent for THIS service, so it won't be re-picked here).
       releaseIdentity(id);

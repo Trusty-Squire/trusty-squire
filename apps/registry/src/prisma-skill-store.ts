@@ -242,7 +242,15 @@ export class PrismaSkillStore implements SkillStore {
         superseded_at: null,
         verifier_succeeded: { lt: VERIFIER_PROMOTION_THRESHOLD },
       },
-      orderBy: { created_at: "asc" },
+      // Do not let stale high-failure pending rows pin the verifier queue.
+      // Fresh/no-signal pending skills should be sampled before rows that have
+      // already burned many identities and failed to converge. Real demotion is
+      // still handled by recordVerifierOutcome; this is only queue priority.
+      orderBy: [
+        { consecutive_verifier_failures: "asc" },
+        { verifier_failed: "asc" },
+        { created_at: "desc" },
+      ],
       take: limit,
     });
     const remaining = Math.max(0, limit - pending.length);

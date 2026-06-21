@@ -101,6 +101,7 @@ export {
 } from "./credential-extraction-flow.js";
 import { captureOnboardingRound } from "./onboarding-capture.js";
 import {
+  KEYS_DESTINATION_URL,
   runNavSearch,
   type NavSearchBrowserPort,
   type NavSearchDeps,
@@ -136,12 +137,14 @@ export interface AgentInbox {
   }>;
 }
 
-// Hard cap on LLM calls per signup. A signup that runs away to 20+ calls
-// is both expensive and almost certainly stuck in a planning loop. 15
-// covers: 2 initial form plans, 1 re-plan pair on validation, plus 6
-// post-verify rounds, with headroom. Override via env when debugging.
+// Hard cap on LLM calls per signup. Keep it aligned with the real
+// post-verify round budget (24) plus a small form-fill/retry allowance.
+// Long but legitimate onboarding wizards (Anyscale-style multi-step org
+// setup) can consume >15 deterministic planner calls before the credential
+// surface exists; the loop itself remains bounded by postVerifyMaxRounds and
+// the wall clock timeout. Override via env when debugging.
 const MAX_LLM_CALLS_PER_SIGNUP = Number.parseInt(
-  process.env.UNIVERSAL_BOT_MAX_LLM_CALLS ?? "15",
+  process.env.UNIVERSAL_BOT_MAX_LLM_CALLS ?? "30",
   10,
 );
 
@@ -438,6 +441,23 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // order hits three unrelated 404s before this path and the recovery
   // walker aborts after 3 consecutive 404s, so pin the documented path.
   sentry: ["/settings/account/api/auth-tokens/"],
+  // Axiom documents API-token creation under Settings > API tokens in
+  // app.axiom.co. Generic /settings/keys guesses hit the wrong surface.
+  axiom: ["/settings/api-tokens", "/settings/tokens", "/settings/api"],
+  // Anyscale documents API keys under the console account menu ("user icon"
+  // → "API keys"). The generic walker tries three /settings/* guesses first
+  // and aborts after consecutive 404s, so pin the account-level route first.
+  anyscale: ["/api-keys", "/account/api-keys"],
+  // Cloudinary's credential docs point users to the Dashboard for visible
+  // cloud/API credentials, with key management under Console Settings >
+  // API Keys. Generic settings guesses can leave an unfinished welcome wizard
+  // in place, so try the dashboard/developer surface first.
+  cloudinary: ["/pm/developer-dashboard", "/settings/api-keys", "/app/settings/api-keys"],
+  // Paddle's dashboard exposes API keys under Developer Tools >
+  // Authentication. The sidebar route is /authentication-v2; generic
+  // /settings/* and /api-keys guesses miss it and the planner can get stuck
+  // in Business Account > Team Members.
+  paddle: ["/authentication-v2"],
 };
 
 // Normalize a service name to the slug used as a SERVICE_KEYS_PATHS key:
@@ -572,6 +592,12 @@ export function findCreateKeyAffordance(
       .trim();
     if (haystack.length === 0) continue;
     const phraseHit = CREATE_KEY_PHRASE.test(haystack);
+    // Guard against large card/buttons whose aggregate subtree text happens to
+    // contain a create verb and a credential noun far apart. Ona's "What's new"
+    // card rendered "What's new ... provider keys" in one button; the old
+    // verb+noun co-occurrence treated that as "New token" and navigated away
+    // from the real PAT panel. Explicit phrases still win regardless of length.
+    if (!phraseHit && haystack.length > 96) continue;
     const verbNounHit =
       CREATE_KEY_VERB.test(haystack) && CREATE_KEY_NOUN.test(haystack);
     if (!phraseHit && !verbNounHit) continue;
@@ -732,7 +758,8 @@ export function pickStuckLoopFallbackUrl(
       const parsedApp = new URL(appUrl);
       if (
         (parsedApp.protocol === "http:" || parsedApp.protocol === "https:") &&
-        !isGoogleSearchUrl(appUrl)
+        !isGoogleSearchUrl(appUrl) &&
+        shouldComposeFallbackOnAppOrigin(parsedCurrent, parsedApp)
       ) {
         composeBase = parsedApp;
       }
@@ -785,6 +812,16 @@ export function pickStuckLoopFallbackUrl(
   return null;
 }
 
+function shouldComposeFallbackOnAppOrigin(current: URL, app: URL): boolean {
+  if (current.origin === app.origin) return true;
+  if (isOAuthProviderHost(current.toString())) return true;
+  const firstLabel = current.hostname.toLowerCase().split(".")[0] ?? "";
+  // Auth/login subdomains are not where settings/key pages live. App consoles
+  // commonly are (console.cloudinary.com, app.axiom.co), so do not blindly
+  // replace every current origin with the original signup URL's origin.
+  return /^(?:auth|authkit|login|accounts?|idp|sso|oauth|signin|signup)$/.test(firstLabel);
+}
+
 // Last-resort canonical signup URL when the caller passed none and no
 // promoted skill / model resolution applies: <name>.com/signup, which
 // catches the common dev-SaaS case (Resend, Postmark, IPInfo, …). Non-.com
@@ -817,6 +854,14 @@ const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
     "https://nomicai-production.us.auth0.com/u/login?state=hKFo2SA2XzhiVGRXMUR4X283bFYtUjQ1T2Q1NXBOZ095RmQ5c6Fur3VuaXZlcnNhbC1sb2dpbqN0aWTZIDdzTWlnTTZKVUZ5WnVDMjZldktEMlNMS0pZRmRfYnZOo2NpZNkgVkY0MURxZEV5UzJBYXE2NHExSW9PMUVPemRwanBsbnY",
   // /signup is now a 404; StackBlitz's account creation route is /register.
   stackblitz: "https://stackblitz.com/register",
+  // Axiom's public login/register surface is app.axiom.co; login.axiom.co
+  // is an auth host and 404s if API-token paths are composed onto it.
+  axiom: "https://app.axiom.co/register",
+  // Anyscale's marketing /signup is a lead form ("Get Started with $100 Credit")
+  // that can submit cleanly without creating an account or sending
+  // verification. Current Anyscale docs identify console.anyscale.com as the
+  // organization signup flow.
+  anyscale: "https://console.anyscale.com",
 };
 
 function canonicalSignupUrl(service: string): string | null {
@@ -1275,6 +1320,7 @@ export interface SignupResult {
 export type FillAction =
   | { kind: "fill"; selector: string; value_kind: FillValueKind; literal?: string; reason: string }
   | { kind: "check"; selector: string; reason: string }
+  | { kind: "select"; selector: string; reason: string; option_text?: string }
   | { kind: "click"; selector: string; reason: string };
 
 export interface SignupPlan {
@@ -1282,6 +1328,82 @@ export interface SignupPlan {
   submit_selector: string;
   confidence: "high" | "medium" | "low";
   notes?: string;
+}
+
+function textOfInteractiveElement(el: InteractiveElement): string {
+  return [
+    el.visibleText,
+    el.ariaLabel,
+    el.title,
+    el.labelText,
+    el.placeholder,
+    el.name,
+    el.id,
+  ]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join(" ")
+    .trim();
+}
+
+export function planSimpleEmailOnlySignup(
+  inventory: readonly InteractiveElement[],
+): SignupPlan | null {
+  const visibleInputs = inventory.filter(
+    (el) =>
+      el.tag === "input" &&
+      el.visible !== false &&
+      el.type !== "hidden" &&
+      el.type !== "checkbox" &&
+      el.type !== "radio",
+  );
+  const emailInputs = visibleInputs.filter((el) => {
+    const hay = textOfInteractiveElement(el);
+    return el.type === "email" || /\be-?mail\b/i.test(hay);
+  });
+  if (emailInputs.length !== 1) return null;
+  if (visibleInputs.some((el) => el.type === "password")) return null;
+  if (visibleInputs.length !== 1) return null;
+
+  const hasSeparateSignupCta = inventory.some((el) => {
+    if (el.visible === false) return false;
+    if (el.tag === "button" || el.type === "submit") return false;
+    return /\b(?:sign up|signup|get started|create (?:an )?account|register)\b/i.test(
+      textOfInteractiveElement(el),
+    );
+  });
+
+  const submit = inventory.find((el) => {
+    if (el.visible === false) return false;
+    if (el.tag !== "button" && el.tag !== "input" && el.role !== "button") return false;
+    const text = textOfInteractiveElement(el);
+    const isSubmitControl = el.type === "submit" || el.tag === "button" || el.role === "button";
+    if (!isSubmitControl) return false;
+    return /\b(?:send (?:me )?(?:a )?(?:magic )?link|magic link|continue|sign up|join|get started)\b/i.test(text);
+  });
+  if (submit === undefined) return null;
+  const submitText = textOfInteractiveElement(submit);
+  if (
+    hasSeparateSignupCta &&
+    !/\b(?:sign up|signup|join|get started|create (?:an )?account|register)\b/i.test(
+      submitText,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    actions: [
+      {
+        kind: "fill",
+        selector: emailInputs[0]!.selector,
+        value_kind: "email",
+        reason: "Fill the email address for the magic-link signup form",
+      },
+    ],
+    submit_selector: submit.selector,
+    confidence: "high",
+    notes: "Deterministic email-only signup form",
+  };
 }
 
 // Outcome of planExecuteWithRetry — the form-fill + submit phase (F3
@@ -1372,6 +1494,7 @@ const FILL_VALUE_KINDS = [
   "name",
   "username",
   "company",
+  "phone",
   "literal",
 ] as const;
 type FillValueKind = (typeof FILL_VALUE_KINDS)[number];
@@ -1462,16 +1585,23 @@ function elementTextForFieldKind(el: InteractiveElement | undefined): string {
     .toLowerCase();
 }
 
-function resolvePlannedFillValue(
+export function resolvePlannedFillValue(
   action: FillAction & { kind: "fill" },
   fillValues: Record<FillValueKind, string>,
   el: InteractiveElement | undefined,
   identity: SignupIdentity,
 ): string {
+  const fieldText = elementTextForFieldKind(el);
+  if (
+    action.value_kind === "literal" &&
+    /\b(?:confirm|confirmation|verify|verification|again|repeat)\b/.test(fieldText) &&
+    /password/.test(fieldText)
+  ) {
+    return fillValues.password;
+  }
   if (action.value_kind === "literal") return action.literal ?? "";
   if (action.value_kind !== "name") return fillValues[action.value_kind];
 
-  const fieldText = elementTextForFieldKind(el);
   if (/\b(?:first|given|forename)\b|first[_-]?name|given[_-]?name/.test(fieldText)) {
     return identity.firstName;
   }
@@ -1620,6 +1750,21 @@ function validateAction(value: unknown, index: number): FillAction {
         selector: requireString(obj, "selector", `action[${index}] (check)`),
         reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
       };
+    case "select": {
+      const optionText = typeof obj["option_text"] === "string" ? obj["option_text"] : undefined;
+      return optionText !== undefined
+        ? {
+            kind: "select",
+            selector: requireString(obj, "selector", `action[${index}] (select)`),
+            option_text: optionText,
+            reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
+          }
+        : {
+            kind: "select",
+            selector: requireString(obj, "selector", `action[${index}] (select)`),
+            reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
+          };
+    }
     case "click":
       return {
         kind: "click",
@@ -2114,13 +2259,13 @@ export function extractVerifyWallAlias(text: string): string | null {
 }
 
 // Pure: does this post-submit page look like a CONTINUATION step of the same
-// signup (a dedicated "Create your password" page — amplitude's step 2 — is the
-// canonical case) rather than a dashboard, a credentials page, or a
-// verify-your-email screen? Conservative on purpose: requires a VISIBLE, EMPTY
-// password input the bot still needs to fill AND a create/continue-style submit
-// control, and the page must NOT read as a verify-your-email screen or a login
-// form (a "sign in" page also has a password field, but re-filling it with the
-// run's generated password would just fail). Exported for unit tests.
+// signup rather than a dashboard, a credentials page, or a verify-your-email
+// screen? Conservative on purpose: requires a create/continue-style submit
+// control and either a visible empty password input (Amplitude) OR explicit
+// signup-wizard copy with visible empty business/account fields (Paddle). The
+// page must NOT read as a verify-your-email screen or a login form (a "sign in"
+// page also has a password field, but re-filling it with the run's generated
+// password would just fail). Exported for unit tests.
 export function isContinuationFormStep(
   html: string,
   inventory: ReadonlyArray<InteractiveElement>,
@@ -2129,6 +2274,15 @@ export function isContinuationFormStep(
   if (expectsVerificationEmail(html)) return false;
   // A login page must not be mistaken for a signup continuation.
   if (classifySignupHtml(html) === "login") return false;
+  const hasSubmitControl = inventory.some((e) => {
+    if (e.tag !== "button" && e.type !== "submit") return false;
+    const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+    return /\b(?:create|continue|sign[\s-]?up|next|submit|finish|get started|done)\b/.test(
+      t,
+    );
+  });
+  if (!hasSubmitControl) return false;
+
   const hasEmptyPassword = inventory.some(
     (e) =>
       e.tag === "input" &&
@@ -2136,13 +2290,21 @@ export function isContinuationFormStep(
       e.visible !== false &&
       (e.value ?? "") === "",
   );
-  if (!hasEmptyPassword) return false;
-  return inventory.some((e) => {
-    if (e.tag !== "button" && e.type !== "submit") return false;
-    const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
-    return /\b(?:create|continue|sign[\s-]?up|next|submit|finish|get started|done)\b/.test(
-      t,
+  if (hasEmptyPassword) return true;
+
+  const signupWizardCopy =
+    /\b(?:account details|business details|part\s+\d+\s+of\s+\d+|business name|business type|annual revenue|company details|workspace details)\b/i.test(
+      html,
     );
+  if (!signupWizardCopy) return false;
+
+  return inventory.some((e) => {
+    if (e.visible === false) return false;
+    if (e.tag !== "input" && e.tag !== "textarea" && e.tag !== "select") return false;
+    if (e.type === "checkbox" || e.type === "radio" || e.type === "hidden") return false;
+    if ((e.value ?? "") !== "") return false;
+    const label = `${e.labelText ?? ""} ${e.placeholder ?? ""} ${e.name ?? ""} ${e.id ?? ""} ${e.ariaLabel ?? ""}`;
+    return /\b(?:business|company|workspace|website|revenue|name|type|role|team)\b/i.test(label);
   });
 }
 
@@ -2586,7 +2748,10 @@ export function detectAlreadySignedIn(args: {
   //   "$N left" / "N days left" / "remaining"
   const BILLING =
     /(?:\$\d+(?:\.\d+)?\s*(?:left|remaining)|\d+\s*days?\s*(?:left|remaining|trial)|\btrial\b)/i;
-  if (inventory.some((e) => BILLING.test(visibleTextOf(e)))) {
+  if (
+    !hasSignupAffordance &&
+    inventory.some((e) => BILLING.test(visibleTextOf(e)))
+  ) {
     return true;
   }
 
@@ -3351,40 +3516,23 @@ export function findSignInAdvanceButton(
 // actually has a session for. `findFirstOAuthButton` walks this list in
 // order and uses the first provider the PAGE offers, so order = preference.
 //
-// RULE 1 — Google leads whenever its session is warm, pin or not. Empirically
-// Google's OAuth blocks far less hard than GitHub's, which hits an UNCLEARABLE
-// forced-2FA "Verify 2FA now" wall on the /authorize step regardless of session
-// warmth or egress IP (MEASURED 2026-06-07: porter + deepinfra were pinned
-// github, hit the wall and aborted, while their own signin pages also offered a
-// clean Google button the bot should have taken). This makes the code match the
-// long-stated intent in resolveOAuthCandidates ("Google blocks less hard, so it
-// leads") — which RULE 1 previously contradicted by leading with the pin.
+// RULE 1 — an explicit pin is an override. The queue uses oauth_provider to
+// test or force a known-good route; silently promoting Google over a pinned
+// GitHub path makes service-level fixes impossible to reason about.
 //
-// A `github` pin still works for its real purpose: when a service's Google is
-// One-Tap/FedCM-only (no redirect button the flow can drive — northflank),
-// findFirstOAuthButton finds no Google button and falls through to GitHub even
-// though Google leads here. So a pin only decides ORDER when Google is NOT warm.
-//
-// RULE 2 — with no warm Google session, honor an explicit pin, else whatever IS
-// warm.
+// RULE 2 — with no explicit pin, auto-prefer warm Google, then other warm
+// providers. Google usually blocks less hard, but that is only a default, not
+// an override of service metadata.
 export function orderOAuthCandidates(
   pinned: OAuthProviderId | undefined,
   loggedIn: readonly OAuthProviderId[],
 ): OAuthProviderId[] {
-  if (loggedIn.includes("google")) {
-    const rest = loggedIn.filter((p) => p !== "google");
-    // A non-Google pin sits right behind Google. Keep it even when its own
-    // session is cold, as a trailing fallback so a page that only offers that
-    // provider still gets attempted (a cold attempt → needs_login, which tells
-    // the operator to log in — better than silently dropping to form-fill).
-    if (pinned !== undefined && pinned !== "google") {
-      return ["google", pinned, ...rest.filter((p) => p !== pinned)];
-    }
-    return ["google", ...rest];
-  }
   if (pinned !== undefined) {
     if (loggedIn.includes(pinned)) return [pinned, ...loggedIn.filter((p) => p !== pinned)];
     return [pinned];
+  }
+  if (loggedIn.includes("google")) {
+    return ["google", ...loggedIn.filter((p) => p !== "google")];
   }
   return [...loggedIn];
 }
@@ -4115,6 +4263,35 @@ export function pickOnboardingSubmit(
   return bySubmit ?? buttons[0] ?? null;
 }
 
+export function pickOnboardingLeafChoice(
+  inventory: readonly InteractiveElement[],
+  alreadyTried: ReadonlySet<string> = new Set(),
+): InteractiveElement | null {
+  const buttons = inventory.filter(
+    (e) => (e.tag === "button" || e.role === "button") && e.visible === true,
+  );
+  const labels = buttons.map((e) => (e.visibleText ?? e.ariaLabel ?? "").trim());
+  const hasParentRole = labels.some((t) => /^(?:developer|engineer|personal\s*&\s*freelance|designer|marketing)$/i.test(t));
+  const hasFinalSubmit = labels.some((t) => /^(?:let'?s get started|get started|finish|done|continue|next)$/i.test(t));
+  if (!hasFinalSubmit) return null;
+
+  const LEAF_ROLE_RE =
+    /^(?:full stack|front end|back end|backend|frontend|mobile|web|software|data|ml|ai|devops|platform|cloud)\s+(?:developer|engineer)\b/i;
+  const leafRole = hasParentRole ? buttons.find((e) => {
+    if (alreadyTried.has(e.selector)) return false;
+    const text = (e.visibleText ?? e.ariaLabel ?? "").trim();
+    return LEAF_ROLE_RE.test(text);
+  }) : undefined;
+  if (leafRole !== undefined) return leafRole;
+
+  const DEV_STACK_RE = /^(?:javascript|typescript|python|node(?:\.js)?|react|next(?:\.js)?|vue|angular|ruby|php|java|go|golang|swift|kotlin|android|ios)\b/i;
+  const devStackOptions = buttons.filter((e) =>
+    DEV_STACK_RE.test((e.visibleText ?? e.ariaLabel ?? "").trim()),
+  );
+  if (devStackOptions.length < 2) return null;
+  return devStackOptions.find((e) => !alreadyTried.has(e.selector)) ?? null;
+}
+
 export function isStalledOnActions(
   effects: ReadonlyArray<{ kind: string; pageUnchanged: boolean; selector?: string | null }>,
   threshold = 3,
@@ -4159,6 +4336,38 @@ export function isLoginPageUrl(url: string): boolean {
   // Some providers keep the path stable but flag the failed auth in the
   // query (amplitude: /login?google-auth-error=…).
   return /[?&]google-auth-error\b/i.test(url);
+}
+
+export function isLoginPageInventory(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const visible = inventory.filter((element) => element.visible !== false);
+  const hasPassword = visible.some(
+    (element) => element.tag === "input" && element.type === "password",
+  );
+  const hasIdentity = visible.some((element) => {
+    if (element.tag !== "input") return false;
+    const text = [
+      element.name,
+      element.id,
+      element.placeholder,
+      element.ariaLabel,
+      element.labelText,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return element.type === "email" || /email|username|login/i.test(text);
+  });
+  if (!hasPassword || !hasIdentity) return false;
+  return visible.some((element) => {
+    if (element.tag !== "button" && element.type !== "submit" && element.role !== "button") {
+      return false;
+    }
+    const text = [element.visibleText, element.ariaLabel, element.labelText]
+      .filter(Boolean)
+      .join(" ");
+    return /\b(log ?in|sign ?in|continue|submit)\b/i.test(text);
+  });
 }
 
 // A pre-account route (signup OR login OR register) — the set of paths an
@@ -4699,6 +4908,13 @@ export class SignupAgent {
         } else if (action.kind === "check") {
           steps.push(`Check ${action.selector} (${action.reason})`);
           await this.browser.check(action.selector);
+        } else if (action.kind === "select") {
+          steps.push(
+            action.option_text !== undefined
+              ? `Select ${action.selector} → ${action.option_text}`
+              : `Select ${action.selector}`,
+          );
+          await this.browser.selectOption(action.selector, action.option_text);
         } else {
           steps.push(`Click ${action.selector} (${action.reason})`);
           await this.browser.click(action.selector);
@@ -4827,6 +5043,27 @@ export class SignupAgent {
         this.browser.getState(),
         this.buildInventory(steps, oauthCandidates),
       ]);
+
+      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(state.url)) {
+        const advanced = await this.browser.advanceOAuthConsent("github");
+        steps.push(
+          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
+        );
+        if (advanced) {
+          await this.browser.wait(3);
+          continue;
+        }
+      }
+
+      {
+        const prePlanCredentials = await this.harvestVisibleCredentials();
+        if (hasAnyExtractedCredential(prePlanCredentials)) {
+          steps.push(
+            "Form-fill: credentials are already visible before planning — skipping form actions and extracting in place.",
+          );
+          return { kind: "submitted" };
+        }
+      }
 
       // Email-verification WALL reached without a fresh submit — e.g. OAuth
       // landed on a pending account's "Verify your email — check <addr>" page.
@@ -5139,17 +5376,20 @@ export class SignupAgent {
         return { kind: "oauth_required" };
       }
 
-      steps.push("Asking Claude to plan the signup form fill...");
-      let plan: SignupPlan;
-      try {
-        plan = await this.planSignupForm({
-          service: task.service,
-          url: state.url,
-          inventory,
-          screenshot: state.screenshot,
-          ...(hint !== undefined ? { hint } : {}),
-        });
-      } catch (err) {
+      let plan = planSimpleEmailOnlySignup(inventory);
+      if (plan !== null) {
+        steps.push("Plan: deterministic email-only signup form (no LLM call).");
+      } else {
+        steps.push("Asking planner to plan the signup form fill...");
+        try {
+          plan = await this.planSignupForm({
+            service: task.service,
+            url: state.url,
+            inventory,
+            screenshot: state.screenshot,
+            ...(hint !== undefined ? { hint } : {}),
+          });
+        } catch (err) {
         // Parse/validation failure — includes a hallucinated selector
         // rejected by the inventory check. An error replan.
         const reason = err instanceof Error ? err.message : String(err);
@@ -5189,6 +5429,7 @@ export class SignupAgent {
           await this.browser.wait(2);
         }
         continue;
+      }
       }
       steps.push(
         `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
@@ -5305,26 +5546,26 @@ export class SignupAgent {
         }
       }
 
-      // A plan with no fill actions either revealed/advanced the page
+      // A plan that should not submit either revealed/advanced the page
       // (a cookie banner, a two-stage "sign up with email" chooser) —
       // worth a re-plan — or found nothing actionable at all. A
       // 0-action plan revealed *nothing*: re-extracting the same
       // static page won't help, so a second consecutive empty plan is
       // a dead end. (The 0.1.12 loop spun this 4x on Axiom.)
       const hadFill = plan.actions.some((a) => a.kind === "fill");
-      // A check is ALSO a field edit = real progress, even though (unlike
-      // a fill) it doesn't promote the plan to the submit path below.
-      // (The form-fill plan vocabulary is fill/check/click — `select`
-      // belongs to the post-verify loop.) Treat a check as progress for
+      // A check/select is ALSO a field edit = real progress, even though
+      // (unlike a fill) it doesn't always promote the plan to the submit
+      // path below. Treat these as progress for
       // the no-progress tracker only: a plan that ticked a box advanced
       // the form, so its click selectors must NOT be recorded as "dead"
       // (and any prior dead record is cleared). Without this, a "click
       // Next (no advance) → tick a required box + re-click Next" cycle
       // false-bailed as a loop even though the check was progress.
       const hadFieldEdit = plan.actions.some(
-        (a) => a.kind === "fill" || a.kind === "check",
+        (a) => a.kind === "fill" || a.kind === "check" || a.kind === "select",
       );
-      if (!hadFill) {
+      const shouldSubmit = hadFill || (hadFieldEdit && planClickSelectors.length === 0);
+      if (!shouldSubmit) {
         if (plan.actions.length === 0) {
           emptyPlans += 1;
           if (emptyPlans >= 2) {
@@ -5376,6 +5617,12 @@ export class SignupAgent {
       // service doesn't disable submit for an unchecked box, the click
       // silently no-ops. This ticks terms/privacy/consent boxes while
       // never touching marketing opt-ins. Best-effort: never throws.
+      const choiceBoxes = await this.browser.checkRequiredSignupChoiceBoxes();
+      if (choiceBoxes.length > 0) {
+        steps.push(
+          `Form: checked required signup choice box(es): [${choiceBoxes.join(", ")}]`,
+        );
+      }
       const agreementBoxes = await this.browser.checkRequiredAgreementBoxes();
       if (agreementBoxes.length > 0) {
         steps.push(
@@ -5623,6 +5870,27 @@ export class SignupAgent {
       const browserState = frame.state;
       const inventory = frame.inventory;
 
+      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(browserState.url)) {
+        const advanced = await this.browser.advanceOAuthConsent("github");
+        steps.push(
+          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
+        );
+        if (advanced) {
+          await this.browser.wait(3);
+          continue;
+        }
+      }
+
+      {
+        const prePlanCredentials = await this.harvestVisibleCredentials();
+        if (hasAnyExtractedCredential(prePlanCredentials)) {
+          steps.push(
+            "Form-fill: credentials are already visible before planning — skipping form actions and extracting in place.",
+          );
+          return { kind: "submitted" };
+        }
+      }
+
       // ── C1 pre_plan: gather the observation, then decide ──
       const hasFillableInput = inventory.some(
         (e) =>
@@ -5630,7 +5898,11 @@ export class SignupAgent {
           (e.type === "email" || e.type === "text" || e.type === "password" || e.type === null) &&
           e.visible !== false,
       );
-      const wallAlias = extractVerifyWallAlias(browserState.html);
+      const visiblePrePlanText = !hasFillableInput
+        ? await this.browser.extractText().catch(() => "")
+        : "";
+      const wallText = `${browserState.html} ${visiblePrePlanText}`;
+      const wallAlias = extractVerifyWallAlias(wallText);
       const ourInboxDomain = task.email.slice(task.email.indexOf("@") + 1).toLowerCase();
       const aliasPollable =
         wallAlias === null ||
@@ -5639,7 +5911,7 @@ export class SignupAgent {
       const offersOAuthSignup = oauthCandidates.length > 0 && oauthButtonHitRaw !== null;
       const verifyWall =
         !hasFillableInput &&
-        expectsVerificationEmail(browserState.html) &&
+        expectsVerificationEmail(wallText) &&
         aliasPollable &&
         !offersOAuthSignup;
       const hasCredentialInput = inventory.some(
@@ -5788,17 +6060,20 @@ export class SignupAgent {
       }
       // preAct.kind === "run_planner" → fall through to the planner.
 
-      steps.push("Asking Claude to plan the signup form fill...");
-      let plan: SignupPlan;
-      try {
-        plan = await this.planSignupForm({
-          service: task.service,
-          url: browserState.url,
-          inventory,
-          screenshot: browserState.screenshot,
-          ...(hint !== undefined ? { hint } : {}),
-        });
-      } catch (err) {
+      let plan = planSimpleEmailOnlySignup(inventory);
+      if (plan !== null) {
+        steps.push("Plan: deterministic email-only signup form (no LLM call).");
+      } else {
+        steps.push("Asking planner to plan the signup form fill...");
+        try {
+          plan = await this.planSignupForm({
+            service: task.service,
+            url: browserState.url,
+            inventory,
+            screenshot: browserState.screenshot,
+            ...(hint !== undefined ? { hint } : {}),
+          });
+        } catch (err) {
         // ── C2 plan_error ──
         const reason = err instanceof Error ? err.message : String(err);
         const isUpstreamBlip =
@@ -5819,6 +6094,7 @@ export class SignupAgent {
           "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
         continue;
       }
+      }
       steps.push(
         `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
           (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
@@ -5828,7 +6104,9 @@ export class SignupAgent {
       const planClickSelectors = plan.actions
         .filter((a) => a.kind === "click")
         .map((a) => a.selector);
-      const planEditsAField = plan.actions.some((a) => a.kind === "fill" || a.kind === "check");
+      const planEditsAField = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check" || a.kind === "select",
+      );
       const pageSig =
         browserState.url + "§" + inventory.map((e) => e.selector).sort().join("|");
       const bySelector = new Map(inventory.map((e) => [e.selector, e]));
@@ -5868,7 +6146,9 @@ export class SignupAgent {
 
       // ── C4 post_execute ──
       const hadFill = plan.actions.some((a) => a.kind === "fill");
-      const hadFieldEdit = plan.actions.some((a) => a.kind === "fill" || a.kind === "check");
+      const hadFieldEdit = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check" || a.kind === "select",
+      );
       const clickedEmailAffordance = plan.actions.some(
         (a) => a.kind === "click" && /\bemail\b/i.test(a.reason),
       );
@@ -5905,6 +6185,10 @@ export class SignupAgent {
         continue;
       }
       // px.action.kind === "submit"
+      const choiceBoxes = await this.browser.checkRequiredSignupChoiceBoxes();
+      if (choiceBoxes.length > 0) {
+        steps.push(`Form: checked required signup choice box(es): [${choiceBoxes.join(", ")}]`);
+      }
       const agreementBoxes = await this.browser.checkRequiredAgreementBoxes();
       if (agreementBoxes.length > 0) {
         steps.push(`Form: checked required agreement box(es): [${agreementBoxes.join(", ")}]`);
@@ -5954,7 +6238,9 @@ export class SignupAgent {
           }
           if (!postGate.blocked) {
             const afterText = (await this.browser.extractText()).slice(0, 4000);
-            validationFailure = this.looksLikeValidationFailure(afterText);
+            validationFailure =
+              !expectsVerificationEmail(afterText) &&
+              this.looksLikeValidationFailure(afterText);
             if (validationFailure) hint = `The previous submit produced validation errors. Visible page text: ${afterText.slice(0, 600)}`;
           }
         }
@@ -6108,14 +6394,30 @@ export class SignupAgent {
         this.captureChainRound += 1;
       };
       for (const action of plan.actions) {
-        if (action.kind !== "fill") continue;
-        if (action.value_kind !== "email" && action.value_kind !== "password") continue;
-        emit({
-          kind: "fill",
-          selector: action.selector,
-          value: fillValues[action.value_kind],
-          reason: `Fill the signup ${action.value_kind}`,
-        });
+        if (action.kind === "fill") {
+          if (
+            action.value_kind !== "email" &&
+            action.value_kind !== "password" &&
+            action.value_kind !== "phone"
+          ) {
+            continue;
+          }
+          emit({
+            kind: "fill",
+            selector: action.selector,
+            value: fillValues[action.value_kind],
+            reason: `Fill the signup ${action.value_kind}`,
+          });
+          continue;
+        }
+        if (action.kind === "select") {
+          emit({
+            kind: "select",
+            selector: action.selector,
+            ...(action.option_text !== undefined ? { option_text: action.option_text } : {}),
+            reason: `Select the signup dropdown option`,
+          });
+        }
       }
       emit({
         kind: "click",
@@ -6371,12 +6673,7 @@ export class SignupAgent {
       await this.effectiveLoggedInProviders(),
     );
     if (ordered.length === 0) return [];
-    const pinNote =
-      provider !== undefined &&
-      provider !== "google" &&
-      ordered[0] === "google"
-        ? ` (pinned ${provider}, but Google session present — Google blocks less hard, so it leads; ${provider} is the fallback)`
-        : "";
+    const pinNote = provider !== undefined ? ` (pinned ${provider})` : "";
     steps.push(
       `Auto-OAuth: candidates [${ordered.join(", ")}]${pinNote} — using whichever the page offers`,
     );
@@ -6958,6 +7255,59 @@ export class SignupAgent {
               `curated signup_url for ${task.service} rendered as "${klass}", but it offers ` +
                 `${oauthHere.provider} OAuth — treating the login page as the signup entry`,
             );
+          } else if (klass === "login" && task.oauthProvider !== undefined) {
+            let loginEntry: InteractiveElement | null = null;
+            for (const el of landedInventory) {
+              const label = (el.visibleText ?? el.ariaLabel ?? el.labelText ?? "").trim().toLowerCase();
+              if (
+                label === "log in" ||
+                label === "login" ||
+                label === "sign in" ||
+                label === "signin"
+              ) {
+                loginEntry = el;
+                break;
+              }
+            }
+            if (loginEntry !== null) {
+              const dismissed = await this.browser.dismissConsentBanner();
+              if (dismissed !== null) {
+                steps.push(`[signup-url] dismissed cookie consent on curated login gate: "${dismissed}"`);
+              }
+              const label = loginEntry.visibleText ?? loginEntry.ariaLabel ?? "login";
+              steps.push(
+                `[signup-url] curated credential URL is login-gated — following "${label.slice(0, 40)}" to OAuth entry`,
+              );
+              try {
+                await this.browser.click(loginEntry.selector);
+                const loginState = await this.browser.getState();
+                const loginInventory = await this.browser.extractInteractiveElements();
+                const loginOAuth = findFirstOAuthButton(loginInventory, ["google", "github"]);
+                if (loginOAuth !== null) {
+                  signupUrl = this.browser.currentUrl();
+                  landed = loginState;
+                  landedInventory = loginInventory;
+                  steps.push(
+                    `[signup-url] recovered OAuth entry from curated login gate: ${signupUrl} (${loginOAuth.provider})`,
+                  );
+                } else {
+                  needsRecovery = true;
+                  steps.push(
+                    `[signup-url] curated login gate did not expose OAuth after click — url=${loginState.url}`,
+                  );
+                }
+              } catch (err) {
+                needsRecovery = true;
+                steps.push(
+                  `[signup-url] curated login gate click failed (${err instanceof Error ? err.message : String(err)}) — attempting recovery`,
+                );
+              }
+            } else {
+              needsRecovery = true;
+              steps.push(
+                `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
+              );
+            }
           } else {
             needsRecovery = true;
             steps.push(
@@ -6987,6 +7337,10 @@ export class SignupAgent {
           try {
             await this.runPrewarm(root, steps);
             await this.browser.goto(root);
+            const dismissed = await this.browser.dismissConsentBanner();
+            if (dismissed !== null) {
+              steps.push(`[signup-url] Tier B dismissed cookie consent: "${dismissed}"`);
+            }
             const inventory = await this.browser.extractInteractiveElements();
             // Score every interactive element's text; pick the best
             // signup CTA. Providers are driven negative by scoreSignupButton
@@ -7004,16 +7358,92 @@ export class SignupAgent {
                 `[signup-url] Tier B clicking CTA "${(best.el.visibleText ?? best.el.ariaLabel ?? "").slice(0, 40)}" (score ${best.score})`,
               );
               await this.browser.click(best.el.selector);
-              const landed = (await this.browser.getState()).html;
-              if (classifySignupHtml(landed) === "signup") {
+              const landedState = await this.browser.getState();
+              const landed = landedState.html;
+              const clickedInventory = await this.browser.extractInteractiveElements();
+              const clickedOAuth = findFirstOAuthButton(clickedInventory, ["google", "github"]);
+              const landedClass = classifySignupHtml(landed);
+              if (landedClass === "signup" || clickedOAuth !== null) {
                 const url = this.browser.currentUrl();
-                steps.push(`[signup-url] Tier B recovered signup page: ${url}`);
+                steps.push(
+                  clickedOAuth !== null
+                    ? `[signup-url] Tier B recovered OAuth signup entry: ${url} (${clickedOAuth.provider})`
+                    : `[signup-url] Tier B recovered signup page: ${url}`,
+                );
                 signupUrl = url;
                 recovered = true;
-              } else {
+              } else if (
+                detectAlreadySignedIn({
+                  inventory: clickedInventory,
+                  url: landedState.url,
+                })
+              ) {
+                const url = this.browser.currentUrl();
                 steps.push(
-                  `[signup-url] Tier B click did not reach a signup form — falling through to search`,
+                  `[signup-url] Tier B landed on an authenticated page after CTA click: ${url}`,
                 );
+                signupUrl = url;
+                alreadyAuthenticated = true;
+                recovered = true;
+              } else {
+                let loginCandidate: InteractiveElement | null = null;
+                for (const el of clickedInventory) {
+                  const label = (el.visibleText ?? el.ariaLabel ?? el.labelText ?? "").trim().toLowerCase();
+                  if (
+                    label === "log in" ||
+                    label === "login" ||
+                    label === "sign in" ||
+                    label === "signin"
+                  ) {
+                    loginCandidate = el;
+                    break;
+                  }
+                }
+                if (landedClass === "login" && loginCandidate !== null) {
+                  const label = loginCandidate.visibleText ?? loginCandidate.ariaLabel ?? "login";
+                  steps.push(
+                    `[signup-url] Tier B following login entry "${label.slice(0, 40)}" after CTA landed on login page`,
+                  );
+                  await this.browser.click(loginCandidate.selector);
+                  const loginState = await this.browser.getState();
+                  const loginInventory = await this.browser.extractInteractiveElements();
+                  const loginOAuth = findFirstOAuthButton(loginInventory, ["google", "github"]);
+                  if (
+                    loginOAuth !== null ||
+                    classifySignupHtml(loginState.html) === "signup" ||
+                    detectAlreadySignedIn({ inventory: loginInventory, url: loginState.url })
+                  ) {
+                    const url = this.browser.currentUrl();
+                    steps.push(
+                      loginOAuth !== null
+                        ? `[signup-url] Tier B recovered OAuth entry after login click: ${url} (${loginOAuth.provider})`
+                        : `[signup-url] Tier B recovered login/signup entry after login click: ${url}`,
+                    );
+                    signupUrl = url;
+                    alreadyAuthenticated = loginOAuth === null && detectAlreadySignedIn({ inventory: loginInventory, url: loginState.url });
+                    recovered = true;
+                  }
+                }
+                const labelPreview = clickedInventory
+                  .map((el) =>
+                    (el.visibleText ||
+                      el.ariaLabel ||
+                      el.labelText ||
+                      el.placeholder ||
+                      el.name ||
+                      el.selector ||
+                      "")
+                      .replace(/\s+/g, " ")
+                      .trim(),
+                  )
+                  .filter((label) => label.length > 0)
+                  .slice(0, 8)
+                  .join(" | ");
+                if (!recovered) {
+                  steps.push(
+                    `[signup-url] Tier B click did not reach a signup form — url=${landedState.url} class=${landedClass} oauth=none buttons=${labelPreview || "none"} — falling through to search`,
+                  );
+                }
               }
             } else {
               steps.push(
@@ -7081,6 +7511,7 @@ export class SignupAgent {
         name: identity.displayName,
         username: identity.username,
         company: `${identity.lastName} Labs`,
+        phone: "6502530000",
         // `literal` has no fixed value — resolved per-action.
         literal: "",
       };
@@ -7270,8 +7701,8 @@ export class SignupAgent {
           // Uses the same post-OAuth loop runOAuthFlow uses after a
           // successful handshake.
           let credentials = await this.extractCredentials();
-          const skippedPostVerify = credentials.api_key !== undefined;
-          if (credentials.api_key === undefined) {
+          const skippedPostVerify = hasUsableCredentialBundle(credentials);
+          if (!hasUsableCredentialBundle(credentials)) {
             credentials = await this.postVerifyLoop({
               service: task.service,
               maxRounds: task.postVerifyMaxRounds ?? 24,
@@ -7282,7 +7713,7 @@ export class SignupAgent {
               ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
             });
           }
-          if (credentials.api_key !== undefined) {
+          if (hasUsableCredentialBundle(credentials)) {
             // 0.8.3-rc.1 — when extractCredentials short-circuited
             // before postVerifyLoop ran, no captures were written.
             // Emit a synthetic extract round so auto-promote can
@@ -7363,7 +7794,13 @@ export class SignupAgent {
                   `Post-submit: continuation form step detected (${stepLabel}) — ` +
                     `filling + submitting (step ${multiStepRounds + 1}).`,
                 );
-                outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+                this.committedToEmailPath = true;
+                outcome = await this.planExecuteWithRetry(
+                  task,
+                  fillValues,
+                  steps,
+                  /* forceFormFill */ true,
+                );
                 continue dispatch;
               }
             }
@@ -7909,6 +8346,10 @@ export class SignupAgent {
       steps.push(
         `OAuth: visible-captcha precheck failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    const oauthConsentDismissed = await this.browser.dismissConsentBanner();
+    if (oauthConsentDismissed !== null) {
+      steps.push(`OAuth: dismissed cookie consent before provider click: "${oauthConsentDismissed}"`);
     }
     steps.push(`OAuth: clicking the ${provider.label} sign-in affordance`);
     // Google Identity Services (GSI) / FedCM does NOT redirect — clicking the
@@ -9501,8 +9942,9 @@ Output rules:
 - Schema:
   {
     "actions": [
-      {"kind":"fill","selector":"<a selector= copied verbatim from the inventory>","value_kind":"email|password|name|username|company|literal","literal":"only when value_kind=literal","reason":"why"},
+      {"kind":"fill","selector":"<a selector= copied verbatim from the inventory>","value_kind":"email|password|name|username|company|phone|literal","literal":"only when value_kind=literal","reason":"why"},
       {"kind":"check","selector":"<from inventory>","reason":"TOS checkbox etc."},
+      {"kind":"select","selector":"<from inventory>","option_text":"<visible option label to pick — optional>","reason":"required dropdown/combobox choice"},
       {"kind":"click","selector":"<from inventory>","reason":"e.g. reveal the email form"}
     ],
     "submit_selector": "<a selector= from the inventory — the primary signup button>",
@@ -9514,6 +9956,8 @@ Output rules:
   modify a selector. A selector not in the inventory is rejected and
   you will be asked to re-plan.
 - Include the TOS/agree checkbox ONLY if the inventory has a real input of type=checkbox for it. If there is no such checkbox, OMIT the check action entirely — never substitute a link or a button.
+- For ANY required dropdown — native select, Ant/MUI/Radix custom combobox, or input role=combobox — use {"kind":"select"}. Do NOT use {"kind":"click"} on a dropdown label/trigger unless the goal is only to reveal fields; clicking a dropdown without selecting an option leaves required form state empty.
+- For business/profile dropdowns, choose harmless low-risk defaults: business type "Software" / "SaaS" / "Individual" / "Other" if available; annual revenue choose the lowest non-empty bracket; company size choose the smallest non-empty team size.
 - Email verification-CODE buttons: if the inventory has a button like
   "Send code", "Send verification code", "Get code", or "Email me a
   code" beside an OTP / verification-code field, you MUST include a
@@ -9527,7 +9971,12 @@ Output rules:
 - Skip elements marked [cookie-consent — avoid], and skip optional
   marketing-opt-in checkboxes.
 - Do NOT add a separate password-confirmation fill unless the
-  inventory shows a second password field.
+  inventory shows a second password field. If there is a password
+  confirmation / repeat password / password again field, fill it with
+  value_kind "password", never "literal".
+- Fill required phone/contact-number fields with value_kind "phone".
+  Do not treat a signup contact-number field as an SMS verification
+  wall; only post-submit OTP/SMS challenges are walls.
 - Two-stage pages: if the inventory has only buttons (e.g. "Sign up
   with email" / "Continue with Google") and no input fields, emit a
   single click action on the EMAIL-signup button, and set
@@ -10039,6 +10488,24 @@ ${formatInventory(input.inventory)}`,
     // control (org-scoped vs account-scoped keys pages).
     let consecutive404 = 0;
     const MAX_CONSECUTIVE_404 = 3;
+    const classifyCurrent404 = async (): Promise<"not_404" | "continue" | "break"> => {
+      try {
+        const after = await this.browser.getState();
+        const bodyText = await this.browser.extractText().catch(() => "");
+        if (!looksLike404(titleFromHtml(after.html), bodyText)) return "not_404";
+        consecutive404 += 1;
+        if (consecutive404 >= MAX_CONSECUTIVE_404) {
+          steps.push(
+            `Existing-account recovery: ${consecutive404} consecutive 404s on guessed keys URLs — ` +
+              `this host's keys path isn't in our list; aborting the walk.`,
+          );
+          return "break";
+        }
+        return "continue";
+      } catch {
+        return "not_404";
+      }
+    };
     for (let i = 0; i < STUCK_LOOP_FALLBACK_PATHS.length; i++) {
       let currentUrl: string;
       try {
@@ -10056,7 +10523,17 @@ ${formatInventory(input.inventory)}`,
       visitedKeysUrls.add(fallback);
       try {
         await this.browser.goto(fallback);
-        await this.browser.waitForInteractiveDom(5, 15_000);
+        // Some SPA 404 shells (Temporal observed 2026-06-20) never satisfy
+        // the interactive-DOM readiness probe. Detect route-not-found copy
+        // before waiting, otherwise the 404 abort below never gets a chance to
+        // fire and the run appears to hang on the guessed key URL.
+        const early404 = await classifyCurrent404();
+        if (early404 === "break") break;
+        if (early404 === "continue") continue;
+        await Promise.race([
+          this.browser.waitForInteractiveDom(5, 15_000),
+          new Promise<void>((resolve) => setTimeout(resolve, 16_000)),
+        ]);
       } catch {
         continue;
       }
@@ -10065,24 +10542,10 @@ ${formatInventory(input.inventory)}`,
       // 404 too and burn the run's 600s budget (axiom/fathom/loops). A real
       // (non-404) page resets the counter so a host that mixes 404s with a
       // live keys page is still fully walked.
-      try {
-        const after = await this.browser.getState();
-        const bodyText = await this.browser.extractText().catch(() => "");
-        if (looksLike404(titleFromHtml(after.html), bodyText)) {
-          consecutive404 += 1;
-          if (consecutive404 >= MAX_CONSECUTIVE_404) {
-            steps.push(
-              `Existing-account recovery: ${consecutive404} consecutive 404s on guessed keys URLs — ` +
-                `this host's keys path isn't in our list; aborting the walk.`,
-            );
-            break;
-          }
-          continue;
-        }
-        consecutive404 = 0;
-      } catch {
-        // best-effort — fall through to the extract attempt
-      }
+      const after404 = await classifyCurrent404();
+      if (after404 === "break") break;
+      if (after404 === "continue") continue;
+      consecutive404 = 0;
       const here = await tryHere();
       if (here !== null) return here;
     }
@@ -10105,6 +10568,31 @@ ${formatInventory(input.inventory)}`,
     // Already on a key surface at entry (bot landed there directly).
     const entry = await this.extractCredentials();
     if (hasRealKey(entry)) return entry;
+
+    // If the curated signup URL is actually a credential/PAT/settings deep link,
+    // revisit it after OAuth/session establishment before searching. OAuth
+    // callbacks often settle on a dashboard/profile page even though the
+    // operator supplied the exact credential route (Ona/Gitpod:
+    // /settings/personal-access-tokens). Starting nav-search from the callback
+    // landing page makes it wander among neighboring settings tabs instead of
+    // preserving the known target surface.
+    const curatedCredentialUrl =
+      this.resolvedSignupUrl !== undefined &&
+      KEYS_DESTINATION_URL.test(this.resolvedSignupUrl)
+        ? this.resolvedSignupUrl
+        : null;
+    if (
+      curatedCredentialUrl !== null &&
+      this.browser.currentUrl() !== curatedCredentialUrl
+    ) {
+      args.steps.push(
+        `nav-search: returning to curated credential URL ${curatedCredentialUrl} after auth`,
+      );
+      await this.browser.goto(curatedCredentialUrl).catch(() => undefined);
+      await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+      const afterCuratedNav = await this.extractCredentials().catch(() => ({}));
+      if (hasRealKey(afterCuratedNav)) return afterCuratedNav;
+    }
 
     const port: NavSearchBrowserPort = {
       currentUrl: () => this.browser.currentUrl(),
@@ -10281,6 +10769,16 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       try {
         const navResult = await this.runNavSearchPhase(args, oauth);
         if (Object.keys(navResult).some((k) => !NON_CREDENTIAL_KEYS.has(k))) {
+          return navResult;
+        }
+        if (
+          this.resolvedSignupUrl !== undefined &&
+          KEYS_DESTINATION_URL.test(this.resolvedSignupUrl)
+        ) {
+          args.steps.push(
+            "nav-search: curated signup_url is a credential surface and no key was found — " +
+              "not handing off to the greedy planner, which would leave the target route",
+          );
           return navResult;
         }
         args.steps.push(
@@ -10736,7 +11234,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // without-residential-egress) oauth_session_not_persisted wall.
       const oauthLoginPageDecision = recoveryFlow.decideOAuthLoginPage({
         isOAuthRun: args.credentials === undefined,
-        isLoginPage: isLoginPageUrl(state.url),
+        isLoginPage: isLoginPageUrl(state.url) || isLoginPageInventory(inventory),
         path: pathOf(state.url),
         rootUrl: originRoot(state.url) ?? state.url,
         currentUrl: state.url,
@@ -11256,6 +11754,30 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             // it actually moves the page, the next iteration's
             // inventory-change check resets the stuck counter and the
             // bot continues normally.
+            const leafChoice = pickOnboardingLeafChoice(
+              inventory,
+              recovery.triedWizardLeafChoices,
+            );
+            if (leafChoice !== null) {
+              recovery.triedWizardLeafChoices.add(leafChoice.selector);
+              args.steps.push(
+                `Post-verify: stuck-loop ${recovery.stuckFiresAtUrl}x at ${state.url} — ` +
+                  `parent role selected but a required leaf role is still available; clicking ` +
+                  `${JSON.stringify(leafChoice.visibleText ?? leafChoice.ariaLabel)} before submitting.`,
+              );
+              try {
+                await this.browser.click(leafChoice.selector);
+                await this.browser.wait(2);
+              } catch (err) {
+                args.steps.push(
+                  `Post-verify: wizard leaf-role click failed (${err instanceof Error ? err.message : String(err)}) — falling through.`,
+                );
+              }
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
+              hint = undefined;
+              continue;
+            }
             const WIZARD_FORWARD =
               /^\s*(?:next|continue|submit|finish|done|get\s+started)\s*$/i;
             const wizardBtn = inventory.find(
@@ -12377,7 +12899,7 @@ ${formatInventory(input.inventory)}${
       return null;
     }
     return isContinuationFormStep(html, inventory)
-      ? `password step at ${pathOf(url)}`
+      ? `continuation form at ${pathOf(url)}`
       : null;
   }
 

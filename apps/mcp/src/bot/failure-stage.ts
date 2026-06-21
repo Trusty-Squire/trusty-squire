@@ -96,7 +96,7 @@ export function classifyFailureStage(
   }
   // Tightened: oauth_required / sso / a literal oauth callback — NOT bare
   // "oauth" (which appears in "post-OAuth navigation …" success-path prose).
-  if (has("oauth_required", "sso", "sso-callback", "oauth callback", "oauth-callback", "oauth handshake")) {
+  if (has("oauth_session_not_persisted", "oauth_required", "sso", "sso-callback", "oauth callback", "oauth-callback", "oauth handshake")) {
     return "oauth_handshake";
   }
   if (has("hydrat", "clerk", "stytch", "not loaded", "spa ")) return "hydration";

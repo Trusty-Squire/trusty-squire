@@ -189,11 +189,10 @@ Modes (pick one — default: verify):
                             holistic fix-agent against the planner
                             eval gate, and commits surviving fixes to
                             staging (the next/RC channel). Needs git
-                            + a local coding CLI (TRUSTY_SQUIRE_FIX_
-                            AGENT/--agent, default 'claude'); set
+                            + the local Codex CLI; set
                             TRUSTY_SQUIRE_FIX_AGENT_PUSH=1 to push.
   autoloop                  Live-gated fix-agent loop to convergence.
-                            Supports --agent=claude|codex|COMMAND.
+                            Always uses Codex. --agent only accepts codex.
   --service=SLUG            Ad-hoc single-service mode. Implies
                             discover. Bot runs once against SLUG.
   --oauth-provider=google|github
@@ -225,8 +224,8 @@ Pacing:
 Auth:
   --registry-url=URL        Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=TOKEN      Override REGISTRY_ADMIN_BEARER.
-  --agent=AGENT             Fix proposer for --mode=fix/autoloop:
-                            claude, codex, or a custom command string.
+  --agent=AGENT             Fix proposer for --mode=fix/autoloop.
+                            Only codex is accepted.
 
 Required env per mode:
   verify:              REGISTRY_ADMIN_BEARER

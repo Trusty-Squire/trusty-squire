@@ -50,6 +50,7 @@ export class PostSignupRecoveryState {
   deadUrls = new Set<string>();
   lastNavigatedTo: string | null = null;
   triedWizardForward = new Set<string>();
+  triedWizardLeafChoices = new Set<string>();
 }
 
 export interface RecoveryClickableElement {

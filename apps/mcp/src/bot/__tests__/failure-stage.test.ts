@@ -28,6 +28,7 @@ describe("classifyFailureStage (B1 taxonomy)", () => {
     ["anti_bot_blocked: Cloudflare on SSO callback", false, "anti_bot"],
     ["captcha_blocked", false, "captcha"],
     ["oauth_required", false, "oauth_handshake"],
+    ["oauth_session_not_persisted: signed in via OAuth but still presents a login screen", true, "oauth_handshake"],
     ["sso-callback hung", false, "oauth_handshake"],
     ["could not pick account in chooser", false, "account_chooser"],
     ["consent screen scope grant failed", false, "consent"],

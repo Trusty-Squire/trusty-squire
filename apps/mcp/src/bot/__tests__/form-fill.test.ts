@@ -317,6 +317,16 @@ describe("decideFormFillStep — C4 post_execute", () => {
     expect(step.action).toEqual({ kind: "submit" });
     expect(step.nextState.lastNoProgressClickSelectors.size).toBe(0);
   });
+  it("a check-only field edit clears the stuck tracker and goes to submit", () => {
+    const step = decideFormFillStep(S({ lastNoProgressClickSelectors: new Set(["#a"]) }), {
+      ...POST_EXEC,
+      hadFill: false,
+      hadFieldEdit: true,
+      planActionCount: 1,
+    });
+    expect(step.action).toEqual({ kind: "submit" });
+    expect(step.nextState.lastNoProgressClickSelectors.size).toBe(0);
+  });
   it("a no-fill plan that revealed the page replans (progress debt) + records dead selectors", () => {
     const step = decideFormFillStep(S(), {
       ...POST_EXEC, hadFill: false, hadFieldEdit: false, planActionCount: 1, planClickSelectors: ["#reveal"],
@@ -326,17 +336,17 @@ describe("decideFormFillStep — C4 post_execute", () => {
     expect([...step.nextState.lastNoProgressClickSelectors]).toEqual(["#reveal"]);
   });
   it("two CONSECUTIVE empty plans → planning_failed; a non-empty plan resets the counter", () => {
-    const first = decideFormFillStep(S(), { ...POST_EXEC, hadFill: false, planActionCount: 0 });
+    const first = decideFormFillStep(S(), { ...POST_EXEC, hadFill: false, hadFieldEdit: false, planActionCount: 0 });
     expect(first.action.kind).toBe("replan");
     expect(first.nextState.emptyPlans).toBe(1);
-    const second = decideFormFillStep(S({ emptyPlans: 1 }), { ...POST_EXEC, hadFill: false, planActionCount: 0 });
+    const second = decideFormFillStep(S({ emptyPlans: 1 }), { ...POST_EXEC, hadFill: false, hadFieldEdit: false, planActionCount: 0 });
     expect(second.action.kind).toBe("terminal");
     // a non-empty no-fill plan resets emptyPlans to 0
-    expect(decideFormFillStep(S({ emptyPlans: 1 }), { ...POST_EXEC, hadFill: false, planActionCount: 1 }).nextState.emptyPlans).toBe(0);
+    expect(decideFormFillStep(S({ emptyPlans: 1 }), { ...POST_EXEC, hadFill: false, hadFieldEdit: false, planActionCount: 1 }).nextState.emptyPlans).toBe(0);
   });
   it("progress replans exhausted → planning_failed (never reached a fillable form)", () => {
     const step = decideFormFillStep(S({ progressReplans: B.MAX_PROGRESS_REPLANS }), {
-      ...POST_EXEC, hadFill: false, planActionCount: 1,
+      ...POST_EXEC, hadFill: false, hadFieldEdit: false, planActionCount: 1,
     });
     expect(step.action.kind).toBe("terminal");
     expect((step.action as { outcome: { reason: string } }).outcome.reason).toContain("never reached a fillable form");

@@ -301,14 +301,15 @@ export interface PostPlanObservation {
   verifyMissNotCheckbox: boolean; // the miss was a "not a checkbox" (drop-the-check hint)
 }
 
-// C4 post_execute — the plan ran. Decides commit-to-email, the empty/no-fill
-// replan, then (when a fill IS present) hands to submit. `submit` + post-submit
-// facts arrive in PostSubmitObservation once the executor has clicked submit.
+// C4 post_execute — the plan ran. Decides commit-to-email, the reveal/no-op
+// replan, then hands to submit when a fill or check-only plan should click the
+// submit selector. `submit` + post-submit facts arrive in PostSubmitObservation
+// once the executor has clicked submit.
 export interface PostExecuteObservation {
   checkpoint: "post_execute";
   clickedEmailAffordance: boolean; // a click whose reason matched /\bemail\b/
   planClickSelectors: readonly string[];
-  hadFill: boolean; // a fill action (promotes to submit)
+  hadFill: boolean; // a fill action (kept for diagnostics/parity)
   hadFieldEdit: boolean; // fill OR check (progress for the no-progress tracker)
   planActionCount: number; // 0 = the planner found nothing actionable
 }
@@ -543,8 +544,9 @@ export function decideFormFillStep(
       const commitPatch: Partial<FormFillState> = obs.clickedEmailAffordance
         ? { committedToEmailPath: true }
         : {};
-      // a plan with no fill either advanced the page (replan) or is a dead end. [5163]
-      if (!obs.hadFill) {
+      const shouldSubmit = obs.hadFill || (obs.hadFieldEdit && obs.planClickSelectors.length === 0);
+      // a plan that should not submit either advanced the page (replan) or is a dead end. [5163]
+      if (!shouldSubmit) {
         let emptyPlans = state.emptyPlans;
         if (obs.planActionCount === 0) {
           emptyPlans += 1;
@@ -585,7 +587,7 @@ export function decideFormFillStep(
           },
         );
       }
-      // a fill IS present = forward progress → clear the stuck tracker, go submit. [5206]
+      // a fill/check-only edit IS present = forward progress → clear the stuck tracker, go submit. [5206]
       return next({ kind: "submit" }, { ...commitPatch, lastNoProgressClickSelectors: new Set() });
     }
 

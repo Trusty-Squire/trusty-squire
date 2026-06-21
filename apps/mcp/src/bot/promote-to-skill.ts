@@ -117,7 +117,11 @@ export interface PromoteRejection {
     // The synthesized graph is schema-valid but can't replay (mirrors the
     // registry's POST /skills gate): an await_email_code with no preceding
     // ${EMAIL_ALIAS} fill + send-code, or a per-run param in signup_url.
-    | "incomplete_replay_graph";
+    | "incomplete_replay_graph"
+    // The captured entry URL is a post-signup/session transaction page, not a
+    // stable replay entry. Publishing it would strand the verifier on a stale
+    // dashboard/auth-confirmation URL and burn robot identities.
+    | "unstable_signup_url";
   message: string;
   offending_round?: number;
   offending_step?: number;
@@ -163,7 +167,6 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // Generalize per-run session params out of the captured entry URL so a stale
   // session token (kinde-class psid=, redirect_to=) doesn't make replay's first
   // navigation dead.
-  const firstRound = verification.rounds[0]!;
   // Pick the entry URL for signup_url. When the capture passed through an
   // OAuth identity provider, round 0's URL can land on the provider's own
   // domain (e.g. accounts.google.com / myaccount.google.com — the bot
@@ -171,11 +174,25 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // it back to the dashboard). That domain is NOT a valid signup entry:
   // replay's first navigation would dead-end on Google instead of the
   // service. Prefer the first captured round whose host is the service's
-  // own (a non-IdP domain); fall back to round 0 only if every round is on
-  // an IdP domain (shouldn't happen for a real signup).
-  const entryRound =
-    verification.rounds.find((r) => !isIdentityProviderUrl(r.state.url)) ??
-    firstRound;
+  // own (a non-IdP domain) AND whose path is not an auth/session transaction
+  // or terminal onboarding confirmation page. If the capture never saw such a
+  // URL, reject the skill instead of publishing a stale replay entry.
+  const entryRound = verification.rounds.find(
+    (r) =>
+      !isIdentityProviderUrl(r.state.url) &&
+      !isUnstableSignupEntryUrl(r.state.url),
+  );
+  if (entryRound === undefined) {
+    return {
+      kind: "rejected",
+      stage: "synthesis",
+      error_kind: "unstable_signup_url",
+      message:
+        "Capture did not contain a stable service entry URL; all candidate URLs were identity-provider or post-signup/session transaction pages.",
+      offending_round: 0,
+      synthesizer_version: SYNTHESIZER_VERSION,
+    };
+  }
   const signupUrl = generalizeCapturedUrl(entryRound.state.url);
   const oauthProvider = inferOAuthProvider(stepsResult.steps);
 
@@ -284,7 +301,7 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // skill_id is derived deterministically from the assembled content
   // so the same captures always produce the same skill_id (test
   // determinism + the registry idempotency on (service, skill_id)).
-  const createdAt = firstRound.state.url; // placeholder unused; created_at sourced from generator
+  const createdAt = entryRound.state.url; // placeholder unused; created_at sourced from generator
   void createdAt;
 
   const candidate: Omit<Skill, "skill_id"> = {
@@ -1021,6 +1038,29 @@ export function isIdentityProviderUrl(url: string): boolean {
     );
   } catch {
     return false; // relative / malformed — not an IdP entry
+  }
+}
+
+export function isUnstableSignupEntryUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+    if (path === "/" || path === "/~") return true;
+    if (path === "/overview") return true;
+    if (path.includes("/auth/cx/")) return true;
+    if (path.includes("/register/create-user-new-org-confirmation")) return true;
+    if (path.includes("/oauth/callback") || path.includes("/auth/callback")) return true;
+    if (path.includes("/login/callback") || path.includes("/sso/callback")) return true;
+    if (
+      path.endsWith("/confirmation") ||
+      path.endsWith("/confirm") ||
+      path.endsWith("/reserved")
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 

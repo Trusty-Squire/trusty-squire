@@ -6,6 +6,7 @@ import {
 } from "./terminal-gate.js";
 import {
   credentialFieldNames,
+  hasSingleCredentialValue,
   isMultiCredBundle,
 } from "./credential-extraction-flow.js";
 
@@ -53,9 +54,7 @@ export class PostSignupCredentialTracker {
       DEFAULT_MAX_ROUNDS_AWAITING_MORE_CREDENTIALS,
   ) {
     this.lastCredentialKeyCount = credentialFieldNames(initialCredentials).length;
-    this.seedHadCredential =
-      initialCredentials.api_key !== undefined ||
-      initialCredentials.username !== undefined;
+    this.seedHadCredential = hasSingleCredentialValue(initialCredentials);
   }
 
   recordPlannerExtract(): void {
@@ -103,7 +102,7 @@ export class PostSignupCredentialTracker {
   ): PostSignupCredentialExit | null {
     if (
       !progress.inMultiCredMode &&
-      (credentials.api_key !== undefined || credentials.username !== undefined) &&
+      hasSingleCredentialValue(credentials) &&
       !progress.haveOnlySeedCredentials
     ) {
       return {
@@ -116,9 +115,7 @@ export class PostSignupCredentialTracker {
       progress.inMultiCredMode &&
       progress.roundsSinceLastNewCredential >=
         this.maxRoundsAwaitingMoreCredentials &&
-      (credentials.api_key !== undefined ||
-        credentials.username !== undefined ||
-        progress.currentCredentialKeyCount >= 2)
+      (hasSingleCredentialValue(credentials) || progress.currentCredentialKeyCount >= 2)
     ) {
       const summary = credentialFieldNames(credentials).join(", ");
       return {

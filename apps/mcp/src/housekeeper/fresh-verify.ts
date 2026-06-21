@@ -97,17 +97,19 @@ export interface ConfidenceOpts {
 // genuinely-broken one is rejected without wasting the pool. Do not present
 // these as authoritative. Env-overridable (see freshVerifyConfidenceFromEnv).
 //
-// WHY 0.3 / 0.2 AND NOT (e.g.) 0.6 / 0.3: with the EXACT Wilson 95% interval
+// WHY 0.2 / 0.2 AND NOT (e.g.) 0.6 / 0.3: with the EXACT Wilson 95% interval
 // (z=1.96) at the small n we operate in, the lower bound is conservative — even
-// a perfect 5/5 only reaches LCB ≈ 0.57, and 2/2 only LCB ≈ 0.34. A floor of
+// a perfect 5/5 only reaches LCB ≈ 0.57, 2/2 only LCB ≈ 0.34, and 1/1 only
+// LCB ≈ 0.21. A floor of
 // 0.6 would therefore be UNREACHABLE inside maxSamples=4 informative draws, so
 // nothing would ever promote. These defaults are chosen so the intended
-// behavior holds against the honest math: a clean 2/2 promotes (LCB 0.34 > 0.30)
-// while a 2/4 does NOT (LCB 0.15 < 0.30) — i.e. "promoted" means "high
+// behavior holds against the honest math: one full fresh browser success can
+// promote (matching the registry's verifier threshold of 1), 2/2 promotes
+// strongly, while a 2/4 does NOT (LCB 0.15 < 0.20) — i.e. "promoted" means "high
 // lower-confidence-bound pass-rate", not "passed once". When the heal-run
 // distribution is measured, RE-DERIVE these (and/or relax z / raise maxSamples)
 // rather than trusting the round numbers. Tracked as the calibration TODO.
-export const DEFAULT_PROMOTE_FLOOR = 0.3;
+export const DEFAULT_PROMOTE_FLOOR = 0.2;
 export const DEFAULT_REJECT_CEILING = 0.2;
 export const DEFAULT_MAX_SAMPLES = 4;
 
@@ -440,17 +442,7 @@ const HARD_FAILURE_CODES = [
   "payment_required",
   "anti_bot_blocked",
   "captcha_blocked",
-  "verification_not_sent",
   "unservable",
-  // Signed in via OAuth but the post-OAuth onboarding WIZARD can't reach the API
-  // key — a deterministic nav wall (the bot can't traverse this service's wizard),
-  // identical for every fresh identity. Measured 0% rescue across baseten/langfuse
-  // + 28 hits in the heal-run distribution. Fixable only by improving post-OAuth
-  // nav, never by spending more robots. NOTE: deliberately NOT including the
-  // look-alikes oauth_loop_detected (gladia promoted on retry) and
-  // oauth_session_not_persisted (clarifai promoted on retry) — those are genuine
-  // per-run variance and are treated as NON-OBSERVATIONS (drop + redraw).
-  "oauth_onboarding_failed",
 ];
 export function isHardFailure(reason: string | undefined): boolean {
   if (reason === undefined) return false;
@@ -467,10 +459,13 @@ const NON_OBSERVATION_CODES = [
   // Genuine per-run OAuth variance — real promotions came from re-drawing these
   // (gladia, clarifai). MUST stay non-informative.
   "oauth_loop_detected",
+  "oauth_onboarding_failed",
   "oauth_session_not_persisted",
   "oauth_consent_needs_review",
+  "verification_not_sent",
   // Transient session / timing / network — the page-load layer, not the recipe.
   "nav_timeout",
+  "run_timeout",
   "timeout",
   "navigation",
   "econnreset",

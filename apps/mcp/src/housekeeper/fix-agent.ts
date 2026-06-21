@@ -395,7 +395,7 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
     // Router gate (Phase 1) — the structural pre-filter. ONLY clusters the
     // path-fence can actually move (post-OAuth nav planner: planner_loop /
     // extract) earn a coding-agent spend. Everything else is routed away WITHOUT
-    // burning a `claude -p` attempt: `wall` for genuine dead-ends (phone /
+    // burning a Codex attempt: `wall` for genuine dead-ends (phone /
     // payment / dead host), parked-for-retry/surface for `drain` (timing) +
     // `capability_gap` (deterministic but out-of-fence). We gate on STAGE — the
     // fence truth — with conservative inputs (recentGreenRate/dnsAlive/curated

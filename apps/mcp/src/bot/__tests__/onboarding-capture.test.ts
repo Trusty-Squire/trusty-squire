@@ -515,12 +515,17 @@ describe("captureRunOutcome — sidecar file", () => {
     }
   });
 
-  it("no-ops when the run captured no rounds", () => {
+  it("writes a zero-round outcome so fast-path successes suppress stale failures", () => {
     withCaptureDir((dir) => {
       resetCaptureChain();
       const service = uniqueService();
-      captureRunOutcome(service, mockResult({ success: false, error: "form_failed" }));
-      expect(readdirSync(dir).filter((f) => f.endsWith(".outcome.json"))).toHaveLength(0);
+      captureRunOutcome(service, mockResult({ success: true, credentials: { api_key: "sk-fast" } }));
+      const outcomeFiles = readdirSync(dir).filter((f) => f.endsWith(".outcome.json"));
+      expect(outcomeFiles).toHaveLength(1);
+      const written = JSON.parse(readFileSync(join(dir, outcomeFiles[0]!), "utf8")) as OnboardingOutcomeFile;
+      expect(written.outcome.ok).toBe(true);
+      expect(written.outcome.terminal_round).toBeNull();
+      expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-fast");
     });
   });
 });

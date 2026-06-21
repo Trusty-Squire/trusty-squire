@@ -55,6 +55,12 @@ describe("wilsonInterval", () => {
 });
 
 describe("evaluateConfidence", () => {
+  it("1/1 → promote by default (registry threshold is one clean fresh replay)", () => {
+    const r = evaluateConfidence(1, 0, { ...DEFAULTS, drawsRemaining: 3 });
+    expect(r.verdict).toBe("promote");
+    expect(r.lcb).toBeGreaterThan(DEFAULT_PROMOTE_FLOOR);
+  });
+
   it("2/2 → promote (LCB clears the floor)", () => {
     const r = evaluateConfidence(2, 0, { ...DEFAULTS, drawsRemaining: 2 });
     expect(r.verdict).toBe("promote");
@@ -82,7 +88,7 @@ describe("evaluateConfidence", () => {
   });
 
   it("pool/budget exhausted before convergence → hold (NOT reject)", () => {
-    // 1/1: interval is wide, neither threshold cleared, and no draws left.
+    // 1✓/1✗: interval is wide, neither threshold cleared, and no draws left.
     const r = evaluateConfidence(1, 1, { ...DEFAULTS, drawsRemaining: 0 });
     expect(r.verdict).toBe("hold");
   });
@@ -123,6 +129,15 @@ describe("classifyAttempt", () => {
     expect(
       classifyAttempt({ success: false, reason: "oauth_loop_detected: redirect bounce" }),
     ).toBe("non_observation");
+    expect(
+      classifyAttempt({ success: false, reason: "oauth_onboarding_failed: dashboard took a bad path" }),
+    ).toBe("non_observation");
+    expect(
+      classifyAttempt({ success: false, reason: "verification_not_sent: email did not arrive in time" }),
+    ).toBe("non_observation");
+    expect(classifyAttempt({ success: false, reason: "run_timeout: exceeded 600s" })).toBe(
+      "non_observation",
+    );
   });
   it("anything else (genuine rot) is an informative failure", () => {
     expect(classifyAttempt({ success: false, reason: "step_failed step=3 button gone" })).toBe(
@@ -151,8 +166,8 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(res.passRateLcb).toBeGreaterThan(DEFAULT_PROMOTE_FLOOR);
   });
 
-  it("does NOT promote on a single success — HOLD on insufficient signal", async () => {
-    // verify-01 succeeds, verify-02 genuinely rots: 1✓/1✗, no draws left → hold.
+  it("does NOT promote mixed 1✗/1✓ — HOLD on insufficient signal", async () => {
+    // verify-01 genuinely rots, verify-02 succeeds: 1✗/1✓, no draws left → hold.
     const res = await freshVerifyService({
       service: "sentry",
       provider: "google",
@@ -160,8 +175,8 @@ describe("freshVerifyService (sampler-driven)", () => {
       usage: [],
       runSignup: async (i) =>
         i.id === "verify-01"
-          ? { success: true, credential: "k" }
-          : { success: false, reason: "step_failed: button gone" },
+          ? { success: false, reason: "step_failed: button gone" }
+          : { success: true, credential: "k" },
       markSpent: () => undefined,
     });
     expect(res.verdict).toBe("hold");
@@ -172,7 +187,7 @@ describe("freshVerifyService (sampler-driven)", () => {
 
   it("a transient flake is DROPPED as a non-observation and another identity is drawn", async () => {
     // verify-01 flakes (transient) — must NOT count; the recipe then proves out
-    // on the next two informative successes.
+    // on the next informative success.
     const marked: string[] = [];
     const res = await freshVerifyService({
       service: "x",
@@ -188,7 +203,7 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(res.verdict).toBe("promote");
     // The flake did not move the posterior (0 failures recorded).
     expect(res.failures).toBe(0);
-    expect(res.successes).toBeGreaterThanOrEqual(2);
+    expect(res.successes).toBeGreaterThanOrEqual(1);
     // verify-01 was still spent (it created/attempted an account).
     expect(marked[0]).toBe("verify-01");
   });
@@ -231,14 +246,14 @@ describe("freshVerifyService (sampler-driven)", () => {
       identities: POOL,
       usage: [],
       runSignup: async (i) => {
-        if (i.id === "verify-02") throw new Error("chrome wedged");
+        if (i.id === "verify-01") throw new Error("chrome wedged");
         return { success: true, credential: "k" };
       },
       markSpent: () => undefined,
     });
     // "chrome wedged" matches the non-observation phrase set → dropped, not counted.
-    const second = res.outcomes.find((o) => o.identityId === "verify-02");
-    expect(second?.observation).toBe("non_observation");
+    const first = res.outcomes.find((o) => o.identityId === "verify-01");
+    expect(first?.observation).toBe("non_observation");
   });
 
   it("returns insufficient_identities when the pool is fully spent", async () => {
@@ -307,10 +322,11 @@ describe("isHardFailure", () => {
     expect(isHardFailure("no_signup_link")).toBe(true);
     expect(isHardFailure("captcha_blocked")).toBe(true);
     expect(isHardFailure("oauth_required")).toBe(true);
-    expect(isHardFailure("oauth_onboarding_failed: could not reach an API key")).toBe(true);
   });
   it("flakes and genuine rot are NOT hard", () => {
     expect(isHardFailure("form drift mid-fill")).toBe(false);
+    expect(isHardFailure("oauth_onboarding_failed: could not reach an API key")).toBe(false);
+    expect(isHardFailure("verification_not_sent: email did not arrive")).toBe(false);
     expect(isHardFailure("step_failed: button gone")).toBe(false);
     expect(isHardFailure(undefined)).toBe(false);
   });

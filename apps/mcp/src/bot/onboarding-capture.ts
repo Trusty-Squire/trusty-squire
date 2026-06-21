@@ -316,15 +316,15 @@ export function summarizeRunOutcome(
 }
 
 // Write the run-outcome sidecar. Best-effort, like the round capture.
-// Skips entirely when the run captured no rounds (runId undefined): the
-// eval is round-keyed, so an outcome with nothing to join against is
-// dead weight.
+// Even zero-round runs get an outcome sidecar: the repair ledger uses later
+// successes to suppress stale failures, and fast-path successes (credentials
+// found immediately after OAuth) may not capture any post-verify rounds.
 export function captureRunOutcome(service: string, result: SignupResult): void {
   const dir = resolveCaptureDir();
   if (dir === null) return;
-  if (runId === undefined) return;
   try {
     mkdirSync(dir, { recursive: true });
+    if (runId === undefined) runId = Date.now().toString(36);
     const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const file = join(dir, `${slug}-${runId}.outcome.json`);
     const sourceCommit = currentSourceCommit();

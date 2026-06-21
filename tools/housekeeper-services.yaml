@@ -320,23 +320,26 @@
     '
 - slug: baseten
   name: Baseten
-  signup_url: https://app.baseten.co/login
+  signup_url: https://app.baseten.co/sign-up
   oauth_provider: google
   scope_hint: null
-  status: needs-manual
-  notes: 'Model serving. Google OAuth works, but new accounts land in
+  status: pending
+  notes: 'Model serving. Google OAuth works. Use the explicit sign-up route;
+    the login route creates a WorkOS source=signin session and fresh robots have
+    repeatedly forked into /waiting_room before any planner-filled fields exist.
+    Baseten remains approval-stateful:
 
-    app.baseten.co/waiting_room — a MANUAL account-review/approval gate. No API
+    some robot identities land directly in an approved workspace and can create
 
-    key exists until a human approves the account, so the bot cannot self-serve
+    keys at /settings/api_keys, while fresh/unapproved identities land in
 
-    it (UNSERVABLE, not a wizard/planner bug). Measured 2026-06-13: bot fills
+    app.baseten.co/waiting_room after submitting company/LinkedIn/use-case
 
-    the approval form, then the planner correctly reports "account review
+    details. This is not an absolute wall; classify waiting_room as async
 
-    waiting room, not approved". Falls through to oauth_onboarding_failed today
+    approval pending and retry the same identity later instead of discarding it
 
-    (should be onboarding_blocked). Dequeued — needs a human or an approved acct.
+    or counting it as a terminal signup failure.
 
     '
 - slug: netlify
@@ -946,10 +949,16 @@
   signup_url: https://replit.com/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: 'Browser dev environment. Google + GitHub + Apple OAuth. API token
-
-    in account settings.
+  status: needs-manual
+  last_probed: 2026-06-20
+  notes: 'Browser dev environment. Google + GitHub + Apple OAuth. Current
+    captures reached authenticated Replit but /settings/api_keys returned
+    "Replit - 404 - Replit"; /settings/keys and /settings/api-keys also did not
+    expose account-level token controls. Replit docs describe app/project
+    Secrets and Replit-managed AI Integrations, not a self-serve account API key
+    suitable for Trusty Squire credential extraction. Treat as
+    no_account_api_key_wall unless a new user-facing account token path is
+    proven.
 
     '
 - slug: codesandbox
@@ -966,8 +975,14 @@
   signup_url: https://stackblitz.com/register
   oauth_provider: google
   scope_hint: null
-  status: pending
+  status: needs-manual
+  last_probed: 2026-06-20
   notes: 'Browser dev environment (WebContainers). GitHub + Google OAuth.
+    Current service docs expose project/repository-scoped environment variables
+    and WebContainer/embed APIs, not a self-serve account-level API token usable
+    as a Trusty Squire credential. Prior discovery also found no user API key
+    exposed in the web UI. Treat as no_account_api_key_wall unless a new account
+    token path is proven.
 
     /login is a 404; /register is the current signup route. Google
 

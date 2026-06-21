@@ -538,17 +538,13 @@ describe("findSignInAdvanceButton", () => {
 // ───────────────────── orderOAuthCandidates ─────────────────────
 
 describe("orderOAuthCandidates", () => {
-  it("leads with Google even over a non-Google pin when Google is warm", () => {
-    // 2026-06-07: GitHub hits an unclearable /authorize 2FA wall, so a warm
-    // Google session must lead even when the service is pinned github (porter/
-    // deepinfra). findFirstOAuthButton still falls through to GitHub on pages
-    // whose Google is One-Tap-only (no button) — e.g. northflank.
-    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["google", "github"]);
-    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["google", "github"]);
+  it("honours a non-Google pin even when Google is warm", () => {
+    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["github", "google"]);
+    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["github", "google"]);
   });
 
-  it("falls back to Google when the pinned provider's session is NOT warm", () => {
-    expect(orderOAuthCandidates("github", ["google"])).toEqual(["google", "github"]);
+  it("tries a pinned provider even when its session is not warm", () => {
+    expect(orderOAuthCandidates("github", ["google"])).toEqual(["github"]);
   });
 
   it("honours a non-Google pin when there's NO Google session (no regression)", () => {

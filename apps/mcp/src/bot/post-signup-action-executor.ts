@@ -97,7 +97,12 @@ export class PostSignupActionExecutor {
         return { steps, hint };
       }
       case "fill":
-        await this.browser.type(step.selector, step.value);
+        if (/#react-select-\d+-input\b/.test(step.selector)) {
+          await this.browser.selectOption(step.selector, step.value);
+          await this.browser.wait(1);
+        } else {
+          await this.browser.type(step.selector, step.value);
+        }
         return { steps, hint };
       case "select":
         await this.browser.selectOption(step.selector, step.option_text);

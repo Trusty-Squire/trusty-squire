@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CredentialExtractionFlow,
   credentialFieldNames,
+  extractAllLabeledTokensFromReason,
   hasAnyExtractedCredential,
   hasUsableCredentialBundle,
   type PostSignupExtractionRoundPort,
@@ -25,6 +26,22 @@ describe("CredentialExtractionFlow credential policy", () => {
 
   it("keeps legacy api_key as a usable single-field credential", () => {
     expect(hasUsableCredentialBundle({ api_key: "sk-live" })).toBe(true);
+  });
+
+  it("keeps access_token as a usable single-field credential", () => {
+    expect(hasUsableCredentialBundle({ access_token: "ddp_example_token" })).toBe(
+      true,
+    );
+    expect(isMultiCredBundle({ access_token: "ddp_example_token" })).toBe(false);
+  });
+
+  it("normalizes personal_api_key planner labels to a usable api_key", () => {
+    expect(
+      extractAllLabeledTokensFromReason(
+        "The API key is visible: personal_api_key='ddp_example_token_123456'",
+        "personal_api_key ddp_example_token_123456",
+      ),
+    ).toEqual({ api_key: "ddp_example_token_123456" });
   });
 
   it("accepts services that expose two named fields without literal api_key", () => {

@@ -10,6 +10,9 @@ export type ClusterBucket =
   | "anti_bot_captcha"
   | "email_verification"
   | "credential_extraction_navigation"
+  | "async_approval_pending"
+  | "manual_account_review_wall"
+  | "no_account_api_key_wall"
   | "phone_payment_wall"
   | "other";
 
@@ -46,6 +49,43 @@ function isLoginAfterOauth(f: FixBatchFailure): boolean {
   return f.failure_stage === "oauth_handshake" || (f.failure_stage === "planner_loop" && hasLoginSurface && saysAlreadyOauth);
 }
 
+function isManualAccountReviewGate(f: FixBatchFailure): boolean {
+  const url = f.terminal_page?.url ?? "";
+  const title = f.terminal_page !== undefined ? "" : "";
+  const reason = f.terminal_page?.observed.reason ?? f.planner_reasoning ?? "";
+  const haystack = `${url} ${title} ${reason}`.toLowerCase();
+  return (
+    f.failure_stage === "manual" ||
+    /waiting[_-]?room|account (?:review|approval)|under review|verify your account|manual approval/.test(
+      haystack,
+    )
+  );
+}
+
+function isAsyncApprovalPending(f: FixBatchFailure): boolean {
+  const service = f.service.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const reason = f.terminal_page?.observed.reason ?? f.planner_reasoning ?? "";
+  const haystack = `${f.terminal_page?.url ?? ""} ${reason}`.toLowerCase();
+  return (
+    service === "baseten" &&
+    /waiting[_-]?room|account (?:review|approval)|under review|verify your account/.test(
+      haystack,
+    )
+  );
+}
+
+function isNoAccountApiKeyWall(f: FixBatchFailure): boolean {
+  const service = f.service.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const reason = f.terminal_page?.observed.reason ?? f.planner_reasoning ?? "";
+  const haystack = `${f.terminal_page?.url ?? ""} ${reason}`.toLowerCase();
+  return (
+    service === "replit" ||
+    /does not support user-facing api keys|no user-facing api keys|no account-level api key|app-scoped external access token|paid plan/.test(
+      haystack,
+    )
+  );
+}
+
 export function coarseFamilyId(f: FixBatchFailure): string {
   const observed = f.terminal_page?.observed.kind ?? "none";
   return `${f.failure_stage}:${observed}:${f.signature}`;
@@ -72,6 +112,24 @@ export function classifyFailureBucket(
   }
   if (f.failure_stage === "verify_email") {
     return { bucket: "email_verification", reason: "email verification capability gap" };
+  }
+  if (isAsyncApprovalPending(f)) {
+    return {
+      bucket: "async_approval_pending",
+      reason: "service accepted signup details but approval is asynchronous; retry same identity later",
+    };
+  }
+  if (isManualAccountReviewGate(f)) {
+    return {
+      bucket: "manual_account_review_wall",
+      reason: "terminal page requires manual account review/approval",
+    };
+  }
+  if (isNoAccountApiKeyWall(f)) {
+    return {
+      bucket: "no_account_api_key_wall",
+      reason: "service does not expose a normal account-level API key after signup",
+    };
   }
   if (f.failure_stage === "extract") {
     return {

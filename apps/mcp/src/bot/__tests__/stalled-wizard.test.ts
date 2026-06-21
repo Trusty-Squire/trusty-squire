@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   isStalledOnActions,
   isLoginPageUrl,
+  isLoginPageInventory,
   isLoadingShellText,
   isLoadingShell,
   SHELL_MAX_ELEMENTS,
@@ -169,6 +170,55 @@ describe("isLoginPageUrl (non-persisting-OAuth detector)", () => {
 
   it("never throws on a malformed URL", () => {
     expect(isLoginPageUrl("not a url")).toBe(false);
+  });
+});
+
+describe("isLoginPageInventory (non-persisting-OAuth detector)", () => {
+  const input = (overrides: Record<string, unknown>) =>
+    ({
+      tag: "input",
+      role: null,
+      type: null,
+      visible: true,
+      selector: "#x",
+      visibleText: null,
+      ariaLabel: null,
+      labelText: null,
+      placeholder: null,
+      name: null,
+      id: null,
+      ...overrides,
+    }) as never;
+
+  const button = (text: string) =>
+    ({
+      tag: "button",
+      role: null,
+      type: "submit",
+      visible: true,
+      selector: "#submit",
+      visibleText: text,
+      ariaLabel: null,
+      labelText: null,
+    }) as never;
+
+  it("flags a rendered login form even when the URL is an app/settings URL", () => {
+    expect(
+      isLoginPageInventory([
+        input({ type: "email", selector: "#login-email" }),
+        input({ type: "password", selector: "#login-password" }),
+        button("Log in"),
+      ]),
+    ).toBe(true);
+  });
+
+  it("does not flag ordinary single-field onboarding forms", () => {
+    expect(
+      isLoginPageInventory([
+        input({ type: "text", name: "company", selector: "#company" }),
+        button("Continue"),
+      ]),
+    ).toBe(false);
   });
 });
 

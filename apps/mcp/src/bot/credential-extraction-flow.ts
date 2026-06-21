@@ -23,6 +23,23 @@ export function credentialFieldNames(
     .filter((key) => !NON_CREDENTIAL_KEYS.has(key));
 }
 
+// Credential fields that are usable by themselves. Other named fields can be
+// part of a credential bundle, but a lone identifier such as cloud_name,
+// application_id, client_id, or org_id must not end the post-signup loop.
+export const SINGLE_CREDENTIAL_FIELDS = new Set<string>([
+  "api_key",
+  "username",
+  "access_token",
+]);
+
+export function hasSingleCredentialValue(
+  creds: Record<string, string | undefined>,
+): boolean {
+  return credentialFieldNames(creds).some((key) =>
+    SINGLE_CREDENTIAL_FIELDS.has(key),
+  );
+}
+
 // True iff the credentials Record holds at least one extracted value
 // (api_key, username, or any labeled multi-cred field). Excludes metadata and
 // truncated stubs. Used to decide whether an extraction round produced progress.
@@ -39,7 +56,7 @@ export function isMultiCredBundle(
   creds: Record<string, string | undefined>,
 ): boolean {
   return credentialFieldNames(creds).some(
-    (key) => key !== "api_key" && key !== "username",
+    (key) => !SINGLE_CREDENTIAL_FIELDS.has(key),
   );
 }
 
@@ -50,7 +67,7 @@ export function isMultiCredBundle(
 export function hasUsableCredentialBundle(
   creds: Record<string, string | undefined>,
 ): boolean {
-  if (creds.api_key !== undefined && creds.api_key.length > 0) return true;
+  if (hasSingleCredentialValue(creds)) return true;
   return credentialFieldNames(creds).length >= 2;
 }
 
@@ -120,7 +137,7 @@ export function extractAllLabeledTokensFromReason(
     consumer_secret: "consumer_secret",
     access_token_secret: "access_token_secret",
     project_api_key: "project_api_key",
-    personal_api_key: "personal_api_key",
+    personal_api_key: "api_key",
     app_key: "app_key",
     appkey: "app_key",
     app_secret: "app_secret",
@@ -267,7 +284,7 @@ export const DOM_LABEL_TO_KEY: Record<string, string> = {
   "access key id": "access_key_id",
   "access token": "access_token",
   "bearer token": "access_token",
-  "personal access token": "access_token",
+  "personal access token": "api_key",
   "auth token": "auth_token",
   "client id": "client_id",
   "client secret": "client_secret",
@@ -286,7 +303,7 @@ export const DOM_LABEL_TO_KEY: Record<string, string> = {
   "consumer secret": "consumer_secret",
   "access token secret": "access_token_secret",
   "project api key": "project_api_key",
-  "personal api key": "personal_api_key",
+  "personal api key": "api_key",
   "organization id": "org_id",
   "org id": "org_id",
   "app key": "app_key",

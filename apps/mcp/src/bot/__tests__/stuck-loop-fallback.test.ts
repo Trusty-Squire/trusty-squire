@@ -118,6 +118,26 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://console.groq.com/keys");
   });
 
+  it("keeps a live console origin instead of composing fallbacks onto a marketing signup host", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.cloudinary.com/app/welcome/",
+      new Set(),
+      "cloudinary",
+      "https://cloudinary.com/users/register_free",
+    );
+    expect(fallback).toBe("https://console.cloudinary.com/pm/developer-dashboard");
+  });
+
+  it("still composes fallbacks onto the app origin from an auth subdomain", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://authkit.anyscale.com/oauth/callback",
+      new Set(),
+      "anyscale",
+      "https://console.anyscale.com",
+    );
+    expect(fallback).toBe("https://console.anyscale.com/api-keys");
+  });
+
   it("resolves the curated path from a multi-word / cased service name via the slug", () => {
     const fallback = pickStuckLoopFallbackUrl(
       "https://app.launchdarkly.com/dashboard",
@@ -134,6 +154,24 @@ describe("pickStuckLoopFallbackUrl", () => {
       "sentry",
     );
     expect(fallback).toBe("https://trustysquire-m3.sentry.io/settings/account/api/auth-tokens/");
+  });
+
+  it("tries Axiom's documented API-token settings path before generic keys paths", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.axiom.co/dashboard",
+      new Set(),
+      "axiom",
+    );
+    expect(fallback).toBe("https://app.axiom.co/settings/api-tokens");
+  });
+
+  it("tries Anyscale's account API-keys page before generic settings paths", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.anyscale.com/",
+      new Set(),
+      "anyscale",
+    );
+    expect(fallback).toBe("https://console.anyscale.com/api-keys");
   });
 
   it("does NOT compose a curated path onto an unrelated host (host gate)", () => {

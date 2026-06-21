@@ -476,7 +476,7 @@ describe("runFixAgent", () => {
       ]),
       propose: async () => {
         call += 1;
-        if (call === 1) throw new Error("Command failed: claude -p … usage limit reached");
+        if (call === 1) throw new Error("Command failed: codex exec … usage limit reached");
         return proposal(["apps/mcp/src/bot/agent.ts"]);
       },
       gate: scriptedGate([gate({ regressPassed: true, holdout: 5 }), gate({ regressPassed: true, holdout: 5 })]),

@@ -442,9 +442,8 @@ function clusterPrompt(
 // already edited the tree); revert() restores those paths so a gate-red attempt
 // leaves no residue. Returns null when the agent made no change.
 //
-// `cliCommand` is split argv (e.g. ["claude","-p"]) — the prompt is appended as
-// the final arg. The operator wires the actual coding CLI; this module only
-// orchestrates it.
+// `cliCommand` is split argv (Codex by default) — the prompt is appended as the
+// final arg. This module only orchestrates the coding-agent invocation.
 // Coding-agent invocations rate-limit (per-minute 429s, or a usage-window cap)
 // — the CLI exits non-zero with one of these in its output. The serial fix loop
 // is naturally paced by the live gate, but a back-to-back retry burst (offline
@@ -659,7 +658,13 @@ export function discoverLiveRunner(config: {
     try {
       const { stdout, stderr, code, signal, timedOut } = await runProcessGroup(
         "node",
-        ["apps/mcp/dist/bin.js", "housekeeper", `--service=${service}`, "--once"],
+        [
+          "apps/mcp/dist/bin.js",
+          "housekeeper",
+          `--service=${service}`,
+          "--from=tools/housekeeper-services.yaml",
+          "--once",
+        ],
         {
           cwd: config.repoRoot,
           maxBuffer: 64 * 1024 * 1024,

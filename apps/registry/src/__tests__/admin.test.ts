@@ -185,6 +185,54 @@ describe("GET /admin/verifier/queue", () => {
     expect(res.json().items).toHaveLength(0);
     await server.close();
   });
+
+  it("prioritizes fresh pending rows over stale high-failure pending rows", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    const staleId = "01HVERIF000000000000000A3";
+    const freshId = "01HVERIF000000000000000A4";
+    const stale = pendingSkill(staleId, "stale-service");
+    stale.created_at = "2026-05-20T04:00:00.000Z";
+    const fresh = pendingSkill(freshId, "fresh-service");
+    fresh.created_at = "2026-05-21T04:00:00.000Z";
+    await skillStore.insert({
+      skill: stale,
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: fresh,
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: staleId,
+      kind: "failure",
+      failure_kind: "nav_timeout",
+      reason: "transient verifier miss",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: staleId,
+      kind: "failure",
+      failure_kind: "nav_timeout",
+      reason: "transient verifier miss",
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue?limit=2",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.items.map((item: { skill_id: string }) => item.skill_id)).toEqual([
+      freshId,
+      staleId,
+    ]);
+    await server.close();
+  });
 });
 
 describe("POST /admin/skills/:id/verifier-outcome", () => {

@@ -142,4 +142,26 @@ describe("PostSignupActionExecutor", () => {
 
     expect(credentials).toEqual({ api_key: "sk-live" });
   });
+
+  it("commits react-select inputs with selectOption instead of raw typing", async () => {
+    const b = browser();
+
+    await new PostSignupActionExecutor(
+      b,
+      extraction(),
+      undefined,
+      { clickPollMaxPolls: 1, clickPollMaxWaitMs: 10_000 },
+    ).execute({
+      step: {
+        kind: "fill",
+        selector: "#react-select-2-input",
+        value: "Software Engineer",
+        reason: "",
+      },
+      credentials: {},
+      snapshotPostClickAlert: async () => undefined,
+    });
+
+    expect(b.calls).toEqual(["select:#react-select-2-input:Software Engineer", "wait:1"]);
+  });
 });

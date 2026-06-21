@@ -37,12 +37,11 @@ const DEFAULT_ALLOWED_PATHS = [
 ] as const;
 const DEFAULT_SERVICE_FACTS_PATH = "tools/housekeeper-services.yaml";
 
-const NAMED_AGENT_COMMANDS = {
-  claude: ["claude", "-p"],
-  codex: ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"],
-} as const;
-
-type NamedFixAgent = keyof typeof NAMED_AGENT_COMMANDS;
+const CODEX_AGENT_COMMAND = [
+  "codex",
+  "exec",
+  "--dangerously-bypass-approvals-and-sandbox",
+] as const;
 
 function isTruthy(v: string | undefined): boolean {
   if (v === undefined) return false;
@@ -54,14 +53,6 @@ function defaultSinceMs(): number {
   const raw = process.env.TRUSTY_SQUIRE_FIX_SINCE_HOURS;
   const hours = raw !== undefined && Number.isFinite(Number(raw)) && Number(raw) > 0 ? Number(raw) : 24;
   return Date.now() - hours * 60 * 60 * 1000;
-}
-
-function splitCliCommand(raw: string): string[] {
-  return raw.split(/\s+/).filter((s) => s.length > 0);
-}
-
-function isNamedFixAgent(v: string): v is NamedFixAgent {
-  return v === "claude" || v === "codex";
 }
 
 interface YamlServiceFactEntry {
@@ -134,22 +125,20 @@ export function resolveFixAgentCommand(agent: string | undefined): {
   label: string;
   command: string[];
 } {
-  const selected = agent ?? process.env.TRUSTY_SQUIRE_FIX_AGENT;
+  const selected =
+    agent ??
+    process.env.TRUSTY_SQUIRE_FIX_AGENT ??
+    process.env.TRUSTY_SQUIRE_FIX_AGENT_CLI;
   if (selected !== undefined && selected.trim().length > 0) {
     const trimmed = selected.trim();
-    const normalized = trimmed.toLowerCase();
-    if (isNamedFixAgent(normalized)) {
-      return { label: normalized, command: [...NAMED_AGENT_COMMANDS[normalized]] };
+    if (trimmed.toLowerCase() !== "codex") {
+      throw new Error(
+        `unsupported fix proposer agent "${trimmed}". The housekeeper fix loop always uses codex; remove the override or pass --agent=codex.`,
+      );
     }
-    return { label: "custom", command: splitCliCommand(trimmed) };
   }
 
-  const fromEnv = process.env.TRUSTY_SQUIRE_FIX_AGENT_CLI;
-  if (fromEnv !== undefined && fromEnv.trim().length > 0) {
-    return { label: "custom", command: splitCliCommand(fromEnv) };
-  }
-
-  return { label: "claude", command: [...NAMED_AGENT_COMMANDS.claude] };
+  return { label: "codex", command: [...CODEX_AGENT_COMMAND] };
 }
 
 function shellQuote(s: string): string {
@@ -175,9 +164,9 @@ export async function runFixMode(opts: {
   // daily run only re-clusters recent failures, not the accumulated dir.
   sinceMs?: number;
   log?: (line: string) => void;
-  // Named proposer agent ("claude" or "codex") or a custom command string.
-  // TRUSTY_SQUIRE_FIX_AGENT provides the same named-agent override; the older
-  // TRUSTY_SQUIRE_FIX_AGENT_CLI remains the raw command escape hatch.
+  // Fix proposer agent override. Only "codex" is accepted; legacy Claude and
+  // raw-command dispatch are intentionally rejected so the loop cannot silently
+  // burn `claude -p` attempts.
   agent?: string;
   // The LIVE ORACLE (Phase 2). When provided, a fix commits only if it also
   // passes the live gate. The autoloop builds this (canary baseline measured

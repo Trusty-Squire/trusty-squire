@@ -198,6 +198,24 @@ describe("PostSignupRecoveryFlow", () => {
     });
   });
 
+  it("also treats login-form DOM on non-login URLs as OAuth login-page evidence", () => {
+    const flow = new PostSignupRecoveryFlow(new PostSignupRecoveryState());
+    const input = {
+      isOAuthRun: true,
+      isLoginPage: true,
+      path: "/settings/api_keys",
+      rootUrl: "https://cockroachlabs.cloud",
+      currentUrl: "https://cockroachlabs.cloud/settings/api_keys",
+    };
+
+    expect(flow.decideOAuthLoginPage(input)).toEqual({ kind: "continue" });
+    expect(flow.decideOAuthLoginPage(input)).toEqual({ kind: "continue" });
+    expect(flow.decideOAuthLoginPage(input)).toMatchObject({
+      kind: "reload",
+      url: "https://cockroachlabs.cloud",
+    });
+  });
+
   it("clears OAuth login-page rounds on non-login pages", () => {
     const state = new PostSignupRecoveryState();
     const flow = new PostSignupRecoveryFlow(state);

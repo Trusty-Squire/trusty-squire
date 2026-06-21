@@ -1844,36 +1844,47 @@ export class BrowserController {
       .scrollIntoViewIfNeeded({ timeout: 5000 })
       .catch(() => {});
     if (!this.humanize) {
-      await this.page.check(selector, { force: true });
-      return;
+      await this.page.check(selector, { force: true }).catch(() => undefined);
+      if (await this.ensureChecked(selector)) return;
+      throw new Error(`Unable to check selector "${selector}" after label and DOM fallbacks`);
     }
     // For visible checkboxes, move the mouse to it first (a real user
     // would). For force-checked invisible ones, fall back to the
     // Playwright API so we don't try to mouse-click an offscreen element.
-    try {
-      await this.humanClick(selector);
-      // Verify it actually became checked; some checkboxes need the
-      // explicit `check()` call to flip state (e.g., styled labels
-      // that swallow the click event).
-      let isChecked = await this.page.locator(selector).isChecked();
-      if (!isChecked) {
-        await this.page.check(selector, { force: true });
-        isChecked = await this.page.locator(selector).isChecked().catch(() => false);
-      }
-      // Mantine / Radix styled checkboxes: the hidden <input> can read
-      // checked in the DOM while the library's React onChange never fired —
-      // so the form's controlled state stays false and the gated submit
-      // stays disabled even though isChecked() is true (MEASURED 2026-06-11:
-      // friendliai's #agreedToServiceTerms cost a wasted round because the
-      // first check didn't register the form state). Clicking the ASSOCIATED
-      // LABEL fires the real onChange the library listens for. Best-effort.
-      if (!isChecked) {
-        const labelClicked = await this.clickAssociatedLabel(selector);
-        if (!labelClicked) await this.page.check(selector, { force: true });
-      }
-    } catch {
-      await this.page.check(selector, { force: true });
-    }
+    await this.humanClick(selector).catch(() => undefined);
+    await this.page.check(selector, { force: true }).catch(() => undefined);
+    if (await this.ensureChecked(selector)) return;
+    throw new Error(`Unable to check selector "${selector}" after click, label, and DOM fallbacks`);
+  }
+
+  private async ensureChecked(selector: string): Promise<boolean> {
+    if (!this.page) return false;
+    if (await this.page.locator(selector).isChecked().catch(() => false)) return true;
+
+    await this.clickAssociatedLabel(selector).catch(() => false);
+    if (await this.page.locator(selector).isChecked().catch(() => false)) return true;
+
+    const domChecked = await this.page
+      .locator(selector)
+      .first()
+      .evaluate((el) => {
+        if (!(el instanceof HTMLInputElement)) return false;
+        if (el.type !== "checkbox" && el.type !== "radio") return false;
+        if (!el.checked) {
+          el.click();
+        }
+        if (!el.checked) {
+          el.checked = true;
+          el.setAttribute("checked", "");
+          el.setAttribute("aria-checked", "true");
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return el.checked;
+      })
+      .catch(() => false);
+    if (!domChecked) return false;
+    return await this.page.locator(selector).isChecked().catch(() => false);
   }
 
   // Click the <label> associated with a checkbox/radio input — either a
@@ -1901,6 +1912,33 @@ export class BrowserController {
       const wrapping = this.page.locator(selector).locator("xpath=ancestor::label[1]").first();
       if ((await wrapping.count()) > 0) {
         await wrapping.click({ timeout: 4000 });
+        return true;
+      }
+      // Some Radix/shadcn-style controls render the hidden input as a sibling
+      // of the visible agreement label, with no `for=` and no wrapping label
+      // (Mistral's terms checkbox). At this point direct check has already
+      // failed/not toggled, so clicking the nearest agreement-shaped label in
+      // the same form is the safest remaining human-equivalent action.
+      const clickedAgreement = await this.page
+        .locator(selector)
+        .first()
+        .evaluate((el) => {
+          const agreementRe =
+            /terms|tos\b|privacy|policy|i accept|i agree|agree to/i;
+          const form = el.closest("form");
+          const labels = [
+            ...(form ? Array.from(form.querySelectorAll("label")) : []),
+            ...Array.from(document.querySelectorAll("label")),
+          ];
+          const label = labels.find((candidate) =>
+            agreementRe.test(candidate.textContent ?? ""),
+          );
+          if (!(label instanceof HTMLElement)) return false;
+          label.click();
+          return true;
+        })
+        .catch(() => false);
+      if (clickedAgreement) {
         return true;
       }
     } catch {
@@ -1991,6 +2029,116 @@ export class BrowserController {
           checked.push(label);
         }
         return checked;
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  // Deterministic pre-submit guard for required signup category choices.
+  //
+  // Paddle-class forms ask a required "What do you sell?" question where one
+  // product category must be selected before account creation, but the submit
+  // button remains enabled. The planner can satisfy the agreement checkbox and
+  // still skip the category, producing a rejected submit + no verification mail.
+  //
+  // Keep this conservative: only fire when the page text explicitly says a
+  // product/category choice is required, never touch agreement/marketing boxes,
+  // and prefer low-risk SaaS/software labels over restricted categories.
+  async checkRequiredSignupChoiceBoxes(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        const choiceGateRe =
+          /what do you sell|categories we support|select which types? of products|choose (?:a|your) (?:category|product|business type)|product category|business category/i;
+        const safeChoiceRe =
+          /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
+        const riskyChoiceRe =
+          /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
+        const agreementRe =
+          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+        const marketingRe =
+          /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+
+        const bodyText = document.body?.innerText ?? "";
+        if (!choiceGateRe.test(bodyText)) return [];
+
+        const associatedText = (box: HTMLInputElement): string => {
+          const parts: string[] = [
+            box.getAttribute("data-testid") ?? "",
+            box.getAttribute("name") ?? "",
+            box.id,
+            box.getAttribute("aria-label") ?? "",
+          ];
+          if (box.id) {
+            const forLabel = document.querySelector(
+              `label[for="${CSS.escape(box.id)}"]`,
+            );
+            if (forLabel) parts.push(forLabel.textContent ?? "");
+          }
+          const ancestorLabel = box.closest("label");
+          if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
+          if (box.nextElementSibling) {
+            parts.push(box.nextElementSibling.textContent ?? "");
+          }
+          return parts.join(" ").replace(/\s+/g, " ").trim();
+        };
+
+        const boxes = Array.from(
+          document.querySelectorAll<HTMLInputElement>(
+            'input[type="checkbox"], input[type="radio"]',
+          ),
+        );
+        const visibleBoxes = boxes.filter((box) => {
+          if (box.disabled) return false;
+          const rect = box.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+
+        const alreadyChoseCategory = visibleBoxes.some((box) => {
+          if (!box.checked) return false;
+          const text = associatedText(box);
+          return (
+            !agreementRe.test(text) &&
+            !marketingRe.test(text) &&
+            !riskyChoiceRe.test(text)
+          );
+        });
+        if (alreadyChoseCategory) return [];
+
+        const candidates = visibleBoxes
+          .filter((box) => !box.checked)
+          .map((box) => ({ box, text: associatedText(box) }))
+          .filter(({ text }) => {
+            if (!text) return false;
+            if (agreementRe.test(text) || marketingRe.test(text)) return false;
+            if (riskyChoiceRe.test(text)) return false;
+            return safeChoiceRe.test(text);
+          })
+          .sort((a, b) => {
+            const score = (text: string): number => {
+              if (/digital products?|saas|software/i.test(text)) return 3;
+              if (/developer tools?|apis?|data|analytics/i.test(text)) return 2;
+              if (/mobile apps?/i.test(text)) return 1;
+              return 0;
+            };
+            return score(b.text) - score(a.text);
+          });
+        const choice = candidates[0];
+        if (!choice) return [];
+
+        choice.box.checked = true;
+        choice.box.dispatchEvent(new Event("input", { bubbles: true }));
+        choice.box.dispatchEvent(new Event("change", { bubbles: true }));
+        choice.box.click();
+        return [
+          choice.box.getAttribute("data-testid") ||
+            choice.box.getAttribute("name") ||
+            choice.box.id ||
+            choice.box.getAttribute("aria-label") ||
+            choice.text ||
+            "signup-choice",
+        ];
       });
     } catch {
       return [];
@@ -2226,6 +2374,40 @@ export class BrowserController {
         if (resolvedTag === "select") {
           activeSelector = resolved;
           tagName = "select";
+        }
+      } else {
+        const rowControl = await this.page
+          .locator(activeSelector)
+          .first()
+          .evaluate((label) => {
+            const root =
+              label.closest(".n-form-group__row") ??
+              label.closest("label")?.parentElement ??
+              label.parentElement;
+            const control = root?.querySelector<HTMLElement>(
+              'select,button[role="combobox"],input[role="combobox"],[role="combobox"]',
+            );
+            if (control === null || control === undefined) return null;
+            const id = control.getAttribute("id");
+            if (id !== null && id.length > 0) return `#${CSS.escape(id)}`;
+            const testId =
+              control.getAttribute("data-qa") ??
+              control.getAttribute("data-testid") ??
+              control.getAttribute("data-test") ??
+              control.getAttribute("data-cy");
+            if (testId !== null && testId.length > 0) {
+              return `[data-qa="${CSS.escape(testId)}"],[data-testid="${CSS.escape(testId)}"],[data-test="${CSS.escape(testId)}"],[data-cy="${CSS.escape(testId)}"]`;
+            }
+            return null;
+          })
+          .catch(() => null);
+        if (rowControl !== null) {
+          activeSelector = rowControl;
+          tagName = await this.page
+            .locator(activeSelector)
+            .first()
+            .evaluate((node) => node.tagName.toLowerCase())
+            .catch(() => tagName);
         }
       }
     }
@@ -4759,9 +4941,23 @@ export class BrowserController {
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
         let base: string;
+        const testId =
+          el.getAttribute("data-testid") ??
+          el.getAttribute("data-test-id") ??
+          el.getAttribute("data-test") ??
+          el.getAttribute("data-cy") ??
+          el.getAttribute("data-qa");
         const id = el.getAttribute("id");
         const name = el.getAttribute("name");
-        if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) {
+        if (testId !== null && testId.length > 0) {
+          const attr =
+            el.hasAttribute("data-testid") ? "data-testid" :
+            el.hasAttribute("data-test-id") ? "data-test-id" :
+            el.hasAttribute("data-test") ? "data-test" :
+            el.hasAttribute("data-cy") ? "data-cy" :
+            "data-qa";
+          base = `[${attr}="${CSS.escape(testId)}"]`;
+        } else if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) {
           base = `#${id}`;
         } else if (name !== null && name.length > 0) {
           base = `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
@@ -5566,6 +5762,55 @@ export class BrowserController {
   async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     if (provider === "github") {
+      // GitHub App install flow can include an account target chooser before
+      // the Install/Authorize screen:
+      //   /apps/<app>/installations/select_target
+      // It renders account/org cards as links/buttons, not as an approve
+      // button. Advance exactly one visible target and let the caller's
+      // consent loop re-classify the next GitHub page.
+      if (/\/apps\/[^/]+\/installations\/select_target\b/.test(new URL(this.page.url()).pathname)) {
+        const startUrl = this.page.url();
+        const clicked = await this.page
+          .evaluate(() => {
+            const visible = (el: HTMLElement): boolean => {
+              const r = el.getBoundingClientRect();
+              const s = window.getComputedStyle(el);
+              return (
+                r.width > 2 &&
+                r.height > 2 &&
+                s.display !== "none" &&
+                s.visibility !== "hidden" &&
+                parseFloat(s.opacity || "1") > 0.01
+              );
+            };
+            const bad = /\b(settings|marketplace|learn more|cancel|skip|back|terms|privacy)\b/i;
+            const candidates = Array.from(
+              document.querySelectorAll<HTMLElement>('a[href], button, [role="button"], [role="link"]'),
+            ).filter((el) => visible(el));
+            const byHref = candidates.find((el) => {
+              const href = el instanceof HTMLAnchorElement ? el.href : el.getAttribute("href") ?? "";
+              return /\/installations\/(?:new|permissions)\b/.test(href);
+            });
+            const target =
+              byHref ??
+              candidates.find((el) => {
+                const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+                if (text.length === 0 || text.length > 80 || bad.test(text)) return false;
+                return true;
+              });
+            if (target === undefined) return false;
+            target.click();
+            return true;
+          })
+          .catch(() => false);
+        if (clicked) {
+          const advanced = await this.page
+            .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 8000 })
+            .then(() => true)
+            .catch(() => false);
+          if (advanced) return true;
+        }
+      }
       // GitHub consent screen variants:
       //   Classic OAuth: "Authorize <app>"
       //   GitHub App (install + auth): "Authorize <app>", "Install",
@@ -5950,6 +6195,10 @@ const AGREEMENT_TEXT_RE =
   /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
 const MARKETING_TEXT_RE =
   /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+const SAFE_SIGNUP_CHOICE_TEXT_RE =
+  /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
+const RISKY_SIGNUP_CHOICE_TEXT_RE =
+  /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
 
 // True when a checkbox's associated text reads as a REQUIRED agreement
 // (terms/privacy/consent) and NOT as a marketing/newsletter opt-in.
@@ -5963,6 +6212,18 @@ const MARKETING_TEXT_RE =
 // hence the explicit marketing exclusion.
 export function isAgreementCheckboxText(text: string): boolean {
   return AGREEMENT_TEXT_RE.test(text) && !MARKETING_TEXT_RE.test(text);
+}
+
+// True when a required signup-category choice is a low-risk default the bot can
+// select deterministically. Keep byte-identical with the in-page regexes in
+// `checkRequiredSignupChoiceBoxes`.
+export function isSafeSignupChoiceText(text: string): boolean {
+  return (
+    SAFE_SIGNUP_CHOICE_TEXT_RE.test(text) &&
+    !RISKY_SIGNUP_CHOICE_TEXT_RE.test(text) &&
+    !AGREEMENT_TEXT_RE.test(text) &&
+    !MARKETING_TEXT_RE.test(text)
+  );
 }
 
 // ───────────── residential proxy (S1) ─────────────

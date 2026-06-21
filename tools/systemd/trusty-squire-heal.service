@@ -46,7 +46,7 @@ ExecStart=/usr/bin/env node apps/mcp/dist/bin.js housekeeper --mode=heal --once 
 # cause, proposes a generalizing fix per cluster, reconciles it against the
 # planner eval gate, and commits surviving fixes to staging (the `next`/RC
 # channel). Best-effort (leading `-`): a fix-pass failure never fails the timer.
-#   • Needs a coding CLI: TRUSTY_SQUIRE_FIX_AGENT_CLI (default "claude -p").
+#   • Needs the Codex CLI. Legacy Claude/raw command overrides are rejected.
 #   • PUSH IS OPT-IN: without TRUSTY_SQUIRE_FIX_AGENT_PUSH=1 it commits RCs to
 #     the local staging branch but does NOT push — nothing reaches npm until
 #     the operator pushes (or sets the env). next→latest stays a human promote.

@@ -26,7 +26,7 @@ vi.mock("../login-state.js", async (importOriginal) => {
   return { ...actual, loggedInProviders: () => [] };
 });
 
-import { SignupAgent } from "../agent.js";
+import { planSimpleEmailOnlySignup, resolvePlannedFillValue, SignupAgent } from "../agent.js";
 import type {
   BrowserController,
   BrowserState,
@@ -62,10 +62,51 @@ const fillPlan = (sel: string, submit: string): string =>
     confidence: "high",
   });
 
+describe("planSimpleEmailOnlySignup", () => {
+  it("plans a one-field magic-link form without an LLM", () => {
+    const plan = planSimpleEmailOnlySignup([
+      mk({ tag: "input", type: "email", labelText: "E-mail", selector: "#email" }),
+      mk({ tag: "button", type: "submit", visibleText: "Send me a magic link", selector: "#submit" }),
+    ]);
+    expect(plan).toMatchObject({
+      actions: [{ kind: "fill", selector: "#email", value_kind: "email" }],
+      submit_selector: "#submit",
+      confidence: "high",
+    });
+  });
+
+  it("does not bypass the planner for multi-field/password forms", () => {
+    expect(
+      planSimpleEmailOnlySignup([
+        mk({ tag: "input", type: "email", labelText: "E-mail", selector: "#email" }),
+        mk({ tag: "input", type: "password", labelText: "Password", selector: "#password" }),
+        mk({ tag: "button", type: "submit", visibleText: "Sign up", selector: "#submit" }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("does not fill an email-only sign-in form that exposes a separate signup link", () => {
+    expect(
+      planSimpleEmailOnlySignup([
+        mk({ tag: "input", type: "email", labelText: "Email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Continue", selector: "#continue" }),
+        mk({ tag: "a", visibleText: "Sign up", selector: "#signup" }),
+      ]),
+    ).toBeNull();
+  });
+});
+
 const clickPlan = (sel: string): string =>
   JSON.stringify({
     actions: [{ kind: "click", selector: sel, reason: "reveal the email form" }],
     submit_selector: sel,
+    confidence: "high",
+  });
+
+const checkPlan = (checkSel: string, submit: string): string =>
+  JSON.stringify({
+    actions: [{ kind: "check", selector: checkSel, reason: "required signup checkbox" }],
+    submit_selector: submit,
     confidence: "high",
   });
 
@@ -104,15 +145,26 @@ class FakeBrowser {
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
   async dismissConsentBanner(): Promise<string | null> { return null; }
-  async type(): Promise<void> {}
-  async check(): Promise<void> {}
+  public typed: Array<{ selector: string; value: string }> = [];
+  async type(selector: string, value: string): Promise<void> {
+    this.typed.push({ selector, value });
+  }
+  public checked: string[] = [];
+  async check(selector: string): Promise<void> {
+    this.checked.push(selector);
+  }
   public clicked: string[] = [];
   async click(selector: string): Promise<void> {
     this.clicked.push(selector);
   }
   public clickSubmitImpl: () => void = () => {};
-  async clickSubmit(): Promise<void> {
+  public submitted: string[] = [];
+  async clickSubmit(selector?: string): Promise<void> {
+    if (selector) this.submitted.push(selector);
     this.clickSubmitImpl();
+  }
+  async checkRequiredSignupChoiceBoxes(): Promise<string[]> {
+    return [];
   }
   async checkRequiredAgreementBoxes(): Promise<string[]> {
     return [];
@@ -168,6 +220,7 @@ async function runLoop(
     name: "Test Bot",
     username: "testbot12",
     company: "Trusty Squire",
+    phone: "6502530000",
     literal: "",
   };
   const fn = (
@@ -215,6 +268,12 @@ describe("planExecuteWithRetry", () => {
         mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
       ],
     ];
+    browser.inspectSelectorImpl = (sel) => ({
+      count: 1,
+      tag: sel === "#go" ? "button" : "input",
+      id: sel.startsWith("#") ? sel.slice(1) : null,
+      name: null,
+    });
     // #email resolves, but to an element whose id != the inventory's
     // on the first plan (a recycled node); the re-plan resolves clean.
     let emailInspects = 0;
@@ -252,6 +311,61 @@ describe("planExecuteWithRetry", () => {
 
     expect(outcome.kind).toBe("submitted");
     expect(steps.some((s) => /only revealed the page/i.test(s))).toBe(true);
+  });
+
+  it("submits after a check-only field edit instead of treating it as reveal-only", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "checkbox", labelText: "I sell software", selector: "#software" }),
+        mk({ tag: "button", type: "submit", visibleText: "Continue", selector: "#continue" }),
+      ],
+    ];
+    const llm = new QueueLLM([checkPlan("#software", "#continue")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(browser.checked).toEqual(["#software"]);
+    expect(browser.submitted).toEqual(["#continue"]);
+    expect(steps.some((s) => /only revealed the page/i.test(s))).toBe(false);
+  });
+
+  it("fills password confirmation with the generated password even if the planner emits literal", () => {
+    const value = resolvePlannedFillValue(
+      {
+        kind: "fill",
+        selector: "#passwordVerification",
+        value_kind: "literal",
+        literal: "same as password",
+        reason: "confirm password",
+      },
+      {
+        email: "bot@inbox.test",
+        password: "Pw-test-12345",
+        name: "Test Bot",
+        username: "testbot12",
+        company: "Trusty Squire",
+        phone: "6502530000",
+        literal: "",
+      },
+      mk({
+        tag: "input",
+        type: "password",
+        id: "passwordVerification",
+        name: "passwordVerification",
+        placeholder: "Enter your password again",
+        selector: "#passwordVerification",
+      }),
+      {
+        firstName: "Test",
+        lastName: "Bot",
+        displayName: "Test Bot",
+        username: "testbot12",
+      },
+    );
+
+    expect(value).toBe("Pw-test-12345");
   });
 
   it("returns oauth_required when the page has only OAuth buttons", async () => {

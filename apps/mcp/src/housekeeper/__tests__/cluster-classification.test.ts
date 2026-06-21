@@ -62,6 +62,42 @@ describe("cluster classification", () => {
     );
   });
 
+  it("classifies Baseten review waiting rooms as async approval pending, not terminal walls", () => {
+    const f = failure({
+      service: "baseten",
+      failure_stage: "extract",
+      terminal_page: {
+        url: "https://app.baseten.co/waiting_room",
+        inventory: [],
+        observed: {
+          kind: "done",
+          reason: "The account is under review, so no further action can be taken.",
+        },
+      },
+    });
+    expect(classifyFailureBucket(f, "current")).toMatchObject({
+      bucket: "async_approval_pending",
+    });
+  });
+
+  it("classifies Replit as an account-key wall instead of planner action", () => {
+    const f = failure({
+      service: "replit",
+      terminal_page: {
+        url: "https://replit.com/~?settings.show=true&settings.tab=security",
+        inventory: [],
+        observed: {
+          kind: "done",
+          reason:
+            "Replit does not support user-facing API keys through account settings; external access tokens are app-scoped.",
+        },
+      },
+    });
+    expect(classifyFailureBucket(f, "current")).toMatchObject({
+      bucket: "no_account_api_key_wall",
+    });
+  });
+
   it("builds bucket summaries for backfilled failures", () => {
     const out = buildClassificationBackfill({
       batch: batch([

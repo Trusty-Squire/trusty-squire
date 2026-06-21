@@ -30,9 +30,12 @@
   signup_url: https://replit.com/signup
   oauth_provider: google
   scope_hint: null
-  status: pending
-  notes: "N3: ran 2026-06-04 on residential, NO clean outcome captured (prior
-    GREEN claim unconfirmed). Re-attempt and capture the outcome."
+  status: needs-manual
+  last_probed: 2026-06-20
+  notes: "N3: prior GREEN claim was unconfirmed. Current authenticated captures
+    reached Replit but /settings/api_keys returned Replit - 404 - Replit and no
+    account-level API key control was exposed; treat as no_account_api_key_wall
+    unless a new credential path is proven."
 - slug: codesandbox
   name: CodeSandbox
   signup_url: https://codesandbox.io/signin

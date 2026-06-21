@@ -306,10 +306,16 @@ export class InMemorySkillStore implements SkillStore {
       }
     }
     // Pending first (the staging gate has user impact via shorter
-    // time-to-promotion); then due-list ordered by oldest-due-first
-    // so a skill that's overdue by a week doesn't keep losing the
-    // tiebreak to one freshly due.
-    pending.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+    // time-to-promotion), but do not let stale high-failure pending rows pin
+    // the queue. Fresh/no-signal candidates should be sampled before rows that
+    // already burned identities and failed to converge.
+    pending.sort((a, b) => {
+      const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
+      if (cvf !== 0) return cvf;
+      const failed = a.verifier_failed - b.verifier_failed;
+      if (failed !== 0) return failed;
+      return b.created_at.getTime() - a.created_at.getTime();
+    });
     due.sort(
       (a, b) =>
         (a.next_freshness_due_at?.getTime() ?? 0) -

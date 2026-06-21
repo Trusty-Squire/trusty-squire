@@ -14,6 +14,11 @@ describe("S3 — expectsVerificationEmail", () => {
     expect(expectsVerificationEmail("We sent a confirmation email to your address")).toBe(true);
     expect(expectsVerificationEmail("Click the verification link we emailed you")).toBe(true);
     expect(expectsVerificationEmail("Please verify your inbox to continue")).toBe(true);
+    expect(
+      expectsVerificationEmail(
+        "Check your inbox We've sent you a magic link. Please click the link to confirm your address.",
+      ),
+    ).toBe(true);
   });
 
   it("is case-insensitive", () => {

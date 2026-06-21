@@ -130,6 +130,11 @@ describe("resolveSignupUrl", () => {
     expect(await resolveSignupUrl("Sentry", undefined)).toBe("https://sentry.com/signup");
   });
 
+  it("uses canonical signup URLs for services whose auth host breaks URL fallback", async () => {
+    expect(await resolveSignupUrl("axiom", null)).toBe("https://app.axiom.co/register");
+    expect(await resolveSignupUrl("anyscale", null)).toBe("https://console.anyscale.com");
+  });
+
   it("logs the resolved URL via the optional logger", async () => {
     const lines: string[] = [];
     await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
@@ -159,6 +164,7 @@ describe("resolveSignupUrl", () => {
       "https://nomicai-production.us.auth0.com/u/login",
     );
     expect(await resolveSignupUrl("stackblitz", llm)).toBe("https://stackblitz.com/register");
+    expect(await resolveSignupUrl("anyscale", llm)).toBe("https://console.anyscale.com");
     expect(calls.n).toBe(0);
   });
 
@@ -356,6 +362,19 @@ describe("detectAlreadySignedIn (F17)", () => {
         ],
       }),
     ).toBe(true);
+  });
+
+  it("does NOT fire on a marketing page with Free Trial plus login/signup CTAs", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://www.dragonflydb.io/cloud",
+        inventory: [
+          mkEl({ tag: "a", visibleText: "Free Trial" }),
+          mkEl({ tag: "a", visibleText: "Login" }),
+          mkEl({ tag: "a", visibleText: "Sign up" }),
+        ],
+      }),
+    ).toBe(false);
   });
 
   it("fires on dashboard URL + creation CTA without billing widget", () => {

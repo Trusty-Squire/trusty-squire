@@ -53,6 +53,42 @@ describe("parseSignupPlan — valid input", () => {
       reason: "",
     });
   });
+
+  it("accepts phone as a fill value kind", () => {
+    const raw = JSON.stringify({
+      actions: [
+        { kind: "fill", selector: "#phone", value_kind: "phone", reason: "required phone field" },
+      ],
+      submit_selector: "#submit",
+      confidence: "medium",
+    });
+    expect(parseSignupPlan(raw).actions[0]).toMatchObject({
+      kind: "fill",
+      selector: "#phone",
+      value_kind: "phone",
+    });
+  });
+
+  it("accepts select actions for required signup dropdowns", () => {
+    const raw = JSON.stringify({
+      actions: [
+        {
+          kind: "select",
+          selector: "#businessType",
+          option_text: "Software",
+          reason: "required business type dropdown",
+        },
+      ],
+      submit_selector: "#submit",
+      confidence: "medium",
+    });
+    expect(parseSignupPlan(raw).actions[0]).toEqual({
+      kind: "select",
+      selector: "#businessType",
+      option_text: "Software",
+      reason: "required business type dropdown",
+    });
+  });
 });
 
 describe("parseSignupPlan — rejection", () => {

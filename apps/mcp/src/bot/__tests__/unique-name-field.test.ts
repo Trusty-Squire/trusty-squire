@@ -5,7 +5,11 @@
 // unique value and resubmits. Field shapes below are kinde's real ones.
 
 import { describe, expect, it } from "vitest";
-import { pickUniqueNameField, pickOnboardingSubmit } from "../agent.js";
+import {
+  pickOnboardingLeafChoice,
+  pickOnboardingSubmit,
+  pickUniqueNameField,
+} from "../agent.js";
 import type { InteractiveElement } from "../browser.js";
 
 function el(over: Partial<InteractiveElement>): InteractiveElement {
@@ -71,5 +75,44 @@ describe("pickOnboardingSubmit", () => {
 
   it("returns null when there are no buttons", () => {
     expect(pickOnboardingSubmit([el({ tag: "input", name: "x" })])).toBeNull();
+  });
+});
+
+describe("pickOnboardingLeafChoice", () => {
+  it("picks a leaf role before submitting a parent/child role wizard", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Let's Get Started", selector: "#submit" }),
+      el({ tag: "button", visibleText: "Developer", selector: "#parent" }),
+      el({ tag: "button", visibleText: "Full Stack Developer", selector: "#leaf" }),
+    ];
+    expect(pickOnboardingLeafChoice(inv)?.selector).toBe("#leaf");
+  });
+
+  it("does not fire on ordinary one-level choice pages", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Next", selector: "#next" }),
+      el({ tag: "button", visibleText: "Personal", selector: "#personal" }),
+    ];
+    expect(pickOnboardingLeafChoice(inv)).toBeNull();
+  });
+
+  it("skips leaf roles already tried", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Let's Get Started", selector: "#submit" }),
+      el({ tag: "button", visibleText: "Developer", selector: "#parent" }),
+      el({ tag: "button", visibleText: "Back End Developer", selector: "#back" }),
+      el({ tag: "button", visibleText: "Full Stack Developer", selector: "#full" }),
+    ];
+    expect(pickOnboardingLeafChoice(inv, new Set(["#back"]))?.selector).toBe("#full");
+  });
+
+  it("picks a concrete dev-stack option before a final get-started submit", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Let's Get Started", selector: "#submit" }),
+      el({ tag: "button", visibleText: "Next.js", selector: "#nextjs" }),
+      el({ tag: "button", visibleText: "Python", selector: "#python" }),
+      el({ tag: "button", visibleText: "React", selector: "#react" }),
+    ];
+    expect(pickOnboardingLeafChoice(inv)?.selector).toBe("#nextjs");
   });
 });

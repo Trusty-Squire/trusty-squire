@@ -12,6 +12,8 @@ import {
   mergeInventories,
   resolveNavHref,
   isOffSiteHref,
+  isCredentialSearchDeadEndHref,
+  isRequiredAccountSetupForm,
   findOverlayDismiss,
   findWizardAdvance,
   planOnboardingChoice,
@@ -152,6 +154,51 @@ describe("isOffSiteHref", () => {
   });
 });
 
+describe("isCredentialSearchDeadEndHref", () => {
+  it("rejects docs/support/blog paths even when they mention tokens or share a registrable domain", () => {
+    const here = "https://app.axiom.co/";
+    expect(isCredentialSearchDeadEndHref(here, "https://axiom.co/docs/reference/tokens#creating-personal-token")).toBe(true);
+    expect(isCredentialSearchDeadEndHref(here, "https://axiom.co/support")).toBe(true);
+    expect(isCredentialSearchDeadEndHref(here, "https://axiom.co/blog/api-tokens")).toBe(true);
+  });
+
+  it("keeps same-app settings/token destinations", () => {
+    const here = "https://app.axiom.co/";
+    expect(isCredentialSearchDeadEndHref(here, "/settings/api-tokens")).toBe(false);
+    expect(isCredentialSearchDeadEndHref(here, "https://app.axiom.co/settings/api-tokens")).toBe(false);
+  });
+});
+
+describe("isRequiredAccountSetupForm", () => {
+  it("detects organization/workspace setup forms that should be handled by the planner", () => {
+    expect(
+      isRequiredAccountSetupForm([
+        el({ tag: "input", labelText: "Organization name", selector: "#org" }),
+        el({ tag: "button", visibleText: "Create org", selector: "#create" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("detects personal account setup forms before dashboard navigation", () => {
+    expect(
+      isRequiredAccountSetupForm([
+        el({ tag: "input", labelText: "Choose username", placeholder: "username", selector: "#user" }),
+        el({ tag: "input", labelText: "Full name", placeholder: "Enter your full name", selector: "#name" }),
+        el({ tag: "button", ariaLabel: "Next", selector: "#next" }),
+        el({ tag: "a", visibleText: "Settings", href: "/~?settings.show=true", selector: "#settings" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("does not treat ordinary settings pages as setup forms", () => {
+    expect(
+      isRequiredAccountSetupForm([
+        el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" }),
+      ]),
+    ).toBe(false);
+  });
+});
+
 describe("scoreCandidate", () => {
   it("scores a real keys href highest", () => {
     expect(scoreCandidate(cand({ href: "/settings/api-keys", text: "Settings" }))).toBeGreaterThan(
@@ -170,6 +217,18 @@ describe("scoreCandidate", () => {
     expect(scoreCandidate(cand({ href: "/docs", text: "Documentation" }))).toBe(0);
     expect(scoreCandidate(cand({ text: "Log out" }))).toBe(0);
     expect(scoreCandidate(cand({ href: "/help/shortcuts", text: "Keyboard shortcuts" }))).toBe(0);
+  });
+
+  it("does not treat arbitrary nested settings tabs as credential destinations", () => {
+    expect(scoreCandidate(cand({ href: "/settings/profile", text: "Profile" }))).toBe(0);
+    expect(scoreCandidate(cand({ href: "/settings/secrets", text: "Secrets" }))).toBe(0);
+    expect(scoreCandidate(cand({ href: "/settings/agent-policies", text: "Agent policies" }))).toBe(0);
+    expect(
+      scoreCandidate(cand({ href: "/settings/personal-access-tokens", text: "Personal access tokens" })),
+    ).toBeGreaterThan(0);
+    expect(
+      scoreCandidate(cand({ href: "/ai?user-settings=personal-access-tokens", text: "Personal access tokens" })),
+    ).toBeGreaterThan(0);
   });
 
   it("a bare unrelated link scores 0", () => {
@@ -220,6 +279,30 @@ describe("assessKeyGoal", () => {
   it("keys/settings URL with no create affordance → on_key_surface (caller extracts)", () => {
     const g = assessKeyGoal({ url: "https://x.test/settings/keys", pageText: "Your API key", inventory: dashInv });
     expect(g.kind).toBe("on_key_surface");
+  });
+
+  it("does not classify ordinary nested settings pages as key surfaces", () => {
+    for (const url of [
+      "https://app.gitpod.io/settings/profile",
+      "https://app.gitpod.io/settings/secrets",
+      "https://app.gitpod.io/settings/agent-policies",
+    ]) {
+      expect(assessKeyGoal({ url, pageText: "Settings", inventory: dashInv }).kind).toBe("not_yet");
+    }
+    expect(
+      assessKeyGoal({
+        url: "https://app.gitpod.io/settings/personal-access-tokens",
+        pageText: "Personal access tokens",
+        inventory: dashInv,
+      }).kind,
+    ).toBe("on_key_surface");
+    expect(
+      assessKeyGoal({
+        url: "https://app.gitpod.io/ai?user-settings=personal-access-tokens",
+        pageText: "Personal access tokens",
+        inventory: dashInv,
+      }).kind,
+    ).toBe("on_key_surface");
   });
 
   it("a normal dashboard URL → not_yet (keep searching)", () => {
@@ -379,6 +462,66 @@ describe("runNavSearch", () => {
     expect(res).toEqual({ kind: "no_self_serve_key" });
   });
 
+  it("does not follow same-domain documentation links that look token-related", async () => {
+    const browser = new FakeBrowser(
+      {
+        url: "https://app.axiom.co/",
+        text: "Start here Learn more",
+        inv: [
+          el({
+            tag: "a",
+            visibleText: "Learn more",
+            href: "https://axiom.co/docs/reference/tokens#creating-personal-token",
+            selector: "#docs",
+          }),
+        ],
+      },
+      {
+        "https://axiom.co/docs/reference/tokens#creating-personal-token": {
+          url: "https://axiom.co/docs/reference/tokens#creating-personal-token",
+          text: "API tokens docs",
+          inv: [],
+        },
+      },
+    );
+    const res = await runNavSearch(browser, {
+      extractKey: async () => null,
+      maxSteps: 2,
+    });
+    expect(res).toEqual({ kind: "no_self_serve_key" });
+    expect(browser.currentUrl()).toBe("https://app.axiom.co/");
+  });
+
+  it("hands required org setup forms back to the planner before searching nav", async () => {
+    const browser = new FakeBrowser(
+      {
+        url: "https://app.axiom.co/",
+        text: "Set up a new organization",
+        inv: [
+          el({ tag: "input", labelText: "Organization name", selector: "#org" }),
+          el({ tag: "button", visibleText: "Create org", selector: "#create" }),
+          el({ tag: "a", visibleText: "Settings", href: "/settings", selector: "#settings" }),
+        ],
+      },
+      {
+        "https://app.axiom.co/settings": {
+          url: "https://app.axiom.co/settings",
+          text: "Settings",
+          inv: [],
+        },
+      },
+    );
+    const logs: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () => null,
+      log: (line) => logs.push(line),
+      maxSteps: 2,
+    });
+    expect(res).toEqual({ kind: "no_self_serve_key" });
+    expect(browser.currentUrl()).toBe("https://app.axiom.co/");
+    expect(logs.some((line) => line.includes("required account/workspace setup form"))).toBe(true);
+  });
+
   it("uses the LLM tiebreak when the deterministic ranker can't decide", async () => {
     // Both candidates are unrankable (no keys signal in href OR text), so the
     // deterministic ranker scores nothing → needsTiebreak → the LLM picks.
@@ -494,6 +637,34 @@ describe("runNavSearch", () => {
     expect(res).toEqual({ kind: "no_self_serve_key" });
     expect(logs.some((line) => line.includes("sterile key surface"))).toBe(false);
     expect(logs.some((line) => line.includes("url=https://ipinfo.test/dashboard/token"))).toBe(true);
+  });
+
+  it("extracts on a query-backed key settings panel before dismissing its close button", async () => {
+    const browser = new FakeBrowser(
+      {
+        url: "https://app.gitpod.io/ai?user-settings=personal-access-tokens",
+        text: "Personal Access Tokens New Token",
+        inv: [
+          el({ tag: "button", visibleText: "Close", selector: "#close" }),
+          el({ tag: "button", visibleText: "New Token", selector: "#new" }),
+        ],
+      },
+      {
+        "#close": {
+          url: "https://app.gitpod.io/ai",
+          text: "Dashboard",
+          inv: [],
+        },
+      },
+    );
+    const actions: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () => ({ api_key: "ona_pat_test" }),
+      captureRound: async (ctx) => { actions.push(ctx.action); },
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "ona_pat_test" } });
+    expect(browser.currentUrl()).toBe("https://app.gitpod.io/ai?user-settings=personal-access-tokens");
+    expect(actions).toEqual(["extract"]);
   });
 
   it("calls captureRound each step (capture-chain parity, A2/OF#1)", async () => {

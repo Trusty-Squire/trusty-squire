@@ -62,6 +62,23 @@ export function isOffSiteHref(currentUrl: string, href: string | null): boolean 
   }
 }
 
+const CREDENTIAL_SEARCH_DEAD_END_PATH =
+  /\/(?:docs?|documentation|blog|support|pricing|legal|terms|privacy|contact|customers?)(?:[/?#]|$)/i;
+
+export function isCredentialSearchDeadEndHref(
+  currentUrl: string,
+  href: string | null,
+): boolean {
+  const abs = resolveNavHref(href, currentUrl);
+  if (abs === null) return false;
+  try {
+    const url = new URL(abs);
+    return CREDENTIAL_SEARCH_DEAD_END_PATH.test(url.pathname);
+  } catch {
+    return true;
+  }
+}
+
 // Union two inventory snapshots, deduped by selector (first wins). Used to
 // survive expandLatentNav's destructive menu-toggling: an affordance present
 // in EITHER the pre- or post-expand read is kept, so an already-open dropdown
@@ -116,10 +133,13 @@ export function enumerateCandidates(inventory: readonly InteractiveElement[]): N
 // ranker (href match) and the goal verifier (am I on a key surface?). They MUST
 // agree: if the ranker navigates to a URL it thinks is a key destination, the
 // goal verifier has to recognize the same URL, or the loop arrives and never
-// extracts. The loose tokens (settings/account/keys/tokens/developers) are
-// trusted because an href/url is a structured path, not free text.
+// extracts. Keep generic `/settings` and `/account` as container routes only:
+// nested settings pages must carry a credential-shaped path segment. Otherwise
+// tabbed settings apps such as Ona make `/settings/profile`, `/settings/secrets`,
+// and `/settings/agent-policies` look like credential destinations and the loop
+// wanders away from the real `/settings/personal-access-tokens` page.
 export const KEYS_DESTINATION_URL =
-  /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|settings|account|keys?|tokens?)(?:[/?#]|$)/i;
+  /(?:\/(?:api(?:[-_]?keys?|[-_]?tokens?)?|access[-_]?tokens?|auth(?:[-_]?tokens?)?|authorization|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)|\/(?:settings|account)(?:[?#]|\/?$)|[?#][^\s]*(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|personal[-_]?access[-_]?tokens?|keys?|tokens?))/i;
 const KEYS_HREF = KEYS_DESTINATION_URL;
 const KEYS_TEXT_STRONG = /\b(?:api|access|secret|auth|personal\s+access)\s*(?:keys?|tokens?)\b/i;
 const KEYS_TEXT_WEAK = /\b(?:developers?|settings|account)\b/i;
@@ -331,6 +351,40 @@ export function planOnboardingChoice(input: {
   return (minimal ?? choices[0])!.selector;
 }
 
+export function isRequiredAccountSetupForm(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const fieldText = (el: InteractiveElement): string =>
+    [el.labelText, el.ariaLabel, el.placeholder, el.name, el.id, el.visibleText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ");
+
+  const hasSetupNameInput = inventory.some((el) => {
+    if (el.tag !== "input" || el.visible === false) return false;
+    return /\b(?:organization|organisation|workspace|company|team|project)\s+name\b/i.test(
+      fieldText(el),
+    );
+  });
+  const hasCreateButton = inventory.some((el) => {
+    if (!isClickable(el)) return false;
+    return /\bcreate\s+(?:org|organization|organisation|workspace|team|project)\b/i.test(
+      elText(el),
+    );
+  });
+  if (hasSetupNameInput && hasCreateButton) return true;
+
+  const visibleTextInputs = inventory.filter(
+    (el) => el.tag === "input" && el.visible !== false && (el.type === null || el.type === "text"),
+  );
+  const hasUsername = visibleTextInputs.some((el) => /\b(?:choose\s+)?user\s*name\b/i.test(fieldText(el)));
+  const hasFullName = visibleTextInputs.some((el) => /\bfull\s+name\b/i.test(fieldText(el)));
+  const hasForwardButton = inventory.some((el) => {
+    if (!isClickable(el)) return false;
+    return /^\s*(?:next|continue|finish|done|get\s+started)\s*$/i.test(elText(el));
+  });
+  return hasUsername && hasFullName && hasForwardButton;
+}
+
 // ── the search loop (T4) ─────────────────────────────────────────────────────
 // Drives the browser through the dashboard using the pure primitives above:
 // each step — settle → clear any blocking overlay → check the goal → else
@@ -437,24 +491,17 @@ export async function runNavSearch(
       );
     }
 
-    // 1) Clear a blocking onboarding overlay / modal before anything else.
-    const overlay = planOverlayStep(inv);
-    if (overlay.kind !== "none" && !overlayTried.has(overlay.selector)) {
-      overlayTried.add(overlay.selector);
-      log(`nav-search: overlay ${overlay.kind} → ${overlay.selector}`);
-      await capture(overlay.kind === "dismiss" ? "overlay_dismiss" : "overlay_advance", inv, overlay.selector);
-      try {
-        await browser.clickSelector(overlay.selector);
-      } catch {
-        await browser.pressEscape().catch(() => {}); // modal with no in-DOM close
-      }
-      continue;
+    if (isRequiredAccountSetupForm(inv)) {
+      log("nav-search: required account/workspace setup form detected — handing off to planner");
+      return { kind: "no_self_serve_key" };
     }
 
-    // 2) Goal check. Try extraction whenever we're plausibly on a key surface
-    //    (on_key_surface OR create_gated — both imply we're at the keys page,
-    //    and after a create-click the key may now be present). Extraction-first
-    //    so a freshly-created key isn't missed because the create button persists.
+    // 1) Goal check BEFORE overlay dismissal. Some apps render the credential
+    // surface itself as a settings drawer/query panel (Ona:
+    // ?user-settings=personal-access-tokens). The generic overlay dismissor sees
+    // that drawer's close button and would close the key surface before we try
+    // extraction/create. If the URL already says "credential surface", honor it
+    // first; only dismiss overlays when we are not at the target.
     const url = browser.currentUrl();
     const text = await browser.extractText().catch(() => "");
     const goal = assessKeyGoal({ url, pageText: text, inventory: inv });
@@ -469,12 +516,6 @@ export async function runNavSearch(
         return { kind: "found", credentials: creds };
       }
     }
-    // 2b) No key yet, but a create affordance is available and untried → MINT.
-    //     Prefer the full mint dep (it drives the two-step "name + confirm"
-    //     modal, waits out the create POST's server round-trip, and reveals a
-    //     masked-on-first-show value) — a bare click would leave the modal
-    //     un-submitted and the loop would then dismiss it as an overlay. Fall
-    //     back to a bare click only when no mint dep is wired (unit tests).
     if (goal.kind === "create_gated" && !tried.has(goal.createSelector)) {
       tried.add(goal.createSelector);
       log(`nav-search: create-key subgoal → ${goal.createSelector}`);
@@ -489,6 +530,20 @@ export async function runNavSearch(
         continue;
       }
       await browser.clickSelector(goal.createSelector).catch(() => {});
+      continue;
+    }
+
+    // 2) Clear a blocking onboarding overlay / modal before searching nav.
+    const overlay = planOverlayStep(inv);
+    if (overlay.kind !== "none" && !overlayTried.has(overlay.selector)) {
+      overlayTried.add(overlay.selector);
+      log(`nav-search: overlay ${overlay.kind} → ${overlay.selector}`);
+      await capture(overlay.kind === "dismiss" ? "overlay_dismiss" : "overlay_advance", inv, overlay.selector);
+      try {
+      await browser.clickSelector(overlay.selector);
+      } catch {
+        await browser.pressEscape().catch(() => {}); // modal with no in-DOM close
+      }
       continue;
     }
 
@@ -509,6 +564,7 @@ export async function runNavSearch(
       (c) =>
         !tried.has(c.selector) &&
         !isOffSiteHref(url, c.href) &&
+        !isCredentialSearchDeadEndHref(url, c.href) &&
         !(
           candidateUrlKey(c, url) !== null &&
           sterileKeyUrls.has(candidateUrlKey(c, url)!)
