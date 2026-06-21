@@ -854,12 +854,24 @@ export class BrowserController {
       // have released within the 120s wait — so by here, reaping the LOCAL
       // holder (SIGKILL + clear singletons; no-ops on a remote-host holder)
       // and retrying once is safe and recovers the run instead of failing it.
-      const reaped = reapLeakedProfileHolder(this.profileDir);
+      //
+      // That assumption is false for verifier/discovery concurrency: a live
+      // holder can be another legitimate slot still closing the same robot
+      // profile. In concurrent mode, never SIGKILL the holder; surface
+      // ProfileBusyError so the orchestrator can retry later without corrupting
+      // another run.
+      const concurrency = Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1;
+      const allowLiveReap = concurrency <= 1;
+      const reaped = allowLiveReap ? reapLeakedProfileHolder(this.profileDir) : false;
       if (reaped) {
         console.error(
           "[universal-bot] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
         );
         free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
+      } else if (!allowLiveReap) {
+        console.error(
+          "[universal-bot] profile still held after wait; not reaping because HOUSEKEEPER_CONCURRENCY>1",
+        );
       }
       if (!free) {
         throw new ProfileBusyError(

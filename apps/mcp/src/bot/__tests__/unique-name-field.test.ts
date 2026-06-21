@@ -88,6 +88,16 @@ describe("pickOnboardingLeafChoice", () => {
     expect(pickOnboardingLeafChoice(inv)?.selector).toBe("#leaf");
   });
 
+  it("treats code/API usage cards as developer parent choices (Cloudinary)", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Next", selector: "#next" }),
+      el({ tag: "button", visibleText: "I write code and use APIs", selector: "#code" }),
+      el({ tag: "button", visibleText: "Full Stack Developer", selector: "#full" }),
+      el({ tag: "button", visibleText: "Back End Developer", selector: "#back" }),
+    ];
+    expect(pickOnboardingLeafChoice(inv)?.selector).toBe("#full");
+  });
+
   it("does not fire on ordinary one-level choice pages", () => {
     const inv = [
       el({ tag: "button", visibleText: "Next", selector: "#next" }),

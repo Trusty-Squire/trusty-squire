@@ -368,6 +368,7 @@ export interface RecordVerifierOutcomeResult {
   // Describes the side effect (if any) the outcome caused.
   transition:
     | "promoted"      // pending-review reached 1 success → active
+    | "superseded"    // verified duplicate lost to an existing protected active row
     | "retired"       // pending-review reached the failure threshold → deleted
     | "demoted"       // active reached 3 consecutive ROT failures → demoted
     | "quarantined"   // verifier hit a terminal WALL → quarantined (needs human)

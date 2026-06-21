@@ -4311,7 +4311,10 @@ export function pickOnboardingLeafChoice(
     (e) => (e.tag === "button" || e.role === "button") && e.visible === true,
   );
   const labels = buttons.map((e) => (e.visibleText ?? e.ariaLabel ?? "").trim());
-  const hasParentRole = labels.some((t) => /^(?:developer|engineer|personal\s*&\s*freelance|designer|marketing)$/i.test(t));
+  const hasParentRole = labels.some((t) =>
+    /^(?:developer|engineer|personal\s*&\s*freelance|designer|marketing)$/i.test(t) ||
+    /\b(?:write|build|code|api|apis|sdk|developer)\b/i.test(t),
+  );
   const hasFinalSubmit = labels.some((t) => /^(?:let'?s get started|get started|finish|done|continue|next)$/i.test(t));
   if (!hasFinalSubmit) return null;
 

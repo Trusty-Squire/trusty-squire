@@ -15,7 +15,7 @@ export type NotifierEvent =
       service: string;
       skill_id: string;
       outcome: "success" | "failure" | "skipped";
-      transition: "promoted" | "retired" | "demoted" | "quarantined" | "none";
+      transition: "promoted" | "superseded" | "retired" | "demoted" | "quarantined" | "none";
       reason: string;
     }
   | {

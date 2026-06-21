@@ -85,7 +85,7 @@ function provider(tasks: HousekeeperTask[]): QueueProvider {
 function recordingClient(opts: {
   skill?: Skill;
   fetchThrows?: Error;
-  outcomeTransition?: "promoted" | "retired" | "demoted" | "none";
+  outcomeTransition?: "promoted" | "superseded" | "retired" | "demoted" | "none";
   // The active-skill count the registry "returns" from the heartbeat (OF#1).
   healSkillsActive?: number;
 }) {

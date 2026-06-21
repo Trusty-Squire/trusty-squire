@@ -144,6 +144,12 @@ describe("classifyAttempt", () => {
     expect(classifyAttempt({ success: false, reason: "run_timeout: exceeded 600s" })).toBe(
       "non_observation",
     );
+    expect(
+      classifyAttempt({
+        success: false,
+        reason: "bot Chrome profile is held by another run (a login or signup); retry shortly",
+      }),
+    ).toBe("non_observation");
   });
   it("anything else (genuine rot) is an informative failure", () => {
     expect(classifyAttempt({ success: false, reason: "step_failed step=3 button gone" })).toBe(
@@ -214,20 +220,34 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(marked[0]).toBe("verify-01");
   });
 
-  it("a HARD wall rejects immediately and does not burn the pool", async () => {
+  it("one HARD wall holds; two independent HARD walls reject", async () => {
     const marked: string[] = [];
     const res = await freshVerifyService({
       service: "x",
       provider: "google",
-      identities: POOL4,
+      identities: [ID("verify-01")],
       usage: [],
       runSignup: async () => ({ success: false, reason: "anti_bot_blocked: turnstile wall" }),
       markSpent: (id) => marked.push(id),
     });
-    expect(res.verdict).toBe("reject");
+    expect(res.verdict).toBe("hold");
     expect(res.promoted).toBe(false);
     expect(res.failureKind).toBe("anti_bot_blocked");
-    expect(marked).toEqual(["verify-01"]); // short-circuited
+    expect(marked).toEqual(["verify-01"]);
+
+    const marked2: string[] = [];
+    const res2 = await freshVerifyService({
+      service: "x",
+      provider: "google",
+      identities: [ID("verify-01"), ID("verify-02")],
+      usage: [],
+      runSignup: async () => ({ success: false, reason: "anti_bot_blocked: turnstile wall" }),
+      markSpent: (id) => marked2.push(id),
+    });
+    expect(res2.verdict).toBe("reject");
+    expect(res2.promoted).toBe(false);
+    expect(res2.failureKind).toBe("anti_bot_blocked");
+    expect(marked2).toEqual(["verify-01", "verify-02"]);
   });
 
   it("genuine rot across identities counts and drives toward reject (high reject ceiling)", async () => {

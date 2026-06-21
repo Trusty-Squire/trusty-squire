@@ -255,17 +255,37 @@ export class PrismaSkillStore implements SkillStore {
       orderBy: { created_at: "desc" },
       take: Math.max(limit * 5, 100),
     })) as unknown as PrismaSkillRow[];
-    const pending = pendingWindow
-      .sort((a, b) => {
-        const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
-        if (cvf !== 0) return cvf;
-        const failed = a.verifier_failed - b.verifier_failed;
-        if (failed !== 0) return failed;
-        return b.created_at.getTime() - a.created_at.getTime();
-      })
-      .slice(0, limit);
-    const remaining = Math.max(0, limit - pending.length);
-    const due = remaining > 0
+    const pendingServices = [...new Set(pendingWindow.map((row) => row.service))];
+    const activeServiceRows = pendingServices.length > 0
+      ? await this.client.skillRecord.findMany({
+          where: {
+            service: { in: pendingServices },
+            status: "active",
+            deleted_at: null,
+            superseded_at: null,
+          },
+          orderBy: { created_at: "desc" },
+          take: pendingServices.length,
+        })
+      : [];
+    const activeServices = new Set(
+      (activeServiceRows as unknown as PrismaSkillRow[]).map((row) => row.service),
+    );
+    const sortPending = (rows: PrismaSkillRow[]) => rows.sort((a, b) => {
+      const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
+      if (cvf !== 0) return cvf;
+      const failed = a.verifier_failed - b.verifier_failed;
+      if (failed !== 0) return failed;
+      return b.created_at.getTime() - a.created_at.getTime();
+    });
+    const uncoveredPending = sortPending(
+      pendingWindow.filter((row) => !activeServices.has(row.service)),
+    );
+    const coveredDuplicatePending = sortPending(
+      pendingWindow.filter((row) => activeServices.has(row.service)),
+    );
+    const remainingAfterUncovered = Math.max(0, limit - uncoveredPending.length);
+    const due = remainingAfterUncovered > 0
       ? await this.client.skillRecord.findMany({
           where: {
             status: "active",
@@ -274,10 +294,12 @@ export class PrismaSkillStore implements SkillStore {
             next_freshness_due_at: { lte: now },
           },
           orderBy: { next_freshness_due_at: "asc" },
-          take: remaining,
+          take: remainingAfterUncovered,
         })
       : [];
-    return [...pending, ...due].map((row) => toSkillStoreRecord(row as PrismaSkillRow));
+    return [...uncoveredPending, ...due, ...coveredDuplicatePending]
+      .slice(0, limit)
+      .map((row) => toSkillStoreRecord(row as PrismaSkillRow));
   }
 
   async recordVerifierOutcome(
@@ -372,7 +394,18 @@ export class PrismaSkillStore implements SkillStore {
             incomingPayload,
           );
         }
-        if (!requireOperatorReview) {
+        if (requireOperatorReview) {
+          // The verifier proved this pending candidate can produce a credential,
+          // but an active skill for the same service already exists with a
+          // different protected entry point. Do NOT replace the active skill.
+          // Also do not leave the candidate in pending-review forever: it is
+          // redundant coverage, so collapse it out of the verifier queue.
+          skill = (await tx.skillRecord.update({
+            where: { skill_id: input.skill_id },
+            data: { status: "superseded", superseded_at: now },
+          })) as unknown as PrismaSkillRow;
+          transition = "superseded";
+        } else {
           // Promote and supersede every other live row for the same service
           // (prior active + lingering demoted + redundant pending-review).
           // Mirrors approveReview's invariant maintenance.
@@ -394,8 +427,6 @@ export class PrismaSkillStore implements SkillStore {
           skill = promoted;
           transition = "promoted";
         }
-        // else: counter incremented, status stays pending-review,
-        // operator runs `mcp skill approve-review` to land it.
       } else if (effectiveKind === "success" && skill.status === "active") {
         // Freshness pass — schedule the next sweep.
         skill = (await tx.skillRecord.update({

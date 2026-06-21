@@ -63,7 +63,7 @@ export function isOffSiteHref(currentUrl: string, href: string | null): boolean 
 }
 
 const CREDENTIAL_SEARCH_DEAD_END_PATH =
-  /\/(?:docs?|documentation|blog|support|pricing|legal|terms|privacy|contact|customers?)(?:[/?#]|$)/i;
+  /\/(?:(?:docs?|documentation|blog|support|pricing|legal|terms|privacy|contact|customers?)|auth\/(?:login|join|signup|sign-up|register|forgot-password|reset-password))(?:[/?#]|$)/i;
 
 export function isCredentialSearchDeadEndHref(
   currentUrl: string,
@@ -376,13 +376,19 @@ export function isRequiredAccountSetupForm(
   const visibleTextInputs = inventory.filter(
     (el) => el.tag === "input" && el.visible !== false && (el.type === null || el.type === "text"),
   );
-  const hasUsername = visibleTextInputs.some((el) => /\b(?:choose\s+)?user\s*name\b/i.test(fieldText(el)));
+  const hasUsername = visibleTextInputs.some((el) =>
+    /\b(?:choose\s+)?user\s*name\b/i.test(fieldText(el)) ||
+    /\b(?:choose\s+)?handle\b/i.test(fieldText(el)),
+  );
   const hasFullName = visibleTextInputs.some((el) => /\bfull\s+name\b/i.test(fieldText(el)));
   const hasForwardButton = inventory.some((el) => {
     if (!isClickable(el)) return false;
     return /^\s*(?:next|continue|finish|done|get\s+started)\s*$/i.test(elText(el));
   });
-  return hasUsername && hasFullName && hasForwardButton;
+  // Some onboarding flows (Val Town) require only a handle/username before
+  // Continue. Treat that as a setup form too; otherwise the generic overlay
+  // advance clicks Continue before the planner gets a chance to fill the field.
+  return hasUsername && hasForwardButton && (hasFullName || visibleTextInputs.length === 1);
 }
 
 // ── the search loop (T4) ─────────────────────────────────────────────────────

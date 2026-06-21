@@ -162,6 +162,13 @@ describe("isCredentialSearchDeadEndHref", () => {
     expect(isCredentialSearchDeadEndHref(here, "https://axiom.co/blog/api-tokens")).toBe(true);
   });
 
+  it("rejects auth-loop paths during post-signup key search (Arize)", () => {
+    const here = "https://app.arize.com/auth/join";
+    expect(isCredentialSearchDeadEndHref(here, "/auth/login")).toBe(true);
+    expect(isCredentialSearchDeadEndHref(here, "/auth/forgot-password")).toBe(true);
+    expect(isCredentialSearchDeadEndHref("https://app.arize.com/auth/login", "/auth/join")).toBe(true);
+  });
+
   it("keeps same-app settings/token destinations", () => {
     const here = "https://app.axiom.co/";
     expect(isCredentialSearchDeadEndHref(here, "/settings/api-tokens")).toBe(false);
@@ -186,6 +193,15 @@ describe("isRequiredAccountSetupForm", () => {
         el({ tag: "input", labelText: "Full name", placeholder: "Enter your full name", selector: "#name" }),
         el({ tag: "button", ariaLabel: "Next", selector: "#next" }),
         el({ tag: "a", visibleText: "Settings", href: "/~?settings.show=true", selector: "#settings" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("detects handle-only onboarding forms before clicking Continue (Val Town)", () => {
+    expect(
+      isRequiredAccountSetupForm([
+        el({ tag: "input", labelText: "Choose your username", name: "handle", selector: "#handle" }),
+        el({ tag: "button", visibleText: "Continue", selector: "#continue" }),
       ]),
     ).toBe(true);
   });

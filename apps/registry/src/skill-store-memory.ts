@@ -287,9 +287,13 @@ export class InMemorySkillStore implements SkillStore {
     const now = opts.now ?? new Date();
     const pending: SkillStoreRecord[] = [];
     const due: SkillStoreRecord[] = [];
+    const activeServices = new Set<string>();
     for (const skill of this.skills.values()) {
       if (skill.deleted_at !== null) continue;
       if (skill.superseded_at !== null) continue;
+      if (skill.status === "active") {
+        activeServices.add(skill.service);
+      }
       if (
         skill.status === "pending-review" &&
         skill.verifier_succeeded < VERIFIER_PROMOTION_THRESHOLD
@@ -305,23 +309,26 @@ export class InMemorySkillStore implements SkillStore {
         due.push(skill);
       }
     }
-    // Pending first (the staging gate has user impact via shorter
-    // time-to-promotion), but do not let stale high-failure pending rows pin
-    // the queue. Fresh/no-signal candidates should be sampled before rows that
-    // already burned identities and failed to converge.
-    pending.sort((a, b) => {
+    // Uncovered pending first (the staging gate has user impact via shorter
+    // time-to-promotion for services with no active coverage), then active
+    // freshness, then duplicate pending rows for already-covered services.
+    // Covered duplicates still stay visible to the verifier, but they cannot
+    // starve genuinely uncovered services or the freshness sweep.
+    const sortPending = (rows: SkillStoreRecord[]) => rows.sort((a, b) => {
       const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
       if (cvf !== 0) return cvf;
       const failed = a.verifier_failed - b.verifier_failed;
       if (failed !== 0) return failed;
       return b.created_at.getTime() - a.created_at.getTime();
     });
+    const uncoveredPending = sortPending(pending.filter((skill) => !activeServices.has(skill.service)));
+    const coveredDuplicatePending = sortPending(pending.filter((skill) => activeServices.has(skill.service)));
     due.sort(
       (a, b) =>
         (a.next_freshness_due_at?.getTime() ?? 0) -
         (b.next_freshness_due_at?.getTime() ?? 0),
     );
-    return [...pending, ...due].slice(0, limit);
+    return [...uncoveredPending, ...due, ...coveredDuplicatePending].slice(0, limit);
   }
 
   async recordVerifierOutcome(
@@ -341,7 +348,7 @@ export class InMemorySkillStore implements SkillStore {
     // path (input.verdict === "promote", D2.C) go through the SAME phishing/abuse
     // gate — the verdict path must never bypass it. Returns "promoted" when it
     // flipped status, "none" when the C11 gate held it in pending-review.
-    const promoteThroughC11Gate = (): "promoted" | "none" => {
+    const promoteThroughC11Gate = (): "promoted" | "superseded" | "none" => {
       let existingActive: SkillStoreRecord | null = null;
       for (const other of this.skills.values()) {
         if (
@@ -358,10 +365,16 @@ export class InMemorySkillStore implements SkillStore {
         existingActive !== null &&
         triggersHumanReview(existingActive.payload, skill.payload)
       ) {
-        // Stay in pending-review; operator must explicitly approve via
-        // `mcp skill approve-review`. Counters stay bumped; transition stays
-        // "none" so the loop logs accurately rather than a phantom promotion.
-        return "none";
+        // The verifier proved this pending candidate can produce a credential,
+        // but an active skill for the same service already exists with a
+        // different protected entry point. Do NOT replace the active skill.
+        // Also do not leave the candidate in pending-review forever: it is
+        // redundant coverage, so collapse it out of the verifier queue.
+        skill.status = "superseded";
+        skill.superseded_at = now;
+        skill.payload.status = "superseded";
+        skill.payload.superseded_at = now.toISOString();
+        return "superseded";
       }
       // Promote pending → active. Mirror approveReview's supersession logic so
       // the (service, status='active') invariant holds and stale demoted/pending

@@ -15,7 +15,7 @@
 services:
   - slug: cloudinary
     name: Cloudinary
-    signup_url: https://cloudinary.com/users/register_free
+    signup_url: https://console.cloudinary.com/users/register_free
     oauth_provider: google
     scope_hint: null
     status: pending

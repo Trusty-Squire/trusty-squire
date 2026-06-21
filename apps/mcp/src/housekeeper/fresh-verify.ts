@@ -283,6 +283,7 @@ export async function freshVerifyService(opts: {
   const outcomes: FreshVerifyOutcome[] = [];
   let successes = 0;
   let failures = 0;
+  let hardWalls = 0;
   let failureKind: string | undefined;
   let lastEval = evaluateConfidence(0, 0, { ...confidence, drawsRemaining: 1 });
 
@@ -329,14 +330,24 @@ export async function freshVerifyService(opts: {
         (res.reason !== undefined ? ` (${res.reason})` : ""),
     );
 
-    // A hard wall is deterministic across identities — reject NOW with high
-    // confidence; spending more robots can't change it (D2.B).
+    // A hard wall should be deterministic across identities, but a single
+    // captcha/anti-bot timeout can be per-run reputation noise. Require two
+    // independent wall observations before reporting a terminal reject; the
+    // first wall is held as suspicion and does not move the posterior.
     if (observation === "hard_wall") {
+      hardWalls += 1;
       failureKind = failureCode(res.reason) || "anti_bot_blocked";
+      if (hardWalls < 2) {
+        log(
+          `[fresh-verify] ${opts.service}: hard wall suspicion (${res.reason ?? "?"}) — ` +
+            `drawing another identity before REJECT`,
+        );
+        continue;
+      }
       const { lcb, ucb } = wilsonInterval(successes, failures);
       log(
-        `[fresh-verify] ${opts.service}: hard wall (${res.reason ?? "?"}) — REJECT ` +
-          `(deterministic across identities)`,
+        `[fresh-verify] ${opts.service}: hard wall confirmed (${res.reason ?? "?"}) — REJECT ` +
+          `(2 independent wall observations)`,
       );
       return {
         kind: "verified",
@@ -486,7 +497,7 @@ const NON_OBSERVATION_CODES = [
 // code token (e.g. "form drift mid-fill", "transient onboarding stall"). Match
 // those phrases too so they're dropped rather than counted as rot.
 const NON_OBSERVATION_PHRASE_RE =
-  /(form drift|onboarding stall|transient|mid-fill|chrome wedged|navigation timeout|timed out|wedged)/i;
+  /(form drift|onboarding stall|transient|mid-fill|chrome wedged|navigation timeout|timed out|wedged|profile is held|profile held|profile is busy|profile busy|profilebusyerror)/i;
 
 export function isNonObservation(reason: string | undefined): boolean {
   if (reason === undefined) return false;

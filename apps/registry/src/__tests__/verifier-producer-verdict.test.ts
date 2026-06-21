@@ -164,9 +164,10 @@ describe("D2.C producer verdict semantics", () => {
       reason: "fresh-verify promote — but signup_url differs",
       verdict: "promote",
     });
-    // C11 holds it: transition none, stays pending-review, legit active untouched.
-    expect(res.transition).toBe("none");
-    expect(res.record.status).toBe("pending-review");
+    // C11 protects the existing active row. The verified duplicate is removed
+    // from the verifier queue instead of staying pending-review forever.
+    expect(res.transition).toBe("superseded");
+    expect(res.record.status).toBe("superseded");
     expect((await store.findById(ACTV))?.status).toBe("active");
   });
 

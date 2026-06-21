@@ -99,6 +99,7 @@ export interface HousekeeperBatchSummary {
   // Verifier-only counters; discovery tasks roll into none.
   transitions: {
     promoted: number;
+    superseded: number;
     retired: number;
     demoted: number;
     quarantined: number;
@@ -122,7 +123,7 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     failed: 0,
     blocked: 0,
     skipped: 0,
-    transitions: { promoted: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
+    transitions: { promoted: 0, superseded: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
     serviceOutcomes: [],
   };
   // Inter-run pacing for live (discover) signups — keeps a clean residential
@@ -290,7 +291,7 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
   log(
     `batch done: attempted=${summary.attempted} ok=${summary.succeeded} ` +
       `fail=${summary.failed} blocked=${summary.blocked} skipped=${summary.skipped} ` +
-      `promoted=${summary.transitions.promoted} retired=${summary.transitions.retired} ` +
+      `promoted=${summary.transitions.promoted} superseded=${summary.transitions.superseded} retired=${summary.transitions.retired} ` +
       `demoted=${summary.transitions.demoted} quarantined=${summary.transitions.quarantined}`,
   );
   return summary;

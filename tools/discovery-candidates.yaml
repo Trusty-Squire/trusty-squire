@@ -256,7 +256,7 @@
 - { slug: scrapingdog, name: Scrapingdog, signup_url: https://www.scrapingdog.com/, oauth_provider: google }
 - { slug: scrapingant, name: ScrapingAnt, signup_url: https://app.scrapingant.com/signup, oauth_provider: google }
 - { slug: crawlbase, name: Crawlbase, signup_url: https://crawlbase.com/signup, oauth_provider: google }
-- { slug: cloudinary, name: Cloudinary, signup_url: https://cloudinary.com/users/register_free, oauth_provider: google }
+- { slug: cloudinary, name: Cloudinary, signup_url: https://console.cloudinary.com/users/register_free, oauth_provider: google }
 - { slug: uploadthing, name: UploadThing, signup_url: https://uploadthing.com/dashboard, oauth_provider: github }
 - { slug: bytescale, name: Bytescale, signup_url: https://www.bytescale.com/get-started, oauth_provider: google }
 - { slug: tinify, name: TinyPNG (Tinify), signup_url: https://tinify.com/developers, oauth_provider: google }
