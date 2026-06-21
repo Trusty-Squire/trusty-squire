@@ -235,7 +235,7 @@ export class PrismaSkillStore implements SkillStore {
     //   2. active with next_freshness_due_at <= now (the freshness
     //      sweep). Capped at limit minus #1's hit count.
     // The combination is then truncated back to the overall limit.
-    const pending = await this.client.skillRecord.findMany({
+    const pendingWindow = (await this.client.skillRecord.findMany({
       where: {
         status: "pending-review",
         deleted_at: null,
@@ -246,13 +246,24 @@ export class PrismaSkillStore implements SkillStore {
       // Fresh/no-signal pending skills should be sampled before rows that have
       // already burned many identities and failed to converge. Real demotion is
       // still handled by recordVerifierOutcome; this is only queue priority.
-      orderBy: [
-        { consecutive_verifier_failures: "asc" },
-        { verifier_failed: "asc" },
-        { created_at: "desc" },
-      ],
-      take: limit,
-    });
+      //
+      // The checked-in Prisma wrapper type only accepts a single orderBy
+      // object, not Prisma's usual array form, so fetch a bounded window and
+      // apply the multi-key priority in-process. This mirrors
+      // InMemorySkillStore and keeps old high-failure rows from monopolizing
+      // the queue while preserving a cap on query size.
+      orderBy: { created_at: "desc" },
+      take: Math.max(limit * 5, 100),
+    })) as unknown as PrismaSkillRow[];
+    const pending = pendingWindow
+      .sort((a, b) => {
+        const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
+        if (cvf !== 0) return cvf;
+        const failed = a.verifier_failed - b.verifier_failed;
+        if (failed !== 0) return failed;
+        return b.created_at.getTime() - a.created_at.getTime();
+      })
+      .slice(0, limit);
     const remaining = Math.max(0, limit - pending.length);
     const due = remaining > 0
       ? await this.client.skillRecord.findMany({
