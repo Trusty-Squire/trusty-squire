@@ -6,10 +6,10 @@
 // WHY: the verify pool is N fresh Google identities (verify-NN@<domain>). "Spent"
 // is one-shot per (robot, service) — once verify-03 signs up at unify it's a
 // returning user there forever. A debugging marathon on ONE service can burn all
-// N robots' slots for that service. The fix is depth: keep the pool topped up
-// toward the Cloud Identity Free per-domain cap (50 active), and rotate
-// fully-spent robots out for fresh ones once we hit it. A fresh robot is a fresh
-// slate at EVERY service.
+// N robots' slots for that service. The fix is rotation, NOT growth: the managed
+// verifier fleet has a hard cap of 10 active robots. When a service needs fresh
+// identities, retire old robots first, then mint replacements under the same cap.
+// A fresh robot is a fresh slate at EVERY service.
 //
 // SPLIT OF AUTONOMY:
 //   • account create / delete + pool bookkeeping → FULLY autonomous here
@@ -45,11 +45,10 @@ import { mintAdminToken } from "./google-admin-token.mjs";
 
 const DOMAIN = process.env.TRUSTY_SQUIRE_VERIFY_DOMAIN ?? "trustysquire.ai";
 const FREE_CAP = Number(process.env.CLOUD_IDENTITY_FREE_CAP ?? 50);
-// COST CAP — the max ACTIVE robots we ever hold (= max billed seats). The whole
-// point: rotation refreshes the pool's composition without ever increasing cost
-// exposure. `create` refuses to push the pool above this; `rotate` retires
-// before it creates so the active count never spikes past the cap mid-rotation.
-const POOL_CAP = Number(process.env.ROBOT_POOL_CAP ?? 10);
+// HARD COST CAP — the max ACTIVE managed verifier robots we ever hold. This is
+// deliberately NOT environment-overridable: raising it creates additional seats.
+// To get fresh identities, rotate old robots out first.
+const POOL_CAP = 10;
 const BASE = process.env.TRUSTY_SQUIRE_VERIFY_POOL_DIR ?? join(homedir(), ".trusty-squire");
 const POOL_PATH = join(BASE, "verify-identities.json");
 const PW_PATH = join(BASE, "verify-passwords.json");
@@ -280,30 +279,28 @@ async function cmdLicenses(apply) {
   );
 }
 
-async function cmdCreate(count, dryRun, allowGrow = false) {
+async function cmdCreate(count, dryRun) {
   const pool = loadPool();
   if (dryRun) {
     const taken = takenNumbers(pool, [], loadUsage());
     const nums = nextFreeNumbers(taken, count);
-    const over = !allowGrow && pool.identities.length + count > POOL_CAP;
+    const over = pool.identities.length + count > POOL_CAP;
     console.log(`[dry-run] would create ${count} robot(s): ${nums.map(idFor).join(", ")}`);
     console.log(
       `[dry-run] pool ${pool.identities.length}→${pool.identities.length + count} of cap ${POOL_CAP}` +
-        (over ? ` — OVER the cost cap; would be REJECTED (use 'rotate --make-room=${count}' instead)` : " — within cap ✓"),
+        (over ? ` — OVER the hard cap; would be REJECTED (use 'rotate --make-room=${count}' instead)` : " — within cap ✓"),
     );
     for (const n of nums) console.log(`[dry-run]   ${emailFor(n)}  profile=${profileDirFor(n)}`);
     return;
   }
-  // COST CAP (the billing guardrail): never let OUR managed robots exceed
-  // POOL_CAP, since each robot is a billed seat. To add capacity without raising
-  // cost, rotate (retire spent → mint fresh, net zero). Bypass for a deliberate
-  // one-time grow with --allow-grow.
-  if (!allowGrow && pool.identities.length + count > POOL_CAP) {
+  // HARD CAP (the billing guardrail): never let managed robots exceed POOL_CAP.
+  // To add fresh capacity without raising cost, rotate (retire spent → mint
+  // fresh, net zero). There is intentionally no bypass.
+  if (pool.identities.length + count > POOL_CAP) {
     throw new Error(
-      `creating ${count} would put the pool at ${pool.identities.length + count} robots, over the cost cap of ` +
+      `creating ${count} would put the pool at ${pool.identities.length + count} robots, over the hard cap of ` +
         `${POOL_CAP} (each robot = a billed seat). To add capacity WITHOUT increasing cost, rotate instead: ` +
-        `node tools/provision-verify-robot.mjs rotate --make-room=${count}  ` +
-        `(or override the cap with ROBOT_POOL_CAP / --allow-grow if you truly want more seats).`,
+        `node tools/provision-verify-robot.mjs rotate --make-room=${count}`,
     );
   }
   const token = await mintAdminToken();
@@ -495,7 +492,10 @@ async function main() {
       await cmdLicenses(flag(argv, "apply"));
       break;
     case "create":
-      await cmdCreate(Number(positional[0] ?? "1"), dryRun, flag(argv, "allow-grow"));
+      if (flag(argv, "allow-grow")) {
+        throw new Error("--allow-grow has been removed: verifier pool has a hard cap of 10. Use rotate instead.");
+      }
+      await cmdCreate(Number(positional[0] ?? "1"), dryRun);
       break;
     case "warm":
       if (!positional[0]) throw new Error("usage: warm verify-NN");
@@ -515,9 +515,9 @@ async function main() {
       break;
     default:
       console.error(
-        "usage: provision-verify-robot.mjs <list | licenses [--apply] | create [N] [--allow-grow] | " +
+        "usage: provision-verify-robot.mjs <list | licenses [--apply] | create [N] | " +
           "warm verify-NN | rotate [--make-room=N | --spent-ge=K] [--target=N] | delete verify-NN> [--dry-run]\n" +
-          `cost cap = ROBOT_POOL_CAP (default ${POOL_CAP}) active robots; rotate is cost-flat (delete-before-create).`,
+          `hard cap = ${POOL_CAP} active robots; rotate is cost-flat (delete-before-create).`,
       );
       process.exit(64);
   }
