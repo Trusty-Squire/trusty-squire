@@ -379,6 +379,69 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
     expect(res.transition).toBe("promoted");
   });
 
+  it("reroutes pending-review disabled-precondition replay brittleness through fresh-verify", async () => {
+    const freshVerify: FreshVerifyRunner = vi.fn(
+      async (): Promise<RunFreshVerifyResult> => ({
+        kind: "verified",
+        service: "fresh-svc",
+        verdict: "promote",
+        promoted: true,
+        successes: 1,
+        failures: 0,
+        samples: 1,
+        passRateLcb: 0.21,
+        passRateUcb: 1,
+        outcomes: [],
+        transition: "promoted",
+      }),
+    );
+    const replay = vi.fn(
+      async (): Promise<ReplayOutcome> => ({
+        kind: "step_failed",
+        stepIndex: 5,
+        reason:
+          "target is disabled (HTML disabled or aria-disabled=true) after 6s — the click would no-op. A required precondition is unmet.",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create API key",
+          provenance: { run_id: "r1", round_index: 5 },
+        },
+      }),
+    );
+    const skill = oauthSkill(null);
+    const client = {
+      fetchSkill: vi.fn(async () => skill),
+      postOutcome: vi.fn(async () => ({
+        transition: "none" as const,
+        status: "pending-review",
+        verifier_succeeded: 0,
+        verifier_failed: 0,
+        consecutive_verifier_failures: 0,
+        next_freshness_due_at: null,
+      })),
+    } as unknown as HousekeeperOpts["client"];
+    const res = await handleReplay(
+      TASK,
+      {
+        queue: { name: "verifier", fetch: async () => [] },
+        client,
+        replay,
+        freshVerify,
+      },
+      noLog,
+    );
+    expect(replay).toHaveBeenCalledOnce();
+    expect(freshVerify).toHaveBeenCalledWith({
+      service: "fresh-svc",
+      skillId: TASK.queueItem.skill_id,
+      signupUrl: "https://fresh.example/signup",
+      oauthProvider: "google",
+    });
+    if (res === "skipped") throw new Error("unreachable");
+    expect(res.outcome).toBe("success");
+    expect(res.transition).toBe("promoted");
+  });
+
   it("does NOT route an email-only (oauth_provider=null) skill through fresh-verify", async () => {
     const skill = oauthSkill(null);
     const client = {

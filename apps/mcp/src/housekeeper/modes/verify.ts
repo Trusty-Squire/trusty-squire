@@ -364,6 +364,29 @@ export async function handleReplay(
       if (fresh !== "fallback") return fresh;
     }
 
+    // A disabled required button on a pending-review replay usually means the
+    // stored capture is missing a signup/onboarding prerequisite, not that the
+    // service is impossible. The verifier's job for pending-review rows is to
+    // prove fresh signup viability, so use the fresh-identity sampler before
+    // posting any replay failure. If the sampler is unavailable, fall back to
+    // the existing brittle/non-demoting downgrade below.
+    if (
+      !isOk &&
+      item.status === "pending-review" &&
+      opts.freshVerify !== undefined &&
+      isDisabledTargetPrecondition(replayReason)
+    ) {
+      const fresh = await runFreshIdentityVerify(
+        task,
+        skill,
+        freshProvider ?? "google",
+        opts,
+        log,
+        startMs,
+      );
+      if (fresh !== "fallback") return fresh;
+    }
+
     outcomeKind = isOk ? "success" : "failure";
     failureKind = isOk ? undefined : replay.kind;
     outcomeReason = replayReason;
