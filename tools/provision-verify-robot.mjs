@@ -413,6 +413,23 @@ async function cmdDelete(id, dryRun) {
   console.log(`deleted ${robot.email} + purged its pool/password/usage entries.`);
 }
 
+// Retire a robot for rotation while preserving its usage rows as tombstones.
+// Those tombstones keep takenNumbers() from reusing the same verify-NN id, which
+// would otherwise point at the old profile directory and violate freshness.
+async function retireForRotation(id) {
+  const pool = loadPool();
+  const robot = pool.identities.find((e) => e.id === id);
+  if (!robot) throw new Error(`${id} not in the pool.`);
+  const token = await mintAdminToken();
+  await dirApi("DELETE", token, `/${encodeURIComponent(robot.email)}`);
+  pool.identities = pool.identities.filter((e) => e.id !== id);
+  writeJson(POOL_PATH, pool);
+  const pw = readJson(PW_PATH, {});
+  delete pw[robot.email];
+  writeJson(PW_PATH, pw);
+  console.log(`retired ${robot.email} for rotation; preserved usage tombstone.`);
+}
+
 // Cost-flat rotation: retire robots and mint the SAME number of fresh ones, so
 // the active count (= billed seats) never increases. DELETE-BEFORE-CREATE is the
 // guarantee — the pool only ever shrinks then refills back to a target that is
@@ -459,8 +476,9 @@ async function cmdRotate({ spentGe, target, makeRoom, dryRun }) {
     console.log(`[dry-run] DELETE-before-CREATE; no API calls, no writes. Active count never exceeds ${POOL_CAP}.`);
     return;
   }
-  // DELETE FIRST — frees the seats so CREATE refills under the cap.
-  for (const id of retire) await cmdDelete(id, false);
+  // DELETE FIRST — frees the seats so CREATE refills under the cap. Preserve
+  // usage tombstones during rotation so new robots get new ids/profile dirs.
+  for (const id of retire) await retireForRotation(id);
   if (toCreate > 0) await cmdCreate(toCreate, false);
   if (toCreate > 0) {
     console.log(
