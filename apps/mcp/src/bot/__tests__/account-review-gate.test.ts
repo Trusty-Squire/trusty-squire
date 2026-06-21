@@ -70,6 +70,16 @@ describe("isAtAccountReviewGate — positive (real manual-approval gates)", () =
     );
     expect(isAtAccountReviewGate("Your account is awaiting access.")).toBe(true);
   });
+
+  it("matches Baseten's pre-submit approval-information form", () => {
+    expect(
+      isAtAccountReviewGate(
+        "We need more information to approve your account. To speed up your approval, " +
+          "please share a little more about yourself and how you want to use Baseten. " +
+          "You'll receive an email when your account is approved.",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("isAtAccountReviewGate — negative (no false positives)", () => {

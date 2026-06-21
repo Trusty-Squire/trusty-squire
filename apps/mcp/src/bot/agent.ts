@@ -9511,6 +9511,22 @@ export class SignupAgent {
           ...this.resultTail(),
         };
       }
+      // Service-side manual approval can appear as an application form BEFORE
+      // the final "pending approval" page (Baseten: company + LinkedIn + use
+      // case form headed "We need more information to approve your account").
+      // Do not hand this to the post-OAuth planner: there is no key to reach
+      // until a human/service process approves the account, and filling the form
+      // burns a robot into an async waiting room.
+      if (isAtAccountReviewGate(gateText)) {
+        return {
+          success: false,
+          error:
+            `onboarding_blocked: ${task.service} put the account into a manual review / ` +
+            `approval flow after signup. The bot cannot obtain an API key until the service approves the account.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
       // (d) Stuck on Google OAuth screens (Upstash class). Bot
       // signed in via Google but the OAuth flow didn't redirect off
       // accounts.google.com — usually a Clerk-mediated chooser the
