@@ -168,7 +168,7 @@ describe("runOneBatch — replay path", () => {
     expect(outcomes[0]!.failure_kind).toBe("step_failed");
   });
 
-  it("downgrades a returning-user-divergence step_failed to a non-rot kind", async () => {
+  it("downgrades a disabled returning-user-divergence step_failed to brittle re-synthesis", async () => {
     const { client, outcomes } = recordingClient({});
     await runOneBatch({
       queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000002R") }]),
@@ -188,9 +188,30 @@ describe("runOneBatch — replay path", () => {
       log: () => undefined,
     });
     expect(outcomes[0]!.kind).toBe("failure");
-    // The reused-operator-account divergence must NOT count as rot, so it
-    // can't false-demote a skill that works fine for a fresh user.
-    expect(outcomes[0]!.failure_kind).toBe("account_already_registered");
+    expect(outcomes[0]!.failure_kind).toBe("brittle_replay_servable");
+    expect(outcomes[0]!.reason).toMatch(/disabled target indicates missing replay precondition/);
+  });
+
+  it("downgrades a plain disabled-target step_failed to brittle re-synthesis", async () => {
+    const { client, outcomes } = recordingClient({});
+    await runOneBatch({
+      queue: provider([{ kind: "replay", queueItem: makeQueueItem("01R0000000000000000000002D") }]),
+      client: client as never,
+      replay: async () => ({
+        kind: "step_failed",
+        stepIndex: 2,
+        reason:
+          "target is disabled (HTML disabled or aria-disabled=true) after 6s — the click would no-op. A required precondition is unmet.",
+        capturedStep: {
+          kind: "click",
+          text_match: "Create API key",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      }),
+      log: () => undefined,
+    });
+    expect(outcomes[0]!.kind).toBe("failure");
+    expect(outcomes[0]!.failure_kind).toBe("brittle_replay_servable");
   });
 
   it("downgrades a rot step_failed to non-demoting when the probe shows the page is still servable", async () => {
@@ -283,7 +304,7 @@ describe("runOneBatch — replay path", () => {
     expect(outcomes[0]!.failure_kind).toBe("step_failed");
   });
 
-  it("does NOT probe a non-rot failure (returning-user divergence)", async () => {
+  it("does NOT probe a disabled-target brittle failure", async () => {
     const { client, outcomes } = recordingClient({});
     let probeCalls = 0;
     await runOneBatch({
@@ -315,10 +336,10 @@ describe("runOneBatch — replay path", () => {
       },
       log: () => undefined,
     });
-    // The divergence guard already downgraded it to a non-rot kind, so the
+    // The disabled-target guard already downgraded it to a non-rot kind, so the
     // probe must not even run (it's gated on failureCountsTowardDemotion).
     expect(probeCalls).toBe(0);
-    expect(outcomes[0]!.failure_kind).toBe("account_already_registered");
+    expect(outcomes[0]!.failure_kind).toBe("brittle_replay_servable");
   });
 
   it("skips schema-drift without posting an outcome", async () => {

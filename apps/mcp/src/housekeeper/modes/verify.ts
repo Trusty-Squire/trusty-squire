@@ -389,6 +389,21 @@ export async function handleReplay(
       failureKind = ACCOUNT_EXISTS_KIND;
     }
 
+    // A disabled click target means the captured recipe is missing a prerequisite
+    // (empty required field, unchecked agreement, unselected plan/role), not that
+    // the service is dead. The fix is fresh re-synthesis from a live signup, so
+    // record it as brittle/non-demoting instead of retiring the skill on a stale
+    // replay. This covers Val Town / Arize class failures where replay clicks a
+    // disabled "Create"/"Continue" button.
+    if (!isOk && isDisabledTargetPrecondition(outcomeReason)) {
+      failureKind = BRITTLE_PROBE_KIND;
+      outcomeReason =
+        `${outcomeReason} | [brittle: disabled target indicates missing replay precondition; re-synthesize]`.slice(
+          0,
+          800,
+        );
+    }
+
     // Auto-probe-before-retire. A failure that WOULD still count toward
     // demotion at this point (a rot kind the two guards above didn't already
     // downgrade) might be replay brittleness against a still-servable service,
@@ -570,6 +585,12 @@ function inferOAuthProviderFromSteps(skill: Skill): "google" | "github" | null {
     if (step.kind === "click_oauth_button") return step.provider;
   }
   return null;
+}
+
+function isDisabledTargetPrecondition(reason: string): boolean {
+  return /target is disabled|aria-disabled|html disabled|click would no-op|required precondition/i.test(
+    reason,
+  );
 }
 
 function describeReplayOutcome(outcome: ReplayOutcome): string {
