@@ -6,6 +6,7 @@ import {
   pickUnspentIdentities,
   isSpent,
   remainingFreshVerifications,
+  summarizeIdentityAvailability,
   loadIdentities,
   loadUsage,
   recordSpent,
@@ -206,5 +207,25 @@ describe("notebook I/O (temp dir)", () => {
     });
 
     expect(picked?.id).toBe("verify-02");
+  });
+
+  it("summarizes service-specific availability from spent records", () => {
+    writeFileSync(
+      join(dir, "verify-identities.json"),
+      JSON.stringify({
+        identities: [
+          { id: "verify-01", email: "verify-01@trustysquire.ai", profileDir: "/p/1", providers: ["google"] },
+          { id: "verify-02", email: "verify-02@trustysquire.ai", profileDir: "/p/2", providers: ["google"] },
+        ],
+      }),
+    );
+    recordSpent("verify-01", "instant-db", "2026-06-19T00:00:00Z");
+    recordSpent("verify-02", "instant-db", "2026-06-19T01:00:00Z");
+    recordSpent("verify-01", "arize", "2026-06-19T02:00:00Z");
+
+    expect(summarizeIdentityAvailability(["instant-db", "arize"], "google")).toMatchObject([
+      { service: "instant-db", total: 2, unspent: 0, available: 0 },
+      { service: "arize", total: 2, unspent: 1, available: 1 },
+    ]);
   });
 });

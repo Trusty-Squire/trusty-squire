@@ -24,6 +24,7 @@ import {
   rmdirSync,
   readdirSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -267,6 +268,57 @@ export function remainingFreshVerifications(
 ): number {
   const avail = pickUnspentIdentities(identities, usage, service, provider, identities.length).length;
   return agreement > 0 ? Math.floor(avail / agreement) : 0;
+}
+
+function liveProfileHolders(): Set<string> {
+  let out = "";
+  try {
+    out = execFileSync("ps", ["-eo", "args"], { encoding: "utf8", timeout: 2_000 });
+  } catch {
+    return new Set();
+  }
+  const holders = new Set<string>();
+  for (const line of out.split("\n")) {
+    const match = line.match(/--user-data-dir=([^ ]*\/\.trusty-squire\/profiles\/(verify-[^ ]+))/);
+    if (match?.[2] !== undefined) holders.add(match[2]);
+  }
+  return holders;
+}
+
+export interface IdentityAvailability {
+  service: string;
+  provider: IdentityProvider;
+  total: number;
+  unspent: number;
+  liveProfileHeld: number;
+  available: number;
+}
+
+export function summarizeIdentityAvailability(
+  services: readonly string[],
+  provider: IdentityProvider,
+): IdentityAvailability[] {
+  const identities = loadIdentities().filter((i) => i.providers.includes(provider));
+  const usage = loadUsage();
+  const held = liveProfileHolders();
+  return [...new Set(services)].map((service) => {
+    const unspent = pickUnspentIdentities(
+      identities,
+      usage,
+      service,
+      provider,
+      identities.length,
+    );
+    const liveProfileHeld = unspent.filter((identity) => held.has(identity.id)).length;
+    return {
+      service,
+      provider,
+      total: identities.length,
+      unspent: unspent.length,
+      liveProfileHeld,
+      available: Math.max(0, unspent.length - liveProfileHeld),
+    };
+  });
 }
 
 // ── Notebook I/O (thin) ────────────────────────────────────────────

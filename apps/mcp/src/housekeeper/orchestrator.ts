@@ -35,6 +35,7 @@ import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
 import { gradeLedgerAgainstPass, describeGrade } from "./fix-ledger.js";
 import { VERSION } from "../version.js";
 import { replenishVerifyPool } from "./robot-replenish.js";
+import { summarizeIdentityAvailability } from "./identity-pool.js";
 
 export type { ReplayMode, ReplayRunner, SignupProbeRunner, FreshVerifyRunner } from "./modes/verify.js";
 export type { DiscoveryBotRunner } from "./modes/discover.js";
@@ -117,6 +118,33 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
   const limit = opts.limit ?? 20;
   const tasks = await opts.queue.fetch(limit);
   log(`fetched queue (${opts.queue.name}): ${tasks.length} task(s)`);
+  if (opts.queue.name === "verifier" && opts.freshVerify !== undefined) {
+    const pendingServices = tasks
+      .flatMap((task) =>
+        task.kind === "replay" && task.queueItem.status === "pending-review"
+          ? [task.queueItem.service]
+          : [],
+      );
+    if (pendingServices.length > 0) {
+      const availability = summarizeIdentityAvailability(pendingServices, "google");
+      const short = availability.filter((row) => row.available <= 0);
+      if (short.length > 0) {
+        log(
+          "verify pool preflight: no available robot for " +
+            short.map((row) => `${row.service} (${row.unspent} unspent, ${row.liveProfileHeld} profile-held)`).join(", "),
+        );
+        await replenishVerifyPool({
+          log,
+          force: true,
+          rotateAll: true,
+          maxPerPass: Math.min(4, Math.max(1, short.length)),
+        });
+      } else {
+        const minAvailable = Math.min(...availability.map((row) => row.available));
+        log(`verify pool preflight: ok (${availability.length} service(s), min available=${minAvailable})`);
+      }
+    }
+  }
   const summary: HousekeeperBatchSummary = {
     attempted: 0,
     succeeded: 0,
