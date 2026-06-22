@@ -93,6 +93,11 @@ describe("evaluateConfidence", () => {
     expect(r.verdict).toBe("hold");
   });
 
+  it("full informative budget with zero successes rejects instead of holding", () => {
+    const r = evaluateConfidence(0, DEFAULT_MAX_SAMPLES, { ...DEFAULTS, drawsRemaining: 0 });
+    expect(r.verdict).toBe("reject");
+  });
+
   it("a strongly-failing posterior with budget left can reject on the UCB", () => {
     // 0/5 with a higher reject ceiling clears UCB < ceiling.
     const r = evaluateConfidence(0, 5, {
@@ -270,6 +275,21 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(res.verdict).toBe("reject");
     expect(res.failures).toBeGreaterThanOrEqual(2);
     expect(res.failureKind).toBe("validator_failed");
+  });
+
+  it("genuine rot across the full default budget rejects, not HOLDs", async () => {
+    const res = await freshVerifyService({
+      service: "x",
+      provider: "google",
+      identities: POOL4,
+      usage: [],
+      runSignup: async () => ({ success: false, reason: "step_failed: submit disabled" }),
+      markSpent: () => undefined,
+    });
+    expect(res.verdict).toBe("reject");
+    expect(res.successes).toBe(0);
+    expect(res.failures).toBe(DEFAULT_MAX_SAMPLES);
+    expect(res.failureKind).toBe("step_failed");
   });
 
   it("a thrown runSignup is captured as a failure observation, not a crash", async () => {

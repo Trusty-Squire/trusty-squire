@@ -127,15 +127,15 @@ function describeReplayOutcomeForFreshVerify(outcome: ReplayOutcome): string {
     case "dry_pass":
       return `stored-skill replay dry_pass steps=${outcome.stepsWalked}`;
     case "step_failed":
-      return `stored-skill replay step_failed step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
+      return `step_failed: stored-skill replay step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
     case "validator_failed":
-      return `stored-skill replay validator_failed step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
+      return `validator_failed: stored-skill replay step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
     case "extraction_failed":
-      return `stored-skill replay extraction_failed step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
+      return `extraction_failed: stored-skill replay step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
     case "needs_login":
-      return `stored-skill replay needs_login provider=${outcome.provider} step=${outcome.stepIndex}`;
+      return `needs_login: stored-skill replay provider=${outcome.provider} step=${outcome.stepIndex}`;
     case "skill_demoted":
-      return `stored-skill replay skill_demoted ${outcome.reason}`;
+      return `skill_demoted: stored-skill replay ${outcome.reason}`;
   }
 }
 

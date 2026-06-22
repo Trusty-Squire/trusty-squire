@@ -2,7 +2,8 @@
 // (promote / reject / hold) instead of re-deriving from a single success count.
 // A `promote` flips pending-review → active THROUGH the C11 phishing/abuse gate
 // (which must stay in front); a `hold` is a no-op; a `reject` carrying an
-// informative rot failure_kind advances the demote path. The replay (non-fresh)
+// informative rot failure_kind retires/demotes immediately because the producer
+// already spent the fresh-identity sample budget. The replay (non-fresh)
 // 3-strike count path stays intact for skills that have no verdict.
 
 import { describe, expect, it } from "vitest";
@@ -100,34 +101,33 @@ describe("D2.C producer verdict semantics", () => {
     expect(res.record.consecutive_verifier_failures).toBe(0);
   });
 
-  it('verdict:"reject" with rot failure_kind advances the demote counter on an active skill', async () => {
+  it('verdict:"reject" with rot failure_kind demotes an active skill immediately', async () => {
     const store = new InMemorySkillStore();
     await seed(store, ACTV, "active");
-    // Three rejecting fresh verdicts (rot kind) → 3 strikes → demote.
-    await store.recordVerifierOutcome({
-      skill_id: ACTV,
-      kind: "failure",
-      reason: "fresh-verify reject",
-      verdict: "reject",
-      failure_kind: "step_failed",
-    });
-    await store.recordVerifierOutcome({
-      skill_id: ACTV,
-      kind: "failure",
-      reason: "fresh-verify reject",
-      verdict: "reject",
-      failure_kind: "validator_failed",
-    });
-    const third = await store.recordVerifierOutcome({
+    const res = await store.recordVerifierOutcome({
       skill_id: ACTV,
       kind: "failure",
       reason: "fresh-verify reject",
       verdict: "reject",
       failure_kind: "extraction_failed",
     });
-    expect(third.transition).toBe("demoted");
-    expect(third.record.status).toBe("demoted");
-    expect(third.record.consecutive_verifier_failures).toBe(3);
+    expect(res.transition).toBe("demoted");
+    expect(res.record.status).toBe("demoted");
+    expect(res.record.consecutive_verifier_failures).toBe(1);
+  });
+
+  it('verdict:"reject" with rot failure_kind retires a pending-review skill immediately', async () => {
+    const store = new InMemorySkillStore();
+    await seed(store, PEND, "pending-review");
+    const res = await store.recordVerifierOutcome({
+      skill_id: PEND,
+      kind: "failure",
+      reason: "fresh-verify reject",
+      verdict: "reject",
+      failure_kind: "step_failed",
+    });
+    expect(res.transition).toBe("retired");
+    expect(res.record.deleted_at).not.toBeNull();
   });
 
   it('verdict:"reject" carrying a WALL failure_kind quarantines on the first hit', async () => {

@@ -183,6 +183,16 @@ export function evaluateConfidence(
   if (ucb < opts.rejectCeiling) return { verdict: "reject", lcb, ucb, samples };
   // Not converged. Can we afford another informative draw?
   const capReached = samples >= opts.maxSamples;
+  // A full-budget replay sweep with zero successes is not "insufficient
+  // signal"; it is exactly the signal the verifier was asked to collect. The
+  // Wilson UCB is intentionally conservative at tiny N, but letting 0/4 HOLD
+  // means structurally-bad stored skills never report failure to the registry
+  // and stay in pending-review forever. Keep mixed outcomes conservative, but
+  // reject a recipe that spent the whole informative budget without producing a
+  // single credential.
+  if (capReached && successes === 0 && failures > 0) {
+    return { verdict: "reject", lcb, ucb, samples };
+  }
   if (capReached || opts.drawsRemaining <= 0) {
     // Budget/pool exhausted before the interval cleared a threshold → HOLD.
     // NOT reject — an honest "not enough signal", so a working recipe that just

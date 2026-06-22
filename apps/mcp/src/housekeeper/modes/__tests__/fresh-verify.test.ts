@@ -230,4 +230,64 @@ describe("runFreshVerify", () => {
     expect(result.verdict).toBe("promote");
     expect(result.successes).toBe(1);
   });
+
+  it("reports stored replay failures with the underlying failure kind", async () => {
+    process.env.TRUSTY_SQUIRE_VERIFY_POOL_DIR = mkdtempSync(
+      join(tmpdir(), "fresh-verify-mode-"),
+    );
+    const fresh = identity(`verify-${Date.now().toString(36)}`);
+    const storedSkill = skill();
+    const replay = vi.fn(async () => ({
+      kind: "step_failed" as const,
+      stepIndex: 4,
+      reason: "target is disabled",
+      capturedStep: {
+        kind: "click" as const,
+        text_match: "Create account",
+        provenance: { run_id: "r1", round_index: 4 },
+      },
+    }));
+    const postOutcome = vi.fn(async () => ({
+      transition: "none" as const,
+      status: "pending-review" as const,
+      verifier_succeeded: 0,
+      verifier_failed: 1,
+      consecutive_verifier_failures: 1,
+      next_freshness_due_at: null,
+    }));
+
+    const result = await runFreshVerify(
+      {
+        service: "arize",
+        skill: storedSkill,
+        skillId: storedSkill.skill_id,
+        confidence: { promoteFloor: 0.1, rejectCeiling: 0.05, maxSamples: 1 },
+      },
+      {
+        machineToken: "machine-token",
+        accountId: "acct-1",
+        replay,
+        inboxClient: { createAlias: vi.fn(async () => "verify@example.com") },
+        poolConfigured: () => true,
+        loadPool: () => ({ identities: [fresh], usage: [] }),
+        registry: { postOutcome },
+        log: () => undefined,
+      },
+    );
+
+    expect(result.kind).toBe("verified");
+    if (result.kind !== "verified") throw new Error("expected verified");
+    expect(result.verdict).toBe("reject");
+    expect(postOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skill_id: storedSkill.skill_id,
+        kind: "failure",
+        verdict: "reject",
+        samples: 1,
+        successes: 0,
+        failures: 1,
+        failure_kind: "step_failed",
+      }),
+    );
+  });
 });

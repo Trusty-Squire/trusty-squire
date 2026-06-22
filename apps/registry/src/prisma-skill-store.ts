@@ -471,10 +471,15 @@ export class PrismaSkillStore implements SkillStore {
         transition = "quarantined";
       } else if (
         effectiveKind === "failure" &&
-        skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
+        fclass === "rot" &&
+        (input.verdict === "reject" ||
+          skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD)
       ) {
-        // Reaching the threshold here means 3 consecutive ROT failures —
-        // the counter only advanced on rot above.
+        // A producer-level `reject` is already a converged fresh-identity
+        // verdict (for example 0/4 informative replays), so trust it
+        // immediately. Non-verdict replay failures keep the historic 3-strike
+        // path. In both cases the branch is rot-only: wall/infra/transient
+        // failures never retire or demote here.
         if (skill.status === "pending-review") {
           // Never validated — retire. Capture sidecars survive for
           // forensic value.
