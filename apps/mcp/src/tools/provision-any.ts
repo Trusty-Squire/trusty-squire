@@ -39,6 +39,7 @@ import {
   type SkillRegistryClient,
 } from "../skill-registry-client.js";
 import { categoryPeersOf } from "../data/service-categories.js";
+import { evaluateProvisionGate } from "../provision-gate.js";
 import { promoteToSkill } from "../bot/promote-to-skill.js";
 import { currentRunId, resolveCaptureDir } from "../bot/onboarding-capture.js";
 import { redactCredentials, redactHtml } from "../bot/redact.js";
@@ -262,6 +263,33 @@ export const provisionTool = {
       };
     }
     const apiBase = session.api_base_url;
+
+    // ── Refuse-walled pre-flight ──────────────────────────────────────
+    // Don't bot a PERMANENT wall — an identity/payment anchor (Stripe KYC,
+    // phone-gated) or an operator-dequeued service. Botting one burns ~6 min +
+    // a free-quota signup + a robot identity and returns a confusing failure;
+    // refuse it fast and route the user to bring-your-own-key. Reads the
+    // registry's ServiceState dossier and FAILS OPEN (a registry hiccup never
+    // blocks a real provision). Temporary/bot-bug walls (anti_bot, nav, …) are
+    // NOT refused — the discover loop is what cracks those. See provision-gate.ts.
+    const gateClient = clientFromEnv(session.account_id);
+    if (gateClient !== null) {
+      const state = await gateClient.fetchServiceState(input.service);
+      const verdict = evaluateProvisionGate(state);
+      if (verdict.decision === "refuse") {
+        return {
+          status: "unsupported_service",
+          service: input.service,
+          wall_kind: verdict.wall_kind,
+          reason: verdict.reason,
+          message:
+            `Trusty Squire won't auto-create an account for ${input.service}: ${verdict.reason}. ` +
+            `This is an account you should own — sign up for it yourself, then paste your ` +
+            `API key and I'll vault it (store_credential) so your app can use it safely.`,
+        };
+      }
+    }
+
     const inboxClient = new InboxClient({ baseUrl: apiBase, apiKey: session.machine_token });
 
     const provisionRun = createProvisionRun({

@@ -31,6 +31,7 @@ import {
   parseSkill,
   type Skill,
 } from "@trusty-squire/skill-schema";
+import type { ProvisionServiceState } from "./provision-gate.js";
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -367,6 +368,30 @@ export class SkillRegistryClient {
         kind: "unavailable",
         reason: `malformed health response: ${e instanceof Error ? e.message : String(e)}`,
       };
+    }
+  }
+
+  /**
+   * Refuse-walled pre-flight: fetch the registry's materialized
+   * ServiceState (the `state` half of the dossier) for the refuse gate.
+   * FAIL-OPEN — any transport/parse trouble returns null, which the gate
+   * treats as "allow" (a registry gap must never block a real provision).
+   * Public-readish endpoint (no admin bearer), same surface as /health.
+   */
+  async fetchServiceState(service: string): Promise<ProvisionServiceState | null> {
+    const serviceSlug = canonicalizeServiceSlug(service);
+    const url = `${this.baseUrl}/v1/services/${encodeURIComponent(serviceSlug)}/dossier`;
+    const attempt = await this.fetchGetWithRetry(url, {
+      "x-account-id": this.accountId,
+    });
+    if (attempt.kind === "err" || !attempt.response.ok) return null;
+    try {
+      const body = (await attempt.response.json()) as {
+        state?: ProvisionServiceState | null;
+      };
+      return body.state ?? null;
+    } catch {
+      return null;
     }
   }
 
