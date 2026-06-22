@@ -22,6 +22,9 @@ import {
   rankCandidates,
   runNavSearch,
   scoreCandidate,
+  classifyBranchRisk,
+  semanticBranchKey,
+  SemanticBranchLedger,
   type NavCandidate,
   type NavSearchBrowserPort,
 } from "../nav-search.js";
@@ -295,6 +298,29 @@ describe("rankCandidates", () => {
   });
 });
 
+describe("semantic branch ledger", () => {
+  it("classifies safe nav separately from committal setup branches", () => {
+    expect(classifyBranchRisk(cand({ text: "API Tokens", href: "/settings/tokens" })).risk).toBe("reversible");
+    expect(classifyBranchRisk(cand({ text: "Create workspace", href: null, isAnchor: false })).risk).toBe("mutating");
+    expect(classifyBranchRisk(cand({ text: "Start trial", href: "/billing/trial" })).risk).toBe("mutating");
+    expect(classifyBranchRisk(cand({ text: "Delete account", href: "/settings/delete" })).risk).toBe("destructive");
+  });
+
+  it("records tried and dead-end branch outcomes by semantic key", () => {
+    const ledger = new SemanticBranchLedger();
+    const currentUrl = "https://x.test/app";
+    const candidate = cand({ selector: "#tokens", text: "API Tokens", href: "/settings/tokens" });
+    ledger.recordCandidates(currentUrl, [candidate]);
+    ledger.markTried(currentUrl, candidate);
+    ledger.markOutcome(currentUrl, candidate, "dead_end");
+    expect(semanticBranchKey(candidate, currentUrl)).toContain("#tokens");
+    expect(ledger.records()).toMatchObject([
+      { selector: "#tokens", risk: "reversible", attempts: 1, outcome: "dead_end" },
+    ]);
+    expect(ledger.nextReversibleCandidates([candidate], currentUrl)).toEqual([]);
+  });
+});
+
 describe("assessKeyGoal", () => {
   const dashInv = [el({ tag: "a", visibleText: "Dashboard", href: "/", selector: "#d" })];
 
@@ -462,6 +488,61 @@ describe("runNavSearch", () => {
       extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_1" } : null),
     });
     expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_1" } });
+  });
+
+  it("prefers a reversible API settings branch over a committal setup branch", async () => {
+    const keysPage: FakePage = { url: "https://x.test/settings/api-keys", text: "Your API key", inv: [] };
+    const createWorkspace: FakePage = {
+      url: "https://x.test/workspaces/new",
+      text: "Create workspace Company name",
+      inv: [],
+    };
+    const browser = new FakeBrowser(
+      {
+        url: "https://x.test/app",
+        text: "Dashboard",
+        inv: [
+          el({ tag: "button", visibleText: "Create workspace", selector: "#create-workspace" }),
+          el({ tag: "a", visibleText: "API Keys", href: "/settings/api-keys", selector: "#keys" }),
+        ],
+      },
+      {
+        "#create-workspace": createWorkspace,
+        "https://x.test/settings/api-keys": keysPage,
+      },
+    );
+    const logs: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_safe" } : null),
+      log: (line) => logs.push(line),
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_safe" } });
+    expect(browser.currentUrl()).toBe("https://x.test/settings/api-keys");
+    expect(logs.some((line) => line.includes("blocked 1 mutating/destructive branch"))).toBe(true);
+  });
+
+  it("does not click a mutating setup branch when no reversible path exists", async () => {
+    const createWorkspace: FakePage = {
+      url: "https://x.test/workspaces/new",
+      text: "Create workspace Company name",
+      inv: [],
+    };
+    const browser = new FakeBrowser(
+      {
+        url: "https://x.test/app",
+        text: "Dashboard",
+        inv: [el({ tag: "button", visibleText: "Create workspace", selector: "#create-workspace" })],
+      },
+      { "#create-workspace": createWorkspace },
+    );
+    const logs: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () => null,
+      log: (line) => logs.push(line),
+    });
+    expect(res).toEqual({ kind: "no_self_serve_key" });
+    expect(browser.currentUrl()).toBe("https://x.test/app");
+    expect(logs.some((line) => line.includes("mutating/mutating_blocked=1"))).toBe(true);
   });
 
   it("runs the create-key subgoal then extracts the freshly created key", async () => {

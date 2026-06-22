@@ -193,6 +193,160 @@ export function rankCandidates(candidates: readonly NavCandidate[]): RankResult 
   return { ranked, needsTiebreak };
 }
 
+export type BranchRisk = "reversible" | "mutating" | "destructive";
+export type BranchOutcome =
+  | "untried"
+  | "promising"
+  | "dead_end"
+  | "credential_surface"
+  | "credential_found"
+  | "mutating_blocked";
+
+export interface SemanticBranchRecord {
+  id: string;
+  selector: string;
+  href: string | null;
+  text: string;
+  risk: BranchRisk;
+  reason: string;
+  attempts: number;
+  outcome: BranchOutcome;
+  fromUrl: string;
+  toUrl?: string;
+}
+
+const MUTATING_BRANCH_TEXT =
+  /\b(?:(?:create|new|add|set\s*up|setup|join)\s+(?:org|organization|organisation|workspace|team|project|app|application|account|company|business)|(?:start|begin)\s+(?:trial|subscription)|(?:choose|select)\s+(?:plan|tier)|upgrade|checkout|payment|billing\s+setup|authorize|accept|approve|continue\s+with|sign\s*up|register)\b/i;
+const REVERSIBLE_NAV_TEXT =
+  /\b(?:api|access|secret|auth|personal\s+access|bearer)?\s*(?:keys?|tokens?)\b|\b(?:developers?|settings|account|security|profile|workspace|projects?|apps?|dashboard|home)\b/i;
+
+export function classifyBranchRisk(candidate: NavCandidate): { risk: BranchRisk; reason: string } {
+  const targetText = `${candidate.text} ${candidate.href ?? ""}`.trim();
+  if (DESTRUCTIVE_TEXT.test(targetText)) {
+    return { risk: "destructive", reason: "destructive label or href" };
+  }
+  if (MUTATING_BRANCH_TEXT.test(targetText)) {
+    return { risk: "mutating", reason: "committal signup/setup action" };
+  }
+  if (candidate.href !== null || REVERSIBLE_NAV_TEXT.test(targetText) || scoreCandidate(candidate) > 0) {
+    return { risk: "reversible", reason: "navigation-like branch" };
+  }
+  return { risk: "reversible", reason: "weak branch, bounded by frontier and tried ledger" };
+}
+
+export function semanticBranchKey(candidate: NavCandidate, currentUrl: string): string {
+  const target = resolveNavHref(candidate.href, currentUrl);
+  return [
+    navUrlKey(currentUrl),
+    candidate.selector,
+    target ?? candidate.href ?? "",
+    candidate.text.trim().toLowerCase().replace(/\s+/g, " "),
+  ].join(" :: ");
+}
+
+export class SemanticBranchLedger {
+  private readonly recordsById = new Map<string, SemanticBranchRecord>();
+
+  recordCandidates(currentUrl: string, candidates: readonly NavCandidate[]): void {
+    for (const candidate of candidates) {
+      const id = semanticBranchKey(candidate, currentUrl);
+      if (this.recordsById.has(id)) continue;
+      const { risk, reason } = classifyBranchRisk(candidate);
+      const toUrl = resolveNavHref(candidate.href, currentUrl) ?? undefined;
+      this.recordsById.set(id, {
+        id,
+        selector: candidate.selector,
+        href: candidate.href,
+        text: candidate.text,
+        risk,
+        reason,
+        attempts: 0,
+        outcome: "untried",
+        fromUrl: currentUrl,
+        ...(toUrl !== undefined ? { toUrl } : {}),
+      });
+    }
+  }
+
+  markTried(currentUrl: string, candidate: NavCandidate): void {
+    const record = this.ensure(currentUrl, candidate);
+    record.attempts += 1;
+    record.outcome = "promising";
+  }
+
+  markOutcome(currentUrl: string, candidate: NavCandidate, outcome: BranchOutcome): void {
+    this.ensure(currentUrl, candidate).outcome = outcome;
+  }
+
+  nextReversibleCandidates(
+    candidates: readonly NavCandidate[],
+    currentUrl: string,
+    limit = 6,
+  ): NavCandidate[] {
+    this.recordCandidates(currentUrl, candidates);
+    return candidates
+      .filter((candidate) => {
+        const record = this.ensure(currentUrl, candidate);
+        return (
+          record.risk === "reversible" &&
+          record.outcome !== "dead_end" &&
+          record.outcome !== "mutating_blocked"
+        );
+      })
+      .slice(0, limit);
+  }
+
+  blockMutatingCandidates(currentUrl: string, candidates: readonly NavCandidate[]): void {
+    this.recordCandidates(currentUrl, candidates);
+    for (const candidate of candidates) {
+      const record = this.ensure(currentUrl, candidate);
+      if (record.risk === "mutating" || record.risk === "destructive") {
+        record.outcome = "mutating_blocked";
+      }
+    }
+  }
+
+  summary(): string {
+    const records = [...this.recordsById.values()];
+    if (records.length === 0) return "no branches recorded";
+    const counts = new Map<string, number>();
+    for (const record of records) {
+      const key = `${record.risk}/${record.outcome}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join(" ");
+  }
+
+  records(): SemanticBranchRecord[] {
+    return [...this.recordsById.values()];
+  }
+
+  private ensure(currentUrl: string, candidate: NavCandidate): SemanticBranchRecord {
+    const id = semanticBranchKey(candidate, currentUrl);
+    let record = this.recordsById.get(id);
+    if (record !== undefined) return record;
+    const { risk, reason } = classifyBranchRisk(candidate);
+    const toUrl = resolveNavHref(candidate.href, currentUrl) ?? undefined;
+    record = {
+      id,
+      selector: candidate.selector,
+      href: candidate.href,
+      text: candidate.text,
+      risk,
+      reason,
+      attempts: 0,
+      outcome: "untried",
+      fromUrl: currentUrl,
+      ...(toUrl !== undefined ? { toUrl } : {}),
+    };
+    this.recordsById.set(id, record);
+    return record;
+  }
+}
+
 function navUrlKey(url: string): string {
   try {
     const u = new URL(url);
@@ -461,6 +615,7 @@ export async function runNavSearch(
   const tried = new Set<string>(); // affordance selectors already clicked
   const overlayTried = new Set<string>(); // overlay controls already actioned
   const sterileKeyUrls = new Set<string>(); // key-looking pages that yielded no progress
+  const branchLedger = new SemanticBranchLedger();
   let lastContainerUrl: string | null = null;
 
   const capture = async (
@@ -592,11 +747,29 @@ export async function runNavSearch(
           sterileKeyUrls.has(candidateUrlKey(c, url)!)
         ),
     );
-    const rank = rankCandidates(candidates);
+    branchLedger.recordCandidates(url, candidates);
+    const reversibleCandidates = branchLedger.nextReversibleCandidates(candidates, url);
+    const blockedCandidates = candidates.filter(
+      (candidate) => classifyBranchRisk(candidate).risk !== "reversible",
+    );
+    if (blockedCandidates.length > 0) {
+      branchLedger.blockMutatingCandidates(url, blockedCandidates);
+      log(
+        `nav-search: blocked ${blockedCandidates.length} mutating/destructive branch(es): ` +
+          blockedCandidates.map((c) => `"${c.text.slice(0, 40)}"`).join(", "),
+      );
+    }
+    const rank = rankCandidates(reversibleCandidates);
     let pick: string | null = rank.ranked[0]?.selector ?? null;
-    if (pick === null && rank.needsTiebreak && deps.tiebreak !== undefined && candidates.length > 0) {
-      pick = await deps.tiebreak(candidates).catch(() => null);
+    if (pick === null && rank.needsTiebreak && deps.tiebreak !== undefined && reversibleCandidates.length > 0) {
+      pick = await deps.tiebreak(reversibleCandidates).catch(() => null);
       if (pick !== null && tried.has(pick)) pick = null;
+      if (
+        pick !== null &&
+        reversibleCandidates.every((candidate) => candidate.selector !== pick)
+      ) {
+        pick = null;
+      }
     }
     if (pick === null) {
       if (
@@ -632,12 +805,14 @@ export async function runNavSearch(
       );
       log(
         `nav-search: candidates exhausted — no self-serve key surface reachable. ` +
+          `branch ledger: ${branchLedger.summary()}. ` +
           `page had ${seen.length} clickable(s): ${seen.join(" | ")}`,
       );
       return { kind: "no_self_serve_key" };
     }
     tried.add(pick);
     const picked = candidates.find((c) => c.selector === pick);
+    if (picked !== undefined) branchLedger.markTried(url, picked);
     const pickText = picked?.text ?? "";
     // Prefer direct href-navigation for anchor picks: a click on a portaled/
     // animated dropdown item (avatar menu, Radix popover) is fragile and often
