@@ -254,6 +254,7 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
     expect(freshVerify).toHaveBeenCalledWith({
       service: "fresh-svc",
       skillId: TASK.queueItem.skill_id,
+      skill,
       signupUrl: skill.signup_url,
       oauthProvider: "google",
     });
@@ -308,6 +309,7 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
     expect(freshVerify).toHaveBeenCalledWith({
       service: "fresh-svc",
       skillId: TASK.queueItem.skill_id,
+      skill,
       signupUrl: "https://fresh.example/signup",
       oauthProvider: "google",
     });
@@ -371,6 +373,7 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
     expect(freshVerify).toHaveBeenCalledWith({
       service: "fresh-svc",
       skillId: TASK.queueItem.skill_id,
+      skill,
       signupUrl: "https://fresh.example/signup",
       oauthProvider: "google",
     });
@@ -434,9 +437,83 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
     expect(freshVerify).toHaveBeenCalledWith({
       service: "fresh-svc",
       skillId: TASK.queueItem.skill_id,
+      skill,
       signupUrl: "https://fresh.example/signup",
       oauthProvider: "google",
     });
+    if (res === "skipped") throw new Error("unreachable");
+    expect(res.outcome).toBe("success");
+    expect(res.transition).toBe("promoted");
+  });
+
+  it("reroutes pending-review stale selector replay through fresh-verify when the live probe sees OAuth", async () => {
+    const freshVerify: FreshVerifyRunner = vi.fn(
+      async (): Promise<RunFreshVerifyResult> => ({
+        kind: "verified",
+        service: "fresh-svc",
+        verdict: "promote",
+        promoted: true,
+        successes: 1,
+        failures: 0,
+        samples: 1,
+        passRateLcb: 0.21,
+        passRateUcb: 1,
+        outcomes: [],
+        transition: "promoted",
+      }),
+    );
+    const replay = vi.fn(
+      async (): Promise<ReplayOutcome> => ({
+        kind: "step_failed",
+        stepIndex: 8,
+        reason: 'No element matches text_match="Create"',
+        capturedStep: {
+          kind: "click",
+          text_match: "Create",
+          provenance: { run_id: "r1", round_index: 8 },
+        },
+      }),
+    );
+    const skill = oauthSkill(null);
+    const client = {
+      fetchSkill: vi.fn(async () => skill),
+      postOutcome: vi.fn(async () => ({
+        transition: "none" as const,
+        status: "pending-review",
+        verifier_succeeded: 0,
+        verifier_failed: 0,
+        consecutive_verifier_failures: 0,
+        next_freshness_due_at: null,
+      })),
+    } as unknown as HousekeeperOpts["client"];
+    const probe = vi.fn(async () => ({
+      providers: ["google"],
+      has_email_signup: false,
+      card_gate: false,
+      interstitial: false,
+      final_url: "https://fresh.example/signup",
+    }));
+    const res = await handleReplay(
+      TASK,
+      {
+        queue: { name: "verifier", fetch: async () => [] },
+        client,
+        replay,
+        probe,
+        freshVerify,
+      },
+      noLog,
+    );
+    expect(replay).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledOnce();
+    expect(freshVerify).toHaveBeenCalledWith({
+      service: "fresh-svc",
+      skillId: TASK.queueItem.skill_id,
+      skill,
+      signupUrl: "https://fresh.example/signup",
+      oauthProvider: "google",
+    });
+    expect(client.postOutcome).not.toHaveBeenCalled();
     if (res === "skipped") throw new Error("unreachable");
     expect(res.outcome).toBe("success");
     expect(res.transition).toBe("promoted");

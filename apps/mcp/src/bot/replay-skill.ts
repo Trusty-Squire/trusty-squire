@@ -124,6 +124,12 @@ export interface ReplayInput {
    */
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>;
   /**
+   * Chrome profile whose OAuth-session marker should be trusted for
+   * replay-time provider checks. Fresh-identity verifier replays pass the
+   * robot profile; normal router replays omit this and use the default profile.
+   */
+  profileDir?: string;
+  /**
    * 0.8.2-rc.19 — bypass the "skill must be active" guard. The verifier
    * loop NEEDS to replay pending-review skills (and sometimes demoted
    * ones) to gather the outcome data that drives promote/demote
@@ -303,6 +309,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
           skill,
           llmFallback,
           candidatesDir,
+          input.profileDir,
         );
         if (fallbackResult.kind === "use_substitute") {
           // We have a substitute, but in dry mode we still don't
@@ -375,6 +382,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         skill,
         llmFallback,
         candidatesDir,
+        input.profileDir,
       );
       if (fallbackResult.kind === "use_substitute") {
         stepToExecute = fallbackResult.substitute;
@@ -480,7 +488,14 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
     // the router can decide whether to retry or fall through to the
     // universal bot.
     try {
-      const execOutcome = await executeStep(stepToExecute, browser, templateValues, skill, input.fetchEmailCode);
+      const execOutcome = await executeStep(
+        stepToExecute,
+        browser,
+        templateValues,
+        skill,
+        input.fetchEmailCode,
+        input.profileDir,
+      );
       if (execOutcome.kind === "needs_login") {
         return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
       }
@@ -1090,6 +1105,7 @@ async function executeStep(
   templateValues: Record<string, string>,
   skill: Skill,
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>,
+  profileDir?: string,
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
     case "navigate": {
@@ -1140,7 +1156,7 @@ async function executeStep(
         // the expected URL, and continue. Only bail to needs_login
         // when no OAuth path is recoverable (no provider session, no
         // OAuth button on the page).
-        const recovered = await attemptOAuthRecovery(browser, targetUrl);
+        const recovered = await attemptOAuthRecovery(browser, targetUrl, profileDir);
         if (recovered.kind === "ok") {
           return { kind: "navigated" };
         }
@@ -1156,7 +1172,7 @@ async function executeStep(
       // the replay engine can't fill that — only the user can. Bail
       // early with needs_login so the router fast-paths to the
       // universal bot.
-      const profiles = loggedInProviders();
+      const profiles = loggedInProviders(profileDir);
       if (!profiles.includes(step.provider)) {
         return { kind: "needs_login", provider: step.provider };
       }
@@ -1193,6 +1209,15 @@ async function executeStep(
 
     case "click": {
       const inventory = await browser.extractInteractiveElements();
+      if (step.href_hint !== undefined && step.role_hint === "link") {
+        const dest = rebaseHrefOntoCurrentUrl(step.href_hint, browser.currentUrl());
+        if (dest !== null) {
+          await browser.goto(dest);
+          await browser.wait(1);
+          await browser.waitForInteractiveDom().catch(() => undefined);
+          return { kind: "clicked" };
+        }
+      }
       // Stable-attribute anchor FIRST (mirrors preValidate) — a unique
       // name=/id= match is the most drift-resistant target.
       if (step.dom_hint !== undefined) {
@@ -2063,12 +2088,13 @@ async function tryFallback(
   skill: Skill,
   llmFallback: ReplayInput["llmFallback"],
   candidatesDir: string | undefined,
+  profileDir: string | undefined,
 ): Promise<FallbackResult> {
   // If the captured step is an OAuth click and the user has no session,
   // fall back to the bot's needs_login flow instead of asking the
   // planner — there's nothing to substitute, the user must `mcp login`.
   if (capturedStep.kind === "click_oauth_button") {
-    const profiles = loggedInProviders();
+    const profiles = loggedInProviders(profileDir);
     if (!profiles.includes(capturedStep.provider)) {
       return { kind: "needs_login", provider: capturedStep.provider };
     }
@@ -2749,6 +2775,12 @@ function isSkippableAbsentFill(
 ): boolean {
   if (step.kind !== "fill") return false;
   if (!/no input matches/i.test(validationReason)) return false;
+  // EMAIL_ALIAS fills are not optional onboarding cosmetics; they dispatch the
+  // verification email that an await_email_code step consumes. Skipping them
+  // turns a real replay failure into a misleading returning-user branch and
+  // strands fresh-identity verification waiting for an email that was never
+  // requested.
+  if (step.value_template.includes("${EMAIL_ALIAS}")) return false;
   return hasLaterCredentialStep(steps, stepIndex);
 }
 
@@ -3238,10 +3270,11 @@ export async function walkOAuthConsent(
 async function attemptOAuthRecovery(
   browser: BrowserController,
   expectedUrl: string,
+  profileDir?: string,
 ): Promise<
   { kind: "ok" } | { kind: "needs_login"; provider: OAuthProviderId }
 > {
-  const rawProfiles = loggedInProviders();
+  const rawProfiles = loggedInProviders(profileDir);
   if (rawProfiles.length === 0) {
     return { kind: "needs_login", provider: "google" };
   }

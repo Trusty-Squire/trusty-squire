@@ -529,6 +529,27 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(extract.near_text_hint).toBe("New Token");
   });
 
+  it("does not persist a quoted credential value as near_text_hint", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    rounds[2]!.observed = {
+      kind: "extract",
+      reason:
+        "The full API token 'db3a32ea-dd1b-4e28-9680-db2991c81e3e' " +
+        "is visible next to the copy button.",
+    };
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+
+    const extract = result.skill.steps[2]!;
+    if (extract.kind !== "extract_via_copy_button") {
+      throw new Error("expected extract_via_copy_button");
+    }
+    expect(extract.near_text_hint).toBe("Copy");
+  });
+
   // rc.19 regression — Railway's icon-only modal copy button has
   // no visible text and no aria-label; its only label signal is the
   // `title="Copy Code"` attribute. Pre-rc.19 the synthesizer missed
@@ -805,6 +826,105 @@ describe("promoteToSkill — OAuth provider detection", () => {
       expect(result.skill.steps[0]!.provider).toBe("github");
     }
     expect(result.skill.oauth_provider).toBe("github");
+  });
+
+  it("preserves an explicit OAuth provider even when the captured graph starts after OAuth", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/dashboard",
+          title: "Dashboard",
+          html: "<html>New Token re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "Token is visible in 'New Token'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({
+      dir,
+      service,
+      run_id: runId,
+      oauthProvider: "google",
+    });
+
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.skill.oauth_provider).toBe("google");
+  });
+
+  it("does not stamp an explicit OAuth provider onto an email-signup graph", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://example.com/register",
+          title: "Register",
+          html: "<html><label>Email</label><input name=\"email\"></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            labelText: "Email",
+            selector: "input[name='email']",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input[name='email']",
+          value: "bot@example.com",
+          reason: "Fill the signup email",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://example.com/dashboard",
+          title: "Dashboard",
+          html: "<html>New Token re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "Token is visible in 'New Token'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({
+      dir,
+      service,
+      run_id: runId,
+      oauthProvider: "google",
+    });
+
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.skill.oauth_provider).toBeNull();
+    expect(result.skill.steps.some((s) => s.kind === "fill" && s.value_template === "${EMAIL_ALIAS}")).toBe(true);
   });
 
   it("does not match 'GitTub' or other near-misses", () => {

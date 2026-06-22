@@ -4,7 +4,7 @@
 // store.ts ships.
 
 import { randomUUID } from "node:crypto";
-import { classifyFailure } from "@trusty-squire/skill-schema";
+import { canonicalizeServiceSlug, classifyFailure } from "@trusty-squire/skill-schema";
 import type {
   InsertCaptureInput,
   InsertSkillInput,
@@ -292,7 +292,7 @@ export class InMemorySkillStore implements SkillStore {
       if (skill.deleted_at !== null) continue;
       if (skill.superseded_at !== null) continue;
       if (skill.status === "active") {
-        activeServices.add(skill.service);
+        activeServices.add(canonicalizeServiceSlug(skill.service));
       }
       if (
         skill.status === "pending-review" &&
@@ -303,17 +303,19 @@ export class InMemorySkillStore implements SkillStore {
       }
       if (
         skill.status === "active" &&
-        skill.next_freshness_due_at !== null &&
-        skill.next_freshness_due_at <= now
+        ((skill.verifier_succeeded < VERIFIER_PROMOTION_THRESHOLD &&
+          skill.next_freshness_due_at === null) ||
+          (skill.next_freshness_due_at !== null &&
+            skill.next_freshness_due_at <= now))
       ) {
         due.push(skill);
       }
     }
     // Uncovered pending first (the staging gate has user impact via shorter
     // time-to-promotion for services with no active coverage), then active
-    // freshness, then duplicate pending rows for already-covered services.
-    // Covered duplicates still stay visible to the verifier, but they cannot
-    // starve genuinely uncovered services or the freshness sweep.
+    // freshness. Covered duplicate pending rows are intentionally not queued:
+    // once a service has active coverage, stale pending captures should not
+    // burn verifier/autoloop cycles or generate repeated false regressions.
     const sortPending = (rows: SkillStoreRecord[]) => rows.sort((a, b) => {
       const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
       if (cvf !== 0) return cvf;
@@ -321,14 +323,15 @@ export class InMemorySkillStore implements SkillStore {
       if (failed !== 0) return failed;
       return b.created_at.getTime() - a.created_at.getTime();
     });
-    const uncoveredPending = sortPending(pending.filter((skill) => !activeServices.has(skill.service)));
-    const coveredDuplicatePending = sortPending(pending.filter((skill) => activeServices.has(skill.service)));
+    const uncoveredPending = sortPending(
+      pending.filter((skill) => !activeServices.has(canonicalizeServiceSlug(skill.service))),
+    );
     due.sort(
       (a, b) =>
         (a.next_freshness_due_at?.getTime() ?? 0) -
         (b.next_freshness_due_at?.getTime() ?? 0),
     );
-    return [...uncoveredPending, ...due, ...coveredDuplicatePending].slice(0, limit);
+    return [...uncoveredPending, ...due].slice(0, limit);
   }
 
   async recordVerifierOutcome(

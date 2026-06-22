@@ -150,6 +150,13 @@ describe("classifyAttempt", () => {
         reason: "bot Chrome profile is held by another run (a login or signup); retry shortly",
       }),
     ).toBe("non_observation");
+    expect(
+      classifyAttempt({
+        success: false,
+        reason:
+          "stored-skill replay step_failed step=3 No email verification code arrived. [returning-user: authenticated session diverged from fresh-signup capture]",
+      }),
+    ).toBe("non_observation");
   });
   it("anything else (genuine rot) is an informative failure", () => {
     expect(classifyAttempt({ success: false, reason: "step_failed step=3 button gone" })).toBe(

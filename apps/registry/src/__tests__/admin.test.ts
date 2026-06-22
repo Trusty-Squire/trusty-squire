@@ -234,7 +234,7 @@ describe("GET /admin/verifier/queue", () => {
     await server.close();
   });
 
-  it("does not let covered duplicate pending rows starve uncovered services or freshness", async () => {
+  it("does not queue covered duplicate pending rows", async () => {
     const { skillStore, build } = buildAdminServer();
     const server = await build();
     const duplicateActiveId = "01HVERIF000000000000000A5";
@@ -281,9 +281,73 @@ describe("GET /admin/verifier/queue", () => {
     const body = res.json();
     expect(body.items.map((item: { skill_id: string }) => item.skill_id)).toEqual([
       uncoveredPendingId,
+      duplicateActiveId,
       dueActiveId,
-      duplicatePendingId,
     ]);
+    await server.close();
+  });
+
+  it("does not queue a pending-review legacy alias when the canonical service is active", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    await skillStore.insert({
+      skill: { ...pendingSkill("01HVERIF000000000000000B1", "anthropic-api"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: pendingSkill("01HVERIF000000000000000B2", "anthropic"),
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().items.map((item: { skill_id: string }) => item.skill_id)).toEqual([
+      "01HVERIF000000000000000B1",
+    ]);
+    await server.close();
+  });
+
+  it("queues active skills that have no verifier proof yet", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    const unprovenActiveId = "01HVERIF000000000000000B3";
+    const provenActiveId = "01HVERIF000000000000000B4";
+    await skillStore.insert({
+      skill: { ...pendingSkill(unprovenActiveId, "unproven-active"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: { ...pendingSkill(provenActiveId, "proven-active"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: provenActiveId,
+      kind: "success",
+      reason: "already proved",
+      now: new Date(),
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue?limit=10",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const ids = res.json().items.map((item: { skill_id: string }) => item.skill_id);
+    expect(ids).toContain(unprovenActiveId);
+    expect(ids).not.toContain(provenActiveId);
     await server.close();
   });
 });

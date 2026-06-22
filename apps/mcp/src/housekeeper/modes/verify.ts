@@ -50,6 +50,7 @@ import type { RunFreshVerifyResult } from "./fresh-verify.js";
 export type FreshVerifyRunner = (input: {
   service: string;
   skillId: string;
+  skill: Skill;
   signupUrl?: string;
   oauthProvider?: "google" | "github";
 }) => Promise<RunFreshVerifyResult>;
@@ -290,8 +291,9 @@ export async function handleReplay(
   // v1 fresh-verify scope is pure-OAuth (the robots are Cloud Identity Free with
   // no mailbox), so we route only OAuth-based skills here; email-only skills and
   // unwired runs fall through to single-account replay below. This is the
-  // promotion trust signal: "the lower-confidence-bound pass-rate over N
-  // independent fresh signups is high", not "replayed once as a returning user".
+  // promotion trust signal: "the lower-confidence-bound pass-rate for replaying
+  // this stored Skill over N independent fresh identities is high", not "the
+  // planner found some way to solve the service again."
   const freshProvider = skill.oauth_provider ?? inferOAuthProviderFromSteps(skill);
   if (opts.freshVerify !== undefined && freshProvider !== null) {
     const fresh = await runFreshIdentityVerify(task, skill, freshProvider, opts, log, startMs);
@@ -366,10 +368,11 @@ export async function handleReplay(
 
     // A disabled required button on a pending-review replay usually means the
     // stored capture is missing a signup/onboarding prerequisite, not that the
-    // service is impossible. The verifier's job for pending-review rows is to
-    // prove fresh signup viability, so use the fresh-identity sampler before
-    // posting any replay failure. If the sampler is unavailable, fall back to
-    // the existing brittle/non-demoting downgrade below.
+    // service is impossible. The fresh-identity sampler can disambiguate
+    // returning-user state from genuine stored-recipe brittleness, but it still
+    // replays the SAME Skill; it must not promote by discovering a new path.
+    // If the sampler is unavailable, fall back to the existing brittle/
+    // non-demoting downgrade below.
     if (
       !isOk &&
       item.status === "pending-review" &&
@@ -450,9 +453,28 @@ export async function handleReplay(
         service: item.service,
       });
       if (downgrade !== null) {
+        if (
+          item.status === "pending-review" &&
+          opts.freshVerify !== undefined
+        ) {
+          const provider = downgrade.providers.find(
+            (p): p is "google" | "github" => p === "google" || p === "github",
+          );
+          if (provider !== undefined) {
+            const fresh = await runFreshIdentityVerify(
+              task,
+              skill,
+              provider,
+              opts,
+              log,
+              startMs,
+            );
+            if (fresh !== "fallback") return fresh;
+          }
+        }
         failureKind = BRITTLE_PROBE_KIND;
         outcomeReason =
-          `${outcomeReason} | [brittle: probe shows servable] ${downgrade}`.slice(
+          `${outcomeReason} | [brittle: probe shows servable] ${downgrade.summary}`.slice(
             0,
             800,
           );
@@ -516,7 +538,7 @@ async function tryBrittleProbeDowngrade(args: {
   signupUrl: string;
   service: string;
   log: (line: string) => void;
-}): Promise<string | null> {
+}): Promise<{ summary: string; providers: PageAffordances["providers"] } | null> {
   const { probe, signupUrl, service, log } = args;
   let affordances: PageAffordances;
   try {
@@ -538,7 +560,7 @@ async function tryBrittleProbeDowngrade(args: {
   log(
     `brittle-probe: ${service} — replay failed but signup page still servable (${summary}) — downgrading, flagged for re-synthesis`,
   );
-  return summary;
+  return { summary, providers: affordances.providers };
 }
 
 // D2.D — drive a 'replay' task through the fresh-identity confidence sampler.
@@ -563,6 +585,7 @@ async function runFreshIdentityVerify(
     fresh = await opts.freshVerify!({
       service: item.service,
       skillId: item.skill_id,
+      skill,
       ...(skill.signup_url.length > 0 ? { signupUrl: skill.signup_url } : {}),
       ...(provider !== null ? { oauthProvider: provider } : {}),
     });

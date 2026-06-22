@@ -2,7 +2,13 @@
 // use InMemorySkillStore. Mirrors prisma-store.ts (the manifest
 // equivalent).
 
-import { classifyFailure, parseSkill, type Skill } from "@trusty-squire/skill-schema";
+import {
+  canonicalizeServiceSlug,
+  classifyFailure,
+  equivalentServiceSlugs,
+  parseSkill,
+  type Skill,
+} from "@trusty-squire/skill-schema";
 import {
   createRegistryPrismaClient,
   type RegistryPrismaClient,
@@ -232,8 +238,13 @@ export class PrismaSkillStore implements SkillStore {
     //   1. pending-review with verifier_succeeded < threshold (the
     //      staging gate). Capped at limit so a registry full of new
     //      submissions doesn't starve the freshness sweep.
-    //   2. active with next_freshness_due_at <= now (the freshness
-    //      sweep). Capped at limit minus #1's hit count.
+    //   2. active with no verifier proof AND no scheduled freshness date, OR
+    //      next_freshness_due_at <= now (proof backfill + freshness sweep).
+    //      Capped at limit minus #1's hit count. Active rows with
+    //      verifier_succeeded=0 and next_freshness_due_at=null used to look
+    //      healthy forever, even though the verifier never proved the stored
+    //      recipe replays. Active rows that are already scheduled in the
+    //      future keep their normal freshness cadence.
     // The combination is then truncated back to the overall limit.
     const pendingWindow = (await this.client.skillRecord.findMany({
       where: {
@@ -255,7 +266,9 @@ export class PrismaSkillStore implements SkillStore {
       orderBy: { created_at: "desc" },
       take: Math.max(limit * 5, 100),
     })) as unknown as PrismaSkillRow[];
-    const pendingServices = [...new Set(pendingWindow.map((row) => row.service))];
+    const pendingServices = [
+      ...new Set(pendingWindow.flatMap((row) => equivalentServiceSlugs(row.service))),
+    ];
     const activeServiceRows = pendingServices.length > 0
       ? await this.client.skillRecord.findMany({
           where: {
@@ -269,7 +282,9 @@ export class PrismaSkillStore implements SkillStore {
         })
       : [];
     const activeServices = new Set(
-      (activeServiceRows as unknown as PrismaSkillRow[]).map((row) => row.service),
+      (activeServiceRows as unknown as PrismaSkillRow[]).map((row) =>
+        canonicalizeServiceSlug(row.service),
+      ),
     );
     const sortPending = (rows: PrismaSkillRow[]) => rows.sort((a, b) => {
       const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
@@ -279,10 +294,7 @@ export class PrismaSkillStore implements SkillStore {
       return b.created_at.getTime() - a.created_at.getTime();
     });
     const uncoveredPending = sortPending(
-      pendingWindow.filter((row) => !activeServices.has(row.service)),
-    );
-    const coveredDuplicatePending = sortPending(
-      pendingWindow.filter((row) => activeServices.has(row.service)),
+      pendingWindow.filter((row) => !activeServices.has(canonicalizeServiceSlug(row.service))),
     );
     const remainingAfterUncovered = Math.max(0, limit - uncoveredPending.length);
     const due = remainingAfterUncovered > 0
@@ -291,13 +303,19 @@ export class PrismaSkillStore implements SkillStore {
             status: "active",
             deleted_at: null,
             superseded_at: null,
-            next_freshness_due_at: { lte: now },
+            OR: [
+              {
+                verifier_succeeded: { lt: VERIFIER_PROMOTION_THRESHOLD },
+                next_freshness_due_at: null,
+              },
+              { next_freshness_due_at: { lte: now } },
+            ],
           },
           orderBy: { next_freshness_due_at: "asc" },
           take: remainingAfterUncovered,
         })
       : [];
-    return [...uncoveredPending, ...due, ...coveredDuplicatePending]
+    return [...uncoveredPending, ...due]
       .slice(0, limit)
       .map((row) => toSkillStoreRecord(row as PrismaSkillRow));
   }

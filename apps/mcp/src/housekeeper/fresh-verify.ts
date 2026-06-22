@@ -497,7 +497,7 @@ const NON_OBSERVATION_CODES = [
 // code token (e.g. "form drift mid-fill", "transient onboarding stall"). Match
 // those phrases too so they're dropped rather than counted as rot.
 const NON_OBSERVATION_PHRASE_RE =
-  /(form drift|onboarding stall|transient|mid-fill|chrome wedged|navigation timeout|timed out|wedged|profile is held|profile held|profile is busy|profile busy|profilebusyerror)/i;
+  /(form drift|onboarding stall|transient|mid-fill|chrome wedged|navigation timeout|timed out|wedged|profile is held|profile held|profile is busy|profile busy|profilebusyerror|returning-user|authenticated session diverged|already registered|account already exists)/i;
 
 export function isNonObservation(reason: string | undefined): boolean {
   if (reason === undefined) return false;

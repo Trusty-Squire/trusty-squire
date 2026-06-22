@@ -4,6 +4,9 @@
 // so we can assert "the replay engine did X then Y" without spinning
 // up Playwright.
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Skill, SkillStep } from "@trusty-squire/skill-schema";
 import type { BrowserController, InteractiveElement } from "../browser.js";
@@ -740,6 +743,36 @@ describe("replaySkill — absent setup-click skip", () => {
     // The substitute was clicked — the absent step was NOT merely skipped.
     expect(clicks.some((c) => c.args[0] === "button.start")).toBe(true);
   });
+
+  it("does NOT skip an absent ${EMAIL_ALIAS} fill before an email-code step", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "fill",
+          label_hint: "Enter your email address",
+          value_template: "${EMAIL_ALIAS}",
+          provenance,
+        },
+        { kind: "click", text_match: "Send Code", role_hint: "button", provenance },
+        { kind: "await_email_code", label_hint: "Your code", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "robot@example.com" },
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(0);
+    expect(result.reason).toContain("No input matches");
+    expect(b.history.some((c) => c.method === "type")).toBe(false);
+  });
 });
 
 // ── Absent onboarding-select skip (porter "Role" / railway "Workspace") ──
@@ -974,11 +1007,85 @@ describe("replaySkill — OAuth needs_login", () => {
     // outcome.
     expect(["needs_login", "step_failed", "extraction_failed", "ok"]).toContain(result.kind);
   });
+
+  it("uses the supplied profileDir when checking OAuth login markers", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "replay-skill-profile-"));
+    try {
+      writeFileSync(
+        join(profileDir, "logged-in-providers.json"),
+        JSON.stringify(["github"]),
+        "utf8",
+      );
+      const b = stubBrowser();
+      b.setInventoryFor("extract", [
+        inv({
+          tag: "button",
+          visibleText: "Continue with GitHub",
+          role: "button",
+          selector: "button.gh",
+        }),
+      ]);
+
+      const result = await replaySkill({
+        skill: skillWith([
+          {
+            kind: "click_oauth_button",
+            provider: "github",
+            text_match: "Continue with GitHub",
+            provenance,
+          },
+        ]),
+        browser: b.controller,
+        mode: "full",
+        profileDir,
+      });
+
+      expect(result.kind).not.toBe("needs_login");
+      expect(b.history.some((call) => call.method === "startOAuth")).toBe(true);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Disambiguation ──────────────────────────────────────────────────
 
 describe("replaySkill — text-match disambiguation", () => {
+  it("navigates link href_hints directly instead of relying on a flaky link click", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "a",
+        visibleText: "API Keys",
+        role: "link",
+        selector: "a.keys",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "navigate", url: "https://console.example.com/home", provenance },
+        {
+          kind: "click",
+          text_match: "API Keys",
+          role_hint: "link",
+          href_hint: "/keys",
+          provenance,
+        },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    const gotos = b.history.filter((call) => call.method === "goto");
+    expect(gotos.some((call) => call.args[0] === "https://console.example.com/keys")).toBe(true);
+    expect(b.history.some((call) => call.method === "click" && call.args[0] === "a.keys")).toBe(false);
+  });
+
   it("rejects when text_match resolves to multiple non-button elements", async () => {
     const b = stubBrowser();
     b.setInventoryFor("extract", [

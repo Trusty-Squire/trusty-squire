@@ -426,13 +426,17 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     }
   }
 
-  // fresh-verify mode: verify a service by fresh-signing-up as N robot
-  // identities, driving the verdict off the bounded sequential-confidence
-  // sampler (D2) instead of replaying as a returning user. Needs a configured
-  // identity pool + operator machine token + account id.
+  // fresh-verify mode: verify a stored registry skill by replaying its exact
+  // steps as N robot identities, driving the verdict off the bounded
+  // sequential-confidence sampler (D2). Needs --skill-id, a configured identity
+  // pool, operator machine token, and account id.
   if (args.mode === "fresh-verify") {
     if (args.service === undefined) {
       console.error("housekeeper --mode=fresh-verify needs --service=<slug>");
+      return 2;
+    }
+    if (args.skillId === undefined) {
+      console.error("housekeeper --mode=fresh-verify needs --skill-id=<registry skill id>");
       return 2;
     }
     const { runFreshVerify } = await import("./modes/fresh-verify.js");
@@ -441,6 +445,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         service: args.service,
         ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
         ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
+        ...(args.oauthProvider !== undefined ? { oauthProvider: args.oauthProvider } : {}),
       });
       if (res.kind === "not_configured") {
         console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
@@ -498,13 +503,12 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       signupUrl?: string;
       allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
-    // D2.D — wire the fresh-identity confidence sampler into the scheduled verify
-    // batch when an identity pool is configured on this box. The verify batch
-    // then routes OAuth-based skills through N independent fresh signups (the
-    // sequential-confidence verdict) instead of single-account replay — the
-    // diverging path the identity-pool redesign was meant to replace. Email-only
-    // skills, and boxes with no pool, stay on single-account replay (the runner
-    // falls back). Lazy-imported so the bot/inbox deps load only when used.
+    // D2.D — wire the fresh-identity confidence sampler into the scheduled
+    // verify batch when an identity pool is configured on this box. The verify
+    // batch then routes OAuth-based skills through N independent stored-skill
+    // replays instead of single-account replay. Email-only skills, and boxes
+    // with no pool, stay on single-account replay (the runner falls back).
+    // Lazy-imported so the bot/inbox deps load only when used.
     let healFreshVerify: FreshVerifyRunner | undefined;
     if (verifyPoolConfigured()) {
       const { runFreshVerify } = await import("./modes/fresh-verify.js");
@@ -512,6 +516,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         runFreshVerify({
           service: input.service,
           skillId: input.skillId,
+          skill: input.skill,
           ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
           ...(input.oauthProvider !== undefined ? { oauthProvider: input.oauthProvider } : {}),
         });
@@ -633,6 +638,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       runFreshVerify({
         service: input.service,
         skillId: input.skillId,
+        skill: input.skill,
         ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
         ...(input.oauthProvider !== undefined ? { oauthProvider: input.oauthProvider } : {}),
       });

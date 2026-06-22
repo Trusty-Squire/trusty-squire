@@ -68,6 +68,13 @@ export interface PromoteInput {
    */
   env_var_suggestion?: string;
   /**
+   * Caller-known OAuth provider from curated service metadata. The
+   * synthesizer can infer a provider only when the captured graph includes
+   * the OAuth click itself; fresh-signup captures often start after that
+   * handoff, so callers must be able to preserve the queue's provider pin.
+   */
+  oauthProvider?: "google" | "github";
+  /**
    * Starting status for the synthesized skill. Defaults to
    * `pending-review` (the two-tier registry's staging slot): the
    * verifier worker flips it to `active` after N=2 fresh signups
@@ -194,7 +201,7 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     };
   }
   const signupUrl = generalizeCapturedUrl(entryRound.state.url);
-  const oauthProvider = inferOAuthProvider(stepsResult.steps);
+  const oauthProvider = resolveOAuthProvider(stepsResult.steps, input.oauthProvider);
 
   // rc.24 — guarantee the first step is a navigate. When the captured
   // bot got "lucky" — landed on a page that already showed the
@@ -1765,10 +1772,31 @@ function pickNearTextHint(
     // Common patterns: "in the 'New Token' section", "under 'New Token'",
     // "after creation". We pull the first quoted phrase if any.
     const quoted = /['"]([^'"]{3,40})['"]/.exec(reasonText);
-    if (quoted !== null && quoted[1] !== undefined) return quoted[1];
+    if (
+      quoted !== null &&
+      quoted[1] !== undefined &&
+      !looksLikeSecretValue(quoted[1])
+    ) {
+      return quoted[1];
+    }
   }
   const fallback = (copyButton.visibleText ?? copyButton.ariaLabel ?? "Copy").trim();
   return fallback.length > 0 ? fallback : "Copy";
+}
+
+function looksLikeSecretValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 12) return false;
+  if (/^(?:sk-|sk_|sk_live_|sk_test_|sk-ant-|sk-or-|re_|rnd_|SG\.|key-)/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[A-Za-z0-9_-]{16,}$/.test(trimmed) && /[A-Za-z]/.test(trimmed) && /\d/.test(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 interface CredentialSpecOk {
@@ -2171,6 +2199,31 @@ function inferOAuthProvider(steps: SkillStep[]): "google" | "github" | null {
     if (step.kind === "click_oauth_button") return step.provider;
   }
   return null;
+}
+
+function resolveOAuthProvider(
+  steps: SkillStep[],
+  override: "google" | "github" | undefined,
+): "google" | "github" | null {
+  const inferred = inferOAuthProvider(steps);
+  if (inferred !== null) return inferred;
+  if (override === undefined) return null;
+
+  // Curated queue metadata can say "prefer Google/GitHub" even when the bot
+  // ultimately used an email form. If we stamp that override onto an
+  // email-signup graph, the verifier routes it through the OAuth robot fleet
+  // and treats planner solvability as replayability. A graph that fills the
+  // runtime EMAIL_ALIAS is an email-signup recipe; only an actual
+  // click_oauth_button should carry oauth_provider metadata.
+  const fillsRuntimeEmail = steps.some(
+    (step) => step.kind === "fill" && step.value_template.includes("${EMAIL_ALIAS}"),
+  );
+  if (fillsRuntimeEmail) return null;
+
+  // Legacy post-auth captures often begin after the OAuth handoff, so there is
+  // no captured provider button. In that shape the provider override is the
+  // only way for the verifier to pick the right fresh robot profile.
+  return override;
 }
 
 // ── Multi-credential upgrade (Phase C) ──────────────────────────────
