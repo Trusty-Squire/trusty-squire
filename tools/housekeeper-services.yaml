@@ -1281,3 +1281,92 @@
     "no credentials found" extractor reproduction.
 
     '
+# ── vibe-coder head spine (added 2026-06-22) ─────────────────────────────
+# Buildable free-tier gaps from the head-50 coverage analysis. BYO anchors
+# (openai / stripe / github / twilio) are intentionally NOT queued — the
+# refuse-walled provision gate handles them. vercel is BYO too (SMS phone
+# gate; already status:skip). lemon-squeezy / polar (payments, merchant-KYC)
+# left BYO per the same call. The rest of the spine (clerk, posthog, netlify,
+# meilisearch, loops, cloudinary, workos, sendgrid, …) is already queued — its
+# lever is bot fixes, not re-queuing.
+- slug: google-ai
+  name: Google AI Studio
+  signup_url: https://aistudio.google.com/apikey
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Gemini API keys via AI Studio (Google sign-in, robot identity). Key
+
+    surfaced at aistudio.google.com/apikey. Tier-0 LLM gap (1 of 2).
+
+    '
+- slug: firebase
+  name: Firebase
+  signup_url: https://console.firebase.google.com/
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Google-account-bound; free Spark tier needs no billing. Credential is
+
+    a web-app config object (apiKey/projectId), not a bearer token — extraction
+
+    differs from the usual dashboard key. Tier-1 db/backend gap.
+
+    '
+- slug: auth0
+  name: Auth0
+  signup_url: https://auth0.com/signup
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Auth provider, free tier. Tier-2 auth alternate (clerk is the Tier-0
+
+    auth target, already queued pending).
+
+    '
+- slug: uploadthing
+  name: UploadThing
+  signup_url: https://uploadthing.com/
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: 'Next.js-native uploader; GitHub OAuth login (robot fleet identity).
+
+    Tier-1 storage/media gap (0/3 storage covered).
+
+    '
+- slug: expo
+  name: Expo
+  signup_url: https://expo.dev/signup
+  oauth_provider: github
+  scope_hint: null
+  status: pending
+  notes: 'Mobile dev (EAS). GitHub or email signup; access token from the
+
+    account settings page. Tier-1 dev-infra.
+
+    '
+- slug: mongodb-atlas
+  name: MongoDB Atlas
+  signup_url: https://www.mongodb.com/cloud/atlas/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'Free M0 cluster tier. Credential is a connection string + DB-user
+
+    creds rather than a single API key. Tier-2 db alternate.
+
+    '
+- slug: bunny
+  name: Bunny.net
+  signup_url: https://dash.bunny.net/register
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  notes: 'CDN/storage; email-first signup (no Google OAuth — bot falls back to
+
+    the email form). May payment-gate on a minimum top-up; if so the refuse
+
+    gate / heal loop marks it. Tier-2 storage alternate.
+
+    '
