@@ -225,6 +225,21 @@ describe("buildCompatHealth — composite", () => {
     const now = Date.now();
     expect(now - latest.getTime()).toBeLessThan(2 * DAY);
   });
+
+  it("classifies a service with a later green as currently working despite older failures", () => {
+    const h = buildCompatHealth(
+      [
+        mkAttempt("failed", 4),
+        mkAttempt("failed", 3),
+        mkAttempt("failed", 2),
+        mkAttempt("success", 0),
+      ],
+      false,
+    );
+    expect(h.successful_count).toBe(1);
+    expect(h.failed_count).toBe(3);
+    expect(h.state).toBe("working");
+  });
 });
 
 // ---------- HTTP route ------------------------------------------------
@@ -654,6 +669,7 @@ describe("projectServiceState — pure projection", () => {
     const p = projectServiceState("groq", events, false);
     expect(p.last_green_at).not.toBeNull();
     expect(p.last_failure_kind).toBe("captcha_blocked");
+    expect(p.status).toBe("working");
   });
 
   it("only failures → struggling/hard-block, no last_green", () => {

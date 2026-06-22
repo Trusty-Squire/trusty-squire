@@ -11,6 +11,7 @@ import {
 import type { InteractiveElement } from "../../bot/browser.js";
 import type { PostVerifyStep } from "../../bot/agent.js";
 import type { OnboardingOutcomeFile } from "../../bot/onboarding-capture.js";
+import type { SemanticTransitionRecord } from "../../bot/semantic-transition.js";
 
 const META: FixBatchMeta = {
   batchId: "batch-1",
@@ -114,6 +115,35 @@ describe("buildFixBatch", () => {
     expect(f.capture_refs).toEqual(["/cap/b-r2-r0.json"]);
     expect(f.planner_reasoning).toBe("click: open keys");
     expect(f.signature).toHaveLength(16);
+  });
+
+  it("carries terminal semantic transition metadata", () => {
+    const semantic: SemanticTransitionRecord = {
+      schema_version: 1,
+      intent: {
+        kind: "navigate_to_credential_surface",
+        target: "API Tokens (#tokens)",
+        evidence: ["target=API Tokens"],
+      },
+      expected_next_state: "API tokens are visible",
+      forbidden_states: ["docs_page"],
+      predicate: {
+        kind: "credential_surface_reached",
+        description: "tokens page reached",
+        verdict: "violated",
+      },
+      likely_failure_bucket: "wrong_product_surface",
+    };
+    const batch = buildFixBatch([outcome("b", "r2", false, "planner_loop")], META, (o) => ({
+      capture_refs: [`/cap/${o.service}-${o.run_id}-r0.json`],
+      terminal: {
+        url: `https://${o.service}.com/dashboard`,
+        inventory: [el({ role: "button", ariaLabel: "API Tokens" })],
+        observed: step,
+        semantic,
+      },
+    }));
+    expect(batch.failures[0]!.terminal_page?.semantic).toEqual(semantic);
   });
 
   it("counts reproduce_count for shared (service, signature)", () => {

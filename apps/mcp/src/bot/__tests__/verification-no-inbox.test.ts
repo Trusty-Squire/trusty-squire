@@ -88,6 +88,9 @@ class SubmitsOkBrowser {
   async checkRequiredAgreementBoxes(): Promise<string[]> {
     return [];
   }
+  async checkRequiredSignupChoiceBoxes(): Promise<string[]> {
+    return [];
+  }
   async extractInteractiveElements(): Promise<InteractiveElement[]> {
     return [
       {

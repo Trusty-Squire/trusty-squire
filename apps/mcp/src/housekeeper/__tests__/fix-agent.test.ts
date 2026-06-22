@@ -166,6 +166,58 @@ describe("clusterFailures", () => {
     expect(clusters).toHaveLength(2);
   });
 
+  it("separates same raw action by semantic intent verdict", () => {
+    const baseSemantic = {
+      schema_version: 1 as const,
+      intent: {
+        kind: "navigate_to_credential_surface" as const,
+        target: "API Keys (#keys)",
+        evidence: ["target=API Keys"],
+      },
+      expected_next_state: "API keys visible",
+      forbidden_states: ["docs_page"],
+      predicate: {
+        kind: "credential_surface_reached",
+        description: "keys page reached",
+        verdict: "violated" as const,
+      },
+      likely_failure_bucket: "wrong_product_surface" as const,
+    };
+    const clusters = clusterFailures(
+      batch([
+        failure({
+          service: "a",
+          signature: "sig-x",
+          semantic_failure_bucket: "wrong_product_surface",
+          semantic_fault_class: "planner_semantic_error",
+          terminal_page: {
+            url: "u",
+            inventory: [],
+            observed: STUCK,
+            semantic: baseSemantic,
+          },
+        }),
+        failure({
+          service: "b",
+          signature: "sig-x",
+          semantic_failure_bucket: "wrong_product_surface",
+          semantic_fault_class: "planner_semantic_error",
+          terminal_page: {
+            url: "u",
+            inventory: [],
+            observed: STUCK,
+            semantic: {
+              ...baseSemantic,
+              predicate: { ...baseSemantic.predicate, verdict: "satisfied" },
+            },
+          },
+        }),
+      ]),
+    );
+    expect(clusters).toHaveLength(2);
+    expect(new Set(clusters.map((c) => c.family_id)).size).toBe(2);
+  });
+
   it("omits pages for failures with no captured terminal round", () => {
     const clusters = clusterFailures(
       batch([unverifiableFailure()]),

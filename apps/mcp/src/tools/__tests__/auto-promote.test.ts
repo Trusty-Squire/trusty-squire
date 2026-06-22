@@ -317,12 +317,17 @@ describe("runAutoPromote — registry interactions", () => {
       service,
       stepsSink: sink,
       accountId: "acct-1",
+      oauthProvider: "google",
       fetchFn,
     });
 
     expect(postedTo).toBe("https://registry.test/skills");
-    const body = postedBody as { skill: { service: string }; signature: string };
+    const body = postedBody as {
+      skill: { service: string; oauth_provider: string | null };
+      signature: string;
+    };
     expect(body.skill.service).toContain("auto-promote-svc");
+    expect(body.skill.oauth_provider).toBe("google");
     expect(body.signature.length).toBeGreaterThan(80); // ed25519 ~86 chars b64url
     expect(sink.join("\n")).toMatch(/published .* v1/);
   });

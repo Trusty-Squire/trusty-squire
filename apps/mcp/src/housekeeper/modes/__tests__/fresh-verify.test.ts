@@ -67,6 +67,181 @@ function skill(): Skill {
 }
 
 describe("runFreshVerify", () => {
+  it("returning-profile mode replays with the shared profile and never posts a fresh verifier outcome", async () => {
+    const storedSkill = skill();
+    const replay = vi.fn(async () => ({
+      kind: "ok" as const,
+      via: "copy_button" as const,
+      credential: "k".repeat(32),
+    }));
+    const postOutcome = vi.fn();
+
+    const result = await runFreshVerify(
+      {
+        service: "arize",
+        skill: storedSkill,
+        skillId: storedSkill.skill_id,
+        profileMode: "returning",
+      },
+      {
+        replay,
+        registry: { postOutcome },
+        poolConfigured: () => false,
+        log: () => undefined,
+      },
+    );
+
+    expect(replay).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skill: storedSkill,
+        identity: expect.objectContaining({
+          id: "returning-profile",
+          email: "returning-profile@local",
+          providers: ["google"],
+        }),
+        emailAlias: expect.stringMatching(/^returning\./),
+        preferredOAuthProvider: "google",
+      }),
+    );
+    expect(postOutcome).not.toHaveBeenCalled();
+    expect(result.kind).toBe("returning_verified");
+    if (result.kind !== "returning_verified") throw new Error("expected returning_verified");
+    expect(result.success).toBe(true);
+  });
+
+  it("returning-profile mode refuses show-once credentials instead of false-green replaying old state", async () => {
+    const storedSkill = skill();
+    storedSkill.credentials[0] = {
+      ...storedSkill.credentials[0]!,
+      visibility: "show_once_at_creation",
+    };
+    const replay = vi.fn(async () => ({
+      kind: "ok" as const,
+      via: "copy_button" as const,
+      credential: "k".repeat(32),
+    }));
+    const postOutcome = vi.fn();
+
+    const result = await runFreshVerify(
+      {
+        service: "arize",
+        skill: storedSkill,
+        skillId: storedSkill.skill_id,
+        profileMode: "returning",
+      },
+      {
+        replay,
+        registry: { postOutcome },
+        poolConfigured: () => false,
+        log: () => undefined,
+      },
+    );
+
+    expect(replay).not.toHaveBeenCalled();
+    expect(postOutcome).not.toHaveBeenCalled();
+    expect(result.kind).toBe("returning_verified");
+    if (result.kind !== "returning_verified") throw new Error("expected returning_verified");
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain("show_once_renewal_required");
+    expect(result.reason).toContain("ARIZE_API_KEY");
+  });
+
+  it("returning-profile mode allows show-once credentials when the stored skill creates a fresh key", async () => {
+    const storedSkill = skill();
+    storedSkill.credentials[0] = {
+      ...storedSkill.credentials[0]!,
+      visibility: "show_once_at_creation",
+    };
+    storedSkill.steps.splice(1, 0, {
+      kind: "click",
+      text_match: "Create API Key",
+      role_hint: "button",
+      provenance: { run_id: "r1", round_index: 1 },
+    });
+    const replay = vi.fn(async () => ({
+      kind: "ok" as const,
+      via: "regex" as const,
+      credential: "k".repeat(32),
+    }));
+
+    const result = await runFreshVerify(
+      {
+        service: "arize",
+        skill: storedSkill,
+        skillId: storedSkill.skill_id,
+        profileMode: "returning",
+      },
+      {
+        replay,
+        poolConfigured: () => false,
+        log: () => undefined,
+      },
+    );
+
+    expect(replay).toHaveBeenCalledOnce();
+    expect(result.kind).toBe("returning_verified");
+    if (result.kind !== "returning_verified") throw new Error("expected returning_verified");
+    expect(result.success).toBe(true);
+  });
+
+  it("returning-profile mode passes an explicit provider preference into replay", async () => {
+    const storedSkill = { ...skill(), oauth_provider: null };
+    const replay = vi.fn(async () => ({
+      kind: "needs_login" as const,
+      provider: "github" as const,
+      stepIndex: 0,
+    }));
+
+    await runFreshVerify(
+      {
+        service: "arize",
+        skill: storedSkill,
+        oauthProvider: "github",
+        profileMode: "returning",
+      },
+      {
+        replay,
+        poolConfigured: () => false,
+        log: () => undefined,
+      },
+    );
+
+    expect(replay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity: expect.objectContaining({ providers: ["github"] }),
+        preferredOAuthProvider: "github",
+      }),
+    );
+  });
+
+  it("returning-profile mode surfaces replay failure without requiring the robot pool", async () => {
+    const replay = vi.fn(async () => ({
+      kind: "extraction_failed" as const,
+      stepIndex: 1,
+      reason: "No Copy button on page",
+    }));
+
+    const result = await runFreshVerify(
+      {
+        service: "arize",
+        skill: skill(),
+        profileMode: "returning",
+      },
+      {
+        replay,
+        poolConfigured: () => false,
+        log: () => undefined,
+      },
+    );
+
+    expect(replay).toHaveBeenCalledOnce();
+    expect(result.kind).toBe("returning_verified");
+    if (result.kind !== "returning_verified") throw new Error("expected returning_verified");
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain("extraction_failed");
+  });
+
   it("replays the stored skill after replenish instead of invoking planner signup", async () => {
     process.env.TRUSTY_SQUIRE_VERIFY_POOL_DIR = mkdtempSync(
       join(tmpdir(), "fresh-verify-mode-"),
@@ -121,6 +296,7 @@ describe("runFreshVerify", () => {
       skill: storedSkill,
       identity: fresh,
       emailAlias: "verify@example.com",
+      preferredOAuthProvider: "google",
       fetchEmailCode: expect.any(Function),
     });
     expect(result.kind).toBe("verified");
@@ -229,6 +405,47 @@ describe("runFreshVerify", () => {
     if (result.kind !== "verified") throw new Error("expected verified");
     expect(result.verdict).toBe("promote");
     expect(result.successes).toBe(1);
+  });
+
+  it("does not replenish when the hold is a provider/session capability blocker", async () => {
+    process.env.TRUSTY_SQUIRE_VERIFY_POOL_DIR = mkdtempSync(
+      join(tmpdir(), "fresh-verify-mode-"),
+    );
+    const fresh = identity(`verify-${Date.now().toString(36)}`);
+    const loadPool = vi.fn<[], { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
+      .mockReturnValue({ identities: [fresh], usage: [] });
+    const replenish = vi.fn(async () => " · pool rotated");
+    const replay = vi.fn(async () => ({
+      kind: "needs_login" as const,
+      provider: "github" as const,
+      stepIndex: 0,
+    }));
+
+    const result = await runFreshVerify(
+      {
+        service: "arize",
+        skill: skill(),
+        confidence: { promoteFloor: 0.1, rejectCeiling: 0.05, maxSamples: 4 },
+      },
+      {
+        machineToken: "machine-token",
+        accountId: "acct-1",
+        replay,
+        inboxClient: { createAlias: vi.fn(async () => "verify@example.com") },
+        poolConfigured: () => true,
+        loadPool,
+        replenish,
+        log: () => undefined,
+      },
+    );
+
+    expect(replenish).not.toHaveBeenCalled();
+    expect(loadPool).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledOnce();
+    expect(result.kind).toBe("verified");
+    if (result.kind !== "verified") throw new Error("expected verified");
+    expect(result.verdict).toBe("hold");
+    expect(result.samples).toBe(0);
   });
 
   it("reports stored replay failures with the underlying failure kind", async () => {

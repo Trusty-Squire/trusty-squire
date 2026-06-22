@@ -259,7 +259,7 @@ export async function freshVerifyService(opts: {
   // the fleet while still letting a couple of flakes be re-drawn.
   const flakeAllowance = confidence.maxSamples; // up to 1 redraw per informative slot
   const maxPull = confidence.maxSamples + flakeAllowance;
-  const candidates = pickUnspentIdentities(
+  let candidates = pickUnspentIdentities(
     opts.identities,
     opts.usage,
     opts.service,
@@ -374,9 +374,52 @@ export async function freshVerifyService(opts: {
       };
     }
 
-    // A non-observation (flake) is dropped: it does NOT move the posterior. Just
-    // draw the next identity (the loop naturally continues), subject to the pool.
+    // A non-observation (flake) is dropped: it does NOT move the posterior. Most
+    // flakes can be re-drawn, but provider/session blockers are not per-identity
+    // evidence about the stored skill. If replay reaches a provider login wall,
+    // spending more robots only burns the fleet until the provider capability is
+    // fixed (e.g. GitHub-warmed robots or a repaired Google session).
     if (observation === "non_observation") {
+      if (isNonRedrawableNonObservation(res.reason)) {
+        const requiredProvider = nonObservationRequiredProvider(res.reason);
+        if (
+          requiredProvider !== undefined &&
+          requiredProvider !== opts.provider &&
+          !candidates.some(
+            (candidate, idx) => idx > i && candidate.providers.includes(requiredProvider),
+          )
+        ) {
+          const seen = new Set(outcomes.map((o) => o.identityId));
+          const rerouteCandidates = pickUnspentIdentities(
+            opts.identities,
+            opts.usage,
+            opts.service,
+            requiredProvider,
+            maxPull,
+          ).filter((candidate) => !seen.has(candidate.id));
+          if (rerouteCandidates.length > 0) {
+            candidates = [
+              ...candidates.slice(0, i + 1),
+              ...rerouteCandidates,
+            ];
+            log(
+              `[fresh-verify] ${opts.service}: replay discovered provider=${requiredProvider}; ` +
+                `rerouting from ${opts.provider} to ${rerouteCandidates.length} ` +
+                `${requiredProvider}-capable identit${rerouteCandidates.length === 1 ? "y" : "ies"}`,
+            );
+            continue;
+          }
+        }
+        lastEval = evaluateConfidence(successes, failures, {
+          ...confidence,
+          drawsRemaining: 0,
+        });
+        log(
+          `[fresh-verify] ${opts.service}: non-redrawable verifier blocker ` +
+            `(${res.reason ?? "unknown"}) — HOLD without spending more identities`,
+        );
+        break;
+      }
       continue;
     }
 
@@ -513,4 +556,27 @@ export function isNonObservation(reason: string | undefined): boolean {
   if (reason === undefined) return false;
   if (NON_OBSERVATION_CODES.includes(failureCode(reason))) return true;
   return NON_OBSERVATION_PHRASE_RE.test(reason);
+}
+
+// A subset of non-observations are verifier-capability blockers, not random
+// flakes. Re-drawing identities cannot prove the skill healthy or broken; it
+// only consumes fresh robots until the missing provider/session capability is
+// repaired out-of-band. Keep returning-user/stale-service divergence redrawable
+// so a rotated clean pool can still recover those cases.
+export function isNonRedrawableNonObservation(reason: string | undefined): boolean {
+  if (!isNonObservation(reason)) return false;
+  const code = failureCode(reason);
+  return code === "needs_login" || code === "needs_oauth_provider_session";
+}
+
+export function nonObservationRequiredProvider(
+  reason: string | undefined,
+): IdentityProvider | undefined {
+  if (reason === undefined) return undefined;
+  const explicit = /\bprovider=(google|github)\b/i.exec(reason)?.[1]?.toLowerCase();
+  if (explicit === "google" || explicit === "github") return explicit;
+  const lower = reason.toLowerCase();
+  if (/\bgithub\b/.test(lower)) return "github";
+  if (/\bgoogle\b/.test(lower)) return "google";
+  return undefined;
 }

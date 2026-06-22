@@ -26,7 +26,11 @@
 // replay so the next attempt re-fetches in case a remediation was
 // just published.
 
-import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
+import {
+  canonicalizeServiceSlug,
+  parseSkill,
+  type Skill,
+} from "@trusty-squire/skill-schema";
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -182,14 +186,15 @@ export class SkillRegistryClient {
     service: string,
     provisionId: string,
   ): Promise<SkillFetchOutcome> {
+    const serviceSlug = canonicalizeServiceSlug(service);
     // Cache check first. A registry-unavailable outcome is NOT cached
     // — we want the next call to try again.
-    const cached = this.readCache(service);
+    const cached = this.readCache(serviceSlug);
     if (cached !== null) {
       return { kind: "found", result: cached };
     }
 
-    const url = `${this.baseUrl}/skills/${encodeURIComponent(service)}`;
+    const url = `${this.baseUrl}/skills/${encodeURIComponent(serviceSlug)}`;
     const attempt = await this.fetchGetWithRetry(url, {
       "x-account-id": this.accountId,
       "x-provision-id": provisionId,
@@ -266,7 +271,7 @@ export class SkillRegistryClient {
       },
     };
 
-    this.writeCache(service, result);
+    this.writeCache(serviceSlug, result);
     return { kind: "found", result };
   }
 
@@ -325,7 +330,7 @@ export class SkillRegistryClient {
    * published correction (skill v2, say) is picked up immediately.
    */
   invalidateCache(service: string): void {
-    this.cache.delete(service);
+    this.cache.delete(canonicalizeServiceSlug(service));
   }
 
   /**
@@ -337,10 +342,11 @@ export class SkillRegistryClient {
     service: string,
     peers: readonly string[] = [],
   ): Promise<ServiceHealthOutcome> {
+    const serviceSlug = canonicalizeServiceSlug(service);
     const peersQuery =
       peers.length > 0 ? `?peers=${peers.map(encodeURIComponent).join(",")}` : "";
     const url =
-      `${this.baseUrl}/v1/services/${encodeURIComponent(service)}/health${peersQuery}`;
+      `${this.baseUrl}/v1/services/${encodeURIComponent(serviceSlug)}/health${peersQuery}`;
     const attempt = await this.fetchGetWithRetry(url, {
       "x-account-id": this.accountId,
     });

@@ -299,6 +299,15 @@ describe("findOAuthButton", () => {
     expect(findOAuthButton([glued], "google")?.selector).toBe("#glued");
   });
 
+  it("matches a provider button with a glued status suffix ('GoogleLast used')", () => {
+    const qovery = mk({
+      tag: "button",
+      visibleText: "Continue with GoogleLast used",
+      selector: "#qovery-google",
+    });
+    expect(findOAuthButton([qovery], "google")?.selector).toBe("#qovery-google");
+  });
+
   it("matches a 'Continue with GitHub' button when the provider is github", () => {
     const gh = mk({ tag: "button", visibleText: "Continue with GitHub", selector: "#gh" });
     expect(findOAuthButton([gh], "github")?.selector).toBe("#gh");

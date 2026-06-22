@@ -1024,6 +1024,10 @@ async function runSignupTask(
         service: input.service,
         stepsSink: ctx.stepsSink,
         accountId: ctx.accountId,
+        ...(input.oauth_provider !== undefined
+          ? { oauthProvider: input.oauth_provider }
+          : {}),
+        ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
       });
     }
     ctx.provisionRun.evidence.append("provision.run.completed", {
@@ -1573,6 +1577,8 @@ export async function runAutoPromote(args: {
   service: string;
   stepsSink: string[];
   accountId: string;
+  oauthProvider?: "google" | "github";
+  signupUrl?: string;
   fetchFn?: typeof globalThis.fetch;
 }): Promise<AutoPromoteResult> {
   const { service, stepsSink } = args;
@@ -1617,6 +1623,8 @@ export async function runAutoPromote(args: {
       dir: captureDir,
       service: serviceSlug,
       run_id: runId,
+      ...(args.oauthProvider !== undefined ? { oauthProvider: args.oauthProvider } : {}),
+      ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
     });
     if (result.kind !== "ok") {
       stepsSink.push(

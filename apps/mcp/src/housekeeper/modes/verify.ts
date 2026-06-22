@@ -601,6 +601,13 @@ async function runFreshIdentityVerify(
     log(`fresh-verify: ${item.service} — no identity pool; falling back to single-account replay`);
     return "fallback";
   }
+  if (fresh.kind === "returning_verified") {
+    log(
+      `fresh-verify: ${item.service} — returning-profile component check ` +
+        `${fresh.success ? "passed" : "failed"}; not a fresh verifier verdict`,
+    );
+    return "skipped";
+  }
   if (fresh.kind === "insufficient_identities") {
     log(
       `fresh-verify: ${item.service} — pool exhausted or leased (${fresh.available ?? 0} available); skipping single-account replay to avoid shared-profile false failures`,

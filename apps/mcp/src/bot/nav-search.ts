@@ -139,7 +139,7 @@ export function enumerateCandidates(inventory: readonly InteractiveElement[]): N
 // and `/settings/agent-policies` look like credential destinations and the loop
 // wanders away from the real `/settings/personal-access-tokens` page.
 export const KEYS_DESTINATION_URL =
-  /(?:\/(?:api(?:[-_]?keys?|[-_]?tokens?)?|access[-_]?tokens?|auth(?:[-_]?tokens?)?|authorization|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)|\/(?:settings|account)(?:[?#]|\/?$)|[?#][^\s]*(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|personal[-_]?access[-_]?tokens?|keys?|tokens?))/i;
+  /(?:\/(?:api(?:[-_]?keys?|[-_]?tokens?)?|access[-_]?tokens?|auth[-_]?tokens?|authorization|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)|\/(?:settings|account)(?:[?#]|\/?$)|[?#][^\s]*(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|personal[-_]?access[-_]?tokens?|keys?|tokens?))/i;
 const KEYS_HREF = KEYS_DESTINATION_URL;
 const KEYS_TEXT_STRONG = /\b(?:api|access|secret|auth|personal\s+access)\s*(?:keys?|tokens?)\b/i;
 const KEYS_TEXT_WEAK = /\b(?:developers?|settings|account)\b/i;
@@ -222,6 +222,8 @@ export function assessKeyGoal(input: {
   pageText: string;
   inventory: readonly InteractiveElement[];
 }): GoalAssessment {
+  const credentialSurface =
+    KEYS_DESTINATION_URL.test(input.url) || TOKEN_CONTEXT_TEXT.test(input.pageText);
   // A create-key affordance on a key surface → mint a fresh key. This is checked
   // BEFORE the existing-account-no-extract heuristic below, and deliberately so:
   // an EMPTY keys table still renders its column headers ("Key name" / "Created" /
@@ -232,7 +234,7 @@ export function assessKeyGoal(input: {
   // the account is virgin OR has masked existing keys. A stray "create" button
   // elsewhere can't hijack the search — we gate on being on a key surface.
   const create = findCreateKeyAffordance(input.inventory);
-  if (create !== null && KEYS_DESTINATION_URL.test(input.url)) {
+  if (create !== null && credentialSurface) {
     return { kind: "create_gated", createSelector: create.selector };
   }
   // No create affordance, but an existing-key listing with no re-reveal (e.g.
@@ -536,6 +538,20 @@ export async function runNavSearch(
         continue;
       }
       await browser.clickSelector(goal.createSelector).catch(() => {});
+      continue;
+    }
+
+    // 2) Satisfy a required onboarding choice before generic overlay dismissal.
+    // Runpod renders the API-key settings page behind a first-run modal with
+    // choices like "Personal or hobby projects"; clicking Skip leaves the modal
+    // re-presented, while selecting the least-committal option enables Continue
+    // and clears the blocker. Handle that before the broad skip/close heuristic.
+    const onboardingChoice = planOnboardingChoice({ url, pageText: text, inventory: inv });
+    if (onboardingChoice !== null && !tried.has(onboardingChoice)) {
+      tried.add(onboardingChoice);
+      log(`nav-search: onboarding choice → ${onboardingChoice}`);
+      await capture("overlay_advance", inv, onboardingChoice);
+      await browser.clickSelector(onboardingChoice).catch(() => {});
       continue;
     }
 

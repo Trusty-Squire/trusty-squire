@@ -19,6 +19,9 @@ describe("isAgreementCheckboxText", () => {
     expect(isAgreementCheckboxText("I acknowledge the privacy policy")).toBe(
       true,
     );
+    expect(isAgreementCheckboxText("I certify that I am 18 years of age or older")).toBe(
+      true,
+    );
   });
 
   it("rejects marketing/newsletter opt-ins even near agreement words", () => {

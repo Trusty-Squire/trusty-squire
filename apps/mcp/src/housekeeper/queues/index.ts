@@ -16,6 +16,7 @@
 
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
+import { canonicalizeServiceSlug } from "@trusty-squire/skill-schema";
 import {
   VerifierRegistryClient,
   type VerifierQueueItem,
@@ -179,7 +180,7 @@ export class YamlSeedQueue implements QueueProvider {
       try {
         const active = await this.opts.excludeActiveFn();
         if (active.size > 0) {
-          pool = pool.filter((e) => !active.has(e.slug.toLowerCase()));
+          pool = pool.filter((e) => !active.has(canonicalizeServiceSlug(e.slug)));
         }
       } catch {
         // best-effort: keep the full pool rather than starve the batch.
@@ -192,7 +193,7 @@ export class YamlSeedQueue implements QueueProvider {
           : undefined;
       return {
         kind: "discover" as const,
-        service: e.slug,
+        service: canonicalizeServiceSlug(e.slug),
         ...(oauthProvider !== undefined ? { oauthProvider } : {}),
         ...(e.signup_url !== undefined && e.signup_url.length > 0
           ? { signupUrl: e.signup_url }
@@ -251,7 +252,7 @@ export class AdHocServiceQueue implements QueueProvider {
     return [
       {
         kind: "discover",
-        service: this.service,
+        service: canonicalizeServiceSlug(this.service),
         ...(this.oauthProvider !== undefined
           ? { oauthProvider: this.oauthProvider }
           : {}),
@@ -282,7 +283,8 @@ export async function lookupServiceInYaml(
     const text = await reader(path);
     const parsed = parseYaml(text) as YamlSeedFile | YamlServiceEntry[];
     const list = Array.isArray(parsed) ? parsed : (parsed.services ?? []);
-    return list.find((e) => e?.slug === slug) ?? null;
+    const wanted = canonicalizeServiceSlug(slug);
+    return list.find((e) => e?.slug !== undefined && canonicalizeServiceSlug(e.slug) === wanted) ?? null;
   } catch {
     return null;
   }

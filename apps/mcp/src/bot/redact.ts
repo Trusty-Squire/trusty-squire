@@ -38,6 +38,7 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   // rc.23 — JWT (Convex, others)
   /\beyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b/g,
   /\btsm_[A-Za-z0-9]{30,}/g,
+  /\bddp_[A-Za-z0-9]{30,}/g,
   /\bwhsec_[A-Za-z0-9+/=]{20,}/g,
   /\bcfut_[A-Za-z0-9]{40,}/g,
   /\bcfat_[A-Za-z0-9]{40,}/g,

@@ -99,7 +99,15 @@ export {
   hasAnyExtractedCredential,
   isMultiCredBundle,
 } from "./credential-extraction-flow.js";
-import { captureOnboardingRound } from "./onboarding-capture.js";
+import {
+  captureOnboardingRound,
+  updateCapturedRoundSemantic,
+} from "./onboarding-capture.js";
+import {
+  evaluateSemanticTransition,
+  inferSemanticTransition,
+  type SemanticTransitionRecord,
+} from "./semantic-transition.js";
 import {
   KEYS_DESTINATION_URL,
   runNavSearch,
@@ -2822,7 +2830,7 @@ export function detectAlreadySignedIn(args: {
     const hasOrgPrefix = /\/(?:organizations?|orgs?)\//i.test(parsed.pathname);
     dashboardyPath =
       hasOrgPrefix ||
-      (/\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
+      (/\/(?:new|dashboard|projects?|account|settings|workspace|home|admin|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
         parsed.pathname,
       ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname));
   } catch {
@@ -3068,6 +3076,10 @@ export function isOauthOnlyChooser(
 // gates path 2 to truly icon-only elements (no own visible text) so a
 // card wrapper with one stray <img alt> can never match.
 const MAX_OAUTH_BUTTON_TEXT_CHARS = 60;
+function normalizeOAuthButtonText(text: string, keyword: string): string {
+  return text.replace(new RegExp(`(${keyword})(?=[A-Z])`, "gi"), "$1 ");
+}
+
 export function findOAuthButton(
   inventory: readonly InteractiveElement[],
   provider: OAuthProviderId,
@@ -3116,7 +3128,10 @@ export function findOAuthButton(
     // 3. Visible text / accessible label naming the provider + an
     //    auth verb. The auth verb requirement rejects nav and policy
     //    links that merely mention the provider.
-    const text = `${visibleText} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+    const text = normalizeOAuthButtonText(
+      `${visibleText} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+      keyword,
+    )
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
@@ -7750,6 +7765,7 @@ export class SignupAgent {
               service: task.service,
               maxRounds: task.postVerifyMaxRounds ?? 24,
               steps,
+              continuationPassword: password,
               ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
               ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
@@ -9650,6 +9666,7 @@ export class SignupAgent {
         service: task.service,
         maxRounds: task.postVerifyMaxRounds ?? 24,
         steps,
+        continuationPassword: task.generatePassword(),
         ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
         ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
         ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
@@ -10534,7 +10551,15 @@ ${formatInventory(input.inventory)}`,
     try {
       const state = await this.browser.getState();
       visitedKeysUrls.add(state.url);
-      if (EXISTING_KEY_URL_HINT.test(state.url)) {
+      const currentInventory = await this.buildInventory(steps, undefined, 80);
+      const currentText = await this.browser.extractText().catch(() => "");
+      if (
+        EXISTING_KEY_URL_HINT.test(state.url) ||
+        (findCreateKeyAffordance(currentInventory) !== null &&
+          /\b(?:api|access|auth|personal\s+access|secret|bearer)\s*(?:keys?|tokens?)\b/i.test(
+            currentText,
+          ))
+      ) {
         const here = await tryHere();
         if (here !== null) return here;
       }
@@ -10785,6 +10810,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
   private async postVerifyLoop(args: {
     service: string;
     credentials?: { email: string; password: string } | undefined;
+    continuationPassword?: string | undefined;
     maxRounds: number;
     steps: string[];
     scopeHint?: string | undefined;
@@ -11092,6 +11118,67 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             );
           }
           continue;
+        }
+      }
+      const continuationPassword =
+        args.credentials?.password ?? args.continuationPassword;
+      if (
+        continuationPassword !== undefined &&
+        isContinuationFormStep(state.html, inventory)
+      ) {
+        const passwordInputs = inventory.filter(
+          (e) =>
+            e.tag === "input" &&
+            e.type === "password" &&
+            e.visible !== false &&
+            (e.value ?? "") === "",
+        );
+        if (passwordInputs.length > 0) {
+          args.steps.push(
+            `Post-verify round ${round}: continuation password form detected — filling ${passwordInputs.length} password field(s) and submitting.`,
+          );
+          try {
+            for (const input of passwordInputs.slice(0, 3)) {
+              await this.browser.type(input.selector, continuationPassword);
+            }
+            await this.browser.wait(1);
+            const fullInv = await this.browser
+              .extractInteractiveElements()
+              .catch(() => inventory);
+            const submit =
+              pickOnboardingSubmit(fullInv) ??
+              fullInv.find((e) => {
+                if (e.visible === false) return false;
+                if (e.tag !== "button" && e.type !== "submit") return false;
+                const label = [
+                  e.visibleText,
+                  e.ariaLabel,
+                  e.title,
+                  e.labelText,
+                ]
+                  .filter((s): s is string => s !== null && s !== undefined)
+                  .join(" ");
+                return /\b(?:continue|create|finish|submit|done|get started)\b/i.test(
+                  label,
+                );
+              }) ??
+              null;
+            if (submit !== null) {
+              await this.browser.click(submit.selector);
+              await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+              hint = undefined;
+              recovery.prevContentSig = null;
+              recovery.actionEffects.length = 0;
+              continue;
+            }
+            args.steps.push(
+              `Post-verify round ${round}: continuation password fields filled but no submit control was found — planner will handle next step.`,
+            );
+          } catch (err) {
+            args.steps.push(
+              `Post-verify round ${round}: continuation password submit failed (${err instanceof Error ? err.message : String(err)}) — planner will handle next step.`,
+            );
+          }
         }
       }
       // Negative-side decision, now visibility- AND inventory-aware: a shell
@@ -11468,6 +11555,13 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // Default-on as of 0.6.14-rc.11 — writes to
       // ~/.trusty-squire/corpus/onboarding/ unless an env override
       // points elsewhere or disables it.
+      let semanticTransition: SemanticTransitionRecord = inferSemanticTransition({
+        state,
+        inventory,
+        observed: nextStep,
+        oauth,
+      });
+      const semanticCapturedRound = capturedRound;
       captureOnboardingRound({
         service: args.service,
         round: capturedRound,
@@ -11475,6 +11569,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         state,
         inventory,
         observed: nextStep,
+        semantic: semanticTransition,
         // Fix C4 — stamp the backend that produced THIS round's plan
         // (planPostVerifyStep set these via callLLM just above).
         ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
@@ -12082,6 +12177,30 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         recoveryFlow.recordNonWait();
       }
       hint = undefined;
+      let semanticVerdictUpdated = false;
+      const updateSemanticVerdict = async (): Promise<void> => {
+        if (semanticVerdictUpdated) return;
+        semanticVerdictUpdated = true;
+        try {
+          const afterFrame = await this.capturePostVerifyObservationFrame(args.steps);
+          semanticTransition = evaluateSemanticTransition(
+            semanticTransition,
+            { state, inventory, credentialPresent: hasAnyExtractedCredential(credentials) },
+            {
+              state: afterFrame.state,
+              inventory: afterFrame.inventory,
+              credentialPresent: hasAnyExtractedCredential(credentials),
+            },
+          );
+          updateCapturedRoundSemantic(args.service, semanticCapturedRound, semanticTransition);
+          args.steps.push(
+            `Post-verify semantic ${round + 1}/${args.maxRounds}: ${semanticTransition.intent.kind} ` +
+              `predicate=${semanticTransition.predicate.verdict}`,
+          );
+        } catch {
+          // Best-effort diagnostic update; never affect signup control flow.
+        }
+      };
       try {
         if (nextStep.kind === "extract") {
           // rc.16 — record that the planner has now affirmatively
@@ -12221,6 +12340,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           `Post-verify action failed (${nextStep.kind}): ${err instanceof Error ? err.message : String(err)}`,
         );
         // Don't bail — Claude may recover on the next round.
+      } finally {
+        await updateSemanticVerdict();
       }
       const syntheticResult = await syntheticCapture.afterAction({
         service: args.service,

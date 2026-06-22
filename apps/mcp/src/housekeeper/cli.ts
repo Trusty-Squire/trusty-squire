@@ -73,6 +73,7 @@ interface ParsedArgs {
   oauthProvider: "google" | "github" | undefined;
   signupUrl: string | undefined; // fresh-verify: override the bot's URL guess
   skillId: string | undefined; // fresh-verify: report the converged verdict to this skill
+  profileMode: "fresh" | "returning";
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
@@ -92,6 +93,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     oauthProvider: undefined,
     signupUrl: undefined,
     skillId: undefined,
+    profileMode: "fresh",
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
@@ -109,6 +111,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--mode=heal") args.mode = "heal";
     else if (arg === "--mode=fix") args.mode = "fix";
     else if (arg === "--mode=fresh-verify") args.mode = "fresh-verify";
+    else if (arg === "--returning-profile") args.profileMode = "returning";
+    else if (arg === "--fresh-profile") args.profileMode = "fresh";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
@@ -213,6 +217,11 @@ Pacing:
   --limit=N                 Tasks per batch (1..100, default 20).
   --interval-seconds=N      Sleep between batches (default 43200 = 12h).
   --dry / --full            Replay mode for verify mode (default --full).
+  --returning-profile       For --mode=fresh-verify, replay with the shared
+                            authenticated profile and do NOT report a fresh
+                            verifier outcome. Checks post-auth nav/extraction.
+  --fresh-profile           For --mode=fresh-verify, use fresh robot identities
+                            (default; only mode that can promote/demote).
 
   Inter-run (protects the residential exit from reputation burn — env):
   UNIVERSAL_BOT_RUN_COOLDOWN_SEC  Base cooldown between live signups (default 60; 0 disables).
@@ -446,10 +455,18 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
         ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
         ...(args.oauthProvider !== undefined ? { oauthProvider: args.oauthProvider } : {}),
+        profileMode: args.profileMode,
       });
       if (res.kind === "not_configured") {
         console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
         return 1;
+      }
+      if (res.kind === "returning_verified") {
+        console.log(
+          `[returning-verify] ${args.service}: ${res.success ? "PASS" : "FAIL"} ` +
+            `(skill_id=${res.skillId})${res.reason !== undefined ? ` — ${res.reason}` : ""}`,
+        );
+        return res.success ? 0 : 1;
       }
       if (res.kind === "insufficient_identities") {
         console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available} unspent) — mint more robots`);
@@ -585,7 +602,7 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     // hit guessSignupUrl(slug) → https://<slug>.com/signup which is
     // wrong for most non-trivial services. Falls back silently to
     // slug-only if the YAML doesn't have the slug or can't be parsed.
-    let signupUrl: string | undefined;
+    let signupUrl = args.signupUrl;
     let oauthProvider = args.oauthProvider;
     let allowExtraOAuthScopes: readonly string[] | undefined;
     const yamlEntry = await lookupAdHocServiceMetadata(args.seedPath, args.service);

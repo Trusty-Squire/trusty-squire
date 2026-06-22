@@ -394,6 +394,41 @@ describe("runDiscover — JIT re-warm on needs_login", () => {
     expect(spent).toEqual([{ id: "verify-01", service: "langfuse" }]);
   });
 
+  it("still re-warms under configured batch concurrency because the identity is leased", async () => {
+    const savedConcurrency = process.env.HOUSEKEEPER_CONCURRENCY;
+    process.env.HOUSEKEEPER_CONCURRENCY = "4";
+    try {
+      const { port } = fakePool([identity("verify-01"), identity("verify-02")]);
+      const { requests, bot } = recordingBot([needsLogin, ok]);
+      const warmed: string[] = [];
+
+      const outcome = await runDiscover(
+        { service: "openpipe", oauthProvider: "google" },
+        {
+          machineToken: "tok",
+          accountId: "acct",
+          inboxClient: stubInbox(),
+          bot,
+          identityPool: port,
+          skipAutoPromote: true,
+          warmIdentity: async (id) => {
+            warmed.push(id);
+            return true;
+          },
+        },
+      );
+
+      expect(outcome.kind).toBe("ok");
+      expect(warmed).toEqual(["verify-01"]);
+      expect(requests).toHaveLength(2);
+      expect(requests[0]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+      expect(requests[1]?.oauthAccountEmail).toBe("verify-01@trustysquire.ai");
+    } finally {
+      if (savedConcurrency === undefined) delete process.env.HOUSEKEEPER_CONCURRENCY;
+      else process.env.HOUSEKEEPER_CONCURRENCY = savedConcurrency;
+    }
+  });
+
   it("keeps the needs_login failure when re-warm fails (no retry attempt)", async () => {
     const { port } = fakePool([identity("verify-01")]);
     const { requests, bot } = recordingBot([needsLogin, ok]);

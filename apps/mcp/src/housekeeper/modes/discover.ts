@@ -686,19 +686,14 @@ export async function runDiscover(
     // second seat consumed (the one-shot invariant holds). Only meaningful for
     // a Google-OAuth attempt that actually bound a robot identity; warming is
     // best-effort and a failed/absent re-warm leaves the needs_login intact.
-    // JIT re-warm shells a SECOND Chrome on the robot's profile. Under
-    // concurrency (HOUSEKEEPER_CONCURRENCY>1) that risks contention with the
-    // batch's other in-flight Chromes / a profile a sibling slot may touch, and
-    // the warm-during-batch is what corrupted a profile in the first 3-wide run
-    // (Google "deletedaccount" state). So skip JIT-warm in concurrent mode and
-    // surface the stale robot for an OFFLINE re-warm instead.
-    const concurrentBatch =
-      (Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1) > 1;
+    // Identity leases already ensure concurrent slots cannot pick the same
+    // robot. If this attempt returned, its browser has unwound, so warming THIS
+    // leased robot is safer than surfacing needs_login and forcing operators to
+    // repair the fleet manually.
     if (
       !result.success &&
       headTokenOf(result.error) === "needs_login" &&
-      firstPlan.identityId !== undefined &&
-      !concurrentBatch
+      firstPlan.identityId !== undefined
     ) {
       const robot = firstPlan.oauthAccountEmail ?? firstPlan.identityId;
       stepsSink.push(
@@ -764,6 +759,10 @@ export async function runDiscover(
         service: input.service,
         stepsSink,
         accountId,
+        ...(explicitOAuthProvider !== undefined
+          ? { oauthProvider: explicitOAuthProvider }
+          : {}),
+        ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
       });
     } catch (err) {
       // Auto-promote failure is annotated but the discovery outcome

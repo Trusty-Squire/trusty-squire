@@ -57,3 +57,8 @@ export {
   backoffForAttempt,
 } from "./provision-policy.js";
 export type { ProvisionAction, StatePolicy } from "./provision-policy.js";
+export {
+  canonicalizeServiceSlug,
+  equivalentServiceSlugs,
+  serviceSlugLookupOrder,
+} from "./service-slugs.js";

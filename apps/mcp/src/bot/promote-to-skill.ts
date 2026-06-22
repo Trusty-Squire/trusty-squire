@@ -75,6 +75,13 @@ export interface PromoteInput {
    */
   oauthProvider?: "google" | "github";
   /**
+   * Caller-known service entry URL. OAuth capture chains often start after the
+   * provider callback, so round 0 can be a post-OAuth onboarding page rather
+   * than the replayable service entry. When present, this wins over captured
+   * round URLs for the Skill signup_url.
+   */
+  signupUrl?: string;
+  /**
    * Starting status for the synthesized skill. Defaults to
    * `pending-review` (the two-tier registry's staging slot): the
    * verifier worker flips it to `active` after N=2 fresh signups
@@ -200,8 +207,59 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
       synthesizer_version: SYNTHESIZER_VERSION,
     };
   }
-  const signupUrl = generalizeCapturedUrl(entryRound.state.url);
+  const capturedEntryUrl = stableSignupEntryUrl(entryRound.state.url, verification.rounds);
+  const signupUrl = stableSignupEntryUrl(input.signupUrl ?? capturedEntryUrl, verification.rounds);
   const oauthProvider = resolveOAuthProvider(stepsResult.steps, input.oauthProvider);
+  const shouldNavigateToCapturedEntryAfterOAuth =
+    input.signupUrl !== undefined &&
+    (() => {
+      try {
+        const signup = new URL(signupUrl);
+        const captured = new URL(capturedEntryUrl);
+        return `${signup.origin}${signup.pathname.replace(/\/+$/, "")}` !==
+          `${captured.origin}${captured.pathname.replace(/\/+$/, "")}`;
+      } catch {
+        return signupUrl !== capturedEntryUrl;
+      }
+    })();
+
+  if (
+    input.signupUrl !== undefined &&
+    oauthProvider !== null &&
+    !stepsResult.steps.some((s) => s.kind === "click_oauth_button")
+  ) {
+    const preamble: SkillStep[] = [
+      {
+        kind: "navigate",
+        url: signupUrl,
+        provenance: {
+          run_id: input.run_id,
+          round_index: 0,
+        },
+      },
+      {
+        kind: "click_oauth_button",
+        provider: oauthProvider,
+        text_match: oauthProvider === "google" ? "Google" : "GitHub",
+        provenance: {
+          run_id: input.run_id,
+          round_index: 0,
+        },
+      },
+    ];
+    if (shouldNavigateToCapturedEntryAfterOAuth) {
+      preamble.push({
+        kind: "navigate",
+        url: capturedEntryUrl,
+        provenance: {
+          run_id: input.run_id,
+          round_index: 0,
+        },
+      });
+    }
+    stepsResult.steps.unshift(...preamble);
+  }
+  stepsResult.steps = dropLateRootNavigatesBeforeHrefClicks(stepsResult.steps);
 
   // rc.24 — guarantee the first step is a navigate. When the captured
   // bot got "lucky" — landed on a page that already showed the
@@ -276,10 +334,13 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     );
     const seen = new Set<string>();
     const specs: SkillCredentialSpec[] = [];
+    const visibility = inferVisibilityFromRounds(steps, verification.rounds);
     for (const s of labeledSteps) {
       if (seen.has(s.produces)) continue;
       seen.add(s.produces);
-      specs.push(buildCredentialSpecForMulti(s.produces, "opaque", input.service));
+      specs.push(
+        buildCredentialSpecForMulti(s.produces, "opaque", input.service, visibility),
+      );
     }
     credentials = specs;
   } else if (multiCred) {
@@ -642,7 +703,39 @@ function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
       }
     }
   }
+  const clickKey = (s: SkillStep): string | null => {
+    if (s.kind !== "click") return null;
+    return `${s.text_match}|${s.role_hint ?? ""}|${s.href_hint ?? ""}`;
+  };
+  for (let i = 0; i < out.length; i += 1) {
+    const curKey = clickKey(out[i]!);
+    if (curKey === null) continue;
+    for (let j = i + 1; j < out.length; j += 1) {
+      if (clickKey(out[j]!) !== curKey) continue;
+      const between = out.slice(i + 1, j);
+      if (between.some((s) => s.kind === "fill" || s.kind === "select")) {
+        out.splice(i, 1);
+        i -= 1;
+      }
+      break;
+    }
+  }
   return out;
+}
+
+function dropLateRootNavigatesBeforeHrefClicks(steps: SkillStep[]): SkillStep[] {
+  return steps.filter((step, index) => {
+    if (index === 0 || step.kind !== "navigate") return true;
+    let url: URL;
+    try {
+      url = new URL(step.url);
+    } catch {
+      return true;
+    }
+    if (url.pathname !== "/" || url.search !== "" || url.hash !== "") return true;
+    const next = steps[index + 1];
+    return !(next?.kind === "click" && next.href_hint !== undefined);
+  });
 }
 
 // 0.8.2-rc.21 — structural equality between two skill steps, ignoring
@@ -1087,6 +1180,51 @@ export function generalizeCapturedUrl(url: string): string {
   }
 }
 
+function captureLooksLikeSignupForm(rounds: readonly OnboardingCaseFile[]): boolean {
+  return rounds.some((round) => {
+    const observed = round.observed;
+    if (observed.kind !== "fill") return false;
+    if (/\bsign[\s-]?up\b|\bregister\b|\bcreate\s+account\b/i.test(observed.reason)) {
+      return true;
+    }
+    const target = round.inventory.find((el) => el.selector === observed.selector);
+    const targetText = [
+      target?.labelText,
+      target?.placeholder,
+      target?.ariaLabel,
+      target?.id,
+      target?.name,
+    ]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join(" ");
+    return /\bconfirm\s+password\b|\bre-enter\s+password\b/i.test(targetText);
+  });
+}
+
+export function stableSignupEntryUrl(
+  url: string,
+  rounds: readonly OnboardingCaseFile[],
+): string {
+  const generalized = generalizeCapturedUrl(url);
+  if (!captureLooksLikeSignupForm(rounds)) return generalized;
+  try {
+    const u = new URL(generalized);
+    const path = u.pathname;
+    const replacement = path
+      .replace(/\/sign[-_]?in(?=\/|$)/i, "/signup")
+      .replace(/\/log[-_]?in(?=\/|$)/i, "/signup");
+    if (replacement !== path) {
+      u.pathname = replacement;
+      u.search = "";
+      u.hash = "";
+      return u.toString();
+    }
+  } catch {
+    return generalized;
+  }
+  return generalized;
+}
+
 // The path of a link element's href (no origin / query / hash), or null
 // when the element isn't a link or has no usable in-app href. Anchors
 // to external/mailto/javascript hrefs are skipped — they aren't the
@@ -1113,6 +1251,23 @@ export function pickHrefHint(el: InteractiveElement): string | null {
   } catch {
     return null;
   }
+}
+
+function pickSameTextAnchorHrefHint(
+  target: InteractiveElement,
+  hint: string,
+  inventory: readonly InteractiveElement[],
+): string | null {
+  const targetHref = pickHrefHint(target);
+  if (targetHref !== null) return targetHref;
+  const anchors = inventory.filter(
+    (el) =>
+      el.selector !== target.selector &&
+      (el.tag === "a" || el.role === "link") &&
+      pickClickText(el) === hint,
+  );
+  const hrefs = [...new Set(anchors.map((el) => pickHrefHint(el)).filter((h): h is string => h !== null))];
+  return hrefs.length === 1 ? hrefs[0]! : null;
 }
 
 function resolveClickHint(
@@ -1158,14 +1313,15 @@ function resolveClickHint(
   // (form labels, "Cancel") provides a unique nearby text that pins
   // the modal context — exactly the same shape pickRowDisambiguator
   // already handles for fill/select.
+  const hrefHint = pickSameTextAnchorHrefHint(match, hint, inventory);
+  const role = inferRoleHint(match) ?? (hrefHint !== null ? "link" : undefined);
   const duplicates = inventory.filter(
     (e) =>
       pickClickText(e) === hint &&
       e.selector !== selector &&
-      !isOwnFormControlLabelEcho(match, e, hint),
+      !isOwnFormControlLabelEcho(match, e, hint) &&
+      !(hrefHint !== null && pickHrefHint(e) === hrefHint),
   );
-  const role = inferRoleHint(match);
-  const hrefHint = pickHrefHint(match);
   if (duplicates.length > 0) {
     const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
     if (nearTextHint === null) {
@@ -1922,6 +2078,46 @@ function inferVisibility(
   return "always_visible";
 }
 
+function inferVisibilityFromRounds(
+  steps: readonly SkillStep[],
+  rounds: OnboardingCaseFile[],
+): "always_visible" | "show_once_at_creation" {
+  const extractRoundIndexes = new Set(
+    steps
+      .filter(
+        (s) =>
+          s.kind === "extract_via_copy_button" ||
+          s.kind === "extract_via_regex" ||
+          s.kind === "extract_via_copy_button_named" ||
+          s.kind === "extract_via_regex_named" ||
+          s.kind === "extract_labeled",
+      )
+      .map((s) => s.provenance.round_index),
+  );
+  if (extractRoundIndexes.size === 0) return "always_visible";
+  const haystack: string[] = [];
+  for (let i = 0; i < rounds.length; i++) {
+    if (!extractRoundIndexes.has(i)) continue;
+    const r = rounds[i]!;
+    const observed = r.observed as unknown as { reason?: string } | undefined;
+    if (typeof observed?.reason === "string") haystack.push(observed.reason);
+    if (typeof r.state?.html === "string") {
+      haystack.push(
+        r.state.html
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .slice(0, 8000),
+      );
+    }
+  }
+  const joined = haystack.join(" \n ");
+  return SHOW_ONCE_PHRASES.some((re) => re.test(joined))
+    ? "show_once_at_creation"
+    : "always_visible";
+}
+
 function validatorForShape(
   shape: SkillCredentialSpec["shape_hint"],
   rounds: OnboardingCaseFile[],
@@ -2258,6 +2454,7 @@ function upgradeToMultiCred(
   const seen = new Set<string>();
   const outSteps: SkillStep[] = [];
   const credentialsByName = new Map<string, SkillCredentialSpec>();
+  const visibility = inferVisibilityFromRounds(inputSteps, rounds);
 
   for (let i = 0; i < inputSteps.length; i++) {
     const step = inputSteps[i]!;
@@ -2300,7 +2497,7 @@ function upgradeToMultiCred(
       });
       credentialsByName.set(
         produces,
-        buildCredentialSpecForMulti(produces, "opaque", service),
+        buildCredentialSpecForMulti(produces, "opaque", service, visibility),
       );
       continue;
     }
@@ -2336,7 +2533,7 @@ function upgradeToMultiCred(
       const shape = patternToShapeHint(step.pattern_name);
       credentialsByName.set(
         produces,
-        buildCredentialSpecForMulti(produces, shape, service),
+        buildCredentialSpecForMulti(produces, shape, service, visibility),
       );
       continue;
     }
@@ -2407,6 +2604,7 @@ function buildCredentialSpecForMulti(
   name: string,
   shape: SkillCredentialSpec["shape_hint"],
   service: string,
+  visibility: "always_visible" | "show_once_at_creation" = "always_visible",
 ): SkillCredentialSpec {
   // Env var: <SERVICE>_<PRODUCES>. Twitter + api_key_secret →
   // TWITTER_API_KEY_SECRET. Maintains the "<SERVICE>_<CRED>" convention
@@ -2419,10 +2617,7 @@ function buildCredentialSpecForMulti(
     type: "api_key",
     shape_hint: shape,
     env_var_suggestion: envVar,
-    // Default to absent (== always_visible). Multi-cred skills get
-    // a per-credential visibility flag added by the visibility-
-    // inference pass only when show-once phrasing was detected for
-    // that specific credential.
+    ...(visibility === "show_once_at_creation" ? { visibility } : {}),
     // ID fields (application_id, org_id, account_id) are short — often a
     // numeric handle (pusher's app_id is 7 digits) — so a 16-char floor wrongly
     // rejects them. Use a low floor for *_id; keep 16 for key/secret/token.

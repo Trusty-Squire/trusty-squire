@@ -21,6 +21,7 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import {
   parseSkill,
+  serviceSlugLookupOrder,
   validateReplayGraph,
   SkillStatusSchema,
   type Skill,
@@ -177,7 +178,11 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
   fastify.get<{ Params: { service: string } }>(
     "/skills/:service",
     async (req, reply) => {
-      const record = await opts.store.findActiveByService(req.params.service);
+      let record: SkillStoreRecord | null = null;
+      for (const service of serviceSlugLookupOrder(req.params.service)) {
+        record = await opts.store.findActiveByService(service);
+        if (record !== null) break;
+      }
       if (record === null) {
         return reply.code(404).send({ ok: false, error: "no_active_skill" });
       }
@@ -590,6 +595,10 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function sendSkillResponse(reply: FastifyReply, record: SkillStoreRecord) {
+  const skill = sanitizeSkillForResponse({
+    ...record.payload,
+    status: record.status as Skill["status"],
+  });
   // Short cache: the status can change (demote/promote) and a 5-min cache
   // made by-id lag the live state.
   reply.header("Cache-Control", "public, max-age=30");
@@ -599,7 +608,7 @@ function sendSkillResponse(reply: FastifyReply, record: SkillStoreRecord) {
     // column (record.status) is the live truth that demote/promote update.
     // Override so by-id agrees with the list (GET /skills) instead of
     // reporting a stale status.
-    skill: { ...record.payload, status: record.status },
+    skill,
     signature: record.signature,
     signed_at: record.signed_at.toISOString(),
     signed_by: record.signed_by,
@@ -609,6 +618,39 @@ function sendSkillResponse(reply: FastifyReply, record: SkillStoreRecord) {
       consecutive_failures: record.consecutive_failures,
     },
   });
+}
+
+function sanitizeSkillForResponse(skill: Skill): Skill {
+  return {
+    ...skill,
+    steps: skill.steps.map((step) => {
+      if (
+        (step.kind === "extract_via_copy_button" ||
+          step.kind === "extract_via_copy_button_named") &&
+        "near_text_hint" in step &&
+        typeof step.near_text_hint === "string" &&
+        looksLikeSecretValue(step.near_text_hint)
+      ) {
+        return { ...step, near_text_hint: "Copy" };
+      }
+      return step;
+    }),
+  };
+}
+
+function looksLikeSecretValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 12) return false;
+  if (/^(?:sk-|sk_|sk_live_|sk_test_|sk-ant-|sk-or-|re_|rnd_|SG\.|key-)/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[A-Za-z0-9_-]{16,}$/.test(trimmed) && /[A-Za-z]/.test(trimmed) && /\d/.test(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 // ── Request body shapes + type guards ───────────────────────────────

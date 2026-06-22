@@ -17,6 +17,7 @@ import { BrowserController } from "../../bot/browser.js";
 import { makeEmailCodeFetcher } from "../../bot/email-code-fetcher.js";
 import { InboxClient } from "../../bot/inbox-client.js";
 import type { OAuthProviderId } from "../../bot/oauth-providers.js";
+import { CHROME_PROFILE_DIR } from "../../bot/profile.js";
 import { replaySkill, type ReplayOutcome } from "../../bot/replay-skill.js";
 import {
   loadIdentities,
@@ -28,6 +29,7 @@ import { replenishVerifyPool } from "../robot-replenish.js";
 import {
   freshVerifyService,
   freshVerifyConfidenceFromEnv,
+  isNonRedrawableNonObservation,
   type ConfidenceOpts,
   type FreshVerifyResult,
 } from "../fresh-verify.js";
@@ -42,6 +44,15 @@ import {
 // admin bearer).
 export type RunFreshVerifyResult =
   | (FreshVerifyResult & { transition?: VerifierOutcomeResponse["transition"] })
+  | {
+      kind: "returning_verified";
+      service: string;
+      skillId: string;
+      success: boolean;
+      credential?: string;
+      reason?: string;
+      outcome: ReplayOutcome;
+    }
   | { kind: "not_configured"; service: string };
 
 export interface RunFreshVerifyInput {
@@ -58,6 +69,11 @@ export interface RunFreshVerifyInput {
   // (FRESH_VERIFY_*) without a deploy. See ../fresh-verify.ts for the UNTUNED
   // default bounds and the calibration note.
   confidence?: ConfidenceOpts;
+  // "fresh" is the only mode allowed to drive registry promotion/demotion.
+  // "returning" is a component check for authenticated post-OAuth navigation
+  // and credential extraction. It uses the shared profile and never reports a
+  // verifier outcome, so it cannot pretend virgin signup still works.
+  profileMode?: "fresh" | "returning";
 }
 
 export interface RunFreshVerifyConfig {
@@ -83,6 +99,8 @@ export interface FreshSkillReplayInput {
   skill: Skill;
   identity: FreshVerifyIdentity;
   emailAlias: string;
+  preferredOAuthProvider?: OAuthProviderId;
+  replayTimeoutMs?: number;
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>;
 }
 
@@ -118,6 +136,20 @@ function firstCredentialFromReplay(outcome: ReplayOutcome): string | undefined {
   return undefined;
 }
 
+function skillCreatesFreshCredentialBeforeExtract(skill: Skill): boolean {
+  for (const step of skill.steps) {
+    if (step.kind === "extract_via_copy_button" || step.kind === "extract_via_regex") {
+      return false;
+    }
+    if (step.kind !== "click") continue;
+    const label = `${step.text_match ?? ""} ${step.dom_hint?.testid ?? ""} ${step.dom_hint?.id ?? ""}`;
+    if (/\b(?:create|generate|new|issue|rotate|regenerate)\b/i.test(label)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function describeReplayOutcomeForFreshVerify(outcome: ReplayOutcome): string {
   switch (outcome.kind) {
     case "ok":
@@ -143,6 +175,13 @@ function digitFree(s: string): string {
   return s.replace(/[0-9]/g, (d) => String.fromCharCode(97 + parseInt(d, 10)));
 }
 
+function returningVerifyTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.RETURNING_VERIFY_TIMEOUT_MS;
+  if (raw === undefined || raw.trim().length === 0) return 90_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 90_000;
+}
+
 function verifierTemplateValues(skill: Skill, emailAlias: string): Record<string, string> {
   const verifierTag = digitFree(skill.skill_id.slice(-6).toLowerCase());
   const tsTag = digitFree(Date.now().toString(36));
@@ -163,15 +202,38 @@ async function defaultReplayStoredSkill(
   );
   try {
     await browser.start();
-    return await replaySkill({
+    const preferredOAuthProvider =
+      input.preferredOAuthProvider ?? input.identity.providers[0];
+    const replay = replaySkill({
       skill: input.skill,
       browser,
       mode: "full",
       bypassStatusGuard: true,
       profileDir: input.identity.profileDir,
       templateValues: verifierTemplateValues(input.skill, input.emailAlias),
+      ...(preferredOAuthProvider !== undefined ? { preferredOAuthProvider } : {}),
       ...(input.fetchEmailCode !== undefined ? { fetchEmailCode: input.fetchEmailCode } : {}),
     });
+    if (input.replayTimeoutMs === undefined) return await replay;
+    return await Promise.race([
+      replay,
+      new Promise<ReplayOutcome>((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              kind: "step_failed",
+              stepIndex: 0,
+              reason: `returning replay timed out after ${input.replayTimeoutMs}ms`,
+              capturedStep: input.skill.steps[0] ?? {
+                kind: "navigate",
+                url: input.skill.signup_url,
+                provenance: { run_id: "timeout", round_index: 0 },
+              },
+            }),
+          input.replayTimeoutMs,
+        ),
+      ),
+    ]);
   } finally {
     try {
       await browser.close();
@@ -196,6 +258,73 @@ export async function runFreshVerify(
   const provider =
     input.oauthProvider ?? skill.oauth_provider ?? inferOAuthProviderFromSteps(skill) ?? "google";
   const skillId = input.skillId ?? skill.skill_id;
+  const profileMode = input.profileMode ?? "fresh";
+
+  if (profileMode === "returning") {
+    const replay = cfg.replay ?? defaultReplayStoredSkill;
+    const showOnceNames = skill.credentials
+      .filter((c) => c.visibility === "show_once_at_creation")
+      .map((c) => c.name ?? c.env_var_suggestion)
+      .filter((v) => v.length > 0);
+    if (showOnceNames.length > 0 && !skillCreatesFreshCredentialBeforeExtract(skill)) {
+      const reason =
+        `show_once_renewal_required: credential(s) [${showOnceNames.join(", ")}] ` +
+        `are only visible at creation; returning verify must create a fresh app/key ` +
+        `and extract the newly shown secret(s), not reread an old app.`;
+      log(`[returning-verify] ${input.service}: ${reason}`);
+      return {
+        kind: "returning_verified",
+        service: input.service,
+        skillId,
+        success: false,
+        reason,
+        outcome: {
+          kind: "step_failed",
+          stepIndex: 0,
+          reason,
+          capturedStep: skill.steps[0] ?? {
+            kind: "navigate",
+            url: skill.signup_url,
+            provenance: { run_id: "show_once", round_index: 0 },
+          },
+        },
+      };
+    }
+    const identity: FreshVerifyIdentity = {
+      id: "returning-profile",
+      email: "returning-profile@local",
+      profileDir: CHROME_PROFILE_DIR,
+      providers: [provider],
+    };
+    const emailAlias = `returning.${Date.now()}@trustysquire.com`;
+    log(
+      `[returning-verify] ${input.service}: replaying skill ${skillId} with shared profile ` +
+        `${CHROME_PROFILE_DIR}`,
+    );
+    const outcome = await replay({
+      skill,
+      identity,
+      emailAlias,
+      preferredOAuthProvider: provider,
+      replayTimeoutMs: returningVerifyTimeoutMs(),
+    });
+    const credential = firstCredentialFromReplay(outcome);
+    const reason =
+      credential === undefined ? describeReplayOutcomeForFreshVerify(outcome) : undefined;
+    log(
+      `[returning-verify] ${input.service}: ${credential !== undefined ? "PASS" : "FAIL"}` +
+        (reason !== undefined ? ` (${reason})` : ""),
+    );
+    return {
+      kind: "returning_verified",
+      service: input.service,
+      skillId,
+      success: credential !== undefined,
+      ...(credential !== undefined ? { credential } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      outcome,
+    };
+  }
 
   const poolConfigured = cfg.poolConfigured ?? verifyPoolConfigured;
   if (!poolConfigured()) {
@@ -245,6 +374,7 @@ export async function runFreshVerify(
       skill,
       identity,
       emailAlias: alias,
+      preferredOAuthProvider: provider,
       fetchEmailCode,
     });
     const cred = firstCredentialFromReplay(outcome);
@@ -292,6 +422,12 @@ export async function runFreshVerify(
     result.outcomes.length > 0 &&
     result.outcomes.every((o) => o.observation === "non_observation")
   ) {
+    if (result.outcomes.some((o) => isNonRedrawableNonObservation(o.reason))) {
+      log(
+        `[fresh-verify] ${input.service}: no informative samples because replay hit a ` +
+          `provider/session blocker — not rotating the pool`,
+      );
+    } else {
     log(
       `[fresh-verify] ${input.service}: no informative samples after ${result.outcomes.length} ` +
         `robot attempt(s) — rotating verify pool and retrying once`,
@@ -303,6 +439,7 @@ export async function runFreshVerify(
       maxPerPass: confidence.maxSamples,
     });
     result = await runSampler(loadPool());
+    }
   }
 
   // Report the converged posterior + verdict to the registry (D2.C). A `hold`

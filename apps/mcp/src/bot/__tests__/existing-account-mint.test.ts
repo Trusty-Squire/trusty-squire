@@ -374,6 +374,24 @@ describe("SignupAgent.attemptMintNewKey", () => {
     expect(browser.clicks).toContain("#create");
   });
 
+  it("mints from a generic settings URL when the current page visibly offers Create API Key (Runpod class)", async () => {
+    const browser = new FakeBrowser({
+      url: "https://console.runpod.io/user/settings",
+      pageText:
+        "User Settings API keys Generate unique keys that allow access to API services Create API Key",
+      candidates: [],
+      inventory: [el({ visibleText: "Create API Key", selector: "#create" })],
+      candidatesAfterCreate: ["re_runpodkeyexampleCCCCCCCCCC03"],
+    });
+    const agent = agentWith(browser);
+    const out = await mint(agent, []);
+
+    expect(out).not.toBeNull();
+    expect(out?.api_key).toBe("re_runpodkeyexampleCCCCCCCCCC03");
+    expect(browser.clicks).toContain("#create");
+    expect(browser.gotos).toHaveLength(0);
+  });
+
   it("walks keys-path fallbacks from a non-keys dashboard, then mints", async () => {
     const browser = new FakeBrowser({
       url: "https://app.example.test/onboarding",

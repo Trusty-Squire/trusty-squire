@@ -14,6 +14,7 @@ import {
   isOffSiteHref,
   isCredentialSearchDeadEndHref,
   isRequiredAccountSetupForm,
+  KEYS_DESTINATION_URL,
   findOverlayDismiss,
   findWizardAdvance,
   planOnboardingChoice,
@@ -113,6 +114,18 @@ describe("mergeInventories", () => {
     const a = [el({ selector: "#x", visibleText: "first" })];
     const b = [el({ selector: "#x", visibleText: "second" })];
     expect(mergeInventories(a, b)[0]?.visibleText).toBe("first");
+  });
+});
+
+describe("KEYS_DESTINATION_URL", () => {
+  it("does not treat auth signup/login pages as credential destinations", () => {
+    expect(KEYS_DESTINATION_URL.test("https://app.arize.com/auth/join")).toBe(false);
+    expect(KEYS_DESTINATION_URL.test("https://app.example.com/auth/login")).toBe(false);
+    expect(KEYS_DESTINATION_URL.test("https://app.example.com/auth/signup")).toBe(false);
+  });
+
+  it("still treats explicit auth-token routes as credential destinations", () => {
+    expect(KEYS_DESTINATION_URL.test("https://app.example.com/settings/auth-tokens")).toBe(true);
   });
 });
 
@@ -292,6 +305,17 @@ describe("assessKeyGoal", () => {
     if (g.kind === "create_gated") expect(g.createSelector).toBe("#create");
   });
 
+  it("create-key affordance on a generic settings URL with API-key page text → create_gated (Runpod class)", () => {
+    const inv = [el({ tag: "button", visibleText: "Create API Key", selector: "#create" })];
+    const g = assessKeyGoal({
+      url: "https://console.runpod.io/user/settings",
+      pageText: "User Settings API keys Generate unique keys Create API Key S3 API keys",
+      inventory: inv,
+    });
+    expect(g.kind).toBe("create_gated");
+    if (g.kind === "create_gated") expect(g.createSelector).toBe("#create");
+  });
+
   it("keys/settings URL with no create affordance → on_key_surface (caller extracts)", () => {
     const g = assessKeyGoal({ url: "https://x.test/settings/keys", pageText: "Your API key", inventory: dashInv });
     expect(g.kind).toBe("on_key_surface");
@@ -467,6 +491,43 @@ describe("runNavSearch", () => {
       extractKey: async () => (browser.currentUrl().includes("api-keys") ? { api_key: "sk_d" } : null),
     });
     expect(res).toEqual({ kind: "found", credentials: { api_key: "sk_d" } });
+  });
+
+  it("satisfies a required onboarding choice before trying to skip the modal (Runpod class)", async () => {
+    const choiceModal: FakePage = {
+      url: "https://console.runpod.io/user/settings",
+      text: "Welcome! What brings you to Runpod? Help us personalize your experience",
+      inv: [
+        el({ tag: "button", visibleText: "Personal or hobby projects", selector: "#personal" }),
+        el({ tag: "button", visibleText: "Professional work", selector: "#work" }),
+        el({ tag: "button", visibleText: "Skip", selector: "#skip" }),
+        el({ tag: "button", visibleText: "Continue", selector: "#continue", disabled: true }),
+      ],
+    };
+    const continueModal: FakePage = {
+      url: "https://console.runpod.io/user/settings",
+      text: "Welcome! What brings you to Runpod? Personal or hobby projects",
+      inv: [el({ tag: "button", visibleText: "Continue", selector: "#continue" })],
+    };
+    const settings: FakePage = {
+      url: "https://console.runpod.io/user/settings",
+      text: "User Settings API keys Generate unique keys",
+      inv: [el({ tag: "button", visibleText: "Create API Key", selector: "#create" })],
+    };
+    const browser = new FakeBrowser(choiceModal, {
+      "#personal": continueModal,
+      "#continue": settings,
+    });
+    const actions: string[] = [];
+    const res = await runNavSearch(browser, {
+      extractKey: async () => null,
+      mintKey: async () => ({ api_key: "runpod_key" }),
+      captureRound: async (ctx) => { actions.push(`${ctx.action}:${ctx.selector ?? ""}`); },
+    });
+    expect(res).toEqual({ kind: "found", credentials: { api_key: "runpod_key" } });
+    expect(actions).toContain("overlay_advance:#personal");
+    expect(actions).not.toContain("overlay_dismiss:#skip");
+    expect(actions).toContain("create_key:#create");
   });
 
   it("returns no_self_serve_key when no candidate is reachable", async () => {

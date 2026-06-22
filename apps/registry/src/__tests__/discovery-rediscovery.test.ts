@@ -15,11 +15,12 @@ import { SKILL_SCHEMA_VERSION, type SkillStatus } from "@trusty-squire/skill-sch
 const ADMIN_BEARER = "test-admin-bearer-9f8e7d6c";
 
 function skillFor(service: string, status: SkillStatus): Skill {
+  const skillIdPart = service.toUpperCase().replace(/[^A-Z0-9]/g, "").padEnd(18, "0").slice(0, 18);
   return {
     schema_version: SKILL_SCHEMA_VERSION,
     service,
     version: "v1",
-    skill_id: `01REDISC${service.toUpperCase().padEnd(18, "0").slice(0, 18)}`,
+    skill_id: `01REDISC${skillIdPart}`,
     signup_url: `https://${service}.example/signup`,
     oauth_provider: "google",
     steps: [
@@ -86,6 +87,16 @@ describe("GET /admin/discovery-candidates — demotion→rediscovery (T5)", () =
     await insert("render", "active");
     const items = await candidates(server);
     expect(items.find((i) => i.service === "render")).toBeUndefined();
+    await server.close();
+  });
+
+  it("does NOT rediscover a demoted legacy alias when the canonical service is active", async () => {
+    const { server, insert } = await setup();
+    await insert("anthropic-api", "active");
+    await insert("anthropic", "demoted");
+    const items = await candidates(server);
+    expect(items.find((i) => i.service === "anthropic")).toBeUndefined();
+    expect(items.find((i) => i.service === "anthropic-api")).toBeUndefined();
     await server.close();
   });
 

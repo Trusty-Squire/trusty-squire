@@ -27,7 +27,7 @@ import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwri
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { detectAsn, type AsnClass } from "./asn.js";
 import {
   CHROME_PROFILE_DIR,
@@ -433,6 +433,86 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const selfManagedChromePids = new Set<number>();
+let selfManagedCleanupInstalled = false;
+let orphanVerifyReapRan = false;
+
+function killPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // already gone / not ours
+  }
+}
+
+function cleanupSelfManagedChromes(): void {
+  for (const pid of selfManagedChromePids) killPid(pid, "SIGKILL");
+  selfManagedChromePids.clear();
+}
+
+function installSelfManagedChromeCleanup(): void {
+  if (selfManagedCleanupInstalled) return;
+  selfManagedCleanupInstalled = true;
+  process.once("exit", cleanupSelfManagedChromes);
+  const exitForSignal = (code: number): void => {
+    cleanupSelfManagedChromes();
+    process.exit(128 + code);
+  };
+  process.once("SIGINT", () => exitForSignal(2));
+  process.once("SIGTERM", () => exitForSignal(15));
+  process.once("SIGHUP", () => exitForSignal(1));
+}
+
+function registerSelfManagedChrome(child: ChildProcess): void {
+  installSelfManagedChromeCleanup();
+  if (child.pid !== undefined) selfManagedChromePids.add(child.pid);
+  child.once("exit", () => {
+    if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+  });
+}
+
+// Stale verifier browsers are the expensive leak mode: if the MCP process dies
+// mid-verify, self-launched Chrome survives as PPID=1 with a
+// ~/.trusty-squire/profiles/verify-* user-data-dir. It keeps the profile lock,
+// burns memory, and may leave defunct helper children. A live verifier should
+// never be parented to init, so these are safe to reap at the next browser
+// startup. Best-effort and Linux-only; failure must not block signups.
+function reapOrphanedVerifyBrowsersOnce(): void {
+  if (orphanVerifyReapRan) return;
+  orphanVerifyReapRan = true;
+  if (process.platform !== "linux") return;
+  let rows = "";
+  try {
+    rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString("utf8");
+  } catch {
+    return;
+  }
+  const pids: number[] = [];
+  for (const line of rows.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const args = match[3] ?? "";
+    if (
+      Number.isFinite(pid) &&
+      ppid === 1 &&
+      /(?:chrome|chromium)/i.test(args) &&
+      /--user-data-dir=.*\.trusty-squire\/profiles\/verify-[^/\s]+/.test(args)
+    ) {
+      pids.push(pid);
+    }
+  }
+  if (pids.length === 0) return;
+  console.error(`[universal-bot] reaping ${pids.length} orphaned verify Chrome process(es)`);
+  for (const pid of pids) killPid(pid, "SIGTERM");
+  setTimeout(() => {
+    for (const pid of pids) killPid(pid, "SIGKILL");
+  }, 2_000).unref();
+}
+
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -635,6 +715,7 @@ export class BrowserController {
       ];
       const child = spawn(params.binary, argv, { env: params.env, stdio: ["ignore", "ignore", "pipe"] });
       this.childChrome = child;
+      registerSelfManagedChrome(child);
       let chromeStderr = "";
       let chromeExit = "";
       child.stderr?.on("data", (chunk: Buffer) => {
@@ -742,6 +823,7 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    reapOrphanedVerifyBrowsersOnce();
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
@@ -1002,10 +1084,9 @@ export class BrowserController {
     // `ReferenceError: __name is not defined` before the real signup even
     // starts. Define the same no-op helper in every document. Built `dist`
     // should not emit these calls, but the helper is harmless there too.
-    await context.addInitScript({
-      content:
-        'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });',
-    });
+    const evaluateNameShimScript =
+      'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
+    await context.addInitScript({ content: evaluateNameShimScript });
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
@@ -1110,6 +1191,12 @@ export class BrowserController {
     })();`;
     await context.addInitScript({ content: installWebglSpoofScript });
     this.page = context.pages()[0] ?? (await context.newPage());
+    // addInitScript covers document-start page JS, but Playwright's
+    // page.evaluate utility execution can run in a separate realm. Install the
+    // same no-op helper there with a STRING evaluate (tsx cannot wrap strings
+    // with __name). This prevents dev-runtime source runs from crashing before
+    // replay reaches the service page.
+    await this.page.evaluate(evaluateNameShimScript).catch(() => undefined);
     // Re-apply on every navigation — the main-world reach patchright's isolated
     // init world denies us. framenavigated fires at navigation-commit (before
     // most page JS), so a late WebGL query (reCAPTCHA scores seconds in) sees
@@ -1117,9 +1204,12 @@ export class BrowserController {
     const reapplyWebglSpoof = (): void => {
       const pg = this.page;
       if (pg === null) return;
-      void pg.evaluate(installWebglSpoofScript).catch(() => {
-        // mid-navigation / closed page — the next navigation re-applies.
-      });
+      void (async () => {
+        await pg.evaluate(evaluateNameShimScript).catch(() => undefined);
+        await pg.evaluate(installWebglSpoofScript).catch(() => {
+          // mid-navigation / closed page — the next navigation re-applies.
+        });
+      })();
     };
     this.page.on("framenavigated", (frame) => {
       if (this.page !== null && frame === this.page.mainFrame()) reapplyWebglSpoof();
@@ -1310,6 +1400,25 @@ export class BrowserController {
     const TRANSIENT_NET =
       /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE|net::ERR_ABORTED/i;
     const MAX_GOTO_ATTEMPTS = 3;
+    const sameOriginPathAndSearch = (a: string, b: string): boolean => {
+      try {
+        const left = new URL(a);
+        const right = new URL(b);
+        return left.origin === right.origin && left.pathname === right.pathname && left.search === right.search;
+      } catch {
+        return false;
+      }
+    };
+    const landedAuthGateForTarget = (landedRaw: string, targetRaw: string): boolean => {
+      try {
+        const landed = new URL(landedRaw);
+        const target = new URL(targetRaw);
+        if (landed.origin !== target.origin) return false;
+        return /\/(?:sign[_-]?in|login|log[_-]?in|auth)(?:\/|$)/i.test(landed.pathname);
+      } catch {
+        return false;
+      }
+    };
     for (let attempt = 1; ; attempt++) {
       try {
         await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -1334,6 +1443,21 @@ export class BrowserController {
         break;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        // Some client-routed apps commit the address bar to the requested SPA
+        // route but never fire the lifecycle event Playwright is waiting for.
+        // Treat that as a successful navigation: callers immediately inspect
+        // the DOM and have their own element-level waits.
+        if (/Timeout \d+ms exceeded/i.test(msg)) {
+          await this.sleep(500);
+          if (sameOriginPathAndSearch(this.page.url(), url)) break;
+          if (landedAuthGateForTarget(this.page.url(), url)) break;
+          await this.page
+            .waitForURL((landed) => sameOriginPathAndSearch(landed.toString(), url), { timeout: 5000 })
+            .then(() => undefined)
+            .catch(() => undefined);
+          if (sameOriginPathAndSearch(this.page.url(), url)) break;
+          if (landedAuthGateForTarget(this.page.url(), url)) break;
+        }
         if (attempt >= MAX_GOTO_ATTEMPTS || !TRANSIENT_NET.test(msg)) throw err;
         // Linear backoff — give the tunnel a moment to recover a slot.
         await this.sleep(1500 * attempt);
@@ -1732,6 +1856,13 @@ export class BrowserController {
     await this.humanClick(selector);
   }
 
+  async clickNth(selector: string, index: number): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const safeIndex = Math.max(0, Math.floor(index));
+    const locator = this.page.locator(selector).nth(safeIndex);
+    await locator.click({ timeout: 8000 });
+  }
+
   // Click a link/button by its visible text. Used for one-off
   // dismissibles where the bot knows the literal label text and
   // doesn't need full inventory ranking (e.g. GitHub's "skip 2FA
@@ -1983,7 +2114,7 @@ export class BrowserController {
         // AGREEMENT_TEXT_RE / MARKETING_TEXT_RE in this module — the
         // page realm can't import, so they're inlined here.
         const agreementRe =
-          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
         const marketingRe =
           /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
 
@@ -1996,7 +2127,12 @@ export class BrowserController {
         for (const box of boxes) {
           if (box.checked || box.disabled) continue;
           const rect = box.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) continue;
+          const ancestorLabel = box.closest("label");
+          const labelRect = ancestorLabel?.getBoundingClientRect();
+          const visible =
+            (rect.width > 0 && rect.height > 0) ||
+            (labelRect !== undefined && labelRect.width > 0 && labelRect.height > 0);
+          if (!visible) continue;
 
           // Associated text = attributes + a label[for=id] + nearest
           // ancestor <label> + the immediately following sibling text.
@@ -2012,7 +2148,6 @@ export class BrowserController {
             );
             if (forLabel) parts.push(forLabel.textContent ?? "");
           }
-          const ancestorLabel = box.closest("label");
           if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
           const sibling = box.nextSibling;
           if (sibling && sibling.textContent) parts.push(sibling.textContent);
@@ -2025,12 +2160,14 @@ export class BrowserController {
 
           // React/Vue controlled inputs ignore a bare `.checked = true`:
           // their state lives in the framework, updated only by the real
-          // event flow. Set the property AND dispatch input/change AND a
-          // synthetic click so the controlled binding observes the flip.
-          box.checked = true;
+          // event flow. Click first (while unchecked) so the framework sees the
+          // same transition a user would make, then force-ensure checked and
+          // dispatch input/change for styled/hidden inputs whose click target
+          // does not toggle the underlying control.
+          box.click();
+          if (!box.checked) box.checked = true;
           box.dispatchEvent(new Event("input", { bubbles: true }));
           box.dispatchEvent(new Event("change", { bubbles: true }));
-          box.click();
 
           const label =
             box.getAttribute("data-testid") ||
@@ -2852,7 +2989,7 @@ export class BrowserController {
     // misreads "URL unchanged, not on provider" as "OAuth completed"
     // and the run falls apart.
     //
-    // Poll for up to 6s for the disabled state to clear. Both the
+    // Poll for up to 15s for the disabled state to clear. Both the
     // HTML `disabled` attribute AND `aria-disabled="true"` are
     // honored — the latter covers ARIA-styled buttons (Radix, Headless
     // UI) that visually appear interactive but reject input.
@@ -2871,7 +3008,7 @@ export class BrowserController {
     // next round's reason includes "click failed: target is
     // aria-disabled" and the planner pivots to checking other fields.
     {
-      const deadline = Date.now() + 6000;
+      const deadline = Date.now() + 15_000;
       let isDisabled = false;
       while (Date.now() < deadline) {
         isDisabled = await locator
@@ -2894,7 +3031,7 @@ export class BrowserController {
         // the generic hint didn't say WHICH field blocked it). Feedback only.
         const hint = await this.unfilledRequiredHint();
         throw new Error(
-          "target is disabled (HTML disabled or aria-disabled=true) after 6s — " +
+          "target is disabled (HTML disabled or aria-disabled=true) after 15s — " +
             "the click would no-op. A required precondition is unmet: an empty " +
             "input, an unselected dropdown, an unchecked agreement checkbox, or " +
             "a missing preset/permission choice. Do NOT retry this click — pick a " +
@@ -3844,6 +3981,108 @@ export class BrowserController {
     return await this.page.evaluate(() => document.body?.innerText ?? "");
   }
 
+  async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(async (rawPrefix) => {
+      const prefix = String(rawPrefix ?? "").replace(/^\/+|\/+$/g, "").toLowerCase();
+      const candidates: string[] = [];
+      const seen = new Set<string>();
+      const add = (value: unknown) => {
+        if (typeof value !== "string") return;
+        const trimmed = value.trim();
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$/.test(trimmed)) return;
+        if (seen.has(trimmed)) return;
+        seen.add(trimmed);
+        candidates.push(trimmed);
+      };
+      const pathSegments = (href: string): string[] => {
+        try {
+          return new URL(href, location.origin).pathname.split("/").filter(Boolean);
+        } catch {
+          return [];
+        }
+      };
+
+      for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+        const segs = pathSegments(anchor.getAttribute("href") ?? "");
+        if ((segs[0] ?? "").toLowerCase() === prefix) add(segs[1]);
+      }
+
+      const walk = (value: unknown) => {
+        if (Array.isArray(value)) {
+          for (const item of value) walk(item);
+          return;
+        }
+        if (value === null || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        const preferredKeys =
+          prefix === "p" || prefix.startsWith("project")
+            ? ["slug", "projectSlug", "currentProjectSlug", "lastViewedProjectSlug", "id"]
+            : prefix.startsWith("org") || prefix.startsWith("organization")
+              ? ["slug", "orgSlug", "organizationSlug", "id"]
+              : prefix.startsWith("workspace")
+                ? ["slug", "workspaceSlug", "id"]
+                : ["slug", "id"];
+        for (const key of preferredKeys) add(record[key]);
+        for (const item of Object.values(record)) walk(item);
+      };
+
+      const inspectJsonText = (text: string) => {
+        try {
+          walk(JSON.parse(text));
+        } catch {
+          // Ignore non-JSON storage/API payloads.
+        }
+      };
+      try {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (key !== null) inspectJsonText(localStorage.getItem(key) ?? "");
+        }
+        for (let i = 0; i < sessionStorage.length; i += 1) {
+          const key = sessionStorage.key(i);
+          if (key !== null) inspectJsonText(sessionStorage.getItem(key) ?? "");
+        }
+      } catch {
+        // Storage can be blocked in hardened contexts; DOM/API probes are enough.
+      }
+
+      const likelyListApi = (url: string): boolean => {
+        const lower = url.toLowerCase();
+        if (!lower.includes("api")) return false;
+        if (prefix === "p" || prefix.startsWith("project")) return /projects?[\w.-]*list|list[\w.-]*projects?/.test(lower);
+        if (prefix.startsWith("org") || prefix.startsWith("organization")) return /organi[sz]ations?[\w.-]*list|orgs?[\w.-]*list|list[\w.-]*(orgs?|organi[sz]ations?)/.test(lower);
+        if (prefix.startsWith("workspace")) return /workspaces?[\w.-]*list|list[\w.-]*workspaces?/.test(lower);
+        return /list/.test(lower);
+      };
+      const urls = Array.from(
+        new Set(
+          performance
+            .getEntriesByType("resource")
+            .map((entry) => entry.name)
+            .filter(likelyListApi),
+        ),
+      ).slice(-8);
+      for (const url of urls) {
+        try {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 1_500);
+          const res = await fetch(url, {
+            credentials: "include",
+            signal: controller.signal,
+          });
+          window.clearTimeout(timeout);
+          if (!res.ok) continue;
+          inspectJsonText(await res.text());
+        } catch {
+          // Best-effort only; resolver falls back to text/href matching.
+        }
+      }
+
+      return candidates.slice(0, 20);
+    }, prefix);
+  }
+
   // Discrete strings an API key might occupy — for credential
   // extraction. Gathered so a key is read WHOLE and un-glued from its
   // neighbours: extractText() concatenates the whole <body>, which
@@ -4516,7 +4755,12 @@ export class BrowserController {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const state = (await this.page.evaluate(authWidgetHydrationProbe)) as {
+        const state = (await Promise.race([
+          this.page.evaluate(authWidgetHydrationProbe),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("auth widget probe timed out")), 1_500),
+          ),
+        ])) as {
           hasAuth: boolean;
           spinnerVisible: boolean;
         };
@@ -4548,19 +4792,24 @@ export class BrowserController {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const count = await this.page.evaluate((min: number) => {
-          const sels =
-            'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
-          const nodes = Array.from(document.querySelectorAll(sels));
-          let visible = 0;
-          for (const n of nodes) {
-            const el = n as HTMLElement;
-            const r = el.getBoundingClientRect();
-            if (r.width >= 2 && r.height >= 2) visible++;
-            if (visible >= min) return visible;
-          }
-          return visible;
-        }, minElements);
+        const count = await Promise.race([
+          this.page.evaluate((min: number) => {
+            const sels =
+              'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
+            const nodes = Array.from(document.querySelectorAll(sels));
+            let visible = 0;
+            for (const n of nodes) {
+              const el = n as HTMLElement;
+              const r = el.getBoundingClientRect();
+              if (r.width >= 2 && r.height >= 2) visible++;
+              if (visible >= min) return visible;
+            }
+            return visible;
+          }, minElements),
+          new Promise<number>((_, reject) =>
+            setTimeout(() => reject(new Error("interactive DOM probe timed out")), 1_500),
+          ),
+        ]);
         if (count >= minElements) return;
       } catch {
         // Page may be mid-navigation — try again on the next tick.
@@ -6087,6 +6336,7 @@ export class BrowserController {
       } catch {
         /* already gone */
       }
+      if (this.childChrome.pid !== undefined) selfManagedChromePids.delete(this.childChrome.pid);
       this.childChrome = null;
     }
     // …and context.close() doesn't always kill the browser: headed Chrome
@@ -6204,7 +6454,7 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
 // can't import, so the same two regexes are inlined there verbatim —
 // keep them BYTE-IDENTICAL with these.
 const AGREEMENT_TEXT_RE =
-  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
 const MARKETING_TEXT_RE =
   /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
 const SAFE_SIGNUP_CHOICE_TEXT_RE =

@@ -24,6 +24,7 @@ import {
   pickHrefHint,
   hasEphemeralPathSegment,
   generalizeCapturedUrl,
+  stableSignupEntryUrl,
   isIdentityProviderUrl,
   isUnstableSignupEntryUrl,
 } from "../promote-to-skill.js";
@@ -75,6 +76,44 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     ).toBe("https://cloud.zilliz.com/signup/verify");
     expect(generalizeCapturedUrl("https://x.co/signup?email=a@b.co&plan=pro")).toBe(
       "https://x.co/signup?plan=pro",
+    );
+  });
+
+  it("stableSignupEntryUrl rewrites login routes only for captured signup forms", () => {
+    const signupRounds = [
+      {
+        observed: {
+          kind: "fill",
+          selector: "#confirm-password",
+          value: "pw",
+          reason: "Fill the signup password",
+        },
+        inventory: [
+          {
+            selector: "#confirm-password",
+            labelText: "Confirm Password",
+            placeholder: "Re-enter Password",
+          },
+        ],
+      },
+    ] as any;
+    const loginRounds = [
+      {
+        observed: {
+          kind: "fill",
+          selector: "#password",
+          value: "pw",
+          reason: "Fill password",
+        },
+        inventory: [{ selector: "#password", labelText: "Password" }],
+      },
+    ] as any;
+
+    expect(stableSignupEntryUrl("https://app.mor.org/signin", signupRounds)).toBe(
+      "https://app.mor.org/signup",
+    );
+    expect(stableSignupEntryUrl("https://app.mor.org/signin", loginRounds)).toBe(
+      "https://app.mor.org/signin",
     );
   });
 
@@ -329,7 +368,7 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     const { dir, runId } = setupCaptures(rounds);
 
     const result = promoteToSkill({ dir, service, run_id: runId });
-    if (result.kind !== "ok") throw new Error("expected ok");
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
 
     const fillStep = result.skill.steps[1]!;
     if (fillStep.kind !== "fill") throw new Error("expected fill");
@@ -863,6 +902,185 @@ describe("promoteToSkill — OAuth provider detection", () => {
 
     if (result.kind !== "ok") throw new Error("expected ok");
     expect(result.skill.oauth_provider).toBe("google");
+  });
+
+  it("uses caller signupUrl and prepends OAuth when capture starts after provider callback", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/account/complete-profile",
+          title: "Complete profile",
+          html: "<html><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.continue", reason: "Continue" },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/p/project/settings",
+          title: "Project settings",
+          html: "<html>Project API Keys <button>Copy</button> opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({
+      dir,
+      service,
+      run_id: runId,
+      oauthProvider: "google",
+      signupUrl: "https://app.openpipe.ai/",
+    });
+
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
+    expect(result.skill.signup_url).toBe("https://app.openpipe.ai/");
+    expect(result.skill.oauth_provider).toBe("google");
+    expect(result.skill.steps[0]).toMatchObject({
+      kind: "navigate",
+      url: "https://app.openpipe.ai/",
+    });
+    expect(result.skill.steps[1]).toMatchObject({
+      kind: "click_oauth_button",
+      provider: "google",
+    });
+    expect(result.skill.steps[2]).toMatchObject({
+      kind: "navigate",
+      url: "https://app.openpipe.ai/account/complete-profile",
+    });
+  });
+
+  it("drops a premature duplicate submit before required form fills", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            placeholder: "Acme",
+            selector: "input.company",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.continue", reason: "Tried submit too early" },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            placeholder: "Acme",
+            selector: "input.company",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "fill", selector: "input.company", value: "Acme", reason: "Fill company" },
+      },
+      {
+        service,
+        round: 2,
+        oauth: false,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            placeholder: "Acme",
+            selector: "input.company",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.continue", reason: "Submit after fill" },
+      },
+      {
+        service,
+        round: 3,
+        oauth: false,
+        state: {
+          url: "https://example.com/settings",
+          title: "Settings",
+          html: "<html><button>Copy</button> sk_test_abcdefghijklmnopqrstuvwxyz123456</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "api_key='sk_test_abcdefghijklmnopqrstuvwxyz123456'" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
+    const clicks = result.skill.steps.filter((s) => s.kind === "click");
+    expect(clicks).toHaveLength(1);
+    expect(result.skill.steps.map((s) => s.kind)).toContain("fill");
+    expect(clicks[0]).toMatchObject({ text_match: "Continue" });
   });
 
   it("does not stamp an explicit OAuth provider onto an email-signup graph", () => {
@@ -1899,6 +2117,25 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     expect(envVars.has(`${upperService}_BEARER_TOKEN`)).toBe(true);
   });
 
+  it("marks every multi-credential secret show_once_at_creation when extraction rounds warn once-only", () => {
+    const service = uniqueService();
+    const rounds = twitterMultiCredRounds(service);
+    for (const round of rounds) {
+      round.state.html = round.state.html.replace(
+        "</body>",
+        " This secret is displayed only once. Make sure to copy it now.</body>",
+      );
+    }
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    expect(result.skill.credentials).toHaveLength(3);
+    expect(result.skill.credentials.every((c) => c.visibility === "show_once_at_creation")).toBe(true);
+  });
+
   it("collapses a re-extraction that derives the same produces (0.8.11)", () => {
     // Two rounds deriving the same `produces` are NOT a multi-cred
     // conflict — they're the post-verify loop re-extracting one
@@ -2674,6 +2911,72 @@ describe("pickHrefHint", () => {
     expect(pickHrefHint(inventoryElement({ tag: "a", href: "#" }))).toBeNull();
     expect(pickHrefHint(inventoryElement({ tag: "a", href: "/" }))).toBeNull();
     expect(pickHrefHint(inventoryElement({ tag: "a", href: null }))).toBeNull();
+  });
+
+  it("synthesizes href_hint from a same-text anchor when the clicked target is an inner element", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/p/abc123/request-logs",
+          title: "Request Logs",
+          html: "<html>Project Settings <button>Copy</button> opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "div",
+            visibleText: "Project Settings",
+            selector: "a.settings > span > div",
+          }),
+          inventoryElement({
+            tag: "a",
+            visibleText: "Project Settings",
+            selector: "a.settings",
+            href: "/p/abc123/settings",
+          }),
+        ],
+        observed: {
+          kind: "click",
+          selector: "a.settings > span > div",
+          reason: "Open project settings",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/p/abc123/settings",
+          title: "Settings",
+          html: "<html><button>Copy</button> opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId, oauthProvider: "google" });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const click = result.skill.steps.find((s) => s.kind === "click");
+    expect(click).toMatchObject({
+      kind: "click",
+      text_match: "Project Settings",
+      href_hint: "/p/abc123/settings",
+    });
   });
 });
 

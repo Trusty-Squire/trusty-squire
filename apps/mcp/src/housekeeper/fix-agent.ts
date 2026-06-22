@@ -215,7 +215,16 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
   const baseCounts = new Map<string, number>();
   for (const f of batch.failures) {
     const observedKind = f.terminal_page?.observed.kind ?? "none";
-    const familyKey = `${f.failure_stage}:${observedKind}:${f.signature}`;
+    const semanticIntent = f.terminal_page?.semantic?.intent.kind;
+    const semanticVerdict = f.terminal_page?.semantic?.predicate.verdict;
+    const semanticShape =
+      semanticIntent !== undefined
+        ? `${semanticIntent}:${semanticVerdict ?? "unchecked"}`
+        : observedKind;
+    const familyKey =
+      f.semantic_failure_bucket !== undefined
+        ? `${f.semantic_fault_class ?? "unknown"}:${f.semantic_failure_bucket}:${semanticShape}:${f.signature}`
+        : `${f.failure_stage}:${semanticShape}:${f.signature}`;
     // Service is part of the fix unit. Cross-service shape collisions produced
     // huge heterogeneous clusters (e.g. fly/braintrust/clarifai/nomic/
     // stackblitz/unify) whose shared "planner_loop" label hid distinct

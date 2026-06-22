@@ -62,6 +62,12 @@ describe("redactCredentials", () => {
     const out = redactCredentials("Bearer tsm_A9cRiZhNff41IEryXECEH2DQNdkM88gUb2tPZMMGn94");
     expect(out).not.toContain("A9cRiZhNff41IEryXECEH2DQNdkM88gUb2tPZMMGn94");
   });
+
+  it("strips Deno deploy tokens", () => {
+    const out = redactCredentials("api_key=ddp_mBgBqQFPmWV4r0JoSTkb0r7xLaQ48Y0LNpgr");
+    expect(out).not.toContain("mBgBqQFPmWV4r0JoSTkb0r7xLaQ48Y0LNpgr");
+    expect(out).toContain("ddp_REDACTED");
+  });
 });
 
 // Memory-overhaul Phase 2 — DOM-secret scrub for the evidence-upload path.

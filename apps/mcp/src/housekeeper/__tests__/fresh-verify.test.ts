@@ -5,6 +5,8 @@ import {
   freshVerifyService,
   isHardFailure,
   isNonObservation,
+  isNonRedrawableNonObservation,
+  nonObservationRequiredProvider,
   wilsonInterval,
   DEFAULT_PROMOTE_FLOOR,
   DEFAULT_REJECT_CEILING,
@@ -16,11 +18,14 @@ import {
   type VerifyIdentity,
 } from "../identity-pool.js";
 
-const ID = (id: string): VerifyIdentity => ({
+const ID = (
+  id: string,
+  providers: VerifyIdentity["providers"] = ["google"],
+): VerifyIdentity => ({
   id,
   email: `${id}@trustysquire.ai`,
   profileDir: `/p/${id}`,
-  providers: ["google"],
+  providers,
 });
 const POOL = [ID("verify-01"), ID("verify-02"), ID("verify-03")];
 const POOL4 = [...POOL, ID("verify-04")];
@@ -232,6 +237,56 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(marked[0]).toBe("verify-01");
   });
 
+  it("a provider/session blocker reroutes to a capable identity when the pool has one", async () => {
+    const marked: string[] = [];
+    const runSignup = vi.fn(async (identity: VerifyIdentity) =>
+      identity.providers.includes("github")
+        ? { success: true, credential: "k-github" }
+        : {
+            success: false,
+            reason: "needs_login: stored-skill replay provider=github step=0",
+          },
+    );
+    const res = await freshVerifyService({
+      service: "replicate",
+      provider: "google",
+      identities: [ID("verify-01"), ID("verify-gh", ["github"])],
+      usage: [],
+      runSignup,
+      markSpent: (id) => marked.push(id),
+    });
+
+    expect(res.kind).toBe("verified");
+    expect(res.verdict).toBe("promote");
+    expect(res.samples).toBe(1);
+    expect(res.outcomes).toHaveLength(2);
+    expect(runSignup).toHaveBeenCalledTimes(2);
+    expect(marked).toEqual(["verify-01", "verify-gh"]);
+  });
+
+  it("a provider/session blocker holds after one robot when no capable identity exists", async () => {
+    const marked: string[] = [];
+    const runSignup = vi.fn(async () => ({
+      success: false,
+      reason: "needs_login: stored-skill replay provider=github step=0",
+    }));
+    const res = await freshVerifyService({
+      service: "replicate",
+      provider: "google",
+      identities: POOL4,
+      usage: [],
+      runSignup,
+      markSpent: (id) => marked.push(id),
+    });
+
+    expect(res.kind).toBe("verified");
+    expect(res.verdict).toBe("hold");
+    expect(res.samples).toBe(0);
+    expect(res.outcomes).toHaveLength(1);
+    expect(runSignup).toHaveBeenCalledOnce();
+    expect(marked).toEqual(["verify-01"]);
+  });
+
   it("one HARD wall holds; two independent HARD walls reject", async () => {
     const marked: string[] = [];
     const res = await freshVerifyService({
@@ -402,5 +457,37 @@ describe("isNonObservation", () => {
     expect(isNonObservation("step_failed: button gone")).toBe(false);
     expect(isNonObservation("validator_failed: wrong key")).toBe(false);
     expect(isNonObservation(undefined)).toBe(false);
+  });
+});
+
+describe("isNonRedrawableNonObservation", () => {
+  it("treats provider/session blockers as non-redrawable verifier capability gaps", () => {
+    expect(
+      isNonRedrawableNonObservation("needs_login: stored-skill replay provider=github step=0"),
+    ).toBe(true);
+    expect(
+      isNonRedrawableNonObservation("needs_oauth_provider_session: google profile stale"),
+    ).toBe(true);
+  });
+
+  it("keeps stale returning-user divergence redrawable by pool rotation", () => {
+    expect(
+      isNonRedrawableNonObservation(
+        "step_failed: stored-skill replay step=3 [returning-user: authenticated session diverged from fresh-signup capture]",
+      ),
+    ).toBe(false);
+    expect(isNonRedrawableNonObservation("nav_timeout: tunnel stall")).toBe(false);
+  });
+});
+
+describe("nonObservationRequiredProvider", () => {
+  it("extracts the provider required by a replay blocker", () => {
+    expect(
+      nonObservationRequiredProvider("needs_login: stored-skill replay provider=github step=0"),
+    ).toBe("github");
+    expect(nonObservationRequiredProvider("needs_oauth_provider_session: google profile stale")).toBe(
+      "google",
+    );
+    expect(nonObservationRequiredProvider("nav_timeout: tunnel stall")).toBeUndefined();
   });
 });

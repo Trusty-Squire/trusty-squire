@@ -181,9 +181,9 @@
     the first run.
 
     '
-- slug: together
+- slug: together-ai
   name: Together AI
-  signup_url: https://api.together.xyz/signin
+  signup_url: https://api.together.ai/
   oauth_provider: google
   scope_hint: null
   status: pending

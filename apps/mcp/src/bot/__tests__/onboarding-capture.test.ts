@@ -16,10 +16,12 @@ import {
   resetCaptureChain,
   resolveCaptureDir,
   summarizeRunOutcome,
+  updateCapturedRoundSemantic,
   verifyCaptureChain,
   type OnboardingCaseFile,
   type OnboardingOutcomeFile,
 } from "../onboarding-capture.js";
+import { inferSemanticTransition } from "../semantic-transition.js";
 import type { PostVerifyStep, SignupResult } from "../agent.js";
 
 // Synthetic test fixtures — never any real captures.
@@ -126,6 +128,36 @@ describe("captureOnboardingRound — format", () => {
 
       expect(r1.prev_hash).toBe(r0.content_hash);
       expect(r1.content_hash).not.toBe(r0.content_hash);
+    });
+  });
+
+  it("updates a captured round's semantic verdict and preserves chain integrity", () => {
+    withCaptureDir((dir) => {
+      const service = uniqueService();
+      const round0 = mockRound(0, service);
+      captureOnboardingRound(round0);
+      const files = readdirSync(dir).sort();
+      const runId = files[0]!.match(/^[^-]+(?:-[^-]+)*-(.+)-r0\.json$/)?.[1];
+      expect(runId).toBeDefined();
+
+      const semantic = inferSemanticTransition({
+        state: round0.state,
+        inventory: round0.inventory,
+        observed: round0.observed,
+        oauth: round0.oauth,
+      });
+      updateCapturedRoundSemantic(service, 0, {
+        ...semantic,
+        predicate: { ...semantic.predicate, verdict: "satisfied" },
+      });
+      captureOnboardingRound(mockRound(1, service));
+
+      const verified = verifyCaptureChain(dir, service, runId!);
+      expect(verified.ok).toBe(true);
+      if (verified.ok) {
+        expect(verified.rounds[0]!.semantic?.predicate.verdict).toBe("satisfied");
+        expect(verified.rounds[1]!.prev_hash).toBe(verified.rounds[0]!.content_hash);
+      }
     });
   });
 

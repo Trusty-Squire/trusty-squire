@@ -39,6 +39,16 @@ describe("isContinuationFormStep", () => {
     ).toBe(true);
   });
 
+  it("flags Arize-style post-OAuth 'Create New Password' steps", () => {
+    expect(
+      isContinuationFormStep("Create New Password New Password Confirm Password Continue", [
+        el({ tag: "input", type: "password", value: "", labelText: "New Password", selector: "#new" }),
+        el({ tag: "input", type: "password", value: "", labelText: "Confirm Password", selector: "#confirm" }),
+        el({ tag: "button", visibleText: "Continue", selector: "#continue" }),
+      ]),
+    ).toBe(true);
+  });
+
   it("does NOT flag a settled dashboard (no password field)", () => {
     expect(
       isContinuationFormStep("API Keys Dashboard Default Project", [

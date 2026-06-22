@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadIdentities, loadUsage } from "./identity-pool.js";
@@ -61,7 +63,7 @@ export async function replenishVerifyPool(opts: ReplenishVerifyPoolOpts): Promis
       ? `pool replenish: no fresh service robot available — rotating ${n}/${worn} robot(s) (cost-flat, delete-before-create)`
       : `pool replenish: ${worn} robot(s) spent at >=${spentGe} services — rotating ${n} (cost-flat, delete-before-create)`,
   );
-  const cwd = process.cwd();
+  const cwd = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
   let fresh: string[] = [];
   try {
     const out = execFileSync("node", ["tools/provision-verify-robot.mjs", "rotate", `--make-room=${n}`], {

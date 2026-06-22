@@ -44,6 +44,13 @@ import { join } from "node:path";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep, SignupResult } from "./agent.js";
 import { classifyFailureStage, type FailureStage } from "./failure-stage.js";
+import {
+  classifySemanticFailure,
+  inferSemanticTransition,
+  type SemanticFailureBucket,
+  type SemanticFaultClass,
+  type SemanticTransitionRecord,
+} from "./semantic-transition.js";
 
 // Capture format version. Bumped when round-shape changes incompatibly.
 // The promoter rejects unknown versions (E2). Same-major minor changes
@@ -108,6 +115,10 @@ export interface OnboardingRoundCapture {
   // attributable from the corpus (which round used which backend).
   resolved_model?: string;
   resolved_provider?: string;
+  // Machine-readable semantic contract for this planner transition. The raw
+  // observed step remains the source of truth for replay synthesis; this is the
+  // planner-correctness/eval surface.
+  semantic?: SemanticTransitionRecord;
 }
 
 // Wire shape of one dumped round. `expect: null` is the curator slot;
@@ -126,6 +137,9 @@ export interface OnboardingCaseFile {
   // and the format stays forward-compatible.
   resolved_model?: string;
   resolved_provider?: string;
+  // Additive semantic transition metadata. Optional so old captures remain
+  // readable and future semantic schema versions can coexist.
+  semantic?: SemanticTransitionRecord;
   expect: null;
   prev_hash: string | null;
   content_hash: string;
@@ -208,6 +222,14 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
       state: entry.state,
       inventory: entry.inventory,
       observed: entry.observed,
+      semantic:
+        entry.semantic ??
+        inferSemanticTransition({
+          state: entry.state,
+          inventory: entry.inventory,
+          observed: entry.observed,
+          oauth: entry.oauth,
+        }),
       // Only set when present so a round that has no resolved_* (older
       // client / backend that didn't report) hashes identically to before
       // — this keeps the integrity chain forward-compatible.
@@ -228,6 +250,47 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
     lastRound = Math.max(lastRound ?? -1, entry.round);
   } catch {
     // best-effort — capture is diagnostic, never load-bearing
+  }
+}
+
+// Patch the semantic verdict for the most recently-written round before the
+// next round extends the hash chain. This keeps the existing "one capture per
+// planner step" contract while letting the executor fill in the post-action
+// predicate verdict after it observes the resulting browser state.
+export function updateCapturedRoundSemantic(
+  service: string,
+  round: number,
+  semantic: SemanticTransitionRecord,
+): void {
+  const dir = resolveCaptureDir();
+  if (dir === null || runId === undefined) return;
+  try {
+    const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const file = join(dir, `${slug}-${runId}-r${round}.json`);
+    const current = JSON.parse(readFileSync(file, "utf8")) as OnboardingCaseFile;
+    const payload: Omit<OnboardingCaseFile, "content_hash" | "expect"> = {
+      capture_format_version: current.capture_format_version,
+      name: current.name,
+      service: current.service,
+      oauth: current.oauth,
+      state: current.state,
+      inventory: current.inventory,
+      observed: current.observed,
+      semantic,
+      ...(current.resolved_model !== undefined ? { resolved_model: current.resolved_model } : {}),
+      ...(current.resolved_provider !== undefined ? { resolved_provider: current.resolved_provider } : {}),
+      prev_hash: current.prev_hash,
+    };
+    const contentHash = computeContentHash(payload);
+    const updated: OnboardingCaseFile = {
+      ...payload,
+      expect: current.expect,
+      content_hash: contentHash,
+    };
+    writeFileSync(file, JSON.stringify(updated, null, 2));
+    chainHead.set(`${slug}|${runId}`, contentHash);
+  } catch {
+    // best-effort — semantic verdicts are diagnostic, never load-bearing
   }
 }
 
@@ -257,6 +320,11 @@ export interface RunOutcomeRecord {
   // Which terminal stage a failed run stopped at (B1 taxonomy). "none" on
   // success. See classifyFailureStage in failure-stage.ts.
   failure_stage: FailureStage;
+  // Coarse semantic diagnosis for the terminal failure. These fields make the
+  // denominator explicit: planner-correctable failures are separate from
+  // executor/transition failures and external walls/infra.
+  semantic_failure_bucket?: SemanticFailureBucket;
+  semantic_fault_class?: SemanticFaultClass;
   // Highest captured round index, or null if the run captured no rounds.
   terminal_round: number | null;
 }
@@ -306,11 +374,26 @@ export function summarizeRunOutcome(
         return typeof v === "string" && v.length > 0;
       })
     : [];
+  const failureStage = classifyFailureStage(result, reachedOnboarding);
+  const semantic =
+    failureStage === "none"
+      ? undefined
+      : classifySemanticFailure({
+          failureStage,
+          ...(result.error !== undefined ? { error: result.error } : {}),
+          reachedOnboarding,
+        });
   return {
     ok: result.success,
     credential_present: fields.length > 0,
     credential_fields: fields,
-    failure_stage: classifyFailureStage(result, reachedOnboarding),
+    failure_stage: failureStage,
+    ...(semantic !== undefined
+      ? {
+          semantic_failure_bucket: semantic.bucket,
+          semantic_fault_class: semantic.fault_class,
+        }
+      : {}),
     terminal_round: terminalRound,
   };
 }

@@ -36,6 +36,8 @@ interface StubBrowser {
   controller: BrowserController;
   history: StubCall[];
   setInventoryFor(method: "extract", inv: InteractiveElement[]): void;
+  setInventorySequence(seq: InteractiveElement[][]): void;
+  setGotoResultUrl(url: string | null): void;
   setTextFor(text: string): void;
   setCandidatesFor(candidates: string[]): void;
   setClipboardFor(clip: string): void;
@@ -57,6 +59,10 @@ function inv(overrides: Partial<InteractiveElement>): InteractiveElement {
     visible: overrides.visible ?? true,
     inViewport: overrides.inViewport ?? true,
     inConsentWidget: overrides.inConsentWidget ?? false,
+    href: overrides.href ?? null,
+    iconLabel: overrides.iconLabel ?? null,
+    title: overrides.title ?? null,
+    testId: overrides.testId ?? null,
     value: overrides.value ?? null,
     interactedThisRun: overrides.interactedThisRun ?? false,
   };
@@ -65,9 +71,11 @@ function inv(overrides: Partial<InteractiveElement>): InteractiveElement {
 function stubBrowser(): StubBrowser {
   const history: StubCall[] = [];
   let inventory: InteractiveElement[] = [];
+  let inventoryQueue: InteractiveElement[][] = [];
   let text = "";
   let candidates: string[] = [];
   let clipboard = "";
+  let gotoResultUrl: string | null = null;
 
   // Track the last URL the stub navigated to so currentUrl() can
   // report consistently — the rc.22 navigate-step drift detector
@@ -76,7 +84,7 @@ function stubBrowser(): StubBrowser {
   const controller = {
     async goto(url: string) {
       history.push({ method: "goto", args: [url] });
-      lastUrl = url;
+      lastUrl = gotoResultUrl ?? url;
     },
     currentUrl(): string {
       return lastUrl;
@@ -106,6 +114,9 @@ function stubBrowser(): StubBrowser {
     },
     async extractInteractiveElements() {
       history.push({ method: "extractInteractiveElements", args: [] });
+      if (inventoryQueue.length > 0) {
+        inventory = inventoryQueue.shift()!;
+      }
       return inventory;
     },
     async extractText() {
@@ -134,6 +145,14 @@ function stubBrowser(): StubBrowser {
     history,
     setInventoryFor(_method, newInv) {
       inventory = newInv;
+      inventoryQueue = [];
+    },
+    setInventorySequence(seq) {
+      inventoryQueue = [...seq];
+      inventory = seq.at(-1) ?? [];
+    },
+    setGotoResultUrl(url) {
+      gotoResultUrl = url;
     },
     setTextFor(newText) {
       text = newText;
@@ -270,6 +289,48 @@ describe("replaySkill — status guards", () => {
       bypassStatusGuard: true,
     });
     expect(result.kind).toBe("skill_demoted");
+  });
+});
+
+// ── Signup submit preconditions ─────────────────────────────────────
+
+describe("replaySkill — signup submit preconditions", () => {
+  it("checks required agreement boxes before a signup-submit click", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ selector: "button.continue", visibleText: "Continue", role: "button" }),
+    ]);
+    b.setTextFor("api key 123e4567-e89b-12d3-a456-426614174000");
+    (b.controller as BrowserController & {
+      checkRequiredAgreementBoxes: () => Promise<string[]>;
+    }).checkRequiredAgreementBoxes = async () => {
+      b.history.push({ method: "checkRequiredAgreementBoxes", args: [] });
+      return ["terms"];
+    };
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "click",
+          text_match: "Continue",
+          role_hint: "button",
+          provenance,
+        },
+        {
+          kind: "extract_via_regex",
+          pattern_name: "uuid_token",
+          provenance,
+        },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    const guardIndex = b.history.findIndex((c) => c.method === "checkRequiredAgreementBoxes");
+    const clickIndex = b.history.findIndex((c) => c.method === "click");
+    expect(guardIndex).toBeGreaterThanOrEqual(0);
+    expect(clickIndex).toBeGreaterThan(guardIndex);
   });
 });
 
@@ -483,6 +544,170 @@ describe("replaySkill — credential validator", () => {
     expect(result.kind).toBe("validator_failed");
     if (result.kind !== "validator_failed") return;
     expect(result.got).toBe("db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+  });
+
+  it("tries alternate copy buttons when the first copied value fails validator shape", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Copy value", selector: "button.copy-value" }),
+      inv({ tag: "button", visibleText: "Copy value", selector: "button.copy-value" }),
+    ]);
+    let clipboard = "";
+    (b.controller as unknown as { click: (selector: string) => Promise<void> }).click = async (selector: string) => {
+      b.history.push({ method: "click", args: [selector] });
+      clipboard = "https://example.kinde.com";
+    };
+    (b.controller as unknown as { clickNth: (selector: string, index: number) => Promise<void> }).clickNth = async (
+      selector: string,
+      index: number,
+    ) => {
+      b.history.push({ method: "clickNth", args: [selector, index] });
+      clipboard = index === 1 ? "1bb74b83064745a18d62dffcbae06529" : "https://example.kinde.com";
+    };
+    (b.controller as unknown as { readClipboard: () => Promise<string> }).readClipboard = async () => clipboard;
+
+    const skill = skillWith([
+      { kind: "extract_via_copy_button", near_text_hint: "Copy value", provenance },
+    ]);
+    skill.credentials[0]!.shape_hint = "opaque";
+    skill.credentials[0]!.post_extract_validator = { min_length: 32, max_length: 32 };
+
+    const result = await replaySkill({
+      skill,
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.credential).toBe("1bb74b83064745a18d62dffcbae06529");
+    expect(b.history.some((c) => c.method === "clickNth" && c.args[1] === 1)).toBe(true);
+  });
+
+  it("classifies client-only app pages where the secret is unavailable", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "", ariaLabel: "Copy value", selector: "button.copy-value" }),
+    ]);
+    b.setClipboardFor("");
+    b.setTextFor("Domain Client ID Client secret is not applicable for this applications");
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "extract_via_copy_button", near_text_hint: "Copy value", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.reason).toContain("credential_surface=secret_unavailable");
+    expect(result.reason).toContain("public/client-only application");
+  });
+
+  it("retries hydrated credential-create click resolution before declaring the target absent", async () => {
+    const b = stubBrowser();
+    b.setInventorySequence([
+      [],
+      [
+        inv({
+          tag: "button",
+          visibleText: "Create API Key",
+          selector: "button.create-key",
+          testId: "keys-page-create-button",
+        }),
+      ],
+      [
+        inv({
+          tag: "button",
+          visibleText: "Create API Key",
+          selector: "button.create-key",
+          testId: "keys-page-create-button",
+        }),
+      ],
+    ]);
+    b.setTextFor("Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "click",
+          text_match: "Create API Key",
+          role_hint: "button",
+          dom_hint: { testid: "keys-page-create-button" },
+          provenance,
+        },
+        { kind: "extract_via_regex", pattern_name: "api_key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create-key")).toBe(true);
+  });
+
+  it("uses href_hint to disambiguate duplicate same-text click targets", async () => {
+    const b = stubBrowser();
+    const links = [
+      inv({ tag: "a", role: "link", visibleText: "Kinde APIs", href: "/docs/apis/", selector: "a.docs" }),
+      inv({ tag: "a", role: "link", visibleText: "Kinde APIs", href: "/kinde-apis/", selector: "a.target" }),
+    ];
+    b.setInventorySequence([links, links]);
+    b.setTextFor("Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+
+    const result = await replaySkill({
+      skill: skillWith([
+        {
+          kind: "click",
+          text_match: "Kinde APIs",
+          role_hint: "link",
+          href_hint: "/kinde-apis/",
+          provenance,
+        },
+        { kind: "extract_via_regex", pattern_name: "api_key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "a.target")).toBe(true);
+  });
+
+  it("prefers non-consent matches over cookie-banner controls for ordinary clicks", async () => {
+    const b = stubBrowser();
+    const inventory = [
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Settings",
+        selector: "button.cookie-settings",
+        inConsentWidget: true,
+      }),
+      inv({
+        tag: "a",
+        role: "link",
+        visibleText: "Settings",
+        href: "/admin/settings",
+        selector: "a.settings",
+      }),
+    ];
+    b.setInventorySequence([inventory, inventory]);
+    b.setTextFor("Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e");
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Settings", role_hint: "link", provenance },
+        { kind: "extract_via_regex", pattern_name: "api_key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "a.settings")).toBe(true);
   });
 });
 
@@ -830,12 +1055,371 @@ describe("replaySkill — absent onboarding-select skip", () => {
   });
 });
 
+// ── Account-onboarding gate recovery ────────────────────────────────
+// Some services let OAuth complete, then redirect deep links to a generic
+// account-profile gate (name, display name, terms checkbox, Continue). A
+// stored skill recorded after that gate should not fail just because the fresh
+// verifier sees the gate first; replay should complete the visible gate and
+// then continue to the stored credential steps.
+
+describe("replaySkill — account-onboarding gate recovery", () => {
+  it("fills a visible account gate, accepts terms, then resumes the stored credential step", async () => {
+    const b = stubBrowser();
+    const onboarding = [
+      inv({
+        tag: "input",
+        labelText: "What's your full name?",
+        selector: "input.full-name",
+        value: "",
+      }),
+      inv({
+        tag: "input",
+        labelText: "What should we call you?",
+        selector: "input.call-you",
+        value: "",
+      }),
+      inv({
+        tag: "span",
+        role: "checkbox",
+        ariaLabel: "Accept terms",
+        labelText: "I am at least 18 years old and agree to the Terms and Privacy Policy",
+        selector: "span.terms",
+        value: "",
+      }),
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "button.continue",
+      }),
+    ];
+    const keysPage = [
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Create key",
+        selector: "button.create-key",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ];
+    b.setInventorySequence([
+      onboarding,
+      onboarding,
+      onboarding,
+      keysPage,
+      keysPage,
+      keysPage,
+    ]);
+    b.setTextFor(
+      "Start building with Claude\nWhat's your full name?*\nWhat should we call you?*\nI am at least 18 years old, agree to Terms and Privacy Policy\nContinue",
+    );
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create key", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { USER_DISPLAY_NAME: "Vera Sutton" },
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "type" && c.args[0] === "input.full-name")).toBe(true);
+    expect(b.history.some((c) => c.method === "type" && c.args[0] === "input.call-you")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "span.terms")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.continue")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create-key")).toBe(true);
+  });
+
+  it("fills a Qdrant-style company gate, then resumes the stored create step", async () => {
+    const b = stubBrowser();
+    const onboarding = [
+      inv({
+        tag: "input",
+        labelText: "First Name",
+        name: "givenName",
+        selector: "input.first",
+        value: "Verify",
+      }),
+      inv({
+        tag: "input",
+        labelText: "Last Name",
+        name: "familyName",
+        selector: "input.last",
+        value: "Robot 163",
+      }),
+      inv({
+        tag: "input",
+        labelText: "Account Name",
+        name: "name",
+        selector: "input.account",
+        value: "Verify Robot 163 - Base Account",
+      }),
+      inv({
+        tag: "input",
+        role: "combobox",
+        labelText: "Company Name",
+        name: "company",
+        selector: "input.company",
+        value: "",
+      }),
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "button.continue",
+      }),
+    ];
+    const apiPage = [
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Create",
+        selector: "button.create",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ];
+    b.setInventorySequence([
+      onboarding,
+      onboarding,
+      onboarding,
+      apiPage,
+      apiPage,
+      apiPage,
+    ]);
+    b.setTextFor(
+      "Step 1/2\nTell us about yourself\nFirst Name\u200B\u200BLast Name\u200B\u200BAccount Name\u200B\u200BCompany Name\u200B\u200BContinue",
+    );
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: {
+        USER_DISPLAY_NAME: "Verify Robot 163",
+        PROJECT_NAME: "Trusty Squire",
+      },
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "type" && c.args[0] === "input.company")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.continue")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create")).toBe(true);
+  });
+
+  it("skips an optional onboarding survey, then resumes the stored create step", async () => {
+    const b = stubBrowser();
+    const survey = [
+      inv({ tag: "input", type: "radio", labelText: "AI/ML Engineer", selector: "input.role" }),
+      inv({ tag: "input", type: "checkbox", labelText: "Retrieval-Augmented Generation (RAG)", selector: "input.usage" }),
+      inv({ tag: "button", role: "button", visibleText: "Continue", selector: "button.continue" }),
+      inv({ tag: "button", role: "button", visibleText: "Skip", selector: "button.skip" }),
+    ];
+    const clusterPage = [
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Create Cluster",
+        selector: "button.create-cluster",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ];
+    b.setInventorySequence([
+      survey,
+      survey,
+      clusterPage,
+      clusterPage,
+      clusterPage,
+    ]);
+    b.setTextFor(
+      "Step 2/2\nHelp us customize your experience\nWhat's your role?\nWhat are you building?\nSkip",
+    );
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.skip")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create-cluster")).toBe(true);
+  });
+});
+
+// ── Optional billing gate recovery ──────────────────────────────────
+// Fresh accounts can be routed through a credits/payment upsell before the
+// stored credential route. If the page offers an explicit skip, replay should
+// take it and resume instead of treating the downstream credential step as rot.
+
+describe("replaySkill — optional billing gate recovery", () => {
+  it("clicks Skip for now on a credits gate, then resumes the stored credential step", async () => {
+    const b = stubBrowser();
+    const creditsGate = [
+      inv({ tag: "button", role: "button", visibleText: "Buy credits", selector: "button.buy" }),
+      inv({ tag: "button", role: "button", visibleText: "Skip for now", selector: "button.skip" }),
+    ];
+    const dashboard = [
+      inv({
+        tag: "a",
+        role: "link",
+        visibleText: "API keys",
+        href: "/settings/workspaces/default/keys",
+        selector: "a.api-keys",
+      }),
+    ];
+    const keysPage = [
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Create key",
+        selector: "button.create-key",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ];
+    b.setInventorySequence([
+      creditsGate,
+      creditsGate,
+      dashboard,
+      keysPage,
+      keysPage,
+      keysPage,
+    ]);
+    b.setTextFor("Buy credits\nCredit card\nBilling address\nSkip for now");
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Create key", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.skip")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "a.api-keys")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create-key")).toBe(true);
+  });
+});
+
+// ── Credential route drift recovery ─────────────────────────────────
+// A stored deep link to a credential page can drift to the product dashboard
+// after a vendor route migration. If the dashboard still exposes an API
+// keys/tokens nav link, replay should click that link before continuing.
+
+describe("replaySkill — credential route drift recovery", () => {
+  it("recovers an old keys deep-link by clicking the visible API keys route", async () => {
+    const b = stubBrowser();
+    b.setGotoResultUrl("https://platform.example.com/dashboard");
+    const dashboard = [
+      inv({
+        tag: "a",
+        role: "link",
+        visibleText: "API keys",
+        href: "/settings/workspaces/default/keys",
+        selector: "a.api-keys",
+      }),
+    ];
+    const keysPage = [
+      inv({
+        tag: "button",
+        role: "button",
+        visibleText: "Create key",
+        selector: "button.create-key",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ];
+    b.setInventorySequence([
+      dashboard,
+      keysPage,
+      keysPage,
+      keysPage,
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "navigate", url: "https://console.example.com/settings/keys", provenance },
+        { kind: "click", text_match: "Create key", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "a.api-keys")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create-key")).toBe(true);
+  });
+});
+
 // ── Token-subset fallback for a glossed credential-creating click ────
 // The captured text_match is the planner's gloss ("Create Token"); the live
 // returning-user page's button reads "Create API Token". Substring match
 // fails; token containment resolves it, but only when unique.
 
 describe("replaySkill — glossed cred-click token fallback", () => {
+  it("prefers exact short click labels over longer prefix matches like Add funds", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({ tag: "button", visibleText: "Add funds", role: "button", selector: "button.add-funds" }),
+      inv({ tag: "button", visibleText: "Add", role: "button", selector: "button.add" }),
+      inv({ tag: "button", visibleText: "Copy key", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Add", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy key", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.add")).toBe(true);
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.add-funds")).toBe(false);
+  });
+
+  it("ignores decorative private-use icon glyphs in captured click text", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "button",
+        visibleText: "Create key",
+        role: "button",
+        selector: "button.create-key",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "\uE001Create key", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "button.create-key")).toBe(true);
+  });
+
   it("resolves a glossed 'Create Token' to a unique 'Create API Token' button", async () => {
     const b = stubBrowser();
     b.setInventoryFor("extract", [
@@ -1046,6 +1630,102 @@ describe("replaySkill — OAuth needs_login", () => {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
+
+  it("does not run navigate-time OAuth recovery when the next stored step is click_oauth_button", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "replay-skill-profile-"));
+    try {
+      writeFileSync(
+        join(profileDir, "logged-in-providers.json"),
+        JSON.stringify(["google"]),
+        "utf8",
+      );
+      const b = stubBrowser();
+      let currentUrl = "about:blank";
+      (b.controller as unknown as { goto: (url: string) => Promise<void> }).goto = async (url: string) => {
+        b.history.push({ method: "goto", args: [url] });
+        currentUrl =
+          url === "https://app.example.com/"
+            ? "https://app.example.com/account/signin"
+            : url;
+      };
+      (b.controller as unknown as { currentUrl: () => string }).currentUrl = () => currentUrl;
+      b.setInventoryFor("extract", [
+        inv({
+          tag: "button",
+          visibleText: "Sign in with Google",
+          role: "button",
+          selector: "button.google",
+        }),
+        inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+      ]);
+      b.setTextFor("api key 123e4567-e89b-12d3-a456-426614174000");
+      b.setCandidatesFor(["123e4567-e89b-12d3-a456-426614174000"]);
+
+      const result = await replaySkill({
+        skill: skillWith([
+          { kind: "navigate", url: "https://app.example.com/", provenance },
+          {
+            kind: "click_oauth_button",
+            provider: "google",
+            text_match: "Google",
+            provenance,
+          },
+          { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+        ]),
+        browser: b.controller,
+        mode: "full",
+        profileDir,
+      });
+
+      expect(result.kind).toBe("ok");
+      expect(b.history.some((call) => call.method === "startOAuth")).toBe(true);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-navigates to the resolved recovery entry when an expired auth transaction page has no OAuth button", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "replay-skill-profile-"));
+    try {
+      writeFileSync(
+        join(profileDir, "logged-in-providers.json"),
+        JSON.stringify(["google"]),
+        "utf8",
+      );
+      const b = stubBrowser();
+      const poisoned =
+        "https://app.kinde.com/auth/cx/_:nav&m:register::_:action&intent:business_details&psid=stale";
+      const expired =
+        "https://app.kinde.com/auth/cx/_:nav&m:auth_error&reason:login_link_expired&psid=stale";
+      const stable = "https://app.kinde.com/admin";
+      let currentUrl = "about:blank";
+      (b.controller as unknown as { goto: (url: string) => Promise<void> }).goto = async (url: string) => {
+        b.history.push({ method: "goto", args: [url] });
+        currentUrl = url === poisoned ? expired : url;
+      };
+      (b.controller as unknown as { currentUrl: () => string }).currentUrl = () => currentUrl;
+      b.setInventorySequence([[], [], []]);
+
+      const result = await replaySkill({
+        skill: skillWith(
+          [
+            { kind: "navigate", url: poisoned, provenance },
+            { kind: "navigate", url: stable, provenance },
+            { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+          ],
+          { signup_url: poisoned },
+        ),
+        browser: b.controller,
+        mode: "full",
+        profileDir,
+      });
+
+      expect(result.kind).toBe("needs_login");
+      expect(b.history.some((call) => call.method === "goto" && call.args[0] === stable)).toBe(true);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Disambiguation ──────────────────────────────────────────────────
@@ -1131,6 +1811,92 @@ describe("replaySkill — text-match disambiguation", () => {
     // The button got clicked, not the link.
     expect(clicks.some((c) => c.args[0] === "button.real")).toBe(true);
     expect(clicks.every((c) => c.args[0] !== "a.docs")).toBe(true);
+  });
+
+  it("recovers a stale reveal-api-key click by generating a new key through the modal", async () => {
+    const b = stubBrowser();
+    b.setInventorySequence([
+      [
+        inv({
+          tag: "button",
+          visibleText: "Generate New API Key",
+          selector: "button.generate-new",
+        }),
+      ],
+      [
+        inv({
+          tag: "button",
+          visibleText: "Generate New API Key",
+          selector: "button.generate-new",
+        }),
+      ],
+      [
+        inv({
+          tag: "input",
+          labelText: "Name",
+          placeholder: "e.g. CI deploy bot",
+          selector: "input.key-name",
+        }),
+        inv({
+          tag: "button",
+          visibleText: "Generate",
+          selector: "button.generate-submit",
+        }),
+      ],
+    ]);
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Reveal API key", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+      templateValues: { EMAIL_ALIAS: "verify-167@trustysquire.ai" },
+    });
+
+    expect(result.kind).toBe("ok");
+    const clicks = b.history.filter((c) => c.method === "click");
+    expect(clicks.some((c) => c.args[0] === "button.generate-new")).toBe(true);
+    expect(clicks.some((c) => c.args[0] === "button.generate-submit")).toBe(true);
+    const types = b.history.filter((c) => c.method === "type");
+    expect(types.some((c) => c.args[0] === "input.key-name")).toBe(true);
+  });
+
+  it("recovers a stale scoped credential route by rebounding through the site root", async () => {
+    const b = stubBrowser();
+    b.setInventorySequence([
+      [
+        inv({ tag: "a", visibleText: "Return home", href: "/", selector: "a.home" }),
+      ],
+      [
+        inv({
+          tag: "a",
+          role: "link",
+          visibleText: "API keys",
+          href: "/trustysquire-new/~/apikeys",
+          selector: "a.api-keys",
+        }),
+      ],
+    ]);
+    b.setTextFor("Page not found");
+    b.setCandidatesFor(["Your token: db3a32ea-dd1b-4e28-9680-db2991c81e3e"]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "navigate", url: "https://console.example.com/old-org/~/apikeys", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Copy", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("ok");
+    expect(
+      b.history.map((c) => `${c.method}:${String(c.args[0] ?? "")}`),
+    ).toContain("goto:https://console.example.com");
+    expect(b.history.some((c) => c.method === "click" && c.args[0] === "a.api-keys")).toBe(true);
   });
 });
 
@@ -2247,6 +3013,22 @@ describe("rebaseSubdomain (per-account subdomain, kinde class)", () => {
   });
 });
 
+describe("normalizeKindeReplayNavigateUrl", () => {
+  it("rewrites legacy Kinde /admin/settings/apis 404 links to the tenant admin router", async () => {
+    const { normalizeKindeReplayNavigateUrl } = await import("../replay-skill.js");
+    expect(normalizeKindeReplayNavigateUrl("https://tsagent.kinde.com/admin/settings/apis")).toBe(
+      "https://tsagent.kinde.com/admin",
+    );
+  });
+
+  it("leaves non-Kinde URLs untouched", async () => {
+    const { normalizeKindeReplayNavigateUrl } = await import("../replay-skill.js");
+    expect(normalizeKindeReplayNavigateUrl("https://example.com/admin/settings/apis")).toBe(
+      "https://example.com/admin/settings/apis",
+    );
+  });
+});
+
 describe("registrableDomain", () => {
   it("collapses per-account subdomains to the registrable domain", async () => {
     const { registrableDomain } = await import("../replay-skill.js");
@@ -2254,6 +3036,80 @@ describe("registrableDomain", () => {
     expect(registrableDomain("app.kinde.com")).toBe("kinde.com");
     expect(registrableDomain("dashboard.algolia.com")).toBe("algolia.com");
     expect(registrableDomain("kinde.com")).toBe("kinde.com");
+  });
+});
+
+describe("resolveReplayRecoveryEntryUrl", () => {
+  it("recovers from a legacy IdP signup_url by using the first stable service navigate step", async () => {
+    const { resolveReplayRecoveryEntryUrl } = await import("../replay-skill.js");
+    const skill = skillWith(
+      [
+        { kind: "navigate", url: "https://console.qovery.com/", provenance },
+        { kind: "click", text_match: "Settings", provenance },
+      ],
+      { signup_url: "https://myaccount.google.com/" },
+    );
+
+    expect(resolveReplayRecoveryEntryUrl(skill)).toBe("https://console.qovery.com/");
+  });
+
+  it("recovers from a legacy Kinde auth transaction signup_url through the neutral admin router", async () => {
+    const { resolveReplayRecoveryEntryUrl } = await import("../replay-skill.js");
+    const skill = skillWith(
+      [
+        {
+          kind: "navigate",
+          url: "https://app.kinde.com/auth/cx/_:nav&m:register::_:action&psid=stale",
+          provenance,
+        },
+        { kind: "navigate", url: "https://tsq380734.kinde.com/admin/settings/apis", provenance },
+      ],
+      {
+        signup_url:
+          "https://app.kinde.com/auth/cx/_:nav&m:register::_:action&intent:business_details&psid=019eb2844fc439e7057f37785f6212a1",
+      },
+    );
+
+    expect(resolveReplayRecoveryEntryUrl(skill)).toBe("https://app.kinde.com/admin");
+  });
+
+  it("preserves clean signup_url values", async () => {
+    const { resolveReplayRecoveryEntryUrl } = await import("../replay-skill.js");
+    const skill = skillWith(
+      [{ kind: "navigate", url: "https://example.com/dashboard", provenance }],
+      { signup_url: "https://example.com/signup?plan=free" },
+    );
+
+    expect(resolveReplayRecoveryEntryUrl(skill)).toBe("https://example.com/signup?plan=free");
+  });
+});
+
+describe("resolveReplayRecoveryTargetUrl", () => {
+  it("substitutes poisoned step targets with the resolved recovery entry", async () => {
+    const { resolveReplayRecoveryTargetUrl } = await import("../replay-skill.js");
+    const skill = skillWith(
+      [{ kind: "navigate", url: "https://console.qovery.com/", provenance }],
+      { signup_url: "https://myaccount.google.com/" },
+    );
+
+    expect(
+      resolveReplayRecoveryTargetUrl(
+        skill,
+        "https://app.kinde.com/auth/cx/_:nav&m:register::_:action&psid=stale",
+      ),
+    ).toBe("https://app.kinde.com/admin");
+  });
+
+  it("preserves ordinary step targets while stripping volatile query params", async () => {
+    const { resolveReplayRecoveryTargetUrl } = await import("../replay-skill.js");
+    const skill = skillWith([{ kind: "navigate", url: "https://example.com/signup", provenance }]);
+
+    expect(
+      resolveReplayRecoveryTargetUrl(
+        skill,
+        "https://example.com/dashboard?session=stale&tab=keys",
+      ),
+    ).toBe("https://example.com/dashboard?tab=keys");
   });
 });
 
@@ -2374,6 +3230,11 @@ describe("normalizeNavPath", () => {
     expect(normalizeNavPath("/settings/api-tokens")).toEqual(["settings", "api-tokens"]);
     expect(normalizeNavPath("/account/keys")).toEqual(["account", "keys"]);
   });
+  it("drops the dynamic member of scoped project/org/workspace routes", async () => {
+    const { normalizeNavPath } = await import("../replay-skill.js");
+    expect(normalizeNavPath("/p/waLWqCn4cX/settings")).toEqual(["p", "settings"]);
+    expect(normalizeNavPath("/p/NmhLn4RPUq/settings")).toEqual(["p", "settings"]);
+  });
 });
 
 describe("matchesHrefHint", () => {
@@ -2393,6 +3254,10 @@ describe("matchesHrefHint", () => {
     expect(
       matchesHrefHint(link({ href: "https://app.axiom.co/ts-9f3a-bk21/settings" }), "/ts-6689-z0as/settings"),
     ).toBe(true);
+  });
+  it("matches scoped project links across differing project slugs", async () => {
+    const { matchesHrefHint } = await import("../replay-skill.js");
+    expect(matchesHrefHint(link({ href: "/p/NmhLn4RPUq/settings" }), "/p/waLWqCn4cX/settings")).toBe(true);
   });
   it("matches a /settings tail against a deeper captured /settings/api-tokens", async () => {
     const { matchesHrefHint } = await import("../replay-skill.js");
@@ -2422,6 +3287,15 @@ describe("rebaseHrefOntoCurrentUrl", () => {
     expect(
       rebaseHrefOntoCurrentUrl("/settings/api-keys", "https://dash.service.com/home"),
     ).toBe("https://dash.service.com/settings/api-keys");
+  });
+  it("swaps scoped project ids in /p/<id>/... paths", async () => {
+    const { rebaseHrefOntoCurrentUrl } = await import("../replay-skill.js");
+    expect(
+      rebaseHrefOntoCurrentUrl(
+        "/p/waLWqCn4cX/settings",
+        "https://app.openpipe.ai/p/currentProject/request-logs",
+      ),
+    ).toBe("https://app.openpipe.ai/p/currentProject/settings");
   });
   it("returns null on an unparseable current URL", async () => {
     const { rebaseHrefOntoCurrentUrl } = await import("../replay-skill.js");
@@ -2705,5 +3579,18 @@ describe("findCodeInput", () => {
         inv({ tag: "input", type: "password", selector: "input.pw" }),
       ]),
     ).toBeNull();
+  });
+});
+
+describe("rebaseScopedHrefWithCandidate", () => {
+  it("replaces a captured scoped project id with the replay account candidate", async () => {
+    const { rebaseScopedHrefWithCandidate } = await import("../replay-skill.js");
+    expect(
+      rebaseScopedHrefWithCandidate(
+        "/p/waLWqCn4cX/settings",
+        "https://app.openpipe.ai/",
+        "7FHd77mDYa",
+      ),
+    ).toBe("https://app.openpipe.ai/p/7FHd77mDYa/settings");
   });
 });

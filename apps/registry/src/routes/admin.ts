@@ -13,6 +13,10 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
+import {
+  canonicalizeServiceSlug,
+  equivalentServiceSlugs,
+} from "@trusty-squire/skill-schema";
 import type {
   SkillStore,
   RecordVerifierOutcomeResult,
@@ -289,17 +293,24 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
         opts.store.listSkills({ status: "demoted", limit: 500 }),
         opts.store.listSkills({ status: "quarantined", limit: 500 }),
       ]);
-      const excludeServices = new Set(activeSkills.map((s) => s.service));
+      const excludeServices = new Set<string>();
+      for (const s of activeSkills) {
+        for (const slug of equivalentServiceSlugs(s.service)) excludeServices.add(slug);
+      }
       // T5 — closed loop: a quarantined (wall) service is routed to the
       // human pile, NEVER auto-rediscovered, so exclude it from candidates.
-      for (const s of quarantinedSkills) excludeServices.add(s.service);
+      for (const s of quarantinedSkills) {
+        for (const slug of equivalentServiceSlugs(s.service)) excludeServices.add(slug);
+      }
       // A freshly-demoted (rot) skill's service should be re-skilled
       // REGARDLESS of demand — that's the demotion→rediscovery handoff.
       // Prepended below so a known-broken skill gets re-captured ahead of
       // demand-only candidates.
       const demotedServices = [
         ...new Set(
-          demotedSkills.map((s) => s.service).filter((svc) => !excludeServices.has(svc)),
+          demotedSkills
+            .map((s) => canonicalizeServiceSlug(s.service))
+            .filter((svc) => !excludeServices.has(svc)),
         ),
       ];
 

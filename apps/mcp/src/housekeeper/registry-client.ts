@@ -2,7 +2,11 @@
 // uses these to pull the queue and report outcomes; the discovery
 // worker (Phase 6) will use a different set on the same client shape.
 
-import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
+import {
+  canonicalizeServiceSlug,
+  parseSkill,
+  type Skill,
+} from "@trusty-squire/skill-schema";
 
 // Phase 3 follow-up — thrown by fetchSkill when the stored payload
 // doesn't pass the current SkillSchema (registry was written under
@@ -157,7 +161,7 @@ export class VerifierRegistryClient {
     const out = new Set<string>();
     for (const s of body.skills ?? []) {
       if (typeof s.service === "string" && s.service.length > 0) {
-        out.add(s.service.toLowerCase());
+        out.add(canonicalizeServiceSlug(s.service));
       }
     }
     return out;

@@ -251,6 +251,28 @@ describe("SkillRegistryClient.fetchActiveSkill", () => {
     expect(headers["x-account-id"]).toBe("acct-42");
     expect(headers["x-provision-id"]).toBe("prov_xyz");
   });
+
+  it("fetches a canonical service when called with a legacy duplicate slug", async () => {
+    let capturedUrl = "";
+    const fetchFn = mockFetch(async (url) => {
+      capturedUrl = String(url);
+      return jsonResponse(200, {
+        signed_by: "x",
+        skill: makeSkill({ service: "anthropic-api" }),
+      });
+    });
+    const client = new SkillRegistryClient({
+      baseUrl: "https://registry.test",
+      accountId: "acct-42",
+      fetchFn,
+      cacheTtlMs: 0,
+    });
+
+    const outcome = await client.fetchActiveSkill("anthropic", "prov_xyz");
+
+    expect(outcome.kind).toBe("found");
+    expect(capturedUrl).toBe("https://registry.test/skills/anthropic-api");
+  });
 });
 
 // ── Cache behaviour ─────────────────────────────────────────────────
