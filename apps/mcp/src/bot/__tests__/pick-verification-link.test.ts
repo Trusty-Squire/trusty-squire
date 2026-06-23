@@ -105,7 +105,7 @@ describe("pickVerificationLinkFromHtml (anchor-text fallback for tracker-wrapped
     expect(pickVerificationLinkFromHtml(`<a href="https://x.io/v?a=1&amp;b=2">Activate</a>`)).toBe("https://x.io/v?a=1&b=2");
   });
   it("returns null when no anchor text is verification-shaped", () => {
-    expect(pickVerificationLinkFromHtml(`<a href="https://x.io/home">Go to dashboard</a><a href="https://x.io/u">Unsubscribe</a>`)).toBeNull();
+    expect(pickVerificationLinkFromHtml(`<a href="https://x.io/home">Read our blog</a><a href="https://x.io/u">Unsubscribe</a>`)).toBeNull();
     expect(pickVerificationLinkFromHtml("")).toBeNull();
   });
 });
