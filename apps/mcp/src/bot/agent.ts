@@ -1864,6 +1864,13 @@ type PlanExecOutcome =
   // own status so the user gets accurate guidance (manual signup) vs.
   // the misleading oauth_required ("there is no form").
   | { kind: "anti_bot_blocked"; vendor: string }
+  // A mandatory MFA / 2-Step-Verification enrollment gate blocks the
+  // authenticated console (Google mandates 2SV for Firebase/GCP; a personal
+  // Gmail without 2SV is locked out at "Turn on 2SV"). The bot can't enable
+  // 2SV — that needs a phone/authenticator on the account — so this is a
+  // distinct account-config terminal, not oauth_required. See
+  // looksLikeMfaEnrollmentGate.
+  | { kind: "mfa_setup_required" }
   // T6: an OAuth-first signup found its provider affordance — the
   // selector of the "Sign in with Google" button to click. signup()
   // hands off to the OAuth consent flow instead of credential extraction.
@@ -2603,6 +2610,31 @@ export function looksLike404(title: string, bodyText: string): boolean {
   // A bare "404" token, or a clear not-found phrase, is enough — guessed
   // keys URLs that hit either are dead ends.
   return has404Token || notFoundPhrase;
+}
+
+// True when a page is a mandatory MFA / 2-Step-Verification enrollment gate
+// that BLOCKS the authenticated console until the account-holder turns on 2SV.
+// Google now mandates this across console products (MEASURED 2026-06-23:
+// console.firebase.google.com replaced the entire console with an "Enable
+// Multi-factor Authentication (MFA) … You must enable MFA to gain access to
+// Firebase / Turn on 2SV" card for a personal Gmail without 2SV; GCP enforces
+// the same). The bot can't satisfy this — enabling 2SV needs a phone /
+// authenticator on the account itself — so it's a distinct, account-config
+// terminal, NOT the misleading `oauth_required` ("no signup form") it used to
+// emit after burning ~16 loading-shell retries on the gate card. Account-level
+// (the org-managed verify robots have org-enforced/exempt 2SV and never see
+// it); reported so the operator enables 2SV on that identity once.
+export function looksLikeMfaEnrollmentGate(text: string): boolean {
+  const hay = text.toLowerCase().replace(/\s+/g, " ").slice(0, 1200);
+  // Require BOTH an MFA/2SV noun AND a "required to access" verb phrase, so a
+  // page that merely links to security settings doesn't trip it.
+  const mfaNoun =
+    /multi-?factor authentication|2-?step verification|\bmfa\b|\b2sv\b/.test(hay);
+  const mandatoryAccess =
+    /must enable mfa|must enable.*(?:mfa|2sv|2-?step)|required (?:for users|to (?:gain )?access)|now required|enable (?:mfa|2sv).*to (?:gain )?access|turn on 2sv/.test(
+      hay,
+    );
+  return mfaNoun && mandatoryAccess;
 }
 
 // Pull the <title> text out of a raw HTML string (lowercased work is left to
@@ -6925,6 +6957,17 @@ export class SignupAgent {
         });
       }
       if (preAct.kind === "oauth_scan_wait") {
+        // A mandatory MFA-enrollment gate renders as a tiny "loading shell"
+        // (one warning card, no provider button), so the scan would burn its
+        // full retry budget then mislabel it `oauth_required`. Detect the gate
+        // and surface the honest, actionable terminal immediately.
+        if (looksLikeMfaEnrollmentGate(await this.browser.extractText().catch(() => ""))) {
+          steps.push(
+            `OAuth-first[engine]: page is a mandatory MFA / 2-Step-Verification ` +
+              `enrollment gate — the account must enable 2SV before the console grants access`,
+          );
+          return { kind: "mfa_setup_required" };
+        }
         steps.push(
           `OAuth-first[engine]: no provider affordance yet — waiting for async render ` +
             `(retry ${state.oauthScanRetries}${oauthScanShell ? ", loading shell" : ""})`,
@@ -8611,6 +8654,16 @@ export class SignupAgent {
           return {
             success: false,
             error: `oauth_required: ${task.service} offers only OAuth/SSO signup — there is no email/password form to automate.`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "mfa_setup_required":
+          return {
+            success: false,
+            error:
+              `mfa_setup_required: ${task.service} requires the signed-in Google account to have ` +
+              `2-Step Verification (MFA) enabled before the console grants access. ` +
+              `Enable 2SV on that account at myaccount.google.com/security, then retry.`,
             steps,
             ...this.resultTail(),
           };

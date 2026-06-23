@@ -14,6 +14,41 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ---
 
+## `firebase` / `gcp` — Google Cloud project-creation is an IDENTITY wall, then an MFA wall (2026-06-23)
+
+### ✓ CONFIRMED: the verify-robot pool can't create GCP projects (org-policy), not a nav/form bug
+
+Fresh robot run reproduced the documented wall exactly: the bot OAuths into the
+authenticated Firebase console and gets all the way into project creation (fills
+name, accepts terms, clicks Continue) — then dies on the **parent-resource
+picker** (`fire-cloud-resource-chip` → `cdk-tree-node`) that only offers
+`trustysquire.ai`. The `verify-NN@trustysquire.ai` robots are Workspace (Cloud
+Identity) accounts: FORCED into the org, no "No organization" option,
+`resourcemanager.projects.create` denied → "Continue" stays disabled, the bot
+loops on "Expand the trustysquire.ai folder" and stalls. Pure
+identity-authorization wall.
+
+### Fix in motion: personal consumer Gmail (defaults to "No organization")
+
+Shipped `BOT_GOOGLE_PROFILE_DIR` (+ `mcp login --profile-dir`) to pin a personal
+Google identity for Google-OAuth discover, bypassing the robot pool (commit
+`35323cb`). A personal Gmail creates projects under "No organization" freely.
+
+### ? OPEN (blocked on account config): Firebase MANDATES 2-Step Verification
+
+With a fresh personal Gmail (no 2SV), `console.firebase.google.com` replaces the
+whole console with **"Enable Multi-factor Authentication (MFA) … You must enable
+MFA to gain access to Firebase / Turn on 2SV"** — a hard gate, no dismiss. The
+bot can't enable 2SV (needs a phone/authenticator on the account). Now correctly
+classified `mfa_setup_required` (was burning ~16 loading-shell retries then
+mislabeling `oauth_required`; detector `looksLikeMfaEnrollmentGate`). The robots
+never saw it (Workspace org-enforced/exempt 2SV). **NEXT:** enable 2SV on the
+personal account, re-run; project creation should clear, leaving only the
+firebase config-object extraction ({apiKey, projectId}) to build. GCP shares the
+project-creation wall, so the same personal+2SV identity cracks it too.
+
+---
+
 ## `meilisearch` — SPA stale-URL 404 trap (CRACKED 2026-06-23) → onboarding-wizard residual
 
 ### ✓ CONFIRMED + FIXED: the "no_credentials_after_already_signed_in" was a 404 false-positive, NOT an auth wall

@@ -1486,6 +1486,27 @@
 
     reachable.
 
+
+    2026-06-23 (re-confirmed + advanced): the robot org-permission wall is
+
+    unchanged. Switched to a PERSONAL consumer Gmail via BOT_GOOGLE_PROFILE_DIR
+
+    (a personal account defaults to "No organization" and clears project
+
+    creation). But the fresh personal account hit a NEW gate: Firebase now
+
+    MANDATES 2SV — the console is replaced by "Enable MFA … You must enable MFA
+
+    to gain access to Firebase / Turn on 2SV" (now classified mfa_setup_required
+
+    instead of a misleading oauth_required). Robots cleared this (Workspace
+
+    org-enforced/exempt 2SV). NEXT: enable 2SV on the personal account, re-run;
+
+    project creation should clear, leaving only config-object extraction
+
+    ({apiKey, projectId}) to build.
+
     '
 - slug: auth0
   name: Auth0
