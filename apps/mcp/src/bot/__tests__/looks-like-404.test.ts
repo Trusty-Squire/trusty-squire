@@ -35,6 +35,22 @@ describe("looksLike404", () => {
     ).toBe(true);
   });
 
+  it("meilisearch: SPA client-rendered /signup 404 ('cute baby seal sleeping')", () => {
+    // MEASURED 2026-06-23: cloud.meilisearch.com/signup serves a 200 SPA
+    // shell, then renders this 404 once React mounts. The static HTTP probe
+    // can't see it, so the signup-url resolver "upgrades" a working /login to
+    // this dead /signup; the live 404 fallback keys off this exact copy.
+    expect(
+      looksLike404(
+        "Meilisearch Cloud",
+        "Meilisearch Cloud You need to enable JavaScript to run this app. " +
+          "Sorry, the page you are looking for does not exist Unless you were " +
+          "specifically looking for a page with a cute baby seal sleeping, in " +
+          "that case, well done. Bring me home, please",
+      ),
+    ).toBe(true);
+  });
+
   it("does NOT flag a real keys page", () => {
     expect(
       looksLike404(

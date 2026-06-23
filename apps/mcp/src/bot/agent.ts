@@ -8107,6 +8107,33 @@ export class SignupAgent {
       // effort: a page with no interstitial returns fast.
       await this.browser.waitForFormReady().catch(() => undefined);
 
+      // Stale-probe 404 fallback. The HTTP probe (resolveSignupUrlByProbe)
+      // can't see a client-rendered 404: an SPA serves the SAME 200
+      // index.html shell for /login and /signup, so the probe may "upgrade"
+      // a working curated /login to a /signup that only renders "page does
+      // not exist" once React mounts. MEASURED 2026-06-23 (meilisearch):
+      // curated /login → probe /signup → live 404 ("cute baby seal
+      // sleeping") → the bot burned the whole run on a dead page (OAuth-first
+      // engine read the 404 as a loading shell, then nav-search clicked the
+      // 404's "Bring me home" into a degraded post-verify loop). When the
+      // probe moved us off the original hint AND the resolved URL renders a
+      // 404, fall back to the hint and re-read before any downstream
+      // classification runs.
+      if (signupUrl !== guessed && !isGoogleSearchUrl(guessed)) {
+        const afterGoto = await this.browser.getState();
+        const afterText = await this.browser.extractText().catch(() => "");
+        if (looksLike404(afterGoto.title, afterText)) {
+          steps.push(
+            `[signup-url] resolved ${signupUrl} renders a client-side 404 — ` +
+              `falling back to the original hint ${guessed}`,
+          );
+          signupUrl = guessed;
+          this.resolvedSignupUrl = signupUrl;
+          await this.browser.goto(signupUrl);
+          await this.browser.waitForFormReady().catch(() => undefined);
+        }
+      }
+
       // After load: does the rendered page look like a signup form?
       // looksLikeSignupPage() can't tell signup from login (both have
       // email+password), so we ALSO classify the rendered HTML's copy via
@@ -8152,6 +8179,26 @@ export class SignupAgent {
         inventory: landedInventory,
         url: landed.url,
       });
+      // 404 veto — a route-not-found shell is NEVER an authenticated
+      // dashboard, even when the host's persistent chrome nav (Projects /
+      // Settings / Dashboard links) trips Signal 1 of detectAlreadySignedIn.
+      // MEASURED 2026-06-23: meilisearch's curated /login went stale, the
+      // signup-url resolver switched to /signup, and cloud.meilisearch.com/
+      // signup 404s ("the page you are looking for does not exist") while
+      // still rendering full app nav chrome. The bot logged "already
+      // authenticated … skipping signup", nav-search-looped over more 404s,
+      // and bailed no_credentials_after_already_signed_in. Treat a 404
+      // landing as a wrong-URL signal: clear signedIn so the recovery path
+      // (Tier B CTA → real signup entry) runs instead of skipping signup.
+      const landedBodyText = await this.browser.extractText().catch(() => "");
+      const landed404 = looksLike404(landed.title, landedBodyText);
+      if (landed404 && signedIn) {
+        signedIn = false;
+        steps.push(
+          `${task.service}: landing ${pathOf(landed.url)} is a 404 shell, not an ` +
+            `authenticated dashboard — recovering the real signup entry`,
+        );
+      }
       // SPA-settle re-check (returning-user cluster). An authenticated SPA
       // redirects the session AFTER the first read — pinecone's
       // `/?sessionType=signup` routes to `/organizations/registration` once
@@ -8162,7 +8209,7 @@ export class SignupAgent {
       // dwell once and re-read before classifying. Safe: a real login/signup
       // page renders its credential input or signup affordance, so
       // detectAlreadySignedIn stays false on the re-check (no false positive).
-      if (!signedIn && landedInventory.length <= 4) {
+      if (!signedIn && !landed404 && landedInventory.length <= 4) {
         const hasCredInput = landedInventory.some(
           (e) =>
             e.tag === "input" &&
