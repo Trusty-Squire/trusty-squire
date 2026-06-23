@@ -24,6 +24,7 @@ import {
   orderOAuthCandidates,
   isLoginLoopState,
   parsePostVerifyStep,
+  hasNativeSignupForm,
   type AgentInbox,
 } from "../agent.js";
 import { scoreSignupButton } from "../browser.js";
@@ -68,6 +69,8 @@ const GITHUB_BTN = mk({
   selector: "#github-oauth",
 });
 const EMAIL_INPUT = mk({ tag: "input", type: "email", selector: "#email" });
+const PASSWORD_INPUT = mk({ tag: "input", type: "password", selector: "#password" });
+const SIGNUP_BTN = mk({ tag: "button", visibleText: "Sign up", selector: "#signup" });
 const API_LINK = mk({ tag: "a", visibleText: "API Keys", selector: "#api" });
 
 // One scripted page: the URL + visible body text the fake serves while
@@ -94,6 +97,12 @@ class FakeOAuthBrowser {
   public consentPageInventory: InteractiveElement[] = [];
   public dashboardInventory: InteractiveElement[] = [];
   public popupClosed = false;
+  public googleGsiAffordance = false;
+  public googleGsiResult: { ok: boolean; via: "fedcm" | "popup" | "redirect" | "none" } = {
+    ok: false,
+    via: "none",
+  };
+  public signupInventoryAfterGoogleGsi: InteractiveElement[] | null = null;
 
   constructor(private readonly script: ScriptPage[]) {}
 
@@ -177,7 +186,13 @@ class FakeOAuthBrowser {
   // These tests exercise the classic OAuth-redirect path; report no GSI/FedCM
   // widget so runOAuthFlow takes startOAuth (not tryGoogleGsiLogin).
   async hasGoogleGsiAffordance(): Promise<boolean> {
-    return false;
+    return this.googleGsiAffordance;
+  }
+  async tryGoogleGsiLogin(): Promise<{ ok: boolean; via: "fedcm" | "popup" | "redirect" | "none" }> {
+    if (this.signupInventoryAfterGoogleGsi !== null) {
+      this.signupInventory = this.signupInventoryAfterGoogleGsi;
+    }
+    return this.googleGsiResult;
   }
   currentUrl(): string {
     return this.page().url;
@@ -1010,6 +1025,39 @@ describe("planExecuteWithRetry — OAuth-first branch (T6)", () => {
     );
     expect(outcome.kind).toBe("oauth");
     expect(outcome.selector).toBe("#google-oauth");
+  });
+});
+
+describe("OAuth GSI fallback routing", () => {
+  it("uses native form-fill before falling back to another OAuth provider", async () => {
+    const browser = new FakeOAuthBrowser([{ url: "https://example.com/signup", text: "" }]);
+    browser.googleGsiAffordance = true;
+    browser.googleGsiResult = { ok: false, via: "none" };
+    browser.signupInventory = [
+      GOOGLE_BTN,
+      GITHUB_BTN,
+      mk({ tag: "input", type: null, name: "email", selector: "#email" }),
+      PASSWORD_INPUT,
+      SIGNUP_BTN,
+    ];
+    browser.signupInventoryAfterGoogleGsi = [GITHUB_BTN];
+    expect(hasNativeSignupForm(browser.signupInventory)).toBe(true);
+    const agent = newAgent(browser);
+    const steps: string[] = [];
+    const result = await (
+      agent as unknown as {
+        runOAuthFlow: (
+          task: ReturnType<typeof oauthTask>,
+          selector: string,
+          provider: "google",
+          steps: string[],
+        ) => Promise<unknown>;
+      }
+    ).runOAuthFlow(oauthTask(), "#google-oauth", "google", steps);
+
+    expect(result).toBe("__fall_back_to_form_fill__");
+    expect(steps.join("\n")).toMatch(/original page had a native email\/password signup form/i);
+    expect(steps.join("\n")).not.toMatch(/falling back to github/i);
   });
 });
 

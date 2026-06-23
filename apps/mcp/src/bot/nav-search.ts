@@ -79,6 +79,21 @@ export function isCredentialSearchDeadEndHref(
   }
 }
 
+export function isGoogleConsumerDetourHref(currentUrl: string, href: string | null): boolean {
+  const abs = resolveNavHref(href, currentUrl);
+  if (abs === null) return false;
+  try {
+    const current = new URL(currentUrl);
+    if (!/^console\.[a-z0-9-]+\.google\.com$/i.test(current.hostname)) return false;
+    const dest = new URL(abs);
+    if (dest.hostname.toLowerCase() === current.hostname.toLowerCase()) return false;
+    return /^(?:accounts|myaccount|www|mail)\.google\.com$/i.test(dest.hostname) ||
+      dest.hostname.toLowerCase() === "google.com";
+  } catch {
+    return true;
+  }
+}
+
 // Union two inventory snapshots, deduped by selector (first wins). Used to
 // survive expandLatentNav's destructive menu-toggling: an affordance present
 // in EITHER the pre- or post-expand read is kept, so an already-open dropdown
@@ -742,6 +757,7 @@ export async function runNavSearch(
         !tried.has(c.selector) &&
         !isOffSiteHref(url, c.href) &&
         !isCredentialSearchDeadEndHref(url, c.href) &&
+        !isGoogleConsumerDetourHref(url, c.href) &&
         !(
           candidateUrlKey(c, url) !== null &&
           sterileKeyUrls.has(candidateUrlKey(c, url)!)

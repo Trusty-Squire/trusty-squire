@@ -57,16 +57,32 @@ import {
 // (new optional fields) stay forward-compatible.
 export const CAPTURE_FORMAT_VERSION = 1 as const;
 
-// One run-scoped id so a multi-service process (the batch harness)
-// keeps each service's rounds grouped without collisions.
-let runId: string | undefined;
+// Per-service run ids. Housekeeper discovery can run several services in one
+// process; a module-global runId lets one signup's reset erase another
+// in-flight signup's capture state before auto-promote reads it.
+const runIds = new Map<string, string>();
+
+function slugOf(service: string): string {
+  return service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function runIdFor(service: string): string {
+  const slug = slugOf(service);
+  const existing = runIds.get(slug);
+  if (existing !== undefined) return existing;
+  const next = Date.now().toString(36);
+  runIds.set(slug, next);
+  return next;
+}
 
 // Read the in-process runId. Auto-promote needs to know which run's
 // captures to promote after a successful signup. Returns undefined
 // when no rounds have been captured yet — auto-promote then skips
 // with a useful message rather than promoting nothing.
-export function currentRunId(): string | undefined {
-  return runId;
+export function currentRunId(service?: string): string | undefined {
+  if (service !== undefined) return runIds.get(slugOf(service));
+  if (runIds.size === 1) return [...runIds.values()][0];
+  return undefined;
 }
 
 // rc.17 — reset the per-process capture chain state at the start of a
@@ -78,10 +94,19 @@ export function currentRunId(): string | undefined {
 // #3 of the Railway closed-loop test was the canonical case).
 // Called from UniversalSignupBot.runSession() before the bot's first
 // captureOnboardingRound call.
-export function resetCaptureChain(): void {
-  runId = undefined;
-  chainHead.clear();
-  lastRound = undefined;
+export function resetCaptureChain(service?: string): void {
+  if (service === undefined) {
+    runIds.clear();
+    chainHead.clear();
+    lastRounds.clear();
+    return;
+  }
+  const slug = slugOf(service);
+  runIds.delete(slug);
+  lastRounds.delete(slug);
+  for (const key of [...chainHead.keys()]) {
+    if (key.startsWith(`${slug}|`)) chainHead.delete(key);
+  }
 }
 
 // Per-(service, runId) chain head. Each new round's `prev_hash` is the
@@ -98,7 +123,7 @@ const chainHead = new Map<string, string>();
 // captureRunOutcome reads this to stamp `terminal_round` — the round the
 // run reached (where a failure got stuck, or the last onboarding step on
 // success). Reset alongside runId/chainHead at the start of each signup.
-let lastRound: number | undefined;
+const lastRounds = new Map<string, number>();
 
 export interface OnboardingRoundCapture {
   service: string;
@@ -203,8 +228,8 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
   if (dir === null) return;
   try {
     mkdirSync(dir, { recursive: true });
-    if (runId === undefined) runId = Date.now().toString(36);
-    const slug = entry.service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const runId = runIdFor(entry.service);
+    const slug = slugOf(entry.service);
     const file = join(dir, `${slug}-${runId}-r${entry.round}.json`);
 
     const chainKey = `${slug}|${runId}`;
@@ -247,7 +272,7 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
     writeFileSync(file, JSON.stringify(corpusCase, null, 2));
 
     chainHead.set(chainKey, contentHash);
-    lastRound = Math.max(lastRound ?? -1, entry.round);
+    lastRounds.set(slug, Math.max(lastRounds.get(slug) ?? -1, entry.round));
   } catch {
     // best-effort — capture is diagnostic, never load-bearing
   }
@@ -263,9 +288,10 @@ export function updateCapturedRoundSemantic(
   semantic: SemanticTransitionRecord,
 ): void {
   const dir = resolveCaptureDir();
+  const runId = currentRunId(service);
   if (dir === null || runId === undefined) return;
   try {
-    const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const slug = slugOf(service);
     const file = join(dir, `${slug}-${runId}-r${round}.json`);
     const current = JSON.parse(readFileSync(file, "utf8")) as OnboardingCaseFile;
     const payload: Omit<OnboardingCaseFile, "content_hash" | "expect"> = {
@@ -358,7 +384,11 @@ function currentSourceCommit(): string | undefined {
 // finalizer derive `reachedOnboarding` for the failure-stage classifier
 // without re-reading the disk.
 export function capturedAnyRound(): boolean {
-  return lastRound !== undefined;
+  return lastRounds.size > 0;
+}
+
+export function capturedAnyRoundForService(service: string): boolean {
+  return lastRounds.has(slugOf(service));
 }
 
 // Redaction-safe summary of a finished run. Pure + exported for tests.
@@ -407,8 +437,9 @@ export function captureRunOutcome(service: string, result: SignupResult): void {
   if (dir === null) return;
   try {
     mkdirSync(dir, { recursive: true });
-    if (runId === undefined) runId = Date.now().toString(36);
-    const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const runId = runIdFor(service);
+    const slug = slugOf(service);
+    const lastRound = lastRounds.get(slug);
     const file = join(dir, `${slug}-${runId}.outcome.json`);
     const sourceCommit = currentSourceCommit();
     const record: OnboardingOutcomeFile = {

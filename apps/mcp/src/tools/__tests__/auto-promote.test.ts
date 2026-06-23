@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isAutoPromoteEnabled, runAutoPromote } from "../provision-any.js";
-import { captureOnboardingRound } from "../../bot/onboarding-capture.js";
+import { captureOnboardingRound, resetCaptureChain } from "../../bot/onboarding-capture.js";
 import type { OnboardingRoundCapture } from "../../bot/onboarding-capture.js";
 import type { InteractiveElement } from "../../bot/browser.js";
 
@@ -34,11 +34,13 @@ const ENV_KEYS = [
 let envBackup: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
 
 beforeEach(() => {
+  resetCaptureChain();
   envBackup = {};
   for (const k of ENV_KEYS) envBackup[k] = process.env[k];
 });
 
 afterEach(() => {
+  resetCaptureChain();
   for (const k of ENV_KEYS) {
     if (envBackup[k] === undefined) delete process.env[k];
     else process.env[k] = envBackup[k];
@@ -242,11 +244,12 @@ describe("runAutoPromote — env preconditions", () => {
   });
 
   it("skips when TRUSTY_SQUIRE_REGISTRY_URL is unset", async () => {
-    writeRailwayCapture(uniqueService());
+    const service = uniqueService();
+    writeRailwayCapture(service);
     delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
     const sink: string[] = [];
     await runAutoPromote({
-      service: "railway",
+      service,
       stepsSink: sink,
       accountId: "acct-1",
     });

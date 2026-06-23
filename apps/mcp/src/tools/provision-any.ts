@@ -1626,7 +1626,7 @@ export async function runAutoPromote(args: {
       );
       return { kind: "skipped", reason: "capture_dir_disabled" };
     }
-    const runId = currentRunId();
+    const runId = currentRunId(service);
     if (runId === undefined) {
       stepsSink.push(
         "[auto-promote] no captures written this run (bot may have taken the fast path) — skipping.",

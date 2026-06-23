@@ -44,6 +44,7 @@ export class PostSignupRecoveryState {
   lastStuckFireUrl: string | null = null;
   triedFallbackUrls = new Set<string>();
   clickedKeysLinks = new Set<string>();
+  clickedScopeLinks = new Set<string>();
   prematureDoneFallbacks = 0;
 
   navigateCount = 0;

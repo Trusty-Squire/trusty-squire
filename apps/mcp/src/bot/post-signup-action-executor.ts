@@ -13,6 +13,7 @@ export interface TosScrollResult {
 
 export interface PostSignupActionBrowserPort {
   click(selector: string): Promise<void>;
+  clickSubmit?(selector: string): Promise<void>;
   type(selector: string, value: string): Promise<void>;
   selectOption(selector: string, optionText?: string): Promise<void>;
   check(selector: string): Promise<void>;
@@ -32,6 +33,7 @@ export interface PostSignupActionExecutorInput {
   step: PostSignupExecutableAction;
   credentials: Record<string, string>;
   snapshotPostClickAlert(): Promise<void>;
+  submitClick?: boolean;
 }
 
 export interface PostSignupActionExecutorResult {
@@ -62,7 +64,11 @@ export class PostSignupActionExecutor {
 
     switch (step.kind) {
       case "click": {
-        await this.browser.click(step.selector);
+        if (input.submitClick === true && this.browser.clickSubmit !== undefined) {
+          await this.browser.clickSubmit(step.selector);
+        } else {
+          await this.browser.click(step.selector);
+        }
         const clickPoll =
           await this.credentialExtractionFlow.pollAfterCredentialProducingClick({
             credentials,

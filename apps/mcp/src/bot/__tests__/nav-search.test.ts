@@ -13,6 +13,7 @@ import {
   resolveNavHref,
   isOffSiteHref,
   isCredentialSearchDeadEndHref,
+  isGoogleConsumerDetourHref,
   isRequiredAccountSetupForm,
   KEYS_DESTINATION_URL,
   findOverlayDismiss,
@@ -189,6 +190,20 @@ describe("isCredentialSearchDeadEndHref", () => {
     const here = "https://app.axiom.co/";
     expect(isCredentialSearchDeadEndHref(here, "/settings/api-tokens")).toBe(false);
     expect(isCredentialSearchDeadEndHref(here, "https://app.axiom.co/settings/api-tokens")).toBe(false);
+  });
+});
+
+describe("isGoogleConsumerDetourHref", () => {
+  it("drops Google Account links from Google product consoles but keeps console links", () => {
+    const here = "https://console.firebase.google.com/u/0/";
+    expect(
+      isGoogleConsumerDetourHref(
+        here,
+        "https://accounts.google.com/SignOutOptions?continue=https://console.firebase.google.com/u/0/",
+      ),
+    ).toBe(true);
+    expect(isGoogleConsumerDetourHref(here, "https://myaccount.google.com/security")).toBe(true);
+    expect(isGoogleConsumerDetourHref(here, "https://console.firebase.google.com/project/demo")).toBe(false);
   });
 });
 
@@ -582,7 +597,7 @@ describe("runNavSearch", () => {
         el({ tag: "button", visibleText: "Personal or hobby projects", selector: "#personal" }),
         el({ tag: "button", visibleText: "Professional work", selector: "#work" }),
         el({ tag: "button", visibleText: "Skip", selector: "#skip" }),
-        el({ tag: "button", visibleText: "Continue", selector: "#continue", disabled: true }),
+        el({ tag: "button", visibleText: "Continue", selector: "#continue" }),
       ],
     };
     const continueModal: FakePage = {

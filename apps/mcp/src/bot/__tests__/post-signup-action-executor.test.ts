@@ -14,6 +14,9 @@ function browser(
     click: async (selector) => {
       calls.push(`click:${selector}`);
     },
+    clickSubmit: async (selector) => {
+      calls.push(`clickSubmit:${selector}`);
+    },
     type: async (selector, value) => {
       calls.push(`type:${selector}:${value}`);
     },
@@ -121,6 +124,24 @@ describe("PostSignupActionExecutor", () => {
     ]);
     expect(result.hint).toContain("operation failed");
     expect(snapshotted).toBe(true);
+  });
+
+  it("uses clickSubmit for submit-button click steps when requested", async () => {
+    const b = browser();
+
+    await new PostSignupActionExecutor(
+      b,
+      extraction(),
+      undefined,
+      { clickPollMaxPolls: 1, clickPollMaxWaitMs: 10_000 },
+    ).execute({
+      step: { kind: "click", selector: "#continue", reason: "" },
+      credentials: {},
+      submitClick: true,
+      snapshotPostClickAlert: async () => undefined,
+    });
+
+    expect(b.calls[0]).toBe("clickSubmit:#continue");
   });
 
   it("merges credentials surfaced after click", async () => {

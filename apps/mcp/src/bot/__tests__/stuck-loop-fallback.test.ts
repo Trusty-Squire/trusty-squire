@@ -334,6 +334,28 @@ describe("pickStuckLoopFallbackUrl", () => {
     );
     expect(fallback).toBe("https://platform.claude.com/settings/keys");
   });
+
+  it("preserves team/org/workspace route scope before origin-root guesses", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.example.test/t/acme-team/dashboard",
+      new Set(),
+    );
+    expect(fallback).toBe("https://app.example.test/t/acme-team/settings/keys");
+
+    const tried = new Set([
+      "https://app.example.test/t/acme-team/settings/keys",
+      "https://app.example.test/t/acme-team/settings/api-keys",
+      "https://app.example.test/t/acme-team/settings/api_keys",
+      "https://app.example.test/t/acme-team/settings/tokens",
+      "https://app.example.test/t/acme-team/settings/api-tokens",
+    ]);
+    expect(
+      pickStuckLoopFallbackUrl(
+        "https://app.example.test/t/acme-team/dashboard",
+        tried,
+      ),
+    ).toBe("https://app.example.test/t/acme-team/settings/api/tokens");
+  });
 });
 
 describe("serviceSlug", () => {

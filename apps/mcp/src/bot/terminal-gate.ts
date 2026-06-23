@@ -77,6 +77,73 @@ export function isOnboardingReviewGate(
   return verificationFailed === undefined && isAtAccountReviewGate(pageText);
 }
 
+function hasActiveLegalOnboardingForm(frame: ObservationFrame | null): boolean {
+  if (frame === null) return false;
+  const text = `${frame.state.title}\n${frame.visibleText}`.toLowerCase();
+  const hasLegalAcceptance =
+    /\b(?:i\s+am\s+at\s+least\s+\d+|agree\s+to\b.*\b(?:terms|policy|privacy)|accept\s+(?:the\s+)?terms|commercial\s+terms|usage\s+policy|privacy\s+policy)\b/i.test(
+      text,
+    ) ||
+    frame.inventory.some((element) => {
+      if (element.visible !== true) return false;
+      if (
+        element.tag !== "input" &&
+        element.role !== "checkbox" &&
+        element.role !== "radio"
+      ) {
+        return false;
+      }
+      const label = [
+        element.visibleText,
+        element.labelText,
+        element.ariaLabel,
+        element.placeholder,
+        element.name,
+      ]
+        .filter((part): part is string => typeof part === "string" && part.length > 0)
+        .join(" ");
+      return /\b(?:terms|policy|privacy|age|accept|agree)\b/i.test(label);
+    });
+  if (!hasLegalAcceptance) return false;
+
+  const hasFillableInput = frame.inventory.some((element) => {
+    if (element.visible !== true) return false;
+    if (element.tag !== "input" && element.tag !== "textarea") return false;
+    if (
+      element.type !== null &&
+      !["", "text", "email", "search", "tel", "url"].includes(element.type)
+    ) {
+      return false;
+    }
+    const label = [
+      element.labelText,
+      element.placeholder,
+      element.name,
+      element.ariaLabel,
+    ]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join(" ");
+    return /\b(?:name|call\s+you|display|nickname|organization|organisation|company|team|workspace)\b/i.test(
+      label,
+    );
+  });
+  if (!hasFillableInput) return false;
+
+  return frame.inventory.some((element) => {
+    if (element.visible !== true) return false;
+    if (element.tag !== "button" && element.role !== "button") return false;
+    const label = [
+      element.visibleText,
+      element.labelText,
+      element.ariaLabel,
+      element.placeholder,
+    ]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join(" ");
+    return /\b(?:continue|next|submit|finish|done|get\s+started|create)\b/i.test(label);
+  });
+}
+
 export function isAtPhoneGate(text: string): boolean {
   return /phone verification|verify your phone|enter your phone|sms code|text message/i.test(text);
 }
@@ -133,8 +200,9 @@ export function classifyTerminalGate(input: TerminalGateInput): TerminalGateVerd
     return { kind: "payment", text, stateVerdict };
   }
   if (
-    stateVerdict?.state === "account_review_gate" ||
-    isAtAccountReviewGate(text)
+    (stateVerdict?.state === "account_review_gate" ||
+      isAtAccountReviewGate(text)) &&
+    !(hasActiveLegalOnboardingForm(input.frame) && !isAtAccountReviewGate(text))
   ) {
     return { kind: "account_review", text, stateVerdict };
   }

@@ -10,6 +10,7 @@ import {
   detectAntiBotBlock,
   firstHttpsUrl,
   guessSignupUrl,
+  isGoogleConsumerPostOAuthUrl,
   isGoogleSearchUrl,
   resolveSignupUrl,
 } from "../agent.js";
@@ -303,6 +304,37 @@ describe("detectAlreadySignedIn (F17)", () => {
     ).toBe(false);
   });
 
+  it("fires on an auth-path 404 shell with authenticated onboarding checklist chrome", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://cloud.example.com/signup",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Bring me home, please" }),
+          mkEl({ tag: "button", visibleText: "Create an index" }),
+          mkEl({ tag: "button", visibleText: "Don't show me again" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("fires on a signed-in product welcome page with a project setup card", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://console.example.com/u/0/",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Google Account Verify Robot" }),
+          mkEl({
+            tag: "div",
+            role: "button",
+            visibleText:
+              "Get started by setting up a project Integrate products to super-charge your app",
+          }),
+          mkEl({ tag: "a", visibleText: "Support" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
   it("does NOT fire when an email or password input is present", () => {
     expect(
       detectAlreadySignedIn({
@@ -499,5 +531,14 @@ describe("detectAlreadySignedIn (F17)", () => {
         }),
       ).toBe(false);
     });
+  });
+});
+
+describe("isGoogleConsumerPostOAuthUrl", () => {
+  it("flags consumer Google pages but not service consoles on google-owned hosts", () => {
+    expect(isGoogleConsumerPostOAuthUrl("https://www.google.com/")).toBe(true);
+    expect(isGoogleConsumerPostOAuthUrl("https://myaccount.google.com/")).toBe(true);
+    expect(isGoogleConsumerPostOAuthUrl("https://aistudio.google.com/apikey")).toBe(false);
+    expect(isGoogleConsumerPostOAuthUrl("https://console.firebase.google.com/")).toBe(false);
   });
 });

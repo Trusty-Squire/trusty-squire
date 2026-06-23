@@ -15,7 +15,11 @@ import type { AgentInbox } from "./agent.js";
 import { withSignupLock } from "./signup-lock.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { LLMClient, LLMPair } from "./llm-client.js";
-import { capturedAnyRound, captureRunOutcome, resetCaptureChain } from "./onboarding-capture.js";
+import {
+  capturedAnyRoundForService,
+  captureRunOutcome,
+  resetCaptureChain,
+} from "./onboarding-capture.js";
 import { classifyFailureStage } from "./failure-stage.js";
 import { classifyUnwinnable } from "./unwinnable-services.js";
 
@@ -180,7 +184,7 @@ export class UniversalSignupBot {
     // in the same bot process share runId and the second one's chain
     // looks up the first one's last hash as prev_hash, failing
     // verifyCaptureChain with prev_hash_mismatch.
-    resetCaptureChain();
+    resetCaptureChain(request.service);
     // Defaults: humanize=true (production behavior — we want to pass
     // Cloudflare/reCAPTCHA scoring). Tests can pass `humanize: false`
     // to skip the behavior-simulation overhead.
@@ -242,7 +246,10 @@ export class UniversalSignupBot {
       // B1 — tag the structured terminal stage onto the result so telemetry
       // and the outcome sidecar share one value (the flakiness histogram is
       // built from it). reachedOnboarding = did any post-verify round capture.
-      result.failure_stage = classifyFailureStage(result, capturedAnyRound());
+      result.failure_stage = classifyFailureStage(
+        result,
+        capturedAnyRoundForService(request.service),
+      );
 
       // A2 — write the run-outcome sidecar next to this run's captured
       // rounds so the offline eval (A3) can label them: rounds from a

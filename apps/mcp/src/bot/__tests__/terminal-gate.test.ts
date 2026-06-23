@@ -74,6 +74,41 @@ describe("classifyTerminalGate", () => {
     expect(verdict.kind).toBe("account_review");
   });
 
+  it("does not classify an active legal onboarding form as account review", () => {
+    const visibleText =
+      "Start building with Claude. What’s your full name? What should we call you? " +
+      "I am at least 18 years old, agree to Commercial Terms and Usage Policy, " +
+      "and acknowledge the Privacy Policy. Continue";
+    const verdict = classifyTerminalGate({
+      frame: frame(visibleText, [
+        { tag: "input", type: "text", name: "fullname", labelText: "What’s your full name?" },
+        { tag: "input", type: "text", name: "displayname", labelText: "What should we call you?" },
+        { tag: "span", role: "checkbox", ariaLabel: "Accept terms" },
+        { tag: "button", visibleText: "Continue" },
+      ]),
+      fallbackText: visibleText,
+      lastDoneReason: "Planner thought the user was in an account review flow.",
+    });
+    expect(verdict.stateVerdict?.state).toBe("account_review_gate");
+    expect(verdict.kind).toBe("none");
+  });
+
+  it("keeps explicit approval language terminal even when a form is visible", () => {
+    const visibleText =
+      "We need more information to approve your account. " +
+      "I agree to the Terms and Privacy Policy. Continue";
+    const verdict = classifyTerminalGate({
+      frame: frame(visibleText, [
+        { tag: "input", type: "text", name: "company", labelText: "Company name" },
+        { tag: "input", type: "checkbox", labelText: "I agree to the Terms" },
+        { tag: "button", visibleText: "Continue" },
+      ]),
+      fallbackText: visibleText,
+      lastDoneReason: null,
+    });
+    expect(verdict.kind).toBe("account_review");
+  });
+
   it("does not treat paywall negation as a payment wall", () => {
     const verdict = classifyTerminalGate({
       frame: frame("No credit card required. Create API Key."),

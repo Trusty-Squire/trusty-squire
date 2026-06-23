@@ -128,6 +128,7 @@ class QueueLLM implements LLMClient {
 class FakeBrowser {
   public inventoryQueue: InteractiveElement[][] = [[]];
   public extractTextValues: string[] = [""];
+  public stateUrl = "https://x.test/signup";
   public inspectSelectorImpl: (sel: string) => {
     count: number;
     tag: string | null;
@@ -177,7 +178,7 @@ class FakeBrowser {
     return { variant: "unknown", challengeRendered: false };
   }
   async getState(): Promise<BrowserState> {
-    return { url: "https://x.test/signup", title: "Sign up", html: "", screenshot: "" };
+    return { url: this.stateUrl, title: "Sign up", html: "", screenshot: "" };
   }
   async extractText(): Promise<string> {
     const i = Math.min(this.textCalls, this.extractTextValues.length - 1);
@@ -382,6 +383,41 @@ describe("planExecuteWithRetry", () => {
 
     expect(outcome.kind).toBe("oauth_required");
     expect(llm.calls).toBe(0); // detected before any planner call
+  });
+
+  it("uses the pinned Google account on provider identifier pages instead of the inbox alias", async () => {
+    const browser = new FakeBrowser();
+    browser.stateUrl =
+      "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fconsole.firebase.google.com%2Fu%2F0%2F";
+    browser.inventoryQueue = [
+      [
+        mk({
+          tag: "input",
+          type: "text",
+          id: "identifierId",
+          labelText: "Email or phone",
+          selector: "#identifierId",
+        }),
+        mk({ tag: "button", type: "button", visibleText: "Create account", selector: "#create" }),
+        mk({ tag: "button", type: "button", visibleText: "Next", selector: "#next" }),
+      ],
+      [mk({ tag: "input", type: "password", labelText: "Enter your password", selector: "#password" })],
+    ];
+    const llm = new QueueLLM([fillPlan("#identifierId", "#next")]);
+
+    const { outcome, steps } = await runLoop(browser, llm, {
+      oauthProvider: "google",
+      oauthAccountEmail: "verify-178@trustysquire.ai",
+    });
+
+    expect(browser.typed).toEqual([
+      { selector: "#identifierId", value: "verify-178@trustysquire.ai" },
+    ]);
+    expect(browser.submitted).toEqual(["#next"]);
+    expect(browser.clicked).not.toContain("#create");
+    expect(outcome.kind).toBe("needs_login");
+    expect(llm.calls).toBe(0);
+    expect(steps.some((s) => /pinned account/i.test(s))).toBe(true);
   });
 
   it("F14: fails planning_failed when the planner re-picks the same click selector after no-progress", async () => {

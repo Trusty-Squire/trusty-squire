@@ -6,7 +6,33 @@
 // 300s of dead air. This guards the keyword set behind that decision.
 
 import { describe, expect, it } from "vitest";
-import { expectsVerificationEmail, submitWasRejected } from "../agent.js";
+import {
+  detectEmailLinkGate,
+  expectsVerificationEmail,
+  isBrowserNavigationErrorPage,
+  submitWasRejected,
+} from "../agent.js";
+import type { InteractiveElement } from "../browser.js";
+
+function el(over: Partial<InteractiveElement>): InteractiveElement {
+  return {
+    index: 0,
+    tag: "input",
+    type: "text",
+    id: null,
+    name: null,
+    placeholder: null,
+    ariaLabel: null,
+    role: null,
+    labelText: null,
+    visibleText: null,
+    selector: "input",
+    visible: true,
+    inViewport: true,
+    inConsentWidget: false,
+    ...over,
+  };
+}
 
 describe("S3 — expectsVerificationEmail", () => {
   it("is true when the page tells the user to check their email", () => {
@@ -68,5 +94,65 @@ describe("S3 — submitWasRejected", () => {
     expect(submitWasRejected("")).toBe(false);
     // "required" appearing in benign marketing copy must not trip it.
     expect(submitWasRejected("No credit card required to get started")).toBe(false);
+  });
+});
+
+describe("S3 — detectEmailLinkGate", () => {
+  it("recognizes post-verify magic-link inbox gates", () => {
+    expect(
+      detectEmailLinkGate(
+        "https://betterstack.com/users/link",
+        "Check your inbox",
+        "Check your inbox We've sent you a magic link to kenneth.carter541@trustysquire.ai.",
+        [el({ tag: "button", visibleText: "Resend email", selector: "#resend" })],
+      ),
+    ).toBe(true);
+  });
+
+  it("does not steal normal passwordless signup forms from form fill", () => {
+    expect(
+      detectEmailLinkGate(
+        "https://betterstack.com/users/sign-up",
+        "Sign up",
+        "Join them by signing up below.",
+        [
+          el({ type: "email", name: "user[email]", labelText: "Email", selector: "#email" }),
+          el({ tag: "button", type: "submit", visibleText: "Send me a magic link", selector: "#submit" }),
+        ],
+      ),
+    ).toBe(false);
+  });
+
+  it("does not classify code-entry gates as link gates", () => {
+    expect(
+      detectEmailLinkGate(
+        "https://app.example.test/verify-email",
+        "Verify your email",
+        "We sent a code to your email.",
+        [el({ name: "otp", placeholder: "Code", selector: "#otp" })],
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("post-verify browser navigation errors", () => {
+  it("recognizes Chrome DNS error pages as dead navigation targets", () => {
+    expect(
+      isBrowserNavigationErrorPage(
+        "chrome-error://chromewebdata/",
+        "app.example.test",
+        "This site can't be reached DNS_PROBE_FINISHED_NXDOMAIN",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify a normal page as a browser navigation error", () => {
+    expect(
+      isBrowserNavigationErrorPage(
+        "https://example.test/dashboard",
+        "Dashboard",
+        "API keys Settings",
+      ),
+    ).toBe(false);
   });
 });
