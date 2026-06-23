@@ -19,12 +19,14 @@ import type { ApiDeps } from "../services/deps.js";
 import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
 import {
   applyAuthShape,
+  EgressGrantStoreUnavailableError,
   parseAuthShape,
   mintGrant,
   verifyEgressToken,
   grantIsLive,
   type EgressGrantStore,
 } from "../services/egress-grant.js";
+import { isRetryablePrismaConnectionError } from "../services/prisma-egress-grant-store.js";
 
 const mintBody = z.object({
   reference: z.string().min(1).max(400).optional(),
@@ -75,6 +77,10 @@ function proxyErrorStatus(code: ProxyError["code"]): number {
     default:
       return 502;
   }
+}
+
+function sendEgressStoreUnavailable(reply: FastifyReply): void {
+  reply.code(503).send({ error: "egress_temporarily_unavailable", retryable: true });
 }
 
 export const registerEgressRoutes: FastifyPluginAsync<{
@@ -188,7 +194,19 @@ export const registerEgressRoutes: FastifyPluginAsync<{
     async (req, reply) => {
       const authz = req.headers.authorization ?? "";
       const token = /^Bearer\s+(.+)$/i.exec(authz)?.[1]?.trim() ?? "";
-      const grant = await opts.egressGrantStore.getById(req.params.grant);
+      let grant;
+      try {
+        grant = await opts.egressGrantStore.getById(req.params.grant);
+      } catch (err) {
+        if (
+          err instanceof EgressGrantStoreUnavailableError ||
+          isRetryablePrismaConnectionError(err)
+        ) {
+          sendEgressStoreUnavailable(reply);
+          return;
+        }
+        throw err;
+      }
       if (grant === null || !verifyEgressToken(token, grant.token_hash)) {
         reply.code(401).send({ error: "invalid_egress_token" });
         return;
@@ -204,9 +222,20 @@ export const registerEgressRoutes: FastifyPluginAsync<{
 
       // Resolve the credential (account-scoped to the grant) for its upstream
       // host + auth_shape. The secret itself is injected by vault.proxy.
-      const owned = await opts.deps.credentialStore.listByAccount(grant.account_id);
-      const cred = owned.find((c) => c.reference === grant.credential_ref);
-      if (cred === undefined || cred.allowed_hosts.length === 0) {
+      let cred;
+      try {
+        cred = await opts.deps.credentialStore.findActive(grant.credential_ref);
+      } catch (err) {
+        if (isRetryablePrismaConnectionError(err)) {
+          sendEgressStoreUnavailable(reply);
+          return;
+        }
+        throw err;
+      }
+      if (cred !== null && cred.account_id !== grant.account_id) {
+        cred = null;
+      }
+      if (cred === null || cred.allowed_hosts.length === 0) {
         reply.code(404).send({ error: "credential_unavailable" });
         return;
       }
@@ -239,8 +268,8 @@ export const registerEgressRoutes: FastifyPluginAsync<{
             : JSON.stringify(req.body);
 
       try {
-        const response = await opts.deps.vault.proxy(
-          grant.credential_ref,
+        const response = await opts.deps.vault.proxyResolvedCredential(
+          cred,
           grant.account_id,
           {
             method: req.method,

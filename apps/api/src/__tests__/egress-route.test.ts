@@ -11,6 +11,11 @@ import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/sessi
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
+import {
+  EgressGrantStoreUnavailableError,
+  type EgressGrant,
+  type EgressGrantStore,
+} from "../services/egress-grant.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 const CUSTOMER_ID = "ts-test";
@@ -32,9 +37,13 @@ function fakeExecutor(): HttpProxyExecutor {
 }
 
 interface Harness { server: FastifyInstance; deps: ApiDeps }
-async function setup(): Promise<Harness> {
+async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promise<Harness> {
   const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
-  const server = await buildServer({ deps, proxyExecutor: fakeExecutor() });
+  const server = await buildServer({
+    deps,
+    proxyExecutor: fakeExecutor(),
+    ...(opts.egressGrantStore !== undefined ? { egressGrantStore: opts.egressGrantStore } : {}),
+  });
   return { server, deps };
 }
 async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
@@ -161,6 +170,66 @@ describe("Egress Grants — /v1/egress", () => {
     });
     // Many calls, never rate-limited.
     for (let i = 0; i < 5; i++) expect((await call()).statusCode).toBe(200);
+  });
+
+  it("maps grant-store connection collapse to retryable 503 instead of raw 500", async () => {
+    await h.server.close();
+    const backing = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID }).egressGrantStore;
+    let failReads = false;
+    const flakyStore: EgressGrantStore = {
+      create: (grant: EgressGrant) => backing.create(grant),
+      listByAccount: (accountId: string) => backing.listByAccount(accountId),
+      revoke: (id: string, accountId: string, at: string) => backing.revoke(id, accountId, at),
+      getById: async (id: string) => {
+        if (failReads) throw new EgressGrantStoreUnavailableError("P1017 after retry");
+        return backing.getById(id);
+      },
+    };
+    h = await setup({ egressGrantStore: flakyStore });
+    const account = await h.deps.accountStore.createAccount("p1017@example.test", "P");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    failReads = true;
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: "egress_temporarily_unavailable", retryable: true });
+    expect(seen).toHaveLength(0);
+  });
+
+  it("resolves the granted credential by reference instead of listing every account credential", async () => {
+    const account = await h.deps.accountStore.createAccount("narrow@example.test", "N");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const originalList = h.deps.credentialStore.listByAccount.bind(h.deps.credentialStore);
+    const originalFindActive = h.deps.credentialStore.findActive.bind(h.deps.credentialStore);
+    let findActiveCalls = 0;
+    h.deps.credentialStore.listByAccount = async (accountId: string) => originalList(accountId);
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+    h.deps.credentialStore.listByAccount = async () => {
+      throw new Error("egress proxy should not list all credentials");
+    };
+    h.deps.credentialStore.findActive = async (reference: string) => {
+      findActiveCalls += 1;
+      return originalFindActive(reference);
+    };
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(findActiveCalls).toBe(1);
   });
 
   it("injects the secret per the credential's stored auth_shape (header, not bearer)", async () => {

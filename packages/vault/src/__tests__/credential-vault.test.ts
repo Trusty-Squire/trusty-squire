@@ -22,11 +22,19 @@ const NOW = new Date("2026-05-30T12:00:00.000Z");
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
 const SUB = "01HSUBAAAAAAAAAAAAAAAAAAAA";
 
-function makeVault(opts: { now?: () => Date } = {}) {
+function makeVault(opts: { now?: () => Date; proxyAuditFailureMode?: "strict" | "best_effort" } = {}) {
   const store = new InMemoryCredentialStore();
   const audit = new InMemoryVaultAuditStore(opts.now ?? (() => NOW));
   const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x42));
-  const vault = new CredentialVault({ store, audit, kms, now: opts.now ?? (() => NOW) });
+  const vault = new CredentialVault({
+    store,
+    audit,
+    kms,
+    now: opts.now ?? (() => NOW),
+    ...(opts.proxyAuditFailureMode !== undefined
+      ? { proxyAuditFailureMode: opts.proxyAuditFailureMode }
+      : {}),
+  });
   return { vault, store, audit };
 }
 
@@ -124,6 +132,46 @@ describe("store + retrieve (field map)", () => {
     expect(entry.field_names.sort()).toEqual(["access_key_id", "secret_access_key"]);
     const fields = await vault.retrieve(entry.reference, "user:read", assertion());
     expect(fields).toEqual({ access_key_id: "AKIA", secret_access_key: "abc/123" });
+  });
+});
+
+describe("proxy audit failure mode", () => {
+  it("best_effort returns the upstream response even when proxy audit writes fail", async () => {
+    const { vault, audit } = makeVault({ proxyAuditFailureMode: "best_effort" });
+    const entry = await vault.store(storeInput());
+    const originalRecord = audit.record.bind(audit);
+    let failAudit = false;
+    audit.record = async (event) => {
+      if (failAudit) throw new Error("audit database unavailable");
+      await originalRecord(event);
+    };
+    failAudit = true;
+
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "POST", url: "https://api.openai.com/v1/chat/completions" },
+        async () => okResponse,
+      ),
+    ).resolves.toEqual(okResponse);
+  });
+
+  it("strict mode keeps proxy audit writes on the success path", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(storeInput());
+    audit.record = async () => {
+      throw new Error("audit database unavailable");
+    };
+
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "POST", url: "https://api.openai.com/v1/chat/completions" },
+        async () => okResponse,
+      ),
+    ).rejects.toThrow(/audit database unavailable/);
   });
 });
 

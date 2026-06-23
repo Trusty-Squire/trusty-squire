@@ -246,6 +246,11 @@ export interface CredentialVaultDeps {
   audit: VaultAuditStore;
   kms: KMSClient;
   now?: () => Date;
+  // Workload proxy traffic should not turn a successful upstream response into
+  // a 500 because a post-response retrieval counter/audit write hit a transient
+  // DB connection failure. Storage/reveal/rotate/delete audit semantics stay
+  // strict; this option applies only to proxy() audit side effects.
+  proxyAuditFailureMode?: "strict" | "best_effort";
 }
 
 export class CredentialVault implements VaultClient {
@@ -566,21 +571,43 @@ export class CredentialVault implements VaultClient {
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
+    return this.proxyRecord(record, accountId, http, executor);
+  }
+
+  async proxyResolvedCredential(
+    record: CredentialRecord,
+    accountId: string,
+    http: ProxyHttpTemplate,
+    executor: ProxyExecutor,
+  ): Promise<ProxyResponse> {
+    if (record.account_id !== accountId || record.deleted_at !== null) {
+      throw new CredentialNotFoundError(record.reference);
+    }
+    return this.proxyRecord(record, accountId, http, executor);
+  }
+
+  private async proxyRecord(
+    record: CredentialRecord,
+    accountId: string,
+    http: ProxyHttpTemplate,
+    executor: ProxyExecutor,
+  ): Promise<ProxyResponse> {
+    const reference = record.reference;
     const targetHost = safeHost(http.url);
     if (targetHost === null || !record.allowed_hosts.includes(targetHost)) {
-      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
-        reference,
-        requester: "agent",
-        ...(targetHost !== null ? { target_host: targetHost } : {}),
-      });
+      await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
+          reference,
+          requester: "agent",
+          ...(targetHost !== null ? { target_host: targetHost } : {}),
+        });
       throw new AllowlistViolationError(reference, targetHost);
     }
     const fields = await this.decryptFields(record);
     const startedAt = this.now().getTime();
     try {
       const response = await executor({ accountId, http, fields });
-      await this.deps.store.markRetrieved(reference, this.now());
-      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
+      await this.runProxyAuditSideEffect(() => this.deps.store.markRetrieved(reference, this.now()));
+      await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
         target_host: targetHost,
@@ -590,7 +617,7 @@ export class CredentialVault implements VaultClient {
       });
       return response;
     } catch (err) {
-      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
+      await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
         target_host: targetHost,
@@ -754,6 +781,29 @@ export class CredentialVault implements VaultClient {
     payload: VaultAuditEventInput["payload"],
   ): Promise<void> {
     await this.deps.audit.record({ account_id: accountId, type, payload });
+  }
+
+  private async recordProxyAudit(
+    accountId: string,
+    type: VaultAuditType,
+    payload: VaultAuditEventInput["payload"],
+  ): Promise<void> {
+    await this.runProxyAuditSideEffect(() => this.recordAudit(accountId, type, payload));
+  }
+
+  private async runProxyAuditSideEffect(fn: () => Promise<void>): Promise<void> {
+    if (this.deps.proxyAuditFailureMode !== "best_effort") {
+      await fn();
+      return;
+    }
+    try {
+      await fn();
+    } catch {
+      // Proxy audit/retrieval counters are important telemetry, but under
+      // workload egress traffic they must not poison an otherwise successful
+      // upstream response. The API process logs request failures at the route
+      // layer; this package intentionally stays logger-free.
+    }
   }
 }
 

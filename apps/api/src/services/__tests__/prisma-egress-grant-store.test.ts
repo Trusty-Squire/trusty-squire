@@ -21,8 +21,17 @@ interface Row {
   revoked_at: Date | null;
 }
 
-function fakePrisma(): { prisma: ApiPrismaClient; rows: Map<string, Row> } {
+function p1017(): Error & { code: string } {
+  return Object.assign(new Error("Server has closed the connection."), { code: "P1017" });
+}
+
+function fakePrisma(): {
+  prisma: ApiPrismaClient & { $disconnect: () => Promise<void> };
+  rows: Map<string, Row>;
+  calls: { findUnique: number; disconnect: number; failFindUnique: number };
+} {
   const rows = new Map<string, Row>();
+  const calls = { findUnique: 0, disconnect: 0, failFindUnique: 0 };
   const egressGrant = {
     async create(args: { data: Record<string, unknown> }) {
       const d = args.data;
@@ -40,6 +49,11 @@ function fakePrisma(): { prisma: ApiPrismaClient; rows: Map<string, Row> } {
       return row;
     },
     async findUnique(args: { where: { id: string } }) {
+      calls.findUnique += 1;
+      if (calls.failFindUnique > 0) {
+        calls.failFindUnique -= 1;
+        throw p1017();
+      }
       return rows.get(args.where.id) ?? null;
     },
     async findMany(args: { where: Record<string, unknown> }) {
@@ -56,7 +70,13 @@ function fakePrisma(): { prisma: ApiPrismaClient; rows: Map<string, Row> } {
       return { count: 0 };
     },
   };
-  return { prisma: { egressGrant } as unknown as ApiPrismaClient, rows };
+  const prisma = {
+    egressGrant,
+    async $disconnect() {
+      calls.disconnect += 1;
+    },
+  } as unknown as ApiPrismaClient & { $disconnect: () => Promise<void> };
+  return { prisma, rows, calls };
 }
 
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
@@ -94,6 +114,50 @@ describe("PrismaEgressGrantStore", () => {
   it("getById() returns null for an unknown id", async () => {
     const store = new PrismaEgressGrantStore(fakePrisma().prisma);
     expect(await store.getById("g_nope")).toBeNull();
+  });
+
+  it("getById() caches grant lookups within the TTL", async () => {
+    const fake = fakePrisma();
+    let now = 1_000;
+    const store = new PrismaEgressGrantStore(fake.prisma, {
+      liveTtlMs: 30_000,
+      now: () => now,
+    });
+    const grant = makeGrant();
+    await store.create(grant);
+
+    expect(await store.getById(grant.id)).toMatchObject({ id: grant.id });
+    expect(await store.getById(grant.id)).toMatchObject({ id: grant.id });
+    expect(fake.calls.findUnique).toBe(0); // create() populated the cache.
+
+    now += 30_001;
+    expect(await store.getById(grant.id)).toMatchObject({ id: grant.id });
+    expect(fake.calls.findUnique).toBe(1);
+  });
+
+  it("getById() retries once on Prisma P1017 and reconnects before surfacing success", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma, { liveTtlMs: 0 });
+    const grant = makeGrant();
+    await store.create(grant);
+    fake.calls.failFindUnique = 1;
+
+    await expect(store.getById(grant.id)).resolves.toMatchObject({ id: grant.id });
+    expect(fake.calls.findUnique).toBe(2);
+    expect(fake.calls.disconnect).toBe(1);
+  });
+
+  it("getById() wraps repeated P1017 as a store-unavailable error", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma, { liveTtlMs: 0 });
+    const grant = makeGrant();
+    await store.create(grant);
+    fake.calls.failFindUnique = 2;
+
+    await expect(store.getById(grant.id)).rejects.toMatchObject({
+      name: "EgressGrantStoreUnavailableError",
+    });
+    expect(fake.calls.disconnect).toBe(1);
   });
 
   it("listByAccount() returns only this account's grants", async () => {
