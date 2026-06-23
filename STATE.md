@@ -14,6 +14,50 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ---
 
+## `meilisearch` — SPA stale-URL 404 trap (CRACKED 2026-06-23) → onboarding-wizard residual
+
+### ✓ CONFIRMED + FIXED: the "no_credentials_after_already_signed_in" was a 404 false-positive, NOT an auth wall
+
+meilisearch failed discover as `no_credentials_after_already_signed_in`. It
+read like an OAuth/session wall; it was not. Two chained bugs, both fixed
+generalizably (commit `649e1a1`):
+
+1. **SPA serves one 200 shell for every route.** `cloud.meilisearch.com/login`
+   and `/signup` both return the SAME 200 `index.html`; `/signup` only renders
+   "Sorry, the page you are looking for does not exist" (the *cute baby seal*
+   404) once React mounts. The static HTTP probe (`resolveSignupUrlByProbe`)
+   can't see a client-rendered 404, so it "upgraded" the working curated
+   `/login` to the dead `/signup`. **Fix:** a live `looksLike404` fallback
+   after `goto`+`waitForFormReady` — when the probe moved us off the hint AND
+   the resolved URL renders a 404, fall back to the original hint and re-read.
+2. **404 page mistaken for an authenticated dashboard.** The 404 still ships
+   meili's chrome nav (Projects/Settings links), which tripped Signal 1 of
+   `detectAlreadySignedIn` → the bot logged "already authenticated … skipping
+   signup" and routed to key-extraction over more 404s. **Fix:** a 404 veto on
+   the already-signed-in classifier.
+
+**Live-validated 2026-06-23:** with both fixes, meilisearch lands `/login`,
+takes the Google OAuth path, and signs in end-to-end (reaches
+`/welcome-informations`). The IP/fingerprint/session hypotheses never applied.
+
+### ? OPEN (residual): `oauth_onboarding_failed` — required cmdk multi-select on the onboarding wizard
+
+After OAuth, `/welcome-informations` ("Tell us about yourself") gates the
+"Next" button (`[data-cy="button-register"]`) behind two **required cmdk
+multi-select comboboxes** (`[data-cy="meilisearch_reasons-trigger"]`,
+`[data-cy="sdk_languages-trigger"]`). The post-OAuth path drives this with
+**nav-search (button navigation) → post-verify planner**, NOT the form-fill
+engine, so it never systematically selects an option in each required
+multi-select; the planner concludes "all fields filled," clicks the disabled
+Next, and STALLs. The executor's cmdk option-commit (2026-06-16 fix) works in
+isolation — the gap is *upstream*: post-OAuth onboarding must run real
+form-fill over a required multi-field survey. This is the tracked
+`oauth_onboarding_failed` workstream (dominant promote-blocker); fix belongs
+there (planner/form-fill over onboarding surveys, gated by LLM-shadow eval),
+not a meili-specific patch.
+
+---
+
 ## `oauth_session_not_persisted` (cartesia, braintrust, pinecone, … the "OAuth-callback wall")
 
 ### ✗✗ FALSIFIED: "it's IP / needs residential egress" (2026-06-14, controlled matrix)
