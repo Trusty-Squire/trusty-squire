@@ -16,8 +16,16 @@ describe("service slug canonicalization", () => {
     expect(canonicalizeServiceSlug("Together AI")).toBe("together-ai");
   });
 
+  it("maps registry-backed legacy slugs to canonical active skill slugs", () => {
+    expect(canonicalizeServiceSlug("fireworks")).toBe("fireworks-ai");
+    expect(canonicalizeServiceSlug("Fireworks AI")).toBe("fireworks-ai");
+    expect(canonicalizeServiceSlug("fly")).toBe("fly-io");
+    expect(canonicalizeServiceSlug("Fly.io")).toBe("fly-io");
+  });
+
   it("returns all equivalent slugs for exclusion sets", () => {
     expect(equivalentServiceSlugs("anthropic-api")).toEqual(["anthropic-api", "anthropic"]);
+    expect(equivalentServiceSlugs("fireworks-ai")).toEqual(["fireworks-ai", "fireworks"]);
   });
 
   it("looks up canonical first, then the normalized original slug", () => {

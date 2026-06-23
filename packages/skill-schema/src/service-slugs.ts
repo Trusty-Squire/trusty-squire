@@ -5,6 +5,8 @@
 
 const SERVICE_SLUG_ALIASES: Readonly<Record<string, string>> = {
   anthropic: "anthropic-api",
+  fireworks: "fireworks-ai",
+  fly: "fly-io",
   together: "together-ai",
 };
 
