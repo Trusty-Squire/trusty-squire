@@ -4518,6 +4518,73 @@ export class BrowserController {
     return await this.page.evaluate(() => document.body?.innerText ?? "");
   }
 
+  // Deterministic Firebase/GCP credential extraction. Every Firebase project
+  // auto-creates a "Browser key (auto created by Firebase)" in its underlying
+  // Google Cloud project — the SAME AIzaSy value as firebaseConfig.apiKey AND a
+  // usable GCP API key — even with NO web app registered. PROVEN surface
+  // (2026-06-23): console.cloud.google.com/apis/credentials?project=<projectId>
+  // → API Keys row "Browser key (auto created by Firebase)" → "Show key" reveals
+  // the AIzaSy value inline in that row. Row-scoped so it never grabs one of the
+  // console's own internal AIzaSy keys (which live in script/attribute data, not
+  // the visible row text). Returns the key, or null when the page didn't render
+  // a Browser key (project not provisioned yet / different surface).
+  async extractGoogleApiKeyFromCredentials(projectId: string): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    const KEY_RE = /AIzaSy[0-9A-Za-z_-]{33}/;
+    const url = `https://console.cloud.google.com/apis/credentials?project=${encodeURIComponent(projectId)}`;
+    await this.page.goto(url, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    // The credentials table renders async (heavy Angular console). Poll for it.
+    for (let i = 0; i < 12; i++) {
+      await this.wait(2.5);
+      const ready = await this.page
+        .evaluate(() => /Browser key|API Keys|Create credentials/i.test(document.body?.innerText ?? ""))
+        .catch(() => false);
+      if (ready) break;
+    }
+    // Locate the Firebase Browser-key row; return its AIzaSy if already shown,
+    // else click the row's "Show key" button to reveal it.
+    const readRowKey = (): Promise<string | null> =>
+      this.page!
+        .evaluate(() => {
+          const rows = Array.from(document.querySelectorAll("tr"));
+          const row =
+            rows.find((r) => /browser key \(auto created by firebase\)/i.test(r.textContent ?? "")) ??
+            rows.find((r) => /browser key/i.test(r.textContent ?? ""));
+          if (row === undefined) return null;
+          const m = (row.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
+          if (m !== null) return m[0];
+          const btn = Array.from(row.querySelectorAll("button,a")).find((b) =>
+            /show key/i.test(b.textContent ?? ""),
+          );
+          if (btn !== undefined) (btn as HTMLElement).click();
+          return null;
+        })
+        .catch(() => null);
+    const first = await readRowKey();
+    if (first !== null && KEY_RE.test(first)) return first;
+    // After the Show-key click, poll the row (reveal is async) and any dialog
+    // / readonly input the console may surface the value in.
+    for (let i = 0; i < 8; i++) {
+      await this.wait(1.5);
+      const revealed = await this.page
+        .evaluate(() => {
+          const rows = Array.from(document.querySelectorAll("tr"));
+          const row = rows.find((r) => /browser key/i.test(r.textContent ?? ""));
+          const inRow = (row?.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
+          if (inRow !== null) return inRow[0];
+          for (const inp of Array.from(document.querySelectorAll("input"))) {
+            const v = (inp as HTMLInputElement).value ?? "";
+            const m = v.match(/AIzaSy[0-9A-Za-z_-]{33}/);
+            if (m !== null) return m[0];
+          }
+          return null;
+        })
+        .catch(() => null);
+      if (revealed !== null && KEY_RE.test(revealed)) return revealed;
+    }
+    return null;
+  }
+
   async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(async (rawPrefix) => {

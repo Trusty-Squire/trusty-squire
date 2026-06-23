@@ -2612,6 +2612,53 @@ export function looksLike404(title: string, bodyText: string): boolean {
   return has404Token || notFoundPhrase;
 }
 
+// Services whose credential is the auto-created Firebase/GCP "Browser key"
+// reachable from the Google Cloud API Credentials page. Both share the same
+// project-creation flow and the SAME AIzaSy key (it's both the firebase web
+// apiKey and a GCP API key), so one deterministic extractor covers both.
+// Keyed by the alphanumeric-stripped slug (matches the serviceSlug normalization
+// used elsewhere: lowercased, non-alphanumerics removed).
+const FIREBASE_GCP_SLUGS = new Set(["firebase", "gcp", "googlecloud"]);
+
+// Pull the Google Cloud / Firebase projectId out of a console URL. After
+// project creation the bot lands on
+// console.firebase.google.com/u/0/project/<projectId>/overview, and the GCP
+// console carries it as a ?project=<projectId> query param. Returns null
+// before any project exists (the console root has no projectId), which is the
+// signal NOT to run the deterministic key extractor yet.
+export function parseGoogleProjectId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (!/\.google\.com$/i.test(u.hostname) && !/\.google\.com$/.test(u.hostname)) {
+      // still accept console.cloud.google.com / console.firebase.google.com
+    }
+    const fromQuery = u.searchParams.get("project");
+    if (fromQuery !== null && /^[a-z][a-z0-9-]{4,29}$/i.test(fromQuery)) return fromQuery;
+    const m = u.pathname.match(/\/project\/([a-z][a-z0-9-]{4,29})(?:\/|$)/i);
+    if (m?.[1] !== undefined) return m[1];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// True when the URL is an authenticated Google Cloud / Firebase console host.
+// A LOGGED-OUT visitor to console.firebase.google.com / console.cloud.google.com
+// is redirected to accounts.google.com, so simply BEING on the console host means
+// an established session. The console is a heavy Angular SPA the OAuth-first scan
+// reads as a perpetual "loading shell" (no provider button — you're already in),
+// so without this it loops and bails the misleading `oauth_required`. Routing to
+// post-verify (already_oauth) instead is where firebase/gcp project creation +
+// the deterministic Browser-key extractor run.
+export function isAuthenticatedGoogleConsoleUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "console.firebase.google.com" || h === "console.cloud.google.com";
+  } catch {
+    return false;
+  }
+}
+
 // True when a page is a mandatory MFA / 2-Step-Verification enrollment gate
 // that BLOCKS the authenticated console until the account-holder turns on 2SV.
 // Google now mandates this across console products (MEASURED 2026-06-23:
@@ -6967,6 +7014,23 @@ export class SignupAgent {
               `enrollment gate — the account must enable 2SV before the console grants access`,
           );
           return { kind: "mfa_setup_required" };
+        }
+        // An authenticated Google console (firebase/gcp) renders as a perpetual
+        // loading shell with no provider button — you're already signed in. Stop
+        // looping toward the misleading oauth_required and route to post-verify,
+        // where project creation + the deterministic Browser-key extractor run.
+        // Gated past the first couple frames so a genuinely-rendering page isn't
+        // cut short.
+        if (
+          state.oauthScanRetries >= 2 &&
+          isAuthenticatedGoogleConsoleUrl(this.browser.currentUrl())
+        ) {
+          steps.push(
+            `OAuth-first[engine]: on an authenticated Google console ` +
+              `(${pathOf(this.browser.currentUrl())}) with no provider affordance — ` +
+              `already signed in, routing to post-verify`,
+          );
+          return { kind: "already_oauth" };
         }
         steps.push(
           `OAuth-first[engine]: no provider affordance yet — waiting for async render ` +
@@ -12016,6 +12080,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
     let lastReachablePostVerifyUrl: string | null = null;
+    // Firebase/GCP deterministic-extraction guard: attempt the GCP-credentials
+    // Browser-key pull at most once per projectId so a transient miss falls back
+    // to the planner instead of re-navigating the credentials page every round.
+    const firebaseGcpSlug = args.service.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const triedProjectIds = new Set<string>();
     const credentialExtractionFlow = new CredentialExtractionFlow();
     const syntheticCapture = new PostSignupSyntheticCapture();
     const loginFlow = new PostSignupLoginFlow();
@@ -12051,6 +12120,48 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         }
       } catch {
         // DOM-proximity miss is non-fatal
+      }
+      // Deterministic Firebase/GCP key extraction. Once the planner has created
+      // a project (projectId appears in the console URL), skip its unreliable
+      // key-hunt and pull the auto-created "Browser key" straight from the GCP
+      // credentials page. The same AIzaSy is the firebase web apiKey AND a GCP
+      // API key, so this covers both services. At most once per projectId.
+      if (
+        credentials.api_key === undefined &&
+        FIREBASE_GCP_SLUGS.has(firebaseGcpSlug)
+      ) {
+        const pid = parseGoogleProjectId(this.browser.currentUrl());
+        if (pid !== null && !triedProjectIds.has(pid)) {
+          triedProjectIds.add(pid);
+          args.steps.push(
+            `firebase/gcp: project ${pid} detected — extracting the auto-created ` +
+              `Browser key from the GCP credentials page`,
+          );
+          const k = await this.browser
+            .extractGoogleApiKeyFromCredentials(pid)
+            .catch((e) => {
+              args.steps.push(
+                `firebase/gcp: extraction errored (${e instanceof Error ? e.message : String(e)})`,
+              );
+              return null;
+            });
+          if (k !== null) {
+            credentials.api_key = k;
+            args.steps.push(
+              `firebase/gcp: extracted Browser key (project=${pid}) — credential captured`,
+            );
+            await this.writeFastPathSyntheticCapture(
+              args.service,
+              capturedRound,
+              oauth,
+            );
+            return credentials;
+          }
+          args.steps.push(
+            `firebase/gcp: no Browser key on the credentials page for ${pid} yet — ` +
+              `falling back to the planner`,
+          );
+        }
       }
       const credentialProgress = credentialTracker.observe(credentials);
       const credentialExit = credentialTracker.decideEarlyCredentialExit(
