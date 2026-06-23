@@ -1,6 +1,6 @@
 # Changelog — @trusty-squire/mcp
 
-## 0.9.17-rc.4 (2026-06-23)
+## 0.9.17-rc.5 (2026-06-23)
 
 Prerelease (`next`). Anti-bot fingerprint hardening, the refuse-walled provision
 gate (BYO anchors), and a batch of generalizing bot/nav fixes.
