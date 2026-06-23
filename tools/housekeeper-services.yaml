@@ -877,6 +877,7 @@
   oauth_provider: google
   scope_hint: null
   status: needs-manual
+  last_probed: 2026-06-23
   notes: '2026-06-22 live falsification: shared resolver correctly finds
 
     https://cloud.meilisearch.com/signup and authenticated-onboarding
@@ -960,6 +961,7 @@
   oauth_provider: google
   scope_hint: null
   status: needs-manual
+  last_probed: 2026-06-23
   notes: '2026-06-22 live falsification: Google OAuth reaches a terminal
 
     organization ownership gate, not an automatable signup step. The page
@@ -1454,6 +1456,7 @@
   oauth_provider: google
   scope_hint: null
   status: needs-manual
+  last_probed: 2026-06-23
   notes: 'Google-account-bound; free Spark tier needs no billing. Credential is
 
     a web-app config object (apiKey/projectId), not a bearer token — extraction
