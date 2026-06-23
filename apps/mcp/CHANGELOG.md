@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.17 (2026-06-23)
+
+Stable (`latest`). Promotes the 0.9.17 line (rc.1–rc.5) from staging: anti-bot
+fingerprint hardening (in-iframe WebGL spoof + real-GPU remote-CDP), the
+refuse-walled provision gate for BYO anchors, semantic-nav + verifier hardening,
+the egress-grant resilient proxy path, per-service capture isolation, the
+shopping pre-bot signup-link resolver, and the queue/spine + test-debt cleanup
+that gets the suite fully green. See the rc entries below for the detail.
+
 ## 0.9.17-rc.5 (2026-06-23)
 
 Prerelease (`next`). Anti-bot fingerprint hardening, the refuse-walled provision
