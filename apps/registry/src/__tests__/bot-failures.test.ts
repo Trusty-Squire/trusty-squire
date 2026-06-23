@@ -257,6 +257,64 @@ describe("GET /admin/discovery-candidates", () => {
     await server.close();
   });
 
+  it("excludes legacy alias failures when the canonical service has an active skill", async () => {
+    const anthropicSkill: Skill = {
+      schema_version: SKILL_SCHEMA_VERSION,
+      service: "anthropic-api",
+      version: "v1",
+      skill_id: "01ANTHRPCAP000000000000XX",
+      signup_url: "https://platform.claude.com/dashboard",
+      oauth_provider: null,
+      steps: [
+        {
+          kind: "navigate",
+          url: "https://platform.claude.com/dashboard",
+          provenance: { run_id: "r1", round_index: 0 },
+        },
+        {
+          kind: "extract_via_copy_button",
+          near_text_hint: "Copy key",
+          provenance: { run_id: "r1", round_index: 1 },
+        },
+      ],
+      credentials: [
+        {
+          type: "api_key",
+          shape_hint: "opaque",
+          env_var_suggestion: "ANTHROPIC_API_KEY",
+          post_extract_validator: { min_length: 16, max_length: 256 },
+        },
+      ],
+      source_run_ids: ["r1"],
+      status: "active",
+      replays_succeeded: 0,
+      replays_failed: 0,
+      consecutive_failures: 0,
+      created_at: "2026-05-21T04:00:00.000Z",
+      last_replayed_at: null,
+      superseded_at: null,
+      deleted_at: null,
+    };
+    const { build: makeServer } = build({ withSkill: anthropicSkill });
+    const server = await makeServer();
+    for (const acct of ["a", "b", "c"]) {
+      await postFailure(server, {
+        service: "anthropic",
+        error_kind: "no_credentials",
+        reason: "legacy duplicate should be suppressed",
+        mcp_version: "0.6.15-rc.39",
+      }, acct);
+    }
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/discovery-candidates",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    const items = (res.json() as { items: Array<{ service: string }> }).items;
+    expect(items.find((i) => i.service === "anthropic")).toBeUndefined();
+    await server.close();
+  });
+
   it("returns 401 without admin bearer", async () => {
     const { build: makeServer } = build();
     const server = await makeServer();

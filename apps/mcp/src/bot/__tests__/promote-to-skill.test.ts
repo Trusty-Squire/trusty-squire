@@ -24,7 +24,9 @@ import {
   pickHrefHint,
   hasEphemeralPathSegment,
   generalizeCapturedUrl,
+  stableSignupEntryUrl,
   isIdentityProviderUrl,
+  isUnstableSignupEntryUrl,
 } from "../promote-to-skill.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -77,6 +79,44 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     );
   });
 
+  it("stableSignupEntryUrl rewrites login routes only for captured signup forms", () => {
+    const signupRounds = [
+      {
+        observed: {
+          kind: "fill",
+          selector: "#confirm-password",
+          value: "pw",
+          reason: "Fill the signup password",
+        },
+        inventory: [
+          {
+            selector: "#confirm-password",
+            labelText: "Confirm Password",
+            placeholder: "Re-enter Password",
+          },
+        ],
+      },
+    ] as any;
+    const loginRounds = [
+      {
+        observed: {
+          kind: "fill",
+          selector: "#password",
+          value: "pw",
+          reason: "Fill password",
+        },
+        inventory: [{ selector: "#password", labelText: "Password" }],
+      },
+    ] as any;
+
+    expect(stableSignupEntryUrl("https://app.mor.org/signin", signupRounds)).toBe(
+      "https://app.mor.org/signup",
+    );
+    expect(stableSignupEntryUrl("https://app.mor.org/signin", loginRounds)).toBe(
+      "https://app.mor.org/signin",
+    );
+  });
+
   it("isIdentityProviderUrl flags IdP domains, not service domains", () => {
     // The deepseek-N26 bug: round 0 landed on a Google domain mid-OAuth,
     // and the synthesizer adopted it as signup_url.
@@ -92,6 +132,21 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
     expect(isIdentityProviderUrl("https://mygoogle.com.evil.io/x")).toBe(false);
     // Malformed / relative → not an IdP entry.
     expect(isIdentityProviderUrl("/signup")).toBe(false);
+  });
+
+  it("isUnstableSignupEntryUrl rejects stale transaction entries, not valid deep key pages", () => {
+    expect(isUnstableSignupEntryUrl("https://app.baseten.co/overview")).toBe(true);
+    expect(isUnstableSignupEntryUrl("https://app.kinde.com/auth/cx/_:nav&m:login")).toBe(true);
+    expect(
+      isUnstableSignupEntryUrl(
+        "https://console.anyscale.com/register/create-user-new-org-confirmation",
+      ),
+    ).toBe(true);
+    expect(isUnstableSignupEntryUrl("https://replit.com/~")).toBe(true);
+
+    expect(isUnstableSignupEntryUrl("https://railway.com/account/tokens")).toBe(false);
+    expect(isUnstableSignupEntryUrl("https://ipinfo.io/account/token")).toBe(false);
+    expect(isUnstableSignupEntryUrl("https://example.com/signup")).toBe(false);
   });
 });
 
@@ -313,7 +368,7 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     const { dir, runId } = setupCaptures(rounds);
 
     const result = promoteToSkill({ dir, service, run_id: runId });
-    if (result.kind !== "ok") throw new Error("expected ok");
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
 
     const fillStep = result.skill.steps[1]!;
     if (fillStep.kind !== "fill") throw new Error("expected fill");
@@ -511,6 +566,27 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
       throw new Error("expected extract_via_copy_button");
     }
     expect(extract.near_text_hint).toBe("New Token");
+  });
+
+  it("does not persist a quoted credential value as near_text_hint", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    rounds[2]!.observed = {
+      kind: "extract",
+      reason:
+        "The full API token 'db3a32ea-dd1b-4e28-9680-db2991c81e3e' " +
+        "is visible next to the copy button.",
+    };
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error("expected ok");
+
+    const extract = result.skill.steps[2]!;
+    if (extract.kind !== "extract_via_copy_button") {
+      throw new Error("expected extract_via_copy_button");
+    }
+    expect(extract.near_text_hint).toBe("Copy");
   });
 
   // rc.19 regression — Railway's icon-only modal copy button has
@@ -789,6 +865,284 @@ describe("promoteToSkill — OAuth provider detection", () => {
       expect(result.skill.steps[0]!.provider).toBe("github");
     }
     expect(result.skill.oauth_provider).toBe("github");
+  });
+
+  it("preserves an explicit OAuth provider even when the captured graph starts after OAuth", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://example.com/dashboard",
+          title: "Dashboard",
+          html: "<html>New Token re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "Token is visible in 'New Token'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({
+      dir,
+      service,
+      run_id: runId,
+      oauthProvider: "google",
+    });
+
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.skill.oauth_provider).toBe("google");
+  });
+
+  it("uses caller signupUrl and prepends OAuth when capture starts after provider callback", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/account/complete-profile",
+          title: "Complete profile",
+          html: "<html><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.continue", reason: "Continue" },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/p/project/settings",
+          title: "Project settings",
+          html: "<html>Project API Keys <button>Copy</button> opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({
+      dir,
+      service,
+      run_id: runId,
+      oauthProvider: "google",
+      signupUrl: "https://app.openpipe.ai/",
+    });
+
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
+    expect(result.skill.signup_url).toBe("https://app.openpipe.ai/");
+    expect(result.skill.oauth_provider).toBe("google");
+    expect(result.skill.steps[0]).toMatchObject({
+      kind: "navigate",
+      url: "https://app.openpipe.ai/",
+    });
+    expect(result.skill.steps[1]).toMatchObject({
+      kind: "click_oauth_button",
+      provider: "google",
+    });
+    expect(result.skill.steps[2]).toMatchObject({
+      kind: "navigate",
+      url: "https://app.openpipe.ai/account/complete-profile",
+    });
+  });
+
+  it("drops a premature duplicate submit before required form fills", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            placeholder: "Acme",
+            selector: "input.company",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.continue", reason: "Tried submit too early" },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            placeholder: "Acme",
+            selector: "input.company",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "fill", selector: "input.company", value: "Acme", reason: "Fill company" },
+      },
+      {
+        service,
+        round: 2,
+        oauth: false,
+        state: {
+          url: "https://example.com/signup",
+          title: "Signup",
+          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            placeholder: "Acme",
+            selector: "input.company",
+          }),
+          inventoryElement({
+            tag: "button",
+            visibleText: "Continue",
+            selector: "button.continue",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "click", selector: "button.continue", reason: "Submit after fill" },
+      },
+      {
+        service,
+        round: 3,
+        oauth: false,
+        state: {
+          url: "https://example.com/settings",
+          title: "Settings",
+          html: "<html><button>Copy</button> sk_test_abcdefghijklmnopqrstuvwxyz123456</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "api_key='sk_test_abcdefghijklmnopqrstuvwxyz123456'" },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
+    const clicks = result.skill.steps.filter((s) => s.kind === "click");
+    expect(clicks).toHaveLength(1);
+    expect(result.skill.steps.map((s) => s.kind)).toContain("fill");
+    expect(clicks[0]).toMatchObject({ text_match: "Continue" });
+  });
+
+  it("does not stamp an explicit OAuth provider onto an email-signup graph", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://example.com/register",
+          title: "Register",
+          html: "<html><label>Email</label><input name=\"email\"></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "input",
+            labelText: "Email",
+            selector: "input[name='email']",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input[name='email']",
+          value: "bot@example.com",
+          reason: "Fill the signup email",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://example.com/dashboard",
+          title: "Dashboard",
+          html: "<html>New Token re_abcdefghij1234567890abc</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "Token is visible in 'New Token'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({
+      dir,
+      service,
+      run_id: runId,
+      oauthProvider: "google",
+    });
+
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.skill.oauth_provider).toBeNull();
+    expect(result.skill.steps.some((s) => s.kind === "fill" && s.value_template === "${EMAIL_ALIAS}")).toBe(true);
   });
 
   it("does not match 'GitTub' or other near-misses", () => {
@@ -1763,6 +2117,25 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     expect(envVars.has(`${upperService}_BEARER_TOKEN`)).toBe(true);
   });
 
+  it("marks every multi-credential secret show_once_at_creation when extraction rounds warn once-only", () => {
+    const service = uniqueService();
+    const rounds = twitterMultiCredRounds(service);
+    for (const round of rounds) {
+      round.state.html = round.state.html.replace(
+        "</body>",
+        " This secret is displayed only once. Make sure to copy it now.</body>",
+      );
+    }
+    const { dir, runId } = setupCaptures(rounds);
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    expect(result.skill.credentials).toHaveLength(3);
+    expect(result.skill.credentials.every((c) => c.visibility === "show_once_at_creation")).toBe(true);
+  });
+
   it("collapses a re-extraction that derives the same produces (0.8.11)", () => {
     // Two rounds deriving the same `produces` are NOT a multi-cred
     // conflict — they're the post-verify loop re-extracting one
@@ -2539,6 +2912,72 @@ describe("pickHrefHint", () => {
     expect(pickHrefHint(inventoryElement({ tag: "a", href: "/" }))).toBeNull();
     expect(pickHrefHint(inventoryElement({ tag: "a", href: null }))).toBeNull();
   });
+
+  it("synthesizes href_hint from a same-text anchor when the clicked target is an inner element", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/p/abc123/request-logs",
+          title: "Request Logs",
+          html: "<html>Project Settings <button>Copy</button> opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "div",
+            visibleText: "Project Settings",
+            selector: "a.settings > span > div",
+          }),
+          inventoryElement({
+            tag: "a",
+            visibleText: "Project Settings",
+            selector: "a.settings",
+            href: "/p/abc123/settings",
+          }),
+        ],
+        observed: {
+          kind: "click",
+          selector: "a.settings > span > div",
+          reason: "Open project settings",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://app.openpipe.ai/p/abc123/settings",
+          title: "Settings",
+          html: "<html><button>Copy</button> opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44</html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+          }),
+        ],
+        observed: { kind: "extract", reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'" },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId, oauthProvider: "google" });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    const click = result.skill.steps.find((s) => s.kind === "click");
+    expect(click).toMatchObject({
+      kind: "click",
+      text_match: "Project Settings",
+      href_hint: "/p/abc123/settings",
+    });
+  });
 });
 
 describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
@@ -2806,6 +3245,63 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
     expect(result.kind).toBe("rejected");
     if (result.kind !== "rejected") return;
     expect(result.error_kind).toBe("incomplete_replay_graph");
+  });
+
+  it("does not synthesize a billing ZIP code fill as await_email_code", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: true,
+        state: {
+          url: "https://console.perplexity.ai/account/setup",
+          title: "Set up your API account",
+          html: "<html><body>Billing zip code <input placeholder='94102'></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({
+            index: 0,
+            tag: "input",
+            placeholder: "94102",
+            ariaLabel: "Billing zip code",
+            selector: "input.zip",
+          }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "input.zip",
+          value: "94102",
+          reason: "Fill in the billing zip code.",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: true,
+        state: {
+          url: "https://console.perplexity.ai/group/abc/settings",
+          title: "API Keys",
+          html: "<html><body>API Key pplx-abcdefghijklmnopqrstuvwxyz0123456789</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [],
+        observed: {
+          kind: "extract",
+          reason: "API key pplx-abcdefghijklmnopqrstuvwxyz0123456789 is visible.",
+        },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.steps.map((s) => s.kind)).not.toContain("await_email_code");
+    const zipFill = result.skill.steps.find(
+      (s) => s.kind === "fill" && s.value_template === "94102",
+    );
+    expect(zipFill).toBeDefined();
   });
 });
 

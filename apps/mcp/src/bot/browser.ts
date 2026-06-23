@@ -26,11 +26,19 @@ import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
-import { existsSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { detectAsn, type AsnClass } from "./asn.js";
-import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, reapLeakedProfileHolder, waitForProfileFree } from "./profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  clearStaleSingletonLock,
+  launchWithProfileGate,
+  ProfileBusyError,
+  reapLeakedProfileHolder,
+  waitForProfileFree,
+} from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
@@ -137,6 +145,71 @@ export interface BrowserState {
   screenshot: string; // base64
 }
 
+const HCAPTCHA_UUID_RE =
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
+export function extractHcaptchaSitekeyFromHtml(html: string): string | null {
+  if (!/hcaptcha\.com|h-captcha|hcaptcha/i.test(html)) return null;
+  const normalized = html
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&amp;/g, "&");
+  for (const src of normalized.matchAll(/<iframe[^>]+src=["']([^"']*hcaptcha[^"']*)["']/gi)) {
+    const raw = src[1];
+    if (raw === undefined) continue;
+    try {
+      const url = new URL(raw, "https://example.invalid");
+      const direct = url.searchParams.get("sitekey");
+      if (direct !== null && direct.length > 10) return direct;
+      const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+      const fromHash = new URLSearchParams(hash).get("sitekey");
+      if (fromHash !== null && fromHash.length > 10) return fromHash;
+    } catch {
+      const match = raw.match(new RegExp(`[?#&]sitekey=(${HCAPTCHA_UUID_RE})`, "i"));
+      if (match?.[1] !== undefined) return match[1];
+    }
+  }
+  const patterns = [
+    // Standard hCaptcha/SDK naming.
+    new RegExp(
+      `(?:sitekey|site_key|site-key|hcaptcha_key|captchaApiKey|data-(?:hcaptcha-)?sitekey)["'\\s]*[:=]\\s*["'](${HCAPTCHA_UUID_RE})["']`,
+      "i",
+    ),
+    // Stripe and similar app config JSON often names keys
+    // `express_hcaptcha_site_key` or `hcaptcha_login_main_site_key`.
+    new RegExp(
+      `(?:hcaptcha[^"'<>]{0,80}site[_-]?key|express_hcaptcha_site_key)["'\\s]*[:=]\\s*["'](${HCAPTCHA_UUID_RE})["']`,
+      "i",
+    ),
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match?.[1] !== undefined) return match[1];
+  }
+  return null;
+}
+
+export function extractHcaptchaResponseKeyFromToken(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  const payload = parts[1];
+  if (payload === undefined || payload.length === 0) return null;
+  try {
+    const json = Buffer.from(
+      payload.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64",
+    ).toString("utf8");
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    for (const key of ["ekey", "eKey", "respKey", "responseKey", "key", "kr"]) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.trim().length > 0) return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export interface BrowserControllerOptions {
   // Adds human-like timing to clicks, typing, and page loads. Defaults
   // to true in production (we want to pass Cloudflare/reCAPTCHA scoring)
@@ -222,6 +295,29 @@ export type CaptchaSolveResult =
   | { found: false }
   | { found: true; solved: true; kind: CaptchaKind }
   | { found: true; solved: false; kind: CaptchaKind };
+
+export type HcaptchaCoordinateSolveResult =
+  | { found: false; solved: false; reason: "no_visible_challenge" }
+  | {
+      found: true;
+      solved: boolean;
+      reason?: string;
+      clicks: number;
+      durationMs?: number;
+    };
+
+function pngDimensions(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24) return null;
+  if (
+    buf[0] !== 0x89 ||
+    buf[1] !== 0x50 ||
+    buf[2] !== 0x4e ||
+    buf[3] !== 0x47
+  ) {
+    return null;
+  }
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
 
 // Real-Chromium-family browser channels we'll prefer over the bundled
 // Chromium binary when available. Chromium ships without Widevine,
@@ -391,6 +487,121 @@ async function waitForDevtools(port: number, deadlineMs: number): Promise<string
   throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
 }
 
+async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
+  const lockDir = "/tmp/trusty-squire-chrome-start.lock";
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      mkdirSync(lockDir);
+      break;
+    } catch (err) {
+      try {
+        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
+        if (ageMs > 120_000) {
+          rmSync(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for Chrome startup lock at ${lockDir}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+}
+
+const selfManagedChromePids = new Set<number>();
+let selfManagedCleanupInstalled = false;
+let orphanVerifyReapRan = false;
+
+function killPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // already gone / not ours
+  }
+}
+
+function cleanupSelfManagedChromes(): void {
+  for (const pid of selfManagedChromePids) killPid(pid, "SIGKILL");
+  selfManagedChromePids.clear();
+}
+
+function installSelfManagedChromeCleanup(): void {
+  if (selfManagedCleanupInstalled) return;
+  selfManagedCleanupInstalled = true;
+  process.once("exit", cleanupSelfManagedChromes);
+  const exitForSignal = (code: number): void => {
+    cleanupSelfManagedChromes();
+    process.exit(128 + code);
+  };
+  process.once("SIGINT", () => exitForSignal(2));
+  process.once("SIGTERM", () => exitForSignal(15));
+  process.once("SIGHUP", () => exitForSignal(1));
+}
+
+function registerSelfManagedChrome(child: ChildProcess): void {
+  installSelfManagedChromeCleanup();
+  if (child.pid !== undefined) selfManagedChromePids.add(child.pid);
+  child.once("exit", () => {
+    if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+  });
+}
+
+// Stale verifier browsers are the expensive leak mode: if the MCP process dies
+// mid-verify, self-launched Chrome survives as PPID=1 with a
+// ~/.trusty-squire/profiles/verify-* user-data-dir. It keeps the profile lock,
+// burns memory, and may leave defunct helper children. A live verifier should
+// never be parented to init, so these are safe to reap at the next browser
+// startup. Best-effort and Linux-only; failure must not block signups.
+function reapOrphanedVerifyBrowsersOnce(): void {
+  if (orphanVerifyReapRan) return;
+  orphanVerifyReapRan = true;
+  if (process.platform !== "linux") return;
+  let rows = "";
+  try {
+    rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    }).toString("utf8");
+  } catch {
+    return;
+  }
+  const pids: number[] = [];
+  for (const line of rows.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    const args = match[3] ?? "";
+    if (
+      Number.isFinite(pid) &&
+      ppid === 1 &&
+      /(?:chrome|chromium)/i.test(args) &&
+      /--user-data-dir=.*\.trusty-squire\/profiles\/verify-[^/\s]+/.test(args)
+    ) {
+      pids.push(pid);
+    }
+  }
+  if (pids.length === 0) return;
+  console.error(`[universal-bot] reaping ${pids.length} orphaned verify Chrome process(es)`);
+  for (const pid of pids) killPid(pid, "SIGTERM");
+  setTimeout(() => {
+    for (const pid of pids) killPid(pid, "SIGKILL");
+  }, 2_000).unref();
+}
+
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -484,6 +695,12 @@ export class BrowserController {
   // parked here so settleAfterOAuth() can switch back to it once the
   // Google handshake completes.
   private oauthProductPage: Page | null = null;
+  // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
+  // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
+  // Stytch SSO callback fails to persist a session (cookie not set, FAPI
+  // rejection, etc.) without guessing. Off by default; zero cost when unset.
+  private oauthNetLog: Array<{ url: string; status: number; setCookie: boolean; ct: string }> = [];
+  private oauthNetListenerAttached = false;
 
   // F13 — on-demand Xvfb. Set when start() determined the host has no
   // display surface but Xvfb is available, so Chrome can run with
@@ -495,10 +712,10 @@ export class BrowserController {
   // F13 — which launch path start() took. Surfaced via .launchMode so
   // the agent can push it into the run's step trail and we can see
   // (from outside the box) whether the bot ran headed.
-  private launchedMode: "display" | "xvfb" | "headless" | "unknown" =
+  private launchedMode: "display" | "xvfb" | "headless" | "remote" | "unknown" =
     "unknown";
 
-  get launchMode(): "display" | "xvfb" | "headless" | "unknown" {
+  get launchMode(): "display" | "xvfb" | "headless" | "remote" | "unknown" {
     return this.launchedMode;
   }
 
@@ -567,36 +784,86 @@ export class BrowserController {
     env: NodeJS.ProcessEnv;
     window: { width: number; height: number };
   }): Promise<BrowserContext> {
-    const port = await findFreePort();
-    const argv = [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${this.profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--password-store=basic",
-      "--window-position=0,0",
-      `--window-size=${params.window.width},${params.window.height}`,
-      "--lang=en-US",
-      ...params.args,
-      ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-      ...(params.headless ? ["--headless=new"] : []),
-      "about:blank",
-    ];
-    const child = spawn(params.binary, argv, { env: params.env, stdio: "ignore" });
-    this.childChrome = child;
-    let endpoint: string;
-    try {
-      endpoint = await waitForDevtools(port, 30_000);
-    } catch (err) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
+    // Remote-CDP attach: BOT_CDP_ENDPOINT points at a Chrome already running on
+    // another host (e.g. a real-GPU Mac), reachable over Tailscale. We do NOT
+    // spawn or own the binary — the remote host launched it with its own
+    // profile, real GPU, and (residential) egress. Just attach over CDP. This
+    // is the real-GPU path: software-WebGL output (llvmpipe) is what
+    // hCaptcha-Enterprise-class anti-bot scores, and only real hardware fixes
+    // the rendered-pixel fingerprint that JS spoofing can't.
+    const remoteEndpoint = (process.env.BOT_CDP_ENDPOINT ?? "").trim();
+    if (remoteEndpoint.length > 0) {
+      const launcher = getChromium();
+      const browser = await launcher.connectOverCDP(remoteEndpoint);
+      this.cdpBrowser = browser;
+      this.launchedMode = "remote";
+      const ctx = browser.contexts()[0];
+      if (ctx === undefined) {
+        throw new Error(
+          `remote Chrome (BOT_CDP_ENDPOINT=${remoteEndpoint}) exposed no default browser context`,
+        );
       }
-      this.childChrome = null;
-      throw err;
+      return ctx;
     }
+    const endpoint = await withChromeStartupLock(async () => {
+      const port = await findFreePort();
+      clearStaleSingletonLock(this.profileDir);
+      const argv = [
+        `--remote-debugging-port=${port}`,
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${this.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...params.args,
+        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+        ...(params.headless ? ["--headless=new"] : []),
+        "about:blank",
+      ];
+      const child = spawn(params.binary, argv, { env: params.env, stdio: ["ignore", "ignore", "pipe"] });
+      this.childChrome = child;
+      registerSelfManagedChrome(child);
+      let chromeStderr = "";
+      let chromeExit = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
+      child.on("exit", (code, signal) => {
+        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
+      });
+      try {
+        return await waitForDevtools(port, 30_000);
+      } catch (err) {
+        const alive =
+          child.pid !== undefined
+            ? (() => {
+                try {
+                  process.kill(child.pid!, 0);
+                  return true;
+                } catch {
+                  return false;
+                }
+              })()
+            : false;
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        reapLeakedProfileHolder(this.profileDir);
+        this.childChrome = null;
+        const detail = chromeStderr.trim();
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
+            `${chromeExit}${
+          detail.length > 0 ? `; Chrome stderr: ${detail}` : ""
+        }`,
+      );
+      }
+    });
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here
@@ -611,7 +878,62 @@ export class BrowserController {
     return ctx;
   }
 
+  // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
+  // image/media/font requests + known analytics/tracker hosts to cut page-load
+  // wall-clock (3-5x on byte-heavy pages; also stops trackers from holding the
+  // network "busy"). HARD ALLOW-GUARD first for captcha/challenge + payment
+  // scripts (blocking those breaks the Turnstile/hCaptcha token poll and the
+  // signup form). CSS + first-party JS are never blocked (not in BLOCK_TYPES) —
+  // the SPA form renders from them and the vision planner reads the styled
+  // render. DUAL RISK, hence default-OFF + an OF#2 A/B before flipping on:
+  //   (1) a browser that loads ZERO images is itself an anti-bot fingerprint;
+  //   (2) the screenshot the vision planner reads loses detail — mitigated
+  //       because the DOM inventory is the authoritative action space, but
+  //       still a regression risk on image-only affordances.
+  // Registered on the CONTEXT so it covers OAuth popups + iframes.
+  private async installResourceBlocking(): Promise<void> {
+    const ctx = this.context;
+    if (ctx === null) return;
+    if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
+    const BLOCK_TYPES = new Set(["image", "media", "font"]);
+    const BLOCK_HOSTS = [
+      "google-analytics.com", "googletagmanager.com", "analytics.google.com",
+      "doubleclick.net", "static.hotjar.com", "script.hotjar.com",
+      "segment.com", "segment.io", "cdn.segment.com", "fullstory.com",
+      "mixpanel.com", "bugsnag.com", "intercom.io", "intercomcdn.com",
+      "widget.intercom.io", "connect.facebook.net", "analytics.tiktok.com",
+      "clarity.ms", "cdn.heapanalytics.com", "wistia.com",
+    ];
+    // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
+    const ALWAYS_ALLOW = [
+      "challenges.cloudflare.com", "turnstile", "hcaptcha.com",
+      "newassets.hcaptcha.com", "recaptcha", "gstatic.com/recaptcha",
+      "js.stripe.com",
+    ];
+    await ctx.route("**/*", async (route) => {
+      try {
+        const url = route.request().url();
+        if (ALWAYS_ALLOW.some((h) => url.includes(h))) {
+          await route.continue();
+          return;
+        }
+        const type = route.request().resourceType();
+        if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      } catch {
+        // Routing race / already-handled — never let a decision crash nav.
+      }
+    });
+    console.error(
+      "[universal-bot] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
+    );
+  }
+
   async start(): Promise<void> {
+    reapOrphanedVerifyBrowsersOnce();
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
@@ -622,12 +944,29 @@ export class BrowserController {
       `[universal-bot] launching browser channel=${channel ?? "bundled-chromium"} ` +
         `proxy=${proxy?.server ?? "direct"}`,
     );
+    // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
+    // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
+    // across Tailscale. The remote machine IS a real device, so we spoof
+    // NOTHING — no WebGL/device fingerprint patch (a fake-Intel string over a
+    // real Apple-GPU output would be its own mismatch tell), no local Xvfb, no
+    // egress-geo override (the remote host's real timezone + residential IP are
+    // authentic). software-WebGL output is exactly what the toughest anti-bot
+    // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
+    // fingerprint, which is the whole point of this path.
+    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    if (remoteMode) {
+      console.error(
+        `[universal-bot] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
+          `(real-host GPU + egress; local fingerprint spoof + Xvfb DISABLED)`,
+      );
+    }
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).
     // Done before the real launch: launchPersistentContext bakes the
-    // timezone in at creation, with no way to set it afterward.
-    const geo = await this.probeEgressGeo(channel, proxy);
+    // timezone in at creation, with no way to set it afterward. Skipped in
+    // remote mode — the remote host's own clock/IP are the authentic truth.
+    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
     if (geo !== null) {
       console.error(
         `[universal-bot] egress geo: timezone=${geo.timezoneId}` +
@@ -724,12 +1063,24 @@ export class BrowserController {
       // have released within the 120s wait — so by here, reaping the LOCAL
       // holder (SIGKILL + clear singletons; no-ops on a remote-host holder)
       // and retrying once is safe and recovers the run instead of failing it.
-      const reaped = reapLeakedProfileHolder(this.profileDir);
+      //
+      // That assumption is false for verifier/discovery concurrency: a live
+      // holder can be another legitimate slot still closing the same robot
+      // profile. In concurrent mode, never SIGKILL the holder; surface
+      // ProfileBusyError so the orchestrator can retry later without corrupting
+      // another run.
+      const concurrency = Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1;
+      const allowLiveReap = concurrency <= 1;
+      const reaped = allowLiveReap ? reapLeakedProfileHolder(this.profileDir) : false;
       if (reaped) {
         console.error(
           "[universal-bot] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
         );
         free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
+      } else if (!allowLiveReap) {
+        console.error(
+          "[universal-bot] profile still held after wait; not reaping because HOUSEKEEPER_CONCURRENCY>1",
+        );
       }
       if (!free) {
         throw new ProfileBusyError(
@@ -851,6 +1202,18 @@ export class BrowserController {
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
+    // Speed: optionally abort heavy/irrelevant requests before any navigation.
+    await this.installResourceBlocking();
+    // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
+    // calls to its `__name(fn, "name")` helper into functions passed to
+    // page.evaluate/addInitScript. Those functions execute in the browser page,
+    // where Node's helper does not exist, causing an immediate
+    // `ReferenceError: __name is not defined` before the real signup even
+    // starts. Define the same no-op helper in every document. Built `dist`
+    // should not emit these calls, but the helper is harmless there too.
+    const evaluateNameShimScript =
+      'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
+    await context.addInitScript({ content: evaluateNameShimScript });
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
@@ -878,18 +1241,17 @@ export class BrowserController {
     //     at 1.0. Idempotent via a marker so the per-nav re-apply is cheap, and
     //     getParameter.toString() is masked to the original native source so
     //     the patch itself isn't a tell. Only strings change, not rendering.
-    const installWebglSpoof = (): void => {
+    const installWebglSpoofScript = String.raw`(() => {
       const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
       const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
-      const spoof = (proto: WebGLRenderingContext | WebGL2RenderingContext): void => {
+      const spoof = (proto) => {
         // The marker lives on the prototype so re-application is a no-op; the
         // cast is the one typed-alternative-exhausted spot (adding an ad-hoc
         // brand to a DOM prototype).
-        const marked = proto as WebGLRenderingContext & { __tsWebglPatched?: boolean };
-        if (marked.__tsWebglPatched === true) return;
+        if (proto.__tsWebglPatched === true) return;
         const orig = proto.getParameter;
         const native = orig.toString();
-        proto.getParameter = function (this: typeof proto, p: number) {
+        proto.getParameter = function (p) {
           if (p === VENDOR_WEBGL) return "Google Inc. (Intel)";
           if (p === RENDERER_WEBGL) {
             return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)";
@@ -901,7 +1263,7 @@ export class BrowserController {
           configurable: true,
           writable: true,
         });
-        marked.__tsWebglPatched = true;
+        proto.__tsWebglPatched = true;
       };
       if (typeof WebGLRenderingContext !== "undefined") {
         spoof(WebGLRenderingContext.prototype);
@@ -921,7 +1283,7 @@ export class BrowserController {
       // (seconds in), so the framenavigated re-apply wins the race. Defined on
       // Navigator.prototype (where the native getters live) so there's no own-
       // property tell on the instance.
-      const navProto = Navigator.prototype as Navigator & { __tsDevicePatched?: boolean };
+      const navProto = Navigator.prototype;
       if (navProto.__tsDevicePatched !== true) {
         try {
           Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
@@ -953,22 +1315,88 @@ export class BrowserController {
           // descriptor already locked by something else — leave it.
         }
       }
-    };
-    await context.addInitScript(installWebglSpoof);
+    })();`;
+    if (!remoteMode) await context.addInitScript({ content: installWebglSpoofScript });
     this.page = context.pages()[0] ?? (await context.newPage());
+    // addInitScript covers document-start page JS, but Playwright's
+    // page.evaluate utility execution can run in a separate realm. Install the
+    // same no-op helper there with a STRING evaluate (tsx cannot wrap strings
+    // with __name). This prevents dev-runtime source runs from crashing before
+    // replay reaches the service page.
+    await this.page.evaluate(evaluateNameShimScript).catch(() => undefined);
     // Re-apply on every navigation — the main-world reach patchright's isolated
     // init world denies us. framenavigated fires at navigation-commit (before
     // most page JS), so a late WebGL query (reCAPTCHA scores seconds in) sees
     // the spoofed strings; a document-start fingerprinter could still race it.
     const reapplyWebglSpoof = (): void => {
+      if (remoteMode) return; // real-GPU remote host: spoof nothing
       const pg = this.page;
       if (pg === null) return;
-      void pg.evaluate(installWebglSpoof).catch(() => {
-        // mid-navigation / closed page — the next navigation re-applies.
-      });
+      void (async () => {
+        await pg.evaluate(evaluateNameShimScript).catch(() => undefined);
+        await pg.evaluate(installWebglSpoofScript).catch(() => {
+          // mid-navigation / closed page — the next navigation re-applies.
+        });
+      })();
     };
+    // A CROSS-ORIGIN captcha iframe (hCaptcha / Turnstile / reCAPTCHA) is its own
+    // realm: the main-frame page.evaluate above never reaches it, so the captcha's
+    // OWN fingerprint read sees the real software-WebGL renderer (llvmpipe /
+    // SwiftShader) + 20-core / high-memory / no-taskbar Linux profile — a
+    // headless/VM tell. MEASURED 2026-06-23: Stripe's invisible hCaptcha
+    // Enterprise flags the session before any token, identically on a datacenter
+    // AND a residential exit IP (IP falsified) — the discriminator is this
+    // unspoofed in-iframe fingerprint. Patch the iframe's own main world too.
+    // frame.evaluate reaches a cross-origin frame's main world at the driver
+    // level (same path that wins the main-frame race), re-applied at
+    // navigation-commit before the captcha's scoring JS queries WebGL.
+    const CAPTCHA_FRAME_RE =
+      /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
+    // String probe (no compiled-fn __name shim needed): the UNMASKED renderer
+    // a captcha would read. Logged only under CAPTCHA_TRACE to prove the fix.
+    const RENDERER_PROBE = String.raw`(() => { try { const c = document.createElement("canvas"); const gl = c.getContext("webgl") || c.getContext("webgl2"); if (!gl) return "no-gl"; const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "no-ext"; } catch (err) { return "err:" + (err && err.message); } })()`;
+    const trace = process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1";
     this.page.on("framenavigated", (frame) => {
-      if (this.page !== null && frame === this.page.mainFrame()) reapplyWebglSpoof();
+      if (remoteMode) return; // real-GPU remote host: no in-iframe spoof
+      if (this.page === null) return;
+      if (frame === this.page.mainFrame()) {
+        reapplyWebglSpoof();
+        return;
+      }
+      if (!CAPTCHA_FRAME_RE.test(frame.url())) return;
+      const cfHost = (() => {
+        try {
+          return new URL(frame.url()).host;
+        } catch {
+          return "captcha-frame";
+        }
+      })();
+      void (async () => {
+        if (trace) {
+          const before = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
+          // eslint-disable-next-line no-console
+          console.error(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
+        }
+        // Retry until the spoof STICKS. The first framenavigated commonly
+        // eval-fails (frame mid-commit, or a throwaway about:blank hCaptcha
+        // replaces), and hCaptcha reads the fingerprint during its widget
+        // lifecycle — a single best-effort apply loses the race. Re-apply on a
+        // ~3s budget until the iframe's renderer reads Intel, so the spoof is in
+        // place before the scoring read.
+        let landed = false;
+        for (let i = 0; i < 20 && !landed; i++) {
+          await frame.evaluate(installWebglSpoofScript).catch(() => undefined);
+          const r = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
+          if (typeof r === "string" && r.includes("Intel")) landed = true;
+          else await new Promise((res) => setTimeout(res, 150));
+        }
+        if (trace) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[captcha-fp] ${cfHost} renderer AFTER spoof:  ${landed ? "Intel (landed)" : "FAILED to land in budget"}`,
+          );
+        }
+      })();
     });
     this.page.on("load", reapplyWebglSpoof);
 
@@ -983,13 +1411,20 @@ export class BrowserController {
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
       this.page.on("response", async (resp) => {
         const url = resp.url();
-        if (!/challenges\.cloudflare\.com|google\.com\/recaptcha/.test(url)) {
+        if (
+          !/challenges\.cloudflare\.com|google\.com\/recaptcha|hcaptcha\.com|newassets\.hcaptcha\.com/.test(
+            url,
+          )
+        ) {
           return;
         }
         const status = resp.status();
         const ct = resp.headers()["content-type"] ?? "";
         let bodyPreview = "";
-        if (/json|javascript|html|plain/.test(ct)) {
+        if (
+          /json|javascript|html|plain/.test(ct) ||
+          /api\.hcaptcha\.com\/(?:checksiteconfig|getcaptcha|checkcaptcha)/.test(url)
+        ) {
           try {
             const body = await resp.text();
             bodyPreview =
@@ -1021,6 +1456,20 @@ export class BrowserController {
     channel: string | null,
     proxy: ProxySettings | null,
   ): Promise<EgressGeo | null> {
+    if (proxy === null) {
+      try {
+        const resp = await fetch("https://ipinfo.io/json", { signal: AbortSignal.timeout(10_000) });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return parseEgressGeo(await resp.text());
+      } catch (err) {
+        console.error(
+          `[universal-bot] egress geo probe failed — using default ` +
+            `timezone: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }
+    }
+
     let probe: Browser | undefined;
     try {
       probe = await getChromium().launch({
@@ -1142,6 +1591,25 @@ export class BrowserController {
     const TRANSIENT_NET =
       /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE|net::ERR_ABORTED/i;
     const MAX_GOTO_ATTEMPTS = 3;
+    const sameOriginPathAndSearch = (a: string, b: string): boolean => {
+      try {
+        const left = new URL(a);
+        const right = new URL(b);
+        return left.origin === right.origin && left.pathname === right.pathname && left.search === right.search;
+      } catch {
+        return false;
+      }
+    };
+    const landedAuthGateForTarget = (landedRaw: string, targetRaw: string): boolean => {
+      try {
+        const landed = new URL(landedRaw);
+        const target = new URL(targetRaw);
+        if (landed.origin !== target.origin) return false;
+        return /\/(?:sign[_-]?in|login|log[_-]?in|auth)(?:\/|$)/i.test(landed.pathname);
+      } catch {
+        return false;
+      }
+    };
     for (let attempt = 1; ; attempt++) {
       try {
         await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -1166,6 +1634,21 @@ export class BrowserController {
         break;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        // Some client-routed apps commit the address bar to the requested SPA
+        // route but never fire the lifecycle event Playwright is waiting for.
+        // Treat that as a successful navigation: callers immediately inspect
+        // the DOM and have their own element-level waits.
+        if (/Timeout \d+ms exceeded/i.test(msg)) {
+          await this.sleep(500);
+          if (sameOriginPathAndSearch(this.page.url(), url)) break;
+          if (landedAuthGateForTarget(this.page.url(), url)) break;
+          await this.page
+            .waitForURL((landed) => sameOriginPathAndSearch(landed.toString(), url), { timeout: 5000 })
+            .then(() => undefined)
+            .catch(() => undefined);
+          if (sameOriginPathAndSearch(this.page.url(), url)) break;
+          if (landedAuthGateForTarget(this.page.url(), url)) break;
+        }
         if (attempt >= MAX_GOTO_ATTEMPTS || !TRANSIENT_NET.test(msg)) throw err;
         // Linear backoff — give the tunnel a moment to recover a slot.
         await this.sleep(1500 * attempt);
@@ -1482,27 +1965,51 @@ export class BrowserController {
           const t = el as HTMLInputElement;
           const inputKind =
             t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") ? t.type : "";
+          // The planner's selector often resolves to a CHILD of the real option
+          // (the inner <span> with the visible text, or a positional wrapper), not
+          // the role=option element itself. Walk up to the nearest combobox-option
+          // ancestor so the role-based re-resolution below fires. cmdk items carry
+          // role=option but the `[cmdk-item]` attribute is the most stable tell.
+          // MEASURED 2026-06-16 (meilisearch /welcome-informations cmdk multi-
+          // select): a plain getByRole("option",{name}).click() COMMITS the value
+          // — the trigger updates + Next un-gates — but only when we target the
+          // option element, not its child span (which a raw coordinate click drops).
+          const optEl = el.closest(
+            '[role="option"],[role="menuitem"],[role="menuitemradio"],[cmdk-item]',
+          );
+          const optRole = optEl !== null ? optEl.getAttribute("role") ?? "option" : "";
+          const optText = optEl !== null ? (optEl.textContent ?? "").trim().slice(0, 80) : "";
           return {
             inputKind,
             role: el.getAttribute("role") ?? "",
             text: (el.textContent ?? "").trim().slice(0, 80),
+            optRole,
+            optText,
           };
         })
-        .catch(() => ({ inputKind: "", role: "", text: "" }));
+        .catch(() => ({ inputKind: "", role: "", text: "", optRole: "", optText: "" }));
       const inputKind = probe.inputKind;
       // Custom-combobox / listbox options (role=option|menuitem) — react-select,
-      // Radix, downshift, MUI. Two failure modes the humanized RAW-COORDINATE
+      // Radix, downshift, cmdk, MUI. Two failure modes the humanized RAW-COORDINATE
       // click hits: (1) the menu is a PORTAL that re-renders/repositions, so the
       // captured POSITIONAL selector (e.g. `div…>> nth=42`) resolves to the wrong
       // element at click time — nothing selects, planner loops (MEASURED
       // 2026-06-11, meilisearch Radix combobox); (2) options bind pointer/select
       // handlers a raw coordinate click misses. Fix: re-resolve by role+accessible
-      // name (robust to portal/positional drift), and use the actionability-checked
-      // locator click. Options are post-load, NOT the anti-bot-scored gate.
-      if (probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio") {
-        const role = probe.role as "option" | "menuitem" | "menuitemradio";
-        if (probe.text.length > 0) {
-          const byName = this.page.getByRole(role, { name: probe.text, exact: false }).first();
+      // name (robust to portal/positional drift + the planner targeting a child),
+      // and use the actionability-checked locator click. Options are post-load,
+      // NOT the anti-bot-scored gate.
+      const optRole =
+        probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio"
+          ? probe.role
+          : probe.optRole === "option" || probe.optRole === "menuitem" || probe.optRole === "menuitemradio"
+            ? probe.optRole
+            : "";
+      const optName = probe.role !== "" ? probe.text : probe.optText;
+      if (optRole !== "") {
+        const role = optRole as "option" | "menuitem" | "menuitemradio";
+        if (optName.length > 0) {
+          const byName = this.page.getByRole(role, { name: optName, exact: false }).first();
           if ((await byName.count().catch(() => 0)) > 0) {
             await byName.click({ timeout: 8000 });
             return;
@@ -1538,6 +2045,13 @@ export class BrowserController {
       return;
     }
     await this.humanClick(selector);
+  }
+
+  async clickNth(selector: string, index: number): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const safeIndex = Math.max(0, Math.floor(index));
+    const locator = this.page.locator(selector).nth(safeIndex);
+    await locator.click({ timeout: 8000 });
   }
 
   // Click a link/button by its visible text. Used for one-off
@@ -1664,36 +2178,47 @@ export class BrowserController {
       .scrollIntoViewIfNeeded({ timeout: 5000 })
       .catch(() => {});
     if (!this.humanize) {
-      await this.page.check(selector, { force: true });
-      return;
+      await this.page.check(selector, { force: true }).catch(() => undefined);
+      if (await this.ensureChecked(selector)) return;
+      throw new Error(`Unable to check selector "${selector}" after label and DOM fallbacks`);
     }
     // For visible checkboxes, move the mouse to it first (a real user
     // would). For force-checked invisible ones, fall back to the
     // Playwright API so we don't try to mouse-click an offscreen element.
-    try {
-      await this.humanClick(selector);
-      // Verify it actually became checked; some checkboxes need the
-      // explicit `check()` call to flip state (e.g., styled labels
-      // that swallow the click event).
-      let isChecked = await this.page.locator(selector).isChecked();
-      if (!isChecked) {
-        await this.page.check(selector, { force: true });
-        isChecked = await this.page.locator(selector).isChecked().catch(() => false);
-      }
-      // Mantine / Radix styled checkboxes: the hidden <input> can read
-      // checked in the DOM while the library's React onChange never fired —
-      // so the form's controlled state stays false and the gated submit
-      // stays disabled even though isChecked() is true (MEASURED 2026-06-11:
-      // friendliai's #agreedToServiceTerms cost a wasted round because the
-      // first check didn't register the form state). Clicking the ASSOCIATED
-      // LABEL fires the real onChange the library listens for. Best-effort.
-      if (!isChecked) {
-        const labelClicked = await this.clickAssociatedLabel(selector);
-        if (!labelClicked) await this.page.check(selector, { force: true });
-      }
-    } catch {
-      await this.page.check(selector, { force: true });
-    }
+    await this.humanClick(selector).catch(() => undefined);
+    await this.page.check(selector, { force: true }).catch(() => undefined);
+    if (await this.ensureChecked(selector)) return;
+    throw new Error(`Unable to check selector "${selector}" after click, label, and DOM fallbacks`);
+  }
+
+  private async ensureChecked(selector: string): Promise<boolean> {
+    if (!this.page) return false;
+    if (await this.page.locator(selector).isChecked().catch(() => false)) return true;
+
+    await this.clickAssociatedLabel(selector).catch(() => false);
+    if (await this.page.locator(selector).isChecked().catch(() => false)) return true;
+
+    const domChecked = await this.page
+      .locator(selector)
+      .first()
+      .evaluate((el) => {
+        if (!(el instanceof HTMLInputElement)) return false;
+        if (el.type !== "checkbox" && el.type !== "radio") return false;
+        if (!el.checked) {
+          el.click();
+        }
+        if (!el.checked) {
+          el.checked = true;
+          el.setAttribute("checked", "");
+          el.setAttribute("aria-checked", "true");
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return el.checked;
+      })
+      .catch(() => false);
+    if (!domChecked) return false;
+    return await this.page.locator(selector).isChecked().catch(() => false);
   }
 
   // Click the <label> associated with a checkbox/radio input — either a
@@ -1721,6 +2246,33 @@ export class BrowserController {
       const wrapping = this.page.locator(selector).locator("xpath=ancestor::label[1]").first();
       if ((await wrapping.count()) > 0) {
         await wrapping.click({ timeout: 4000 });
+        return true;
+      }
+      // Some Radix/shadcn-style controls render the hidden input as a sibling
+      // of the visible agreement label, with no `for=` and no wrapping label
+      // (Mistral's terms checkbox). At this point direct check has already
+      // failed/not toggled, so clicking the nearest agreement-shaped label in
+      // the same form is the safest remaining human-equivalent action.
+      const clickedAgreement = await this.page
+        .locator(selector)
+        .first()
+        .evaluate((el) => {
+          const agreementRe =
+            /terms|tos\b|privacy|policy|i accept|i agree|agree to/i;
+          const form = el.closest("form");
+          const labels = [
+            ...(form ? Array.from(form.querySelectorAll("label")) : []),
+            ...Array.from(document.querySelectorAll("label")),
+          ];
+          const label = labels.find((candidate) =>
+            agreementRe.test(candidate.textContent ?? ""),
+          );
+          if (!(label instanceof HTMLElement)) return false;
+          label.click();
+          return true;
+        })
+        .catch(() => false);
+      if (clickedAgreement) {
         return true;
       }
     } catch {
@@ -1753,7 +2305,7 @@ export class BrowserController {
         // AGREEMENT_TEXT_RE / MARKETING_TEXT_RE in this module — the
         // page realm can't import, so they're inlined here.
         const agreementRe =
-          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
         const marketingRe =
           /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
 
@@ -1766,7 +2318,12 @@ export class BrowserController {
         for (const box of boxes) {
           if (box.checked || box.disabled) continue;
           const rect = box.getBoundingClientRect();
-          if (rect.width <= 0 || rect.height <= 0) continue;
+          const ancestorLabel = box.closest("label");
+          const labelRect = ancestorLabel?.getBoundingClientRect();
+          const visible =
+            (rect.width > 0 && rect.height > 0) ||
+            (labelRect !== undefined && labelRect.width > 0 && labelRect.height > 0);
+          if (!visible) continue;
 
           // Associated text = attributes + a label[for=id] + nearest
           // ancestor <label> + the immediately following sibling text.
@@ -1782,7 +2339,6 @@ export class BrowserController {
             );
             if (forLabel) parts.push(forLabel.textContent ?? "");
           }
-          const ancestorLabel = box.closest("label");
           if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
           const sibling = box.nextSibling;
           if (sibling && sibling.textContent) parts.push(sibling.textContent);
@@ -1795,12 +2351,14 @@ export class BrowserController {
 
           // React/Vue controlled inputs ignore a bare `.checked = true`:
           // their state lives in the framework, updated only by the real
-          // event flow. Set the property AND dispatch input/change AND a
-          // synthetic click so the controlled binding observes the flip.
-          box.checked = true;
+          // event flow. Click first (while unchecked) so the framework sees the
+          // same transition a user would make, then force-ensure checked and
+          // dispatch input/change for styled/hidden inputs whose click target
+          // does not toggle the underlying control.
+          box.click();
+          if (!box.checked) box.checked = true;
           box.dispatchEvent(new Event("input", { bubbles: true }));
           box.dispatchEvent(new Event("change", { bubbles: true }));
-          box.click();
 
           const label =
             box.getAttribute("data-testid") ||
@@ -1811,6 +2369,116 @@ export class BrowserController {
           checked.push(label);
         }
         return checked;
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  // Deterministic pre-submit guard for required signup category choices.
+  //
+  // Paddle-class forms ask a required "What do you sell?" question where one
+  // product category must be selected before account creation, but the submit
+  // button remains enabled. The planner can satisfy the agreement checkbox and
+  // still skip the category, producing a rejected submit + no verification mail.
+  //
+  // Keep this conservative: only fire when the page text explicitly says a
+  // product/category choice is required, never touch agreement/marketing boxes,
+  // and prefer low-risk SaaS/software labels over restricted categories.
+  async checkRequiredSignupChoiceBoxes(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        const choiceGateRe =
+          /what do you sell|categories we support|select which types? of products|choose (?:a|your) (?:category|product|business type)|product category|business category/i;
+        const safeChoiceRe =
+          /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
+        const riskyChoiceRe =
+          /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
+        const agreementRe =
+          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+        const marketingRe =
+          /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+
+        const bodyText = document.body?.innerText ?? "";
+        if (!choiceGateRe.test(bodyText)) return [];
+
+        const associatedText = (box: HTMLInputElement): string => {
+          const parts: string[] = [
+            box.getAttribute("data-testid") ?? "",
+            box.getAttribute("name") ?? "",
+            box.id,
+            box.getAttribute("aria-label") ?? "",
+          ];
+          if (box.id) {
+            const forLabel = document.querySelector(
+              `label[for="${CSS.escape(box.id)}"]`,
+            );
+            if (forLabel) parts.push(forLabel.textContent ?? "");
+          }
+          const ancestorLabel = box.closest("label");
+          if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
+          if (box.nextElementSibling) {
+            parts.push(box.nextElementSibling.textContent ?? "");
+          }
+          return parts.join(" ").replace(/\s+/g, " ").trim();
+        };
+
+        const boxes = Array.from(
+          document.querySelectorAll<HTMLInputElement>(
+            'input[type="checkbox"], input[type="radio"]',
+          ),
+        );
+        const visibleBoxes = boxes.filter((box) => {
+          if (box.disabled) return false;
+          const rect = box.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+
+        const alreadyChoseCategory = visibleBoxes.some((box) => {
+          if (!box.checked) return false;
+          const text = associatedText(box);
+          return (
+            !agreementRe.test(text) &&
+            !marketingRe.test(text) &&
+            !riskyChoiceRe.test(text)
+          );
+        });
+        if (alreadyChoseCategory) return [];
+
+        const candidates = visibleBoxes
+          .filter((box) => !box.checked)
+          .map((box) => ({ box, text: associatedText(box) }))
+          .filter(({ text }) => {
+            if (!text) return false;
+            if (agreementRe.test(text) || marketingRe.test(text)) return false;
+            if (riskyChoiceRe.test(text)) return false;
+            return safeChoiceRe.test(text);
+          })
+          .sort((a, b) => {
+            const score = (text: string): number => {
+              if (/digital products?|saas|software/i.test(text)) return 3;
+              if (/developer tools?|apis?|data|analytics/i.test(text)) return 2;
+              if (/mobile apps?/i.test(text)) return 1;
+              return 0;
+            };
+            return score(b.text) - score(a.text);
+          });
+        const choice = candidates[0];
+        if (!choice) return [];
+
+        choice.box.checked = true;
+        choice.box.dispatchEvent(new Event("input", { bubbles: true }));
+        choice.box.dispatchEvent(new Event("change", { bubbles: true }));
+        choice.box.click();
+        return [
+          choice.box.getAttribute("data-testid") ||
+            choice.box.getAttribute("name") ||
+            choice.box.id ||
+            choice.box.getAttribute("aria-label") ||
+            choice.text ||
+            "signup-choice",
+        ];
       });
     } catch {
       return [];
@@ -2047,6 +2715,40 @@ export class BrowserController {
           activeSelector = resolved;
           tagName = "select";
         }
+      } else {
+        const rowControl = await this.page
+          .locator(activeSelector)
+          .first()
+          .evaluate((label) => {
+            const root =
+              label.closest(".n-form-group__row") ??
+              label.closest("label")?.parentElement ??
+              label.parentElement;
+            const control = root?.querySelector<HTMLElement>(
+              'select,button[role="combobox"],input[role="combobox"],[role="combobox"]',
+            );
+            if (control === null || control === undefined) return null;
+            const id = control.getAttribute("id");
+            if (id !== null && id.length > 0) return `#${CSS.escape(id)}`;
+            const testId =
+              control.getAttribute("data-qa") ??
+              control.getAttribute("data-testid") ??
+              control.getAttribute("data-test") ??
+              control.getAttribute("data-cy");
+            if (testId !== null && testId.length > 0) {
+              return `[data-qa="${CSS.escape(testId)}"],[data-testid="${CSS.escape(testId)}"],[data-test="${CSS.escape(testId)}"],[data-cy="${CSS.escape(testId)}"]`;
+            }
+            return null;
+          })
+          .catch(() => null);
+        if (rowControl !== null) {
+          activeSelector = rowControl;
+          tagName = await this.page
+            .locator(activeSelector)
+            .first()
+            .evaluate((node) => node.tagName.toLowerCase())
+            .catch(() => tagName);
+        }
       }
     }
 
@@ -2176,6 +2878,8 @@ export class BrowserController {
       '[role="option"]:visible',
       '[role="menuitem"]:visible',
       '[role="menuitemradio"]:visible',
+      'mat-option:visible',
+      '.mat-mdc-option:visible',
       '[id^="react-select-"][role*="menu"]:visible',
       '[role="listbox"]:visible li:visible',
     ];
@@ -2478,7 +3182,7 @@ export class BrowserController {
     // misreads "URL unchanged, not on provider" as "OAuth completed"
     // and the run falls apart.
     //
-    // Poll for up to 6s for the disabled state to clear. Both the
+    // Poll for up to 15s for the disabled state to clear. Both the
     // HTML `disabled` attribute AND `aria-disabled="true"` are
     // honored — the latter covers ARIA-styled buttons (Radix, Headless
     // UI) that visually appear interactive but reject input.
@@ -2497,7 +3201,7 @@ export class BrowserController {
     // next round's reason includes "click failed: target is
     // aria-disabled" and the planner pivots to checking other fields.
     {
-      const deadline = Date.now() + 6000;
+      const deadline = Date.now() + 15_000;
       let isDisabled = false;
       while (Date.now() < deadline) {
         isDisabled = await locator
@@ -2520,7 +3224,7 @@ export class BrowserController {
         // the generic hint didn't say WHICH field blocked it). Feedback only.
         const hint = await this.unfilledRequiredHint();
         throw new Error(
-          "target is disabled (HTML disabled or aria-disabled=true) after 6s — " +
+          "target is disabled (HTML disabled or aria-disabled=true) after 15s — " +
             "the click would no-op. A required precondition is unmet: an empty " +
             "input, an unselected dropdown, an unchecked agreement checkbox, or " +
             "a missing preset/permission choice. Do NOT retry this click — pick a " +
@@ -2779,6 +3483,10 @@ export class BrowserController {
         return false;
       });
       if (solved) {
+        if (widget.kind === "hcaptcha") {
+          const settled = await this.waitForCaptchaChallengeToSettle(15_000, 10_000);
+          if (!settled) return { found: true, solved: false, kind: widget.kind };
+        }
         return { found: true, solved: true, kind: widget.kind };
       }
     }
@@ -3097,6 +3805,16 @@ export class BrowserController {
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
         }
+        for (const el of Array.from(
+          document.querySelectorAll<HTMLElement>("[data-hcaptcha-widget-id], .h-captcha"),
+        )) {
+          el.setAttribute("data-hcaptcha-response", tok);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        const form = inputs[0]?.closest("form");
+        form?.dispatchEvent(new Event("input", { bubbles: true }));
+        form?.dispatchEvent(new Event("change", { bubbles: true }));
         // 2. Fire the widget's onSuccess callback if registered. The
         //    callbacks are stored on `___grecaptcha_cfg.clients`; the
         //    exact tree is undocumented and shifts across versions
@@ -3311,7 +4029,7 @@ export class BrowserController {
   async extractHcaptchaSitekey(): Promise<string | null> {
     if (!this.page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate(() => {
+      const fromDom = await this.page.evaluate(() => {
         const div = document.querySelector<HTMLElement>(".h-captcha[data-sitekey], [data-hcaptcha-sitekey]");
         if (div !== null) {
           const k =
@@ -3323,54 +4041,396 @@ export class BrowserController {
           'iframe[src*="hcaptcha.com"]',
         );
         if (iframe !== null) {
-          const k = new URL(iframe.src).searchParams.get("sitekey");
+          const url = new URL(iframe.src);
+          const k =
+            url.searchParams.get("sitekey") ??
+            new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash).get(
+              "sitekey",
+            );
           if (k !== null && k.length > 10) return k;
         }
         return null;
       });
+      if (fromDom !== null) return fromDom;
+      // INVISIBLE hCaptcha (Hugging Face, Stripe): no .h-captcha div, no
+      // iframe `?sitekey=` param — the sitekey lives in the page's JS/JSON
+      // config (`captchaApiKey`, `express_hcaptcha_site_key`,
+      // `hcaptcha_login_main_site_key`, etc.). Scan the HTML for a UUID-shaped
+      // key next to a sitekey/captcha hint, but only when an hCaptcha marker is
+      // present so an unrelated config UUID cannot match.
+      const html = await this.page.evaluate(() => document.documentElement.outerHTML);
+      return extractHcaptchaSitekeyFromHtml(html);
     } catch {
       return null;
     }
   }
 
+  async getBrowserUserAgent(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => navigator.userAgent);
+    } catch {
+      return null;
+    }
+  }
+
+  async getHcaptchaSolveContext(): Promise<{
+    invisible: boolean;
+    userAgent: string | null;
+    rqdata: string | null;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        let invisible = false;
+        let rqdata: string | null = null;
+        const useRqdata = (value: string | null): void => {
+          if (rqdata === null && value !== null && value.trim().length > 0) rqdata = value;
+        };
+        for (const el of Array.from(
+          document.querySelectorAll<HTMLElement>(".h-captcha, [data-hcaptcha-widget-id]"),
+        )) {
+          const size = el.getAttribute("data-size") ?? el.getAttribute("size");
+          if (size?.toLowerCase() === "invisible") invisible = true;
+          useRqdata(el.getAttribute("data-rqdata"));
+        }
+        for (const iframe of Array.from(
+          document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
+        )) {
+          try {
+            const url = new URL(iframe.src);
+            const hashParams = new URLSearchParams(
+              url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
+            );
+            const size = url.searchParams.get("size") ?? hashParams.get("size");
+            const frame = url.searchParams.get("frame") ?? hashParams.get("frame");
+            useRqdata(url.searchParams.get("rqdata") ?? hashParams.get("rqdata"));
+            const clientOptions = url.searchParams.get("clientOptions") ?? hashParams.get("clientOptions");
+            if (clientOptions !== null) {
+              try {
+                const parsed = JSON.parse(clientOptions) as { rqdata?: unknown };
+                if (typeof parsed.rqdata === "string") useRqdata(parsed.rqdata);
+              } catch {
+                // ignore non-JSON client options
+              }
+            }
+            if (
+              size?.toLowerCase() === "invisible" ||
+              frame?.toLowerCase() === "checkbox-invisible"
+            ) {
+              invisible = true;
+            }
+          } catch {
+            // ignore malformed extension/proxy iframe URLs
+          }
+        }
+        return { invisible, userAgent: navigator.userAgent, rqdata };
+      });
+    } catch {
+      return {
+        invisible: false,
+        userAgent: await this.getBrowserUserAgent().catch(() => null),
+        rqdata: null,
+      };
+    }
+  }
+
   // Inject a 2Captcha-resolved hCaptcha token into the page's
-  // h-captcha-response textarea(s) and fire the widget's data-callback
-  // if the page registered one. Mirrors injectRecaptchaToken; hCaptcha
-  // also mirrors the response token into a g-recaptcha-response textarea
-  // on some compat installs, so populate both names if present.
+  // h-captcha-response textarea(s), update hCaptcha runtime response
+  // accessors, and fire registered callbacks. Mirrors injectRecaptchaToken;
+  // hCaptcha also mirrors the response token into a g-recaptcha-response
+  // textarea on some compat installs, so populate both names if present.
   async injectHcaptchaToken(token: string): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate((tok: string) => {
+      const responseKey = extractHcaptchaResponseKeyFromToken(token);
+      return await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
+        const widgetIds = new Set<string>();
         const inputs = Array.from(
           document.querySelectorAll<HTMLTextAreaElement>(
             'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
           ),
         );
-        if (inputs.length === 0) return false;
         for (const input of inputs) {
           input.value = tok;
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
         }
-        // Fire the data-callback the page registered on the .h-captcha
-        // host (hCaptcha calls it by name on window). Best-effort — the
-        // populated textarea is what server-side validation reads.
+        for (const host of Array.from(
+          document.querySelectorAll<HTMLElement>(
+            ".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]",
+          ),
+        )) {
+          host.setAttribute("data-hcaptcha-response", tok);
+          const id =
+            host.getAttribute("data-hcaptcha-widget-id") ??
+            host.getAttribute("data-hcaptcha-widget-id".toLowerCase());
+          if (id !== null && id.length > 0) widgetIds.add(id);
+          host.dispatchEvent(new Event("input", { bubbles: true }));
+          host.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        for (const iframe of Array.from(
+          document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
+        )) {
+          try {
+            const url = new URL(iframe.src);
+            const params = new URLSearchParams(
+              url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
+            );
+            const id = params.get("id");
+            if (id !== null && id.length > 0) widgetIds.add(id);
+          } catch {
+            // ignore malformed extension/proxy iframe URLs
+          }
+        }
+
+        const win = window as unknown as Record<string, unknown>;
+        const hcaptcha = win.hcaptcha as
+          | {
+              getResponse?: (id?: string) => string;
+              getRespKey?: (id?: string) => string;
+            }
+          | undefined;
+        if (hcaptcha !== undefined) {
+          const originalGetResponse = hcaptcha.getResponse?.bind(hcaptcha);
+          const originalGetRespKey = hcaptcha.getRespKey?.bind(hcaptcha);
+          hcaptcha.getResponse = (id?: string) => {
+            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return tok;
+            return originalGetResponse?.(id) ?? tok;
+          };
+          hcaptcha.getRespKey = (id?: string) => {
+            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return key ?? "";
+            return originalGetRespKey?.(id) ?? key ?? "";
+          };
+        }
+
+        let callbackFired = false;
+        const fire = (fn: unknown): void => {
+          if (typeof fn !== "function") return;
+          callbackFired = true;
+          try {
+            (fn as (t: string, k?: string) => void)(tok, key ?? undefined);
+          } catch {
+            // A page callback can be stale after React remounts a widget.
+          }
+        };
+
+        // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
         try {
-          const host = document.querySelector<HTMLElement>(".h-captcha[data-callback]");
-          const name = host?.getAttribute("data-callback");
-          if (name !== null && name !== undefined) {
-            const fn = (window as unknown as Record<string, unknown>)[name];
-            if (typeof fn === "function") (fn as (t: string) => void)(tok);
+          for (const host of Array.from(
+            document.querySelectorAll<HTMLElement>(".h-captcha[data-callback]"),
+          )) {
+            const name = host.getAttribute("data-callback");
+            if (name !== null && name !== undefined) fire(win[name]);
           }
         } catch {
-          // no named callback — DOM injection stands.
+          // no named callback, continue to runtime config scan.
         }
-        return true;
-      }, token);
+
+        // Programmatic hCaptcha integrations pass function callbacks to
+        // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
+        // generically so React/Vue wrappers are handled like plain forms.
+        const seen = new Set<unknown>();
+        const scan = (value: unknown, depth: number): void => {
+          if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
+          seen.add(value);
+          if (typeof value === "function") return;
+          if (typeof value !== "object") return;
+          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+            const normalized = key.toLowerCase();
+            if (
+              typeof child === "function" &&
+              (normalized === "callback" ||
+                normalized === "success-callback" ||
+                normalized === "verify-callback" ||
+                normalized === "onverify" ||
+                normalized === "onsuccess")
+            ) {
+              fire(child);
+              continue;
+            }
+            if (typeof child === "object" && child !== null) scan(child, depth + 1);
+          }
+        };
+        scan(win.___hcaptcha_cfg, 0);
+        scan(win.hcaptcha, 0);
+
+        return inputs.length > 0 || widgetIds.size > 0 || callbackFired;
+      }, { tok: token, key: responseKey });
     } catch {
       return false;
     }
+  }
+
+  async solveVisibleHcaptchaChallengeWithCoordinates(
+    solve: (input: {
+      imageBase64: string;
+      comment?: string;
+      minClicks?: number;
+      maxClicks?: number;
+    }) => Promise<TwoCaptchaCoordinatesResult>,
+  ): Promise<HcaptchaCoordinateSolveResult> {
+    if (!this.page) throw new Error("Browser not started");
+
+    const challenge = await this.findVisibleHcaptchaChallengeFrame();
+    if (challenge === null) {
+      return { found: false, solved: false, reason: "no_visible_challenge" };
+    }
+
+    let shot: Buffer;
+    try {
+      shot = await challenge.locator.screenshot({ type: "png", timeout: 8_000 });
+    } catch (err) {
+      return {
+        found: true,
+        solved: false,
+        reason: `screenshot_failed:${err instanceof Error ? err.message : String(err)}`,
+        clicks: 0,
+      };
+    }
+
+    const dims = pngDimensions(shot);
+    if (dims === null || dims.width <= 0 || dims.height <= 0) {
+      return {
+        found: true,
+        solved: false,
+        reason: "invalid_challenge_screenshot",
+        clicks: 0,
+      };
+    }
+
+    const solveRes = await solve({
+      imageBase64: shot.toString("base64"),
+      comment:
+        "hCaptcha challenge screenshot. Click all matching image targets requested by the prompt. If a Verify or Submit button is visible, click it after selecting targets.",
+      minClicks: 1,
+      maxClicks: 12,
+    });
+    if (solveRes.kind !== "ok") {
+      return {
+        found: true,
+        solved: false,
+        reason:
+          `2captcha_${solveRes.kind}` +
+          ("reason" in solveRes ? `:${solveRes.reason}` : ""),
+        clicks: 0,
+        ...("durationMs" in solveRes ? { durationMs: solveRes.durationMs } : {}),
+      };
+    }
+
+    let clicks = 0;
+    for (const point of solveRes.coordinates) {
+      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
+      if (box === null || box.width <= 0 || box.height <= 0) break;
+      const x = box.x + (point.x / dims.width) * box.width;
+      const y = box.y + (point.y / dims.height) * box.height;
+      await this.bezierMouseTo(x, y);
+      await this.sleep(rand(100, 260));
+      await this.page.mouse.click(x, y);
+      this.mouseX = x;
+      this.mouseY = y;
+      clicks += 1;
+    }
+
+    await this.sleep(650);
+    let settled = await this.waitForCaptchaChallengeToSettle(2_500).catch(() => false);
+    if (!settled && clicks > 0) {
+      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
+      if (box !== null && box.width > 0 && box.height > 0) {
+        const verifyX = box.x + Math.min(box.width - 32, Math.max(32, box.width * 0.84));
+        const verifyY = box.y + Math.min(box.height - 24, Math.max(24, box.height * 0.92));
+        await this.bezierMouseTo(verifyX, verifyY);
+        await this.sleep(rand(120, 320));
+        await this.page.mouse.click(verifyX, verifyY);
+        this.mouseX = verifyX;
+        this.mouseY = verifyY;
+      }
+      settled = await this.waitForCaptchaChallengeToSettle(10_000).catch(() => false);
+    }
+
+    const responsePresent = await this.page
+      .evaluate(() => {
+        const ta = document.querySelector(
+          'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
+        ) as HTMLTextAreaElement | null;
+        return ta !== null && ta.value.length > 0;
+      })
+      .catch(() => false);
+
+    const out: HcaptchaCoordinateSolveResult = {
+      found: true,
+      solved: settled || responsePresent,
+      clicks,
+      durationMs: solveRes.durationMs,
+    };
+    if (!out.solved) out.reason = "challenge_still_visible";
+    return out;
+  }
+
+  private async findVisibleHcaptchaChallengeFrame(): Promise<{
+    locator: Locator;
+    box: { x: number; y: number; width: number; height: number };
+  } | null> {
+    if (!this.page) throw new Error("Browser not started");
+    const selectors = [
+      'iframe[src*="hcaptcha.com"][src*="frame=challenge"]',
+      'iframe[src*="newassets.hcaptcha.com"][src*="frame=challenge"]',
+      'iframe[src*="hcaptcha.com"][src*="/challenge"]',
+      'iframe[src*="newassets.hcaptcha.com"][src*="/challenge"]',
+    ];
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      for (const selector of selectors) {
+        const locator = this.page.locator(selector);
+        const count = await locator.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          const el = locator.nth(i);
+          const box = await el.boundingBox({ timeout: 1_000 }).catch(() => null);
+          if (box === null) continue;
+          if (box.width < 180 || box.height < 160) continue;
+          return { locator: el, box };
+        }
+      }
+      await this.sleep(250);
+    }
+    return null;
+  }
+
+  async waitForCaptchaChallengeToSettle(timeoutMs = 4000, stableClearMs = 2_500): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const hasVisibleChallenge = async (): Promise<boolean> =>
+      await this.page!.evaluate(() => {
+        const visible = (el: Element): boolean => {
+          const style = window.getComputedStyle(el as HTMLElement);
+          if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+            return false;
+          }
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 8 && r.height > 8;
+        };
+        const selectors = [
+          'iframe[src*="hcaptcha.com"][src*="frame=challenge"]',
+          'iframe[src*="newassets.hcaptcha.com"][src*="frame=challenge"]',
+          'iframe[src*="recaptcha/api2/bframe"]',
+          'iframe[src*="challenges.cloudflare.com"]',
+        ];
+        return selectors.some((sel) =>
+          Array.from(document.querySelectorAll(sel)).some((el) => visible(el)),
+        );
+      });
+    const deadline = Date.now() + timeoutMs;
+    let clearSince: number | null = null;
+    while (Date.now() < deadline) {
+      const visible = await hasVisibleChallenge().catch(() => false);
+      if (!visible) {
+        clearSince ??= Date.now();
+        if (Date.now() - clearSince >= stableClearMs) return true;
+      } else {
+        clearSince = null;
+      }
+      await this.sleep(250);
+    }
+    return false;
   }
 
   // Small mouse wiggle near the current position. Used during prewarm
@@ -3407,6 +4467,7 @@ export class BrowserController {
       fullPage: false,
       type: "jpeg",
       quality: 70,
+      timeout: 8_000,
     });
     return buffer.toString("base64");
   }
@@ -3433,13 +4494,130 @@ export class BrowserController {
       url: this.page.url(),
       title: await this.page.title(),
       html: await this.page.content(),
-      screenshot: await this.screenshot(),
+      screenshot: await this.screenshot().catch(() => ""),
     };
   }
 
   async extractText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.textContent("body") || "";
+  }
+
+  // RENDERED, visibility-respecting body text. extractText() reads
+  // textContent("body"), which includes display:none / visibility:hidden /
+  // off-screen nodes — so a fully-rendered dashboard whose DOM merely
+  // CONTAINS a hidden skeleton / "Loading…" / "Please wait 30 seconds…"
+  // string (Next.js RSC inline payloads, lazy placeholders, aria-hidden
+  // spinners) reads as still-loading and false-trips the loading-shell gate.
+  // innerText is layout-aware: it omits hidden text and reflects what a user
+  // would actually see. Use this for the SHELL decision ONLY — credential/key
+  // extraction and wall-text checks deliberately read RAW text via
+  // extractText() and must stay byte-identical, so this is purely additive.
+  async extractVisibleText(): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => document.body?.innerText ?? "");
+  }
+
+  async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(async (rawPrefix) => {
+      const prefix = String(rawPrefix ?? "").replace(/^\/+|\/+$/g, "").toLowerCase();
+      const candidates: string[] = [];
+      const seen = new Set<string>();
+      const add = (value: unknown) => {
+        if (typeof value !== "string") return;
+        const trimmed = value.trim();
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$/.test(trimmed)) return;
+        if (seen.has(trimmed)) return;
+        seen.add(trimmed);
+        candidates.push(trimmed);
+      };
+      const pathSegments = (href: string): string[] => {
+        try {
+          return new URL(href, location.origin).pathname.split("/").filter(Boolean);
+        } catch {
+          return [];
+        }
+      };
+
+      for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+        const segs = pathSegments(anchor.getAttribute("href") ?? "");
+        if ((segs[0] ?? "").toLowerCase() === prefix) add(segs[1]);
+      }
+
+      const walk = (value: unknown) => {
+        if (Array.isArray(value)) {
+          for (const item of value) walk(item);
+          return;
+        }
+        if (value === null || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        const preferredKeys =
+          prefix === "p" || prefix.startsWith("project")
+            ? ["slug", "projectSlug", "currentProjectSlug", "lastViewedProjectSlug", "id"]
+            : prefix.startsWith("org") || prefix.startsWith("organization")
+              ? ["slug", "orgSlug", "organizationSlug", "id"]
+              : prefix.startsWith("workspace")
+                ? ["slug", "workspaceSlug", "id"]
+                : ["slug", "id"];
+        for (const key of preferredKeys) add(record[key]);
+        for (const item of Object.values(record)) walk(item);
+      };
+
+      const inspectJsonText = (text: string) => {
+        try {
+          walk(JSON.parse(text));
+        } catch {
+          // Ignore non-JSON storage/API payloads.
+        }
+      };
+      try {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (key !== null) inspectJsonText(localStorage.getItem(key) ?? "");
+        }
+        for (let i = 0; i < sessionStorage.length; i += 1) {
+          const key = sessionStorage.key(i);
+          if (key !== null) inspectJsonText(sessionStorage.getItem(key) ?? "");
+        }
+      } catch {
+        // Storage can be blocked in hardened contexts; DOM/API probes are enough.
+      }
+
+      const likelyListApi = (url: string): boolean => {
+        const lower = url.toLowerCase();
+        if (!lower.includes("api")) return false;
+        if (prefix === "p" || prefix.startsWith("project")) return /projects?[\w.-]*list|list[\w.-]*projects?/.test(lower);
+        if (prefix.startsWith("org") || prefix.startsWith("organization")) return /organi[sz]ations?[\w.-]*list|orgs?[\w.-]*list|list[\w.-]*(orgs?|organi[sz]ations?)/.test(lower);
+        if (prefix.startsWith("workspace")) return /workspaces?[\w.-]*list|list[\w.-]*workspaces?/.test(lower);
+        return /list/.test(lower);
+      };
+      const urls = Array.from(
+        new Set(
+          performance
+            .getEntriesByType("resource")
+            .map((entry) => entry.name)
+            .filter(likelyListApi),
+        ),
+      ).slice(-8);
+      for (const url of urls) {
+        try {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 1_500);
+          const res = await fetch(url, {
+            credentials: "include",
+            signal: controller.signal,
+          });
+          window.clearTimeout(timeout);
+          if (!res.ok) continue;
+          inspectJsonText(await res.text());
+        } catch {
+          // Best-effort only; resolver falls back to text/href matching.
+        }
+      }
+
+      return candidates.slice(0, 20);
+    }, prefix);
   }
 
   // Discrete strings an API key might occupy — for credential
@@ -4085,34 +5263,44 @@ export class BrowserController {
   // provider/sign-up button) is present yet. Best-effort — never throws.
   async waitForAuthWidgetHydration(timeoutMs = 8_000): Promise<void> {
     if (!this.page) return;
+    const authWidgetHydrationProbe = String.raw`(() => {
+      const vis = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const anyVis = (sel) =>
+        Array.from(document.querySelectorAll(sel)).some(vis);
+      const hasAuthInput = anyVis(
+        'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
+      );
+      let hasAuthButton = false;
+      const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
+      for (const el of Array.from(
+        document.querySelectorAll('button,a[href],[role="button"]'),
+      )) {
+        if (!vis(el)) continue;
+        if (re.test((el.textContent ?? "").trim())) {
+          hasAuthButton = true;
+          break;
+        }
+      }
+      const spinnerVisible = anyVis(
+        '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
+      );
+      return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
+    })()`;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const state = await this.page.evaluate(() => {
-          const vis = (el: Element): boolean => {
-            const r = (el as HTMLElement).getBoundingClientRect();
-            return r.width > 0 && r.height > 0;
-          };
-          const anyVis = (sel: string): boolean =>
-            Array.from(document.querySelectorAll(sel)).some(vis);
-          // Auth signal: a real form input or a recognizable provider /
-          // signup affordance.
-          const hasAuthInput = anyVis(
-            'input[type="email"],input[type="password"],input[name="email" i],input[name="password" i]',
-          );
-          let hasAuthButton = false;
-          const re = /\b(sign\s?up|continue with|log ?in with|with google|with github|with sso|create account)\b/i;
-          for (const el of Array.from(
-            document.querySelectorAll('button,a[href],[role="button"]'),
-          )) {
-            if (!vis(el)) continue;
-            if (re.test((el.textContent ?? "").trim())) { hasAuthButton = true; break; }
-          }
-          const spinnerVisible = anyVis(
-            '[role="progressbar"],[aria-busy="true"],[class*="spin" i],[class*="loading" i],[class*="loader" i],.ant-spin,.MuiCircularProgress-root',
-          );
-          return { hasAuth: hasAuthInput || hasAuthButton, spinnerVisible };
-        });
+        const state = (await Promise.race([
+          this.page.evaluate(authWidgetHydrationProbe),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("auth widget probe timed out")), 1_500),
+          ),
+        ])) as {
+          hasAuth: boolean;
+          spinnerVisible: boolean;
+        };
         // Done the moment an auth signal appears, or once nothing is
         // spinning anymore (no point waiting on a page that simply has
         // no auth widget — a true OAuth-less/blank page bails honestly).
@@ -4141,19 +5329,24 @@ export class BrowserController {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const count = await this.page.evaluate((min: number) => {
-          const sels =
-            'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
-          const nodes = Array.from(document.querySelectorAll(sels));
-          let visible = 0;
-          for (const n of nodes) {
-            const el = n as HTMLElement;
-            const r = el.getBoundingClientRect();
-            if (r.width >= 2 && r.height >= 2) visible++;
-            if (visible >= min) return visible;
-          }
-          return visible;
-        }, minElements);
+        const count = await Promise.race([
+          this.page.evaluate((min: number) => {
+            const sels =
+              'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
+            const nodes = Array.from(document.querySelectorAll(sels));
+            let visible = 0;
+            for (const n of nodes) {
+              const el = n as HTMLElement;
+              const r = el.getBoundingClientRect();
+              if (r.width >= 2 && r.height >= 2) visible++;
+              if (visible >= min) return visible;
+            }
+            return visible;
+          }, minElements),
+          new Promise<number>((_, reject) =>
+            setTimeout(() => reject(new Error("interactive DOM probe timed out")), 1_500),
+          ),
+        ]);
         if (count >= minElements) return;
       } catch {
         // Page may be mid-navigation — try again on the next tick.
@@ -4546,9 +5739,23 @@ export class BrowserController {
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
         let base: string;
+        const testId =
+          el.getAttribute("data-testid") ??
+          el.getAttribute("data-test-id") ??
+          el.getAttribute("data-test") ??
+          el.getAttribute("data-cy") ??
+          el.getAttribute("data-qa");
         const id = el.getAttribute("id");
         const name = el.getAttribute("name");
-        if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) {
+        if (testId !== null && testId.length > 0) {
+          const attr =
+            el.hasAttribute("data-testid") ? "data-testid" :
+            el.hasAttribute("data-test-id") ? "data-test-id" :
+            el.hasAttribute("data-test") ? "data-test" :
+            el.hasAttribute("data-cy") ? "data-cy" :
+            "data-qa";
+          base = `[${attr}="${CSS.escape(testId)}"]`;
+        } else if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) {
           base = `#${id}`;
         } else if (name !== null && name.length > 0) {
           base = `${tag}[name="${name.replace(/"/g, '\\"')}"]`;
@@ -4859,6 +6066,7 @@ export class BrowserController {
   // settleAfterOAuth() restores the product page afterwards.
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
+    this.maybeAttachOAuthNetListener();
     this.oauthProductPage = this.page;
     // Race a popup `page` event against the click. context-level
     // "page" fires for both window.open popups and target=_blank.
@@ -4874,6 +6082,108 @@ export class BrowserController {
       await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
+    }
+  }
+
+  // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
+  // Attach a context-level response recorder ONCE. Records SSO-relevant
+  // responses (the service host + Clerk/Stytch/WorkOS FAPI hosts) with their
+  // status + whether they set a cookie — the signal for "did the callback's
+  // session-establish request succeed and set the session cookie?"
+  private maybeAttachOAuthNetListener(): void {
+    if (this.oauthNetListenerAttached) return;
+    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
+    if (!this.context) return;
+    this.oauthNetListenerAttached = true;
+    const RELEVANT = /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
+    this.context.on("response", (res) => {
+      void (async () => {
+        try {
+          const url = res.url();
+          if (!RELEVANT.test(url)) return;
+          const headers = res.headers();
+          if (this.oauthNetLog.length >= 200) return;
+          const entry: { url: string; status: number; setCookie: boolean; ct: string; body?: string } = {
+            url: url.slice(0, 200),
+            status: res.status(),
+            setCookie: "set-cookie" in headers || "Set-Cookie" in headers,
+            ct: (headers["content-type"] ?? "").slice(0, 40),
+          };
+          // Capture the body of a Clerk/Stytch/WorkOS sign-in/up/callback error
+          // (>=400) — its error code is the definitive tell (captcha_invalid vs
+          // transfer vs identifier_*). JSON only, bounded.
+          if (res.status() >= 400 && /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)) {
+            entry.body = (await res.text().catch(() => "")).slice(0, 800);
+          }
+          this.oauthNetLog.push(entry);
+        } catch {
+          // best-effort observability — never perturb the run
+        }
+      })();
+    });
+  }
+
+  // Dump cookies + the SSO network log to a file for post-mortem. Called at the
+  // oauth_session_not_persisted decision point when UNIVERSAL_BOT_OAUTH_DEBUG.
+  async dumpOAuthDebug(service: string, label: string): Promise<void> {
+    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
+    if (!this.context) return;
+    try {
+      const cookies = await this.context.cookies();
+      const cookieSummary = cookies.map((c) => ({
+        name: c.name,
+        domain: c.domain,
+        path: c.path,
+        len: c.value.length,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        sameSite: c.sameSite,
+      }));
+      const url = this.page ? this.page.url() : "(no page)";
+      // Capture the live Clerk SDK state — the definitive read on whether a
+      // sign-up transfer is available (the new-user-OAuth fix hinges on this).
+      const clerkState = this.page
+        ? await this.page
+            .evaluate(() => {
+              const w = window as unknown as { Clerk?: Record<string, unknown> };
+              const c = w.Clerk;
+              if (c === undefined) return { present: false };
+              const client = (c as { client?: Record<string, unknown> }).client;
+              const si = client?.["signIn"] as Record<string, unknown> | undefined;
+              const su = client?.["signUp"] as Record<string, unknown> | undefined;
+              const ffv = si?.["firstFactorVerification"] as Record<string, unknown> | undefined;
+              return {
+                present: true,
+                loaded: (c as { loaded?: unknown }).loaded ?? null,
+                signInStatus: si?.["status"] ?? null,
+                signInFFVStatus: ffv?.["status"] ?? null,
+                signInFFVError: ffv?.["error"] ?? null,
+                signUpStatus: su?.["status"] ?? null,
+                signUpMissingFields: su?.["missingFields"] ?? null,
+                hasSignUpCreate: typeof (su as { create?: unknown })?.create === "function",
+              };
+            })
+            .catch((e: unknown) => ({ present: "evalError", err: String(e).slice(0, 120) }))
+        : { present: false };
+      const consoleText = await this.extractText().catch(() => "");
+      const { writeFileSync, mkdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { homedir } = await import("node:os");
+      const dir = join(homedir(), ".trusty-squire", "oauth-debug");
+      mkdirSync(dir, { recursive: true });
+      const ts = process.env.OAUTH_DEBUG_TS ?? String(this.oauthNetLog.length);
+      const path = join(dir, `${service}-${label}-${ts}.json`);
+      writeFileSync(
+        path,
+        JSON.stringify(
+          { service, label, finalUrl: url, clerkState, cookies: cookieSummary, netLog: this.oauthNetLog, pageText: consoleText.slice(0, 600) },
+          null,
+          2,
+        ),
+      );
+      console.error(`[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`);
+    } catch (err) {
+      console.error(`[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -5151,6 +6461,38 @@ export class BrowserController {
     return this.page !== null ? this.page.url() : "";
   }
 
+  // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that
+  // exposes no in-DOM close control). Best-effort. Used by the nav-search
+  // overlay handler's dismiss fallback.
+  async pressKey(key: string): Promise<void> {
+    if (!this.page) return;
+    await this.page.keyboard.press(key).catch(() => {});
+  }
+
+  // Open obvious collapsed menus (hamburger / avatar / account / "Settings"
+  // toggles) so nav links hidden behind them mount in the DOM before the
+  // nav-search enumerates candidates (outside-voice #1: the keys link is often
+  // behind a menu, not in the rendered top nav). CONSERVATIVE: only clicks
+  // elements that ADVERTISE a popup menu (aria-haspopup=menu/true), capped at 3,
+  // short timeouts, best-effort — never a plain link, so it can't wander.
+  async expandLatentNav(): Promise<void> {
+    if (!this.page) return;
+    try {
+      const n = await this.page
+        .$$eval('[aria-haspopup="menu"], [aria-haspopup="true"]', (els) => {
+          const slice = els.slice(0, 3);
+          slice.forEach((e, i) => e.setAttribute("data-navsearch-toggle", String(i)));
+          return slice.length;
+        })
+        .catch(() => 0);
+      for (let i = 0; i < n; i++) {
+        await this.page.click(`[data-navsearch-toggle="${i}"]`, { timeout: 1200 }).catch(() => {});
+      }
+    } catch {
+      // best-effort — never fail the search over menu expansion
+    }
+  }
+
   // Fetch a URL's final response (following redirects) and return its
   // status, final URL, and body text — or null on any failure.
   //
@@ -5218,6 +6560,55 @@ export class BrowserController {
   async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     if (provider === "github") {
+      // GitHub App install flow can include an account target chooser before
+      // the Install/Authorize screen:
+      //   /apps/<app>/installations/select_target
+      // It renders account/org cards as links/buttons, not as an approve
+      // button. Advance exactly one visible target and let the caller's
+      // consent loop re-classify the next GitHub page.
+      if (/\/apps\/[^/]+\/installations\/select_target\b/.test(new URL(this.page.url()).pathname)) {
+        const startUrl = this.page.url();
+        const clicked = await this.page
+          .evaluate(() => {
+            const visible = (el: HTMLElement): boolean => {
+              const r = el.getBoundingClientRect();
+              const s = window.getComputedStyle(el);
+              return (
+                r.width > 2 &&
+                r.height > 2 &&
+                s.display !== "none" &&
+                s.visibility !== "hidden" &&
+                parseFloat(s.opacity || "1") > 0.01
+              );
+            };
+            const bad = /\b(settings|marketplace|learn more|cancel|skip|back|terms|privacy)\b/i;
+            const candidates = Array.from(
+              document.querySelectorAll<HTMLElement>('a[href], button, [role="button"], [role="link"]'),
+            ).filter((el) => visible(el));
+            const byHref = candidates.find((el) => {
+              const href = el instanceof HTMLAnchorElement ? el.href : el.getAttribute("href") ?? "";
+              return /\/installations\/(?:new|permissions)\b/.test(href);
+            });
+            const target =
+              byHref ??
+              candidates.find((el) => {
+                const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+                if (text.length === 0 || text.length > 80 || bad.test(text)) return false;
+                return true;
+              });
+            if (target === undefined) return false;
+            target.click();
+            return true;
+          })
+          .catch(() => false);
+        if (clicked) {
+          const advanced = await this.page
+            .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 8000 })
+            .then(() => true)
+            .catch(() => false);
+          if (advanced) return true;
+        }
+      }
       // GitHub consent screen variants:
       //   Classic OAuth: "Authorize <app>"
       //   GitHub App (install + auth): "Authorize <app>", "Install",
@@ -5393,6 +6784,33 @@ export class BrowserController {
     return false;
   }
 
+  // Wait on a Clerk callback for a session to establish, polling COOKIES (which
+  // are world-agnostic — unlike window.Clerk, invisible to our isolated-world
+  // page.evaluate under patchright). Clerk's main-world JS, if left alone on the
+  // /sso-callback page (not navigated away), completes the new-user sign-up
+  // transfer and sets a session; this detects that. Returns true once a Clerk
+  // session indicator appears (`__session` cookie, or `__client_uat` flips off
+  // "0"), false on timeout. Cheap + safe: only the bot's own context cookies.
+  async waitForClerkSession(timeoutMs = 12000): Promise<boolean> {
+    if (!this.context) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const cookies = await this.context.cookies();
+        const signedIn = cookies.some(
+          (c) =>
+            (c.name === "__session" && c.value.length > 0) ||
+            (c.name.startsWith("__client_uat") && c.value.length > 0 && c.value !== "0"),
+        );
+        if (signedIn) return true;
+      } catch {
+        // transient — keep polling
+      }
+      await this.sleep(1000);
+    }
+    return false;
+  }
+
   // Restore the product page once the OAuth handshake completes. A
   // no-op for the same-tab redirect flow (the active page already IS
   // the product page); for the popup flow, waits briefly for the popup
@@ -5455,6 +6873,7 @@ export class BrowserController {
       } catch {
         /* already gone */
       }
+      if (this.childChrome.pid !== undefined) selfManagedChromePids.delete(this.childChrome.pid);
       this.childChrome = null;
     }
     // …and context.close() doesn't always kill the browser: headed Chrome
@@ -5572,9 +6991,13 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
 // can't import, so the same two regexes are inlined there verbatim —
 // keep them BYTE-IDENTICAL with these.
 const AGREEMENT_TEXT_RE =
-  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
 const MARKETING_TEXT_RE =
   /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
+const SAFE_SIGNUP_CHOICE_TEXT_RE =
+  /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
+const RISKY_SIGNUP_CHOICE_TEXT_RE =
+  /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
 
 // True when a checkbox's associated text reads as a REQUIRED agreement
 // (terms/privacy/consent) and NOT as a marketing/newsletter opt-in.
@@ -5588,6 +7011,18 @@ const MARKETING_TEXT_RE =
 // hence the explicit marketing exclusion.
 export function isAgreementCheckboxText(text: string): boolean {
   return AGREEMENT_TEXT_RE.test(text) && !MARKETING_TEXT_RE.test(text);
+}
+
+// True when a required signup-category choice is a low-risk default the bot can
+// select deterministically. Keep byte-identical with the in-page regexes in
+// `checkRequiredSignupChoiceBoxes`.
+export function isSafeSignupChoiceText(text: string): boolean {
+  return (
+    SAFE_SIGNUP_CHOICE_TEXT_RE.test(text) &&
+    !RISKY_SIGNUP_CHOICE_TEXT_RE.test(text) &&
+    !AGREEMENT_TEXT_RE.test(text) &&
+    !MARKETING_TEXT_RE.test(text)
+  );
 }
 
 // ───────────── residential proxy (S1) ─────────────

@@ -34,6 +34,18 @@ jobs:
       - name: Scan tracked files for credential-shaped values
         run: tools/secret-scan.sh
 
+  # Block an un-evidenced "wall": a service marked needs-manual/unservable must
+  # carry dated affordance-probe evidence (last_probed) OR be grandfathered.
+  # A NEW unservable label without proof fails here — so a false wall (e.g.
+  # "fly.io is github-only") can't merge on an unverified say-so. The control
+  # lives in CI, not in anyone's memory. Dependency-free (node only).
+  wall-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint wall/unservable labels for probe evidence
+        run: node tools/lint-wall-evidence.mjs
+
   typecheck:
     runs-on: ubuntu-latest
     steps:
@@ -75,6 +87,35 @@ jobs:
             pnpm --filter "$p" typecheck
             echo "::endgroup::"
           done
+
+  # Production build (the emit path). typecheck runs `tsc --noEmit` and test
+  # runs vitest — NEITHER exercises `tsc -p tsconfig.build.json`. So a
+  # build-order / published-dep-skew break (e.g. apps/mcp importing a
+  # skill-schema export whose dist hasn't been built / has gone stale) passes
+  # both and only surfaces at local build or release time. This job makes that
+  # break a PR red. Dep order matters: skill-schema's dist must exist before
+  # mcp's production build — the workspace-dep-dist step below builds it first.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Prisma generate (inbox)
+        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
+      # Builds skill-schema (+ other workspace packages) dist FIRST.
+      - name: Build workspace dep dists
+        run: pnpm -r --filter "./packages/**" --if-present build
+      # The mcp production build (tsc -p tsconfig.build.json) over the freshly
+      # built skill-schema dist — the exact path that broke at 0.9.14 release.
+      - name: Build mcp (production)
+        run: pnpm -F @trusty-squire/mcp build
 
   test:
     runs-on: ubuntu-latest

@@ -124,6 +124,20 @@ export interface ReplayInput {
    */
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>;
   /**
+   * Chrome profile whose OAuth-session marker should be trusted for
+   * replay-time provider checks. Fresh-identity verifier replays pass the
+   * robot profile; normal router replays omit this and use the default profile.
+   */
+  profileDir?: string;
+  /**
+   * Preferred provider for replay-time OAuth recovery when a navigate step
+   * drifts to a login page and the stored skill has no explicit
+   * click_oauth_button step. Captured click_oauth_button steps remain
+   * authoritative; this only orders recovery candidates for legacy/post-auth
+   * skills whose provider metadata was inferred outside the step graph.
+   */
+  preferredOAuthProvider?: OAuthProviderId;
+  /**
    * 0.8.2-rc.19 — bypass the "skill must be active" guard. The verifier
    * loop NEEDS to replay pending-review skills (and sometimes demoted
    * ones) to gather the outcome data that drives promote/demote
@@ -303,6 +317,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
           skill,
           llmFallback,
           candidatesDir,
+          input.profileDir,
         );
         if (fallbackResult.kind === "use_substitute") {
           // We have a substitute, but in dry mode we still don't
@@ -337,6 +352,19 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       return { kind: "dry_pass", stepsWalked };
     }
 
+    if (
+      isReturningUserOnboardingDismissClick(step, i, skill.steps) &&
+      (await looksAuthenticatedReturningUser(browser))
+    ) {
+      const textMatch = step.kind === "click" ? step.text_match : "";
+      console.error(
+        `[replay] step ${i} (click text_match=${JSON.stringify(textMatch)}) ` +
+          `is a first-run onboarding dismissal and the page is already an ` +
+          `authenticated returning-user session — skipping.`,
+      );
+      continue;
+    }
+
     // Pre-validate: would this step resolve cleanly against the
     // current page? If not, hand to the LLM fallback.
     let validation = await preValidateStep(step, browser, templateValues);
@@ -365,8 +393,73 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       // crawl through every remaining step at +12s apiece.
       if (!validation.ok) lastExecutedWasClick = false;
     }
+    if (
+      !validation.ok &&
+      step.kind === "click" &&
+      (await attemptAccountOnboardingGate(browser, templateValues))
+    ) {
+      validation = await preValidateStep(step, browser, templateValues);
+    }
+    if (
+      !validation.ok &&
+      step.kind === "click" &&
+      (await attemptOptionalOnboardingSurveyGate(browser))
+    ) {
+      validation = await preValidateStep(step, browser, templateValues);
+    }
+    if (
+      !validation.ok &&
+      step.kind === "click" &&
+      (await attemptOptionalBillingGate(browser))
+    ) {
+      validation = await preValidateStep(step, browser, templateValues);
+    }
+    if (
+      !validation.ok &&
+      step.kind === "click" &&
+      (await attemptSimpleProjectOnboarding(browser, templateValues))
+    ) {
+      validation = await preValidateStep(step, browser, templateValues);
+    }
+    if (!validation.ok) {
+      const recovered = await attemptOAuthRecoveryForFailedStep(
+        browser,
+        resolveReplayRecoveryEntryUrl(skill),
+        input.profileDir,
+        input.preferredOAuthProvider,
+      );
+      if (recovered.kind === "ok") {
+        validation = await preValidateStep(step, browser, templateValues);
+      } else if (recovered.kind === "needs_login") {
+        return { kind: "needs_login", provider: recovered.provider, stepIndex: i };
+      }
+    }
     let stepToExecute = step;
     if (!validation.ok) {
+      if (
+        step.kind === "click" &&
+        isSkippableAbsentClick(
+          step,
+          i,
+          await countClickMatches(step, browser),
+          skill.steps,
+        ) &&
+        (llmFallback === undefined || (await looksAuthenticatedReturningUser(browser)))
+      ) {
+        // Account-state-dependent setup click (hookdeck "Create
+        // Project" / Kinde first-run wizard class): the target only
+        // existed in the original signup state. If it is wholly absent
+        // and a later credential step exists, skip BEFORE invoking the
+        // fallback planner; otherwise returning-user verify can burn the
+        // entire timeout inventing a replacement for a step that should
+        // not run.
+        console.error(
+          `[replay] step ${i} (click text_match=${JSON.stringify(step.text_match)}) ` +
+            `target absent from page; skipping as optional setup step. ` +
+            `Reason: ${validation.reason}`,
+        );
+        continue;
+      }
       const fallbackResult = await tryFallback(
         step,
         validation.reason,
@@ -375,34 +468,12 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         skill,
         llmFallback,
         candidatesDir,
+        input.profileDir,
       );
       if (fallbackResult.kind === "use_substitute") {
         stepToExecute = fallbackResult.substitute;
       } else if (fallbackResult.kind === "needs_login") {
         return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i };
-      } else if (
-        step.kind === "click" &&
-        isSkippableAbsentClick(
-          step,
-          i,
-          await countClickMatches(step, browser),
-          skill.steps,
-        )
-      ) {
-        // Account-state-dependent setup click (hookdeck "Create
-        // Project" class): the target button only existed in the
-        // original signup's account state. It's wholly absent now AND
-        // it isn't the credential-creating click — skip it and continue
-        // rather than hard-failing a replay that can still reach the
-        // credential. Step-trail note so the skip is visible to anyone
-        // triaging the run (and so a genuinely-required vanished button
-        // isn't silently swallowed without a paper trail).
-        console.error(
-          `[replay] step ${i} (click text_match=${JSON.stringify(step.text_match)}) ` +
-            `target absent from page; skipping as optional setup step. ` +
-            `Reason: ${validation.reason}`,
-        );
-        continue;
       } else if (
         step.kind === "fill" &&
         isSkippableAbsentFill(step, validation.reason, i, skill.steps)
@@ -480,7 +551,16 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
     // the router can decide whether to retry or fall through to the
     // universal bot.
     try {
-      const execOutcome = await executeStep(stepToExecute, browser, templateValues, skill, input.fetchEmailCode);
+      const execOutcome = await executeStep(
+        stepToExecute,
+        browser,
+        templateValues,
+        skill,
+        input.fetchEmailCode,
+        input.profileDir,
+        input.preferredOAuthProvider,
+        skill.steps[i + 1],
+      );
       if (execOutcome.kind === "needs_login") {
         return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
       }
@@ -721,7 +801,10 @@ async function preValidateStep(
 
     case "click_oauth_button": {
       const inventory = await browser.extractInteractiveElements();
-      const matches = inventory.filter((el) => matchesClickHint(el, step.text_match));
+      const matches = preferNonConsentClickMatches(
+        inventory.filter((el) => matchesClickHint(el, step.text_match)),
+        step.text_match,
+      );
       if (matches.length === 0) {
         return {
           ok: false,
@@ -738,7 +821,8 @@ async function preValidateStep(
     }
 
     case "click": {
-      const inventory = await browser.extractInteractiveElements();
+      let inventory = await browser.extractInteractiveElements();
+      inventory = await maybeRefreshInventoryForHydratedClick(step, browser, inventory);
       // Stable-attribute anchor FIRST. A unique name=/id= match is the most
       // drift-resistant target — it survives the visible-text changes
       // ("Create" → "Create token") and fresh-user ambiguity ("Next" matching
@@ -748,7 +832,10 @@ async function preValidateStep(
         const byDom = inventory.filter((el) => matchesDomHint(el, step.dom_hint!));
         if (byDom.length === 1) return { ok: true, match: byDom[0]! };
       }
-      const matches = inventory.filter((el) => matchesClickHint(el, step.text_match));
+      const matches = preferNonConsentClickMatches(
+        inventory.filter((el) => matchesClickHint(el, step.text_match)),
+        step.text_match,
+      );
       // role_hint is a SOFT preference, not a hard gate. When it filters out
       // every text-match — imagekit's live "Next" renders as an <a>, not the
       // captured <button> — fall back to the text matches and let the
@@ -766,6 +853,13 @@ async function preValidateStep(
         if (step.href_hint !== undefined) {
           const byHref = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
           if (byHref.length === 1) return { ok: true, match: byHref[0]! };
+          if (rebaseHrefOntoCurrentUrl(step.href_hint, browser.currentUrl()) !== null) {
+            return { ok: true };
+          }
+        }
+        const generatedKeyRecovery = findGenerateApiKeyRecoveryCandidate(inventory, step.text_match);
+        if (generatedKeyRecovery !== null) {
+          return { ok: true, match: generatedKeyRecovery };
         }
         // Last-resort token-subset fallback: the captured text_match is a
         // planner gloss ("Create Token") that doesn't substring-match the live
@@ -789,6 +883,17 @@ async function preValidateStep(
         };
       }
       if (filtered.length > 1) {
+        if (step.href_hint !== undefined) {
+          const byHref = filtered.filter((el) => matchesHrefHint(el, step.href_hint!));
+          if (byHref.length === 1) return { ok: true, match: byHref[0]! };
+          const byHrefInventory = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
+          if (byHrefInventory.length === 1) return { ok: true, match: byHrefInventory[0]! };
+          if (rebaseHrefOntoCurrentUrl(step.href_hint, browser.currentUrl()) !== null) {
+            return { ok: true };
+          }
+        }
+        const exact = filterExactClickHint(filtered, step.text_match);
+        if (exact.length === 1) return { ok: true, match: exact[0]! };
         // 0.8.3-rc.1 — schema v1+ optional near_text_hint narrows
         // ambiguous click matches BEFORE the heuristic disambiguator
         // fires. Same shape as the fill/select path (rc.3). Emitted by
@@ -1066,6 +1171,387 @@ export function labelMatchesHint(label: string | null, hint: string): boolean {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+function isLikelySubmitClick(step: Extract<SkillStep, { kind: "click" }>): boolean {
+  const text = step.text_match.toLowerCase();
+  return /\b(create account|sign up|signup|register|submit)\b/.test(text);
+}
+
+async function autofillCommonIdentityFieldsBeforeSubmit(
+  browser: BrowserController,
+  templateValues: Record<string, string>,
+): Promise<void> {
+  const displayName = (templateValues.USER_DISPLAY_NAME ?? "").trim();
+  const email = (templateValues.EMAIL_ALIAS ?? "").trim();
+  const projectName = (templateValues.PROJECT_NAME ?? "").trim();
+  const [firstFallback, ...lastParts] = displayName.split(/\s+/).filter(Boolean);
+  const firstName = firstFallback ?? "Verify";
+  const lastName = lastParts.join(" ") || "Robot";
+  const company = projectName || `${lastName} Labs`;
+  const inventory = await browser.extractInteractiveElements().catch(() => []);
+  for (const el of inventory) {
+    if (!isFillable(el)) continue;
+    if (el.tag === "select") continue;
+    if (el.value !== "") continue;
+    const signal = [el.name, el.id, el.labelText, el.placeholder, el.ariaLabel]
+      .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+      .join(" ")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+    let value: string | null = null;
+    if (/^(firstname|givenname)$/.test(signal) || signal.includes("firstname") || signal.includes("givenname")) {
+      value = firstName;
+    } else if (
+      /^(lastname|surname|familyname)$/.test(signal) ||
+      signal.includes("lastname") ||
+      signal.includes("surname") ||
+      signal.includes("familyname")
+    ) {
+      value = lastName;
+    } else if ((signal === "name" || signal === "fullname" || signal.includes("fullname")) && displayName.length > 0) {
+      value = displayName;
+    } else if (signal.includes("company") || signal.includes("organization") || signal.includes("organisation")) {
+      value = company;
+    } else if (signal === "email" || signal.includes("emailaddress")) {
+      value = email.length > 0 ? email : null;
+    }
+    if (value !== null && value.length > 0) {
+      await browser.type(el.selector, value);
+    }
+  }
+}
+
+async function attemptCapturedCredentialLogin(
+  browser: BrowserController,
+  skill: Skill,
+  templateValues: Record<string, string>,
+  inventory: InteractiveElement[],
+): Promise<boolean> {
+  const emailInput = inventory.find((el) => isFillable(el) && matchesLabelHint(el, "email"));
+  const passwordInput = inventory.find(
+    (el) => isFillable(el) && (el.type === "password" || matchesLabelHint(el, "password")),
+  );
+  const submit = inventory.find(
+    (el) =>
+      (el.tag === "button" || el.role === "button") &&
+      /^(sign in|login|log in)$/i.test((el.visibleText ?? el.ariaLabel ?? "").trim()),
+  );
+  if (emailInput === undefined || passwordInput === undefined || submit === undefined) return false;
+  const emailStep = skill.steps.find(
+    (s): s is Extract<SkillStep, { kind: "fill" }> =>
+      s.kind === "fill" &&
+      (s.value_template.includes("${EMAIL_ALIAS}") || labelMatchesHint(s.label_hint, "email")),
+  );
+  const passwordStep = skill.steps.find(
+    (s): s is Extract<SkillStep, { kind: "fill" }> =>
+      s.kind === "fill" &&
+      !s.value_template.includes("${EMAIL_ALIAS}") &&
+      (/pass|pw/i.test(s.label_hint) || s.value_template.length >= 8),
+  );
+  if (emailStep === undefined || passwordStep === undefined) return false;
+  await browser.type(emailInput.selector, substituteTemplate(emailStep.value_template, templateValues));
+  await browser.type(passwordInput.selector, substituteTemplate(passwordStep.value_template, templateValues));
+  await browser.click(submit.selector);
+  await browser.wait(2);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  return true;
+}
+
+async function attemptAccountOnboardingGate(
+  browser: BrowserController,
+  templateValues: Record<string, string>,
+): Promise<boolean> {
+  const text = await browser.extractText().catch(async () => {
+    const page = pageOf(browser);
+    return page === null
+      ? ""
+      : await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+  });
+  let inventory: InteractiveElement[] = [];
+  if (!looksLikeAccountOnboardingGate(text)) {
+    if (!shouldProbeAccountOnboardingInventory(browser.currentUrl(), text)) return false;
+    inventory = await browser.extractInteractiveElements().catch(() => []);
+    if (!inventoryLooksLikeAccountOnboardingGate(inventory)) return false;
+  } else {
+    inventory = await browser.extractInteractiveElements().catch(() => []);
+  }
+
+  const displayName = (templateValues.USER_DISPLAY_NAME ?? "").trim() || "Verify Robot";
+  const email = (templateValues.EMAIL_ALIAS ?? "").trim();
+  const projectName = (templateValues.PROJECT_NAME ?? "").trim();
+  const [firstFallback, ...lastParts] = displayName.split(/\s+/).filter(Boolean);
+  const firstName = firstFallback ?? "Verify";
+  const lastName = lastParts.join(" ") || "Robot";
+  const company = projectName || `${lastName} Labs`;
+
+  let filled = 0;
+  for (const el of inventory) {
+    if (!isFillable(el)) continue;
+    if (el.tag === "select") continue;
+    if ((el.value ?? "") !== "") continue;
+    const signal = elementSignal(el);
+    let value: string | null = null;
+    if (signal.includes("fullname") || signal === "name" || signal.includes("yourname")) {
+      value = displayName;
+    } else if (signal.includes("call") || signal.includes("displayname") || signal.includes("nickname")) {
+      value = firstName;
+    } else if (signal.includes("firstname") || signal.includes("givenname")) {
+      value = firstName;
+    } else if (signal.includes("lastname") || signal.includes("surname") || signal.includes("familyname")) {
+      value = lastName;
+    } else if (signal.includes("company") || signal.includes("organization") || signal.includes("organisation")) {
+      value = company;
+    } else if (signal.includes("email")) {
+      value = email.length > 0 ? email : null;
+    }
+    if (value !== null && value.length > 0) {
+      await browser.type(el.selector, value);
+      if (el.role === "combobox") {
+        await browser.wait(1);
+        await browser.pressKey?.("Enter").catch(() => undefined);
+      }
+      filled += 1;
+    }
+  }
+
+  let checked = 0;
+  for (const el of inventory) {
+    if (!isAgreementCheckboxCandidate(el)) continue;
+    const signal = elementSignal(el);
+    if (
+      signal.includes("agree") ||
+      signal.includes("terms") ||
+      signal.includes("privacy") ||
+      signal.includes("policy") ||
+      signal.includes("age") ||
+      signal.includes("18")
+    ) {
+      if (el.tag === "input" && el.type === "checkbox") {
+        await browser.check(el.selector).catch(() => undefined);
+      } else {
+        await browser.click(el.selector).catch(() => undefined);
+      }
+      checked += 1;
+    }
+  }
+
+  const latestInventory = await browser.extractInteractiveElements().catch(() => inventory);
+  const submit = latestInventory.find((el) => {
+    if (el.tag !== "button" && el.role !== "button") return false;
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+    return /^(continue|next|finish|get started|start building|submit)$/i.test(label);
+  });
+  if (submit === undefined) return false;
+  if (filled === 0 && checked === 0) return false;
+  await browser.click(submit.selector);
+  await browser.wait(5);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  return true;
+}
+
+function looksLikeAccountOnboardingGate(text: string): boolean {
+  const normalized = normalizeVisibleWords(text.replace(/[\u200B-\u200D\uFEFF]/g, " "));
+  if (!/\b(?:continue|next|finish|get started|start building)\b/.test(normalized)) return false;
+  return (
+    /\btell us about yourself\b/.test(normalized) ||
+    /\bfull name\b/.test(normalized) ||
+    /\bwhat should we call you\b/.test(normalized) ||
+    /\bdisplay name\b/.test(normalized) ||
+    /\bfirst name\b/.test(normalized) ||
+    /\blast name\b/.test(normalized) ||
+    /\baccount name\b/.test(normalized) ||
+    /\bcompany name\b/.test(normalized) ||
+    (/\bagree\b/.test(normalized) && /\b(?:terms|privacy|policy|18)\b/.test(normalized))
+  );
+}
+
+function shouldProbeAccountOnboardingInventory(currentUrl: string, text: string): boolean {
+  const normalized = normalizeVisibleWords(text.replace(/[\u200B-\u200D\uFEFF]/g, " "));
+  if (/\b(?:tell us about yourself|account name|company name|first name|last name)\b/.test(normalized)) {
+    return true;
+  }
+  try {
+    const path = new URL(currentUrl).pathname;
+    return /\/onboarding\/1(?:$|[/?#])/i.test(path) ||
+      /\/(?:profile|account)(?:\/|$)/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+function inventoryLooksLikeAccountOnboardingGate(inventory: readonly InteractiveElement[]): boolean {
+  const hasSubmit = inventory.some((el) => {
+    if (!isButtonish(el)) return false;
+    return /^(continue|next|finish|get started|start building|submit)$/i.test(elementClickLabel(el));
+  });
+  if (!hasSubmit) return false;
+
+  const fieldSignals = new Set<string>();
+  for (const el of inventory) {
+    if (!isFillable(el) || el.tag === "select") continue;
+    const signal = elementSignal(el);
+    if (signal.includes("fullname") || signal === "name" || signal.includes("yourname")) {
+      fieldSignals.add("name");
+    }
+    if (signal.includes("firstname") || signal.includes("givenname")) {
+      fieldSignals.add("first");
+    }
+    if (signal.includes("lastname") || signal.includes("surname") || signal.includes("familyname")) {
+      fieldSignals.add("last");
+    }
+    if (signal.includes("company") || signal.includes("organization") || signal.includes("organisation")) {
+      fieldSignals.add("company");
+    }
+    if (signal.includes("accountname")) {
+      fieldSignals.add("account");
+    }
+    if (signal.includes("email")) {
+      fieldSignals.add("email");
+    }
+  }
+  return fieldSignals.size >= 2 || fieldSignals.has("company");
+}
+
+function elementSignal(el: InteractiveElement): string {
+  return [el.name, el.id, el.labelText, el.placeholder, el.ariaLabel, el.visibleText]
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .join(" ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function isAgreementCheckboxCandidate(el: InteractiveElement): boolean {
+  return (el.tag === "input" && el.type === "checkbox") || el.role === "checkbox";
+}
+
+async function attemptOptionalOnboardingSurveyGate(browser: BrowserController): Promise<boolean> {
+  const text = await browser.extractText().catch(async () => {
+    const page = pageOf(browser);
+    return page === null
+      ? ""
+      : await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+  });
+  const normalized = normalizeVisibleWords(text);
+  const looksOptionalSurvey =
+    /\bhelp us customize your experience\b/.test(normalized) ||
+    (/\bwhat(?:'s| is) your role\b/.test(normalized) &&
+      /\bwhat are you (?:building|trying to do)\b/.test(normalized));
+  if (!looksOptionalSurvey && !/\/onboarding\/2(?:$|[/?#])/i.test(browser.currentUrl())) {
+    return false;
+  }
+  const inventory = await browser.extractInteractiveElements().catch(() => []);
+  const skip = inventory.find((el) => {
+    if (!isButtonish(el) && el.tag !== "a" && el.role !== "link") return false;
+    return /^skip$/i.test(elementClickLabel(el));
+  });
+  if (skip === undefined) return false;
+  const page = pageOf(browser);
+  if (page !== null) {
+    await page.getByRole("button", { name: /^Skip$/ }).click({ timeout: 5_000 }).catch(async () => {
+      await browser.click(skip.selector);
+    });
+  } else {
+    await browser.click(skip.selector);
+  }
+  await browser.wait(5);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  return true;
+}
+
+async function attemptOptionalBillingGate(browser: BrowserController): Promise<boolean> {
+  const text = await browser.extractText().catch(async () => {
+    const page = pageOf(browser);
+    return page === null
+      ? ""
+      : await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+  });
+  const normalized = text.toLowerCase();
+  const onBillingGate =
+    /\b(?:buy credits|add credits|credit card|billing address|payment method)\b/.test(normalized) ||
+    /\/(?:create\/)?credits\b/i.test(browser.currentUrl());
+  if (!onBillingGate) return false;
+
+  const inventory = await browser.extractInteractiveElements().catch(() => []);
+  const skip = inventory.find((el) => {
+    if (el.tag !== "button" && el.role !== "button" && el.tag !== "a" && el.role !== "link") return false;
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+    return /^(skip|skip for now|maybe later|not now|do this later)$/i.test(label);
+  });
+  if (skip === undefined) return false;
+  await browser.click(skip.selector);
+  await browser.wait(5);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  await attemptVisibleCredentialNavLink(browser);
+  return true;
+}
+
+async function attemptVisibleCredentialNavLink(browser: BrowserController): Promise<boolean> {
+  const inventory = await browser.extractInteractiveElements().catch(() => []);
+  const candidates = inventory.filter((el) => {
+    if (el.tag !== "a" && el.role !== "link" && el.tag !== "button" && el.role !== "button") {
+      return false;
+    }
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+    const href = el.href ?? "";
+    return (
+      /\bapi\s+keys?\b/i.test(label) ||
+      /\bapi\s+tokens?\b/i.test(label) ||
+      /(?:api[-_/]?)?keys?/i.test(href) ||
+      /(?:api[-_/]?)?tokens?/i.test(href)
+    );
+  });
+  return clickCredentialNavCandidate(browser, candidates);
+}
+
+async function clickCredentialNavCandidate(
+  browser: BrowserController,
+  candidates: readonly InteractiveElement[],
+): Promise<boolean> {
+  const link = candidates.find((el) => el.tag === "a" || el.role === "link") ?? candidates[0];
+  if (link === undefined) return false;
+  await browser.click(link.selector);
+  await browser.wait(3);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  return true;
+}
+
+async function attemptSimpleProjectOnboarding(
+  browser: BrowserController,
+  templateValues: Record<string, string>,
+): Promise<boolean> {
+  const base = (templateValues.PROJECT_NAME ?? templateValues.USER_DISPLAY_NAME ?? "verify project")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+  const project = base.length > 0 ? base : "verify-project";
+  const page = pageOf(browser);
+  if (page !== null) {
+    const body = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+    if (!/\bnew project\b/i.test(body) && !/\bcreate project\b/i.test(body)) return false;
+    const input = page.locator("input[type='text'], input:not([type])").first();
+    await input.waitFor({ state: "visible", timeout: 2000 }).catch(() => undefined);
+    if ((await input.count().catch(() => 0)) === 0) return false;
+    await input.fill(project, { timeout: 3000 });
+    const create = page.getByRole("button", { name: /^create project$/i }).first();
+    await create.waitFor({ state: "visible", timeout: 3000 });
+    await create.click({ timeout: 5000 });
+  } else {
+    const text = await browser.extractText().catch(() => "");
+    if (!/\bnew project\b/i.test(text) && !/\bcreate project\b/i.test(text)) return false;
+    const inventory = await browser.extractInteractiveElements().catch(() => []);
+    const create = inventory.find((el) => matchesClickHint(el, "Create project"));
+    if (create === undefined) return false;
+    const input = inventory.find((el) => isFillable(el) && el.tag !== "select" && (el.value ?? "") === "");
+    if (input === undefined) return false;
+    await browser.type(input.selector, project);
+    await browser.wait(1);
+    await browser.click(create.selector);
+  }
+  await browser.wait(5);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  return true;
+}
+
 // ── Step execution ───────────────────────────────────────────────────
 
 type ExecutionOutcome =
@@ -1090,6 +1576,9 @@ async function executeStep(
   templateValues: Record<string, string>,
   skill: Skill,
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>,
+  profileDir?: string,
+  preferredOAuthProvider?: OAuthProviderId,
+  nextStep?: SkillStep,
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
     case "navigate": {
@@ -1098,7 +1587,9 @@ async function executeStep(
       // account's host, so a captured deep-nav URL with a stale subdomain
       // gets rewritten to the current one. No-op for same-host / cross-product
       // / first-navigate (about:blank) cases.
-      const targetUrl = rebaseSubdomain(step.url, browser.currentUrl());
+      const targetUrl = normalizeKindeReplayNavigateUrl(
+        rebaseSubdomain(step.url, browser.currentUrl()),
+      );
       await browser.goto(targetUrl);
       // Settle for SPA-style apps that fire route handlers post-
       // DOMContentLoaded. A fixed 2s under-waits heavy authenticated
@@ -1129,6 +1620,9 @@ async function executeStep(
       const landedUrl = browser.currentUrl();
       const driftReason = detectNavigationDrift(landedUrl, targetUrl);
       if (driftReason !== null) {
+        if (nextStep?.kind === "click_oauth_button") {
+          return { kind: "navigated" };
+        }
         // 0.8.2-rc.22 — drive the OAuth handshake. Captured skills
         // for OAuth-protected services (Railway, Sentry, etc.) often
         // assume an authenticated session because the original capture
@@ -1140,26 +1634,28 @@ async function executeStep(
         // the expected URL, and continue. Only bail to needs_login
         // when no OAuth path is recoverable (no provider session, no
         // OAuth button on the page).
-        const recovered = await attemptOAuthRecovery(browser, targetUrl);
+        const recovered = await attemptOAuthRecovery(
+          browser,
+          resolveReplayRecoveryTargetUrl(skill, targetUrl),
+          profileDir,
+          preferredOAuthProvider,
+        );
         if (recovered.kind === "ok") {
+          await attemptCredentialRouteLinkRecovery(browser, targetUrl);
           return { kind: "navigated" };
         }
         return { kind: "needs_login", provider: recovered.provider };
       }
+      await attemptCredentialRouteLinkRecovery(browser, targetUrl);
       return { kind: "navigated" };
     }
 
     case "click_oauth_button": {
-      // Profile-session guard. If the user hasn't run `mcp login` for
-      // this provider, the click would still happen but we'd land on
-      // a credential-entry form (provider's needs_login state), and
-      // the replay engine can't fill that — only the user can. Bail
-      // early with needs_login so the router fast-paths to the
-      // universal bot.
-      const profiles = loggedInProviders();
-      if (!profiles.includes(step.provider)) {
-        return { kind: "needs_login", provider: step.provider };
-      }
+      // Do not trust logged-in-providers.json as a hard precondition. Fleet
+      // warmers can establish a real provider session without writing that
+      // marker. Click the captured OAuth affordance and let walkOAuthConsent()
+      // classify the actual provider state; it returns needs_login on a real
+      // credential/challenge page.
       // Resolve the button via the same pre-validation logic so we're
       // clicking the same element preValidate approved. We re-fetch
       // because the inventory may have changed between pre-validation
@@ -1192,7 +1688,58 @@ async function executeStep(
     }
 
     case "click": {
-      const inventory = await browser.extractInteractiveElements();
+      let inventory = await browser.extractInteractiveElements();
+      inventory = await maybeRefreshInventoryForHydratedClick(step, browser, inventory);
+      if (isLikelySubmitClick(step)) {
+        await autofillCommonIdentityFieldsBeforeSubmit(browser, templateValues);
+        inventory = await browser.extractInteractiveElements().catch(() => inventory);
+      }
+      await checkRequiredAgreementBoxesBeforeSubmitClick(browser, step);
+      if (step.href_hint !== undefined && step.role_hint === "link") {
+        if (scopedHrefPrefix(step.href_hint) !== null) {
+          // Scoped app routes often appear only after a post-signup redirect
+          // creates the user's first project/workspace. Prefer the app's live
+          // link over a synthesized deep link: some SPAs (OpenPipe) can wedge
+          // on direct deep-link navigation before the workspace shell has
+          // finished hydrating.
+          for (let attempt = 0; attempt < 45; attempt += 1) {
+            const byHref = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
+            if (byHref.length === 1) {
+              await browser.click(byHref[0]!.selector);
+              await browser.wait(3);
+              await browser.waitForInteractiveDom().catch(() => undefined);
+              return { kind: "clicked" };
+            }
+            await browser.wait(1);
+            inventory = await browser.extractInteractiveElements().catch(() => inventory);
+          }
+          const landing = await resolveScopedLandingDestination(browser, step.href_hint);
+          if (landing !== null) {
+            await gotoResolvedHref(browser, landing).catch(() => undefined);
+            await browser.wait(2);
+            await browser.waitForInteractiveDom().catch(() => undefined);
+            for (let attempt = 0; attempt < 15; attempt += 1) {
+              inventory = await browser.extractInteractiveElements().catch(() => inventory);
+              const byHref = inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
+              if (byHref.length === 1) {
+                await browser.click(byHref[0]!.selector);
+                await browser.wait(3);
+                await browser.waitForInteractiveDom().catch(() => undefined);
+                return { kind: "clicked" };
+              }
+              await browser.wait(1);
+            }
+          }
+        }
+        const dest = await resolveHrefDestination(browser, step.href_hint);
+        if (dest !== null) {
+          await gotoResolvedHref(browser, dest);
+          await browser.wait(1);
+          await browser.waitForInteractiveDom().catch(() => undefined);
+          await attemptCredentialRouteLinkRecovery(browser, dest);
+          return { kind: "clicked" };
+        }
+      }
       // Stable-attribute anchor FIRST (mirrors preValidate) — a unique
       // name=/id= match is the most drift-resistant target.
       if (step.dom_hint !== undefined) {
@@ -1211,6 +1758,25 @@ async function executeStep(
         : matches;
       const filtered = roleFiltered.length > 0 ? roleFiltered : matches;
       if (filtered.length === 0) {
+        if (await attemptCapturedCredentialLogin(browser, skill, templateValues, inventory)) {
+          inventory = await browser.extractInteractiveElements().catch(() => inventory);
+          const postLoginMatches = inventory.filter((el) => matchesClickHint(el, step.text_match));
+          const postLoginRoleFiltered = step.role_hint
+            ? postLoginMatches.filter((el) => matchesRole(el, step.role_hint!))
+            : postLoginMatches;
+          const postLoginFiltered =
+            postLoginRoleFiltered.length > 0 ? postLoginRoleFiltered : postLoginMatches;
+          if (postLoginFiltered.length > 0) {
+            const narrowed = postLoginFiltered.length === 1
+              ? postLoginFiltered
+              : filterByNearTextHint(postLoginFiltered, step.near_text_hint, inventory);
+            const target = narrowed.length === 1 ? narrowed[0]! : pickClickPriority(narrowed);
+            await browser.click(target.selector);
+            await browser.wait(1);
+            await browser.waitForInteractiveDom().catch(() => undefined);
+            return { kind: "clicked" };
+          }
+        }
         // href fallback (mirrors preValidate): resolve a nav link by its
         // stable href path tail when text matching finds nothing. If even
         // that fails but we have an href_hint, navigate to it directly —
@@ -1224,12 +1790,16 @@ async function executeStep(
             await browser.wait(1);
             return { kind: "clicked" };
           }
-          const dest = rebaseHrefOntoCurrentUrl(step.href_hint, browser.currentUrl());
+          const dest = await resolveHrefDestination(browser, step.href_hint);
           if (dest !== null) {
-            await browser.goto(dest);
+            await gotoResolvedHref(browser, dest);
             await browser.wait(1);
+            await attemptCredentialRouteLinkRecovery(browser, dest);
             return { kind: "clicked" };
           }
+        }
+        if (await attemptGenerateApiKeyRecovery(browser, inventory, step.text_match, templateValues)) {
+          return { kind: "clicked" };
         }
         // Token-subset fallback — mirrors preValidate so execute clicks the
         // same gloss-resolved element preValidate approved. Unique match only.
@@ -1256,7 +1826,25 @@ async function executeStep(
       // would pick the trigger, leaving the submit unclicked).
       const narrowed = filtered.length === 1
         ? filtered
-        : filterByNearTextHint(filtered, step.near_text_hint, inventory);
+        : step.href_hint !== undefined
+          ? (() => {
+              const byHref = filtered.filter((el) => matchesHrefHint(el, step.href_hint!));
+              if (byHref.length > 0) return byHref;
+              return inventory.filter((el) => matchesHrefHint(el, step.href_hint!));
+            })()
+        : filterExactClickHint(filtered, step.text_match).length === 1
+          ? filterExactClickHint(filtered, step.text_match)
+          : filterByNearTextHint(filtered, step.near_text_hint, inventory);
+      if (narrowed.length === 0 && step.href_hint !== undefined) {
+        const dest = await resolveHrefDestination(browser, step.href_hint);
+        if (dest !== null) {
+          await gotoResolvedHref(browser, dest);
+          await browser.wait(1);
+          await browser.waitForInteractiveDom().catch(() => undefined);
+          await attemptCredentialRouteLinkRecovery(browser, dest);
+          return { kind: "clicked" };
+        }
+      }
       const target =
         narrowed.length === 1 ? narrowed[0]! : pickClickPriority(narrowed);
       await browser.click(target.selector);
@@ -1417,7 +2005,7 @@ async function executeStep(
         // is the credential. We don't need the Copy button anymore.
         if (fallbackValidatorPoll !== undefined) {
           try {
-            const polled = await browser.extractCredentialCandidates();
+            const polled = await extractCredentialCandidatesCapped(browser);
             for (const cand of polled) {
               if (cand.length < fallbackValidatorPoll.min_length) continue;
               if (cand.length > fallbackValidatorPoll.max_length) continue;
@@ -1438,15 +2026,24 @@ async function executeStep(
           : copyButtons.find((btn) => nearTextHintMatches(btn, step.near_text_hint, inventory));
       }
       if (target !== undefined) {
-        await browser.click(target.selector);
+        const targetIndex = copyButtons.indexOf(target);
+        const selectorOrdinal = copyButtons
+          .slice(0, targetIndex + 1)
+          .filter((candidate) => candidate.selector === target.selector).length - 1;
+        if (typeof browser.clickNth === "function") {
+          await browser.clickNth(target.selector, selectorOrdinal);
+        } else {
+          await browser.click(target.selector);
+        }
         await browser.wait(1);
       }
+      const copiedValues: string[] = [];
       // BrowserController.extractCredentialCandidates pulls visible
       // candidates (input values + direct text); it does NOT read the
       // clipboard yet. We use it as the primary source and fall back
       // to the full body text for regex matching when the candidate
       // list yields nothing recognisable.
-      const candidates = await browser.extractCredentialCandidates();
+      const candidates = await extractCredentialCandidatesCapped(browser);
       for (const candidate of candidates) {
         const hit = extractApiKeyFromText(candidate);
         if (hit !== null && !isTruncatedCapture(candidate, hit)) {
@@ -1457,7 +2054,7 @@ async function executeStep(
       // Body-text fallback. Some services render the credential in a
       // node that isn't picked up as a discrete candidate (CSS-styled
       // tokens, nested spans).
-      const text = await browser.extractText();
+      const text = await extractTextCapped(browser);
       const fromBody = extractApiKeyFromText(text);
       if (fromBody !== null && !isTruncatedCapture(text, fromBody)) {
         return { kind: "extract_ok", value: fromBody, via: "copy_button" };
@@ -1471,8 +2068,9 @@ async function executeStep(
       // grants clipboard-read permission at context start so this
       // works without an OS prompt.
       try {
-        const clip = await browser.readClipboard();
+        const clip = await readClipboardCapped(browser);
         if (clip && clip.length > 0) {
+          copiedValues.push(clip.trim());
           const fromClip = extractApiKeyFromText(clip);
           if (fromClip !== null && !isTruncatedCapture(clip, fromClip)) {
             return { kind: "extract_ok", value: fromClip, via: "copy_button" };
@@ -1493,10 +2091,55 @@ async function executeStep(
               return { kind: "extract_ok", value: trimmed, via: "copy_button" };
             }
           }
+          if (opaqueClipboardValueLooksCredentialLike(skill, clip.trim())) {
+            return { kind: "extract_ok", value: clip.trim(), via: "copy_button" };
+          }
         }
       } catch {
         // Clipboard read failed (permission denied, no clipboard
         // contents). Fall through to the canonical error.
+      }
+      if (copyButtons.length > 1) {
+        for (let i = 0; i < copyButtons.length; i += 1) {
+          const btn = copyButtons[i]!;
+          if (target !== undefined && btn === target) continue;
+          try {
+            const selectorOrdinal = copyButtons
+              .slice(0, i + 1)
+              .filter((candidate) => candidate.selector === btn.selector).length - 1;
+            if (selectorOrdinal > 0 && typeof browser.clickNth === "function") {
+              await browser.clickNth(btn.selector, selectorOrdinal);
+            } else {
+              await browser.click(btn.selector);
+            }
+            await browser.wait(0.5);
+            const clip = (await readClipboardCapped(browser)).trim();
+            if (clip.length === 0 || copiedValues.includes(clip)) continue;
+            copiedValues.push(clip);
+            const fromClip = extractApiKeyFromText(clip);
+            if (fromClip !== null && !isTruncatedCapture(clip, fromClip)) {
+              return { kind: "extract_ok", value: fromClip, via: "copy_button" };
+            }
+            const validator = skill.credentials[0]?.post_extract_validator;
+            if (
+              validator !== undefined &&
+              clip.length >= validator.min_length &&
+              clip.length <= validator.max_length &&
+              /^[a-zA-Z0-9_\-.]+$/.test(clip)
+            ) {
+              return { kind: "extract_ok", value: clip, via: "copy_button" };
+            }
+            if (opaqueClipboardValueLooksCredentialLike(skill, clip)) {
+              return { kind: "extract_ok", value: clip, via: "copy_button" };
+            }
+          } catch {
+            // Best-effort alternate copy-button probe.
+          }
+        }
+        const planetscalePair = planetscaleServiceTokenPair(copiedValues, skill.service);
+        if (planetscalePair !== null) {
+          return { kind: "extract_ok", value: planetscalePair, via: "copy_button" };
+        }
       }
       // 0.8.2-rc.22 — validator-filtered candidate scan. Mirrors the
       // identical tier in `extract_via_regex` so that copy_button
@@ -1509,7 +2152,7 @@ async function executeStep(
       const fallbackValidator = skill.credentials[0]?.post_extract_validator;
       if (fallbackValidator !== undefined) {
         try {
-          const cands = await browser.extractCredentialCandidates();
+          const cands = await extractCredentialCandidatesCapped(browser);
           for (const cand of cands) {
             if (cand.length < fallbackValidator.min_length) continue;
             if (cand.length > fallbackValidator.max_length) continue;
@@ -1527,10 +2170,18 @@ async function executeStep(
       // url + inventory.length is enough to triage 90% of cases; full
       // snapshots would require a new sink and aren't worth the
       // complexity here.
+      const pageTextForDiag = await extractTextCapped(browser);
+      const unavailableSecretDiag =
+        /\b(?:client\s+)?secret\s+is\s+not\s+applicable\b/i.test(pageTextForDiag) ||
+        /\bsecret\s+(?:is\s+)?(?:not\s+available|unavailable|disabled)\b/i.test(pageTextForDiag)
+          ? " credential_surface=secret_unavailable"
+          : "";
       const diag =
-        ` [url=${browser.currentUrl()} inventory=${inventory.length} copyButtons=${copyButtons.length}]`;
+        ` [url=${browser.currentUrl()} inventory=${inventory.length} copyButtons=${copyButtons.length}${unavailableSecretDiag}]`;
       const failureReason =
-        target === undefined
+        unavailableSecretDiag !== ""
+          ? `Credential page says the secret is unavailable/non-applicable; stored skill likely selected or reused a public/client-only application instead of a credential-bearing confidential/server application.${diag}`
+          : target === undefined
           ? `No Copy button on page and no credential-shaped string passed the validator.${diag}`
           : `Copy button clicked but no credential matched the regex library in candidates, body text, or clipboard.${diag}`;
       throw new Error(failureReason);
@@ -1916,12 +2567,63 @@ async function findValidatedCandidate(
   return null;
 }
 
+function planetscaleServiceTokenPair(values: readonly string[], service: string): string | null {
+  if (service !== "planetscale") return null;
+  const cleaned = values.map((v) => v.trim()).filter((v) => v.length > 0);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const id = cleaned.find((v) => uuid.test(v));
+  const token = cleaned.find(
+    (v) =>
+      v !== id &&
+      v.length >= 12 &&
+      !uuid.test(v) &&
+      /^[A-Za-z0-9_.:-]+$/.test(v),
+  );
+  return id !== undefined && token !== undefined ? `${id}:${token}` : null;
+}
+
+function opaqueClipboardValueLooksCredentialLike(skill: Skill, value: string): boolean {
+  if (skill.credentials[0]?.shape_hint !== "opaque") return false;
+  if (value.length < 16 || value.length > 128) return false;
+  if (!/\d/.test(value)) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return false;
+  if (isCredentialNoiseCandidate(value)) return false;
+  return true;
+}
+
+async function readClipboardCapped(browser: BrowserController): Promise<string> {
+  return await Promise.race([
+    browser.readClipboard(),
+    new Promise<string>((resolve) => setTimeout(() => resolve(""), 2500)),
+  ]);
+}
+
+async function extractTextCapped(browser: BrowserController): Promise<string> {
+  return await Promise.race([
+    browser.extractText().catch(() => ""),
+    new Promise<string>((resolve) => setTimeout(() => resolve(""), 2500)),
+  ]);
+}
+
+async function extractCredentialCandidatesCapped(browser: BrowserController): Promise<string[]> {
+  return await Promise.race([
+    browser.extractCredentialCandidates().catch(() => []),
+    new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 2500)),
+  ]);
+}
+
 async function validateCredential(
   value: string,
   spec: SkillCredentialSpec,
   fetchFn?: typeof globalThis.fetch,
 ): Promise<ValidatorOk | ValidatorFail> {
   const validator = spec.post_extract_validator;
+  if (
+    /^PLANETSCALE_/i.test(spec.env_var_suggestion) &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:.{12,}$/i.test(value)
+  ) {
+    return { ok: true };
+  }
   // 0.8.3 — length bounds are advisory when the regex library
   // recognises the value's shape. The synthesizer computes
   // min/max_length from a single observed example at capture time
@@ -2063,16 +2765,9 @@ async function tryFallback(
   skill: Skill,
   llmFallback: ReplayInput["llmFallback"],
   candidatesDir: string | undefined,
+  profileDir: string | undefined,
 ): Promise<FallbackResult> {
-  // If the captured step is an OAuth click and the user has no session,
-  // fall back to the bot's needs_login flow instead of asking the
-  // planner — there's nothing to substitute, the user must `mcp login`.
-  if (capturedStep.kind === "click_oauth_button") {
-    const profiles = loggedInProviders();
-    if (!profiles.includes(capturedStep.provider)) {
-      return { kind: "needs_login", provider: capturedStep.provider };
-    }
-  }
+  void profileDir;
 
   if (llmFallback === undefined) return { kind: "give_up" };
 
@@ -2159,9 +2854,9 @@ function includesAtWordBoundary(haystack: string, needle: string): boolean {
 }
 
 function matchesClickHint(el: InteractiveElement, hint: string): boolean {
-  const lowerHint = hint.toLowerCase();
-  const text = (el.visibleText ?? "").toLowerCase();
-  const aria = (el.ariaLabel ?? "").toLowerCase();
+  const lowerHint = normalizeVisibleWords(hint);
+  const text = normalizeVisibleWords(el.visibleText ?? "");
+  const aria = normalizeVisibleWords(el.ariaLabel ?? "");
   if (includesAtWordBoundary(text, lowerHint) || includesAtWordBoundary(aria, lowerHint)) {
     return true;
   }
@@ -2177,6 +2872,135 @@ function matchesClickHint(el: InteractiveElement, hint: string): boolean {
   const id = (el.id ?? "").toLowerCase();
   if (id.length > 0 && id === lowerHint && !isRuntimeId(id)) return true;
   return false;
+}
+
+function preferNonConsentClickMatches(
+  matches: InteractiveElement[],
+  hint: string,
+): InteractiveElement[] {
+  if (matches.length <= 1) return matches;
+  if (/\b(?:accept|allow|authorize|consent|cookie|necessary|preferences)\b/i.test(hint)) {
+    return matches;
+  }
+  const outsideConsent = matches.filter((el) => !el.inConsentWidget);
+  return outsideConsent.length > 0 ? outsideConsent : matches;
+}
+
+async function maybeRefreshInventoryForHydratedClick(
+  step: Extract<SkillStep, { kind: "click" }>,
+  browser: BrowserController,
+  inventory: InteractiveElement[],
+): Promise<InteractiveElement[]> {
+  if (step.dom_hint === undefined) return inventory;
+  const hasDomMatch =
+    step.dom_hint !== undefined &&
+    inventory.some((el) => matchesDomHint(el, step.dom_hint!));
+  const hasTextMatch = inventory.some((el) => matchesClickHint(el, step.text_match));
+  if (hasDomMatch || hasTextMatch) return inventory;
+  await browser.wait(2);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+  return await browser.extractInteractiveElements().catch(() => inventory);
+}
+
+function filterExactClickHint(
+  elements: readonly InteractiveElement[],
+  hint: string,
+): InteractiveElement[] {
+  const want = normalizeVisibleWords(hint);
+  if (want.length === 0) return [];
+  return elements.filter((el) => {
+    const text = normalizeVisibleWords(el.visibleText ?? "");
+    const aria = normalizeVisibleWords(el.ariaLabel ?? "");
+    return text === want || aria === want;
+  });
+}
+
+function elementClickLabel(el: InteractiveElement): string {
+  return `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+}
+
+function isButtonish(el: InteractiveElement): boolean {
+  return el.tag === "button" || el.role === "button";
+}
+
+function isStaleRevealApiKeyHint(hint: string): boolean {
+  const normalized = normalizeVisibleWords(hint);
+  return /\b(?:reveal|show|view)\b/.test(normalized) && /\b(?:api\s+)?key\b/.test(normalized);
+}
+
+function isGenerateApiKeyAction(el: InteractiveElement): boolean {
+  if (!isButtonish(el)) return false;
+  const label = normalizeVisibleWords(elementClickLabel(el));
+  return /^(?:generate|create)(?:\s+new)?\s+(?:api\s+)?key$/.test(label) ||
+    /^new\s+(?:api\s+)?key$/.test(label);
+}
+
+function findGenerateApiKeyRecoveryCandidate(
+  inventory: readonly InteractiveElement[],
+  missingHint: string,
+): InteractiveElement | null {
+  if (!isStaleRevealApiKeyHint(missingHint)) return null;
+  const candidates = inventory.filter(isGenerateApiKeyAction);
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+function generatedCredentialName(templateValues: Record<string, string>): string {
+  const existing = (templateValues.TOKEN_NAME ?? templateValues.KEY_NAME ?? "").trim();
+  if (existing.length > 0) return existing;
+  const alias = (templateValues.EMAIL_ALIAS ?? "").trim();
+  const local = alias.split("@")[0]?.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "");
+  return local !== undefined && local.length > 0 ? `trusty-squire-${local}` : "trusty-squire-api-key";
+}
+
+function findGeneratedKeyNameInput(inventory: readonly InteractiveElement[]): InteractiveElement | null {
+  const fillables = inventory.filter((el) => isFillable(el) && el.tag !== "select");
+  const exact = fillables.filter((el) => matchesLabelHint(el, "Name"));
+  if (exact.length === 1) return exact[0]!;
+  const descriptive = fillables.filter((el) => {
+    const text = normalizeVisibleWords(
+      `${el.labelText ?? ""} ${el.placeholder ?? ""} ${el.ariaLabel ?? ""} ${el.name ?? ""} ${el.id ?? ""}`,
+    );
+    return /\b(?:name|label|friendly)\b/.test(text) && /\b(?:key|token|api)\b/.test(text);
+  });
+  if (descriptive.length === 1) return descriptive[0]!;
+  return null;
+}
+
+function findModalGenerateButton(inventory: readonly InteractiveElement[]): InteractiveElement | null {
+  const candidates = inventory.filter((el) => {
+    if (!isButtonish(el)) return false;
+    const label = normalizeVisibleWords(elementClickLabel(el));
+    return label === "generate" || label === "create";
+  });
+  return candidates.length === 1 ? candidates[0]! : null;
+}
+
+async function attemptGenerateApiKeyRecovery(
+  browser: BrowserController,
+  inventory: readonly InteractiveElement[],
+  missingHint: string,
+  templateValues: Record<string, string>,
+): Promise<boolean> {
+  const start = findGenerateApiKeyRecoveryCandidate(inventory, missingHint);
+  if (start === null) return false;
+
+  await browser.click(start.selector);
+  await browser.wait(1);
+  await browser.waitForInteractiveDom().catch(() => undefined);
+
+  const modalInventory = await browser.extractInteractiveElements().catch(() => []);
+  const nameInput = findGeneratedKeyNameInput(modalInventory);
+  if (nameInput !== null) {
+    await browser.type(nameInput.selector, generatedCredentialName(templateValues));
+  }
+
+  const submit = findModalGenerateButton(modalInventory);
+  if (submit !== null) {
+    await browser.click(submit.selector);
+    await browser.wait(2);
+    await browser.waitForInteractiveDom().catch(() => undefined);
+  }
+  return true;
 }
 
 // Token-subset fallback for a credential-creating click whose captured
@@ -2239,7 +3063,7 @@ async function maybeDumpReplayDebug(
 
 function matchesClickHintTokens(el: InteractiveElement, hint: string): boolean {
   const tokenize = (s: string): string[] =>
-    (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= 3);
+    (normalizeVisibleWords(s).match(/[a-z0-9]+/g) ?? []).filter((t) => t.length >= 3);
   const want = tokenize(hint);
   if (want.length === 0) return false;
   const have = new Set([
@@ -2247,6 +3071,14 @@ function matchesClickHintTokens(el: InteractiveElement, hint: string): boolean {
     ...tokenize(el.ariaLabel ?? ""),
   ]);
   return want.every((t) => have.has(t));
+}
+
+function normalizeVisibleWords(s: string): string {
+  return s
+    .replace(/[\uE000-\uF8FF]/g, " ")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // 2026-06-07 — href-tail match for nav-link clicks. The synthesizer
@@ -2266,6 +3098,12 @@ export function normalizeNavPath(path: string): string[] {
   const segs = path.split("/").filter((s) => s.length > 0);
   if (segs.length <= 1) return segs.map((s) => s.toLowerCase());
   const first = segs[0]!;
+  if (
+    segs.length >= 3 &&
+    /^(?:p|project|projects|org|organization|organizations|workspace|workspaces)$/i.test(first)
+  ) {
+    return [first, ...segs.slice(2)].map((s) => s.toLowerCase());
+  }
   const looksLikeSlug = /\d/.test(first) || /^[a-z0-9]+(?:-[a-z0-9]+){2,}$/i.test(first);
   const tail = looksLikeSlug ? segs.slice(1) : segs;
   return tail.map((s) => s.toLowerCase());
@@ -2337,6 +3175,14 @@ export function rebaseHrefOntoCurrentUrl(
   const capSegs = hrefHint.split("/").filter((s) => s.length > 0);
   if (capSegs.length === 0) return null;
   const curSegs = cur.pathname.split("/").filter((s) => s.length > 0);
+  if (
+    capSegs.length >= 2 &&
+    curSegs.length >= 2 &&
+    capSegs[0] === curSegs[0] &&
+    /^(?:p|project|projects|org|organization|organizations|workspace|workspaces)$/i.test(capSegs[0]!)
+  ) {
+    capSegs[1] = curSegs[1]!;
+  }
   // When both the captured path and the current URL lead with a slug-shaped
   // segment, swap in the replay account's slug so the destination resolves
   // under the right workspace. Otherwise navigate the captured path as-is.
@@ -2344,6 +3190,201 @@ export function rebaseHrefOntoCurrentUrl(
     capSegs[0] = curSegs[0]!;
   }
   return `${cur.origin}/${capSegs.join("/")}`;
+}
+
+function scopedHrefPrefix(hrefHint: string): string | null {
+  const segs = hrefHint.split("/").filter((s) => s.length > 0);
+  if (
+    segs.length >= 2 &&
+    /^(?:p|project|projects|org|organization|organizations|workspace|workspaces)$/i.test(segs[0]!)
+  ) {
+    return segs[0]!;
+  }
+  return null;
+}
+
+export function rebaseScopedHrefWithCandidate(
+  hrefHint: string,
+  currentUrl: string,
+  candidate: string,
+): string | null {
+  let cur: URL;
+  try {
+    cur = new URL(currentUrl);
+  } catch {
+    return null;
+  }
+  const segs = hrefHint.split("/").filter((s) => s.length > 0);
+  if (segs.length < 2) return null;
+  if (candidate.trim().length === 0) return null;
+  segs[1] = candidate.trim();
+  return `${cur.origin}/${segs.map((seg) => encodeURIComponent(seg)).join("/")}`;
+}
+
+async function resolveScopedLandingDestination(
+  browser: BrowserController,
+  hrefHint: string,
+): Promise<string | null> {
+  const prefix = scopedHrefPrefix(hrefHint);
+  if (prefix === null) return null;
+  const currentHasScope = (() => {
+    try {
+      return new URL(browser.currentUrl()).pathname.split("/").filter(Boolean)[0] === prefix;
+    } catch {
+      return false;
+    }
+  })();
+  if (currentHasScope) return null;
+  const candidates = await browser.extractScopedRouteCandidates(prefix).catch(() => []);
+  const unique = Array.from(new Set(candidates));
+  if (unique.length !== 1) return null;
+  try {
+    const cur = new URL(browser.currentUrl());
+    return `${cur.origin}/${prefix}/${encodeURIComponent(unique[0]!)}`;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveHrefDestination(
+  browser: BrowserController,
+  hrefHint: string,
+): Promise<string | null> {
+  const prefix = scopedHrefPrefix(hrefHint);
+  let dest = rebaseHrefOntoCurrentUrl(hrefHint, browser.currentUrl());
+  if (prefix === null || dest === null) return dest;
+  const currentHasScope = (() => {
+    try {
+      return new URL(browser.currentUrl()).pathname.split("/").filter(Boolean)[0] === prefix;
+    } catch {
+      return false;
+    }
+  })();
+  if (currentHasScope) return dest;
+  try {
+    const cur = new URL(browser.currentUrl());
+    await browser.goto(cur.origin + "/");
+    await browser.wait(2);
+    await browser.waitForInteractiveDom?.().catch(() => undefined);
+    dest = rebaseHrefOntoCurrentUrl(hrefHint, browser.currentUrl());
+    const rebasedHasScope = new URL(browser.currentUrl()).pathname.split("/").filter(Boolean)[0] === prefix;
+    if (rebasedHasScope) return dest;
+    const candidates = await browser.extractScopedRouteCandidates(prefix).catch(() => []);
+    const unique = Array.from(new Set(candidates));
+    if (unique.length === 1) {
+      return rebaseScopedHrefWithCandidate(hrefHint, browser.currentUrl(), unique[0]!);
+    }
+    return null;
+  } catch {
+    return dest;
+  }
+}
+
+function sameOriginPathAndSearch(a: string, b: string): boolean {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    return left.origin === right.origin && left.pathname === right.pathname && left.search === right.search;
+  } catch {
+    return false;
+  }
+}
+
+async function gotoResolvedHref(browser: BrowserController, dest: string): Promise<void> {
+  try {
+    await browser.goto(dest);
+  } catch (err) {
+    if (sameOriginPathAndSearch(browser.currentUrl(), dest)) return;
+    throw err;
+  }
+}
+
+async function attemptCredentialRouteLinkRecovery(
+  browser: BrowserController,
+  targetUrl: string,
+): Promise<boolean> {
+  const intent = credentialRouteIntent(targetUrl);
+  if (intent === null) return false;
+  let notFoundText: string | null = null;
+  if (currentUrlLooksLikeCredentialRoute(browser.currentUrl(), intent)) {
+    notFoundText = await browser.extractText().catch(() => "");
+    if (!pageLooksNotFound(notFoundText)) return false;
+  }
+
+  const inventory = await browser.extractInteractiveElements().catch(() => []);
+  const candidates = inventory.filter((el) => {
+    if (el.tag !== "a" && el.role !== "link" && el.tag !== "button" && el.role !== "button") {
+      return false;
+    }
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+    return intent.label.test(label) || (el.href != null && intent.href.test(el.href));
+  });
+  if (candidates.length === 0) {
+    const text = notFoundText ?? await browser.extractText().catch(() => "");
+    if (!pageLooksNotFound(text)) return false;
+    let origin: string;
+    try {
+      origin = new URL(targetUrl).origin;
+    } catch {
+      return false;
+    }
+    await gotoResolvedHref(browser, origin).catch(() => undefined);
+    await browser.wait(2);
+    await browser.waitForInteractiveDom().catch(() => undefined);
+    const reboundInventory = await browser.extractInteractiveElements().catch(() => []);
+    const reboundCandidates = reboundInventory.filter((el) => {
+      if (el.tag !== "a" && el.role !== "link" && el.tag !== "button" && el.role !== "button") {
+        return false;
+      }
+      const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""}`.trim();
+      return intent.label.test(label) || (el.href != null && intent.href.test(el.href));
+    });
+    if (reboundCandidates.length === 0) return false;
+    return clickCredentialNavCandidate(browser, reboundCandidates);
+  }
+  return clickCredentialNavCandidate(browser, candidates);
+}
+
+function pageLooksNotFound(text: string): boolean {
+  return /\b(?:page not found|404|not found|does not exist)\b/i.test(text);
+}
+
+function credentialRouteIntent(targetUrl: string): { label: RegExp; href: RegExp; kind: "key" | "token" } | null {
+  let path: string;
+  try {
+    path = new URL(targetUrl).pathname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (/\bkeys?\b|api[-_/]?keys?/.test(path)) {
+    return {
+      kind: "key",
+      label: /\b(?:api\s+keys?|keys?)\b/i,
+      href: /(?:api[-_/]?)?keys?/i,
+    };
+  }
+  if (/\btokens?\b|api[-_/]?tokens?/.test(path)) {
+    return {
+      kind: "token",
+      label: /\b(?:api\s+tokens?|tokens?)\b/i,
+      href: /(?:api[-_/]?)?tokens?/i,
+    };
+  }
+  return null;
+}
+
+function currentUrlLooksLikeCredentialRoute(
+  currentUrl: string,
+  intent: { kind: "key" | "token" },
+): boolean {
+  try {
+    const path = new URL(currentUrl).pathname.toLowerCase();
+    return intent.kind === "key"
+      ? /\bkeys?\b|api[-_/]?keys?/.test(path)
+      : /\btokens?\b|api[-_/]?tokens?/.test(path);
+  } catch {
+    return false;
+  }
 }
 
 function matchesLabelHint(el: InteractiveElement, hint: string): boolean {
@@ -2408,6 +3449,25 @@ function isRuntimeId(id: string): boolean {
 // select for the SELECT case which also matches by labelText.
 function isFillable(el: InteractiveElement): boolean {
   return el.tag === "input" || el.tag === "textarea" || el.tag === "select";
+}
+
+function isSignupSubmitLikeClick(step: Extract<SkillStep, { kind: "click" }>): boolean {
+  if (step.role_hint === "link") return false;
+  return /\b(?:continue|sign\s*up|register|create\s+(?:account|workspace|organization)|start(?:\s+my)?\s+free\s+trial|submit)\b/i.test(
+    step.text_match,
+  );
+}
+
+async function checkRequiredAgreementBoxesBeforeSubmitClick(
+  browser: BrowserController,
+  step: Extract<SkillStep, { kind: "click" }>,
+): Promise<void> {
+  if (!isSignupSubmitLikeClick(step)) return;
+  const maybeBrowser = browser as BrowserController & {
+    checkRequiredAgreementBoxes?: () => Promise<string[]>;
+  };
+  if (typeof maybeBrowser.checkRequiredAgreementBoxes !== "function") return;
+  await maybeBrowser.checkRequiredAgreementBoxes().catch(() => []);
 }
 
 // A `select` step's target is broader than isFillable: MUI/Radix-class
@@ -2696,6 +3756,18 @@ function isSkippableAbsentClick(
   return hasLaterCredentialStep(steps, stepIndex);
 }
 
+function isReturningUserOnboardingDismissClick(
+  step: SkillStep,
+  stepIndex: number,
+  steps: SkillStep[],
+): boolean {
+  if (step.kind !== "click") return false;
+  if (!hasLaterCredentialStep(steps, stepIndex)) return false;
+  return /\b(?:no thanks|explore at my own pace|skip(?: for now)?|maybe later|not now)\b/i.test(
+    step.text_match,
+  );
+}
+
 // Tag a step_failed reason when it fires AFTER we skipped an absent onboarding
 // fill — the operator account is already registered, so the credential step
 // diverged from the fresh-signup capture. The verifier matches this marker
@@ -2749,6 +3821,12 @@ function isSkippableAbsentFill(
 ): boolean {
   if (step.kind !== "fill") return false;
   if (!/no input matches/i.test(validationReason)) return false;
+  // EMAIL_ALIAS fills are not optional onboarding cosmetics; they dispatch the
+  // verification email that an await_email_code step consumes. Skipping them
+  // turns a real replay failure into a misleading returning-user branch and
+  // strands fresh-identity verification waiting for an email that was never
+  // requested.
+  if (step.value_template.includes("${EMAIL_ALIAS}")) return false;
   return hasLaterCredentialStep(steps, stepIndex);
 }
 
@@ -2851,6 +3929,17 @@ const OAUTH_PROVIDER_HOSTS = new Set([
   "auth0.com",
   "login.microsoftonline.com",
 ]);
+const IDENTITY_PROVIDER_DOMAINS = [
+  "google.com",
+  "github.com",
+  "microsoftonline.com",
+  "appleid.apple.com",
+  "facebook.com",
+  "okta.com",
+  "auth0.com",
+] as const;
+const EPHEMERAL_REPLAY_URL_PARAM =
+  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email)$/i;
 
 // A service's OWN auth/login host — the FIRST hop when the replay session has
 // expired (porter's dashboard.porter.run → auth.porter.run). Distinct from
@@ -2865,6 +3954,90 @@ function looksLikeAuthHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
   if (/^(auth|login|accounts|signin|sign-in|sso|id)\./.test(h)) return true;
   return /(^|\.)(workos|auth0|okta|clerk|stytch|onelogin|duosecurity)\.(com|io|dev|app)$/.test(h);
+}
+
+function isIdentityProviderEntryUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return IDENTITY_PROVIDER_DOMAINS.some(
+      (idp) => host === idp || host.endsWith(`.${idp}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isAuthTransactionEntryUrl(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase().replace(/\/+$/, "") || "/";
+    if (path.includes("/auth/cx/")) return true;
+    if (path.includes("/oauth/callback") || path.includes("/auth/callback")) return true;
+    if (path.includes("/login/callback") || path.includes("/sso/callback")) return true;
+    if (path.includes("/register/create-user-new-org-confirmation")) return true;
+    if (path.endsWith("/confirmation") || path.endsWith("/confirm") || path.endsWith("/reserved")) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function cleanReplayEntryUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    let changed = false;
+    for (const key of [...u.searchParams.keys()]) {
+      if (EPHEMERAL_REPLAY_URL_PARAM.test(key)) {
+        u.searchParams.delete(key);
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : url;
+  } catch {
+    return url;
+  }
+}
+
+function isPoisonedReplayEntryUrl(url: string): boolean {
+  return isIdentityProviderEntryUrl(url) || isAuthTransactionEntryUrl(url);
+}
+
+function isStableReplayNavigateUrl(url: string): boolean {
+  return !isPoisonedReplayEntryUrl(url);
+}
+
+function kindeNeutralAdminUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.hostname === "app.kinde.com" && u.pathname.includes("/auth/cx/")
+      ? "https://app.kinde.com/admin"
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveReplayRecoveryEntryUrl(skill: Skill): string {
+  const cleanedSignupUrl = cleanReplayEntryUrl(skill.signup_url);
+  const kindeNeutral = kindeNeutralAdminUrl(cleanedSignupUrl);
+  if (kindeNeutral !== null) return kindeNeutral;
+  if (!isPoisonedReplayEntryUrl(cleanedSignupUrl)) return cleanedSignupUrl;
+  const stableNavigate = skill.steps.find(
+    (step) => step.kind === "navigate" && isStableReplayNavigateUrl(step.url),
+  );
+  return stableNavigate?.kind === "navigate"
+    ? cleanReplayEntryUrl(stableNavigate.url)
+    : cleanedSignupUrl;
+}
+
+export function resolveReplayRecoveryTargetUrl(skill: Skill, targetUrl: string): string {
+  const cleanedTargetUrl = cleanReplayEntryUrl(targetUrl);
+  const kindeNeutral = kindeNeutralAdminUrl(cleanedTargetUrl);
+  if (kindeNeutral !== null) return kindeNeutral;
+  return isPoisonedReplayEntryUrl(cleanedTargetUrl)
+    ? resolveReplayRecoveryEntryUrl(skill)
+    : cleanedTargetUrl;
 }
 
 // Returns null when the current URL is consistent with the requested
@@ -2940,6 +4113,22 @@ export function rebaseSubdomain(capturedUrl: string, liveUrl: string): string {
   if (registrableDomain(cap.hostname) !== registrableDomain(live.hostname)) return capturedUrl;
   cap.hostname = live.hostname;
   return cap.toString();
+}
+
+export function normalizeKindeReplayNavigateUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (!u.hostname.endsWith(".kinde.com")) return url;
+    if (u.pathname === "/admin/settings/apis") {
+      u.pathname = "/admin";
+      u.search = "";
+      u.hash = "";
+      return u.toString();
+    }
+    return url;
+  } catch {
+    return url;
+  }
 }
 
 // True when the URL is back on the product host AND no longer on an auth
@@ -3167,6 +4356,10 @@ export async function walkOAuthConsent(
       );
       continue;
     }
+    if (providerId === "google" && /\/signin\/identifier\b/i.test(url)) {
+      console.error(`[replay-oauth] google identifier page — needs_login`);
+      return "needs_login";
+    }
     const state = provider.classifyAuthState(url, body);
     console.error(`[replay-oauth] state=${state} url=${url.slice(0, 100)}`);
     if (state === "not_provider") return "ok"; // flow left the provider
@@ -3235,30 +4428,67 @@ export async function walkOAuthConsent(
   return browser.oauthPageClosed() ? "ok" : "needs_login";
 }
 
+async function clickGenericAuthBrokerButton(
+  browser: BrowserController,
+  inventory: InteractiveElement[],
+): Promise<boolean> {
+  const hasPasswordInput = inventory.some(
+    (el) => isFillable(el) && (el.type === "password" || matchesLabelHint(el, "password")),
+  );
+  const hasEmailInput = inventory.some((el) => isFillable(el) && matchesLabelHint(el, "email"));
+  if (hasPasswordInput || hasEmailInput) return false;
+  const candidates = inventory.filter((el) => {
+    if (!(el.visible && (el.tag === "button" || el.role === "button" || el.tag === "a"))) return false;
+    const text = (el.visibleText ?? el.ariaLabel ?? "").trim();
+    return /^(sign in|log in|login|continue)$/i.test(text);
+  });
+  if (candidates.length !== 1) return false;
+  await browser.click(candidates[0]!.selector);
+  return true;
+}
+
 async function attemptOAuthRecovery(
   browser: BrowserController,
   expectedUrl: string,
+  profileDir?: string,
+  preferredProvider?: OAuthProviderId,
 ): Promise<
   { kind: "ok" } | { kind: "needs_login"; provider: OAuthProviderId }
 > {
-  const rawProfiles = loggedInProviders();
-  if (rawProfiles.length === 0) {
-    return { kind: "needs_login", provider: "google" };
-  }
+  const rawProfiles = loggedInProviders(profileDir);
+  // Do not treat the marker as authoritative. The fleet warmer can leave a
+  // real Google session in the Chrome profile without writing the local marker
+  // (or after the marker was pruned during robot rotation). The OAuth walker
+  // is the real truth: if Google shows an identifier/password page it returns
+  // needs_login; if it shows an account chooser/consent it can proceed.
+  const rawOrDefaultProfiles =
+    rawProfiles.length > 0
+      ? preferredProvider !== undefined && !rawProfiles.includes(preferredProvider)
+        ? [preferredProvider, ...rawProfiles]
+        : rawProfiles
+      : preferredProvider !== undefined
+        ? [preferredProvider]
+        : ["google" as const];
   // Prefer Google over GitHub when a service offers both. GitHub OAuth
   // callbacks are rejected by more anti-bot services (pusher bounces a
   // github sign-in back to /accounts/sign_in with no session, while the
   // google round-trip completes). Try the more-reliable provider first.
-  const profiles = [...rawProfiles].sort((a, b) =>
-    a === "google" ? -1 : b === "google" ? 1 : 0,
-  );
+  const profiles = [...rawOrDefaultProfiles].sort((a, b) => {
+    if (preferredProvider !== undefined) {
+      if (a === preferredProvider) return -1;
+      if (b === preferredProvider) return 1;
+    }
+    return a === "google" ? -1 : b === "google" ? 1 : 0;
+  });
   // Find an OAuth button matching a provider we have a cached session for.
   // Retry: SPA login pages (posthog, kinde) render the OAuth buttons a beat
   // after domcontentloaded, so a single inventory races them → false
   // "no button" needs_login. Re-inventory a few times before giving up.
   let pickedProvider: OAuthProviderId | null = null;
   let pickedButton: ReturnType<typeof findOAuthButton> | null = null;
-  for (let attempt = 0; attempt < 4 && pickedButton === null; attempt++) {
+  let brokerClicked = false;
+  let retriedExpectedUrl = false;
+  for (let attempt = 0; attempt < 6 && pickedButton === null; attempt++) {
     if (attempt > 0) await browser.wait(2);
     const inventory = await browser.extractInteractiveElements();
     for (const p of profiles) {
@@ -3268,6 +4498,31 @@ async function attemptOAuthRecovery(
         pickedButton = btn;
         break;
       }
+    }
+    if (pickedButton === null && rawProfiles.length === 0) {
+      for (const p of ["google", "github"] as const) {
+        const btn = findOAuthButton(inventory, p);
+        if (btn !== null) {
+          pickedProvider = p;
+          pickedButton = btn;
+          break;
+        }
+      }
+    }
+    if (pickedButton === null && !brokerClicked && (await clickGenericAuthBrokerButton(browser, inventory))) {
+      brokerClicked = true;
+      await browser.wait(2);
+      await browser.waitForInteractiveDom().catch(() => undefined);
+    }
+    if (
+      pickedButton === null &&
+      !retriedExpectedUrl &&
+      browser.currentUrl() !== expectedUrl
+    ) {
+      retriedExpectedUrl = true;
+      await browser.goto(expectedUrl);
+      await browser.wait(2);
+      await browser.waitForInteractiveDom().catch(() => undefined);
     }
   }
   if (pickedProvider === null || pickedButton === null) {
@@ -3296,7 +4551,12 @@ async function attemptOAuthRecovery(
   // consent screens (the old code clicked and only WAITED, so any
   // interstitial stalled it into needs_login).
   await browser.startOAuth(pickedButton.selector);
-  const walk = await walkOAuthConsent(browser, pickedProvider);
+  let walk = await walkOAuthConsent(browser, pickedProvider);
+  if (walk === "needs_login") {
+    if (await attemptKindeOrganizationSelection(browser, expectedUrl)) {
+      walk = "ok";
+    }
+  }
   if (walk === "needs_login") {
     await browser.settleAfterOAuth().catch(() => undefined);
     return { kind: "needs_login", provider: pickedProvider };
@@ -3308,6 +4568,9 @@ async function attemptOAuthRecovery(
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     await browser.wait(1);
+    if (await attemptKindeOrganizationSelection(browser, expectedUrl)) {
+      continue;
+    }
     if (browser.oauthPageClosed()) break;
     // Wait until we're back on the product host AND clear of the auth
     // intermediary. Services that broker OAuth through their OWN domain
@@ -3323,8 +4586,26 @@ async function attemptOAuthRecovery(
   // popup and the re-navigate below throws "Target page has been closed". Only
   // the discovery bot called settleAfterOAuth before — the replay recovery
   // never did, so every popup-based OAuth crashed here.
-  await browser.settleAfterOAuth().catch(() => undefined);
-  await browser.goto(expectedUrl);
+  const activeUrlBeforeSettle = browser.currentUrl();
+  const activePageIsProduct = settledOnProductPage(activeUrlBeforeSettle, expectedHost);
+  if (!activePageIsProduct) {
+    await browser.settleAfterOAuth().catch(() => undefined);
+    await attemptKindeOrganizationSelection(browser, expectedUrl);
+  }
+  const keepKindeTenantPage =
+    activePageIsProduct &&
+    expectedHost === "app.kinde.com" &&
+    (() => {
+      try {
+        const active = new URL(activeUrlBeforeSettle);
+        return active.hostname.endsWith(".kinde.com") && active.hostname !== "app.kinde.com";
+      } catch {
+        return false;
+      }
+    })();
+  if (!keepKindeTenantPage) {
+    await browser.goto(expectedUrl);
+  }
   await browser.wait(2);
   const drift = detectNavigationDrift(browser.currentUrl(), expectedUrl);
   if (drift !== null) {
@@ -3333,4 +4614,78 @@ async function attemptOAuthRecovery(
     return { kind: "needs_login", provider: pickedProvider };
   }
   return { kind: "ok" };
+}
+
+async function attemptKindeOrganizationSelection(
+  browser: BrowserController,
+  expectedUrl: string,
+): Promise<boolean> {
+  let current: URL;
+  try {
+    current = new URL(browser.currentUrl());
+  } catch {
+    return false;
+  }
+  if (process.env.REPLAY_DEBUG) {
+    console.error(`[replay-oauth-debug] Kinde org-selection probe url=${current.href.slice(0, 140)}`);
+  }
+  if (current.hostname !== "app.kinde.com") return false;
+  if (!current.pathname.includes("/auth/cx/")) return false;
+  if (!current.href.includes("organization_selection")) return false;
+  let expected: URL | null = null;
+  try {
+    expected = new URL(expectedUrl);
+  } catch {
+    expected = null;
+  }
+  const expectedOrg =
+    expected !== null &&
+    expected.hostname.endsWith(".kinde.com") &&
+    expected.hostname !== "app.kinde.com"
+      ? expected.hostname.split(".")[0]
+      : undefined;
+  try {
+    await browser.waitForInteractiveDom().catch(() => undefined);
+    await browser.selectOption('select[name="p_org_code"]', expectedOrg);
+    const inventory = await browser.extractInteractiveElements();
+    const continueButton = inventory.find(
+      (e) =>
+        e.visible &&
+        (e.tag === "button" || e.role === "button" || e.type === "submit") &&
+        /\bcontinue\b/i.test(e.visibleText ?? e.ariaLabel ?? ""),
+    );
+    if (continueButton === undefined) return false;
+    await browser.click(continueButton.selector);
+    await browser.wait(3);
+    await browser.waitForInteractiveDom().catch(() => undefined);
+    return true;
+  } catch (err) {
+    if (process.env.REPLAY_DEBUG) {
+      console.error(
+        `[replay-oauth-debug] Kinde organization selection failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return false;
+  }
+}
+
+async function attemptOAuthRecoveryForFailedStep(
+  browser: BrowserController,
+  expectedUrl: string,
+  profileDir?: string,
+  preferredProvider?: OAuthProviderId,
+): Promise<
+  { kind: "ok" } | { kind: "needs_login"; provider: OAuthProviderId } | { kind: "not_auth_page" }
+> {
+  let inventory: InteractiveElement[];
+  try {
+    inventory = await browser.extractInteractiveElements();
+  } catch {
+    return { kind: "not_auth_page" };
+  }
+  const hasOAuthButton = (["google", "github"] as const).some(
+    (provider) => findOAuthButton(inventory, provider) !== null,
+  );
+  if (!hasOAuthButton) return { kind: "not_auth_page" };
+  return await attemptOAuthRecovery(browser, expectedUrl, profileDir, preferredProvider);
 }

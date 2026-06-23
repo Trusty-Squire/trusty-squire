@@ -298,6 +298,10 @@ describe("isMultiCredBundle", () => {
     ).toBe(false);
   });
 
+  it("returns false for an access_token only", () => {
+    expect(isMultiCredBundle({ access_token: "ddp_example_token" })).toBe(false);
+  });
+
   it("returns false when only housekeeping keys are present", () => {
     expect(
       isMultiCredBundle({

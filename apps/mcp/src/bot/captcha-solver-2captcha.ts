@@ -25,6 +25,7 @@
 // silently turns on a paid service.
 
 const TWOCAPTCHA_BASE = "https://2captcha.com";
+const TWOCAPTCHA_API_BASE = "https://api.2captcha.com";
 
 // Per-solve timeouts. The IN call should answer fast (sitekey
 // submission is just queued). The RES polling can take 60-120s on
@@ -49,6 +50,10 @@ export type TwoCaptchaResult =
   | { kind: "submission_failed"; reason: string }
   | { kind: "solve_timeout"; durationMs: number }
   | { kind: "solver_error"; reason: string };
+
+export type TwoCaptchaCoordinatesResult =
+  | { kind: "ok"; coordinates: Array<{ x: number; y: number }>; durationMs: number }
+  | Exclude<TwoCaptchaResult, { kind: "ok"; token: string; durationMs: number }>;
 
 export class TwoCaptchaSolver {
   private readonly apiKey: string | undefined;
@@ -98,11 +103,19 @@ export class TwoCaptchaSolver {
   async solveHcaptcha(input: {
     sitekey: string;
     pageUrl: string;
+    invisible?: boolean;
+    userAgent?: string;
+    data?: string;
   }): Promise<TwoCaptchaResult> {
     return this.submitAndPoll({
       method: "hcaptcha",
       sitekey: input.sitekey,
       pageurl: input.pageUrl,
+      ...(input.invisible === true ? { invisible: "1" } : {}),
+      ...(input.userAgent !== undefined && input.userAgent.trim().length > 0
+        ? { userAgent: input.userAgent }
+        : {}),
+      ...(input.data !== undefined && input.data.trim().length > 0 ? { data: input.data } : {}),
     });
   }
 
@@ -131,6 +144,93 @@ export class TwoCaptchaSolver {
       ...(input.action !== undefined ? { action: input.action } : {}),
       ...(input.data !== undefined ? { data: input.data } : {}),
     });
+  }
+
+  async solveCoordinates(input: {
+    imageBase64: string;
+    comment?: string;
+    minClicks?: number;
+    maxClicks?: number;
+  }): Promise<TwoCaptchaCoordinatesResult> {
+    if (!this.isAvailable()) return { kind: "no_key" };
+    const apiKey = this.apiKey!;
+    const startMs = Date.now();
+
+    let taskId: number;
+    try {
+      const res = await withTimeout(
+        this.fetchFn(`${TWOCAPTCHA_API_BASE}/createTask`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            clientKey: apiKey,
+            task: {
+              type: "CoordinatesTask",
+              body: input.imageBase64,
+              ...(input.comment !== undefined ? { comment: input.comment } : {}),
+              ...(input.minClicks !== undefined ? { minClicks: input.minClicks } : {}),
+              ...(input.maxClicks !== undefined ? { maxClicks: input.maxClicks } : {}),
+            },
+          }),
+        }),
+        IN_TIMEOUT_MS,
+      );
+      if (!res.ok) return { kind: "submission_failed", reason: `createTask HTTP ${res.status}` };
+      const body = (await res.json()) as {
+        errorId?: number;
+        errorCode?: string;
+        errorDescription?: string;
+        taskId?: number;
+      };
+      if (body.errorId !== 0 || typeof body.taskId !== "number") {
+        return {
+          kind: "submission_failed",
+          reason: body.errorCode ?? body.errorDescription ?? "unknown_2captcha_error",
+        };
+      }
+      taskId = body.taskId;
+    } catch (err) {
+      return {
+        kind: "submission_failed",
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    while (Date.now() - startMs < this.resTimeoutMs) {
+      await this.sleepFn(RES_POLL_INTERVAL_MS);
+      try {
+        const res = await this.fetchFn(`${TWOCAPTCHA_API_BASE}/getTaskResult`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ clientKey: apiKey, taskId }),
+        });
+        if (!res.ok) continue;
+        const body = (await res.json()) as {
+          errorId?: number;
+          errorCode?: string;
+          errorDescription?: string;
+          status?: string;
+          solution?: { coordinates?: Array<{ x?: unknown; y?: unknown }> };
+        };
+        if (body.errorId !== 0) {
+          return {
+            kind: "solver_error",
+            reason: body.errorCode ?? body.errorDescription ?? "unknown_res_error",
+          };
+        }
+        if (body.status !== "ready") continue;
+        const coordinates = (body.solution?.coordinates ?? [])
+          .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+          .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+        if (coordinates.length === 0) {
+          return { kind: "solver_error", reason: "missing_coordinates" };
+        }
+        return { kind: "ok", coordinates, durationMs: Date.now() - startMs };
+      } catch {
+        // transient; retry on next tick
+      }
+    }
+    return { kind: "solve_timeout", durationMs: Date.now() - startMs };
   }
 
   // Shared in.php submit + res.php poll. `params` carries the

@@ -4,7 +4,7 @@
 // drives Playwright + the LLM proxy.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runDiscover } from "../discover.js";
+import { runDiscover, type IdentityPoolPort } from "../discover.js";
 import type { SignupResult, UniversalSignupRequest } from "../../../bot/index.js";
 import type { InboxClient } from "../../../bot/inbox-client.js";
 
@@ -34,6 +34,24 @@ function stubInbox(aliasReturn: string = "alias@trustysquire.com") {
 function stubBot(result: SignupResult) {
   return {
     signup: async (): Promise<SignupResult> => result,
+  };
+}
+
+// Inject a deterministic 1-robot pool so outcome-mapping tests reach the bot
+// instead of short-circuiting on the real on-disk pool (the discover path now
+// preflights an identity; an empty pool returns insufficient_identities, which
+// masks the bot-error reason these tests assert). Mirrors discover-isolation.test.
+function stubPool(): IdentityPoolPort {
+  return {
+    pick: () => [
+      {
+        id: "verify-test",
+        email: "verify-test@trustysquire.ai",
+        profileDir: "/tmp/verify-test",
+        providers: ["google"],
+      },
+    ],
+    markSpent: () => {},
   };
 }
 
@@ -78,6 +96,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -98,6 +117,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -118,6 +138,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -137,6 +158,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -156,6 +178,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -175,6 +198,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -194,6 +218,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -214,6 +239,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot: bot as never,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -260,6 +286,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -322,6 +349,7 @@ describe("runDiscover — auto-promote logging", () => {
           accountId: "acct-flush",
           inboxClient: stubInbox(),
           bot,
+          identityPool: stubPool(),
           // skipAutoPromote NOT set — we want the real auto-promote path.
         },
       );
@@ -402,6 +430,7 @@ describe("runDiscover — telemetry emit (D1 gap fix)", () => {
         accountId: "acct-telemetry",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -444,6 +473,7 @@ describe("runDiscover — telemetry emit (D1 gap fix)", () => {
         accountId: "acct-telemetry",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );

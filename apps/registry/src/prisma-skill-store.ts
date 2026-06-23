@@ -2,7 +2,13 @@
 // use InMemorySkillStore. Mirrors prisma-store.ts (the manifest
 // equivalent).
 
-import { classifyFailure, parseSkill, type Skill } from "@trusty-squire/skill-schema";
+import {
+  canonicalizeServiceSlug,
+  classifyFailure,
+  equivalentServiceSlugs,
+  parseSkill,
+  type Skill,
+} from "@trusty-squire/skill-schema";
 import {
   createRegistryPrismaClient,
   type RegistryPrismaClient,
@@ -232,33 +238,86 @@ export class PrismaSkillStore implements SkillStore {
     //   1. pending-review with verifier_succeeded < threshold (the
     //      staging gate). Capped at limit so a registry full of new
     //      submissions doesn't starve the freshness sweep.
-    //   2. active with next_freshness_due_at <= now (the freshness
-    //      sweep). Capped at limit minus #1's hit count.
+    //   2. active with no verifier proof AND no scheduled freshness date, OR
+    //      next_freshness_due_at <= now (proof backfill + freshness sweep).
+    //      Capped at limit minus #1's hit count. Active rows with
+    //      verifier_succeeded=0 and next_freshness_due_at=null used to look
+    //      healthy forever, even though the verifier never proved the stored
+    //      recipe replays. Active rows that are already scheduled in the
+    //      future keep their normal freshness cadence.
     // The combination is then truncated back to the overall limit.
-    const pending = await this.client.skillRecord.findMany({
+    const pendingWindow = (await this.client.skillRecord.findMany({
       where: {
         status: "pending-review",
         deleted_at: null,
         superseded_at: null,
         verifier_succeeded: { lt: VERIFIER_PROMOTION_THRESHOLD },
       },
-      orderBy: { created_at: "asc" },
-      take: limit,
+      // Do not let stale high-failure pending rows pin the verifier queue.
+      // Fresh/no-signal pending skills should be sampled before rows that have
+      // already burned many identities and failed to converge. Real demotion is
+      // still handled by recordVerifierOutcome; this is only queue priority.
+      //
+      // The checked-in Prisma wrapper type only accepts a single orderBy
+      // object, not Prisma's usual array form, so fetch a bounded window and
+      // apply the multi-key priority in-process. This mirrors
+      // InMemorySkillStore and keeps old high-failure rows from monopolizing
+      // the queue while preserving a cap on query size.
+      orderBy: { created_at: "desc" },
+      take: Math.max(limit * 5, 100),
+    })) as unknown as PrismaSkillRow[];
+    const pendingServices = [
+      ...new Set(pendingWindow.flatMap((row) => equivalentServiceSlugs(row.service))),
+    ];
+    const activeServiceRows = pendingServices.length > 0
+      ? await this.client.skillRecord.findMany({
+          where: {
+            service: { in: pendingServices },
+            status: "active",
+            deleted_at: null,
+            superseded_at: null,
+          },
+          orderBy: { created_at: "desc" },
+          take: pendingServices.length,
+        })
+      : [];
+    const activeServices = new Set(
+      (activeServiceRows as unknown as PrismaSkillRow[]).map((row) =>
+        canonicalizeServiceSlug(row.service),
+      ),
+    );
+    const sortPending = (rows: PrismaSkillRow[]) => rows.sort((a, b) => {
+      const cvf = a.consecutive_verifier_failures - b.consecutive_verifier_failures;
+      if (cvf !== 0) return cvf;
+      const failed = a.verifier_failed - b.verifier_failed;
+      if (failed !== 0) return failed;
+      return b.created_at.getTime() - a.created_at.getTime();
     });
-    const remaining = Math.max(0, limit - pending.length);
-    const due = remaining > 0
+    const uncoveredPending = sortPending(
+      pendingWindow.filter((row) => !activeServices.has(canonicalizeServiceSlug(row.service))),
+    );
+    const remainingAfterUncovered = Math.max(0, limit - uncoveredPending.length);
+    const due = remainingAfterUncovered > 0
       ? await this.client.skillRecord.findMany({
           where: {
             status: "active",
             deleted_at: null,
             superseded_at: null,
-            next_freshness_due_at: { lte: now },
+            OR: [
+              {
+                verifier_succeeded: { lt: VERIFIER_PROMOTION_THRESHOLD },
+                next_freshness_due_at: null,
+              },
+              { next_freshness_due_at: { lte: now } },
+            ],
           },
           orderBy: { next_freshness_due_at: "asc" },
-          take: remaining,
+          take: remainingAfterUncovered,
         })
       : [];
-    return [...pending, ...due].map((row) => toSkillStoreRecord(row as PrismaSkillRow));
+    return [...uncoveredPending, ...due]
+      .slice(0, limit)
+      .map((row) => toSkillStoreRecord(row as PrismaSkillRow));
   }
 
   async recordVerifierOutcome(
@@ -273,11 +332,33 @@ export class PrismaSkillStore implements SkillStore {
     // transient (oauth/session/timeout) records the stat but must NOT
     // advance consecutive_verifier_failures, or a working skill thrashes
     // toward demotion on a blip. Unknown kinds default to transient.
-    const fclass = input.kind === "failure" ? classifyFailure(input.failure_kind) : null;
+    // D2.C — a converged producer verdict from the fresh-verify
+    // sequential-confidence sampler is TRUSTED over the raw success count. A
+    // `hold` is an explicit no-op (no signal — don't even bump the stat
+    // counters). `promote`/`reject` map to a success/failure outcome so the
+    // shared C11 promote-gate + rot demote-path below apply unchanged; a
+    // `promote` additionally short-circuits the count threshold (promotes on
+    // this single converged outcome). Absent verdict → historic count semantics.
+    if (input.verdict === "hold") {
+      const current = (await this.client.skillRecord.findUnique({
+        where: { skill_id: input.skill_id },
+      })) as PrismaSkillRow | null;
+      if (current === null) {
+        throw new Error(`Cannot record verifier outcome for unknown skill ${input.skill_id}`);
+      }
+      return { record: toSkillStoreRecord(current), transition: "none" };
+    }
+    const effectiveKind: "success" | "failure" =
+      input.verdict === "promote"
+        ? "success"
+        : input.verdict === "reject"
+          ? "failure"
+          : input.kind;
+    const fclass = effectiveKind === "failure" ? classifyFailure(input.failure_kind) : null;
     const failureKind = (input.failure_kind ?? "unknown").slice(0, 80);
     return this.client.$transaction(async (tx) => {
       let skill: PrismaSkillRow;
-      if (input.kind === "success") {
+      if (effectiveKind === "success") {
         skill = (await tx.skillRecord.update({
           where: { skill_id: input.skill_id },
           data: {
@@ -304,9 +385,10 @@ export class PrismaSkillStore implements SkillStore {
       // double-demote.
       let transition: RecordVerifierOutcomeResult["transition"] = "none";
       if (
-        input.kind === "success" &&
+        effectiveKind === "success" &&
         skill.status === "pending-review" &&
-        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
+        (input.verdict === "promote" ||
+          skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD)
       ) {
         // C11 gate — same logic as InMemorySkillStore. If an existing
         // active skill for this service has a DIFFERENT signup_url or
@@ -330,7 +412,18 @@ export class PrismaSkillStore implements SkillStore {
             incomingPayload,
           );
         }
-        if (!requireOperatorReview) {
+        if (requireOperatorReview) {
+          // The verifier proved this pending candidate can produce a credential,
+          // but an active skill for the same service already exists with a
+          // different protected entry point. Do NOT replace the active skill.
+          // Also do not leave the candidate in pending-review forever: it is
+          // redundant coverage, so collapse it out of the verifier queue.
+          skill = (await tx.skillRecord.update({
+            where: { skill_id: input.skill_id },
+            data: { status: "superseded", superseded_at: now },
+          })) as unknown as PrismaSkillRow;
+          transition = "superseded";
+        } else {
           // Promote and supersede every other live row for the same service
           // (prior active + lingering demoted + redundant pending-review).
           // Mirrors approveReview's invariant maintenance.
@@ -352,16 +445,14 @@ export class PrismaSkillStore implements SkillStore {
           skill = promoted;
           transition = "promoted";
         }
-        // else: counter incremented, status stays pending-review,
-        // operator runs `mcp skill approve-review` to land it.
-      } else if (input.kind === "success" && skill.status === "active") {
+      } else if (effectiveKind === "success" && skill.status === "active") {
         // Freshness pass — schedule the next sweep.
         skill = (await tx.skillRecord.update({
           where: { skill_id: input.skill_id },
           data: { next_freshness_due_at: new Date(now.getTime() + oneWeek) },
         })) as unknown as PrismaSkillRow;
       } else if (
-        input.kind === "failure" &&
+        effectiveKind === "failure" &&
         fclass === "wall" &&
         (skill.status === "active" || skill.status === "pending-review")
       ) {
@@ -379,11 +470,16 @@ export class PrismaSkillStore implements SkillStore {
         })) as unknown as PrismaSkillRow;
         transition = "quarantined";
       } else if (
-        input.kind === "failure" &&
-        skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
+        effectiveKind === "failure" &&
+        fclass === "rot" &&
+        (input.verdict === "reject" ||
+          skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD)
       ) {
-        // Reaching the threshold here means 3 consecutive ROT failures —
-        // the counter only advanced on rot above.
+        // A producer-level `reject` is already a converged fresh-identity
+        // verdict (for example 0/4 informative replays), so trust it
+        // immediately. Non-verdict replay failures keep the historic 3-strike
+        // path. In both cases the branch is rot-only: wall/infra/transient
+        // failures never retire or demote here.
         if (skill.status === "pending-review") {
           // Never validated — retire. Capture sidecars survive for
           // forensic value.

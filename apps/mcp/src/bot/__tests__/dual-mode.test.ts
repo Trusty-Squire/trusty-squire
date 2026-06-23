@@ -191,14 +191,14 @@ describe("SignupAgent dual-mode LLM fallback", () => {
       // Re-import to pick up the new env value. We can't easily
       // re-evaluate the module constant, so instead verify the
       // mechanism via the constant we already have: simulate the
-      // count by calling 16 times until we trip the default 15-cap.
+      // count by setting it to the default cap.
       // (The constant lives at module scope so changing the env
       // post-import doesn't help. Test the symptom: forced-bail.)
       const primary = new FakeLLM("primary", `{"ok":true}`);
       const agent = agentWithPair({ primary, premium: null });
-      // Burn through the default cap of 15 by manipulating the counter.
+      // Burn through the default cap by manipulating the counter.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (agent as any).llmCallCount = 15;
+      (agent as any).llmCallCount = 30;
 
       await expect(
         callLLM(agent, {

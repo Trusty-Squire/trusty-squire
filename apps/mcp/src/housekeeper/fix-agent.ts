@@ -39,9 +39,21 @@ import type { EvalGateResult } from "../bot/eval-gate.js";
 import type { PostVerifyStep } from "../bot/agent.js";
 import { assertStagingPrerelease, computeNextRc } from "./release-guard.js";
 import type { FixBatch, FixBatchFailure } from "./fix-batch.js";
+import {
+  buildRouterInput,
+  type ServiceRoutingFacts,
+} from "./fix-router-input.js";
+import {
+  classifyCluster,
+  type FailureDisposition,
+  type FailureOwner,
+  type FixRoute,
+  type RouterVerdict,
+} from "./fix-router.js";
 
 // Default give-up bound per cluster (decision: K = 3).
 export const DEFAULT_MAX_ATTEMPTS = 3;
+const MAX_FAILURES_PER_CLUSTER = 8;
 
 // Paths the agent may NEVER write, regardless of allowedPaths — the corpus is
 // append-only-from-successes (build-corpus), never edited to make the gate pass.
@@ -52,6 +64,11 @@ export const FORBIDDEN_PATH_FRAGMENTS = ["corpus/eval"] as const;
 // patch per service.
 export interface FixCluster {
   id: string;
+  // Service-agnostic problem family. Execution clusters stay service-local so
+  // the live oracle proves each service independently, but family_id lets logs
+  // and future scheduling show how many broader problems those execution units
+  // collapse into.
+  family_id: string;
   failure_stage: FailureStage;
   signature: string;
   services: string[];
@@ -84,6 +101,19 @@ export class WallError extends Error {
   }
 }
 
+export type NoChangeClassification = "wall" | "out_of_fence" | "confused";
+
+export class NoChangeProposalError extends Error {
+  constructor(
+    public readonly classification: NoChangeClassification,
+    public readonly transcriptPath: string,
+    public readonly excerpt: string,
+  ) {
+    super(`no code change (${classification}); transcript=${transcriptPath}`);
+    this.name = "NoChangeProposalError";
+  }
+}
+
 // Propose a fix for a cluster (or null = "nothing this attempt"). Throw a
 // WallError to park it as a genuine wall with a concrete reason.
 export type FixProposer = (
@@ -108,6 +138,11 @@ export type Committer = (input: {
   version: string;
 }) => Promise<void>;
 
+export interface StaleClusterGateResult {
+  proceed: boolean;
+  reason: string;
+}
+
 export interface FixAgentOpts {
   batch: FixBatch;
   propose: FixProposer;
@@ -115,12 +150,21 @@ export interface FixAgentOpts {
   // Replays a captured page through the (freshly-edited) planner so the loop can
   // verify the fix actually moved the stuck page before committing.
   replay: ClusterReplay;
+  // The LIVE ORACLE (autonomous-fix-loop Phase 2). When wired, the offline gate
+  // + replay above are only the FAST inner filter; a fix commits ONLY if it also
+  // passes the live gate — the cluster's services extract a working key on ≥M
+  // distinct services AND a held-out canary doesn't regress. Builds dist + runs
+  // real signups internally; returns the verdict. Absent → offline-only (the
+  // pre-Phase-2 behaviour; the unit tests drive it without live runs).
+  liveGate?: (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }>;
   commit: Committer;
   branch: string;
   currentVersion: string;
   // Posture (a): the gated surfaces the agent may touch. A proposal touching
   // anything outside these (or under corpus/eval) is parked, never committed.
   allowedPaths: readonly string[];
+  routerFacts?: ServiceRoutingFacts;
+  staleClusterGate?: (cluster: FixCluster) => Promise<StaleClusterGateResult>;
   maxAttemptsPerCluster?: number;
   log?: (line: string) => void;
 }
@@ -131,6 +175,17 @@ export interface WallCandidate {
   services: string[];
   signature: string;
   attempts: number;
+  reason: string;
+}
+
+export interface RoutedCluster {
+  cluster_id: string;
+  failure_stage: FailureStage;
+  services: string[];
+  signature: string;
+  route: FixRoute;
+  owner: FailureOwner;
+  disposition: FailureDisposition;
   reason: string;
 }
 
@@ -146,36 +201,50 @@ export interface FixAgentResult {
   }>;
   walls: WallCandidate[];
   parked: Array<{ cluster_id: string; reason: string; touched_paths: string[] }>;
+  routed: RoutedCluster[];
 }
 
 // ── Clustering (pure) ───────────────────────────────────────────────
 //
-// Group failures by (failure_stage, signature). Failures that hit the SAME
-// stuck page (same signature) cluster together even across services — that's
-// the shared-root-cause case the holistic pass exists to catch. Same stage but
-// a different page stays a separate cluster (likely a different fix).
+// Group failures by failure shape + page signature, then cap each cluster.
+// A fix still needs to generalize across services, but the verifier requires
+// every captured page in the cluster to move. Huge heterogeneous clusters make
+// that acceptance rule unreachable and starve smaller, actionable fixes.
 export function clusterFailures(batch: FixBatch): FixCluster[] {
   const byKey = new Map<string, FixCluster>();
+  const baseCounts = new Map<string, number>();
   for (const f of batch.failures) {
-    // Cluster by SEMANTIC failure shape: failure_stage + the planner's terminal
-    // action kind. This groups "the planner kept clicking and looped" or "the
-    // planner gave up (done) too early" across services — the shared-root-cause
-    // case the holistic pass exists for. The page signature is deliberately NOT
-    // in the key: even a structural (role-only) signature is per-page, so it
-    // shatters same-root-cause failures back into per-service singletons
-    // (measured 2026-06-11: stage+kind → 11 clusters, +signature → 22). The
-    // eval gate + per-cluster replay are the safety net against an over-merge —
-    // a fix that can't satisfy the whole cluster fails the gate and walls.
     const observedKind = f.terminal_page?.observed.kind ?? "none";
-    const key = `${f.failure_stage}:${observedKind}`;
+    const semanticIntent = f.terminal_page?.semantic?.intent.kind;
+    const semanticVerdict = f.terminal_page?.semantic?.predicate.verdict;
+    const semanticShape =
+      semanticIntent !== undefined
+        ? `${semanticIntent}:${semanticVerdict ?? "unchecked"}`
+        : observedKind;
+    const familyKey =
+      f.semantic_failure_bucket !== undefined
+        ? `${f.semantic_fault_class ?? "unknown"}:${f.semantic_failure_bucket}:${semanticShape}:${f.signature}`
+        : `${f.failure_stage}:${semanticShape}:${f.signature}`;
+    // Service is part of the fix unit. Cross-service shape collisions produced
+    // huge heterogeneous clusters (e.g. fly/braintrust/clarifai/nomic/
+    // stackblitz/unify) whose shared "planner_loop" label hid distinct
+    // regressions and let a proposer declare a false wall for known-green
+    // services. Keep the signature useful for ordering, but require the live
+    // oracle to prove each service independently.
+    const baseKey = `${f.service}:${familyKey}`;
     const page =
       f.terminal_capture_ref !== undefined && f.terminal_page !== undefined
         ? { service: f.service, captureRef: f.terminal_capture_ref, observed: f.terminal_page.observed }
         : undefined;
+    const count = baseCounts.get(baseKey) ?? 0;
+    baseCounts.set(baseKey, count + 1);
+    const bucket = Math.floor(count / MAX_FAILURES_PER_CLUSTER);
+    const key = `${baseKey}:${bucket + 1}`;
     const existing = byKey.get(key);
     if (existing === undefined) {
       byKey.set(key, {
         id: key,
+        family_id: familyKey,
         failure_stage: f.failure_stage,
         signature: f.signature,
         services: [f.service],
@@ -196,6 +265,30 @@ export function clusterFailures(batch: FixBatch): FixCluster[] {
   return [...byKey.values()].sort(
     (a, b) => b.services.length - a.services.length || b.failures.length - a.failures.length,
   );
+}
+
+function summarizeClusterFamilies(clusters: readonly FixCluster[]): string {
+  const byFamily = new Map<string, { clusters: number; services: Set<string>; failures: number }>();
+  for (const cluster of clusters) {
+    const entry = byFamily.get(cluster.family_id) ?? {
+      clusters: 0,
+      services: new Set<string>(),
+      failures: 0,
+    };
+    entry.clusters += 1;
+    entry.failures += cluster.failures.length;
+    for (const service of cluster.services) entry.services.add(service);
+    byFamily.set(cluster.family_id, entry);
+  }
+  const top = [...byFamily.entries()]
+    .sort((a, b) => b[1].clusters - a[1].clusters || b[1].failures - a[1].failures)
+    .slice(0, 5)
+    .map(
+      ([family, entry]) =>
+        `${family}=${entry.clusters} cluster(s)/${entry.services.size} service(s)/${entry.failures} failure(s)`,
+    )
+    .join("; ");
+  return `${byFamily.size} problem family(ies)` + (top.length > 0 ? `; top: ${top}` : "");
 }
 
 // ── Path fence (pure) ───────────────────────────────────────────────
@@ -285,26 +378,70 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
   let nextVersion = computeNextRc(opts.currentVersion);
   assertStagingPrerelease({ branch: opts.branch, version: nextVersion });
 
-  const result: FixAgentResult = { committed: [], walls: [], parked: [] };
+  const result: FixAgentResult = { committed: [], walls: [], parked: [], routed: [] };
   const clusters = clusterFailures(opts.batch);
   log(`batch ${opts.batch.batch_id}: ${opts.batch.failures.length} failure(s) → ${clusters.length} cluster(s)`);
+  log(`cluster families: ${summarizeClusterFamilies(clusters)}`);
 
   // Baseline the gate ONCE so "holdout didn't drop" is measured against the
   // pre-fix state, not re-derived per attempt.
   const baseline = await opts.gate();
+  const hasLiveOracle = opts.liveGate !== undefined;
   if (baseline.emptyRegress) {
-    log("WARNING: regress corpus is empty — the gate is not meaningful; nothing will be committed");
+    if (hasLiveOracle) {
+      // The offline regress corpus is only the CHEAP pre-filter. When it's empty
+      // (the expected state until captures grow A2 sidecars) the LIVE oracle
+      // (Guard 3) is the authoritative commit gate — so an empty corpus is a
+      // skipped filter, not a veto. Without a live oracle there's nothing to
+      // verify against, so empty still blocks (see Guard 1).
+      log("NOTE: regress corpus is empty — deferring the commit decision to the LIVE oracle (Guard 3)");
+    } else {
+      log("WARNING: regress corpus is empty and no live oracle is wired — the gate is not meaningful; nothing will be committed");
+    }
   }
 
   for (const cluster of clusters) {
-    // Can't verify a fix with no captured page — don't commit blind. Park as a
-    // wall-candidate (the honest "we can't confirm a fix here today"), and skip
-    // burning the coding agent on something we couldn't prove either way.
+    // Router gate (Phase 1) — the structural pre-filter. ONLY clusters the
+    // path-fence can actually move (post-OAuth nav planner: planner_loop /
+    // extract) earn a coding-agent spend. Everything else is routed away WITHOUT
+    // burning a Codex attempt: `wall` for genuine dead-ends (phone /
+    // payment / dead host), parked-for-retry/surface for `drain` (timing) +
+    // `capability_gap` (deterministic but out-of-fence). We gate on STAGE — the
+    // fence truth — with conservative inputs (recentGreenRate/dnsAlive/curated
+    // default safe so we never wall on absent data). This is what keeps a lap
+    // from spending 3 attempts each on anti_bot/oauth/phone clusters it can't fix.
+    const route = classifyCluster(buildRouterInput(cluster, opts.batch, opts.routerFacts));
+    result.routed.push(routedWith(cluster, route));
+    if (route.route !== "fix") {
+      result.parked.push({
+        cluster_id: cluster.id,
+        reason: `router-${route.route}: ${route.reason}`,
+        touched_paths: [],
+      });
+      log(`cluster ${cluster.id}: ROUTED → ${route.route} (no coding-agent spend) — ${route.reason}`);
+      continue;
+    }
+
+    const freshness = await opts.staleClusterGate?.(cluster);
+    if (freshness !== undefined && !freshness.proceed) {
+      result.parked.push({
+        cluster_id: cluster.id,
+        reason: freshness.reason,
+        touched_paths: [],
+      });
+      log(`cluster ${cluster.id}: parked — ${freshness.reason}`);
+      continue;
+    }
+
+    // Can't verify a fix with no captured page — don't commit blind. Park it for
+    // recapture/live repro, but do not call it a wall.
     if (cluster.pages.length === 0) {
-      result.walls.push(
-        wallWith(cluster, 0, "no captured page to verify a fix against — cannot confirm a fix today"),
-      );
-      log(`cluster ${cluster.id}: WALL-candidate — unverifiable (no captured page)`);
+      result.parked.push({
+        cluster_id: cluster.id,
+        reason: "no captured page to verify a fix against — recapture required",
+        touched_paths: [],
+      });
+      log(`cluster ${cluster.id}: parked — unverifiable (no captured page)`);
       continue;
     }
 
@@ -317,11 +454,39 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
       try {
         proposal = await opts.propose(cluster, attempt, priorFeedback);
       } catch (err) {
-        if (err instanceof WallError) {
-          wallReason = err.reason;
+        if (err instanceof NoChangeProposalError) {
+          result.parked.push({
+            cluster_id: cluster.id,
+            reason:
+              `no-change-${err.classification}: ${err.excerpt}; ` +
+              `transcript=${err.transcriptPath}`,
+            touched_paths: [],
+          });
+          log(
+            `cluster ${cluster.id}: parked — no code change (${err.classification}); transcript=${err.transcriptPath}`,
+          );
           break;
         }
-        throw err;
+        if (err instanceof WallError) {
+          wallReason = err.reason;
+          priorFeedback =
+            `Do not classify this cluster as a wall. Treat this as a regression; ` +
+            `previous wall claim was: ${err.reason}`;
+          continue;
+        }
+        // A proposer failure (coding-agent crash, timeout, exhausted rate-limit
+        // backoff) is an INFRA failure on THIS cluster — NOT a reason to kill the
+        // whole lap and lose its already-committed fixes. Park it (the next lap
+        // retries) and move on. The proposer guarantees a clean tree on throw, so
+        // the next cluster's clean-tree assertion still holds.
+        const reason = err instanceof Error ? err.message : String(err);
+        log(`cluster ${cluster.id}: proposer error — parking, continuing lap: ${reason}`);
+        result.parked.push({
+          cluster_id: cluster.id,
+          reason: `proposer error: ${reason}`,
+          touched_paths: [],
+        });
+        break;
       }
       if (proposal === null) {
         priorFeedback = "proposer returned no change";
@@ -343,13 +508,20 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
 
       await proposal.apply();
 
-      // Guard 1 — didn't break known-good. The empty-regress gate is vacuously
-      // green; refuse to commit against a meaningless gate.
+      // Guard 1 — didn't break known-good. The regress corpus is the cheap
+      // offline pre-filter. When it's NON-empty it must stay green and the
+      // holdout must not drop. When it's EMPTY the filter is vacuous: with a
+      // live oracle (Guard 3) we defer to the real key and skip this filter;
+      // without one, committing blind is wrong, so empty still blocks.
       const verdict = await opts.gate();
-      const regressOk = verdict.regressPassed && !verdict.emptyRegress;
-      if (!regressOk || !holdoutHeld(verdict, baseline)) {
+      const regressOk = verdict.emptyRegress
+        ? hasLiveOracle
+        : verdict.regressPassed && holdoutHeld(verdict, baseline);
+      if (!regressOk) {
         await proposal.revert();
-        priorFeedback = gateFeedback(verdict, baseline);
+        priorFeedback = verdict.emptyRegress
+          ? "regress corpus empty and no live oracle configured — cannot verify; refusing to commit blind"
+          : gateFeedback(verdict, baseline);
         log(`cluster ${cluster.id}: attempt ${attempt}/${K} red (regression) — ${priorFeedback}`);
         continue;
       }
@@ -366,7 +538,25 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
         continue;
       }
 
-      // Verified: no regression AND every stuck page moved.
+      // Guard 3 — the LIVE ORACLE (Phase 2). Offline said the page moves; now
+      // prove it against reality: the cluster extracts a working key live AND
+      // the canary held. The offline gate can be fooled (stale DOM, a fix that
+      // moves the planner's STEP but doesn't complete the signup); a live key
+      // cannot. Only run after the cheap offline filters pass.
+      if (opts.liveGate !== undefined) {
+        const live = await opts.liveGate(cluster);
+        log(`cluster ${cluster.id}: attempt ${attempt}/${K} live gate — ${live.reason}`);
+        if (!live.passed) {
+          await proposal.revert();
+          priorFeedback =
+            `offline said the page moved, but the LIVE gate rejected it: ${live.reason}. ` +
+            `The fix must make REAL signups extract a working key without breaking the canary.`;
+          continue;
+        }
+      }
+
+      // Verified: no regression, every stuck page moved offline, AND the live
+      // oracle confirmed real keys without canary regression.
       await opts.commit({ cluster, proposal, version: nextVersion });
       result.committed.push({
         cluster_id: cluster.id,
@@ -382,12 +572,16 @@ export async function runFixAgent(opts: FixAgentOpts): Promise<FixAgentResult> {
 
     if (!committed) {
       if (wallReason !== undefined) {
-        result.walls.push(wallWith(cluster, K, wallReason));
-        log(`cluster ${cluster.id}: WALL — ${wallReason}`);
+        result.parked.push({
+          cluster_id: cluster.id,
+          reason: `proposer claimed wall after ${K} attempt(s), rejected by no-wall policy: ${wallReason}`,
+          touched_paths: [],
+        });
+        log(`cluster ${cluster.id}: parked — proposer wall claim rejected: ${wallReason}`);
       } else if (!result.parked.some((p) => p.cluster_id === cluster.id)) {
-        const reason = `no fix both held the gate AND unstuck the page after ${K} attempt(s); no articulable infra reason`;
-        result.walls.push(wallWith(cluster, K, reason));
-        log(`cluster ${cluster.id}: WALL-candidate — ${reason}`);
+        const reason = `no fix both held the gate AND unstuck the page after ${K} attempt(s); rerun/recapture required`;
+        result.parked.push({ cluster_id: cluster.id, reason, touched_paths: [] });
+        log(`cluster ${cluster.id}: parked — ${reason}`);
       }
     }
   }
@@ -415,5 +609,18 @@ function wallWith(cluster: FixCluster, attempts: number, reason: string): WallCa
     signature: cluster.signature,
     attempts,
     reason,
+  };
+}
+
+function routedWith(cluster: FixCluster, route: RouterVerdict): RoutedCluster {
+  return {
+    cluster_id: cluster.id,
+    failure_stage: cluster.failure_stage,
+    services: cluster.services,
+    signature: cluster.signature,
+    route: route.route,
+    owner: route.owner,
+    disposition: route.disposition,
+    reason: route.reason,
   };
 }

@@ -6,9 +6,12 @@ import {
   pickUnspentIdentities,
   isSpent,
   remainingFreshVerifications,
+  summarizeIdentityAvailability,
   loadIdentities,
   loadUsage,
   recordSpent,
+  releaseIdentityLease,
+  reserveIdentityForService,
   verifyPoolConfigured,
   type VerifyIdentity,
   type UsageRecord,
@@ -116,5 +119,113 @@ describe("notebook I/O (temp dir)", () => {
     expect(usage[0]).toMatchObject({ identityId: "verify-01", service: "sentry" });
     const onDisk = JSON.parse(readFileSync(join(dir, "identity-usage.json"), "utf8"));
     expect(onDisk.spent).toHaveLength(1);
+  });
+
+  it("loadUsage preserves spent pairs from backup ledgers", () => {
+    writeFileSync(
+      join(dir, "identity-usage.json"),
+      JSON.stringify({
+        spent: [{ identityId: "verify-02", service: "sentry", at: "new" }],
+      }),
+    );
+    writeFileSync(
+      join(dir, "identity-usage.json.bak-1"),
+      JSON.stringify({
+        spent: [
+          { identityId: "verify-01", service: "sentry", at: "old" },
+          { identityId: "verify-02", service: "sentry", at: "older-duplicate" },
+        ],
+      }),
+    );
+
+    const usage = loadUsage();
+    expect(usage.map((u) => `${u.identityId}:${u.service}`).sort()).toEqual([
+      "verify-01:sentry",
+      "verify-02:sentry",
+    ]);
+    expect(pickUnspentIdentities(POOL, usage, "sentry", "google", 3).map((p) => p.id)).toEqual([
+      "verify-03",
+    ]);
+  });
+
+  it("reserves identities in a file-backed lease table and excludes active leases", () => {
+    writeFileSync(
+      join(dir, "verify-identities.json"),
+      JSON.stringify({
+        identities: [
+          { id: "verify-01", email: "verify-01@trustysquire.ai", profileDir: "/p/1", providers: ["google"] },
+          { id: "verify-02", email: "verify-02@trustysquire.ai", profileDir: "/p/2", providers: ["google"] },
+        ],
+      }),
+    );
+
+    const first = reserveIdentityForService({
+      service: "ipinfo",
+      provider: "google",
+      runId: "run-1",
+    });
+    const second = reserveIdentityForService({
+      service: "instant-db",
+      provider: "google",
+      runId: "run-2",
+    });
+    const third = reserveIdentityForService({
+      service: "langfuse",
+      provider: "google",
+      runId: "run-3",
+    });
+
+    expect(first?.id).toBe("verify-01");
+    expect(second?.id).toBe("verify-02");
+    expect(third).toBeNull();
+
+    releaseIdentityLease("run-1");
+    const fourth = reserveIdentityForService({
+      service: "langfuse",
+      provider: "google",
+      runId: "run-4",
+    });
+    expect(fourth?.id).toBe("verify-01");
+  });
+
+  it("does not reserve an identity already spent at that service", () => {
+    writeFileSync(
+      join(dir, "verify-identities.json"),
+      JSON.stringify({
+        identities: [
+          { id: "verify-01", email: "verify-01@trustysquire.ai", profileDir: "/p/1", providers: ["google"] },
+          { id: "verify-02", email: "verify-02@trustysquire.ai", profileDir: "/p/2", providers: ["google"] },
+        ],
+      }),
+    );
+    recordSpent("verify-01", "ipinfo", "2026-06-19T00:00:00Z");
+
+    const picked = reserveIdentityForService({
+      service: "ipinfo",
+      provider: "google",
+      runId: "run-spent",
+    });
+
+    expect(picked?.id).toBe("verify-02");
+  });
+
+  it("summarizes service-specific availability from spent records", () => {
+    writeFileSync(
+      join(dir, "verify-identities.json"),
+      JSON.stringify({
+        identities: [
+          { id: "verify-01", email: "verify-01@trustysquire.ai", profileDir: "/p/1", providers: ["google"] },
+          { id: "verify-02", email: "verify-02@trustysquire.ai", profileDir: "/p/2", providers: ["google"] },
+        ],
+      }),
+    );
+    recordSpent("verify-01", "instant-db", "2026-06-19T00:00:00Z");
+    recordSpent("verify-02", "instant-db", "2026-06-19T01:00:00Z");
+    recordSpent("verify-01", "arize", "2026-06-19T02:00:00Z");
+
+    expect(summarizeIdentityAvailability(["instant-db", "arize"], "google")).toMatchObject([
+      { service: "instant-db", total: 2, unspent: 0, available: 0 },
+      { service: "arize", total: 2, unspent: 1, available: 1 },
+    ]);
   });
 });

@@ -289,6 +289,23 @@ export interface RecordVerifierOutcomeInput {
   // omit it; a failure with no kind defaults to `transient` and never
   // demotes (anti-thrash — see failure-taxonomy classifyFailure).
   failure_kind?: string;
+  // D2.C — the fresh-verify producer's CONVERGED verdict from the bounded
+  // sequential-confidence sampler. When present, the registry TRUSTS it: a
+  // `promote` flips pending-review → active (through the C11 gate, exactly like
+  // the count-based promote), a `reject` feeds the informative failure_kind into
+  // the demote path, a `hold` is a no-op (the producer had no signal). When
+  // ABSENT (the single-account replay path), the registry falls back to the
+  // historic count-based semantics (one success → promote at the threshold).
+  // Additive + optional so an older client still works.
+  verdict?: "promote" | "reject" | "hold";
+  // The posterior the verdict converged from — stat-only today (carried in the
+  // reason string + available for future telemetry), not part of the transition
+  // logic, so a producer can't fake a verdict by lying about counts.
+  samples?: number;
+  successes?: number;
+  failures?: number;
+  pass_rate_lcb?: number;
+  pass_rate_ucb?: number;
   // Optional duration metric for cost tracking.
   duration_ms?: number;
   // Optional now() override for deterministic tests.
@@ -351,6 +368,7 @@ export interface RecordVerifierOutcomeResult {
   // Describes the side effect (if any) the outcome caused.
   transition:
     | "promoted"      // pending-review reached 1 success → active
+    | "superseded"    // verified duplicate lost to an existing protected active row
     | "retired"       // pending-review reached the failure threshold → deleted
     | "demoted"       // active reached 3 consecutive ROT failures → demoted
     | "quarantined"   // verifier hit a terminal WALL → quarantined (needs human)

@@ -17,8 +17,20 @@ import {
   NAV_TIMEOUT_KIND,
   isReturningUserDivergence,
   ACCOUNT_EXISTS_KIND,
+  failureCountsTowardDemotion,
 } from "@trusty-squire/skill-schema";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  probeShowsServable,
+  BRITTLE_PROBE_KIND,
+} from "../probe-demotion-guard.js";
 import { BrowserController } from "../../bot/browser.js";
+import {
+  probeAffordances,
+  type PageAffordances,
+} from "../../bot/affordance-probe.js";
 import { replaySkill, type ReplayOutcome } from "../../bot/replay-skill.js";
 import { InboxClient } from "../../bot/inbox-client.js";
 import { makeEmailCodeFetcher } from "../../bot/email-code-fetcher.js";
@@ -29,6 +41,19 @@ import {
 import type { HousekeeperTask } from "../queues/index.js";
 import { runCleanup } from "../cleanup.js";
 import type { HousekeeperOpts } from "../orchestrator.js";
+import type { RunFreshVerifyResult } from "./fresh-verify.js";
+
+// D2.D — the fresh-identity verifier hook. Wired by the CLI in heal mode when an
+// identity pool is configured. Returns the sampler result + the registry
+// transition it reported. Shaped as a function so the orchestrator stays
+// decoupled from the bot/inbox wiring runFreshVerify needs.
+export type FreshVerifyRunner = (input: {
+  service: string;
+  skillId: string;
+  skill: Skill;
+  signupUrl?: string;
+  oauthProvider?: "google" | "github";
+}) => Promise<RunFreshVerifyResult>;
 
 // Replay mode applies to the verifier path. 'full' actually
 // generates a credential (proves the path still produces one);
@@ -48,6 +73,17 @@ export type ReplayRunner = (input: {
   // path, where a non-active skill must never be replayed.
   bypassStatusGuard?: boolean;
 }) => Promise<ReplayOutcome>;
+
+// Auto-probe-before-retire hook. Loads the skill's signup page in a fresh
+// browser and reports its affordances, so the verifier can tell a brittle
+// replay failure (page still servable) from genuine skill rot before letting
+// a rot failure advance the demote counter. Owns its own BrowserController
+// lifecycle (handleReplay holds no browser handle — the replay runner already
+// opened and closed one). Injectable so the downgrade logic is unit-testable
+// without a browser.
+export type SignupProbeRunner = (input: {
+  url: string;
+}) => Promise<PageAffordances>;
 
 export type ReplayResult =
   | "skipped" // schema drift; task left in queue for next worker rev
@@ -73,7 +109,14 @@ export function createReplayRunner(): ReplayRunner {
     mode: "dry" | "full";
     bypassStatusGuard?: boolean;
   }): Promise<ReplayOutcome> => {
-    const browser = new BrowserController({});
+    const requiresProviderSession =
+      input.skill.oauth_provider !== null || inferOAuthProviderFromSteps(input.skill) !== null;
+    const tempProfileDir = requiresProviderSession
+      ? undefined
+      : mkdtempSync(join(tmpdir(), "ts-verifier-replay-"));
+    const browser = new BrowserController(
+      tempProfileDir !== undefined ? { profileDir: tempProfileDir } : {},
+    );
     try {
       await browser.start();
       // 0.8.2-rc.22 — synthesize template values for verifier replays.
@@ -162,6 +205,34 @@ export function createReplayRunner(): ReplayRunner {
       } catch {
         // shutdown noise — replay outcome is already captured
       }
+      if (tempProfileDir !== undefined) {
+        try {
+          rmSync(tempProfileDir, { recursive: true, force: true });
+        } catch {
+          // temp-profile cleanup noise — replay outcome is already captured
+        }
+      }
+    }
+  };
+}
+
+// Build the SignupProbeRunner the CLI wires into HousekeeperOpts.probe.
+// A separate browser from the replay runner's — the replay browser is
+// already torn down by the time the probe is needed, and a probe must
+// load the page fresh (no replay-mutated state, no logged-in session
+// from an OAuth step).
+export function createProbeRunner(): SignupProbeRunner {
+  return async (input: { url: string }): Promise<PageAffordances> => {
+    const browser = new BrowserController({});
+    try {
+      await browser.start();
+      return await probeAffordances(browser, input.url);
+    } finally {
+      try {
+        await browser.close();
+      } catch {
+        // shutdown noise — the affordance read is already captured
+      }
     }
   };
 }
@@ -215,6 +286,22 @@ export async function handleReplay(
     return { outcome: "failure", reason, transition };
   }
 
+  // D2.D — prefer the fresh-identity confidence sampler over single-account
+  // replay when the heal pass wired it AND this skill has a fresh-identity path.
+  // v1 fresh-verify scope is pure-OAuth (the robots are Cloud Identity Free with
+  // no mailbox), so we route only OAuth-based skills here; email-only skills and
+  // unwired runs fall through to single-account replay below. This is the
+  // promotion trust signal: "the lower-confidence-bound pass-rate for replaying
+  // this stored Skill over N independent fresh identities is high", not "the
+  // planner found some way to solve the service again."
+  const freshProvider = skill.oauth_provider ?? inferOAuthProviderFromSteps(skill);
+  if (opts.freshVerify !== undefined && freshProvider !== null) {
+    const fresh = await runFreshIdentityVerify(task, skill, freshProvider, opts, log, startMs);
+    if (fresh !== "fallback") return fresh;
+    // "fallback" → the fresh path couldn't run (no pool / pool exhausted);
+    // fall through to single-account replay so the skill still gets verified.
+  }
+
   let outcomeKind: "success" | "failure" = "failure";
   let outcomeReason = "uncaught";
   // Structured failure kind for the demotion classifier (T4). The replay
@@ -234,9 +321,78 @@ export async function handleReplay(
     });
     const isOk =
       replay.kind === "ok" || replay.kind === "ok_multi" || replay.kind === "dry_pass";
+
+    // Legacy/stale skills may be missing oauth_provider metadata and may have
+    // no click_oauth_button step because the capture started after auth. The
+    // first time we learn they require a warm provider session is replay's
+    // needs_login outcome. If the fresh-identity verifier is wired, do not post
+    // that as a verifier failure from the shared/single-account path; reroute
+    // through the robot fleet using the provider replay discovered.
+    if (!isOk && replay.kind === "needs_login" && opts.freshVerify !== undefined) {
+      const fresh = await runFreshIdentityVerify(
+        task,
+        skill,
+        replay.provider,
+        opts,
+        log,
+        startMs,
+      );
+      if (fresh !== "fallback") return fresh;
+    }
+
+    // Returning-user divergence is exactly what the robot fleet was built to
+    // avoid: replaying a fresh-signup capture against an already-known account
+    // makes onboarding elements disappear, then a later selector fails. If the
+    // fresh verifier is available, do not score that replay as evidence. Retry
+    // the service as a never-before-used robot identity. Older skills often
+    // lack oauth_provider metadata, so default to Google: the verify fleet is a
+    // Google robot fleet, and if the service truly has no Google path the fresh
+    // signup will return an explicit non-observation/wall instead of a false
+    // returning-user replay failure.
+    const replayReason = describeReplayOutcome(replay);
+    if (
+      !isOk &&
+      opts.freshVerify !== undefined &&
+      isReturningUserDivergence(replayReason)
+    ) {
+      const fresh = await runFreshIdentityVerify(
+        task,
+        skill,
+        freshProvider ?? "google",
+        opts,
+        log,
+        startMs,
+      );
+      if (fresh !== "fallback") return fresh;
+    }
+
+    // A disabled required button on a pending-review replay usually means the
+    // stored capture is missing a signup/onboarding prerequisite, not that the
+    // service is impossible. The fresh-identity sampler can disambiguate
+    // returning-user state from genuine stored-recipe brittleness, but it still
+    // replays the SAME Skill; it must not promote by discovering a new path.
+    // If the sampler is unavailable, fall back to the existing brittle/
+    // non-demoting downgrade below.
+    if (
+      !isOk &&
+      item.status === "pending-review" &&
+      opts.freshVerify !== undefined &&
+      isDisabledTargetPrecondition(replayReason)
+    ) {
+      const fresh = await runFreshIdentityVerify(
+        task,
+        skill,
+        freshProvider ?? "google",
+        opts,
+        log,
+        startMs,
+      );
+      if (fresh !== "fallback") return fresh;
+    }
+
     outcomeKind = isOk ? "success" : "failure";
     failureKind = isOk ? undefined : replay.kind;
-    outcomeReason = describeReplayOutcome(replay);
+    outcomeReason = replayReason;
 
     // A page-never-loaded failure (proxy blip / cold tunnel / DNS / TLS /
     // connection reset) surfaces as step_failed — the same rot kind as a
@@ -257,6 +413,72 @@ export async function handleReplay(
     // fresh user; a fresh-account discover run is the only true re-verification.
     if (!isOk && isReturningUserDivergence(outcomeReason)) {
       failureKind = ACCOUNT_EXISTS_KIND;
+    }
+
+    // A disabled click target means the captured recipe is missing a prerequisite
+    // (empty required field, unchecked agreement, unselected plan/role), not that
+    // the service is dead. The fix is fresh re-synthesis from a live signup, so
+    // record it as brittle/non-demoting instead of retiring the skill on a stale
+    // replay. This covers Val Town / Arize class failures where replay clicks a
+    // disabled "Create"/"Continue" button.
+    if (!isOk && isDisabledTargetPrecondition(outcomeReason)) {
+      failureKind = BRITTLE_PROBE_KIND;
+      outcomeReason =
+        `${outcomeReason} | [brittle: disabled target indicates missing replay precondition; re-synthesize]`.slice(
+          0,
+          800,
+        );
+    }
+
+    // Auto-probe-before-retire. A failure that WOULD still count toward
+    // demotion at this point (a rot kind the two guards above didn't already
+    // downgrade) might be replay brittleness against a still-servable service,
+    // not genuine rot — the fly.io bug (2026-06-13): a brittle text_match
+    // retired a working skill. Probe the live signup page; if it clearly shows
+    // the service's entry affordances (an OAuth provider or an email-signup
+    // form, no anti-bot interstitial), the failure is brittleness — downgrade
+    // it to the non-demoting BRITTLE_PROBE_KIND and flag it for re-synthesis
+    // instead of retiring it. Conservative: only DOWNGRADE on a clear positive;
+    // a probe error or an empty/ambiguous page leaves the rot classification
+    // intact.
+    if (
+      !isOk &&
+      opts.probe !== undefined &&
+      failureCountsTowardDemotion(failureKind)
+    ) {
+      const downgrade = await tryBrittleProbeDowngrade({
+        probe: opts.probe,
+        signupUrl: skill.signup_url,
+        log,
+        service: item.service,
+      });
+      if (downgrade !== null) {
+        if (
+          item.status === "pending-review" &&
+          opts.freshVerify !== undefined
+        ) {
+          const provider = downgrade.providers.find(
+            (p): p is "google" | "github" => p === "google" || p === "github",
+          );
+          if (provider !== undefined) {
+            const fresh = await runFreshIdentityVerify(
+              task,
+              skill,
+              provider,
+              opts,
+              log,
+              startMs,
+            );
+            if (fresh !== "fallback") return fresh;
+          }
+        }
+        failureKind = BRITTLE_PROBE_KIND;
+        outcomeReason =
+          `${outcomeReason} | [brittle: probe shows servable] ${downgrade.summary}`.slice(
+            0,
+            800,
+          );
+      }
     }
 
     if (isOk && replay.kind === "ok") {
@@ -304,6 +526,124 @@ export async function handleReplay(
     `replay end:   ${item.service} (skill_id=${item.skill_id}, outcome=${outcomeKind}, transition=${transition}, ${duration_ms}ms) — ${outcomeReason.slice(0, 120)}`,
   );
   return { outcome: outcomeKind, reason: outcomeReason, transition };
+}
+
+// Run the auto-probe-before-retire check. Returns a short human summary of
+// the probe result when it CLEARLY shows the page is still servable (the
+// caller then downgrades the failure to non-demoting), or null otherwise — a
+// probe error, an ambiguous/empty page, or a page that itself explains a wall.
+// Null always means "leave the rot classification intact" (never upgrades).
+async function tryBrittleProbeDowngrade(args: {
+  probe: SignupProbeRunner;
+  signupUrl: string;
+  service: string;
+  log: (line: string) => void;
+}): Promise<{ summary: string; providers: PageAffordances["providers"] } | null> {
+  const { probe, signupUrl, service, log } = args;
+  let affordances: PageAffordances;
+  try {
+    affordances = await probe({ url: signupUrl });
+  } catch (err) {
+    // Probe failed (nav/network/launch) — we learned nothing, so don't touch
+    // the demoting classification. A wall/rot here is indistinguishable from
+    // a transient probe blip, and the safe default is the original kind.
+    log(
+      `brittle-probe error: ${service} — ${err instanceof Error ? err.message : String(err)} — leaving rot classification intact`,
+    );
+    return null;
+  }
+  if (!probeShowsServable(affordances)) return null;
+  const summary =
+    `providers=[${affordances.providers.join(",") || "none"}] ` +
+    `email=${affordances.has_email_signup} card=${affordances.card_gate} ` +
+    `interstitial=${affordances.interstitial} url=${affordances.final_url}`;
+  log(
+    `brittle-probe: ${service} — replay failed but signup page still servable (${summary}) — downgrading, flagged for re-synthesis`,
+  );
+  return { summary, providers: affordances.providers };
+}
+
+// D2.D — drive a 'replay' task through the fresh-identity confidence sampler.
+// Returns a ReplayResult mapped from the sampler verdict, or the sentinel
+// "fallback" when the fresh path can't run (no identity pool, pool exhausted,
+// not configured) so handleReplay continues to single-account replay. The
+// sampler reports its OWN outcome to the registry (carrying the verdict +
+// posterior) — runFreshVerify hands back the transition the registry returned,
+// which we surface in the batch summary.
+async function runFreshIdentityVerify(
+  task: Extract<HousekeeperTask, { kind: "replay" }>,
+  skill: Skill,
+  provider: "google" | "github",
+  opts: HousekeeperOpts,
+  log: (line: string) => void,
+  startMs: number,
+): Promise<ReplayResult | "fallback"> {
+  const item = task.queueItem;
+  log(`fresh-verify start: ${item.service} (skill_id=${item.skill_id}, oauth=${provider})`);
+  let fresh: RunFreshVerifyResult;
+  try {
+    fresh = await opts.freshVerify!({
+      service: item.service,
+      skillId: item.skill_id,
+      skill,
+      ...(skill.signup_url.length > 0 ? { signupUrl: skill.signup_url } : {}),
+      ...(provider !== null ? { oauthProvider: provider } : {}),
+    });
+  } catch (err) {
+    // A crash in the fresh path is not a skill verdict — fall back to replay.
+    log(
+      `fresh-verify error: ${item.service} — ${err instanceof Error ? err.message : String(err)} — falling back to single-account replay`,
+    );
+    return "fallback";
+  }
+
+  if (fresh.kind === "not_configured") {
+    log(`fresh-verify: ${item.service} — no identity pool; falling back to single-account replay`);
+    return "fallback";
+  }
+  if (fresh.kind === "returning_verified") {
+    log(
+      `fresh-verify: ${item.service} — returning-profile component check ` +
+        `${fresh.success ? "passed" : "failed"}; not a fresh verifier verdict`,
+    );
+    return "skipped";
+  }
+  if (fresh.kind === "insufficient_identities") {
+    log(
+      `fresh-verify: ${item.service} — pool exhausted or leased (${fresh.available ?? 0} available); skipping single-account replay to avoid shared-profile false failures`,
+    );
+    return "skipped";
+  }
+
+  // A converged verdict. runFreshVerify already posted it to the registry (when
+  // a skillId + admin bearer were present) and handed back the transition. A
+  // `hold` is a deliberate no-op — surface it as a skipped task so the batch
+  // doesn't count it as a pass or a fail.
+  const duration_ms = Date.now() - startMs;
+  const reason =
+    `fresh-verify ${fresh.verdict} (${fresh.successes}✓/${fresh.failures}✗, ` +
+    `LCB ${fresh.passRateLcb.toFixed(2)}/UCB ${fresh.passRateUcb.toFixed(2)}, ` +
+    `${fresh.samples} sample(s), ${duration_ms}ms)`;
+  log(`fresh-verify end:   ${item.service} — ${reason} → transition=${fresh.transition ?? "none"}`);
+  if (fresh.verdict === "hold") return "skipped";
+  return {
+    outcome: fresh.verdict === "promote" ? "success" : "failure",
+    reason,
+    transition: fresh.transition ?? "none",
+  };
+}
+
+function inferOAuthProviderFromSteps(skill: Skill): "google" | "github" | null {
+  for (const step of skill.steps) {
+    if (step.kind === "click_oauth_button") return step.provider;
+  }
+  return null;
+}
+
+function isDisabledTargetPrecondition(reason: string): boolean {
+  return /target is disabled|aria-disabled|html disabled|click would no-op|required precondition/i.test(
+    reason,
+  );
 }
 
 function describeReplayOutcome(outcome: ReplayOutcome): string {

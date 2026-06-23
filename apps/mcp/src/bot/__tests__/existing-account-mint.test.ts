@@ -18,7 +18,13 @@
 //     the captcha-short-circuit test's documented encapsulation break.
 
 import { describe, expect, it } from "vitest";
-import { findCreateKeyAffordance, SignupAgent } from "../agent.js";
+import {
+  findApiKeysNavLink,
+  findCreateKeyAffordance,
+  findKeyModalSubmit,
+  findKeyNameInput,
+  SignupAgent,
+} from "../agent.js";
 import type { BrowserController, InteractiveElement } from "../browser.js";
 import type { LLMClient, LLMRequest, LLMResponse } from "../llm-client.js";
 
@@ -116,8 +122,125 @@ describe("findCreateKeyAffordance", () => {
     expect(findCreateKeyAffordance(inv)).toBeNull();
   });
 
+  it("does not match large announcement cards with distant 'new' and 'keys' words", () => {
+    const inv = [
+      el({
+        visibleText:
+          "What's new User budgets for AI usage Admins can set monthly budgets " +
+          "covering model spend through provider keys and exports. Learn more",
+        selector: "#whats-new",
+      }),
+      el({ visibleText: "New token", selector: "#new-token" }),
+    ];
+    expect(findCreateKeyAffordance(inv)?.selector).toBe("#new-token");
+  });
+
   it("returns null on an empty inventory", () => {
     expect(findCreateKeyAffordance([])).toBeNull();
+  });
+});
+
+describe("findKeyModalSubmit / findKeyNameInput", () => {
+  // groq's create-key flow: clicking the page-level "Create API Key" opens a
+  // dialog with a Name input + a bare "Submit". findCreateKeyAffordance can't
+  // see "Submit", so the modal needs its own confirm matcher.
+  const groqModal = [
+    el({ tag: "input", type: "text", placeholder: "Name", selector: "#name" }),
+    el({ tag: "button", visibleText: "Cancel", selector: "#cancel" }),
+    el({ tag: "button", visibleText: "Submit", selector: "#submit" }),
+    // The page-level create button is STILL in the background DOM:
+    el({ tag: "button", visibleText: "Create API Key", selector: "#create-page" }),
+  ];
+
+  it("finds the modal's bare 'Submit' (excluding the page-level create button)", () => {
+    expect(findKeyModalSubmit(groqModal, "#create-page")?.selector).toBe("#submit");
+  });
+
+  it("ignores Cancel/Close negatives", () => {
+    const inv = [
+      el({ tag: "input", type: "text", selector: "#name" }),
+      el({ tag: "button", visibleText: "Cancel", selector: "#cancel" }),
+      el({ tag: "button", visibleText: "Close", selector: "#close" }),
+    ];
+    expect(findKeyModalSubmit(inv, "#none")).toBeNull();
+  });
+
+  it("requires a name input to be present (no modal → no submit)", () => {
+    const inv = [el({ tag: "button", visibleText: "Submit", selector: "#submit" })];
+    expect(findKeyModalSubmit(inv, "#none")).toBeNull();
+  });
+
+  it("does not return the excluded page-level create button as the confirm", () => {
+    const inv = [
+      el({ tag: "input", type: "text", selector: "#name" }),
+      el({ tag: "button", visibleText: "Create API Key", selector: "#create-page" }),
+    ];
+    // "Create API Key" is the excluded selector; nothing else is affirmative.
+    expect(findKeyModalSubmit(inv, "#create-page")).toBeNull();
+  });
+
+  it("findKeyNameInput returns the first visible text input", () => {
+    expect(findKeyNameInput(groqModal)?.selector).toBe("#name");
+    expect(
+      findKeyNameInput([el({ tag: "input", type: "checkbox", selector: "#cb" })]),
+    ).toBeNull();
+  });
+});
+
+describe("findApiKeysNavLink", () => {
+  it("finds an anchor whose href points at a keys page", () => {
+    const inv = [
+      el({ tag: "a", visibleText: "Dashboard", href: "/dashboard", selector: "#d" }),
+      el({ tag: "a", visibleText: "Settings", href: "/settings/api-keys", selector: "#k" }),
+    ];
+    expect(findApiKeysNavLink(inv)?.selector).toBe("#k");
+  });
+
+  it("finds a non-conventional keys href the URL-guesser would never reach", () => {
+    // unify-ai: the keys link exists but at a path /keys, /api-keys,
+    // /settings/api-keys all 404'd — only the real href works.
+    const inv = [
+      el({ tag: "a", visibleText: "API", href: "/org/abc/developer/api-keys", selector: "#real" }),
+    ];
+    expect(findApiKeysNavLink(inv)?.selector).toBe("#real");
+  });
+
+  it("matches by link text when no href is present", () => {
+    expect(
+      findApiKeysNavLink([el({ tag: "a", visibleText: "API Keys", selector: "#t" })])?.selector,
+    ).toBe("#t");
+  });
+
+  it("prefers a real href target over a text-only match", () => {
+    const inv = [
+      el({ tag: "a", visibleText: "API keys", selector: "#text" }),
+      el({ tag: "a", visibleText: "Keys", href: "/settings/keys", selector: "#href" }),
+    ];
+    expect(findApiKeysNavLink(inv)?.selector).toBe("#href");
+  });
+
+  it("skips a link already clicked", () => {
+    const inv = [el({ tag: "a", visibleText: "API Keys", href: "/api-keys", selector: "#k" })];
+    expect(findApiKeysNavLink(inv, new Set(["#k"]))).toBeNull();
+  });
+
+  it("ignores a 'Create API key' button (not a nav link) without a keys href", () => {
+    expect(
+      findApiKeysNavLink([el({ tag: "button", visibleText: "Create API key", selector: "#c" })]),
+    ).toBeNull();
+  });
+
+  it("does not match unrelated nav (keyboard shortcuts, billing, docs)", () => {
+    const inv = [
+      el({ tag: "a", visibleText: "Keyboard shortcuts", href: "/help/shortcuts", selector: "#kb" }),
+      el({ tag: "a", visibleText: "Billing", href: "/settings/billing", selector: "#b" }),
+      el({ tag: "a", visibleText: "Docs", href: "/docs", selector: "#d" }),
+    ];
+    expect(findApiKeysNavLink(inv)).toBeNull();
+  });
+
+  it("returns null on an empty inventory", () => {
+    expect(findApiKeysNavLink([])).toBeNull();
   });
 });
 
@@ -137,11 +260,13 @@ interface FakeBrowserConfig {
   // revealMaskedCredentials result.
   revealClicked?: number;
   pageText?: string;
+  waitForInteractiveDomHangs?: boolean;
 }
 
 class FakeBrowser {
   public clicks: string[] = [];
   public gotos: string[] = [];
+  public interactiveWaits = 0;
   private created = false;
   constructor(private readonly cfg: FakeBrowserConfig) {}
 
@@ -188,7 +313,12 @@ class FakeBrowser {
     this.gotos.push(url);
     this.cfg.url = url;
   }
-  async waitForInteractiveDom(_a: number, _b: number): Promise<void> {}
+  async waitForInteractiveDom(_a: number, _b: number): Promise<void> {
+    this.interactiveWaits += 1;
+    if (this.cfg.waitForInteractiveDomHangs === true) {
+      await new Promise(() => {});
+    }
+  }
 }
 
 function agentWith(browser: FakeBrowser): SignupAgent {
@@ -244,6 +374,24 @@ describe("SignupAgent.attemptMintNewKey", () => {
     expect(browser.clicks).toContain("#create");
   });
 
+  it("mints from a generic settings URL when the current page visibly offers Create API Key (Runpod class)", async () => {
+    const browser = new FakeBrowser({
+      url: "https://console.runpod.io/user/settings",
+      pageText:
+        "User Settings API keys Generate unique keys that allow access to API services Create API Key",
+      candidates: [],
+      inventory: [el({ visibleText: "Create API Key", selector: "#create" })],
+      candidatesAfterCreate: ["re_runpodkeyexampleCCCCCCCCCC03"],
+    });
+    const agent = agentWith(browser);
+    const out = await mint(agent, []);
+
+    expect(out).not.toBeNull();
+    expect(out?.api_key).toBe("re_runpodkeyexampleCCCCCCCCCC03");
+    expect(browser.clicks).toContain("#create");
+    expect(browser.gotos).toHaveLength(0);
+  });
+
   it("walks keys-path fallbacks from a non-keys dashboard, then mints", async () => {
     const browser = new FakeBrowser({
       url: "https://app.example.test/onboarding",
@@ -278,5 +426,22 @@ describe("SignupAgent.attemptMintNewKey", () => {
     expect(out).toBeNull();
     // No create affordance → never clicked one.
     expect(browser.clicks).toHaveLength(0);
+  });
+
+  it("aborts guessed key URL walking on SPA 404 copy before a hanging readiness wait", async () => {
+    const browser = new FakeBrowser({
+      url: "https://cloud.temporal.io/login",
+      pageText: "404 Uh oh. There's an error. Not found: /settings/api_keys",
+      inventory: [],
+      waitForInteractiveDomHangs: true,
+    });
+    const agent = agentWith(browser);
+    const steps: string[] = [];
+    const out = await mint(agent, steps);
+
+    expect(out).toBeNull();
+    expect(browser.interactiveWaits).toBe(0);
+    expect(browser.gotos).toHaveLength(3);
+    expect(steps.some((s) => s.includes("3 consecutive 404s on guessed keys URLs"))).toBe(true);
   });
 });

@@ -16,6 +16,10 @@ export interface ReadOtpInput {
   // Restrict by sender domain (e.g. "porter.run"). The bot derives
   // this from the current page's hostname.
   fromDomain?: string;
+  // Recipient mailbox to search when the code is sent to a Workspace
+  // catch-all robot identity (e.g. verify-11@trustysquire.ai) instead
+  // of the operator inbox itself.
+  toAddress?: string;
   // Max seconds to wait in total. Defaults to 90s — the upper end
   // of "the email should arrive within this window".
   maxWaitSeconds?: number;
@@ -67,12 +71,50 @@ export async function readOperatorOtp(
       ...(input.fromDomain !== undefined && input.fromDomain.length > 0
         ? { from_domain: input.fromDomain }
         : {}),
+      ...(input.toAddress !== undefined && input.toAddress.length > 0
+        ? { to_address: input.toAddress }
+        : {}),
       ...(input.otpPattern !== undefined && input.otpPattern.length > 0
         ? { otp_pattern: input.otpPattern }
         : {}),
       ...(input.returnKind === "url" ? { return_kind: "url" } : {}),
     };
     try {
+      if (input.toAddress !== undefined && input.toAddress.length > 0) {
+        const workspaceRes = await fetch(`${base}/v1/inbox/poll-workspace-mail`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${input.machineToken}`,
+          },
+          body: JSON.stringify({
+            to_address: input.toAddress,
+            since_seconds: sinceSeconds,
+          }),
+        });
+        if (!workspaceRes.ok) {
+          lastReason = `workspace_http_${workspaceRes.status}`;
+          if (workspaceRes.status === 401 || workspaceRes.status === 503) {
+            return { code: null, reason: lastReason };
+          }
+        } else {
+          const payload = (await workspaceRes.json()) as {
+            email: {
+              subject: string;
+              body_text: string;
+              body_html: string;
+              parsed_codes: string[];
+            } | null;
+            reason?: string;
+          };
+          const code =
+            payload.email === null
+              ? null
+              : pickOtpFromWorkspaceEmail(payload.email, input.toAddress);
+          if (code !== null) return { code, reason: "found" };
+          lastReason = payload.reason ?? "workspace_no_match";
+        }
+      } else {
       const res = await fetch(`${base}/v1/inbox/poll-operator-otp`, {
         method: "POST",
         headers: {
@@ -98,6 +140,7 @@ export async function readOperatorOtp(
         }
         lastReason = payload.reason ?? "no_match";
       }
+      }
     } catch (err) {
       lastReason = `network_${err instanceof Error ? err.message : String(err)}`;
     }
@@ -106,6 +149,37 @@ export async function readOperatorOtp(
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   return { code: null, reason: lastReason };
+}
+
+function pickOtpFromWorkspaceEmail(
+  email: {
+    subject: string;
+    body_text: string;
+    body_html: string;
+    parsed_codes: string[];
+  },
+  recipient: string,
+): string | null {
+  const recipientLocal = recipient.split("@")[0] ?? "";
+  const recipientDigits = new Set(recipientLocal.match(/\d{4,10}/g) ?? []);
+  const parsed = email.parsed_codes.find(
+    (c) => /^\d{4,8}$/.test(c) && !recipientDigits.has(c),
+  );
+  if (parsed !== undefined) return parsed;
+  const body = `${email.subject}\n${email.body_text}\n${email.body_html}`
+    .split(recipient)
+    .join(" ")
+    .split(recipientLocal)
+    .join(" ");
+  const strict =
+    /\b(?:code|otp|one[\s-]?time|verification|verify|pin)\b[^A-Za-z0-9]{0,50}?(\d(?:[ \-]?\d){3,7})/i.exec(
+      body,
+    );
+  if (strict?.[1] !== undefined) {
+    const cleaned = strict[1].replace(/[^0-9]/g, "");
+    if (cleaned.length >= 4 && cleaned.length <= 8) return cleaned;
+  }
+  return null;
 }
 
 // 0.8.3-rc.1 — convenience wrapper: poll for a GitHub

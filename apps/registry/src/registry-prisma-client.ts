@@ -16,6 +16,75 @@ export interface RegistryPrismaClient {
   provisionEvent: ProvisionEventDelegate;
   // T10 — closed-loop heal-pass heartbeats for the admin status panel.
   healRun: HealRunDelegate;
+  // Memory-overhaul Phase 3 — materialized per-service status.
+  serviceState: ServiceStateDelegate;
+  // Memory-overhaul Phase 4 — the drainable failure ledger.
+  openIssue: OpenIssueDelegate;
+}
+
+interface OpenIssueRow {
+  id: string;
+  service: string;
+  failure_kind: string;
+  status: string;
+  first_seen: Date;
+  attempts: number;
+  resolved_run: string | null;
+  falsified: unknown;
+  actor: string | null;
+  version: number;
+  updated_at: Date;
+}
+
+interface OpenIssueDelegate {
+  create(args: { data: Record<string, unknown> }): Promise<OpenIssueRow>;
+  update(args: {
+    where: Record<string, unknown>;
+    data: Record<string, unknown>;
+  }): Promise<OpenIssueRow>;
+  updateMany(args: {
+    where: Record<string, unknown>;
+    data: Record<string, unknown>;
+  }): Promise<{ count: number }>;
+  findUnique(args: {
+    where: Record<string, unknown>;
+  }): Promise<OpenIssueRow | null>;
+  findMany(args: {
+    where?: Record<string, unknown>;
+    orderBy?: Record<string, unknown>;
+  }): Promise<OpenIssueRow[]>;
+  deleteMany(args: {
+    where: Record<string, unknown>;
+  }): Promise<{ count: number }>;
+}
+
+interface ServiceStateRow {
+  service: string;
+  status: string;
+  confidence: number;
+  successful_count: number;
+  failed_count: number;
+  last_attempt_at: Date | null;
+  last_green_at: Date | null;
+  last_failure_kind: string | null;
+  current_diagnosis: string | null;
+  diagnosis_evidence: string | null;
+  wall_classification: string | null;
+  projection_updated_at: Date;
+}
+
+interface ServiceStateDelegate {
+  upsert(args: {
+    where: Record<string, unknown>;
+    create: Record<string, unknown>;
+    update: Record<string, unknown>;
+  }): Promise<ServiceStateRow>;
+  findUnique(args: {
+    where: Record<string, unknown>;
+  }): Promise<ServiceStateRow | null>;
+  findMany(args: {
+    orderBy?: Record<string, unknown>;
+  }): Promise<ServiceStateRow[]>;
 }
 
 interface HealRunRow {

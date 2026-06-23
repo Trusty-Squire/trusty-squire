@@ -133,6 +133,13 @@ export interface EgressGrantStore {
   revoke(id: string, accountId: string, at: string): Promise<boolean>;
 }
 
+export class EgressGrantStoreUnavailableError extends Error {
+  constructor(message = "egress grant store temporarily unavailable") {
+    super(message);
+    this.name = "EgressGrantStoreUnavailableError";
+  }
+}
+
 export class InMemoryEgressGrantStore implements EgressGrantStore {
   private readonly grants = new Map<string, EgressGrant>();
 

@@ -42,6 +42,10 @@ export class PrismaProvisionEventStore implements ProvisionEventStore {
       final_outcome: input.final_outcome ?? null,
       failure_kind: input.failure_kind ?? null,
       signup_url: input.signup_url ?? null,
+      mode: input.mode ?? null,
+      captcha_kind: input.captcha_kind ?? null,
+      captcha_variant: input.captcha_variant ?? null,
+      captcha_blocked: input.captcha_blocked ?? null,
       provision_id: input.provision_id ?? null,
       step_trail,
       llm_cost: input.llm_cost ?? null,
@@ -182,6 +186,10 @@ function mapRow(r: {
   status: string;
   failure_kind: string | null;
   signup_url: string | null;
+  mode?: string | null;
+  captcha_kind?: string | null;
+  captcha_variant?: string | null;
+  captcha_blocked?: boolean | null;
   artifacts_uri: string | null;
   provision_id?: string | null;
   step_trail?: string | null;
@@ -206,6 +214,10 @@ function mapRow(r: {
     final_outcome: (r.final_outcome ?? null) as ProvisionEventRecord["final_outcome"],
     failure_kind: r.failure_kind,
     signup_url: r.signup_url,
+    mode: r.mode ?? null,
+    captcha_kind: r.captcha_kind ?? null,
+    captcha_variant: r.captcha_variant ?? null,
+    captcha_blocked: r.captcha_blocked ?? null,
     artifacts_uri: r.artifacts_uri,
     provision_id: r.provision_id ?? null,
     step_trail: r.step_trail ?? null,

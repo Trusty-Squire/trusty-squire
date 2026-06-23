@@ -188,6 +188,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     store: credentialStore,
     audit: vaultAuditStore,
     kms,
+    proxyAuditFailureMode: "best_effort",
   });
 
   // Inbox stores: Postgres-backed when INBOX_DATABASE_URL is set,

@@ -14,9 +14,12 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import {
   type ExtractFailureStore,
+  type ExtractFailureDetail,
+  type ExtractFailureSummary,
   RateLimitedError,
   TooLargeError,
 } from "../extract-failure-store.js";
+import { redactCredentials, redactHtml } from "../redact.js";
 
 export interface ExtractFailuresRouteDeps {
   store: ExtractFailureStore;
@@ -58,11 +61,14 @@ export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRou
       const { screenshot_jpeg_base64, provision_id, ...payload } = parsed.data;
       const upload = {
         ...payload,
+        extract_reason: redactCredentials(payload.extract_reason),
+        candidates: payload.candidates.map(redactCredentials),
+        html: redactHtml(payload.html),
         ...(screenshot_jpeg_base64 !== undefined ? { screenshot_jpeg_base64 } : {}),
         ...(provision_id !== undefined ? { provision_id } : {}),
       };
       const summary = await store.upload(account_id, upload);
-      return reply.code(201).send(summary);
+      return reply.code(201).send(sanitizeSummary(summary));
     } catch (err) {
       if (err instanceof RateLimitedError) {
         return reply
@@ -83,7 +89,7 @@ export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRou
     const query = request.query as Record<string, string | undefined>;
     const limit = query.limit !== undefined ? Math.min(200, Math.max(1, Number(query.limit))) : 50;
     const summaries = await store.list(account_id, limit);
-    return reply.send({ snapshots: summaries });
+    return reply.send({ snapshots: summaries.map(sanitizeSummary) });
   });
 
   fastify.get("/v1/extract-failures/:id", async (request, reply) => {
@@ -92,7 +98,7 @@ export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRou
     const detail = await store.get(account_id, id);
     if (detail === null) return reply.code(404).send({ error: "not_found" });
     return reply.send({
-      ...detail,
+      ...sanitizeDetail(detail),
       screenshot_jpeg_base64:
         detail.screenshot_jpeg !== null
           ? detail.screenshot_jpeg.toString("base64")
@@ -112,7 +118,7 @@ export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRou
     if (detail === null) return reply.code(404).send({ error: "not_found" });
     return reply
       .header("Content-Type", "text/html; charset=utf-8")
-      .send(detail.html);
+      .send(redactHtml(detail.html));
   });
 
   fastify.get("/v1/extract-failures/:id/jpeg", async (request, reply) => {
@@ -126,3 +132,19 @@ export const registerExtractFailuresRoute: FastifyPluginAsync<ExtractFailuresRou
       .send(detail.screenshot_jpeg);
   });
 };
+
+function sanitizeSummary(summary: ExtractFailureSummary): ExtractFailureSummary {
+  return {
+    ...summary,
+    extract_reason: redactCredentials(summary.extract_reason),
+  };
+}
+
+function sanitizeDetail(detail: ExtractFailureDetail): ExtractFailureDetail {
+  return {
+    ...sanitizeSummary(detail),
+    html: redactHtml(detail.html),
+    screenshot_jpeg: detail.screenshot_jpeg,
+    candidates: detail.candidates.map(redactCredentials),
+  };
+}

@@ -13,6 +13,10 @@
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { Buffer } from "node:buffer";
+import {
+  canonicalizeServiceSlug,
+  equivalentServiceSlugs,
+} from "@trusty-squire/skill-schema";
 import type {
   SkillStore,
   RecordVerifierOutcomeResult,
@@ -138,6 +142,18 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
             : {}),
           ...(req.body.duration_ms !== undefined
             ? { duration_ms: req.body.duration_ms }
+            : {}),
+          // D2.C — the fresh-verify sampler's converged posterior + verdict.
+          // All additive/optional; absent on the single-account replay path.
+          ...(req.body.verdict !== undefined ? { verdict: req.body.verdict } : {}),
+          ...(req.body.samples !== undefined ? { samples: req.body.samples } : {}),
+          ...(req.body.successes !== undefined ? { successes: req.body.successes } : {}),
+          ...(req.body.failures !== undefined ? { failures: req.body.failures } : {}),
+          ...(req.body.pass_rate_lcb !== undefined
+            ? { pass_rate_lcb: req.body.pass_rate_lcb }
+            : {}),
+          ...(req.body.pass_rate_ucb !== undefined
+            ? { pass_rate_ucb: req.body.pass_rate_ucb }
             : {}),
         });
       } catch (err) {
@@ -277,17 +293,24 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
         opts.store.listSkills({ status: "demoted", limit: 500 }),
         opts.store.listSkills({ status: "quarantined", limit: 500 }),
       ]);
-      const excludeServices = new Set(activeSkills.map((s) => s.service));
+      const excludeServices = new Set<string>();
+      for (const s of activeSkills) {
+        for (const slug of equivalentServiceSlugs(s.service)) excludeServices.add(slug);
+      }
       // T5 — closed loop: a quarantined (wall) service is routed to the
       // human pile, NEVER auto-rediscovered, so exclude it from candidates.
-      for (const s of quarantinedSkills) excludeServices.add(s.service);
+      for (const s of quarantinedSkills) {
+        for (const slug of equivalentServiceSlugs(s.service)) excludeServices.add(slug);
+      }
       // A freshly-demoted (rot) skill's service should be re-skilled
       // REGARDLESS of demand — that's the demotion→rediscovery handoff.
       // Prepended below so a known-broken skill gets re-captured ahead of
       // demand-only candidates.
       const demotedServices = [
         ...new Set(
-          demotedSkills.map((s) => s.service).filter((svc) => !excludeServices.has(svc)),
+          demotedSkills
+            .map((s) => canonicalizeServiceSlug(s.service))
+            .filter((svc) => !excludeServices.has(svc)),
         ),
       ];
 
@@ -491,6 +514,16 @@ interface VerifierOutcomeBody {
   // classifies as transient and never demotes.
   failure_kind?: string;
   duration_ms?: number;
+  // D2.C — the fresh-verify producer's converged sequential-confidence verdict +
+  // posterior. All additive/optional: the single-account replay path omits them
+  // and the store falls back to count-based semantics. When `verdict` is present
+  // the store TRUSTS it (promote/reject/hold) instead of re-deriving from counts.
+  verdict?: "promote" | "reject" | "hold";
+  samples?: number;
+  successes?: number;
+  failures?: number;
+  pass_rate_lcb?: number;
+  pass_rate_ucb?: number;
 }
 
 interface BotFailureBody {
@@ -517,5 +550,11 @@ function isVerifierOutcomeBody(body: unknown): body is VerifierOutcomeBody {
   if (typeof b["reason"] !== "string") return false;
   if (b["failure_kind"] !== undefined && typeof b["failure_kind"] !== "string") return false;
   if (b["duration_ms"] !== undefined && typeof b["duration_ms"] !== "number") return false;
+  // D2.C — additive optional sampler fields.
+  const v = b["verdict"];
+  if (v !== undefined && v !== "promote" && v !== "reject" && v !== "hold") return false;
+  for (const k of ["samples", "successes", "failures", "pass_rate_lcb", "pass_rate_ucb"]) {
+    if (b[k] !== undefined && typeof b[k] !== "number") return false;
+  }
   return true;
 }

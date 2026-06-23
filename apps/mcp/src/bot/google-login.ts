@@ -127,8 +127,12 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
 // phone via noVNC (the spike's 1920x1080 was the UX mistake). 720x1280
 // is the smallest size that doesn't look pixel-y on a 1080p+ phone
 // screen, and stays bandwidth-friendly compared to 1080x1920.
-const HEADLESS_W = 720;
-const HEADLESS_H = 1280;
+// Overridable via BOT_NOVNC_W/H — a desktop-width display (e.g. 1440x900) is
+// needed when the remote page is a responsive app whose desktop-only controls
+// (hover-revealed row menus in the Workspace Admin console) collapse at phone
+// width. Defaults stay phone-shaped for the common login-from-phone case.
+const HEADLESS_W = Number(process.env.BOT_NOVNC_W) || 720;
+const HEADLESS_H = Number(process.env.BOT_NOVNC_H) || 1280;
 
 // The Debian/Ubuntu `novnc` package installs its web assets here — the
 // `core/` RFB library our branded page reuses (see runHeadlessChrome).
@@ -371,6 +375,7 @@ export function extractGoogleNumberMatch(text: string): string | null {
 // --- environment helpers ----------------------------------------------
 export function hasDisplay(): boolean {
   if (process.env.TRUSTY_SQUIRE_FORCE_HEADLESS === "true") return false;
+  if (process.env.TRUSTY_SQUIRE_FORCE_DISPLAY === "true") return true;
   // macOS (Aqua) and Windows (Win32) have native windowing — Chrome
   // opens a real window without an X server. DISPLAY is a Unix concept
   // they don't set, so a DISPLAY-only check would have wrongly routed
@@ -379,8 +384,16 @@ export function hasDisplay(): boolean {
   // platforms).
   if (process.platform === "darwin" || process.platform === "win32") return true;
   // Linux: a non-empty DISPLAY means there's an X server we can draw to.
-  // Headless boxes (Hetzner, Codespaces, Docker, SSH) won't have it
-  // and fall through to the noVNC path.
+  // Headless boxes often inherit an automation/Xvfb DISPLAY over SSH, though;
+  // that is NOT a human-visible desktop. Prefer noVNC for SSH/TTY Linux
+  // sessions unless explicitly overridden with TRUSTY_SQUIRE_FORCE_DISPLAY.
+  if (
+    process.env.SSH_CONNECTION !== undefined ||
+    process.env.SSH_TTY !== undefined ||
+    process.env.XDG_SESSION_TYPE === "tty"
+  ) {
+    return false;
+  }
   return typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0;
 }
 

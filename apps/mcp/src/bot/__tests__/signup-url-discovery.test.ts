@@ -10,6 +10,7 @@ import {
   detectAntiBotBlock,
   firstHttpsUrl,
   guessSignupUrl,
+  isGoogleConsumerPostOAuthUrl,
   isGoogleSearchUrl,
   resolveSignupUrl,
 } from "../agent.js";
@@ -130,6 +131,11 @@ describe("resolveSignupUrl", () => {
     expect(await resolveSignupUrl("Sentry", undefined)).toBe("https://sentry.com/signup");
   });
 
+  it("uses canonical signup URLs for services whose auth host breaks URL fallback", async () => {
+    expect(await resolveSignupUrl("axiom", null)).toBe("https://app.axiom.co/register");
+    expect(await resolveSignupUrl("anyscale", null)).toBe("https://console.anyscale.com");
+  });
+
   it("logs the resolved URL via the optional logger", async () => {
     const lines: string[] = [];
     await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"), {
@@ -146,6 +152,21 @@ describe("resolveSignupUrl", () => {
     });
     expect(url).toBe("https://xata.io/app/signup");
     expect(calls.n).toBe(0); // a verified skill URL never spends an LLM call
+  });
+
+  it("uses canonical canary URLs before spending LLM calls", async () => {
+    const calls = { n: 0 };
+    const llm = stubLLM("https://console.cloud.clickhouse.com/signup", calls);
+    expect(await resolveSignupUrl("clickhouse-cloud", llm)).toBe("https://console.clickhouse.cloud/signup");
+    expect(await resolveSignupUrl("langfuse", llm)).toBe("https://cloud.langfuse.com/auth/sign-up");
+    expect(await resolveSignupUrl("fly-io", llm)).toBe("https://fly.io/app/sign-up");
+    expect(await resolveSignupUrl("braintrust", llm)).toBe("https://www.braintrust.dev/signup");
+    expect(await resolveSignupUrl("nomic", llm)).toContain(
+      "https://nomicai-production.us.auth0.com/u/login",
+    );
+    expect(await resolveSignupUrl("stackblitz", llm)).toBe("https://stackblitz.com/register");
+    expect(await resolveSignupUrl("anyscale", llm)).toBe("https://console.anyscale.com");
+    expect(calls.n).toBe(0);
   });
 
   it("falls through to the model when the skill lookup returns null", async () => {
@@ -283,6 +304,37 @@ describe("detectAlreadySignedIn (F17)", () => {
     ).toBe(false);
   });
 
+  it("fires on an auth-path 404 shell with authenticated onboarding checklist chrome", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://cloud.example.com/signup",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Bring me home, please" }),
+          mkEl({ tag: "button", visibleText: "Create an index" }),
+          mkEl({ tag: "button", visibleText: "Don't show me again" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("fires on a signed-in product welcome page with a project setup card", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://console.example.com/u/0/",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Google Account Verify Robot" }),
+          mkEl({
+            tag: "div",
+            role: "button",
+            visibleText:
+              "Get started by setting up a project Integrate products to super-charge your app",
+          }),
+          mkEl({ tag: "a", visibleText: "Support" }),
+        ],
+      }),
+    ).toBe(true);
+  });
+
   it("does NOT fire when an email or password input is present", () => {
     expect(
       detectAlreadySignedIn({
@@ -342,6 +394,19 @@ describe("detectAlreadySignedIn (F17)", () => {
         ],
       }),
     ).toBe(true);
+  });
+
+  it("does NOT fire on a marketing page with Free Trial plus login/signup CTAs", () => {
+    expect(
+      detectAlreadySignedIn({
+        url: "https://www.dragonflydb.io/cloud",
+        inventory: [
+          mkEl({ tag: "a", visibleText: "Free Trial" }),
+          mkEl({ tag: "a", visibleText: "Login" }),
+          mkEl({ tag: "a", visibleText: "Sign up" }),
+        ],
+      }),
+    ).toBe(false);
   });
 
   it("fires on dashboard URL + creation CTA without billing widget", () => {
@@ -466,5 +531,14 @@ describe("detectAlreadySignedIn (F17)", () => {
         }),
       ).toBe(false);
     });
+  });
+});
+
+describe("isGoogleConsumerPostOAuthUrl", () => {
+  it("flags consumer Google pages but not service consoles on google-owned hosts", () => {
+    expect(isGoogleConsumerPostOAuthUrl("https://www.google.com/")).toBe(true);
+    expect(isGoogleConsumerPostOAuthUrl("https://myaccount.google.com/")).toBe(true);
+    expect(isGoogleConsumerPostOAuthUrl("https://aistudio.google.com/apikey")).toBe(false);
+    expect(isGoogleConsumerPostOAuthUrl("https://console.firebase.google.com/")).toBe(false);
   });
 });

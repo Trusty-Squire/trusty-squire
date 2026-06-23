@@ -54,6 +54,11 @@ export function emitProvisionEvent(
     signupUrl?: string;
     stepTrail?: string;
     replayServed: boolean;
+    // Memory-overhaul Phase 1 — housekeeper context ("discover"|"verify"|
+    // "replay") + captcha summary (partial fold; same data the detailed
+    // CaptchaEvent carries to the API). Both optional.
+    mode?: "discover" | "verify" | "replay";
+    captcha?: { kind?: string; variant?: string; blocked?: boolean };
   },
 ): Promise<unknown> {
   return registry.recordProvisionEvent({
@@ -67,6 +72,10 @@ export function emitProvisionEvent(
       ? { failureKind: args.result.error }
       : {}),
     ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
+    ...(args.mode !== undefined ? { mode: args.mode } : {}),
+    ...(args.captcha?.kind !== undefined ? { captchaKind: args.captcha.kind } : {}),
+    ...(args.captcha?.variant !== undefined ? { captchaVariant: args.captcha.variant } : {}),
+    ...(args.captcha?.blocked !== undefined ? { captchaBlocked: args.captcha.blocked } : {}),
     provisionId: args.provisionId,
     ...(args.stepTrail !== undefined ? { stepTrail: args.stepTrail } : {}),
     // Replay is LLM/captcha-free → known-zero cost. The bot path leaves

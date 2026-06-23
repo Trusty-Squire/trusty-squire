@@ -16,7 +16,7 @@
 // the machine_token (for the bot's LLM proxy + inbox alias) and the
 // agent_session_token (for vault writes), both bound to one account.
 
-import { generateKeyPairSync, randomBytes } from "crypto";
+import { generateKeyPairSync } from "crypto";
 import { z } from "zod";
 import {
   UniversalSignupBot,
@@ -34,16 +34,18 @@ import { getMachineStatus } from "../api-client.js";
 import { VERSION } from "../version.js";
 import {
   clientFromEnv,
-  generateProvisionId,
   makeSkillUrlLookup,
   type ServiceHealthResponse,
   type SkillRegistryClient,
 } from "../skill-registry-client.js";
 import { categoryPeersOf } from "../data/service-categories.js";
+import { evaluateProvisionGate } from "../provision-gate.js";
 import { promoteToSkill } from "../bot/promote-to-skill.js";
 import { currentRunId, resolveCaptureDir } from "../bot/onboarding-capture.js";
+import { redactCredentials, redactHtml } from "../bot/redact.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import { CliExit } from "../skill-cli/errors.js";
+import { createProvisionRun, type ProvisionRun } from "../provision-run.js";
 
 
 type SignupResult = Awaited<ReturnType<UniversalSignupBot["signup"]>>;
@@ -156,6 +158,7 @@ const CHECK_STATUS_JSON_SCHEMA = {
 interface RunRecord {
   service: string;
   startedAt: number;
+  provisionRun: ProvisionRun;
   // undefined while the run is in flight; the final tool response once done.
   result: Record<string, unknown> | undefined;
   // Mutable, shared with the bot. Surfaces mid-run prompts (Google
@@ -260,17 +263,41 @@ export const provisionTool = {
       };
     }
     const apiBase = session.api_base_url;
+
+    // ── Refuse-walled pre-flight ──────────────────────────────────────
+    // Don't bot a PERMANENT wall — an identity/payment anchor (Stripe KYC,
+    // phone-gated) or an operator-dequeued service. Botting one burns ~6 min +
+    // a free-quota signup + a robot identity and returns a confusing failure;
+    // refuse it fast and route the user to bring-your-own-key. Reads the
+    // registry's ServiceState dossier and FAILS OPEN (a registry hiccup never
+    // blocks a real provision). Temporary/bot-bug walls (anti_bot, nav, …) are
+    // NOT refused — the discover loop is what cracks those. See provision-gate.ts.
+    const gateClient = clientFromEnv(session.account_id);
+    if (gateClient !== null) {
+      const state = await gateClient.fetchServiceState(input.service);
+      const verdict = evaluateProvisionGate(state);
+      if (verdict.decision === "refuse") {
+        return {
+          status: "unsupported_service",
+          service: input.service,
+          wall_kind: verdict.wall_kind,
+          reason: verdict.reason,
+          message:
+            `Trusty Squire won't auto-create an account for ${input.service}: ${verdict.reason}. ` +
+            `This is an account you should own — sign up for it yourself, then paste your ` +
+            `API key and I'll vault it (store_credential) so your app can use it safely.`,
+        };
+      }
+    }
+
     const inboxClient = new InboxClient({ baseUrl: apiBase, apiKey: session.machine_token });
 
-    // Random suffix, not just a ms timestamp: two concurrent signups in
-    // the same millisecond would otherwise share a run_id — and, for the
-    // same service, the same inbox alias.
-    const runId = `mcp-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
-    // Skill promoter correlation ID (D8). Distinct from runId — runId
-    // identifies the universal-bot run, provisionId spans the whole
-    // tool invocation including the registry-router phase that runs
-    // before the bot might even start.
-    const provisionId = generateProvisionId();
+    const provisionRun = createProvisionRun({
+      service: input.service,
+      accountId: session.account_id,
+    });
+    const runId = provisionRun.runId;
+    const provisionId = provisionRun.provisionId;
     let alias: string;
     try {
       alias = await inboxClient.createAlias({
@@ -322,7 +349,8 @@ export const provisionTool = {
     const stepsSink: string[] = [];
     runStore.set(runId, {
       service: input.service,
-      startedAt: Date.now(),
+      startedAt: provisionRun.startedAt,
+      provisionRun,
       result: undefined,
       stepsSink,
     });
@@ -337,8 +365,8 @@ export const provisionTool = {
       inboxClient,
       agentSessionToken: session.agent_session_token,
       stepsSink,
-      provisionId,
       accountId: session.account_id,
+      provisionRun,
     });
 
     return {
@@ -385,13 +413,21 @@ export const checkProvisionStatusTool = {
         service: record.service,
         elapsed_seconds: Math.round((Date.now() - record.startedAt) / 1000),
         recent_steps: recentSteps,
+        recent_evidence: record.provisionRun.evidence.snapshot().slice(-20),
+        evidence_path: record.provisionRun.evidencePath,
+        evidence_persistence: record.provisionRun.evidence.persistenceStatus(),
         user_action_required: userActionRequired,
         message: userActionRequired
           ? "Signup is waiting on a user action — read recent_steps and relay the prompt to the user. Poll again in ~10 seconds."
           : "Signup still in progress. Poll again in about 30 seconds.",
       };
     }
-    return await maybeAppendQuotaNudge(record.result);
+    return await maybeAppendQuotaNudge({
+      ...record.result,
+      evidence: record.provisionRun.evidence.snapshot(),
+      evidence_path: record.provisionRun.evidencePath,
+      evidence_persistence: record.provisionRun.evidence.persistenceStatus(),
+    });
   },
 };
 
@@ -455,7 +491,7 @@ interface RunContext {
   // provision entry, propagated through every registry
   // call + bot run + vault write. Useful for forensics: one log
   // grep finds every event tied to this signup attempt.
-  provisionId: string;
+  provisionRun: ProvisionRun;
   // The account_id the session is bound to; passed to the registry
   // client so replay-outcome writes are attributable.
   accountId: string;
@@ -553,7 +589,7 @@ async function tryReplayLearnedSkill(
   ctx: RunContext,
 ): Promise<SignupResult | null> {
   const serviceSlug = input.service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const fetched = await client.fetchActiveSkill(serviceSlug, ctx.provisionId);
+  const fetched = await client.fetchActiveSkill(serviceSlug, ctx.provisionRun.provisionId);
 
   if (fetched.kind !== "found") {
     return null;
@@ -615,7 +651,7 @@ async function tryReplayLearnedSkill(
         mode: "dry",
         templateValues: {
           EMAIL_ALIAS: ctx.alias,
-          TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
+          TOKEN_NAME: `mcp-${ctx.provisionRun.provisionId.slice(5)}`,
         },
       });
     }
@@ -625,7 +661,7 @@ async function tryReplayLearnedSkill(
       skill_id: skill.skill_id,
       outcome: "step_failed",
       reason: `replay engine crashed: ${err instanceof Error ? err.message : String(err)}`,
-      provision_id: ctx.provisionId,
+      provision_id: ctx.provisionRun.provisionId,
     });
     client.invalidateCache(serviceSlug);
     try { await browser.close(); } catch { /* noop */ }
@@ -640,7 +676,7 @@ async function tryReplayLearnedSkill(
         skill.skill_id,
         dryOutcome,
         `dry-mode pre-flight failed: ${JSON.stringify(dryOutcome)}`,
-        ctx.provisionId,
+        ctx.provisionRun.provisionId,
       ),
     );
     client.invalidateCache(serviceSlug);
@@ -663,7 +699,7 @@ async function tryReplayLearnedSkill(
       mode: "full",
       templateValues: {
         EMAIL_ALIAS: ctx.alias,
-        TOKEN_NAME: `mcp-${ctx.provisionId.slice(5)}`,
+        TOKEN_NAME: `mcp-${ctx.provisionRun.provisionId.slice(5)}`,
       },
       fetchEmailCode: emailCodeFetcher,
     });
@@ -673,7 +709,7 @@ async function tryReplayLearnedSkill(
       skill_id: skill.skill_id,
       outcome: "step_failed",
       reason: `full replay engine crashed: ${err instanceof Error ? err.message : String(err)}`,
-      provision_id: ctx.provisionId,
+      provision_id: ctx.provisionRun.provisionId,
     });
     client.invalidateCache(serviceSlug);
     try { await fullBrowser.close(); } catch { /* noop */ }
@@ -692,7 +728,7 @@ async function tryReplayLearnedSkill(
         skill.skill_id,
         fullOutcome,
         `full replay failed: ${JSON.stringify(fullOutcome)}`,
-        ctx.provisionId,
+        ctx.provisionRun.provisionId,
       ),
     );
     client.invalidateCache(serviceSlug);
@@ -706,7 +742,7 @@ async function tryReplayLearnedSkill(
       skill_id: skill.skill_id,
       outcome: "ok",
       reason: `extracted via ${fullOutcome.via}`,
-      provision_id: ctx.provisionId,
+      provision_id: ctx.provisionRun.provisionId,
     });
     const credSpec = skill.credentials[0];
     const credentialKey = credSpec?.env_var_suggestion?.toLowerCase() ?? "api_key";
@@ -736,7 +772,7 @@ async function tryReplayLearnedSkill(
     skill_id: skill.skill_id,
     outcome: "ok",
     reason: `multi-cred extracted: [${Object.keys(fullOutcome.credentials).join(", ")}]`,
-    provision_id: ctx.provisionId,
+    provision_id: ctx.provisionRun.provisionId,
   });
   const credentials: Record<string, string> = {};
   for (const [produces, value] of Object.entries(fullOutcome.credentials)) {
@@ -768,9 +804,10 @@ async function runSignupTask(
   // T45 — correlation id for this provision call. Threaded into every
   // round/extract upload AND the final attempt-recording so the
   // admin dashboard can JOIN per-attempt screenshots + step trail.
-  const provisionId = generateProvisionId();
+  const provisionId = ctx.provisionRun.provisionId;
+  ctx.provisionRun.evidence.append("provision.signup_task.started", { service: input.service });
   // Wall-clock start, for the event's duration_ms.
-  const startedAt = Date.now();
+  const startedAt = ctx.provisionRun.startedAt;
   try {
     // ── Skill promoter Tier-2 router ────────────────────────────────
     // Before launching the universal bot, check the registry for an
@@ -792,17 +829,26 @@ async function runSignupTask(
           result: replayed,
           ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
           replayServed: true,
+          // Memory-overhaul Phase 1 — a learned skill served this provision.
+          mode: "replay",
         });
         // Persist to vault same as the bot path — credentials are real.
         if (replayed.success && replayed.credentials !== undefined) {
-          void postCredentialsToVault(
+          const vault = await postCredentialsToVault(
             ctx.apiBase,
             ctx.agentSessionToken,
             input.service,
             replayed.credentials,
             signupObservedHosts(input.signup_url),
           );
+          attachVaultPersistence(response, vault);
+          ctx.provisionRun.evidence.append(
+            "vault.persisted",
+            vaultPersistenceEvidence(vault),
+            vault.every((item) => item.ok) ? "info" : "warn",
+          );
         }
+        ctx.provisionRun.evidence.append("provision.run.completed", { status: "success", via: "skill" });
         const record = runStore.get(runId);
         if (record !== undefined) record.result = response;
         return;
@@ -845,7 +891,7 @@ async function runSignupTask(
       // No curated URL → let resolveSignupUrl reuse a promoted skill's
       // verified entry URL (registry-backed) before falling to the model.
       ...(registry !== null
-        ? { lookupSkillUrl: makeSkillUrlLookup(registry, ctx.provisionId) }
+        ? { lookupSkillUrl: makeSkillUrlLookup(registry, ctx.provisionRun.provisionId) }
         : {}),
       email: ctx.alias,
       // SES inbound pipeline revived on trustysquire.com 2026-05-20
@@ -972,15 +1018,21 @@ async function runSignupTask(
     }
 
     // Persist the collected keys into the account's vault. Fire-and-
-    // forget — the credentials are already in `response`, so a vault
-    // write failure is non-fatal.
+    // report — the credentials are already in `response`, so a vault
+    // write failure is non-fatal, but it must be visible to the caller.
     if (result.success && result.credentials !== undefined) {
-      void postCredentialsToVault(
+      const vault = await postCredentialsToVault(
         ctx.apiBase,
         ctx.agentSessionToken,
         input.service,
         result.credentials,
         signupObservedHosts(input.signup_url),
+      );
+      attachVaultPersistence(response, vault);
+      ctx.provisionRun.evidence.append(
+        "vault.persisted",
+        vaultPersistenceEvidence(vault),
+        vault.every((item) => item.ok) ? "info" : "warn",
       );
     }
 
@@ -1000,8 +1052,16 @@ async function runSignupTask(
         service: input.service,
         stepsSink: ctx.stepsSink,
         accountId: ctx.accountId,
+        ...(input.oauth_provider !== undefined
+          ? { oauthProvider: input.oauth_provider }
+          : {}),
+        ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
       });
     }
+    ctx.provisionRun.evidence.append("provision.run.completed", {
+      status: result.success ? "success" : "failed",
+      via: "bot",
+    }, result.success ? "info" : "warn");
   } catch (err) {
     response = {
       status: "error",
@@ -1261,9 +1321,51 @@ function signupObservedHosts(...urls: Array<string | undefined>): string[] {
 }
 
 // Stores the keys a signup yielded into the paired account's vault via
-// POST /v1/vault/credentials (agent-authenticated). Best-effort, one
-// request per credential — a failure logs and is dropped, since the
-// keys are still returned to the caller in the tool response.
+// POST /v1/vault/credentials (agent-authenticated). One request per
+// credential. Failures are non-fatal because the keys are still returned to
+// the caller, but they are part of the run outcome and must be visible.
+type VaultPersistResult =
+  | { ok: true; name: string; status: number }
+  | { ok: false; name: string; error: string; status?: number };
+
+function attachVaultPersistence(
+  response: Record<string, unknown>,
+  results: readonly VaultPersistResult[],
+): void {
+  if (results.length === 0) return;
+  response.vault_persisted = results.every((item) => item.ok);
+  response.vault_persistence = results.map((item) =>
+    item.ok
+      ? { name: item.name, ok: true, status: item.status }
+      : {
+          name: item.name,
+          ok: false,
+          error: item.error,
+          ...(item.status !== undefined ? { status: item.status } : {}),
+        },
+  );
+}
+
+function vaultPersistenceEvidence(
+  results: readonly VaultPersistResult[],
+): Record<string, unknown> {
+  return {
+    total: results.length,
+    ok: results.filter((item) => item.ok).length,
+    failed: results.filter((item) => !item.ok).length,
+    credentials: results.map((item) =>
+      item.ok
+        ? { name: item.name, ok: true, status: item.status }
+        : {
+            name: item.name,
+            ok: false,
+            error: item.error,
+            ...(item.status !== undefined ? { status: item.status } : {}),
+          },
+    ),
+  };
+}
+
 async function postCredentialsToVault(
   apiBase: string,
   agentSessionToken: string,
@@ -1273,16 +1375,17 @@ async function postCredentialsToVault(
   // vault unions them into allowed_hosts — a captured credential never lands
   // with an empty allowlist (which would 403 every use_credential call).
   observedHosts: string[] = [],
-): Promise<void> {
+): Promise<VaultPersistResult[]> {
   // "Resend" → "RESEND"; used to build an env-var-style key name.
   const prefix = service
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+  const results: VaultPersistResult[] = [];
   for (const [name, value] of Object.entries(credentials)) {
     if (value === undefined || value.length === 0) continue;
     try {
-      await fetch(`${apiBase}/v1/vault/credentials`, {
+      const resp = await fetch(`${apiBase}/v1/vault/credentials`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -1296,7 +1399,24 @@ async function postCredentialsToVault(
           ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
         }),
       });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        const detail = body.length > 0 ? `: ${body.slice(0, 500)}` : "";
+        results.push({
+          ok: false,
+          name,
+          status: resp.status,
+          error: `vault returned HTTP ${resp.status}${detail}`,
+        });
+        continue;
+      }
+      results.push({ ok: true, name, status: resp.status });
     } catch (err) {
+      results.push({
+        ok: false,
+        name,
+        error: err instanceof Error ? err.message : String(err),
+      });
       console.error(
         `[provision-any] vault store failed for ${service}/${name} (non-fatal): ${
           err instanceof Error ? err.message : String(err)
@@ -1304,6 +1424,7 @@ async function postCredentialsToVault(
       );
     }
   }
+  return results;
 }
 
 // Build the extract-failure diagnostic uploader. The bot calls this
@@ -1315,7 +1436,7 @@ async function postCredentialsToVault(
 //
 // All errors are swallowed: a snapshot upload failure must never
 // abort a signup.
-function buildExtractFailureUploader(
+export function buildExtractFailureUploader(
   accountId: string,
   provisionId?: string,
 ): (input: {
@@ -1341,9 +1462,13 @@ function buildExtractFailureUploader(
         url: input.url,
         title: input.title,
         step_label: input.step_label,
-        extract_reason: input.extract_reason,
-        candidates: input.candidates,
-        html: input.html,
+        // Phase 2 — redact secrets before anything leaves the box. The DOM
+        // gets the full HTML scrub (captcha/auth/password + key shapes); the
+        // prose reason + candidate strings get the key-shape redactor (they
+        // routinely contain the LLM's verbatim view of an extracted value).
+        extract_reason: redactCredentials(input.extract_reason),
+        candidates: input.candidates.map(redactCredentials),
+        html: redactHtml(input.html),
         ...(input.screenshot_jpeg_base64 !== undefined
           ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
           : {}),
@@ -1380,7 +1505,7 @@ function buildExtractFailureUploader(
 // are logged but never propagate, and the round-uploader call site in
 // agent.ts ALSO wraps in try/catch so the loop is bulletproof either
 // way. Account-scoped identically.
-function buildRoundUploader(
+export function buildRoundUploader(
   accountId: string,
   provisionId?: string,
 ): (input: {
@@ -1407,9 +1532,13 @@ function buildRoundUploader(
         // planner's chosen reason so the trail is intelligible
         // without fetching the full row.
         step_label: `round-${input.round}-${input.kind}`,
-        extract_reason: `round_telemetry: ${input.observed_reason}`.slice(0, 4000),
+        extract_reason: redactCredentials(
+          `round_telemetry: ${input.observed_reason}`.slice(0, 4000),
+        ),
         candidates: [`inventory_count=${input.inventory_count}`],
-        html: input.html,
+        // Phase 2 — redact secrets from the DOM before upload (every failure
+        // kind now uploads its chain, so this path is the one that grows).
+        html: redactHtml(input.html),
         ...(input.screenshot_jpeg_base64 !== undefined
           ? { screenshot_jpeg_base64: input.screenshot_jpeg_base64 }
           : {}),
@@ -1476,6 +1605,8 @@ export async function runAutoPromote(args: {
   service: string;
   stepsSink: string[];
   accountId: string;
+  oauthProvider?: "google" | "github";
+  signupUrl?: string;
   fetchFn?: typeof globalThis.fetch;
 }): Promise<AutoPromoteResult> {
   const { service, stepsSink } = args;
@@ -1495,7 +1626,7 @@ export async function runAutoPromote(args: {
       );
       return { kind: "skipped", reason: "capture_dir_disabled" };
     }
-    const runId = currentRunId();
+    const runId = currentRunId(service);
     if (runId === undefined) {
       stepsSink.push(
         "[auto-promote] no captures written this run (bot may have taken the fast path) — skipping.",
@@ -1520,6 +1651,8 @@ export async function runAutoPromote(args: {
       dir: captureDir,
       service: serviceSlug,
       run_id: runId,
+      ...(args.oauthProvider !== undefined ? { oauthProvider: args.oauthProvider } : {}),
+      ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
     });
     if (result.kind !== "ok") {
       stepsSink.push(

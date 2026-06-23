@@ -26,7 +26,12 @@
 // replay so the next attempt re-fetches in case a remediation was
 // just published.
 
-import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
+import {
+  canonicalizeServiceSlug,
+  parseSkill,
+  type Skill,
+} from "@trusty-squire/skill-schema";
+import type { ProvisionServiceState } from "./provision-gate.js";
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -182,14 +187,15 @@ export class SkillRegistryClient {
     service: string,
     provisionId: string,
   ): Promise<SkillFetchOutcome> {
+    const serviceSlug = canonicalizeServiceSlug(service);
     // Cache check first. A registry-unavailable outcome is NOT cached
     // — we want the next call to try again.
-    const cached = this.readCache(service);
+    const cached = this.readCache(serviceSlug);
     if (cached !== null) {
       return { kind: "found", result: cached };
     }
 
-    const url = `${this.baseUrl}/skills/${encodeURIComponent(service)}`;
+    const url = `${this.baseUrl}/skills/${encodeURIComponent(serviceSlug)}`;
     const attempt = await this.fetchGetWithRetry(url, {
       "x-account-id": this.accountId,
       "x-provision-id": provisionId,
@@ -266,7 +272,7 @@ export class SkillRegistryClient {
       },
     };
 
-    this.writeCache(service, result);
+    this.writeCache(serviceSlug, result);
     return { kind: "found", result };
   }
 
@@ -325,7 +331,7 @@ export class SkillRegistryClient {
    * published correction (skill v2, say) is picked up immediately.
    */
   invalidateCache(service: string): void {
-    this.cache.delete(service);
+    this.cache.delete(canonicalizeServiceSlug(service));
   }
 
   /**
@@ -337,10 +343,11 @@ export class SkillRegistryClient {
     service: string,
     peers: readonly string[] = [],
   ): Promise<ServiceHealthOutcome> {
+    const serviceSlug = canonicalizeServiceSlug(service);
     const peersQuery =
       peers.length > 0 ? `?peers=${peers.map(encodeURIComponent).join(",")}` : "";
     const url =
-      `${this.baseUrl}/v1/services/${encodeURIComponent(service)}/health${peersQuery}`;
+      `${this.baseUrl}/v1/services/${encodeURIComponent(serviceSlug)}/health${peersQuery}`;
     const attempt = await this.fetchGetWithRetry(url, {
       "x-account-id": this.accountId,
     });
@@ -365,6 +372,30 @@ export class SkillRegistryClient {
   }
 
   /**
+   * Refuse-walled pre-flight: fetch the registry's materialized
+   * ServiceState (the `state` half of the dossier) for the refuse gate.
+   * FAIL-OPEN — any transport/parse trouble returns null, which the gate
+   * treats as "allow" (a registry gap must never block a real provision).
+   * Public-readish endpoint (no admin bearer), same surface as /health.
+   */
+  async fetchServiceState(service: string): Promise<ProvisionServiceState | null> {
+    const serviceSlug = canonicalizeServiceSlug(service);
+    const url = `${this.baseUrl}/v1/services/${encodeURIComponent(serviceSlug)}/dossier`;
+    const attempt = await this.fetchGetWithRetry(url, {
+      "x-account-id": this.accountId,
+    });
+    if (attempt.kind === "err" || !attempt.response.ok) return null;
+    try {
+      const body = (await attempt.response.json()) as {
+        state?: ProvisionServiceState | null;
+      };
+      return body.state ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Record one provision event (any dispatch path). Fire-and-forget;
    * a 4xx/5xx here only means the dashboard/score won't reflect it.
    * Posts to the historical /attempts route (URL unchanged so already-
@@ -381,6 +412,12 @@ export class SkillRegistryClient {
     finalOutcome?: "ok" | "failed" | "blocked";
     failureKind?: string;
     signupUrl?: string;
+    // Memory-overhaul Phase 1 — housekeeper context ("discover"|"verify"|
+    // "replay") + captcha summary (partial fold). Optional.
+    mode?: "discover" | "verify" | "replay";
+    captchaKind?: string;
+    captchaVariant?: string;
+    captchaBlocked?: boolean;
     mcpVersion: string;
     // T45 — correlation id linking this event to the
     // ExtractFailureSnapshot rows uploaded during the same run. Also the
@@ -419,6 +456,10 @@ export class SkillRegistryClient {
           ? { failure_kind: input.failureKind.slice(0, 120) }
           : {}),
         ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
+        ...(input.mode !== undefined ? { mode: input.mode } : {}),
+        ...(input.captchaKind !== undefined ? { captcha_kind: input.captchaKind.slice(0, 40) } : {}),
+        ...(input.captchaVariant !== undefined ? { captcha_variant: input.captchaVariant.slice(0, 40) } : {}),
+        ...(input.captchaBlocked !== undefined ? { captcha_blocked: input.captchaBlocked } : {}),
         ...(input.provisionId !== undefined ? { provision_id: input.provisionId } : {}),
         ...(input.stepTrail !== undefined ? { step_trail: input.stepTrail } : {}),
         ...(input.llmCost !== undefined ? { llm_cost: input.llmCost } : {}),

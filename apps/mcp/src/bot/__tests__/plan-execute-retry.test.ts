@@ -26,7 +26,7 @@ vi.mock("../login-state.js", async (importOriginal) => {
   return { ...actual, loggedInProviders: () => [] };
 });
 
-import { SignupAgent } from "../agent.js";
+import { planSimpleEmailOnlySignup, resolvePlannedFillValue, SignupAgent } from "../agent.js";
 import type {
   BrowserController,
   BrowserState,
@@ -62,10 +62,51 @@ const fillPlan = (sel: string, submit: string): string =>
     confidence: "high",
   });
 
+describe("planSimpleEmailOnlySignup", () => {
+  it("plans a one-field magic-link form without an LLM", () => {
+    const plan = planSimpleEmailOnlySignup([
+      mk({ tag: "input", type: "email", labelText: "E-mail", selector: "#email" }),
+      mk({ tag: "button", type: "submit", visibleText: "Send me a magic link", selector: "#submit" }),
+    ]);
+    expect(plan).toMatchObject({
+      actions: [{ kind: "fill", selector: "#email", value_kind: "email" }],
+      submit_selector: "#submit",
+      confidence: "high",
+    });
+  });
+
+  it("does not bypass the planner for multi-field/password forms", () => {
+    expect(
+      planSimpleEmailOnlySignup([
+        mk({ tag: "input", type: "email", labelText: "E-mail", selector: "#email" }),
+        mk({ tag: "input", type: "password", labelText: "Password", selector: "#password" }),
+        mk({ tag: "button", type: "submit", visibleText: "Sign up", selector: "#submit" }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("does not fill an email-only sign-in form that exposes a separate signup link", () => {
+    expect(
+      planSimpleEmailOnlySignup([
+        mk({ tag: "input", type: "email", labelText: "Email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Continue", selector: "#continue" }),
+        mk({ tag: "a", visibleText: "Sign up", selector: "#signup" }),
+      ]),
+    ).toBeNull();
+  });
+});
+
 const clickPlan = (sel: string): string =>
   JSON.stringify({
     actions: [{ kind: "click", selector: sel, reason: "reveal the email form" }],
     submit_selector: sel,
+    confidence: "high",
+  });
+
+const checkPlan = (checkSel: string, submit: string): string =>
+  JSON.stringify({
+    actions: [{ kind: "check", selector: checkSel, reason: "required signup checkbox" }],
+    submit_selector: submit,
     confidence: "high",
   });
 
@@ -87,6 +128,7 @@ class QueueLLM implements LLMClient {
 class FakeBrowser {
   public inventoryQueue: InteractiveElement[][] = [[]];
   public extractTextValues: string[] = [""];
+  public stateUrl = "https://x.test/signup";
   public inspectSelectorImpl: (sel: string) => {
     count: number;
     tag: string | null;
@@ -104,15 +146,26 @@ class FakeBrowser {
   async wait(): Promise<void> {}
   async waitForFormReady(): Promise<void> {}
   async dismissConsentBanner(): Promise<string | null> { return null; }
-  async type(): Promise<void> {}
-  async check(): Promise<void> {}
+  public typed: Array<{ selector: string; value: string }> = [];
+  async type(selector: string, value: string): Promise<void> {
+    this.typed.push({ selector, value });
+  }
+  public checked: string[] = [];
+  async check(selector: string): Promise<void> {
+    this.checked.push(selector);
+  }
   public clicked: string[] = [];
   async click(selector: string): Promise<void> {
     this.clicked.push(selector);
   }
   public clickSubmitImpl: () => void = () => {};
-  async clickSubmit(): Promise<void> {
+  public submitted: string[] = [];
+  async clickSubmit(selector?: string): Promise<void> {
+    if (selector) this.submitted.push(selector);
     this.clickSubmitImpl();
+  }
+  async checkRequiredSignupChoiceBoxes(): Promise<string[]> {
+    return [];
   }
   async checkRequiredAgreementBoxes(): Promise<string[]> {
     return [];
@@ -125,7 +178,7 @@ class FakeBrowser {
     return { variant: "unknown", challengeRendered: false };
   }
   async getState(): Promise<BrowserState> {
-    return { url: "https://x.test/signup", title: "Sign up", html: "", screenshot: "" };
+    return { url: this.stateUrl, title: "Sign up", html: "", screenshot: "" };
   }
   async extractText(): Promise<string> {
     const i = Math.min(this.textCalls, this.extractTextValues.length - 1);
@@ -168,6 +221,7 @@ async function runLoop(
     name: "Test Bot",
     username: "testbot12",
     company: "Trusty Squire",
+    phone: "6502530000",
     literal: "",
   };
   const fn = (
@@ -215,6 +269,12 @@ describe("planExecuteWithRetry", () => {
         mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
       ],
     ];
+    browser.inspectSelectorImpl = (sel) => ({
+      count: 1,
+      tag: sel === "#go" ? "button" : "input",
+      id: sel.startsWith("#") ? sel.slice(1) : null,
+      name: null,
+    });
     // #email resolves, but to an element whose id != the inventory's
     // on the first plan (a recycled node); the re-plan resolves clean.
     let emailInspects = 0;
@@ -254,6 +314,61 @@ describe("planExecuteWithRetry", () => {
     expect(steps.some((s) => /only revealed the page/i.test(s))).toBe(true);
   });
 
+  it("submits after a check-only field edit instead of treating it as reveal-only", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "checkbox", labelText: "I sell software", selector: "#software" }),
+        mk({ tag: "button", type: "submit", visibleText: "Continue", selector: "#continue" }),
+      ],
+    ];
+    const llm = new QueueLLM([checkPlan("#software", "#continue")]);
+
+    const { outcome, steps } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(browser.checked).toEqual(["#software"]);
+    expect(browser.submitted).toEqual(["#continue"]);
+    expect(steps.some((s) => /only revealed the page/i.test(s))).toBe(false);
+  });
+
+  it("fills password confirmation with the generated password even if the planner emits literal", () => {
+    const value = resolvePlannedFillValue(
+      {
+        kind: "fill",
+        selector: "#passwordVerification",
+        value_kind: "literal",
+        literal: "same as password",
+        reason: "confirm password",
+      },
+      {
+        email: "bot@inbox.test",
+        password: "Pw-test-12345",
+        name: "Test Bot",
+        username: "testbot12",
+        company: "Trusty Squire",
+        phone: "6502530000",
+        literal: "",
+      },
+      mk({
+        tag: "input",
+        type: "password",
+        id: "passwordVerification",
+        name: "passwordVerification",
+        placeholder: "Enter your password again",
+        selector: "#passwordVerification",
+      }),
+      {
+        firstName: "Test",
+        lastName: "Bot",
+        displayName: "Test Bot",
+        username: "testbot12",
+      },
+    );
+
+    expect(value).toBe("Pw-test-12345");
+  });
+
   it("returns oauth_required when the page has only OAuth buttons", async () => {
     const browser = new FakeBrowser();
     browser.inventoryQueue = [
@@ -268,6 +383,41 @@ describe("planExecuteWithRetry", () => {
 
     expect(outcome.kind).toBe("oauth_required");
     expect(llm.calls).toBe(0); // detected before any planner call
+  });
+
+  it("uses the pinned Google account on provider identifier pages instead of the inbox alias", async () => {
+    const browser = new FakeBrowser();
+    browser.stateUrl =
+      "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fconsole.firebase.google.com%2Fu%2F0%2F";
+    browser.inventoryQueue = [
+      [
+        mk({
+          tag: "input",
+          type: "text",
+          id: "identifierId",
+          labelText: "Email or phone",
+          selector: "#identifierId",
+        }),
+        mk({ tag: "button", type: "button", visibleText: "Create account", selector: "#create" }),
+        mk({ tag: "button", type: "button", visibleText: "Next", selector: "#next" }),
+      ],
+      [mk({ tag: "input", type: "password", labelText: "Enter your password", selector: "#password" })],
+    ];
+    const llm = new QueueLLM([fillPlan("#identifierId", "#next")]);
+
+    const { outcome, steps } = await runLoop(browser, llm, {
+      oauthProvider: "google",
+      oauthAccountEmail: "verify-178@trustysquire.ai",
+    });
+
+    expect(browser.typed).toEqual([
+      { selector: "#identifierId", value: "verify-178@trustysquire.ai" },
+    ]);
+    expect(browser.submitted).toEqual(["#next"]);
+    expect(browser.clicked).not.toContain("#create");
+    expect(outcome.kind).toBe("needs_login");
+    expect(llm.calls).toBe(0);
+    expect(steps.some((s) => /pinned account/i.test(s))).toBe(true);
   });
 
   it("F14: fails planning_failed when the planner re-picks the same click selector after no-progress", async () => {
@@ -323,6 +473,102 @@ describe("planExecuteWithRetry", () => {
 
     expect(outcome.kind).toBe("submitted");
     expect(llm.calls).toBe(3);
+  });
+
+  it("F14: does NOT bail when the page changed between two clicks of the same selector (kinde unique-value retry)", async () => {
+    const browser = new FakeBrowser();
+    // kinde's post-OAuth register form: clicking "Next" with a colliding
+    // (globally-unique) domain value does not advance the page; the bot
+    // edits the field, the page re-renders (a new input/validation
+    // element appears), and the planner RE-CLICKS the same "Next". That
+    // re-click is legitimate progress, not a loop — the false-bail this
+    // guards against ended the kinde run at terminal_round 3.
+    browser.inventoryQueue = [
+      // Round 1: the "Next" affordance + a text field whose value
+      // collided — clicking Next does not advance.
+      [
+        mk({ tag: "input", type: "text", selector: "#domain" }),
+        mk({ tag: "a", visibleText: "Next", selector: "#next" }),
+      ],
+      // Round 2: page CHANGED — a validation message element appeared
+      // after the edit (inventory differs) → real progress. Same #next
+      // is re-clicked.
+      [
+        mk({ tag: "input", type: "text", selector: "#domain" }),
+        mk({ tag: "span", visibleText: "domain available", selector: "#domain-ok" }),
+        mk({ tag: "a", visibleText: "Next", selector: "#next" }),
+      ],
+      // Round 3: the revealed form to fill + submit.
+      [
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create", selector: "#go" }),
+      ],
+    ];
+    const llm = new QueueLLM([
+      clickPlan("#next"), // r1: no advance → records #next as no-progress
+      clickPlan("#next"), // r2: page changed → must NOT bail on the re-click
+      fillPlan("#email", "#go"), // r3: submit
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(llm.calls).toBe(3);
+  });
+
+  it("F14: does NOT bail when a check/select was issued between two same-selector clicks", async () => {
+    const browser = new FakeBrowser();
+    // Inventory holds steady (no element add/remove), but the planner
+    // ticks a required agreement box between the two "Next" clicks — a
+    // field edit IS progress, so the re-click must not be judged a loop.
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "checkbox", selector: "#tos" }),
+        mk({ tag: "button", visibleText: "Next", selector: "#next" }),
+        mk({ tag: "input", type: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create", selector: "#go" }),
+      ],
+    ];
+    const checkThenClick = JSON.stringify({
+      actions: [
+        { kind: "check", selector: "#tos", reason: "accept terms" },
+        { kind: "click", selector: "#next", reason: "advance" },
+      ],
+      submit_selector: "#next",
+      confidence: "high",
+    });
+    const llm = new QueueLLM([
+      clickPlan("#next"), // r1: no advance → records #next
+      checkThenClick, // r2: check = progress → clears #next from no-progress
+      fillPlan("#email", "#go"), // r3: submit
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("submitted");
+    expect(llm.calls).toBe(3);
+  });
+
+  it("F14: STILL bails on a true loop — same selector re-clicked with no intervening progress", async () => {
+    const browser = new FakeBrowser();
+    // Page never changes and no field is edited between the two identical
+    // dead-link clicks — a genuine planner loop that must still bail.
+    // (Same shape as the canonical F14 case so the page enters the
+    // planner rather than short-circuiting to oauth_required.)
+    browser.inventoryQueue = [
+      [mk({ tag: "a", visibleText: "Email", selector: "#footer-email" })],
+    ];
+    const llm = new QueueLLM([
+      clickPlan("#footer-email"),
+      clickPlan("#footer-email"),
+    ]);
+
+    const { outcome } = await runLoop(browser, llm);
+
+    expect(outcome.kind).toBe("planning_failed");
+    expect(outcome.reason ?? "").toMatch(/stuck/i);
+    expect(outcome.reason ?? "").toContain("#footer-email");
+    expect(llm.calls).toBe(2);
   });
 
   it("bails clean on repeated empty plans instead of spinning (Axiom 0-action loop)", async () => {
@@ -628,5 +874,62 @@ describe("planExecuteWithRetry", () => {
     // It tried the click-through, but the cap (2) stopped it.
     expect(browser.clicked.filter((s) => s === "#signin").length).toBe(2);
     expect(llm.calls).toBe(0);
+  });
+});
+
+// Fix C — the form-fill planner (planSignupForm, reached via
+// planExecuteWithRetry) must mark its LLM call deterministic:true so the
+// proxy pins a single model + provider + seed. temperature 0 alone leaves
+// the model/provider lottery in play.
+describe("planner call sites set deterministic=true (Fix C)", () => {
+  // Records every request the planner sends so the test can assert the
+  // deterministic flag rode along.
+  class RecordingLLM implements LLMClient {
+    readonly name = "recording";
+    public requests: import("../llm-client.js").LLMRequest[] = [];
+    constructor(private readonly reply: string) {}
+    async createMessage(
+      req: import("../llm-client.js").LLMRequest,
+    ): Promise<LLMResponse> {
+      this.requests.push(req);
+      return { text: this.reply, backend: this.name };
+    }
+  }
+
+  it("planSignupForm sends deterministic=true + temperature 0", async () => {
+    const browser = new FakeBrowser();
+    browser.inventoryQueue = [
+      [
+        mk({ tag: "input", type: "email", id: "email", selector: "#email" }),
+        mk({ tag: "button", type: "submit", visibleText: "Create account", selector: "#go" }),
+      ],
+    ];
+    const llm = new RecordingLLM(fillPlan("#email", "#go"));
+    const asController: unknown = browser;
+    if (!isController(asController)) throw new Error("unreachable");
+    const agent = new SignupAgent(asController, llm);
+    const fillValues = {
+      email: "bot@inbox.test",
+      password: "Pw-test-12345",
+      name: "Test Bot",
+      username: "testbot12",
+      company: "Trusty Squire",
+      literal: "",
+    };
+    const fn = (
+      agent as unknown as {
+        planExecuteWithRetry: (
+          t: { service: string; email: string },
+          fv: typeof fillValues,
+          s: string[],
+        ) => Promise<Outcome>;
+      }
+    ).planExecuteWithRetry.bind(agent);
+    await fn({ service: "Test", email: "bot@inbox.test" }, fillValues, []);
+
+    expect(llm.requests.length).toBeGreaterThan(0);
+    const first = llm.requests[0]!;
+    expect(first.deterministic).toBe(true);
+    expect(first.temperature).toBe(0);
   });
 });

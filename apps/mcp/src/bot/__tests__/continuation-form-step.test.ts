@@ -39,12 +39,34 @@ describe("isContinuationFormStep", () => {
     ).toBe(true);
   });
 
+  it("flags Arize-style post-OAuth 'Create New Password' steps", () => {
+    expect(
+      isContinuationFormStep("Create New Password New Password Confirm Password Continue", [
+        el({ tag: "input", type: "password", value: "", labelText: "New Password", selector: "#new" }),
+        el({ tag: "input", type: "password", value: "", labelText: "Confirm Password", selector: "#confirm" }),
+        el({ tag: "button", visibleText: "Continue", selector: "#continue" }),
+      ]),
+    ).toBe(true);
+  });
+
   it("does NOT flag a settled dashboard (no password field)", () => {
     expect(
       isContinuationFormStep("API Keys Dashboard Default Project", [
         el({ tag: "a", visibleText: "API Keys", selector: "#k" }),
       ]),
     ).toBe(false);
+  });
+
+  it("flags Paddle-style business-details wizard steps", () => {
+    expect(
+      isContinuationFormStep("Business details Part 1 of 2 Annual revenue Continue", [
+        el({ tag: "input", type: "text", value: "", labelText: "Business name", selector: "#business" }),
+        el({ tag: "select", value: "", labelText: "Business type", selector: "#type" }),
+        el({ tag: "select", value: "", labelText: "What's your annual revenue?", selector: "#revenue" }),
+        el({ tag: "input", type: "text", value: "", labelText: "Website address", selector: "#website" }),
+        el({ tag: "button", visibleText: "Continue", selector: "#go" }),
+      ]),
+    ).toBe(true);
   });
 
   it("does NOT flag a verify-your-email screen (handled by the inbox poll)", () => {

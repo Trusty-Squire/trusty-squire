@@ -25,6 +25,24 @@ import {
   type OAuthProviderId,
 } from "./oauth-providers.js";
 import { extractGoogleNumberMatch, scrapeGoogleScopePhrases } from "./google-login.js";
+import { decideOAuthStep } from "./oauth-flow.js";
+import {
+  decideFormFillStep,
+  FORM_FILL_BUDGETS as B_FF,
+  findSignupLinkOnLoginPage,
+  initialFormFillState,
+  pickEmailCodeSubmitSelector,
+  type FormFillObservation,
+  type FormFillOutcome,
+  type FormFillState,
+} from "./form-fill.js";
+import {
+  accumulateCandidate,
+  hasFullHit,
+  initialExtractionState,
+  resolveExtraction,
+  type CandidateClass,
+} from "./extraction.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
 import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
@@ -35,8 +53,68 @@ import {
   clearProviderLoggedIn,
   markProviderLoggedIn,
 } from "./login-state.js";
+import { SignupOAuthFlow } from "./signup-oauth-flow.js";
 import { saveDebugSnapshot } from "./debug.js";
-import { captureOnboardingRound } from "./onboarding-capture.js";
+import { captureObservationFrame, type ObservationFrame } from "./observation-frame.js";
+import { classifyObservationFrame } from "./state-classifier.js";
+import {
+  classifyTerminalGate,
+  isAtAccountReviewGate,
+  isAtPaywall,
+  isOnboardingReviewGate,
+  isSignupsClosed,
+} from "./terminal-gate.js";
+export {
+  isAtAccountReviewGate,
+  isAtPaywall,
+  isOnboardingReviewGate,
+  isSignupsClosed,
+} from "./terminal-gate.js";
+import {
+  PostSignupCredentialTracker,
+  classifyNoCredentialPostSignup,
+} from "./post-signup-flow.js";
+import {
+  PostSignupActionExecutor,
+  type PostSignupExecutableAction,
+} from "./post-signup-action-executor.js";
+import { PostSignupLoginFlow } from "./post-signup-login-flow.js";
+import {
+  MAX_POST_VERIFY_NAVIGATES,
+  MAX_PREMATURE_DONE_FALLBACKS,
+  MAX_UPSTREAM_BLIP_RETRIES,
+  PostSignupRecoveryFlow,
+  PostSignupRecoveryState,
+} from "./post-signup-recovery-state.js";
+import { PostSignupSyntheticCapture } from "./post-signup-synthetic-capture.js";
+import {
+  CredentialExtractionFlow,
+  DOM_LABEL_TO_KEY,
+  NON_CREDENTIAL_KEYS,
+  extractAllLabeledTokensFromReason,
+  hasAnyExtractedCredential,
+  hasUsableCredentialBundle,
+} from "./credential-extraction-flow.js";
+export {
+  extractAllLabeledTokensFromReason,
+  hasAnyExtractedCredential,
+  isMultiCredBundle,
+} from "./credential-extraction-flow.js";
+import {
+  captureOnboardingRound,
+  updateCapturedRoundSemantic,
+} from "./onboarding-capture.js";
+import {
+  evaluateSemanticTransition,
+  inferSemanticTransition,
+  type SemanticTransitionRecord,
+} from "./semantic-transition.js";
+import {
+  KEYS_DESTINATION_URL,
+  runNavSearch,
+  type NavSearchBrowserPort,
+  type NavSearchDeps,
+} from "./nav-search.js";
 import type { FailureStage } from "./failure-stage.js";
 import { wasRecentlyPrewarmed, recordPrewarmSuccess } from "./prewarm-cache.js";
 import {
@@ -68,12 +146,14 @@ export interface AgentInbox {
   }>;
 }
 
-// Hard cap on LLM calls per signup. A signup that runs away to 20+ calls
-// is both expensive and almost certainly stuck in a planning loop. 15
-// covers: 2 initial form plans, 1 re-plan pair on validation, plus 6
-// post-verify rounds, with headroom. Override via env when debugging.
+// Hard cap on LLM calls per signup. Keep it aligned with the real
+// post-verify round budget (24) plus a small form-fill/retry allowance.
+// Long but legitimate onboarding wizards (Anyscale-style multi-step org
+// setup) can consume >15 deterministic planner calls before the credential
+// surface exists; the loop itself remains bounded by postVerifyMaxRounds and
+// the wall clock timeout. Override via env when debugging.
 const MAX_LLM_CALLS_PER_SIGNUP = Number.parseInt(
-  process.env.UNIVERSAL_BOT_MAX_LLM_CALLS ?? "15",
+  process.env.UNIVERSAL_BOT_MAX_LLM_CALLS ?? "30",
   10,
 );
 
@@ -108,11 +188,108 @@ const VERIFICATION_EXPECTED_PATTERNS: readonly string[] = [
   "one more step",
 ];
 
+// A single-use verification link that lands on an "expired / already used /
+// invalid" page. MEASURED on portkey (2026-06-17): a FRESH, seconds-old
+// Firebase mode=verifyEmail oobCode rendered "Email Verification Failed — This
+// link has expired" on the bot's FIRST navigation. A single-use action link is
+// routinely burned by an upstream mail link-scanner (anti-phishing prefetch) —
+// and following a Firebase verifyEmail link COMPLETES the verification
+// server-side. So "expired" almost always means the email is ALREADY verified;
+// the right move is to log in with the signup credentials and proceed, not bail.
+// Exported for unit tests.
+const VERIFY_LINK_FAILED_PATTERNS: readonly string[] = [
+  "link has expired",
+  "link is invalid",
+  "link is no longer valid",
+  "invalid or expired",
+  "expired or invalid",
+  "verification failed",
+  "already been used",
+  "already verified", // some apps say so outright → also "go log in"
+];
+
+export function verificationLinkFailed(pageText: string): boolean {
+  const t = pageText.toLowerCase();
+  return VERIFY_LINK_FAILED_PATTERNS.some((p) => t.includes(p));
+}
+
+// Firebase email-action links carry mode=verifyEmail + oobCode + apiKey as
+// query params — even on a custom domain (portkey: app.portkey.ai/auth?…).
+// Extract them so we can confirm the verification via Firebase's REST API
+// directly: far lower latency than a browser SPA navigation (racing a short
+// oobCode TTL) and it issues the single-use code exactly ONCE (no SPA
+// double-submit). Returns null when the link isn't a Firebase verifyEmail
+// action. Exported for unit tests.
+export function parseFirebaseEmailAction(
+  url: string,
+): { apiKey: string; oobCode: string } | null {
+  let u: URL;
+  try {
+    u = new URL(url.replace(/&amp;/g, "&"));
+  } catch {
+    return null;
+  }
+  const oobCode = u.searchParams.get("oobCode");
+  const apiKey = u.searchParams.get("apiKey");
+  if (u.searchParams.get("mode") !== "verifyEmail" || oobCode === null || apiKey === null) {
+    return null;
+  }
+  if (!/^AIza[\w-]{20,}$/.test(apiKey)) return null; // Firebase web API key shape
+  return { apiKey, oobCode };
+}
+
+// Apply a Firebase email-verification oobCode via the Identity Toolkit REST API
+// — the same call the emailed link's SPA makes, issued directly so it runs the
+// instant the mail lands and only once. The apiKey is the Firebase WEB api key
+// (public by design). ok=true + the verified email on success; ok=false + the
+// Firebase error (EXPIRED_OOB_CODE / INVALID_OOB_CODE) otherwise — which itself
+// proves whether the code was alive at receipt. Exported for unit tests.
+export async function applyFirebaseEmailVerification(
+  apiKey: string,
+  oobCode: string,
+): Promise<{ ok: boolean; email?: string; error?: string }> {
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:update?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ oobCode }),
+      },
+    );
+    const data = (await resp.json().catch(() => ({}))) as {
+      email?: string;
+      emailVerified?: boolean;
+      error?: { message?: string };
+    };
+    if (resp.ok && (data.emailVerified === true || data.email !== undefined)) {
+      return { ok: true, ...(data.email !== undefined ? { email: data.email } : {}) };
+    }
+    return { ok: false, error: data.error?.message ?? `http_${resp.status}` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // Short probe when, even after a settle, the post-submit page still never
 // prompted the user to check their email AND no account-created signal
 // appeared. Legitimate verification mail almost always lands inside a
 // minute; this catches the fast case without 300s of dead air.
 const VERIFICATION_PROBE_SECONDS = 45;
+
+// Give-up ceiling for the "page says check your email" case (mail IS coming).
+// These poll timeouts are pure GIVE-UP BOUNDS: the inbox server long-polls and
+// early-exits the instant mail arrives, so a real email returns at ~its arrival
+// time regardless of the ceiling — the ceiling only costs wall-clock when mail
+// NEVER comes (young-domain withhold). Sized to the ARRIVAL TAIL, not the
+// average: transactional mail lands <30s typically, with a greylist retry tail
+// to ~60s, so 90s covers every real case with margin while failing a withheld
+// mail 90s sooner (was 180). Tail-sized, NOT average-sized — abandoning real
+// mail loses a signup (OF#2). Env-tunable for an A/B.
+const VERIFY_EMAIL_CEILING_SECONDS = Number.parseInt(
+  process.env.BOT_VERIFY_EMAIL_CEILING_S ?? "120",
+  10,
+);
 
 // Settle window before the SECOND post-submit page read. SPA signups
 // (Postmark, ElevenLabs, Browserbase, Grafana Cloud, …) swap in their
@@ -129,9 +306,14 @@ const SUBMIT_SETTLE_SECONDS = 3;
 // fresh send (Postmark, SendGrid) routinely take longer than the 45s
 // probe. Polling 120s here — rather than bailing at 45s — is the
 // difference between catching that mail and a false `verification_not_sent`.
-// Still bounded so a genuinely-silent service doesn't hold the run for the
-// full 180s expected-email timeout.
-const SUBMITTED_PROBE_FLOOR_SECONDS = 120;
+// Still bounded so a genuinely-silent service doesn't hold the run for the full
+// ceiling. Tail-sized to ~90s (arrival tail incl. a greylist retry); since the
+// long-poll early-exits on arrival, this only costs wall-clock when mail never
+// comes — failing an inconclusive no-mail run 30s sooner (was 120). Env-tunable.
+const SUBMITTED_PROBE_FLOOR_SECONDS = Number.parseInt(
+  process.env.BOT_VERIFY_INCONCLUSIVE_CEILING_S ?? "90",
+  10,
+);
 
 // Post-submit page text that means the submit was REJECTED, not accepted —
 // no account was created, so no verification mail is coming and even the
@@ -155,80 +337,6 @@ export function submitWasRejected(pageText: string): boolean {
   return SUBMIT_REJECTED_PATTERNS.some((p) => p.test(pageText));
 }
 
-// T7: page text that means the post-OAuth API key sits behind a
-// billing / payment-method wall. When the OAuth onboarding loop ends
-// without a key and the page reads like this, the run ends
-// `onboarding_blocked` rather than grep-looping a wall it cannot
-// satisfy (the S3-class trap named in the plan's failure modes).
-//
-// rc.27 — patterns are regexes (not substrings) so word boundaries
-// hold. `isAtPaywall` also rejects matches preceded by a negator
-// ("no", "without", "doesn't require", …) so a free-plan blurb like
-// "No credit card required, no hidden fees" — the exact phrase that
-// false-positively halted the IPInfo run on rc.26 — no longer
-// triggers a paywall verdict.
-const ONBOARDING_PAYWALL_PATTERNS: readonly RegExp[] = [
-  /\badd\s+a\s+payment\s+method\b/i,
-  /\badd\s+(?:a\s+)?credit\s+card\b/i,
-  /\bpayment\s+method\s+(?:is\s+)?required\b/i,
-  /\bcredit\s+card\s+required\b/i,
-  /\benter\s+your\s+card\b/i,
-  /\benter\s+your\s+payment\b/i,
-  /\benter\s+payment\s+details\b/i,
-  /\bconnect\s+a(?:\s+valid)?\s+payment\s+method\b/i,
-  /\byour\s+(?:free\s+)?trial\s+(?:is\s+)?ending\b/i,
-  /\bupgrade\s+your\s+plan\s+to\b/i,
-  /\bstart\s+your\s+paid\s+plan\b/i,
-  // rc.39 — Koyeb-class. Cover the variants the post-verify planner
-  // produces in its `done` reason when it gives up on a billing wall:
-  // "requires credit card payment", "credit card verification wall",
-  // "payment wall", "Pro plan payment required", "complete billing".
-  /\brequir(?:es?|ing)\s+(?:a\s+)?credit\s+card\b/i,
-  /\b(?:credit\s+card|payment)\s+wall\b/i,
-  /\bcredit\s+card\s+verification\b/i,
-  /\b(?:plan\s+|account\s+)?payment\s+required\b/i,
-  /\bcomplet(?:e|ing)\s+(?:billing|payment)\b/i,
-  /\bbilling\s+setup\s+(?:is\s+)?required\b/i,
-  // 0.8.2-rc.5 — Together.ai's post-OAuth landing surfaces a "payment
-  // form" gate that the post-verify planner reliably describes in its
-  // `done` reason:
-  //
-  //   "This page shows a payment form, and it's not possible to proceed
-  //    further without inputting payment information."
-  //
-  // None of the rc.39 patterns covered "payment form" / "payment
-  // information" — together fell through to `oauth_onboarding_failed`,
-  // which is misleading (the OAuth handshake succeeded; the wall is
-  // billing). Patterns are scoped to the "form/information requirement"
-  // shape so a marketing tile mentioning "payment information" doesn't
-  // false-positive.
-  /\bpayment\s+form\b/i,
-  /\binput(?:ting)?\s+payment\s+information\b/i,
-  /\benter(?:ing)?\s+payment\s+information\b/i,
-];
-
-// Negators that, if they appear in the ~30 characters immediately
-// before a paywall pattern match, flip its meaning from a demand
-// to a marketing reassurance. "No", "without", "doesn't require",
-// "don't need", "isn't".
-const PAYWALL_NEGATION_PREFIX =
-  /\b(?:no|without|doesn'?t\s+(?:need|require)|don'?t\s+(?:need|require)|isn'?t)\s+$/i;
-
-// Exported for unit testing — the post-OAuth heuristic distinguishing
-// "the dashboard is asking for a card before issuing a key" from "the
-// dashboard happens to mention cards on a marketing tile".
-export function isAtPaywall(text: string): boolean {
-  for (const pattern of ONBOARDING_PAYWALL_PATTERNS) {
-    const m = pattern.exec(text);
-    if (m === null) continue;
-    const start = Math.max(0, m.index - 30);
-    const prefix = text.slice(start, m.index);
-    if (PAYWALL_NEGATION_PREFIX.test(prefix)) continue;
-    return true;
-  }
-  return false;
-}
-
 // S3: does this post-submit page text indicate the service genuinely
 // expects the user to confirm via email? Drives whether the bot polls the
 // full verification timeout or runs only a short probe. Exported so the
@@ -236,6 +344,74 @@ export function isAtPaywall(text: string): boolean {
 export function expectsVerificationEmail(pageText: string): boolean {
   const lower = pageText.toLowerCase();
   return VERIFICATION_EXPECTED_PATTERNS.some((p) => lower.includes(p));
+}
+
+export function detectEmailLinkGate(
+  url: string,
+  title: string,
+  pageText: string,
+  inventory?: readonly InteractiveElement[],
+): boolean {
+  if (detectEmailOtpGate(url, title, pageText, inventory)) return false;
+  if (inventory !== undefined) {
+    const visibleInputs = inventory.filter((e) => {
+      return e.visible !== false && (e.tag === "input" || e.tag === "textarea");
+    });
+    const hasPassword = visibleInputs.some((e) => e.type === "password");
+    if (hasPassword) return false;
+    const hasEmailInput = visibleInputs.some((e) => {
+      const hay = `${e.type ?? ""} ${e.name ?? ""} ${e.id ?? ""} ${e.placeholder ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`;
+      return /\bemail\b/i.test(hay);
+    });
+    const hasSignupSubmit = inventory.some((e) => {
+      if (e.visible === false) return false;
+      const label = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.title ?? ""} ${e.labelText ?? ""}`;
+      return /\b(?:sign up|signup|join|create account|get started|send (?:me )?(?:a )?(?:magic )?link)\b/i.test(
+        label,
+      );
+    });
+    if (hasEmailInput && hasSignupSubmit) return false;
+  }
+
+  let path = "";
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    // ignore malformed URLs; page copy is enough
+  }
+  const text = `${title}\n${pageText}`.toLowerCase();
+  const explicitGate =
+    /\bcheck your (?:email|inbox)\b/.test(text) ||
+    /\bwe(?:'|’)ve sent (?:you )?(?:a )?(?:magic |sign[\s-]?in |login |verification |confirmation )?link\b/.test(
+      text,
+    ) ||
+    /\bwe sent (?:you )?(?:a )?(?:magic |sign[\s-]?in |login |verification |confirmation )?link\b/.test(
+      text,
+    ) ||
+    /\bclick (?:the |that )?(?:magic |sign[\s-]?in |login |verification |confirmation )?link\b/.test(
+      text,
+    ) ||
+    /\bmagic link\b/.test(text);
+  if (explicitGate) return true;
+  return (
+    /\/(?:users\/link|check[-_]?email|check[-_]?inbox|email[-_]?sent|verify[-_]?email|confirm[-_]?email)(?:\/|$)/.test(
+      path,
+    ) && expectsVerificationEmail(text)
+  );
+}
+
+export function isBrowserNavigationErrorPage(
+  url: string,
+  title: string,
+  pageText: string,
+): boolean {
+  const text = `${title}\n${pageText}`.toLowerCase();
+  return (
+    url.startsWith("chrome-error://") ||
+    /\b(?:dns_probe_finished_nxdomain|err_name_not_resolved|err_connection|this site can.t be reached|site can.t be reached)\b/i.test(
+      text,
+    )
+  );
 }
 
 export class LLMCallBudgetExceeded extends Error {
@@ -260,8 +436,9 @@ export class OAuthSessionNotPersistedError extends Error {
 // 0.8.2-rc.10 — common dashboard paths that vendors host their
 // per-account API key UI at. Ordered most-specific first so a
 // fallback navigate doesn't land short of the actual page. Returned
-// as an array of path-strings; the caller composes them onto the
-// origin of the currently-stuck URL and skips any already tried.
+// as an array of path-strings; the caller composes them onto the APP
+// origin (the signup/app URL the bot navigated to), NOT the auth/IdP
+// origin it may be stuck on post-OAuth, and skips any already tried.
 //
 // Patterns harvested from Anthropic (settings/keys), Sentry
 // (settings/account/api/auth-tokens), Neon (settings#api-keys),
@@ -274,6 +451,7 @@ const STUCK_LOOP_FALLBACK_PATHS: readonly string[] = [
   "/settings/api_keys",
   "/settings/tokens",
   "/settings/api-tokens",
+  "/settings/api/tokens",
   "/settings/account/api/auth-tokens/",
   // 0.8.3-rc.2 — added after the post-OAuth onboarding drain
   // (amplitude/groq/launchdarkly/modal/weaviate/…). These conventions
@@ -334,9 +512,61 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // Weaviate keys are issued per-cluster, but the org-level admin page
   // is the closest reachable surface; account-scoped guesses all 404.
   weaviate: ["/account", "/settings/api-keys"],
-  // northflank hosts user API keys under the account menu, not a
-  // top-level /settings/keys.
-  northflank: ["/account/api", "/settings/api"],
+  // Sentry's personal auth-token UI lives here. The generic fallback
+  // order hits three unrelated 404s before this path and the recovery
+  // walker aborts after 3 consecutive 404s, so pin the documented path.
+  sentry: ["/settings/account/api/auth-tokens/"],
+  // Axiom documents API-token creation under Settings > API tokens in
+  // app.axiom.co. Generic /settings/keys guesses hit the wrong surface.
+  axiom: ["/settings/api-tokens", "/settings/tokens", "/settings/api"],
+  // Anyscale documents API keys under the console account menu ("user icon"
+  // → "API keys"). The generic walker tries three /settings/* guesses first
+  // and aborts after consecutive 404s, so pin the account-level route first.
+  anyscale: ["/api-keys", "/account/api-keys"],
+  // Cloudinary's credential docs point users to the Dashboard for visible
+  // cloud/API credentials, with key management under Console Settings >
+  // API Keys. Generic settings guesses can leave an unfinished welcome wizard
+  // in place, so try the dashboard/developer surface first.
+  cloudinary: [
+    "https://console.cloudinary.com/pm/developer-dashboard",
+    "https://console.cloudinary.com/settings/api-keys",
+    "https://console.cloudinary.com/app/settings/api-keys",
+    "/pm/developer-dashboard",
+    "/settings/api-keys",
+    "/app/settings/api-keys",
+  ],
+  // Luma's docs link the API key page on the marketing/apex host, while OAuth
+  // can settle inside app.lumalabs.ai or an app NotFound shell. This cannot be
+  // discovered by same-origin guesses.
+  lumaai: ["https://lumalabs.ai/dream-machine/api/keys", "https://lumalabs.ai/api/keys"],
+  // Mistral's current API-key surface is on admin.mistral.ai; generic guesses
+  // from console.mistral.ai can miss the organization-scoped key page.
+  mistral: [
+    "https://admin.mistral.ai/organization/api-keys",
+    "https://console.mistral.ai/api-keys",
+    "https://console.mistral.ai/home?workspace_dialog=apiKeys",
+  ],
+  // Baseten documents API keys under app settings. If signup lands in a model
+  // catalog/onboarding surface, go straight to the settings route.
+  baseten: ["https://app.baseten.co/settings/api-keys"],
+  // Val Town's docs link API tokens here; /new opens the token-creation flow
+  // directly, avoiding disabled list-page actions.
+  valtown: ["https://www.val.town/settings/api/new", "https://www.val.town/settings/api"],
+  // Langfuse project ids are dynamic, but the cloud root/settings route is the
+  // stable entry to project settings/API keys after signup.
+  langfuse: ["https://cloud.langfuse.com/settings/api-keys", "https://us.cloud.langfuse.com/settings/api-keys"],
+  // Kinde docs direct API-key troubleshooting to Settings > API Keys.
+  // The feature can be paid-plan gated; reaching the route lets terminal-gate
+  // classification see that wall instead of a generic no-key dashboard miss.
+  kinde: ["https://app.kinde.com/settings/api-keys", "/settings/api-keys"],
+  // WorkOS documents the dashboard API key page directly; post-OAuth can land
+  // on product/onboarding surfaces that do not expose the sidebar path.
+  workos: ["https://dashboard.workos.com/api-keys"],
+  // Paddle's dashboard exposes API keys under Developer Tools >
+  // Authentication. The sidebar route is /authentication-v2; generic
+  // /settings/* and /api-keys guesses miss it and the planner can get stuck
+  // in Business Account > Team Members.
+  paddle: ["/authentication-v2"],
 };
 
 // Normalize a service name to the slug used as a SERVICE_KEYS_PATHS key:
@@ -471,6 +701,12 @@ export function findCreateKeyAffordance(
       .trim();
     if (haystack.length === 0) continue;
     const phraseHit = CREATE_KEY_PHRASE.test(haystack);
+    // Guard against large card/buttons whose aggregate subtree text happens to
+    // contain a create verb and a credential noun far apart. Ona's "What's new"
+    // card rendered "What's new ... provider keys" in one button; the old
+    // verb+noun co-occurrence treated that as "New token" and navigated away
+    // from the real PAT panel. Explicit phrases still win regardless of length.
+    if (!phraseHit && haystack.length > 96) continue;
     const verbNounHit =
       CREATE_KEY_VERB.test(haystack) && CREATE_KEY_NOUN.test(haystack);
     if (!phraseHit && !verbNounHit) continue;
@@ -489,6 +725,292 @@ export function findCreateKeyAffordance(
   return candidates[0]!.el;
 }
 
+// A "name your key" confirm modal frequently labels its submit button
+// generically — "Submit", "Create", "Generate", "Done" — with NO key noun, so
+// findCreateKeyAffordance can't see it (groq: the page-level "Create API Key"
+// opens a dialog whose only affirmative is a bare "Submit"). Worse, the
+// page-level create button is still in the background DOM, so a naive
+// findCreateKeyAffordance re-grabs IT and reopens the modal forever. This finds
+// the modal's affirmative submit instead. Bounded to the modal shape — a text
+// input (the name field) MUST be present — so a page-level Submit on an
+// unrelated form can't be tripped. Excludes the just-clicked create button and
+// any cancel/close control. Pure; exported for unit testing.
+const KEY_MODAL_SUBMIT_AFFIRM =
+  /^\s*(?:submit|create(?:\s+(?:api\s+)?key)?|generate(?:\s+key)?|confirm|done|save|add(?:\s+key)?|ok)\s*$/i;
+const KEY_MODAL_NEGATIVE = /\b(?:cancel|close|back|dismiss|never\s*mind)\b/i;
+
+export function findKeyModalSubmit(
+  inventory: readonly InteractiveElement[],
+  excludeSelector: string,
+): InteractiveElement | null {
+  const hasNameInput = inventory.some(
+    (el) =>
+      el.tag === "input" &&
+      el.visible !== false &&
+      (el.type === null || /^(?:text|search|email)$/i.test(el.type)),
+  );
+  if (!hasNameInput) return null;
+  for (const el of inventory) {
+    if (el.selector === excludeSelector) continue;
+    const clickable =
+      el.tag === "button" || el.tag === "a" || el.role === "button" || el.role === "link";
+    if (!clickable || el.visible === false) continue;
+    const label = [el.visibleText, el.ariaLabel, el.title]
+      .filter((s): s is string => s !== null && s !== undefined && s.length > 0)
+      .join(" ")
+      .trim();
+    if (label.length === 0 || label.length > 24) continue;
+    if (KEY_MODAL_NEGATIVE.test(label)) continue;
+    if (KEY_MODAL_SUBMIT_AFFIRM.test(label)) return el;
+  }
+  return null;
+}
+
+// The name input inside a "name your key" modal — the first visible text-like
+// input. Some vendors gate the submit on a non-empty name (groq), so the mint
+// flow types one before clicking submit. Pure; exported for unit testing.
+export function findKeyNameInput(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  for (const el of inventory) {
+    if (el.tag !== "input" || el.visible === false) continue;
+    if (el.type !== null && !/^(?:text|search|email)$/i.test(el.type)) continue;
+    return el;
+  }
+  return null;
+}
+
+// An in-DOM nav link/affordance that points AT an API-keys / tokens page.
+// Distinct from findCreateKeyAffordance (the "create key" button): this finds
+// the LINK that navigates TO the keys page, so the bot can click the real
+// target — whose href is the correct path — instead of GUESSING a URL from a
+// fixed convention list (which 404s whenever a service hosts keys at a
+// non-standard path: unify-ai's keys aren't at /keys, /api-keys, or
+// /settings/api-keys, all of which 404). A human clicks the sidebar link; so
+// should the bot. Exported, pure (operates on the inventory shape only).
+const API_KEYS_HREF =
+  /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)/i;
+const API_KEYS_TEXT =
+  /\b(?:api|access|secret|auth|personal\s+access)\s*(?:keys?|tokens?)\b/i;
+
+export function findApiKeysNavLink(
+  inventory: readonly InteractiveElement[],
+  alreadyClicked: ReadonlySet<string> = new Set(),
+): InteractiveElement | null {
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of inventory) {
+    const isClickable =
+      el.tag === "a" ||
+      el.tag === "button" ||
+      el.role === "link" ||
+      el.role === "button";
+    if (!isClickable) continue;
+    if (el.visible === false) continue;
+    if (alreadyClicked.has(el.selector)) continue;
+    const href = el.href ?? "";
+    const text = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    // The loose href segments (keys?/tokens?/developers?) are only trusted on
+    // an actual anchor href, where they're a structured path, not free text.
+    const hrefHit = href.length > 0 && API_KEYS_HREF.test(href);
+    const textHit = API_KEYS_TEXT.test(text);
+    if (!hrefHit && !textHit) continue;
+    // A "create API key" control is a different affordance (it opens a
+    // create flow / modal, it doesn't navigate to the listing). Skip it here
+    // UNLESS it's a real anchor with a keys href (then it's a nav link that
+    // merely happens to read "New API key").
+    if (CREATE_KEY_PHRASE.test(text) && !(el.tag === "a" && hrefHit)) continue;
+    let score = 0;
+    if (hrefHit) score += 4; // a real, navigable target beats a text guess
+    if (/\bapi\s*(?:keys?|tokens?)\b/i.test(text)) score += 2;
+    else if (textHit) score += 1;
+    if (el.tag === "a") score += 1; // prefer anchors over role=button
+    if (el.inViewport === true) score += 1;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+const RELOCATED_PAGE_TEXT =
+  /\b(?:404|page not found|not found|does not exist|no longer exists|has moved|moved|migrated|now (?:lives|exists)|part of .* instead|teams? list|organisations? list|organizations? list)\b/i;
+const CREDENTIAL_CONTEXT_TEXT =
+  /\b(?:api[\s_-]*(?:keys?|tokens?)|access[\s_-]*tokens?|personal[\s_-]*access[\s_-]*tokens?|secret[\s_-]*keys?|auth[\s_-]*tokens?|credentials?|developers?)\b/i;
+const RELOCATION_RECOVERY_TEXT =
+  /\b(?:teams?|organisations?|organizations?|accounts?|settings|profile|dashboard|developers?|api|keys?|tokens?|credentials?)\b/i;
+
+function sameOriginOrRelativeHref(currentUrl: string, href: string): boolean {
+  if (/^(?:#|\/(?!\/)|\?)/.test(href)) return true;
+  try {
+    return new URL(href).origin === new URL(currentUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+// When a guessed credentials URL lands on a provider's own "this page moved /
+// was migrated" screen, the DOM often includes the correct account/team-scoped
+// replacement link. Follow that link before letting the planner declare done
+// or keep guessing URLs. Pure and service-agnostic: it only requires a
+// credential-looking current page plus relocated-page copy plus an in-origin
+// recovery link.
+export function findRelocatedCredentialPageRecoveryLink(input: {
+  currentUrl: string;
+  pageText: string;
+  inventory: readonly InteractiveElement[];
+  alreadyClicked?: ReadonlySet<string> | undefined;
+}): InteractiveElement | null {
+  const relocatedText = `${input.currentUrl}\n${input.pageText}`;
+  if (!RELOCATED_PAGE_TEXT.test(relocatedText)) return null;
+  const hasCredentialContext =
+    CREDENTIAL_CONTEXT_TEXT.test(relocatedText) ||
+    /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)/i.test(
+      input.currentUrl,
+    );
+  if (!hasCredentialContext) return null;
+
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of input.inventory) {
+    const isLink = el.tag === "a" || el.role === "link";
+    if (!isLink || el.visible === false) continue;
+    if (input.alreadyClicked?.has(el.selector) === true) continue;
+    const href = el.href ?? "";
+    if (href.length === 0 || !sameOriginOrRelativeHref(input.currentUrl, href)) {
+      continue;
+    }
+    const text = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    const haystack = `${href} ${text}`;
+    if (!RELOCATION_RECOVERY_TEXT.test(haystack)) continue;
+    let score = 0;
+    if (API_KEYS_HREF.test(href)) score += 6;
+    if (API_KEYS_TEXT.test(text)) score += 4;
+    if (/\b(?:teams?|organisations?|organizations?)\b/i.test(haystack)) score += 3;
+    if (/\b(?:settings|accounts?|profile|developers?)\b/i.test(haystack)) score += 2;
+    if (/\b(?:dashboard|home)\b/i.test(haystack)) score -= 2;
+    if (el.inViewport === true) score += 1;
+    if (score <= 0) continue;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+const SCOPE_LIST_PATH =
+  /\/(?:teams?|orgs?|organisations?|organizations?|workspaces?|accounts?)(?:[/?#]|$)/i;
+const GENERIC_SCOPE_NAV_LABEL =
+  /^(?:dashboard|teams?|organisations?|organizations?|workspaces?|accounts?|account|settings|security|billing|projects?|create\s+(?:team|organi[sz]ation|workspace|account)|new\s+(?:team|organi[sz]ation|workspace|account)|home|docs?|blog|changelog|support|status)$/i;
+const SCOPE_ENTITY_HREF =
+  /\/(?:t|team|teams|org|orgs|organisation|organisations|organization|organizations|workspace|workspaces|account|accounts)\/[^/?#]+(?:[/?#]|$)/i;
+
+export function findAccountScopeListEntry(input: {
+  currentUrl: string;
+  pageText: string;
+  inventory: readonly InteractiveElement[];
+  alreadyClicked?: ReadonlySet<string> | undefined;
+}): InteractiveElement | null {
+  if (!SCOPE_LIST_PATH.test(input.currentUrl)) {
+    return null;
+  }
+  let currentScopeBase: string | null = null;
+  try {
+    currentScopeBase = scopedDashboardBasePath(new URL(input.currentUrl));
+  } catch {
+    currentScopeBase = null;
+  }
+  const hasListAffordance = input.inventory.some((el) => {
+    const label = [el.visibleText, el.ariaLabel, el.title, el.labelText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    return /\b(?:create\s+(?:team|organi[sz]ation|workspace|account)|search)\b/i.test(label);
+  });
+  if (!hasListAffordance) return null;
+
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of input.inventory) {
+    const isLink = el.tag === "a" || el.role === "link";
+    if (!isLink || el.visible === false) continue;
+    if (input.alreadyClicked?.has(el.selector) === true) continue;
+    const href = el.href ?? "";
+    if (href.length === 0 || !sameOriginOrRelativeHref(input.currentUrl, href)) continue;
+    const resolved = (() => {
+      try {
+        return new URL(href, input.currentUrl);
+      } catch {
+        return null;
+      }
+    })();
+    if (resolved === null) continue;
+    if (resolved.href.replace(/\/+$/, "") === input.currentUrl.replace(/\/+$/, "")) continue;
+    if (
+      currentScopeBase !== null &&
+      resolved.pathname.replace(/\/+$/, "") === currentScopeBase.replace(/\/+$/, "")
+    ) {
+      continue;
+    }
+    if (/\/(?:new|settings|billing|security|preferences|profile)(?:[/?#]|$)/i.test(resolved.pathname)) {
+      continue;
+    }
+    const label = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (label.length === 0) continue;
+    if (GENERIC_SCOPE_NAV_LABEL.test(label)) continue;
+    let score = 0;
+    if (SCOPE_ENTITY_HREF.test(resolved.pathname)) score += 4;
+    if (/\b(?:team|organi[sz]ation|workspace|account)\b/i.test(label)) score += 2;
+    if (label.length > 12) score += 1;
+    if (el.inViewport === true) score += 1;
+    if (score <= 0) continue;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+const RESOURCE_SETUP_FIELD =
+  /\b(?:project|workspace|team|organi[sz]ation|company|app|application|service|database|cluster|environment|index)\s+name|\bname\s+(?:your|of)\s+(?:project|workspace|team|organi[sz]ation|company|app|application|service|database|cluster|environment|index)\b/i;
+
+export function findPendingResourceSetupSubmit(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const hasResourceField = inventory.some((el) => {
+    if (el.visible === false) return false;
+    if (el.tag !== "input" && el.tag !== "textarea" && el.tag !== "label") return false;
+    const label = [el.name, el.id, el.placeholder, el.labelText, el.ariaLabel, el.visibleText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return RESOURCE_SETUP_FIELD.test(label);
+  });
+  if (!hasResourceField) return null;
+  const submitCandidates = inventory.filter((el) => {
+    if (el.visible === false) return false;
+    return el.tag === "button" || el.role === "button" || el.type === "submit";
+  });
+  const labelFor = (el: InteractiveElement): string =>
+    [el.visibleText, el.ariaLabel, el.title, el.labelText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+  return (
+    submitCandidates.find((el) => isOnboardingForwardLabel(labelFor(el))) ??
+    submitCandidates.find((el) => el.type === "submit") ??
+    null
+  );
+}
+
 // Pick the next fallback URL to try, keyed against the origin of the
 // currently-stuck URL. The curated SERVICE_KEYS_PATHS for the run's
 // service (when its host matches the stuck origin) are tried FIRST,
@@ -498,28 +1020,54 @@ export function pickStuckLoopFallbackUrl(
   currentUrl: string,
   alreadyTried: ReadonlySet<string>,
   service?: string,
+  appUrl?: string,
 ): string | null {
-  let parsed: URL;
+  let parsedCurrent: URL;
   try {
-    parsed = new URL(currentUrl);
+    parsedCurrent = new URL(currentUrl);
   } catch {
     return null;
+  }
+
+  // Compose key-path guesses onto the APP origin, NOT the origin of the
+  // currently-stuck URL. After OAuth the stuck URL is the identity-provider
+  // subdomain (auth.lumalabs.ai, accounts.<svc>, login.<svc>, the IdP) — which
+  // has no settings/keys pages, so "${authOrigin}/settings/keys" 404s by
+  // construction. The keys live on the app host (lumalabs.ai). `appUrl` is the
+  // signup/app URL the bot actually navigated to (this.resolvedSignupUrl), so
+  // its origin is the right host to guess against. Fall back to the stuck
+  // origin only when no usable app URL is known.
+  let composeBase: URL = parsedCurrent;
+  if (appUrl !== undefined) {
+    try {
+      const parsedApp = new URL(appUrl);
+      if (
+        (parsedApp.protocol === "http:" || parsedApp.protocol === "https:") &&
+        !isGoogleSearchUrl(appUrl) &&
+        shouldComposeFallbackOnAppOrigin(parsedCurrent, parsedApp)
+      ) {
+        composeBase = parsedApp;
+      }
+    } catch {
+      // keep the stuck origin
+    }
   }
   // about:blank / data: / chrome-error pages have an opaque origin that
   // serializes to the literal string "null" — building "${origin}${path}"
   // then yields an unnavigable "null/settings/keys". Only compose
   // fallbacks against a real http(s) origin.
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+  if (composeBase.protocol !== "http:" && composeBase.protocol !== "https:") {
     return null;
   }
-  const origin = parsed.origin;
-  // Skip a candidate when the current URL's path ALREADY matches it
-  // (case-insensitive, trailing-slash tolerant). The planner is stuck
-  // ON the page the candidate points to — navigating to the same URL
-  // again won't break the cycle, only a different path will.
-  const currentPath = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+  const origin = composeBase.origin;
+  // Skip a candidate when it resolves to the exact URL we're already stuck
+  // on (full origin+path, trailing-slash/case tolerant) — re-navigating
+  // there won't break the cycle. Compared on the full URL now that the
+  // compose origin can differ from the stuck origin.
+  const currentFull =
+    `${parsedCurrent.origin}${parsedCurrent.pathname}`.replace(/\/+$/, "").toLowerCase();
 
-  // Compose curated per-service paths first, but only when the stuck
+  // Compose curated per-service paths first, but only when the COMPOSE
   // origin's host actually belongs to the named service. The slug is
   // a substring of the host for the vendors we curate (groq →
   // console.groq.com, launchdarkly → app.launchdarkly.com, …); this
@@ -527,26 +1075,76 @@ export function pickStuckLoopFallbackUrl(
   // unrelated origin the bot wandered onto (e.g. an OAuth provider or
   // a redirect to a marketing domain).
   const slug = service !== undefined ? serviceSlug(service) : "";
-  const curated =
-    slug !== "" &&
-    SERVICE_KEYS_PATHS[slug] !== undefined &&
-    parsed.hostname.toLowerCase().includes(slug)
+  const servicePaths =
+    slug !== "" && SERVICE_KEYS_PATHS[slug] !== undefined
       ? SERVICE_KEYS_PATHS[slug]
+      : undefined;
+  const hasAbsoluteServicePath =
+    servicePaths?.some((path) => /^https?:\/\//i.test(path)) === true;
+  const curated =
+    servicePaths !== undefined &&
+    (hasAbsoluteServicePath || composeBase.hostname.toLowerCase().includes(slug))
+      ? servicePaths
       : [];
 
-  // Curated paths lead; the generic list follows. De-dup so a path that
-  // appears in both (groq's /keys, /settings/keys) isn't offered twice.
+  const scopedBase =
+    parsedCurrent.origin === origin ? scopedDashboardBasePath(parsedCurrent) : null;
+  const routeBases =
+    scopedBase !== null ? [`${origin}${scopedBase}`, origin] : [origin];
+
+  // Curated paths lead; the generic list follows. Absolute curated URLs are
+  // offered first. Relative paths drain under the scoped dashboard base before
+  // origin-root guesses, so `/t/acme/settings/*` is exhausted before
+  // `/settings/*`.
   const seen = new Set<string>();
-  for (const path of [...curated, ...STUCK_LOOP_FALLBACK_PATHS]) {
-    const candidatePath = path.replace(/\/+$/, "").toLowerCase();
+  const allPaths = [...curated, ...STUCK_LOOP_FALLBACK_PATHS];
+  const absolutePaths = allPaths.filter((path) => /^https?:\/\//i.test(path));
+  const relativePaths = allPaths.filter((path) => !/^https?:\/\//i.test(path));
+  for (const path of absolutePaths) {
+    const candidate = path;
+    const candidatePath = candidate.replace(/\/+$/, "").toLowerCase();
     if (seen.has(candidatePath)) continue;
     seen.add(candidatePath);
-    const candidate = `${origin}${path}`;
     if (alreadyTried.has(candidate)) continue;
-    if (candidatePath === currentPath) continue;
+    if (candidate.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
     return candidate;
   }
+  for (const base of routeBases) {
+    for (const path of relativePaths) {
+      const candidate = `${base}${path}`;
+      const candidatePath = candidate.replace(/\/+$/, "").toLowerCase();
+      if (seen.has(candidatePath)) continue;
+      seen.add(candidatePath);
+      if (alreadyTried.has(candidate)) continue;
+      if (candidate.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
+      return candidate;
+    }
+  }
   return null;
+}
+
+function scopedDashboardBasePath(url: URL): string | null {
+  const parts = url.pathname.split("/").filter((part) => part.length > 0);
+  if (parts.length < 2) return null;
+  const scope = parts[0]!.toLowerCase();
+  if (
+    !/^(?:t|team|teams|org|orgs|organization|organizations|workspace|workspaces|account|accounts|u|user|users)$/.test(
+      scope,
+    )
+  ) {
+    return null;
+  }
+  return `/${parts[0]}/${parts[1]}`;
+}
+
+function shouldComposeFallbackOnAppOrigin(current: URL, app: URL): boolean {
+  if (current.origin === app.origin) return true;
+  if (isOAuthProviderHost(current.toString())) return true;
+  const firstLabel = current.hostname.toLowerCase().split(".")[0] ?? "";
+  // Auth/login subdomains are not where settings/key pages live. App consoles
+  // commonly are (console.cloudinary.com, app.axiom.co), so do not blindly
+  // replace every current origin with the original signup URL's origin.
+  return /^(?:auth|authkit|login|accounts?|idp|sso|oauth|signin|signup)$/.test(firstLabel);
 }
 
 // Last-resort canonical signup URL when the caller passed none and no
@@ -560,6 +1158,66 @@ export function pickStuckLoopFallbackUrl(
 export function guessSignupUrl(service: string): string {
   const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
   return `https://${slug}.com/signup`;
+}
+
+const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
+  // The model repeatedly returns the stale/dead host
+  // console.cloud.clickhouse.com, which no longer resolves. ClickHouse's own
+  // docs and current console use console.clickhouse.cloud.
+  clickhousecloud: "https://console.clickhouse.cloud/signup",
+  // The model repeatedly guesses /auth/signup, which Langfuse serves as a
+  // Next.js 404. The actual Clerk/Auth.js registration route uses sign-up.
+  langfuse: "https://cloud.langfuse.com/auth/sign-up",
+  // The model guesses /app/signup, but Fly's current route is /app/sign-up.
+  flyio: "https://fly.io/app/sign-up",
+  // "Braintrust" is ambiguous in search/model results: usebraintrust.com is a
+  // talent marketplace, while the API-key product is the AI observability app.
+  braintrust: "https://www.braintrust.dev/signup",
+  // Nomic's public Atlas routes now redirect to a marketing/developer page.
+  // The self-serve account surface lives behind Auth0's universal login.
+  nomic:
+    "https://nomicai-production.us.auth0.com/u/login?state=hKFo2SA2XzhiVGRXMUR4X283bFYtUjQ1T2Q1NXBOZ095RmQ5c6Fur3VuaXZlcnNhbC1sb2dpbqN0aWTZIDdzTWlnTTZKVUZ5WnVDMjZldktEMlNMS0pZRmRfYnZOo2NpZNkgVkY0MURxZEV5UzJBYXE2NHExSW9PMUVPemRwanBsbnY",
+  // /signup is now a 404; StackBlitz's account creation route is /register.
+  stackblitz: "https://stackblitz.com/register",
+  // Axiom's public login/register surface is app.axiom.co; login.axiom.co
+  // is an auth host and 404s if API-token paths are composed onto it.
+  axiom: "https://app.axiom.co/register",
+  // Anyscale's marketing /signup is a lead form ("Get Started with $100 Credit")
+  // that can submit cleanly without creating an account or sending
+  // verification. Current Anyscale docs identify console.anyscale.com as the
+  // organization signup flow.
+  anyscale: "https://console.anyscale.com",
+};
+
+function canonicalSignupUrl(service: string): string | null {
+  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return CANONICAL_SIGNUP_URLS[slug] ?? null;
+}
+
+function serviceDerivedSignupCandidates(serviceSlug: string): string[] {
+  const parts = serviceSlug
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) return [];
+
+  const candidates: string[] = [];
+  const add = (url: string): void => {
+    if (!candidates.includes(url)) candidates.push(url);
+  };
+
+  const compact = parts.join("");
+  add(`https://${compact}.com/signup`);
+
+  if (parts.length >= 2) {
+    const root = parts.slice(0, -1).join("");
+    const tld = parts[parts.length - 1];
+    add(`https://${root}.${tld}/signup`);
+    add(`https://app.${root}.${tld}/signup`);
+    add(`https://console.${root}.${tld}/signup`);
+  }
+
+  return candidates;
 }
 
 // Pull the first well-formed http(s) URL out of arbitrary model text.
@@ -623,6 +1281,11 @@ export async function resolveSignupUrl(
       );
     }
   }
+  const canonical = canonicalSignupUrl(service);
+  if (canonical !== null) {
+    opts.log?.(`Resolved signup URL for "${service}" from canonical map: ${canonical}`);
+    return canonical;
+  }
   // No model available → preserve the old deterministic behavior exactly.
   if (llm === null || llm === undefined) return guessSignupUrl(service);
   try {
@@ -667,6 +1330,109 @@ export function isGoogleSearchUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function hasSignupIntentPath(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return /(?:^|\/)(?:signup|register|sign-up|create-account|join)\b/.test(path);
+  } catch {
+    return false;
+  }
+}
+
+export function isMarketingAuthDeadEndUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (/^docs?\./.test(host)) return true;
+    const path = parsed.pathname.toLowerCase();
+    return /(?:^|\/)(?:pricing|docs?|documentation|blog|customers?|legal|terms|privacy|contact)(?:\/|$)/.test(
+      path,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isAuthEntryPageForPreExtraction(input: {
+  url: string;
+  html?: string;
+  inventory: readonly InteractiveElement[];
+}): boolean {
+  let pathLooksAuth = false;
+  try {
+    const path = new URL(input.url).pathname.toLowerCase();
+    pathLooksAuth = /(?:^|\/)(?:signup|sign-up|register|login|signin|sign-in)(?:\/|$)/.test(path);
+  } catch {
+    pathLooksAuth = false;
+  }
+
+  const hasCredentialInput = input.inventory.some(
+    (e) =>
+      e.tag === "input" &&
+      e.visible !== false &&
+      (e.type === "email" || e.type === "password"),
+  );
+  const hasAuthAffordance = input.inventory.some((e) => {
+    if (e.visible === false) return false;
+    if (e.tag !== "button" && e.tag !== "a" && e.role !== "button" && e.role !== "link") {
+      return false;
+    }
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`.toLowerCase();
+    return /\b(?:sign\s*up|signup|sign\s*in|signin|log\s*in|login|continue with|with google|with github|with gitlab|with bitbucket)\b/.test(
+      text,
+    );
+  });
+  const htmlClass =
+    input.html !== undefined ? classifySignupHtml(input.html) : "other";
+
+  return (
+    (pathLooksAuth && (hasAuthAffordance || hasCredentialInput || htmlClass !== "other")) ||
+    (hasCredentialInput && hasAuthAffordance)
+  );
+}
+
+export function hasNativeSignupForm(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const visible = inventory.filter((e) => e.visible !== false);
+  const inputSignal = (e: InteractiveElement): string =>
+    [e.name, e.id, e.labelText, e.placeholder, e.ariaLabel]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join(" ");
+  const hasEmail = visible.some((e) => {
+    if (e.tag !== "input") return false;
+    if (e.type === "email") return true;
+    if (e.type !== null && e.type !== "" && e.type !== "text") return false;
+    return /\be-?mail(?:\s+address)?\b/i.test(inputSignal(e));
+  });
+  const hasPassword = visible.some(
+    (e) => e.tag === "input" && e.type === "password",
+  );
+  if (!hasEmail || !hasPassword) return false;
+  return visible.some((e) => {
+    if (
+      e.tag !== "button" &&
+      e.tag !== "a" &&
+      e.role !== "button" &&
+      e.type !== "submit"
+    ) {
+      return false;
+    }
+    const label = [
+      e.visibleText,
+      e.ariaLabel,
+      e.labelText,
+      e.placeholder,
+      e.name,
+    ]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join(" ");
+    return /\b(?:sign\s*up|signup|create\s+(?:an\s+)?account|register|get\s+started)\b/i.test(
+      label,
+    );
+  });
 }
 
 // Google's NEWER consent screen (URL form
@@ -982,6 +1748,7 @@ export interface SignupResult {
 export type FillAction =
   | { kind: "fill"; selector: string; value_kind: FillValueKind; literal?: string; reason: string }
   | { kind: "check"; selector: string; reason: string }
+  | { kind: "select"; selector: string; reason: string; option_text?: string }
   | { kind: "click"; selector: string; reason: string };
 
 export interface SignupPlan {
@@ -991,11 +1758,88 @@ export interface SignupPlan {
   notes?: string;
 }
 
+function textOfInteractiveElement(el: InteractiveElement): string {
+  return [
+    el.visibleText,
+    el.ariaLabel,
+    el.title,
+    el.labelText,
+    el.placeholder,
+    el.name,
+    el.id,
+  ]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join(" ")
+    .trim();
+}
+
+export function planSimpleEmailOnlySignup(
+  inventory: readonly InteractiveElement[],
+): SignupPlan | null {
+  const visibleInputs = inventory.filter(
+    (el) =>
+      el.tag === "input" &&
+      el.visible !== false &&
+      el.type !== "hidden" &&
+      el.type !== "checkbox" &&
+      el.type !== "radio",
+  );
+  const emailInputs = visibleInputs.filter((el) => {
+    const hay = textOfInteractiveElement(el);
+    return el.type === "email" || /\be-?mail\b/i.test(hay);
+  });
+  if (emailInputs.length !== 1) return null;
+  if (visibleInputs.some((el) => el.type === "password")) return null;
+  if (visibleInputs.length !== 1) return null;
+
+  const hasSeparateSignupCta = inventory.some((el) => {
+    if (el.visible === false) return false;
+    if (el.tag === "button" || el.type === "submit") return false;
+    return /\b(?:sign up|signup|get started|create (?:an )?account|register)\b/i.test(
+      textOfInteractiveElement(el),
+    );
+  });
+
+  const submit = inventory.find((el) => {
+    if (el.visible === false) return false;
+    if (el.tag !== "button" && el.tag !== "input" && el.role !== "button") return false;
+    const text = textOfInteractiveElement(el);
+    const isSubmitControl = el.type === "submit" || el.tag === "button" || el.role === "button";
+    if (!isSubmitControl) return false;
+    return /\b(?:send (?:me )?(?:a )?(?:magic )?link|magic link|continue|sign up|join|get started)\b/i.test(text);
+  });
+  if (submit === undefined) return null;
+  const submitText = textOfInteractiveElement(submit);
+  if (
+    hasSeparateSignupCta &&
+    !/\b(?:sign up|signup|join|get started|create (?:an )?account|register)\b/i.test(
+      submitText,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    actions: [
+      {
+        kind: "fill",
+        selector: emailInputs[0]!.selector,
+        value_kind: "email",
+        reason: "Fill the email address for the magic-link signup form",
+      },
+    ],
+    submit_selector: submit.selector,
+    confidence: "high",
+    notes: "Deterministic email-only signup form",
+  };
+}
+
 // Outcome of planExecuteWithRetry — the form-fill + submit phase (F3
 // T5). signup() maps each kind to a SignupResult, except `submitted`
 // which falls through to credential extraction.
 type PlanExecOutcome =
   | { kind: "submitted" }
+  | { kind: "needs_login"; provider: OAuthProviderId; reason: string }
   | { kind: "captcha_blocked"; captchaKind: string }
   | { kind: "submit_failed"; reason: string }
   | { kind: "planning_failed"; reason: string }
@@ -1070,6 +1914,49 @@ export type PostVerifyStep =
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
+export function coercePostVerifyIdentityFillStep(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+  credentials?: { email: string; password: string } | undefined,
+): PostVerifyStep {
+  if (step.kind !== "fill" || credentials === undefined) return step;
+  const target = inventory.find((e) => e.selector === step.selector);
+  if (target === undefined) return step;
+  const hay = [
+    target.type,
+    target.id,
+    target.name,
+    target.placeholder,
+    target.ariaLabel,
+    target.labelText,
+    target.visibleText,
+    target.testId,
+  ]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (target.tag === "input" && (target.type === "email" || /\bemail\b/.test(hay))) {
+    if (step.value !== credentials.email) {
+      return {
+        ...step,
+        value: credentials.email,
+        reason: `${step.reason} (runtime coerced invented email to the active signup alias)`,
+      };
+    }
+    return step;
+  }
+  if (target.tag === "input" && target.type === "password") {
+    if (step.value !== credentials.password) {
+      return {
+        ...step,
+        value: credentials.password,
+        reason: `${step.reason} (runtime coerced invented password to the active signup password)`,
+      };
+    }
+  }
+  return step;
+}
+
 // The set of value_kinds the planner is allowed to emit. Kept as a
 // runtime array so validation and the exhaustive `valueFor` switch
 // share one source of truth.
@@ -1079,9 +1966,122 @@ const FILL_VALUE_KINDS = [
   "name",
   "username",
   "company",
+  "phone",
   "literal",
 ] as const;
 type FillValueKind = (typeof FILL_VALUE_KINDS)[number];
+
+const HUMAN_FIRST_NAMES = [
+  "Alex",
+  "Jordan",
+  "Taylor",
+  "Casey",
+  "Morgan",
+  "Riley",
+  "Jamie",
+  "Cameron",
+  "Avery",
+  "Quinn",
+] as const;
+
+const HUMAN_LAST_NAMES = [
+  "Miller",
+  "Parker",
+  "Reed",
+  "Brooks",
+  "Hayes",
+  "Bennett",
+  "Carter",
+  "Foster",
+  "Morgan",
+  "Spencer",
+] as const;
+
+interface SignupIdentity {
+  firstName: string;
+  lastName: string;
+  displayName: string;
+  username: string;
+}
+
+function stableHash(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function titleCaseNameToken(token: string): string {
+  const lower = token.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function safeNameToken(token: string | undefined): string | null {
+  if (token === undefined) return null;
+  const cleaned = token.replace(/[^a-z]/gi, "");
+  if (cleaned.length < 2) return null;
+  if (/^(?:trusty|squire|bot|test|demo|admin|user|verify)$/i.test(cleaned)) return null;
+  return titleCaseNameToken(cleaned);
+}
+
+export function identityFromEmail(email: string): SignupIdentity {
+  const local = email.split("@", 1)[0] ?? "";
+  const tokens = local.split(/[^a-z]+/i).map(safeNameToken).filter((token): token is string => token !== null);
+  const hash = stableHash(email);
+  const firstName = tokens[0] ?? HUMAN_FIRST_NAMES[hash % HUMAN_FIRST_NAMES.length]!;
+  const lastName = tokens[1] ?? HUMAN_LAST_NAMES[Math.floor(hash / HUMAN_FIRST_NAMES.length) % HUMAN_LAST_NAMES.length]!;
+  const suffix = String(hash % 10_000).padStart(4, "0");
+  const username = `${firstName}${lastName}${suffix}`.toLowerCase();
+  return {
+    firstName,
+    lastName,
+    displayName: `${firstName} ${lastName}`,
+    username,
+  };
+}
+
+function elementTextForFieldKind(el: InteractiveElement | undefined): string {
+  if (el === undefined) return "";
+  return [
+    el.name,
+    el.id,
+    el.placeholder,
+    el.ariaLabel,
+    el.labelText,
+    el.visibleText,
+  ]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+}
+
+export function resolvePlannedFillValue(
+  action: FillAction & { kind: "fill" },
+  fillValues: Record<FillValueKind, string>,
+  el: InteractiveElement | undefined,
+  identity: SignupIdentity,
+): string {
+  const fieldText = elementTextForFieldKind(el);
+  if (
+    action.value_kind === "literal" &&
+    /\b(?:confirm|confirmation|verify|verification|again|repeat)\b/.test(fieldText) &&
+    /password/.test(fieldText)
+  ) {
+    return fillValues.password;
+  }
+  if (action.value_kind === "literal") return action.literal ?? "";
+  if (action.value_kind !== "name") return fillValues[action.value_kind];
+
+  if (/\b(?:first|given|forename)\b|first[_-]?name|given[_-]?name/.test(fieldText)) {
+    return identity.firstName;
+  }
+  if (/\b(?:last|family|surname)\b|last[_-]?name|family[_-]?name/.test(fieldText)) {
+    return identity.lastName;
+  }
+  return identity.displayName;
+}
 
 // Parsers/validators live at module scope so callLLM() can pass them
 // as plain functions. Each parser MUST throw on any malformed reply —
@@ -1222,6 +2222,21 @@ function validateAction(value: unknown, index: number): FillAction {
         selector: requireString(obj, "selector", `action[${index}] (check)`),
         reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
       };
+    case "select": {
+      const optionText = typeof obj["option_text"] === "string" ? obj["option_text"] : undefined;
+      return optionText !== undefined
+        ? {
+            kind: "select",
+            selector: requireString(obj, "selector", `action[${index}] (select)`),
+            option_text: optionText,
+            reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
+          }
+        : {
+            kind: "select",
+            selector: requireString(obj, "selector", `action[${index}] (select)`),
+            reason: typeof obj["reason"] === "string" ? obj["reason"] : "",
+          };
+    }
     case "click":
       return {
         kind: "click",
@@ -1716,13 +2731,13 @@ export function extractVerifyWallAlias(text: string): string | null {
 }
 
 // Pure: does this post-submit page look like a CONTINUATION step of the same
-// signup (a dedicated "Create your password" page — amplitude's step 2 — is the
-// canonical case) rather than a dashboard, a credentials page, or a
-// verify-your-email screen? Conservative on purpose: requires a VISIBLE, EMPTY
-// password input the bot still needs to fill AND a create/continue-style submit
-// control, and the page must NOT read as a verify-your-email screen or a login
-// form (a "sign in" page also has a password field, but re-filling it with the
-// run's generated password would just fail). Exported for unit tests.
+// signup rather than a dashboard, a credentials page, or a verify-your-email
+// screen? Conservative on purpose: requires a create/continue-style submit
+// control and either a visible empty password input (Amplitude) OR explicit
+// signup-wizard copy with visible empty business/account fields (Paddle). The
+// page must NOT read as a verify-your-email screen or a login form (a "sign in"
+// page also has a password field, but re-filling it with the run's generated
+// password would just fail). Exported for unit tests.
 export function isContinuationFormStep(
   html: string,
   inventory: ReadonlyArray<InteractiveElement>,
@@ -1731,6 +2746,15 @@ export function isContinuationFormStep(
   if (expectsVerificationEmail(html)) return false;
   // A login page must not be mistaken for a signup continuation.
   if (classifySignupHtml(html) === "login") return false;
+  const hasSubmitControl = inventory.some((e) => {
+    if (e.tag !== "button" && e.type !== "submit") return false;
+    const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+    return /\b(?:create|continue|sign[\s-]?up|next|submit|finish|get started|done)\b/.test(
+      t,
+    );
+  });
+  if (!hasSubmitControl) return false;
+
   const hasEmptyPassword = inventory.some(
     (e) =>
       e.tag === "input" &&
@@ -1738,13 +2762,21 @@ export function isContinuationFormStep(
       e.visible !== false &&
       (e.value ?? "") === "",
   );
-  if (!hasEmptyPassword) return false;
-  return inventory.some((e) => {
-    if (e.tag !== "button" && e.type !== "submit") return false;
-    const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
-    return /\b(?:create|continue|sign[\s-]?up|next|submit|finish|get started|done)\b/.test(
-      t,
+  if (hasEmptyPassword) return true;
+
+  const signupWizardCopy =
+    /\b(?:account details|business details|part\s+\d+\s+of\s+\d+|business name|business type|annual revenue|company details|workspace details)\b/i.test(
+      html,
     );
+  if (!signupWizardCopy) return false;
+
+  return inventory.some((e) => {
+    if (e.visible === false) return false;
+    if (e.tag !== "input" && e.tag !== "textarea" && e.tag !== "select") return false;
+    if (e.type === "checkbox" || e.type === "radio" || e.type === "hidden") return false;
+    if ((e.value ?? "") !== "") return false;
+    const label = `${e.labelText ?? ""} ${e.placeholder ?? ""} ${e.name ?? ""} ${e.id ?? ""} ${e.ariaLabel ?? ""}`;
+    return /\b(?:business|company|workspace|website|revenue|name|type|role|team)\b/i.test(label);
   });
 }
 
@@ -1929,6 +2961,22 @@ export async function resolveSignupUrlByProbe(
   log?: (m: string) => void,
 ): Promise<string | null> {
   const note = (m: string): void => log?.(m);
+  const probeLooksUsableSignup = (res: {
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  }): { usable: boolean; htmlClass: "signup" | "login" | "other" } => {
+    const htmlClass = classifySignupHtml(res.bodyText);
+    if (res.status >= 400) return { usable: false, htmlClass };
+    return {
+      usable:
+        htmlClass === "signup" ||
+        (htmlClass === "other" &&
+          hasSignupIntentPath(res.finalUrl) &&
+          !isMarketingAuthDeadEndUrl(res.finalUrl)),
+      htmlClass,
+    };
+  };
 
   let hint: URL;
   try {
@@ -1938,10 +2986,22 @@ export async function resolveSignupUrlByProbe(
     return null;
   }
 
+  const googleConsoleEntry = canonicalGoogleConsoleEntryUrl(hintUrl);
+  if (googleConsoleEntry !== null) {
+    const entryRes = await fetchText(googleConsoleEntry);
+    if (entryRes !== null && entryRes.status < 500) {
+      note(`[signup-url] canonicalized Google console root ${hintUrl} → ${googleConsoleEntry}`);
+      return googleConsoleEntry;
+    }
+  }
+
   // Fast path: the hint itself, followed through redirects. A 308 chain
   // (plunk's app. → next-app.) resolves here for free.
   const hintRes = await fetchText(hintUrl);
-  if (hintRes !== null && classifySignupHtml(hintRes.bodyText) === "signup") {
+  const hintProbe =
+    hintRes !== null ? probeLooksUsableSignup(hintRes) : null;
+  const hintClass = hintProbe?.htmlClass ?? "other";
+  if (hintRes !== null && hintProbe?.usable === true) {
     if (hintRes.finalUrl !== hintUrl) {
       note(`[signup-url] hint ${hintUrl} redirected to signup ${hintRes.finalUrl}`);
     } else {
@@ -1953,7 +3013,7 @@ export async function resolveSignupUrlByProbe(
     `[signup-url] hint ${hintUrl} did not classify as signup` +
       (hintRes === null
         ? " (fetch failed)"
-        : ` (${classifySignupHtml(hintRes.bodyText)})`),
+        : ` (${hintClass})`),
   );
 
   // The hint's registered domain (eTLD+1) is the trusted anchor — it's the
@@ -1975,7 +3035,10 @@ export async function resolveSignupUrlByProbe(
     if (candidate === hintUrl) continue; // already tried as the hint
     const res = await fetchText(candidate);
     if (res === null) continue;
-    if (classifySignupHtml(res.bodyText) !== "signup") continue;
+    const candidateProbe = probeLooksUsableSignup(res);
+    if (!candidateProbe.usable) {
+      continue;
+    }
 
     let finalHost: string;
     try {
@@ -1995,6 +3058,56 @@ export async function resolveSignupUrlByProbe(
     }
     note(`[signup-url] resolved via probe: ${candidate} → ${res.finalUrl}`);
     return res.finalUrl;
+  }
+
+  // If the model/curated hint is not even reachable, widen from "same origin"
+  // to service-name-derived origins and validate those with the same HTTP
+  // probe. This recovers stale host guesses like
+  // console.cloud.clickhouse.com → console.clickhouse.cloud without trusting
+  // the LLM blindly. If a candidate is reachable but its static HTML is
+  // inconclusive (common Auth0/Clerk shell), return it only as a replacement
+  // for an unreachable hint; the browser planner can then inspect the live
+  // page instead of dying on DNS.
+  let firstReachableServiceCandidate: string | null = null;
+  if (hintRes === null) {
+    for (const candidate of serviceDerivedSignupCandidates(serviceSlug)) {
+      if (candidate === hintUrl) continue;
+      const res = await fetchText(candidate);
+      if (res === null) continue;
+
+      let finalHost: string;
+      let candidateHost: string;
+      try {
+        finalHost = new URL(res.finalUrl).hostname;
+        candidateHost = new URL(candidate).hostname;
+      } catch {
+        continue;
+      }
+      const finalDomain = getDomain(finalHost.toLowerCase());
+      const candidateDomain = getDomain(candidateHost.toLowerCase());
+      const sameCandidateDomain =
+        finalDomain !== null && candidateDomain !== null && finalDomain === candidateDomain;
+      if (!sameCandidateDomain && !hostMatchesServiceDomain(finalHost, serviceSlug)) {
+        note(
+          `[signup-url] service candidate ${candidate} → ${res.finalUrl} rejected: off-domain`,
+        );
+        continue;
+      }
+
+      if (classifySignupHtml(res.bodyText) === "signup") {
+        note(`[signup-url] recovered via service probe: ${candidate} → ${res.finalUrl}`);
+        return res.finalUrl;
+      }
+      firstReachableServiceCandidate ??= res.finalUrl;
+    }
+  }
+
+  if (firstReachableServiceCandidate !== null) {
+    note(
+      `[signup-url] hint ${hintUrl} was unreachable; using reachable service candidate ` +
+        `${firstReachableServiceCandidate}`,
+    );
+    return firstReachableServiceCandidate;
   }
 
   note(`[signup-url] no conventional signup path resolved for ${hintUrl}`);
@@ -2107,6 +3220,24 @@ export function detectAlreadySignedIn(args: {
       ) || /^(?:sign ?up|sign ?in|log ?in|create (?:an )?account)$/.test(t)
     );
   });
+
+  const visibleTextOf = (e: InteractiveElement): string =>
+    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+
+  const RESOURCE_CREATION_CTA =
+    /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key|database|cluster|instance|service|index|environment)|create(?:\s+(?:new|a|an|project|workspace|database|cluster|instance|deployment|app|service|index|environment))?|get\s+started\s+by\s+sett?ing\s+up\s+(?:a|an)?\s*.*\b(?:project|workspace|app|application|service|database|cluster|index)\b|sett?ing\s+up\s+(?:a|an)?\s*.*\b(?:project|workspace|app|application|service|database|cluster|index)\b)/i;
+  const hasResourceCreationCta = inventory.some((e) =>
+    RESOURCE_CREATION_CTA.test(visibleTextOf(e)),
+  );
+  const ONBOARDING_CHROME =
+    /\b(?:set up your first|create your project|get started by sett?ing up|welcome to|import documents|make a search|don'?t show me again|bring me home|setup checklist|onboarding)\b/i;
+  const hasOnboardingChrome = inventory.some((e) =>
+    ONBOARDING_CHROME.test(visibleTextOf(e)),
+  );
+  if (!hasSignupAffordance && hasResourceCreationCta && hasOnboardingChrome) {
+    return true;
+  }
+
   try {
     if (
       !hasSignupAffordance &&
@@ -2119,9 +3250,6 @@ export function detectAlreadySignedIn(args: {
   } catch {
     // malformed URL — fall through to the other signals
   }
-
-  const visibleTextOf = (e: InteractiveElement): string =>
-    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
 
   // Signal 1 — strict nav-keyword match (the canonical Sentry-class case).
   const AUTH_KEYWORDS =
@@ -2138,7 +3266,10 @@ export function detectAlreadySignedIn(args: {
   //   "$N left" / "N days left" / "remaining"
   const BILLING =
     /(?:\$\d+(?:\.\d+)?\s*(?:left|remaining)|\d+\s*days?\s*(?:left|remaining|trial)|\btrial\b)/i;
-  if (inventory.some((e) => BILLING.test(visibleTextOf(e)))) {
+  if (
+    !hasSignupAffordance &&
+    inventory.some((e) => BILLING.test(visibleTextOf(e)))
+  ) {
     return true;
   }
 
@@ -2169,7 +3300,7 @@ export function detectAlreadySignedIn(args: {
     const hasOrgPrefix = /\/(?:organizations?|orgs?)\//i.test(parsed.pathname);
     dashboardyPath =
       hasOrgPrefix ||
-      (/\/(?:new|dashboard|projects?|account|settings|workspace|home|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
+      (/\/(?:new|dashboard|projects?|account|settings|workspace|home|admin|redis|kafka|vector|cluster|databases?|instances?|apps?|deployments?|services?|onboarding|welcome|getting-started|get-started|setup)(?:\/|$)/i.test(
         parsed.pathname,
       ) && !/\/(?:signup|sign-up|register|login|sign-in|signin)/i.test(parsed.pathname));
   } catch {
@@ -2184,12 +3315,10 @@ export function detectAlreadySignedIn(args: {
     // bot's F17 already-signed-in path fell through to form-fill
     // and the planner clicked the CTA thinking it was a signup
     // submit button.
-    const CREATION_CTA =
-      /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key|database|cluster|instance|service)|create(?:\s+(?:new|a|project|workspace|database|cluster|instance|deployment|app|service|index|environment))?)/i;
     if (
       inventory.some((e) => {
         const t = e.visibleText ?? e.ariaLabel ?? "";
-        return CREATION_CTA.test(t.trim());
+        return RESOURCE_CREATION_CTA.test(t.trim());
       })
     ) {
       return true;
@@ -2415,6 +3544,10 @@ export function isOauthOnlyChooser(
 // gates path 2 to truly icon-only elements (no own visible text) so a
 // card wrapper with one stray <img alt> can never match.
 const MAX_OAUTH_BUTTON_TEXT_CHARS = 60;
+function normalizeOAuthButtonText(text: string, keyword: string): string {
+  return text.replace(new RegExp(`(${keyword})(?=[A-Z])`, "gi"), "$1 ");
+}
+
 export function findOAuthButton(
   inventory: readonly InteractiveElement[],
   provider: OAuthProviderId,
@@ -2463,7 +3596,10 @@ export function findOAuthButton(
     // 3. Visible text / accessible label naming the provider + an
     //    auth verb. The auth verb requirement rejects nav and policy
     //    links that merely mention the provider.
-    const text = `${visibleText} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+    const text = normalizeOAuthButtonText(
+      `${visibleText} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+      keyword,
+    )
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
@@ -2648,6 +3784,7 @@ export function detectEmailOtpGate(
   url: string,
   title: string,
   pageText: string,
+  inventory?: readonly InteractiveElement[],
 ): boolean {
   let path: string;
   try {
@@ -2670,10 +3807,33 @@ export function detectEmailOtpGate(
   // phrasing — must include a "we sent … code … to" or "enter …
   // code … sent" shape with a bounded gap.
   const lower = pageText.toLowerCase();
+  if (inventory !== undefined && !hasOtpInput(inventory)) {
+    return false;
+  }
   return (
     /we sent[^.]{0,60}\bcode\b[^.]{0,40}to\b/.test(lower) ||
     /enter[^.]{0,40}\bcode\b[^.]{0,40}\b(?:sent|email)/.test(lower)
   );
+}
+
+function hasOtpInput(inventory: readonly InteractiveElement[]): boolean {
+  return inventory.some((e) => {
+    if (e.tag !== "input" && e.tag !== "textarea") return false;
+    const text = [
+      e.type,
+      e.id,
+      e.name,
+      e.placeholder,
+      e.ariaLabel,
+      e.labelText,
+      e.visibleText,
+      e.testId,
+    ]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join(" ")
+      .toLowerCase();
+    return /\b(?:otp|code|verification|verify|one[\s-]?time|pin)\b/.test(text);
+  });
 }
 
 // (c) SSO restriction (Fly.io class). Service rejects token-creation
@@ -2795,6 +3955,36 @@ export function detectStuckOnGoogleOAuth(url: string): boolean {
   }
 }
 
+function isGoogleAccountsAuthUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "accounts.google.com" || h.endsWith(".accounts.google.com");
+  } catch {
+    return false;
+  }
+}
+
+export function isGoogleConsumerPostOAuthUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "google.com" || h === "www.google.com" || h === "myaccount.google.com";
+  } catch {
+    return false;
+  }
+}
+
+export function canonicalGoogleConsoleEntryUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (!/^console\.[a-z0-9-]+\.google\.com$/i.test(host)) return null;
+    if (parsed.pathname.replace(/\/+$/, "") !== "") return null;
+    return `${parsed.origin}/u/0/`;
+  } catch {
+    return null;
+  }
+}
+
 // Is the current URL an OAuth/SSO CALLBACK route — the redirect target
 // where the SPA exchanges the provider code for a session? MEASURED
 // 2026-06-04: clerk's `/sign-in/sso-callback` does a token exchange that
@@ -2879,42 +4069,30 @@ export function findSignInAdvanceButton(
 // actually has a session for. `findFirstOAuthButton` walks this list in
 // order and uses the first provider the PAGE offers, so order = preference.
 //
-// RULE 1 — Google leads whenever its session is warm, pin or not. Empirically
-// Google's OAuth blocks far less hard than GitHub's, which hits an UNCLEARABLE
-// forced-2FA "Verify 2FA now" wall on the /authorize step regardless of session
-// warmth or egress IP (MEASURED 2026-06-07: porter + deepinfra were pinned
-// github, hit the wall and aborted, while their own signin pages also offered a
-// clean Google button the bot should have taken). This makes the code match the
-// long-stated intent in resolveOAuthCandidates ("Google blocks less hard, so it
-// leads") — which RULE 1 previously contradicted by leading with the pin.
+// RULE 1 — an explicit pin is an override. The queue uses oauth_provider to
+// test or force a known-good route; silently promoting Google over a pinned
+// GitHub path makes service-level fixes impossible to reason about.
 //
-// A `github` pin still works for its real purpose: when a service's Google is
-// One-Tap/FedCM-only (no redirect button the flow can drive — northflank),
-// findFirstOAuthButton finds no Google button and falls through to GitHub even
-// though Google leads here. So a pin only decides ORDER when Google is NOT warm.
-//
-// RULE 2 — with no warm Google session, honor an explicit pin, else whatever IS
-// warm.
+// RULE 2 — with no explicit pin, auto-prefer warm Google, then other warm
+// providers. Google usually blocks less hard, but that is only a default, not
+// an override of service metadata.
 export function orderOAuthCandidates(
   pinned: OAuthProviderId | undefined,
   loggedIn: readonly OAuthProviderId[],
 ): OAuthProviderId[] {
-  if (loggedIn.includes("google")) {
-    const rest = loggedIn.filter((p) => p !== "google");
-    // A non-Google pin sits right behind Google. Keep it even when its own
-    // session is cold, as a trailing fallback so a page that only offers that
-    // provider still gets attempted (a cold attempt → needs_login, which tells
-    // the operator to log in — better than silently dropping to form-fill).
-    if (pinned !== undefined && pinned !== "google") {
-      return ["google", pinned, ...rest.filter((p) => p !== pinned)];
-    }
-    return ["google", ...rest];
-  }
   if (pinned !== undefined) {
     if (loggedIn.includes(pinned)) return [pinned, ...loggedIn.filter((p) => p !== pinned)];
     return [pinned];
   }
+  if (loggedIn.includes("google")) {
+    return ["google", ...loggedIn.filter((p) => p !== "google")];
+  }
   return [...loggedIn];
+}
+
+export function defaultOAuthProviderForService(service: string): OAuthProviderId | undefined {
+  void service;
+  return undefined;
 }
 
 // Parse a post-verify step. When `allowedSelectors` is supplied, a
@@ -3112,9 +4290,13 @@ export function extractQuotedTokenFromReason(
   // `.` is in the class: many tokens are dot-separated (Zerops
   // `LhJbaP.VeODh3ZZ…`, GitLab PATs, JWTs, Slack `xox*`); excluding it
   // dropped every dotted token to null and looped to run_timeout
-  // (MEASURED 2026-06-12: zerops). The verbatim pageText.includes guard
-  // below keeps a sentence's trailing period from matching.
-  const matches = reason.matchAll(/['"`]([A-Za-z0-9_.\-]{10,80})['"`]/g);
+  // (MEASURED 2026-06-12: zerops). `+/=` are in too: some services mint
+  // BASE64-encoded keys (portkey, MEASURED 2026-06-17: `tdCwXd/8kp4…` — the
+  // `/` truncated capture to `tdCwXd` (<10) → null → 24-round loop to
+  // run_timeout despite the key being on the page). The verbatim
+  // pageText.includes guard below keeps a sentence's trailing period — or a
+  // stray path/URL fragment — from matching anything not actually on the page.
+  const matches = reason.matchAll(/['"`]([A-Za-z0-9_.+/=\-]{10,80})['"`]/g);
   for (const m of matches) {
     const candidate = m[1];
     if (candidate === undefined) continue;
@@ -3143,286 +4325,6 @@ export function extractQuotedTokenFromReason(
   }
   return null;
 }
-
-// Phase E — multi-credential planner-prose parser. When a service
-// exposes several distinct credentials on the same page (Cloudinary:
-// cloud_name + api_key + api_secret; Algolia: application_id +
-// admin_api_key + search_api_key; Twilio: account_sid + auth_token;
-// Stripe: publishable_key + secret_key), the post-verify planner is
-// instructed (Phase E prompt update) to label each value explicitly
-// in its extract reason. This parser pulls those labels + values out
-// and returns them as { [label]: value }.
-//
-// The label vocabulary is whitelisted to known credential-shaped
-// names so the parser doesn't false-match prose like "the
-// dashboard_url is …" or "the project_name is …". Anything outside
-// the whitelist is dropped to keep credentials objects clean.
-//
-// Returns empty record when nothing parsed. Caller folds the result
-// into the credentials dict; falls back to single-cred extraction
-// when this returns empty.
-export function extractAllLabeledTokensFromReason(
-  reason: string,
-  pageText: string,
-): Record<string, string> {
-  // Whitelist of credential labels we recognize. Snake_case canonical;
-  // the matcher tolerates the LLM emitting hyphenated or PascalCase
-  // variants. Each entry maps a normalized form back to the canonical
-  // snake_case used in the credentials Record.
-  const LABEL_ALIASES: Record<string, string> = {
-    api_key: "api_key",
-    apikey: "api_key",
-    api_token: "api_key",
-    apitoken: "api_key",
-    access_token: "access_token",
-    accesstoken: "access_token",
-    api_secret: "api_secret",
-    apisecret: "api_secret",
-    secret_key: "secret_key",
-    secretkey: "secret_key",
-    publishable_key: "publishable_key",
-    publishablekey: "publishable_key",
-    client_id: "client_id",
-    clientid: "client_id",
-    client_secret: "client_secret",
-    clientsecret: "client_secret",
-    cloud_name: "cloud_name",
-    cloudname: "cloud_name",
-    application_id: "application_id",
-    applicationid: "application_id",
-    app_id: "application_id",
-    appid: "application_id",
-    admin_api_key: "admin_api_key",
-    adminapikey: "admin_api_key",
-    search_api_key: "search_api_key",
-    searchapikey: "search_api_key",
-    monitoring_api_key: "monitoring_api_key",
-    account_sid: "account_sid",
-    accountsid: "account_sid",
-    auth_token: "auth_token",
-    authtoken: "auth_token",
-    sandbox_secret: "sandbox_secret",
-    sandboxsecret: "sandbox_secret",
-    org_id: "org_id",
-    orgid: "org_id",
-    organization_id: "org_id",
-    consumer_key: "consumer_key",
-    consumer_secret: "consumer_secret",
-    access_token_secret: "access_token_secret",
-    project_api_key: "project_api_key",
-    personal_api_key: "personal_api_key",
-    app_key: "app_key",
-    appkey: "app_key",
-    app_secret: "app_secret",
-    appsecret: "app_secret",
-    // 2026-06-08 — bare "secret" (Pusher's App Keys page labels its app
-    // secret just "secret"; the bot reached the keys page + saw it but the
-    // parser dropped it because no alias mapped bare "secret"). Maps to a
-    // neutral `secret` credential name. The \bsecret\b match can't fire
-    // inside api_secret/client_secret/app_secret (the preceding "_" kills
-    // the word boundary), so this doesn't double-capture those.
-    secret: "secret",
-    // 0.8.3-rc.1 — typeform's planner uses `personal_access_token`
-    // and `Personal access token` (the latter when transcribing the
-    // page heading verbatim). Both alias to api_key — typeform issues
-    // ONE token type, and downstream consumers expect `api_key`.
-    personal_access_token: "api_key",
-    personalaccesstoken: "api_key",
-    // Bearer / private / write key patterns surfaced across the
-    // 2026-05-29 retest. Each was quoted by the planner but not in
-    // the alias set, so the labeled extractor missed them.
-    bearer_token: "api_key",
-    bearertoken: "api_key",
-    private_key: "api_key",
-    privatekey: "api_key",
-    write_key: "api_key",
-    writekey: "api_key",
-    read_key: "api_key",
-    readkey: "api_key",
-    server_token: "api_key",
-    servertoken: "api_key",
-  };
-
-  const out: Record<string, string> = {};
-
-  // Build the label-alternation from the whitelist keys. Restricting
-  // the regex to KNOWN labels avoids the greedy-match-eats-real-label
-  // bug (without this, "shows: application_id" would match as
-  // label='shows' / value='application_id' and consume the real
-  // 'application_id' that follows). Longer aliases first so the
-  // regex prefers `admin_api_key` over `api_key` at the same start.
-  const labelKeys = Object.keys(LABEL_ALIASES).sort(
-    (a, b) => b.length - a.length,
-  );
-  const labelAlt = labelKeys.map(escapeRegex).join("|");
-  // Hyphen + space variants — the LLM sometimes emits `cloud-name`
-  // or `Cloud name` instead of `cloud_name`. Replace _ with
-  // [-_\s] inside each alternative so the regex matches all three.
-  const labelAltLoose = labelAlt.replace(/_/g, "[-_\\s]");
-  // Two patterns:
-  //
-  // (A) Strict QUOTED form — `label='value'` / `label="value"` /
-  //     `label:'value'` etc. Trusts the value as credential-shape
-  //     because the planner was instructed (Phase E prompt) to quote.
-  //
-  // (B) Prose `label is value` form — required for natural-language
-  //     extracts but DANGEROUS. The Cloudinary trace produced
-  //     "api_secret is hidden behind asterisks" — the prose-pattern
-  //     greedily captured `hidden` as the value, then the
-  //     anti-hallucination check passed (the word "hidden" was in
-  //     pageText/reason). Mitigations: (1) require the value to LOOK
-  //     credential-shape (mixed alpha+digit, ≥16 chars, OR a known
-  //     credential prefix); (2) hard-reject a curated set of common
-  //     English status words that look label-like in extract prose.
-  const quotedRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*[=:]\\s*['"\`]([A-Za-z0-9_.\\-]{4,80})['"\`]`,
-    "gi",
-  );
-  for (const m of reason.matchAll(quotedRe)) {
-    const rawLabel = (m[1] ?? "").toLowerCase().replace(/[-\s]+/g, "_");
-    const normalized = rawLabel.replace(/_+/g, "_");
-    const canonical = LABEL_ALIASES[normalized];
-    const value = m[2];
-    if (canonical === undefined || value === undefined) continue;
-    // Email local-part guard. The value class stops at '@', so an email
-    // ("giselle703@gmail.com") is captured as its local-part ("giselle703")
-    // — a digit-bearing string that passes credential-shape. An email is
-    // never a credential; reject when the captured value is immediately
-    // followed by '@' in the source. (Cloudinary email-settings page.)
-    if (reason.includes(value + "@") || pageText.includes(value + "@")) continue;
-    if (!pageText.includes(value)) continue;
-    if (out[canonical] === undefined) out[canonical] = value;
-  }
-
-  // English status words that show up in planner prose alongside
-  // a credential label but are NEVER the credential value itself.
-  // Each is a literal lowercase comparison after value-lowercase.
-  const PROSE_BLACKLIST = new Set<string>([
-    "hidden", "masked", "shown", "visible", "available", "missing",
-    "unavailable", "redacted", "obscured", "concealed", "secret",
-    "true", "false", "null", "none", "empty", "unset", "undefined",
-    "displayed", "revealed", "asterisks", "bullets", "dots", "stars",
-    "blurred", "encrypted",
-  ]);
-  const looksCredentialShape = (v: string): boolean => {
-    if (v.length >= 16) return true; // long-enough tokens are presumed real
-    if (/^[A-Za-z]+$/.test(v)) return false; // pure word → suspect
-    if (/^\d{10,}$/.test(v)) return true; // long all-digit (Cloudinary api_key)
-    if (/[_\-]/.test(v) && /[a-z]/i.test(v) && /\d/.test(v)) return true; // mixed
-    if (/^[a-z]+_[A-Za-z0-9]/i.test(v)) return true; // prefix_ style (sk_…, npm_…)
-    if (/\d/.test(v) && /[A-Za-z]/.test(v)) return true; // alphanumeric mix
-    return false; // pure short word → reject as suspect
-  };
-  // Same separator vocab as quoted, plus optional quotes around the
-  // value. The credential-shape + blacklist guards run on the
-  // captured (possibly-unquoted) value.
-  const proseRe = new RegExp(
-    `\\b(${labelAltLoose})\\b\\s*(?:[=:]|\\b(?:is|are)\\b)\\s*['"\`]?([A-Za-z0-9_.\\-]{4,80})['"\`]?`,
-    "gi",
-  );
-  for (const m of reason.matchAll(proseRe)) {
-    const rawLabel = (m[1] ?? "").toLowerCase().replace(/[-\s]+/g, "_");
-    const normalized = rawLabel.replace(/_+/g, "_");
-    const canonical = LABEL_ALIASES[normalized];
-    const value = m[2];
-    if (canonical === undefined || value === undefined) continue;
-    if (out[canonical] !== undefined) continue; // quoted-form already won
-    if (PROSE_BLACKLIST.has(value.toLowerCase())) continue;
-    // Email local-part guard — see the quoted loop above.
-    if (reason.includes(value + "@") || pageText.includes(value + "@")) continue;
-    if (!looksCredentialShape(value)) continue;
-    if (!pageText.includes(value)) continue;
-    out[canonical] = value;
-  }
-
-  return out;
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Keys that the postVerifyLoop's accumulator stores for housekeeping —
-// they're NOT extracted credentials and must NOT count as "we found
-// something" when deciding whether an extract round succeeded.
-const NON_CREDENTIAL_KEYS = new Set<string>([
-  "api_key_truncated", // truncated stub from extractCredentials Pass 1
-  "password", // signup form metadata (email-verification path)
-  "email", // signup form metadata
-]);
-
-// True iff the credentials Record holds at least one extracted value
-// (api_key, username, or any labeled multi-cred field). Excludes
-// metadata + truncated stubs. Used to decide "this extract round
-// produced something — continue the loop / capture a synthetic extract
-// round" vs "every tier missed — try the planner-quoted fallback".
-export function hasAnyExtractedCredential(
-  creds: Record<string, string>,
-): boolean {
-  for (const key of Object.keys(creds)) {
-    if (NON_CREDENTIAL_KEYS.has(key)) continue;
-    return true;
-  }
-  return false;
-}
-
-// True iff the credentials Record contains a multi-credential bundle
-// — anything beyond the legacy single api_key/username pair. Used by
-// the post-verify loop's early-exit so a partial multi-cred capture
-// doesn't return prematurely (Cloudinary's api_key surfaces 4-5
-// rounds before api_secret; the legacy exit fired the moment api_key
-// was set, losing cloud_name + api_secret).
-export function isMultiCredBundle(
-  creds: Record<string, string>,
-): boolean {
-  for (const key of Object.keys(creds)) {
-    if (NON_CREDENTIAL_KEYS.has(key)) continue;
-    if (key === "api_key" || key === "username") continue;
-    return true;
-  }
-  return false;
-}
-
-// DOM-label phrase → canonical credential key. Shared by
-// extractFromDomProximity (which harvests VALUES) and
-// countPresentedCredentialLabels (which counts how many distinct
-// credentials a page PRESENTS, masked included). Kept in lockstep with
-// the Phase E LABEL_ALIASES vocabulary.
-const DOM_LABEL_TO_KEY: Record<string, string> = {
-  "api key": "api_key",
-  "api token": "api_key",
-  "api secret": "api_secret",
-  "secret key": "secret_key",
-  "publishable key": "publishable_key",
-  "access key": "access_key_id",
-  "access key id": "access_key_id",
-  "access token": "access_token",
-  "bearer token": "access_token",
-  "personal access token": "access_token",
-  "auth token": "auth_token",
-  "client id": "client_id",
-  "client secret": "client_secret",
-  "client key": "client_id",
-  "cloud name": "cloud_name",
-  cloudname: "cloud_name",
-  "application id": "application_id",
-  "app id": "application_id",
-  "admin api key": "admin_api_key",
-  "search api key": "search_api_key",
-  "search-only api key": "search_api_key",
-  "monitoring api key": "monitoring_api_key",
-  "account sid": "account_sid",
-  "secret access key": "secret_access_key",
-  "consumer key": "consumer_key",
-  "consumer secret": "consumer_secret",
-  "access token secret": "access_token_secret",
-  "project api key": "project_api_key",
-  "personal api key": "personal_api_key",
-  "organization id": "org_id",
-  "org id": "org_id",
-  "app key": "app_key",
-  "app secret": "app_secret",
-};
 
 export function extractApiKeyFromText(text: string): string | null {
   const prefixed: readonly RegExp[] = [
@@ -3661,6 +4563,7 @@ export function pickVerificationLink(links: readonly string[]): string | null {
   const scored = links.map((url) => {
     const lower = url.toLowerCase();
     let score = 0;
+    if (isEmailAssetLink(lower)) score -= 50;
     if (lower.includes("verify") || lower.includes("confirm")) score += 10;
     if (lower.includes("activate")) score += 8;
     if (lower.includes("welcome")) score += 3;
@@ -3669,7 +4572,24 @@ export function pickVerificationLink(links: readonly string[]): string | null {
   });
   scored.sort((a, b) => b.score - a.score);
   const top = scored[0];
-  return top !== undefined && top.score > 0 ? top.url : null;
+  return top !== undefined && top.score > 0
+    ? top.url.replace(/&amp;/gi, "&")
+    : null;
+}
+
+function isEmailAssetLink(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl.replace(/&amp;/g, "&"));
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+    return (
+      /\.(?:png|jpe?g|gif|webp|svg|ico|css|woff2?|ttf|otf)(?:$|[?#])/.test(path) ||
+      /^(?:static|cdn|assets|images|img|media)\./.test(host) ||
+      /\/(?:static|assets|images|img|media)\//.test(path)
+    );
+  } catch {
+    return false;
+  }
 }
 
 // Pick a verification link by its ANCHOR TEXT in the email HTML — the fallback
@@ -3681,13 +4601,13 @@ export function pickVerificationLink(links: readonly string[]): string | null {
 // year "2025"). The anchor TEXT still reads "Activate account". Pure + exported
 // for unit tests.
 export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
-  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const anchorRe = /<a\b[^>]*href\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
   let best: { url: string; score: number } | null = null;
   let m: RegExpExecArray | null;
   while ((m = anchorRe.exec(bodyHtml)) !== null) {
-    const href = (m[1] ?? "").replace(/&amp;/g, "&");
+    const href = (m[2] ?? "").replace(/&amp;/g, "&");
     if (!/^https?:\/\//i.test(href)) continue;
-    const text = (m[2] ?? "")
+    const text = (m[3] ?? "")
       .replace(/<[^>]+>/g, " ")
       .replace(/&[a-z]+;/gi, " ")
       .replace(/\s+/g, " ")
@@ -3702,7 +4622,28 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
     ) {
       score += 5;
     }
-    if (/get started|finish setting up/.test(text)) score += 3;
+    if (
+      /confirmation instructions|confirm (?:my |your )?account|confirm (?:my |your )?email address|verify (?:my |your )?account|accept confirmation/.test(
+        text,
+      )
+    ) {
+      score += 8;
+    }
+    if (
+      /get started|finish setting up|continue|open stackblitz|log in|login|sign in|magic link|open dashboard|go to dashboard/.test(
+        text,
+      )
+    ) {
+      score += 3;
+    }
+    try {
+      const u = new URL(href);
+      if ((u.pathname === "/" || u.pathname === "") && u.search === "" && u.hash === "") {
+        score -= 8;
+      }
+    } catch {
+      /* already validated as http(s), leave score unchanged */
+    }
     if (
       /unsubscribe|preferences|manage|view (?:in|this) (?:browser|email)|privacy|terms/.test(
         text,
@@ -3713,6 +4654,41 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
     if (score > (best?.score ?? 0)) best = { url: href, score };
   }
   return best !== null && best.score > 0 ? best.url : null;
+}
+
+// Last-resort verification-link pick: a link in the email that points at the
+// SERVICE's OWN domain. MEASURED on arize (2026-06-17): the confirm email says
+// "Click the link in the email", but its confirm link is a click-tracker the
+// keyword scorers miss, and a spurious number in the body got read as a code →
+// the bot entered a code on a page with no code field and stalled. A same-
+// registrable-domain link in a signup email is almost always the confirmation,
+// so follow it when the keyword scorers came up empty. Skips obvious non-confirm
+// links (unsubscribe/preferences/privacy/terms/social). Exported for unit tests.
+export function pickServiceDomainLink(
+  links: readonly string[],
+  serviceHost: string | null,
+): string | null {
+  if (serviceHost === null || serviceHost.length === 0) return null;
+  // Compare the last two labels so app.arize.com matches arize.com.
+  const base = (h: string): string =>
+    h.toLowerCase().replace(/^www\./, "").split(".").slice(-2).join(".");
+  const target = base(serviceHost);
+  const SKIP =
+    /unsubscribe|preferences|email[_-]?settings|\bmanage\b|privacy|\bterms\b|twitter|linkedin|facebook|instagram|youtube|status\.|\/help\b|\/support\b|\/docs\b/i;
+  for (const raw of links) {
+    let u: URL;
+    try {
+      u = new URL(raw.replace(/&amp;/g, "&"));
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "https:" && u.protocol !== "http:") continue;
+    if ((u.pathname === "/" || u.pathname === "") && u.search === "" && u.hash === "") continue;
+    if (SKIP.test(raw)) continue;
+    if (isEmailAssetLink(raw)) continue;
+    if (base(u.hostname) === target) return u.href;
+  }
+  return null;
 }
 
 // Last-resort verification-CODE extraction from an email body, for the
@@ -3840,10 +4816,157 @@ export function pickOnboardingSubmit(
 ): InteractiveElement | null {
   const buttons = inventory.filter((e) => e.tag === "button" || e.role === "button");
   const ADVANCE_RE = /^(?:next|continue|submit|create|register|get started|finish|done|save)\b/i;
-  const byText = buttons.find((e) => ADVANCE_RE.test((e.visibleText ?? e.ariaLabel ?? "").trim()));
+  const labelFor = (e: InteractiveElement): string =>
+    (e.visibleText ?? e.ariaLabel ?? "").trim();
+  const bySpecificCreate = buttons.find((e) =>
+    /^\s*create\s+(?:organization|organisation|workspace|project|team|account|app|application|service|database|cluster|environment|index)\b/i.test(
+      labelFor(e),
+    ),
+  );
+  if (bySpecificCreate !== undefined) return bySpecificCreate;
+  const byText = buttons.find((e) => ADVANCE_RE.test(labelFor(e)));
   if (byText !== undefined) return byText;
   const bySubmit = buttons.find((e) => e.type === "submit");
   return bySubmit ?? buttons[0] ?? null;
+}
+
+export function isOnboardingForwardLabel(label: string): boolean {
+  return /^\s*(?:next|continue|submit|finish|done|get\s+started|create(?:\s+(?:organization|organisation|workspace|project|team|account|app|application))?|set\s*up(?:\s+(?:organization|organisation|workspace|project|team|account|app|application))?)\s*$/i.test(
+    label,
+  );
+}
+
+export function retargetCredentialAppTypeChoice(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): PostVerifyStep {
+  if (step.kind !== "click") return step;
+  const chosen = inventory.find((e) => e.selector === step.selector);
+  if (chosen === undefined || chosen.visible !== true) return step;
+  const labelFor = (e: InteractiveElement): string =>
+    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.replace(/\s+/g, " ").trim();
+  const chosenLabel = labelFor(chosen);
+  const buttons = inventory.filter(
+    (e) => (e.tag === "button" || e.role === "button") && e.visible === true,
+  );
+  const frontendFrameworkRe = /^\s*(?:react|angular|vue|svelte|ember)(?:\b|$)|\bsingle[-\s]?page\b|\bspa\b/i;
+  if (frontendFrameworkRe.test(chosenLabel)) {
+    const backendTech =
+      buttons.find((e) => /^(?:python|node(?:\.js)?|express|django|flask|fastapi)\b/i.test(labelFor(e))) ??
+      buttons.find((e) => /^(?:java|spring|ruby|rails|php|laravel|go|golang|\.net|c#)\b/i.test(labelFor(e)));
+    if (backendTech !== undefined) {
+      return {
+        ...step,
+        selector: backendTech.selector,
+        reason:
+          `${step.reason} Retargeted from ${JSON.stringify(chosenLabel)} to ` +
+          `${JSON.stringify(labelFor(backendTech))}: backend/server runtimes keep the app on ` +
+          "a credential-bearing path instead of narrowing creation to SPA/native clients.",
+      };
+    }
+  }
+  const resourceClientRe =
+    /\b(?:machine\s*to\s*machine|m2m|server\s*to\s*server|api\s+client|client\s+credentials)\b/i;
+  if (!resourceClientRe.test(chosenLabel)) return step;
+
+  const preferred =
+    buttons.find((e) => /\bregular\s+web\s+app\b/i.test(labelFor(e))) ??
+    buttons.find((e) =>
+      /\b(?:traditional\s+web|server(?:[-\s]?side)?\s+web|backend\s+web|web\s+app\b.*\bserver)\b/i.test(
+        labelFor(e),
+      ),
+    );
+  if (preferred === undefined) return step;
+  return {
+    ...step,
+    selector: preferred.selector,
+    reason:
+      `${step.reason} Retargeted from ${JSON.stringify(chosenLabel)} to ` +
+      `${JSON.stringify(labelFor(preferred))}: web/server app types expose client credentials ` +
+      "without requiring a pre-existing API/resource.",
+  };
+}
+
+export function coerceCheckboxClickStep(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): PostVerifyStep {
+  if (step.kind !== "click") return step;
+  const target = inventory.find((e) => e.selector === step.selector);
+  if (target === undefined) return step;
+  const isCheckbox =
+    (target.tag === "input" && target.type === "checkbox") || target.role === "checkbox";
+  if (!isCheckbox) return step;
+  return {
+    kind: "check",
+    selector: step.selector,
+    reason:
+      `${step.reason} Coerced from click to check because the selector targets a checkbox; ` +
+      "checking is idempotent and avoids toggling an accepted agreement off.",
+  };
+}
+
+export function retargetSubmitToDefaultedPicker(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): PostVerifyStep {
+  if (step.kind !== "click") return step;
+  const target = inventory.find((e) => e.selector === step.selector);
+  const targetLabel = `${target?.visibleText ?? ""} ${target?.ariaLabel ?? ""}`.trim();
+  if (!/^(?:continue|next|submit|create|finish|done)\b/i.test(targetLabel)) return step;
+  const targetSelector = target?.selector ?? step.selector;
+  if (/\b(?:dialog|modal)\b/i.test(targetSelector)) return step;
+  const picker = inventory.find((e) => {
+    if (e.visible !== true || e.interactedThisRun === true) return false;
+    if (e.tag !== "button" && e.role !== "button" && e.role !== "combobox") return false;
+    const label = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+    return /select\s+(?:parent\s+)?(?:resource|organization|organisation|workspace|project|account|team)\b/i.test(
+      label,
+    );
+  });
+  if (picker === undefined) return step;
+  const reason =
+    `${step.reason} Retargeted before submit: a required-looking picker ` +
+    `${JSON.stringify(picker.visibleText ?? picker.ariaLabel ?? picker.labelText ?? picker.selector)} ` +
+    "is still in its Select state.";
+  if (picker.role === "combobox") {
+    return { kind: "select", selector: picker.selector, reason };
+  }
+  return { kind: "click", selector: picker.selector, reason };
+}
+
+export function pickOnboardingLeafChoice(
+  inventory: readonly InteractiveElement[],
+  alreadyTried: ReadonlySet<string> = new Set(),
+): InteractiveElement | null {
+  const buttons = inventory.filter(
+    (e) => (e.tag === "button" || e.role === "button") && e.visible === true,
+  );
+  const labels = buttons.map((e) => (e.visibleText ?? e.ariaLabel ?? "").trim());
+  const hasParentRole = labels.some((t) =>
+    /^(?:developer|engineer|personal\s*&\s*freelance|designer|marketing)$/i.test(t) ||
+    /\b(?:write|build|code|api|apis|sdk|developer)\b/i.test(t),
+  );
+  const hasFinalSubmit = labels.some((t) => /^(?:let'?s get started|get started|finish|done|continue|next)$/i.test(t));
+  if (!hasFinalSubmit) return null;
+
+  const LEAF_ROLE_RE =
+    /^(?:full stack|front end|back end|backend|frontend|mobile|web|software|data|ml|ai|devops|platform|cloud)\s+(?:developer|engineer)\b/i;
+  const leafRole = hasParentRole ? buttons.find((e) => {
+    if (alreadyTried.has(e.selector)) return false;
+    const text = (e.visibleText ?? e.ariaLabel ?? "").trim();
+    return LEAF_ROLE_RE.test(text);
+  }) : undefined;
+  if (leafRole !== undefined) return leafRole;
+
+  const DEV_STACK_RE = /^(?:javascript|typescript|python|node(?:\.js)?|react|next(?:\.js)?|vue|angular|ruby|php|java|go|golang|swift|kotlin|android|ios)\b/i;
+  const devStackOptions = buttons.filter((e) =>
+    DEV_STACK_RE.test((e.visibleText ?? e.ariaLabel ?? "").trim()),
+  );
+  if (devStackOptions.length < 2) return null;
+  return devStackOptions.find((e) => !alreadyTried.has(e.selector)) ?? null;
 }
 
 export function isStalledOnActions(
@@ -3890,6 +5013,38 @@ export function isLoginPageUrl(url: string): boolean {
   // Some providers keep the path stable but flag the failed auth in the
   // query (amplitude: /login?google-auth-error=…).
   return /[?&]google-auth-error\b/i.test(url);
+}
+
+export function isLoginPageInventory(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const visible = inventory.filter((element) => element.visible !== false);
+  const hasPassword = visible.some(
+    (element) => element.tag === "input" && element.type === "password",
+  );
+  const hasIdentity = visible.some((element) => {
+    if (element.tag !== "input") return false;
+    const text = [
+      element.name,
+      element.id,
+      element.placeholder,
+      element.ariaLabel,
+      element.labelText,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return element.type === "email" || /email|username|login/i.test(text);
+  });
+  if (!hasPassword || !hasIdentity) return false;
+  return visible.some((element) => {
+    if (element.tag !== "button" && element.type !== "submit" && element.role !== "button") {
+      return false;
+    }
+    const text = [element.visibleText, element.ariaLabel, element.labelText]
+      .filter(Boolean)
+      .join(" ");
+    return /\b(log ?in|sign ?in|continue|submit)\b/i.test(text);
+  });
 }
 
 // A pre-account route (signup OR login OR register) — the set of paths an
@@ -3947,6 +5102,55 @@ export function isLoadingShellText(text: string): boolean {
   return /\bconnecting\b|\bloading\b|please wait|getting things ready|initiali[sz]ing/i.test(
     text,
   );
+}
+
+// The interactive-element count at/above which a page is "hydrated by
+// definition" — a rendered dashboard/form a user can act on — so a stray
+// "loading"/"please wait" word in its (visible) text is NOT a hydration
+// shell. WHY 5: a genuine loading shell paints zero or a handful of chrome
+// affordances (a logo link, maybe a skip-link); a real authenticated surface
+// (nav + content + an "API Keys"/"Create" affordance) clears 5 trivially.
+// Field evidence: luma-ai/unify-ai/sambanova/fireworks-ai/defang carried
+// 10–95 visible interactive elements yet were flagged a shell EVERY round —
+// any threshold from ~5 up vetoes all of them while still catching the true
+// 0-to-few-element shell (northflank). Reuses the same minElements default as
+// waitForInteractiveDom (5) so the negative gate and the positive readiness
+// wait agree on what "hydrated" means.
+export const SHELL_MAX_ELEMENTS = 5;
+
+// The authoritative loading-shell decision: a page is a hydration shell only
+// when loading-text is present in its VISIBLE text AND it has fewer than
+// SHELL_MAX_ELEMENTS interactive elements. Splitting the two conditions kills
+// the dominant false positive two ways at once:
+//   1. visibleText (innerText) drops hidden skeleton/RSC "loading" strings a
+//      raw textContent read picked up;
+//   2. the inventory veto makes the gate un-fireable on a hydrated page
+//      regardless of any residual stray "loading" word.
+// Pure + exported for unit tests. The text predicate stays isLoadingShellText
+// (still used where only text is on hand); this is the call-site gate where
+// both signals are available.
+export function isLoadingShell(
+  visibleText: string,
+  inventoryCount: number,
+): boolean {
+  if (inventoryCount >= SHELL_MAX_ELEMENTS) return false;
+  return isLoadingShellText(visibleText);
+}
+
+// Thrown from postVerifyLoop when a post-OAuth/post-verify SPA presents a
+// genuine loading shell that never hydrates within the bounded budget (and a
+// navigate-to-root retry didn't unstick it). Surfaced as the terminal status
+// `spa_never_hydrated`. classifyFailure() (skill-schema failure-taxonomy)
+// has no entry for this kind, so it falls to the deliberate transient default
+// — a non-demoting outcome (a never-hydrating route is environmental/transient,
+// not skill rot), and no new exported skill-schema symbol is needed (avoids
+// the published-dep-skew trap). The leading token before ':' is what
+// classifyFailure keys on, so the message MUST start with the bare kind.
+export class SpaNeverHydratedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SpaNeverHydratedError";
+  }
 }
 
 // Transient "the session is being established RIGHT NOW" copy. MEASURED on
@@ -4010,6 +5214,12 @@ export class SignupAgent {
   // backends_used[i] is the .name string of the LLMClient that produced
   // the i-th reply this run.
   private readonly backendsUsed: string[] = [];
+  // Fix C4 — the model/provider the backend actually served on the most
+  // recent LLM call, captured per round. callLLM stamps these after every
+  // call; the capture sites read them when dumping a round. Undefined
+  // until the first call (or when the backend doesn't report a model).
+  private lastResolvedModel: string | undefined;
+  private lastResolvedProvider: string | undefined;
   private readonly llmPair: LLMPair;
 
   // Captcha encounter state for the current run. Updated by the
@@ -4018,6 +5228,23 @@ export class SignupAgent {
   // because a "blocked" outcome is more diagnostic than an earlier
   // "solved" one and we always want the failure mode in the result.
   private captchaEncounter: SignupResult["captcha"] = undefined;
+
+  // Sticky "this run is on the email path" flag. Set when OAuth turns out to be
+  // login-only (a new identity has no account — Clerk's form_identifier_not_found)
+  // and we fall back to email signup. Without it, the dispatch loop re-runs the
+  // OAuth-first scan after the re-route and re-clicks Google → loops forever
+  // (the cartesia oauth_session_not_persisted bug). Honored by
+  // resolveOAuthCandidates; reset at the start of each signup().
+  private committedToEmailPath = false;
+
+  // One-shot guard for the post-OAuth-callback email fallback. When a Clerk-class
+  // app completes the Google handshake but never persists a session (its callback
+  // silently fails for a brand-new identity driven through sign-IN — the cartesia
+  // root cause WITHOUT the explicit "no account" text), the bot recovers by
+  // creating the account via email instead. This flag keeps that to one attempt so
+  // a service that's genuinely OAuth-only (no email form to fall back to) fails
+  // honestly rather than re-trying forever. Reset at the start of each signup().
+  private oauthEmailFallbackTried = false;
 
   // Invisible-captcha presence for the current run. Cloudflare Turnstile
   // and reCAPTCHA-v3 are score-based: a HIGH score passes silently with no
@@ -4031,7 +5258,7 @@ export class SignupAgent {
   // blocked=true and which wins over this (captchaEncounter takes
   // precedence in resultTail).
   private invisibleCaptcha:
-    | { kind: "turnstile" | "recaptcha"; variant: CaptchaVariant }
+    | { kind: "turnstile" | "recaptcha" | "hcaptcha"; variant: CaptchaVariant }
     | undefined = undefined;
 
   // Helper: build the common trailing fields every SignupResult needs.
@@ -4131,6 +5358,84 @@ export class SignupAgent {
           steps.push(
             `${label} captcha: invisible reCAPTCHA v3 — ${minted ? "minted score token via grecaptcha.execute()" : "badge present, token not minted (form may submit it itself)"}`,
           );
+        } else if (this.captchaSolver?.isAvailable() === true) {
+          // INVISIBLE hCaptcha (huggingface, 2026-06-17): sitekey in the page's
+          // JS config, NO visible widget, but the form REQUIRES an
+          // h-captcha-response token to submit (the wired Tier 3 hCaptcha path
+          // only fires for VISIBLE widgets). Solve via 2Captcha now and inject,
+          // so the imminent submit carries a token instead of a silent reject.
+          // HONEST CAVEAT: a sophisticated host (HF may run Enterprise hCaptcha)
+          // can bind the token to the browser session and reject a solver token
+          // regardless — in which case this surfaces the real wall instead of a
+          // misleading "validation error".
+          const hSitekey = await this.browser.extractHcaptchaSitekey();
+          if (hSitekey !== null) {
+            this.invisibleCaptcha = { kind: "hcaptcha", variant: "hcaptcha" };
+            const pageUrl = (await this.browser.getState().catch(() => null))?.url;
+            if (pageUrl !== undefined && this.captchaSolver !== undefined) {
+              const solveContext = await this.browser.getHcaptchaSolveContext().catch(() => ({
+                invisible: false,
+                userAgent: null,
+                rqdata: null,
+              }));
+              steps.push(
+                `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit`,
+              );
+              const solveRes = await this.captchaSolver.solveHcaptcha({
+                sitekey: hSitekey,
+                pageUrl,
+                invisible: solveContext.invisible,
+                ...(solveContext.userAgent !== null ? { userAgent: solveContext.userAgent } : {}),
+                ...(solveContext.rqdata !== null ? { data: solveContext.rqdata } : {}),
+              });
+              if (solveRes.kind === "ok") {
+                const injected = await this.browser.injectHcaptchaToken(solveRes.token);
+                const settled = injected
+                  ? await this.browser.waitForCaptchaChallengeToSettle()
+                  : false;
+                steps.push(
+                  injected
+                    ? `${label} captcha: invisible hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s + token injected`
+                      + (settled ? "" : " (challenge overlay still visible after token injection)")
+                    : `${label} captcha: hCaptcha token arrived but injection failed`,
+                );
+                if (injected) {
+                  if (settled) {
+                    return { found: true, solved: true, blocked: false, kind: "hcaptcha" };
+                  }
+                  const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+                    (input) => this.captchaSolver!.solveCoordinates(input),
+                  );
+                  steps.push(
+                    coordinateSolve.found
+                      ? `${label} captcha: visible hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates` +
+                          ` (${coordinateSolve.clicks} clicks` +
+                          (coordinateSolve.durationMs !== undefined
+                            ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+                            : "") +
+                          ")" +
+                          (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : "")
+                      : `${label} captcha: hCaptcha token injection exposed no coordinate-solvable challenge`,
+                  );
+                  if (coordinateSolve.solved) {
+                    return { found: true, solved: true, blocked: false, kind: "hcaptcha" };
+                  }
+                  this.captchaEncounter = {
+                    kind: "hcaptcha",
+                    variant: "hcaptcha",
+                    challenge_rendered: true,
+                    blocked: true,
+                  };
+                  return { found: true, solved: false, blocked: true, kind: "hcaptcha" };
+                }
+              } else {
+                steps.push(
+                  `${label} captcha: invisible hCaptcha 2Captcha ${solveRes.kind}` +
+                    ("reason" in solveRes ? `: ${solveRes.reason}` : ""),
+                );
+              }
+            }
+          }
         }
       }
       return { found: false, solved: false, blocked: false, kind: "turnstile" };
@@ -4172,10 +5477,12 @@ export class SignupAgent {
           if (solveRes.kind === "ok") {
             const injected = await this.browser.injectRecaptchaToken(solveRes.token);
             if (injected) {
+              const settled = await this.browser.waitForCaptchaChallengeToSettle();
               steps.push(
-                `${label} captcha: Tier 3 solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+                `${label} captcha: Tier 3 solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha` +
+                  (settled ? "" : " (challenge overlay still visible after token injection)"),
               );
-              result = { ...result, solved: true };
+              if (settled) result = { ...result, solved: true };
             } else {
               steps.push(
                 `${label} captcha: Tier 3 token arrived but page injection failed — captcha stays blocked`,
@@ -4198,18 +5505,70 @@ export class SignupAgent {
       result.kind === "hcaptcha" &&
       this.captchaSolver?.isAvailable() === true
     ) {
+      const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+        (input) => this.captchaSolver!.solveCoordinates(input),
+      );
+      if (coordinateSolve.found) {
+        steps.push(
+          `${label} captcha: visible hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates before token fallback` +
+            ` (${coordinateSolve.clicks} clicks` +
+            (coordinateSolve.durationMs !== undefined
+              ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+              : "") +
+            ")" +
+            (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : ""),
+        );
+        if (coordinateSolve.solved) result = { ...result, solved: true };
+      }
+    }
+    if (
+      !result.solved &&
+      result.kind === "hcaptcha" &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
       const sitekey = await this.browser.extractHcaptchaSitekey();
       const pageUrl = (await this.browser.getState().catch(() => null))?.url;
       if (sitekey !== null && pageUrl !== undefined) {
+        const solveContext = await this.browser.getHcaptchaSolveContext().catch(() => ({
+          invisible: false,
+          userAgent: null,
+          rqdata: null,
+        }));
         steps.push(`${label} captcha: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`);
-        const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+        const solveRes = await this.captchaSolver.solveHcaptcha({
+          sitekey,
+          pageUrl,
+          invisible: solveContext.invisible,
+          ...(solveContext.userAgent !== null ? { userAgent: solveContext.userAgent } : {}),
+          ...(solveContext.rqdata !== null ? { data: solveContext.rqdata } : {}),
+        });
         if (solveRes.kind === "ok") {
           const injected = await this.browser.injectHcaptchaToken(solveRes.token);
           if (injected) {
+            const settled = await this.browser.waitForCaptchaChallengeToSettle();
             steps.push(
-              `${label} captcha: Tier 3 hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+              `${label} captcha: Tier 3 hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha` +
+                (settled ? "" : " (challenge overlay still visible after token injection)"),
             );
-            result = { ...result, solved: true };
+            if (settled) {
+              result = { ...result, solved: true };
+            } else {
+              const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+                (input) => this.captchaSolver!.solveCoordinates(input),
+              );
+              steps.push(
+                coordinateSolve.found
+                  ? `${label} captcha: visible hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates` +
+                      ` (${coordinateSolve.clicks} clicks` +
+                      (coordinateSolve.durationMs !== undefined
+                        ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+                        : "") +
+                      ")" +
+                      (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : "")
+                  : `${label} captcha: hCaptcha token injection exposed no coordinate-solvable challenge`,
+              );
+              if (coordinateSolve.solved) result = { ...result, solved: true };
+            }
           } else {
             steps.push(
               `${label} captcha: Tier 3 hCaptcha token arrived but page injection failed — captcha stays blocked`,
@@ -4243,10 +5602,12 @@ export class SignupAgent {
         if (solveRes.kind === "ok") {
           const injected = await this.browser.injectTurnstileToken(solveRes.token);
           if (injected) {
+            const settled = await this.browser.waitForCaptchaChallengeToSettle();
             steps.push(
-              `${label} captcha: Tier 3 Turnstile solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+              `${label} captcha: Tier 3 Turnstile solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha` +
+                (settled ? "" : " (challenge overlay still visible after token injection)"),
             );
-            result = { ...result, solved: true };
+            if (settled) result = { ...result, solved: true };
           } else {
             steps.push(
               `${label} captcha: Tier 3 Turnstile token arrived but page injection failed — captcha stays blocked`,
@@ -4275,6 +5636,32 @@ export class SignupAgent {
     // Classify the widget for spike telemetry — a pure read, after the
     // solve attempt so the challenge grid (if any) has had time to render.
     const detected = await this.browser.detectCaptchaVariant();
+    if (
+      result.solved &&
+      result.kind === "hcaptcha" &&
+      detected.variant === "hcaptcha" &&
+      detected.challengeRendered &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
+      steps.push(
+        `${label} captcha: hCaptcha challenge rendered after the checkbox token — solving visible challenge via 2Captcha coordinates`,
+      );
+      const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+        (input) => this.captchaSolver!.solveCoordinates(input),
+      );
+      steps.push(
+        coordinateSolve.found
+          ? `${label} captcha: delayed hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates` +
+              ` (${coordinateSolve.clicks} clicks` +
+              (coordinateSolve.durationMs !== undefined
+                ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+                : "") +
+              ")" +
+              (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : "")
+          : `${label} captcha: delayed hCaptcha challenge was no longer visible before coordinate solve`,
+      );
+      if (!coordinateSolve.solved) result = { ...result, solved: false };
+    }
     this.captchaEncounter = {
       kind: result.kind,
       variant: detected.variant,
@@ -4291,6 +5678,7 @@ export class SignupAgent {
   private async executePlan(
     plan: SignupPlan,
     fillValues: Record<FillValueKind, string>,
+    identity: SignupIdentity,
     steps: string[],
     bySelector: Map<string, InteractiveElement>,
   ): Promise<void> {
@@ -4305,11 +5693,7 @@ export class SignupAgent {
       }
       try {
         if (action.kind === "fill") {
-          // `literal` is per-action; everything else is a fixed value.
-          const value =
-            action.value_kind === "literal"
-              ? action.literal ?? ""
-              : fillValues[action.value_kind];
+          const value = resolvePlannedFillValue(action, fillValues, el, identity);
           if (el !== undefined && el.tag === "select") {
             // A <select> needs selectOption, not type() (Sentry bug).
             steps.push(`Select ${action.selector}`);
@@ -4321,6 +5705,13 @@ export class SignupAgent {
         } else if (action.kind === "check") {
           steps.push(`Check ${action.selector} (${action.reason})`);
           await this.browser.check(action.selector);
+        } else if (action.kind === "select") {
+          steps.push(
+            action.option_text !== undefined
+              ? `Select ${action.selector} → ${action.option_text}`
+              : `Select ${action.selector}`,
+          );
+          await this.browser.selectOption(action.selector, action.option_text);
         } else {
           steps.push(`Click ${action.selector} (${action.reason})`);
           await this.browser.click(action.selector);
@@ -4354,6 +5745,18 @@ export class SignupAgent {
     // same no-account bounce. One-shot equivalent of committedToEmailPath.
     forceFormFill = false,
   ): Promise<PlanExecOutcome> {
+    // FORM_FILL_ENGINE (default-ON since 2026-06-15, strangler slice 3): route the
+    // whole round through the pure decideFormFillStep reducer. Flipped default-on
+    // after live validation showed the engine reaches the correct terminal on
+    // every fillable form (ipinfo full success; cohere/deepinfra/postmark each
+    // reached submit — their failures were downstream verification/extraction or
+    // already-registered, NOT the form-fill phase). The inline loop below is kept
+    // one cycle as the explicit opt-out fallback (FORM_FILL_ENGINE=0/off) and is
+    // deleted next, once a heal pass confirms no per-service regression
+    // (DESIGN-form-fill-engine.md migration step 4).
+    if (!/^(0|false|off|no)$/i.test(process.env.FORM_FILL_ENGINE ?? "")) {
+      return this.planExecuteViaEngine(task, fillValues, steps, forceFormFill);
+    }
     const MAX_ERROR_REPLANS = 2;
     // 0.8.3-rc.1 — widened from 4 to 6 so submit_disabled re-plans
     // get more attempts to identify the gating control. Mailgun's
@@ -4362,6 +5765,7 @@ export class SignupAgent {
     // surfaces the unchecked checkbox. Bounded by the 15-call LLM
     // budget so genuinely-stuck signups still terminate.
     const MAX_PROGRESS_REPLANS = 6;
+    const identity = identityFromEmail(task.email);
     let errorReplans = 0;
     let progressReplans = 0;
     let emptyPlans = 0;
@@ -4392,10 +5796,23 @@ export class SignupAgent {
     // F14 — selectors the planner clicked WITHOUT advancing the page.
     // Each no-progress plan records its click selectors here; the next
     // plan that picks ONLY selectors in this set is failed as stuck
-    // instead of looping. Cleared on any progress (fill action). The
-    // Railway run that motivated F14 spun the same footer "Email" link
-    // 5 times before timing out; this loop now bails after 2.
+    // instead of looping. Cleared on ANY real progress between two
+    // clicks of the same selector — a fill/select/check action OR a
+    // page change (inventory/url moved). The Railway run that motivated
+    // F14 spun the same footer "Email" link 5 times before timing out;
+    // this loop now bails after 2.
     let lastNoProgressClickSelectors: Set<string> = new Set();
+    // Page-state fingerprint from the END of the previous round, used to
+    // decide whether the page actually moved between rounds. A
+    // "fill field → submit → (validation error) → fix field → submit
+    // again" cycle is legitimate progress, NOT a loop: kinde's post-OAuth
+    // register form has a globally-unique "domain" field, so the first
+    // guess collides ("taken") and the bot must edit the field and
+    // re-click the SAME "Next" button. Without this, re-clicking the same
+    // selector after a genuine field edit (or any inventory/url change)
+    // false-bailed as planner_loop even though the intervening fill was
+    // real progress. (MEASURED 2026-06-13, kinde, terminal_round 3.)
+    let lastRoundPageSig: string | null = null;
     // rc.31 — once the bot has explicitly clicked an email-flow
     // button (e.g. Railway's "Log in using email" two-stage chooser),
     // stay on the email path. Without this, the auto-OAuth-first
@@ -4424,6 +5841,50 @@ export class SignupAgent {
         this.browser.getState(),
         this.buildInventory(steps, oauthCandidates),
       ]);
+
+      const googleIdentifierAdvance =
+        await this.advancePinnedGoogleIdentifierPage({
+          task,
+          url: state.url,
+          inventory,
+          steps,
+        });
+      if (googleIdentifierAdvance === "advanced") continue;
+      if (googleIdentifierAdvance === "needs_login") {
+        return {
+          kind: "needs_login",
+          provider: "google",
+          reason: "Google asked for the pinned account password during OAuth-first signup",
+        };
+      }
+
+      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(state.url)) {
+        const advanced = await this.browser.advanceOAuthConsent("github");
+        steps.push(
+          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
+        );
+        if (advanced) {
+          await this.browser.wait(3);
+          continue;
+        }
+      }
+
+      {
+        const prePlanCredentials = await this.harvestVisibleCredentials();
+        if (
+          hasAnyExtractedCredential(prePlanCredentials) &&
+          !isAuthEntryPageForPreExtraction({
+            url: state.url,
+            html: state.html,
+            inventory,
+          })
+        ) {
+          steps.push(
+            "Form-fill: credentials are already visible before planning — skipping form actions and extracting in place.",
+          );
+          return { kind: "submitted" };
+        }
+      }
 
       // Email-verification WALL reached without a fresh submit — e.g. OAuth
       // landed on a pending account's "Verify your email — check <addr>" page.
@@ -4736,17 +6197,20 @@ export class SignupAgent {
         return { kind: "oauth_required" };
       }
 
-      steps.push("Asking Claude to plan the signup form fill...");
-      let plan: SignupPlan;
-      try {
-        plan = await this.planSignupForm({
-          service: task.service,
-          url: state.url,
-          inventory,
-          screenshot: state.screenshot,
-          ...(hint !== undefined ? { hint } : {}),
-        });
-      } catch (err) {
+      let plan = planSimpleEmailOnlySignup(inventory);
+      if (plan !== null) {
+        steps.push("Plan: deterministic email-only signup form (no LLM call).");
+      } else {
+        steps.push("Asking planner to plan the signup form fill...");
+        try {
+          plan = await this.planSignupForm({
+            service: task.service,
+            url: state.url,
+            inventory,
+            screenshot: state.screenshot,
+            ...(hint !== undefined ? { hint } : {}),
+          });
+        } catch (err) {
         // Parse/validation failure — includes a hallucinated selector
         // rejected by the inventory check. An error replan.
         const reason = err instanceof Error ? err.message : String(err);
@@ -4787,6 +6251,7 @@ export class SignupAgent {
         }
         continue;
       }
+      }
       steps.push(
         `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
           (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
@@ -4808,16 +6273,44 @@ export class SignupAgent {
         return { kind: "already_oauth" };
       }
 
+      // The page moved since the previous round if the URL changed or the
+      // set of interactive selectors changed (a field gained/lost, a
+      // validation message toggled an element, a wizard step advanced).
+      // ANY such change means whatever the planner did last round was real
+      // progress — clear the no-progress memory so a re-click of a
+      // previously-"dead" selector on the now-changed page isn't judged a
+      // loop. This is the unique-value-retry case (kinde domain field):
+      // edit field → page re-renders → re-click "Next" is legitimate.
+      const pageSig =
+        state.url +
+        "§" +
+        inventory
+          .map((e) => e.selector)
+          .sort()
+          .join("|");
+      if (lastRoundPageSig !== null && pageSig !== lastRoundPageSig) {
+        lastNoProgressClickSelectors = new Set();
+      }
+      lastRoundPageSig = pageSig;
+
       // F14 — stuck-detection: if the plan picks ONLY click selectors
       // we already tried in the previous round without page progress,
       // it's a planner loop. Fail planning_failed with the offending
       // selector(s) so the operator sees what stalled. Doesn't fire
       // when the plan adds at least one new selector (legitimate
-      // exploration). Doesn't fire on fill plans (forward progress).
+      // exploration). Doesn't fire on fill plans (forward progress),
+      // nor on a plan that ALSO edits a field this round (a fill/check
+      // alongside the re-click is real progress — kinde's "tick the
+      // required box + re-click Next" advances the form even though the
+      // Next selector repeats).
       const planClickSelectors = plan.actions
         .filter((a) => a.kind === "click")
         .map((a) => a.selector);
+      const planEditsAField = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check",
+      );
       if (
+        !planEditsAField &&
         planClickSelectors.length > 0 &&
         lastNoProgressClickSelectors.size > 0 &&
         planClickSelectors.every((s) => lastNoProgressClickSelectors.has(s))
@@ -4850,7 +6343,7 @@ export class SignupAgent {
         continue;
       }
 
-      await this.executePlan(plan, fillValues, steps, bySelector);
+      await this.executePlan(plan, fillValues, identityFromEmail(task.email), steps, bySelector);
 
       // rc.31 — flag the email-path commitment once we've executed a
       // click whose reason explicitly targets an "email" affordance
@@ -4874,14 +6367,26 @@ export class SignupAgent {
         }
       }
 
-      // A plan with no fill actions either revealed/advanced the page
+      // A plan that should not submit either revealed/advanced the page
       // (a cookie banner, a two-stage "sign up with email" chooser) —
       // worth a re-plan — or found nothing actionable at all. A
       // 0-action plan revealed *nothing*: re-extracting the same
       // static page won't help, so a second consecutive empty plan is
       // a dead end. (The 0.1.12 loop spun this 4x on Axiom.)
       const hadFill = plan.actions.some((a) => a.kind === "fill");
-      if (!hadFill) {
+      // A check/select is ALSO a field edit = real progress, even though
+      // (unlike a fill) it doesn't always promote the plan to the submit
+      // path below. Treat these as progress for
+      // the no-progress tracker only: a plan that ticked a box advanced
+      // the form, so its click selectors must NOT be recorded as "dead"
+      // (and any prior dead record is cleared). Without this, a "click
+      // Next (no advance) → tick a required box + re-click Next" cycle
+      // false-bailed as a loop even though the check was progress.
+      const hadFieldEdit = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check" || a.kind === "select",
+      );
+      const shouldSubmit = hadFill || (hadFieldEdit && planClickSelectors.length === 0);
+      if (!shouldSubmit) {
         if (plan.actions.length === 0) {
           emptyPlans += 1;
           if (emptyPlans >= 2) {
@@ -4905,8 +6410,12 @@ export class SignupAgent {
         // F14 — record the click selectors that didn't advance the
         // page. The next plan's stuck-detection check (above) bails
         // if it picks the same ones again. Hint also tells the
-        // planner which selectors NOT to re-pick.
-        lastNoProgressClickSelectors = new Set(planClickSelectors);
+        // planner which selectors NOT to re-pick. A plan that ALSO made
+        // a field edit (select/check) made real progress, so clear the
+        // tracker instead of recording its clicks as dead.
+        lastNoProgressClickSelectors = hadFieldEdit
+          ? new Set()
+          : new Set(planClickSelectors);
         const avoidHint =
           planClickSelectors.length > 0
             ? ` AVOID these selectors — they were clicked but the page did NOT advance: ${planClickSelectors.map((s) => JSON.stringify(s)).join(", ")}.`
@@ -4929,6 +6438,12 @@ export class SignupAgent {
       // service doesn't disable submit for an unchecked box, the click
       // silently no-ops. This ticks terms/privacy/consent boxes while
       // never touching marketing opt-ins. Best-effort: never throws.
+      const choiceBoxes = await this.browser.checkRequiredSignupChoiceBoxes();
+      if (choiceBoxes.length > 0) {
+        steps.push(
+          `Form: checked required signup choice box(es): [${choiceBoxes.join(", ")}]`,
+        );
+      }
       const agreementBoxes = await this.browser.checkRequiredAgreementBoxes();
       if (agreementBoxes.length > 0) {
         steps.push(
@@ -5046,16 +6561,53 @@ export class SignupAgent {
       await this.browser.wait(2);
 
       const postGate = await this.runCaptchaGate("Post-submit", steps);
-      if (postGate.blocked) return { kind: "captcha_blocked", captchaKind: postGate.kind };
+      if (postGate.blocked) {
+        // A managed/invisible Turnstile (Clerk's Smart CAPTCHA) resolves
+        // SERVER-SIDE: the submit can succeed — account created, verification
+        // email sent — even though our client-side token poll timed out.
+        // cartesia PROVED this: it emailed a verification code AFTER the bot had
+        // bailed captcha_blocked. The ground truth of "did the submit go
+        // through" is the INBOX, not the client token. So for a POST-submit
+        // Turnstile with an inbox available, don't hard-bail: proceed to the
+        // verification step and let the inbox poll arbitrate — a code arriving
+        // proves the managed Turnstile passed (→ completes); no code surfaces
+        // an honest verification_not_sent rather than a false captcha_blocked.
+        // A genuine pre-submit gate (no inbox, or a non-Turnstile challenge)
+        // still bails captcha_blocked.
+        if (postGate.kind === "turnstile" && task.inbox !== undefined) {
+          steps.push(
+            "Post-submit Turnstile token didn't populate — but a managed Turnstile resolves " +
+              "server-side, so the submit may have gone through. Proceeding to verification; " +
+              "the inbox poll arbitrates (a code = submit succeeded).",
+          );
+          // Don't let the recorded block short-circuit later gates / the result.
+          this.captchaEncounter = undefined;
+          await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
+          return { kind: "submitted" };
+        }
+        return { kind: "captcha_blocked", captchaKind: postGate.kind };
+      }
       if (postGate.found && postGate.solved) {
         // Re-click submit so the populated token ships with the form.
         try {
-          await this.browser.click(plan.submit_selector);
+          await this.reapplyPlanFieldActionsAfterCaptcha(
+            plan,
+            fillValues,
+            identity,
+            steps,
+          );
+          await this.browser.clickSubmit(plan.submit_selector);
           await this.browser.wait(3);
         } catch (err) {
-          steps.push(
-            `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          const reason = err instanceof Error ? err.message : String(err);
+          steps.push(`⚠ post-captcha submit retry failed: ${reason}`);
+          if (reason.startsWith("submit_disabled")) {
+            if (++progressReplans > MAX_PROGRESS_REPLANS) {
+              return { kind: "submit_failed", reason };
+            }
+            hint = await this.buildSubmitDisabledHint(steps);
+            continue;
+          }
         }
       }
 
@@ -5082,6 +6634,696 @@ export class SignupAgent {
       await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
       return { kind: "submitted" };
     }
+  }
+
+  private async captureFormObservationFrame(
+    steps: string[],
+    oauthCandidates: readonly OAuthProviderId[],
+  ): Promise<ObservationFrame> {
+    return captureObservationFrame(this.browser, () => this.buildInventory(steps, oauthCandidates));
+  }
+
+  private async captureTextObservationFrame(): Promise<ObservationFrame> {
+    return captureObservationFrame(this.browser, async () => []);
+  }
+
+  private async advancePinnedGoogleIdentifierPage(input: {
+    task: SignupTask;
+    url: string;
+    inventory: ReadonlyArray<InteractiveElement>;
+    steps: string[];
+  }): Promise<"advanced" | "needs_login" | "not_applicable"> {
+    if (input.task.oauthProvider !== "google") return "not_applicable";
+    const account = input.task.oauthAccountEmail?.trim();
+    if (account === undefined || account.length === 0) return "not_applicable";
+    if (!isGoogleAccountsAuthUrl(input.url)) return "not_applicable";
+
+    const passwordField = input.inventory.find(
+      (e) => e.tag === "input" && e.type === "password" && e.visible !== false,
+    );
+    if (passwordField !== undefined) {
+      input.steps.push(
+        "OAuth-first: Google asked for the account password after selecting the pinned account — treating the provider session as stale.",
+      );
+      return "needs_login";
+    }
+
+    const emailField =
+      input.inventory.find(
+        (e) =>
+          e.tag === "input" &&
+          e.visible !== false &&
+          (e.id === "identifierId" ||
+            e.type === "email" ||
+            /\b(?:email|phone|identifier)\b/i.test(
+              `${e.name ?? ""} ${e.placeholder ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+            )),
+      ) ?? null;
+    if (emailField === null) return "not_applicable";
+
+    const advance =
+      input.inventory.find(
+        (e) =>
+          (e.tag === "button" || e.type === "submit") &&
+          e.visible !== false &&
+          /^\s*next\s*$/i.test(`${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim()),
+      ) ??
+      input.inventory.find(
+        (e) =>
+          (e.tag === "button" || e.type === "submit") &&
+          e.visible !== false &&
+          /\b(?:continue|next|submit)\b/i.test(`${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`),
+      );
+    if (advance === undefined) return "not_applicable";
+
+    input.steps.push(
+      `OAuth-first: Google identifier page — entering pinned account ${account} instead of the signup inbox alias.`,
+    );
+    await this.browser.type(emailField.selector, account);
+    await this.browser.clickSubmit(advance.selector).catch(async () => {
+      await this.browser.click(advance.selector);
+    });
+    await this.browser.wait(3);
+    return "advanced";
+  }
+
+  private async capturePostVerifyObservationFrame(
+    steps: string[],
+  ): Promise<ObservationFrame> {
+    return captureObservationFrame(this.browser, () => this.buildInventory(steps, undefined, 80));
+  }
+
+  // FORM_FILL_ENGINE path (strangler slice 3) — the same round as
+  // planExecuteWithRetry, but every DECISION goes through the pure
+  // decideFormFillStep reducer (form-fill.ts); this method owns only the I/O and
+  // the replan-hint CONTENT. Faithful to the inline loop; reuses its helpers.
+  private async planExecuteViaEngine(
+    task: SignupTask,
+    fillValues: Record<FillValueKind, string>,
+    steps: string[],
+    forceFormFill: boolean,
+  ): Promise<PlanExecOutcome> {
+    let state: FormFillState = initialFormFillState(forceFormFill);
+    let hint: string | undefined;
+    const identity = identityFromEmail(task.email);
+    // Map a reducer terminal outcome to PlanExecOutcome. needs_oauth_provider_session
+    // + oauth carry provider IDs the executor holds in typed form — pass those in.
+    const toPlanExec = (
+      outcome: FormFillOutcome,
+      typed?: {
+        oauth?: { selector: string; provider: OAuthProviderId } | undefined;
+        missingProviders?: readonly OAuthProviderId[] | undefined;
+        haveSessions?: readonly OAuthProviderId[] | undefined;
+      },
+    ): PlanExecOutcome => {
+      switch (outcome.kind) {
+        case "oauth":
+          return { kind: "oauth", selector: typed!.oauth!.selector, provider: typed!.oauth!.provider };
+        case "needs_oauth_provider_session":
+          return {
+            kind: "needs_oauth_provider_session",
+            missingProviders: typed!.missingProviders!,
+            haveSessions: typed!.haveSessions!,
+          };
+        default:
+          return outcome;
+      }
+    };
+
+    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
+    for (;;) {
+      await this.browser.waitForFormReady();
+      const dismissed = await this.browser.dismissConsentBanner();
+      if (dismissed !== null) steps.push(`Dismissed cookie consent: "${dismissed}"`);
+      await saveDebugSnapshot(this.browser, "before-fill");
+      const frame = await this.captureFormObservationFrame(steps, oauthCandidates);
+      const frameVerdict = classifyObservationFrame(frame);
+      if (process.env.TRUSTY_SQUIRE_OBSERVATION_DEBUG === "1") {
+        steps.push(`Observation :  ()`);
+      }
+      const browserState = frame.state;
+      const inventory = frame.inventory;
+
+      const googleIdentifierAdvance =
+        await this.advancePinnedGoogleIdentifierPage({
+          task,
+          url: browserState.url,
+          inventory,
+          steps,
+        });
+      if (googleIdentifierAdvance === "advanced") continue;
+      if (googleIdentifierAdvance === "needs_login") {
+        return {
+          kind: "needs_login",
+          provider: "google",
+          reason: "Google asked for the pinned account password during OAuth-first signup",
+        };
+      }
+
+      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(browserState.url)) {
+        const advanced = await this.browser.advanceOAuthConsent("github");
+        steps.push(
+          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
+        );
+        if (advanced) {
+          await this.browser.wait(3);
+          continue;
+        }
+      }
+
+      {
+        const prePlanCredentials = await this.harvestVisibleCredentials();
+        if (
+          hasAnyExtractedCredential(prePlanCredentials) &&
+          !isAuthEntryPageForPreExtraction({
+            url: browserState.url,
+            html: browserState.html,
+            inventory,
+          })
+        ) {
+          steps.push(
+            "Form-fill: credentials are already visible before planning — skipping form actions and extracting in place.",
+          );
+          return { kind: "submitted" };
+        }
+      }
+
+      // ── C1 pre_plan: gather the observation, then decide ──
+      const hasFillableInput = inventory.some(
+        (e) =>
+          e.tag === "input" &&
+          (e.type === "email" || e.type === "text" || e.type === "password" || e.type === null) &&
+          e.visible !== false,
+      );
+      const visiblePrePlanText = !hasFillableInput
+        ? await this.browser.extractText().catch(() => "")
+        : "";
+      const wallText = `${browserState.html} ${visiblePrePlanText}`;
+      const wallAlias = extractVerifyWallAlias(wallText);
+      const ourInboxDomain = task.email.slice(task.email.indexOf("@") + 1).toLowerCase();
+      const aliasPollable =
+        wallAlias === null ||
+        wallAlias.slice(wallAlias.indexOf("@") + 1).toLowerCase() === ourInboxDomain;
+      const oauthButtonHitRaw = findFirstOAuthButton(inventory, oauthCandidates);
+      const offersOAuthSignup = oauthCandidates.length > 0 && oauthButtonHitRaw !== null;
+      const verifyWall =
+        !hasFillableInput &&
+        expectsVerificationEmail(wallText) &&
+        aliasPollable &&
+        !offersOAuthSignup;
+      const hasCredentialInput = inventory.some(
+        (e) => e.tag === "input" && (e.type === "email" || e.type === "password" || e.type === "tel"),
+      );
+      // LAZY (parity with inline agent.ts:4823): the loading-shell check calls
+      // extractText() — an I/O read — so only compute it when the OAuth-scan
+      // branch will actually consult it (candidates present, NOT committed, and
+      // no provider button hit yet). Computing it unconditionally would fire a
+      // spurious extractText() every round and diverge from the inline path.
+      const needScanShell =
+        oauthCandidates.length > 0 && !state.committedToEmailPath && oauthButtonHitRaw === null;
+      const oauthScanShell =
+        needScanShell &&
+        (inventory.length <= 1 ||
+          !hasCredentialInput ||
+          isLoadingShellText(await this.browser.extractText().catch(() => "")));
+      const signInAdvance = findSignInAdvanceButton(inventory, oauthCandidates);
+      const signupLinkOnLoginPage = findSignupLinkOnLoginPage({
+        inventory,
+        url: browserState.url,
+        title: browserState.title,
+        htmlOrText: browserState.html,
+      });
+      const antiBotVendor = inventory.length < 10 ? detectAntiBotBlock(browserState.html) : null;
+      const oauthOnly = isOauthOnlyChooser(inventory);
+      let missingProviders: readonly OAuthProviderId[] = [];
+      let haveSessions: readonly OAuthProviderId[] = [];
+      if (oauthOnly) {
+        const visibleProviders = detectOAuthProvidersInInventory(inventory);
+        haveSessions = await this.effectiveLoggedInProviders();
+        missingProviders = visibleProviders.filter((p) => !haveSessions.includes(p));
+      }
+      const preObs: FormFillObservation = {
+        checkpoint: "pre_plan",
+        hasFillableInput,
+        verifyWall,
+        codeGate: isVerificationCodeGate(inventory, browserState.html),
+        oauthCandidatesPresent: oauthCandidates.length > 0,
+        oauthButtonHit:
+          oauthButtonHitRaw !== null
+            ? { selector: oauthButtonHitRaw.button.selector, provider: oauthButtonHitRaw.provider }
+            : null,
+        oauthScanShell,
+        alreadySignedIn: detectAlreadySignedIn({ inventory, url: browserState.url }),
+        signInAdvancePresent: signInAdvance !== null,
+        signupLinkOnLoginPage: signupLinkOnLoginPage !== null,
+        antiBotVendor,
+        oauthOnly,
+        oauthOnlyMissingProviders: missingProviders,
+        oauthOnlyHaveSessions: haveSessions,
+      };
+      const pre = decideFormFillStep(state, preObs);
+      state = pre.nextState;
+      const preAct = pre.action;
+      if (preAct.kind === "route_to_verification") {
+        this.pendingVerificationAlias = wallAlias;
+        steps.push(
+          `Form: email-verification wall (no fields to fill${wallAlias !== null ? `, check ${wallAlias}` : ""}) — ` +
+            `routing to the inbox-poll + verification-link flow.`,
+        );
+        const resend = inventory.find((e) => {
+          if (e.tag !== "button" && e.tag !== "a") return false;
+          const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+          return /resend (?:verification )?(?:email|link)|send (?:it )?again/.test(t);
+        });
+        if (resend !== undefined) {
+          try {
+            await this.browser.click(resend.selector);
+            steps.push(`Form: clicked "Resend verification email" to refresh the link.`);
+            await this.browser.wait(2);
+          } catch {
+            // non-fatal
+          }
+        }
+        return { kind: "submitted" };
+      }
+      if (preAct.kind === "terminal") {
+        if (preAct.outcome.kind === "oauth" && oauthButtonHitRaw !== null) {
+          const label = OAUTH_PROVIDERS[oauthButtonHitRaw.provider].label;
+          steps.push(
+            `OAuth-first: found a ${label} sign-in affordance ` +
+              `(${JSON.stringify(oauthButtonHitRaw.button.visibleText ?? oauthButtonHitRaw.button.ariaLabel ?? label)}) ` +
+              `— taking the OAuth path`,
+          );
+        }
+        return toPlanExec(preAct.outcome, {
+          oauth:
+            oauthButtonHitRaw !== null
+              ? { selector: oauthButtonHitRaw.button.selector, provider: oauthButtonHitRaw.provider }
+              : undefined,
+          missingProviders,
+          haveSessions,
+        });
+      }
+      if (preAct.kind === "oauth_scan_wait") {
+        steps.push(
+          `OAuth-first[engine]: no provider affordance yet — waiting for async render ` +
+            `(retry ${state.oauthScanRetries}${oauthScanShell ? ", loading shell" : ""})`,
+        );
+        await this.browser.wait(3);
+        continue;
+      }
+      if (preAct.kind === "oauth_shell_reload") {
+        steps.push(`OAuth-first[engine]: page stuck as a loading shell — reloading once to unstick the SPA`);
+        try {
+          await this.browser.goto(this.browser.currentUrl());
+          await this.browser.waitForFormReady();
+        } catch {
+          // reload failed — re-loop and let the terminal handling take over
+        }
+        continue;
+      }
+      if (preAct.kind === "sign_in_advance" && signInAdvance !== null) {
+        steps.push(
+          `OAuth-first: no provider affordance, but found a generic ` +
+            `sign-in affordance (${JSON.stringify(signInAdvance.visibleText ?? signInAdvance.ariaLabel ?? "")}) ` +
+            `— clicking it to advance to the real login page ` +
+            `(${state.signInAdvanceClicks}/${B_FF.MAX_SIGN_IN_ADVANCE_CLICKS})`,
+        );
+        try {
+          await this.browser.click(signInAdvance.selector);
+        } catch (err) {
+          steps.push(
+            `OAuth-first[engine]: sign-in advance click failed (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
+        continue;
+      }
+      if (preAct.kind === "signup_link_advance" && signupLinkOnLoginPage !== null) {
+        steps.push(
+          `Form: login page exposes a signup affordance ` +
+            `(${JSON.stringify(signupLinkOnLoginPage.visibleText ?? signupLinkOnLoginPage.ariaLabel ?? signupLinkOnLoginPage.href ?? "")}) ` +
+            `— clicking it before filling credentials ` +
+            `(${state.signupLinkAdvanceClicks}/${B_FF.MAX_SIGNUP_LINK_ADVANCE_CLICKS})`,
+        );
+        try {
+          await this.browser.click(signupLinkOnLoginPage.selector);
+          await this.browser.waitForFormReady();
+        } catch (err) {
+          steps.push(
+            `Form[engine]: signup-link advance click failed (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
+        continue;
+      }
+      // preAct.kind === "run_planner" → fall through to the planner.
+
+      let plan = planSimpleEmailOnlySignup(inventory);
+      if (plan !== null) {
+        steps.push("Plan: deterministic email-only signup form (no LLM call).");
+      } else {
+        steps.push("Asking planner to plan the signup form fill...");
+        try {
+          plan = await this.planSignupForm({
+            service: task.service,
+            url: browserState.url,
+            inventory,
+            screenshot: browserState.screenshot,
+            ...(hint !== undefined ? { hint } : {}),
+          });
+        } catch (err) {
+        // ── C2 plan_error ──
+        const reason = err instanceof Error ? err.message : String(err);
+        const isUpstreamBlip =
+          /\b50[234]\b/.test(reason) ||
+          /\bupstream_(?:error|unreachable)\b/i.test(reason) ||
+          /\bnetwork error\b/i.test(reason);
+        const pe = decideFormFillStep(state, { checkpoint: "plan_error", isUpstreamBlip, reason });
+        state = pe.nextState;
+        if (pe.action.kind === "terminal") return toPlanExec(pe.action.outcome);
+        if (pe.action.kind === "blip_retry") {
+          steps.push(`⚠ planner request hit a transient upstream blip (${reason}) — retrying`);
+          await this.browser.wait(2);
+          continue;
+        }
+        // replan (selector_not_in_inventory)
+        steps.push(`⚠ plan rejected (${reason}) — re-planning`);
+        hint =
+          "Your previous plan used a selector not in the inventory. Use ONLY selectors copied verbatim from a `selector=` field.";
+        continue;
+      }
+      }
+      steps.push(
+        `Plan: ${plan.actions.length} action(s), confidence=${plan.confidence}` +
+          (plan.notes !== undefined ? ` — ${plan.notes}` : ""),
+      );
+
+      // ── C3 post_plan ──
+      const planClickSelectors = plan.actions
+        .filter((a) => a.kind === "click")
+        .map((a) => a.selector);
+      const planEditsAField = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check" || a.kind === "select",
+      );
+      const pageSig =
+        browserState.url + "§" + inventory.map((e) => e.selector).sort().join("|");
+      const bySelector = new Map(inventory.map((e) => [e.selector, e]));
+      const miss = await this.verifyPlan(plan, bySelector);
+      const post = decideFormFillStep(state, {
+        checkpoint: "post_plan",
+        isDashboard: detectFormFillIsDashboard(plan),
+        pageSig,
+        planClickSelectors,
+        planEditsAField,
+        verifyMiss: miss,
+        verifyMissNotCheckbox: miss !== null && miss.includes("not a checkbox"),
+      });
+      state = post.nextState;
+      if (post.action.kind === "terminal") {
+        if (post.action.outcome.kind === "planning_failed") {
+          steps.push(`Form[engine]: post-plan → planning_failed (${post.action.outcome.reason})`);
+        }
+        return toPlanExec(post.action.outcome);
+      }
+      if (post.action.kind === "replan") {
+        if (post.action.hintKind === "drop_the_check") {
+          steps.push(`⚠ planned selectors did not verify (${miss}) — re-planning`);
+          hint =
+            `These selectors did not resolve correctly: ${miss}. Pick different inventory entries.` +
+            " If the inventory has NO input of type=checkbox, OMIT the check" +
+            " action entirely — do not substitute a link or a button. The" +
+            " agreement may be implicit or pre-accepted.";
+        } else {
+          steps.push(`⚠ planned selectors did not verify (${miss}) — re-planning`);
+          hint = `These selectors did not resolve correctly: ${miss}. Pick different inventory entries.`;
+        }
+        continue;
+      }
+      // post.action.kind === "execute_plan"
+      await this.executePlan(plan, fillValues, identityFromEmail(task.email), steps, bySelector);
+
+      // ── C4 post_execute ──
+      const hadFill = plan.actions.some((a) => a.kind === "fill");
+      const hadFieldEdit = plan.actions.some(
+        (a) => a.kind === "fill" || a.kind === "check" || a.kind === "select",
+      );
+      const clickedEmailAffordance = plan.actions.some(
+        (a) => a.kind === "click" && /\bemail\b/i.test(a.reason),
+      );
+      const wasCommitted = state.committedToEmailPath;
+      const px = decideFormFillStep(state, {
+        checkpoint: "post_execute",
+        clickedEmailAffordance,
+        planClickSelectors,
+        hadFill,
+        hadFieldEdit,
+        planActionCount: plan.actions.length,
+      });
+      state = px.nextState;
+      if (!wasCommitted && state.committedToEmailPath) {
+        steps.push("Committed to email-fill path — auto-OAuth-first scan suppressed for the rest of this signup");
+      }
+      if (px.action.kind === "terminal") {
+        steps.push(`Form[engine]: post-execute → planning_failed`);
+        return toPlanExec(px.action.outcome);
+      }
+      if (px.action.kind === "replan") {
+        const avoidHint =
+          planClickSelectors.length > 0
+            ? ` AVOID these selectors — they were clicked but the page did NOT advance: ${planClickSelectors.map((s) => JSON.stringify(s)).join(", ")}.`
+            : "";
+        steps.push(
+          plan.actions.length === 0
+            ? "Plan found nothing to act on — re-checking once for a late render"
+            : "Plan only revealed the page — re-planning the now-visible form",
+        );
+        hint =
+          "The previous step revealed or advanced the page. Plan the signup form that should now be visible." +
+          avoidHint;
+        continue;
+      }
+      // px.action.kind === "submit"
+      const choiceBoxes = await this.browser.checkRequiredSignupChoiceBoxes();
+      if (choiceBoxes.length > 0) {
+        steps.push(`Form: checked required signup choice box(es): [${choiceBoxes.join(", ")}]`);
+      }
+      const agreementBoxes = await this.browser.checkRequiredAgreementBoxes();
+      if (agreementBoxes.length > 0) {
+        steps.push(`Form: checked required agreement box(es): [${agreementBoxes.join(", ")}]`);
+      }
+
+      // ── C4 post_submit: gather facts incrementally (the reducer's priority-order
+      // checks make an early-blocking pre-gate correct even with default tails). ──
+      const preGate = await this.runCaptchaGate("Pre-submit", steps);
+      let submitError: string | null = null;
+      let submitDisabled = false;
+      let submitTimeout = false;
+      let postGateBlocked = false;
+      let postGateKind = "";
+      let validationFailure = false;
+      if (!preGate.blocked) {
+        const submitSelector =
+          pickEmailCodeSubmitSelector({
+            inventory,
+            htmlOrText: browserState.html,
+            currentSubmitSelector: plan.submit_selector,
+          }) ?? plan.submit_selector;
+        if (submitSelector !== plan.submit_selector) {
+          steps.push(`Form: corrected email-code submit selector ${plan.submit_selector} → ${submitSelector}`);
+        }
+        steps.push(`Submit → ${submitSelector}`);
+        try {
+          await this.browser.clickSubmit(submitSelector);
+        } catch (err) {
+          submitError = err instanceof Error ? err.message : String(err);
+          submitDisabled = submitError.startsWith("submit_disabled");
+          submitTimeout = !submitDisabled && isSubmitTimeout(submitError);
+        }
+        if (submitError === null) {
+          await this.browser.wait(2);
+          const postGate = await this.runCaptchaGate("Post-submit", steps);
+          postGateBlocked = postGate.blocked;
+          postGateKind = postGate.kind;
+          if (!postGate.blocked && postGate.found && postGate.solved) {
+            try {
+              await this.reapplyPlanFieldActionsAfterCaptcha(
+                plan,
+                fillValues,
+                identity,
+                steps,
+              );
+              await this.browser.clickSubmit(submitSelector);
+              await this.browser.wait(3);
+            } catch (err) {
+              submitError = err instanceof Error ? err.message : String(err);
+              submitDisabled = submitError.startsWith("submit_disabled");
+              submitTimeout = !submitDisabled && isSubmitTimeout(submitError);
+              steps.push(`⚠ post-captcha submit retry failed: ${submitError}`);
+            }
+          }
+          if (!postGate.blocked) {
+            const afterText = (await this.browser.extractText()).slice(0, 4000);
+            validationFailure =
+              !expectsVerificationEmail(afterText) &&
+              this.looksLikeValidationFailure(afterText);
+            if (validationFailure) hint = `The previous submit produced validation errors. Visible page text: ${afterText.slice(0, 600)}`;
+          }
+        }
+      }
+      const ps = decideFormFillStep(state, {
+        checkpoint: "post_submit",
+        preGateBlocked: preGate.blocked,
+        preGateKind: preGate.kind,
+        submitError,
+        submitDisabled,
+        submitTimeout,
+        postGateBlocked,
+        postGateKind,
+        hasInbox: task.inbox !== undefined,
+        validationFailure,
+      });
+      state = ps.nextState;
+      if (ps.action.kind === "replan") {
+        if (ps.action.hintKind === "submit_disabled") {
+          steps.push(`⚠ ${submitError} — re-planning to satisfy it`);
+          hint = await this.buildSubmitDisabledHint(steps);
+        } else if (ps.action.hintKind === "submit_went_stale") {
+          steps.push(`⚠ submit selector went stale — the page likely advanced; re-planning`);
+          hint =
+            "The submit button selected last round was no longer present when " +
+            "we tried to click it — an earlier action probably advanced the page. " +
+            "Re-read the now-visible form and plan the next step (pick the submit " +
+            "button that is actually on the current screen).";
+        } else {
+          steps.push("Post-submit validation errors — re-planning");
+          // hint already set above from afterText
+        }
+        continue;
+      }
+      if (ps.action.kind === "terminal") {
+        // Match the inline step trail: a genuine (non-disabled, non-timeout)
+        // submit error logs "submit click failed" before failing.
+        if (
+          ps.action.outcome.kind === "submit_failed" &&
+          submitError !== null &&
+          !submitDisabled &&
+          !submitTimeout
+        ) {
+          steps.push(`⚠ submit click failed: ${submitError}`);
+        }
+        if (ps.action.outcome.kind === "submitted" && postGateBlocked && postGateKind === "turnstile") {
+          // managed-Turnstile + inbox flip: clear the recorded block so it can't
+          // short-circuit a later gate, and capture the form rounds.
+          steps.push(
+            "Post-submit Turnstile token didn't populate — managed Turnstile resolves server-side; " +
+              "proceeding to verification (the inbox poll arbitrates).",
+          );
+          this.captchaEncounter = undefined;
+        }
+        if (ps.action.outcome.kind === "submitted") {
+          await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
+        }
+        return toPlanExec(ps.action.outcome);
+      }
+    }
+  }
+
+  private async reapplyPlanFieldActionsAfterCaptcha(
+    plan: SignupPlan,
+    fillValues: Record<FillValueKind, string>,
+    identity: SignupIdentity,
+    steps: string[],
+  ): Promise<void> {
+    const fieldActions = plan.actions.filter(
+      (action) =>
+        action.kind === "fill" ||
+        action.kind === "check" ||
+        action.kind === "select",
+    );
+    if (fieldActions.length === 0) return;
+    const inventory = await this.buildInventory([], undefined, 80);
+    const bySelector = new Map(inventory.map((e) => [e.selector, e]));
+    for (const action of fieldActions) {
+      const el = bySelector.get(action.selector);
+      if (el !== undefined && el.inConsentWidget) continue;
+      try {
+        if (action.kind === "fill") {
+          const value = resolvePlannedFillValue(action, fillValues, el, identity);
+          if (el !== undefined && el.tag === "select") {
+            steps.push(`Post-captcha reselect ${action.selector}`);
+            await this.browser.selectOption(action.selector);
+          } else {
+            steps.push(`Post-captcha refill ${action.value_kind} → ${action.selector}`);
+            await this.browser.type(action.selector, value);
+          }
+        } else if (action.kind === "check") {
+          steps.push(`Post-captcha recheck ${action.selector}`);
+          await this.browser.check(action.selector);
+        } else {
+          steps.push(
+            action.option_text !== undefined
+              ? `Post-captcha reselect ${action.selector} → ${action.option_text}`
+              : `Post-captcha reselect ${action.selector}`,
+          );
+          await this.browser.selectOption(action.selector, action.option_text);
+        }
+      } catch (err) {
+        steps.push(
+          `Post-captcha field reapply skipped ${action.selector}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  // The submit_disabled replan hint CONTENT (review Q2 — the executor owns this;
+  // the reducer only emits the intent). A fresh inventory snapshot lists concrete
+  // unchecked-checkbox + empty-input candidates so the planner picks one
+  // immediately. Best-effort: a snapshot failure falls back to the generic prose.
+  private async buildSubmitDisabledHint(steps: string[]): Promise<string> {
+    let uncheckedHint = "";
+    let emptyInputHint = "";
+    try {
+      const snapshotInv = await this.buildInventory(steps, undefined, 60);
+      const unchecked = snapshotInv.filter(
+        (e) =>
+          e.tag === "input" &&
+          (e.type === "checkbox" || e.role === "checkbox") &&
+          e.checked === false &&
+          e.visible === true,
+      );
+      if (unchecked.length > 0) {
+        const lines = unchecked.slice(0, 6).map((e) => {
+          const label = (e.labelText ?? e.ariaLabel ?? e.placeholder ?? e.name ?? "(no label)").toString().slice(0, 60);
+          return `  - selector ${JSON.stringify(e.selector)} label=${JSON.stringify(label)}`;
+        });
+        uncheckedHint = `\nUnchecked checkboxes visible on the page:\n${lines.join("\n")}`;
+      }
+      const emptyInputs = snapshotInv.filter(
+        (e) =>
+          e.tag === "input" &&
+          e.type !== "checkbox" &&
+          e.type !== "radio" &&
+          e.type !== "hidden" &&
+          (e.value === null || e.value === "") &&
+          e.visible === true,
+      );
+      if (emptyInputs.length > 0) {
+        const lines = emptyInputs.slice(0, 6).map((e) => {
+          const label = (e.labelText ?? e.placeholder ?? e.ariaLabel ?? e.name ?? "(no label)").toString().slice(0, 60);
+          return `  - selector ${JSON.stringify(e.selector)} label=${JSON.stringify(label)}`;
+        });
+        emptyInputHint = `\nEmpty visible inputs (any could be the unmet required field):\n${lines.join("\n")}`;
+      }
+    } catch {
+      // best-effort
+    }
+    return (
+      "The submit button is disabled — a required field or an agreement " +
+      "was not satisfied. Issue {\"kind\":\"check\"} on an unchecked " +
+      "agreement/terms checkbox, OR {\"kind\":\"fill\"} on an empty " +
+      "required input. Do NOT click a link." +
+      uncheckedHint +
+      emptyInputHint
+    );
   }
 
   // Emit the signup-form-fill rounds (email + password + submit) into the
@@ -5114,18 +7356,39 @@ export class SignupAgent {
           state,
           inventory,
           observed,
+          // Fix C4 — the form-plan's backend (planSignupForm ran before
+          // this synthetic preamble capture, so lastResolved* still reflect
+          // it). These preamble rounds replay the one plan; one backend.
+          ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+          ...(this.lastResolvedProvider !== undefined ? { resolved_provider: this.lastResolvedProvider } : {}),
         });
         this.captureChainRound += 1;
       };
       for (const action of plan.actions) {
-        if (action.kind !== "fill") continue;
-        if (action.value_kind !== "email" && action.value_kind !== "password") continue;
-        emit({
-          kind: "fill",
-          selector: action.selector,
-          value: fillValues[action.value_kind],
-          reason: `Fill the signup ${action.value_kind}`,
-        });
+        if (action.kind === "fill") {
+          if (
+            action.value_kind !== "email" &&
+            action.value_kind !== "password" &&
+            action.value_kind !== "phone"
+          ) {
+            continue;
+          }
+          emit({
+            kind: "fill",
+            selector: action.selector,
+            value: fillValues[action.value_kind],
+            reason: `Fill the signup ${action.value_kind}`,
+          });
+          continue;
+        }
+        if (action.kind === "select") {
+          emit({
+            kind: "select",
+            selector: action.selector,
+            ...(action.option_text !== undefined ? { option_text: action.option_text } : {}),
+            reason: `Select the signup dropdown option`,
+          });
+        }
       }
       emit({
         kind: "click",
@@ -5351,45 +7614,37 @@ export class SignupAgent {
     }
   }
 
-  // Which OAuth providers can the bot actually use right now — the UNION of
-  // the logged-in-providers.json marker (a memo) and a LIVE read of the
-  // browser's cookie jar. The cookie jar is ground truth, so a warm session
-  // is never invisible just because the marker drifted (the GitHub-skipped-
-  // for-Google bug). Self-heals the marker for any live session it was
-  // missing. Falls back to the marker alone if the cookie read fails.
+  // Which OAuth providers can the bot actually use right now. The LIVE browser
+  // cookie jar is ground truth; logged-in-providers.json is only a memo used
+  // when the live probe itself fails. A stale marker must not make the bot
+  // prefer OAuth after the provider session expired.
   private async effectiveLoggedInProviders(): Promise<OAuthProviderId[]> {
-    const fromMarker = loggedInProviders();
-    let live: OAuthProviderId[] = [];
-    try {
-      live = await this.browser.detectSessionProviders();
-    } catch {
-      live = [];
-    }
-    for (const p of live) {
-      if (!fromMarker.includes(p)) markProviderLoggedIn(p);
-    }
-    return [...new Set([...fromMarker, ...live])];
+    return new SignupOAuthFlow(this.browser, {
+      loggedInProviders,
+      markProviderLoggedIn,
+      clearProviderLoggedIn,
+    }).effectiveLoggedInProviders();
   }
 
   private async resolveOAuthCandidates(
     task: SignupTask,
     steps: string[],
   ): Promise<OAuthProviderId[]> {
-    if (task.forceForm === true) {
-      steps.push("Force-form: OAuth-first scan suppressed — taking the email/password path");
+    if (task.forceForm === true || this.committedToEmailPath) {
+      steps.push(
+        this.committedToEmailPath
+          ? "Committed to email path (OAuth was login-only) — OAuth-first scan suppressed"
+          : "Force-form: OAuth-first scan suppressed — taking the email/password path",
+      );
       return [];
     }
+    const provider = task.oauthProvider;
     const ordered = orderOAuthCandidates(
-      task.oauthProvider,
+      provider,
       await this.effectiveLoggedInProviders(),
     );
     if (ordered.length === 0) return [];
-    const pinNote =
-      task.oauthProvider !== undefined &&
-      task.oauthProvider !== "google" &&
-      ordered[0] === "google"
-        ? ` (pinned ${task.oauthProvider}, but Google session present — Google blocks less hard, so it leads; ${task.oauthProvider} is the fallback)`
-        : "";
+    const pinNote = provider !== undefined ? ` (pinned ${provider})` : "";
     steps.push(
       `Auto-OAuth: candidates [${ordered.join(", ")}]${pinNote} — using whichever the page offers`,
     );
@@ -5561,6 +7816,11 @@ export class SignupAgent {
     // deterministic decisions (see docs/DESIGN-planner-navigation-eval.md);
     // omitted → provider default.
     temperature?: number;
+    // Fix C — mark a NAVIGATION-PLANNER call. Forwarded to the proxy so it
+    // pins a single model + backend provider + seed (temperature 0 alone
+    // doesn't kill the model/provider-swap byte-flips). Set true by the
+    // form + post-verify planners; left unset by every other call.
+    deterministic?: boolean;
   }): Promise<T extends undefined ? string : T> {
     // Use a typed helper because the conditional return type confuses
     // the inner narrowing.
@@ -5573,6 +7833,7 @@ export class SignupAgent {
     maxTokens: number;
     parse?: (raw: string) => T;
     temperature?: number;
+    deterministic?: boolean;
   }): Promise<T | string> {
     const callOne = async (client: LLMClient): Promise<string> => {
       if (this.llmCallCount >= MAX_LLM_CALLS_PER_SIGNUP) {
@@ -5588,14 +7849,32 @@ export class SignupAgent {
       // permission scope, 5 short of the API key. Failed calls produce
       // no progress; charging them against the budget is wrong. Behave
       // like a meter: only count consumption that actually delivered.
+      // Text-only planner experiment (BOT_PLANNER_TEXT_ONLY, default-off).
+      // The DOM inventory is the authoritative action space — the planner
+      // may only pick a selector the bot supplied, so the screenshot can
+      // never expand the move set. This strips the screenshot from
+      // NAVIGATION-PLANNER calls (deterministic=true) ONLY, leaving genuine
+      // vision calls (2SV number-read, on-screen key extraction) untouched,
+      // to measure whether the image earns its latency + token cost.
+      const plannerTextOnly =
+        args.deterministic === true &&
+        /^(1|true|on)$/i.test(process.env.BOT_PLANNER_TEXT_ONLY ?? "");
+      const userBlocks = plannerTextOnly
+        ? args.userBlocks.filter((b) => b.kind !== "image")
+        : args.userBlocks;
       const resp = await client.createMessage({
         system: args.system,
-        user: args.userBlocks,
+        user: userBlocks,
         max_tokens: args.maxTokens,
         ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
+        ...(args.deterministic === true ? { deterministic: true } : {}),
       });
       this.llmCallCount += 1;
       this.backendsUsed.push(resp.backend);
+      // Fix C4 — remember the served model/provider so the capture sites
+      // can stamp this round with what actually produced the plan.
+      this.lastResolvedModel = resp.resolved_model;
+      this.lastResolvedProvider = resp.resolved_provider;
       return resp.text;
     };
 
@@ -5677,6 +7956,9 @@ export class SignupAgent {
     // (Google number-match etc.). Without it, the run still works —
     // steps are just only visible in the final result.
     const steps: string[] = task.stepsSink ?? [];
+    // Fresh per-run: don't let a prior run's email-path commitment leak.
+    this.committedToEmailPath = false;
+    this.oauthEmailFallbackTried = false;
     // Stash the service name so the diagnostic uploader (called from
     // deep inside postVerifyLoop after a failed extract) can label
     // the snapshot without us threading task through every method.
@@ -5719,8 +8001,7 @@ export class SignupAgent {
 
   private async runSignup(task: SignupTask, steps: string[]): Promise<SignupResult> {
     const password = task.generatePassword();
-    const displayName = "Trusty Squire Bot";
-    const username = `tsbot${Date.now().toString().slice(-7)}`;
+    const identity = identityFromEmail(task.email);
 
     // F13 diagnostic: which Chrome launch mode start() chose, and
     // whether egress went through the configured proxy. Lets us tell
@@ -5945,6 +8226,59 @@ export class SignupAgent {
               `curated signup_url for ${task.service} rendered as "${klass}", but it offers ` +
                 `${oauthHere.provider} OAuth — treating the login page as the signup entry`,
             );
+          } else if (klass === "login" && task.oauthProvider !== undefined) {
+            let loginEntry: InteractiveElement | null = null;
+            for (const el of landedInventory) {
+              const label = (el.visibleText ?? el.ariaLabel ?? el.labelText ?? "").trim().toLowerCase();
+              if (
+                label === "log in" ||
+                label === "login" ||
+                label === "sign in" ||
+                label === "signin"
+              ) {
+                loginEntry = el;
+                break;
+              }
+            }
+            if (loginEntry !== null) {
+              const dismissed = await this.browser.dismissConsentBanner();
+              if (dismissed !== null) {
+                steps.push(`[signup-url] dismissed cookie consent on curated login gate: "${dismissed}"`);
+              }
+              const label = loginEntry.visibleText ?? loginEntry.ariaLabel ?? "login";
+              steps.push(
+                `[signup-url] curated credential URL is login-gated — following "${label.slice(0, 40)}" to OAuth entry`,
+              );
+              try {
+                await this.browser.click(loginEntry.selector);
+                const loginState = await this.browser.getState();
+                const loginInventory = await this.browser.extractInteractiveElements();
+                const loginOAuth = findFirstOAuthButton(loginInventory, ["google", "github"]);
+                if (loginOAuth !== null) {
+                  signupUrl = this.browser.currentUrl();
+                  landed = loginState;
+                  landedInventory = loginInventory;
+                  steps.push(
+                    `[signup-url] recovered OAuth entry from curated login gate: ${signupUrl} (${loginOAuth.provider})`,
+                  );
+                } else {
+                  needsRecovery = true;
+                  steps.push(
+                    `[signup-url] curated login gate did not expose OAuth after click — url=${loginState.url}`,
+                  );
+                }
+              } catch (err) {
+                needsRecovery = true;
+                steps.push(
+                  `[signup-url] curated login gate click failed (${err instanceof Error ? err.message : String(err)}) — attempting recovery`,
+                );
+              }
+            } else {
+              needsRecovery = true;
+              steps.push(
+                `curated signup_url for ${task.service} rendered as "${klass}", not a signup form — attempting recovery`,
+              );
+            }
           } else {
             needsRecovery = true;
             steps.push(
@@ -5974,6 +8308,10 @@ export class SignupAgent {
           try {
             await this.runPrewarm(root, steps);
             await this.browser.goto(root);
+            const dismissed = await this.browser.dismissConsentBanner();
+            if (dismissed !== null) {
+              steps.push(`[signup-url] Tier B dismissed cookie consent: "${dismissed}"`);
+            }
             const inventory = await this.browser.extractInteractiveElements();
             // Score every interactive element's text; pick the best
             // signup CTA. Providers are driven negative by scoreSignupButton
@@ -5983,6 +8321,9 @@ export class SignupAgent {
               const label =
                 el.visibleText ?? el.ariaLabel ?? el.iconLabel ?? el.title ?? "";
               if (label.trim().length === 0) continue;
+              if (typeof el.href === "string" && isMarketingAuthDeadEndUrl(el.href)) {
+                continue;
+              }
               const score = scoreSignupButton(label, ["google", "github"]);
               if (best === null || score > best.score) best = { el, score };
             }
@@ -5991,16 +8332,96 @@ export class SignupAgent {
                 `[signup-url] Tier B clicking CTA "${(best.el.visibleText ?? best.el.ariaLabel ?? "").slice(0, 40)}" (score ${best.score})`,
               );
               await this.browser.click(best.el.selector);
-              const landed = (await this.browser.getState()).html;
-              if (classifySignupHtml(landed) === "signup") {
+              const landedState = await this.browser.getState();
+              const landed = landedState.html;
+              const clickedInventory = await this.browser.extractInteractiveElements();
+              const clickedOAuth = findFirstOAuthButton(clickedInventory, ["google", "github"]);
+              const landedClass = classifySignupHtml(landed);
+              if (isMarketingAuthDeadEndUrl(landedState.url)) {
+                steps.push(
+                  `[signup-url] Tier B CTA landed on marketing route ${landedState.url} — rejecting as signup entry`,
+                );
+              } else if (landedClass === "signup" || clickedOAuth !== null) {
                 const url = this.browser.currentUrl();
-                steps.push(`[signup-url] Tier B recovered signup page: ${url}`);
+                steps.push(
+                  clickedOAuth !== null
+                    ? `[signup-url] Tier B recovered OAuth signup entry: ${url} (${clickedOAuth.provider})`
+                    : `[signup-url] Tier B recovered signup page: ${url}`,
+                );
                 signupUrl = url;
                 recovered = true;
-              } else {
+              } else if (
+                detectAlreadySignedIn({
+                  inventory: clickedInventory,
+                  url: landedState.url,
+                })
+              ) {
+                const url = this.browser.currentUrl();
                 steps.push(
-                  `[signup-url] Tier B click did not reach a signup form — falling through to search`,
+                  `[signup-url] Tier B landed on an authenticated page after CTA click: ${url}`,
                 );
+                signupUrl = url;
+                alreadyAuthenticated = true;
+                recovered = true;
+              } else {
+                let loginCandidate: InteractiveElement | null = null;
+                for (const el of clickedInventory) {
+                  const label = (el.visibleText ?? el.ariaLabel ?? el.labelText ?? "").trim().toLowerCase();
+                  if (
+                    label === "log in" ||
+                    label === "login" ||
+                    label === "sign in" ||
+                    label === "signin"
+                  ) {
+                    loginCandidate = el;
+                    break;
+                  }
+                }
+                if (landedClass === "login" && loginCandidate !== null) {
+                  const label = loginCandidate.visibleText ?? loginCandidate.ariaLabel ?? "login";
+                  steps.push(
+                    `[signup-url] Tier B following login entry "${label.slice(0, 40)}" after CTA landed on login page`,
+                  );
+                  await this.browser.click(loginCandidate.selector);
+                  const loginState = await this.browser.getState();
+                  const loginInventory = await this.browser.extractInteractiveElements();
+                  const loginOAuth = findFirstOAuthButton(loginInventory, ["google", "github"]);
+                  if (
+                    loginOAuth !== null ||
+                    classifySignupHtml(loginState.html) === "signup" ||
+                    detectAlreadySignedIn({ inventory: loginInventory, url: loginState.url })
+                  ) {
+                    const url = this.browser.currentUrl();
+                    steps.push(
+                      loginOAuth !== null
+                        ? `[signup-url] Tier B recovered OAuth entry after login click: ${url} (${loginOAuth.provider})`
+                        : `[signup-url] Tier B recovered login/signup entry after login click: ${url}`,
+                    );
+                    signupUrl = url;
+                    alreadyAuthenticated = loginOAuth === null && detectAlreadySignedIn({ inventory: loginInventory, url: loginState.url });
+                    recovered = true;
+                  }
+                }
+                const labelPreview = clickedInventory
+                  .map((el) =>
+                    (el.visibleText ||
+                      el.ariaLabel ||
+                      el.labelText ||
+                      el.placeholder ||
+                      el.name ||
+                      el.selector ||
+                      "")
+                      .replace(/\s+/g, " ")
+                      .trim(),
+                  )
+                  .filter((label) => label.length > 0)
+                  .slice(0, 8)
+                  .join(" | ");
+                if (!recovered) {
+                  steps.push(
+                    `[signup-url] Tier B click did not reach a signup form — url=${landedState.url} class=${landedClass} oauth=none buttons=${labelPreview || "none"} — falling through to search`,
+                  );
+                }
               }
             } else {
               steps.push(
@@ -6034,6 +8455,17 @@ export class SignupAgent {
           await this.runPrewarm(found, steps);
           steps.push(`Found signup link: ${found}`);
           await this.browser.goto(found);
+          const foundState = await this.browser.getState();
+          if (isMarketingAuthDeadEndUrl(foundState.url)) {
+            return {
+              success: false,
+              error:
+                `no_signup_link: searched for ${task.service}'s signup page but ` +
+                `${found} redirected to a marketing route (${foundState.url}), not a signup entry.`,
+              steps,
+              ...this.resultTail(),
+            };
+          }
           // PERF: planner loop's waitForFormReady is next; no dwell.
         } else {
           // BUG-1 GUARD: findSignupLink filters off-domain candidates
@@ -6065,9 +8497,10 @@ export class SignupAgent {
       const fillValues: Record<FillValueKind, string> = {
         email: task.email,
         password,
-        name: displayName,
-        username,
-        company: "Trusty Squire",
+        name: identity.displayName,
+        username: identity.username,
+        company: `${identity.lastName} Labs`,
+        phone: "6502530000",
         // `literal` has no fixed value — resolved per-action.
         literal: "",
       };
@@ -6115,6 +8548,15 @@ export class SignupAgent {
           return {
             success: false,
             error: `planning_failed: ${outcome.reason}`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "needs_login":
+          return {
+            success: false,
+            error:
+              `needs_login: ${OAUTH_PROVIDERS[outcome.provider].label} session is missing or stale — ` +
+              `${outcome.reason}. Re-run provider login or let housekeeper re-warm the identity, then retry.`,
             steps,
             ...this.resultTail(),
           };
@@ -6222,6 +8664,10 @@ export class SignupAgent {
             // /signup form), fill it IN PLACE — re-navigating to task.signupUrl
             // could bounce back to the demo. Otherwise re-navigate (the
             // login-only / no-account case left us on a /login page).
+            // OAuth was login-only (no account for this identity). Commit to the
+            // email path for the rest of the run so the dispatch loop's
+            // OAuth-first scan doesn't re-click Google and loop.
+            this.committedToEmailPath = true;
             const onSignupFormHtml =
               (await this.browser.getState().catch(() => null))?.html ?? "";
             if (classifySignupHtml(onSignupFormHtml) === "signup") {
@@ -6253,19 +8699,22 @@ export class SignupAgent {
           // Uses the same post-OAuth loop runOAuthFlow uses after a
           // successful handshake.
           let credentials = await this.extractCredentials();
-          const skippedPostVerify = credentials.api_key !== undefined;
-          if (credentials.api_key === undefined) {
+          const skippedPostVerify = hasUsableCredentialBundle(credentials);
+          if (!hasUsableCredentialBundle(credentials)) {
             credentials = await this.postVerifyLoop({
               service: task.service,
               maxRounds: task.postVerifyMaxRounds ?? 24,
               steps,
+              continuationPassword: password,
+              ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+              verificationEmailAlias: task.email,
               ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
               ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
               ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
             });
           }
-          if (credentials.api_key !== undefined) {
+          if (hasUsableCredentialBundle(credentials)) {
             // 0.8.3-rc.1 — when extractCredentials short-circuited
             // before postVerifyLoop ran, no captures were written.
             // Emit a synthetic extract round so auto-promote can
@@ -6346,7 +8795,13 @@ export class SignupAgent {
                   `Post-submit: continuation form step detected (${stepLabel}) — ` +
                     `filling + submitting (step ${multiStepRounds + 1}).`,
                 );
-                outcome = await this.planExecuteWithRetry(task, fillValues, steps);
+                this.committedToEmailPath = true;
+                outcome = await this.planExecuteWithRetry(
+                  task,
+                  fillValues,
+                  steps,
+                  /* forceFormFill */ true,
+                );
                 continue dispatch;
               }
             }
@@ -6412,7 +8867,7 @@ export class SignupAgent {
           //     created, so transactional mail is plausibly inbound and
           //     can outlast the 45s probe; bounded below the full timeout).
           const verificationTimeoutSeconds = expectsEmail
-            ? (task.verificationTimeoutSeconds ?? 180)
+            ? (task.verificationTimeoutSeconds ?? VERIFY_EMAIL_CEILING_SECONDS)
             : submitRejected
               ? VERIFICATION_PROBE_SECONDS
               : SUBMITTED_PROBE_FLOOR_SECONDS;
@@ -6435,10 +8890,64 @@ export class SignupAgent {
               // URL-keyword scorer first; if it can't see past a click-tracker
               // wrapper, fall back to matching the link's ANCHOR TEXT in the
               // HTML body (amplitude's SendGrid-wrapped "Activate account").
+              // The service's own host — for the same-domain link fallback
+              // below. The current page IS the service (its confirm-email
+              // wall), so its URL is the most reliable source; task.signupUrl
+              // backs it up.
+              let serviceHost: string | null = null;
+              try {
+                serviceHost = new URL((await this.browser.getState()).url).hostname;
+              } catch {
+                /* fall through to signupUrl */
+              }
+              if (serviceHost === null && task.signupUrl !== undefined) {
+                try {
+                  serviceHost = new URL(task.signupUrl).hostname;
+                } catch {
+                  /* leave null */
+                }
+              }
               const verifyLink =
                 this.pickVerificationLink(Array.from(email.parsed_links)) ??
-                pickVerificationLinkFromHtml(email.body_html ?? "");
+                pickVerificationLinkFromHtml(email.body_html ?? "") ??
+                pickServiceDomainLink(Array.from(email.parsed_links), serviceHost);
               if (verifyLink !== null) {
+                // Firebase email-action link → verify via the REST API
+                // IMMEDIATELY (clean ms-latency POST) instead of the browser
+                // SPA, which (portkey, 2026-06-17) landed on "link expired".
+                // This races a short oobCode TTL, issues the single-use code
+                // once, AND diagnoses: an EXPIRED error here proves the code is
+                // dead at receipt (mail-pipeline latency), not a browser bug.
+                const fbAction = parseFirebaseEmailAction(verifyLink);
+                let firebaseVerified = false;
+                if (fbAction !== null) {
+                  const r = await applyFirebaseEmailVerification(
+                    fbAction.apiKey,
+                    fbAction.oobCode,
+                  );
+                  firebaseVerified = r.ok;
+                  steps.push(
+                    r.ok
+                      ? `Verified the email directly via Firebase REST (${r.email ?? "account"} now verified) — bypassing the browser link.`
+                      : `Firebase REST verify did not succeed (${r.error ?? "unknown"}) — oobCode appears dead at receipt; falling back to the browser link.`,
+                  );
+                }
+                if (firebaseVerified) {
+                  // Email verified server-side → go to the app and log in
+                  // (two-stage aware); extraction below then reaches the key.
+                  try {
+                    await this.browser.goto(new URL(verifyLink).origin);
+                    await this.browser.wait(2);
+                    await this.loginWithCredentials(task.email, password, steps);
+                    await this.browser.wait(2);
+                  } catch (err) {
+                    steps.push(
+                      `Post-Firebase-verify login errored (non-fatal): ${
+                        err instanceof Error ? err.message : String(err)
+                      }`,
+                    );
+                  }
+                } else {
                 steps.push(`Following verification link: ${verifyLink}`);
                 await this.browser.goto(verifyLink);
                 // PERF: a 1s settle is enough for the verify landing
@@ -6469,6 +8978,35 @@ export class SignupAgent {
                   // best-effort — fall through to extraction regardless
                 }
 
+                // Expired/used single-use verification link (portkey,
+                // 2026-06-17). A fresh Firebase oobCode that reads "expired" on
+                // first touch was consumed upstream by a mail link-scanner —
+                // which ALSO ran the verification server-side, so the email is
+                // already verified. Don't fail: log in with the signup
+                // credentials (the account is ready) and let the extraction +
+                // post-verify loop below reach the key. Generalizes to every
+                // single-use verify-link flow (Firebase et al.).
+                try {
+                  const linkText = await this.browser.extractText();
+                  if (verificationLinkFailed(linkText)) {
+                    steps.push(
+                      "Verification link reported expired/used — a single-use link is typically burned by an upstream mail scanner, which also completes verification server-side. Treating the email as verified and logging in with the signup credentials.",
+                    );
+                    const origin = new URL(verifyLink).origin;
+                    await this.browser.goto(origin);
+                    await this.browser.wait(2);
+                    await this.loginWithCredentials(task.email, password, steps);
+                    await this.browser.wait(2);
+                  }
+                } catch (err) {
+                  steps.push(
+                    `Post-expiry login attempt errored (non-fatal): ${
+                      err instanceof Error ? err.message : String(err)
+                    }`,
+                  );
+                }
+                } // end browser-link fallback (non-Firebase path)
+
                 // Try extracting first — many services drop the API key
                 // straight onto the landing page after verification.
                 credentials = await this.extractCredentials();
@@ -6481,6 +9019,8 @@ export class SignupAgent {
                   credentials = await this.postVerifyLoop({
                     service: task.service,
                     credentials: { email: task.email, password },
+                    ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+                    verificationEmailAlias: task.email,
                     maxRounds,
                     steps,
                     ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
@@ -6511,7 +9051,14 @@ export class SignupAgent {
                     steps,
                   );
                 } else {
-                  steps.push("Email had no usable verification link or code.");
+                  // Diagnostic (arize, 2026-06-17): the email arrived but
+                  // neither scorer found a usable link and no code parsed —
+                  // dump the candidate hrefs so the next run shows WHY (e.g. an
+                  // image-only button, or anchor text the scorer doesn't weight).
+                  const hrefs = email.parsed_links.slice(0, 8).join(" | ");
+                  steps.push(
+                    `Email had no usable verification link or code. parsed_links(${email.parsed_links.length}): ${hrefs || "(none)"}`,
+                  );
                 }
               }
             } else if (email.parsed_codes.length > 0) {
@@ -6544,6 +9091,47 @@ export class SignupAgent {
         return {
           success: true,
           credentials: { ...credentials, password, email: task.email },
+          steps,
+          ...this.resultTail(),
+        };
+      }
+
+      // Before the generic no-credentials miss: a service that completed the
+      // signup form and then dropped the account into a manual-approval gate
+      // (waiting room / waitlist / pending review). Same terminal, non-demoting
+      // onboarding_blocked status the OAuth path uses — there's no key to reach
+      // until a human approves the account, so don't surface it as a generic
+      // failure (which can wrongly chase a code bug) or punish a skill for it.
+      //
+      // ONLY when verification did NOT time out. A pending email-verification
+      // page ("check your email", "we sent a code") can read as a review gate
+      // to the classifier, but the authoritative cause there is the missing
+      // mail (verification_not_sent) — anthropic mislabeled as onboarding_blocked
+      // exactly this way. If we were waiting on an email that never came, that
+      // is the failure; don't reinterpret it as a manual-review gate.
+      const reviewGateText =
+        verificationFailed === undefined ? await this.browser.extractText().catch(() => "") : "";
+      // Closed / invite-only registration takes precedence over the review-gate
+      // and the generic miss — no account can be created, so it's terminally
+      // unservable (dequeue), not a fixable nav bug. Checked only when
+      // verification didn't time out (same reasoning as the review gate).
+      if (verificationFailed === undefined && isSignupsClosed(reviewGateText)) {
+        return {
+          success: false,
+          error:
+            `signups_closed: ${task.service} is not accepting new self-serve sign-ups ` +
+            `(closed / invite-only registration) — no account can be created. Dequeue or sign up manually once open.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+      if (isOnboardingReviewGate(verificationFailed, reviewGateText)) {
+        return {
+          success: false,
+          error:
+            `onboarding_blocked: ${task.service} put the account into a manual review / ` +
+            `waitlist gate after signup — no API key is obtainable until a human approves ` +
+            `the account. Finish the signup manually once access is granted.`,
           steps,
           ...this.resultTail(),
         };
@@ -6681,10 +9269,21 @@ export class SignupAgent {
           const sitekey = await this.browser.extractHcaptchaSitekey();
           const pageUrl = (await this.browser.getState().catch(() => null))?.url;
           if (sitekey !== null && pageUrl !== undefined) {
+            const solveContext = await this.browser.getHcaptchaSolveContext().catch(() => ({
+              invisible: false,
+              userAgent: null,
+              rqdata: null,
+            }));
             steps.push(
               `OAuth: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`,
             );
-            const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+            const solveRes = await this.captchaSolver.solveHcaptcha({
+              sitekey,
+              pageUrl,
+              invisible: solveContext.invisible,
+              ...(solveContext.userAgent !== null ? { userAgent: solveContext.userAgent } : {}),
+              ...(solveContext.rqdata !== null ? { data: solveContext.rqdata } : {}),
+            });
             if (solveRes.kind === "ok") {
               const injected = await this.browser.injectHcaptchaToken(solveRes.token);
               if (injected) {
@@ -6762,6 +9361,10 @@ export class SignupAgent {
         `OAuth: visible-captcha precheck failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    const oauthConsentDismissed = await this.browser.dismissConsentBanner();
+    if (oauthConsentDismissed !== null) {
+      steps.push(`OAuth: dismissed cookie consent before provider click: "${oauthConsentDismissed}"`);
+    }
     steps.push(`OAuth: clicking the ${provider.label} sign-in affordance`);
     // Google Identity Services (GSI) / FedCM does NOT redirect — clicking the
     // widget raises a browser-native FedCM dialog or a popup and returns a
@@ -6770,8 +9373,13 @@ export class SignupAgent {
     // session never persists (northflank). Detect GSI and drive it over CDP.
     let gsiHandled = false;
     let gsiAttempted = false;
+    let nativeSignupFormBeforeGsi = false;
     if (provider.id === "google" && (await this.browser.hasGoogleGsiAffordance())) {
       gsiAttempted = true;
+      nativeSignupFormBeforeGsi = await this.browser
+        .extractInteractiveElements()
+        .then((inv) => hasNativeSignupForm(inv))
+        .catch(() => false);
       const gsi = await this.browser.tryGoogleGsiLogin(oauthSelector);
       // Only count GSI as handled when it ACTUALLY resolved. On via:"none"
       // (FedCM dialog never fired AND no popup) we must fall through to the
@@ -6814,6 +9422,13 @@ export class SignupAgent {
     // caller a TRY_NEXT_PROVIDER signal so it re-dispatches via that provider
     // instead of dead-ending on Google. meilisearch offers both.
     if (gsiAttempted && !gsiHandled) {
+      if (nativeSignupFormBeforeGsi) {
+        this.committedToEmailPath = true;
+        steps.push(
+          "OAuth: Google GSI/FedCM is a dead end, but the original page had a native email/password signup form — falling back to form-fill instead of another OAuth provider.",
+        );
+        return OAUTH_FALL_BACK_TO_FORM_FILL;
+      }
       // The GSI click commonly leaves the page mid-SPA-transition (netlify:
       // the button[name="google"] goes invisible, the page hasn't navigated
       // anywhere useful), so a single inventory read here can THROW or return
@@ -6889,6 +9504,14 @@ export class SignupAgent {
     // complete first.
     let consentAdvanceWaits = 0;
     const MAX_CONSENT_ADVANCE_WAITS = 3;
+    // OAUTH_ENGINE (default-ON since 2026-06-15): route the CONSENT decision
+    // through the pure reducer (oauth-flow.ts, eng-reviewed) instead of the inline
+    // scope-gate branches below. Flipped after live validation drove a real Google
+    // consent screen both ways — advance_consent (opaque-scope→blind approve, full
+    // ipinfo OAuth signup succeeded) AND the abort-on-login-form safety invariant.
+    // The inline scope-gate block is kept one cycle as the explicit opt-out
+    // (OAUTH_ENGINE=0) and deleted next (DESIGN-oauth-consent-engine.md step 2).
+    const oauthEngineOn = !/^(0|false|off|no)$/i.test(process.env.OAUTH_ENGINE ?? "");
     for (let i = 0; i < MAX_OAUTH_NAV; i++) {
       if (this.browser.oauthPageClosed()) {
         steps.push(
@@ -7222,6 +9845,96 @@ export class SignupAgent {
         );
       }
 
+      // authState === "consent" — route through the reducer when OAUTH_ENGINE is
+      // on (every path here continues or returns, so the inline block below is
+      // the default-off path). Faithful to the inline ordering; the executor owns
+      // the advance-success flag flip + the consentAdvanceWaits budget.
+      if (oauthEngineOn) {
+        const hasLoginForm = await this.oauthLoginFormPresent();
+        const scopes = extractOAuthScopes(url);
+        const dangerPhrases = provider.id === "google" ? scrapeGoogleScopePhrases(body) : [];
+        const consentDom = scopes === null ? await this.browser.extractText().catch(() => "") : "";
+        const { action } = decideOAuthStep(
+          {
+            providerId: provider.id,
+            consentAlreadyApproved,
+            omniauthPostTried,
+            allowBlindOAuthConsent: task.allowBlindOAuthConsent === true,
+            allowExtraOAuthScopes: task.allowExtraOAuthScopes ?? [],
+          },
+          {
+            isChooser: false,
+            authState: "consent",
+            hasLoginForm,
+            omniAuthPassthru: false,
+            scopes,
+            dangerPhrases,
+            domBasicFromDom: provider.id === "google" && googleConsentIsBasicFromDom(body),
+            domBasicGis: provider.id === "google" && googleGisConsentIsBasic(consentDom),
+          },
+          { scopesAreBasic: (s) => provider.scopesAreBasic(s) },
+        );
+        steps.push(
+          `OAuth[engine]: scopes=[${scopes === null ? "<unreadable>" : scopes.join(", ")}] → ` +
+            `${action.kind}${action.kind === "advance_consent" ? `:${action.mode}` : ""}`,
+        );
+        // Faithful inline step trail: a readable all-basic approve logs the same
+        // "scopes all basic … auto-approving" line the inline scope-gate emits.
+        if (action.kind === "advance_consent" && action.mode === "approve" && scopes !== null) {
+          steps.push(`OAuth: consent scopes all basic (${scopes.join(", ")}) — auto-approving`);
+        }
+        if (action.kind === "abort") {
+          if (action.clearProviderLoggedIn) clearProviderLoggedIn(provider.id);
+          const detail =
+            action.reason === "needs_login"
+              ? `landed on a ${provider.label} sign-in form / no session — re-run \`${loginCmd}\`, then retry. ` +
+                `The bot will not type into ${provider.label}'s login form.`
+              : action.unauthorizedScopes !== undefined
+                ? `${provider.label} consent requests non-basic scopes: [${action.unauthorizedScopes.join(", ")}]. ` +
+                  `All requested: [${(scopes ?? []).join(", ")}]. Re-run provision with allow_extra_oauth_scopes set to proceed.`
+                : `reached a ${provider.label} consent screen but could not safely auto-approve its scopes — approve it manually.`;
+          return this.oauthAbort(action.reason, detail, steps);
+        }
+        // A consent observation only ever yields abort | advance_consent; this
+        // narrows the union for TS (and is a defensive no-op if it ever doesn't).
+        if (action.kind !== "advance_consent") break;
+        // advance_consent — perform the advance; flip the flag only on success.
+        const advanced = await this.browser.advanceOAuthConsent(provider.id);
+        if (advanced) {
+          consentAlreadyApproved = true;
+          await this.browser.wait(3);
+          continue;
+        }
+        if (action.onAdvanceFail === "bounded_wait") {
+          if (consentAdvanceWaits < MAX_CONSENT_ADVANCE_WAITS) {
+            consentAdvanceWaits += 1;
+            steps.push(
+              `OAuth[engine]: approve control not present yet — waiting for hydrate/redirect ` +
+                `(${consentAdvanceWaits}/${MAX_CONSENT_ADVANCE_WAITS})`,
+            );
+            await this.browser.wait(4);
+            continue;
+          }
+          return this.oauthAbort(
+            "oauth_consent_needs_review",
+            `blind-consent approved but no approve control on the ${provider.label} consent page ` +
+              `after ${consentAdvanceWaits} waits — sign up manually.`,
+            steps,
+          );
+        }
+        if (action.onAdvanceFail === "wait_nav") {
+          steps.push("OAuth[engine]: post-grant page, no approve control — waiting for natural navigation");
+          await this.browser.wait(3);
+          continue;
+        }
+        // onAdvanceFail === "abort"
+        return this.oauthAbort(
+          "oauth_consent_needs_review",
+          `reached a ${provider.label} consent screen but found no approve control to click — approve it manually.`,
+          steps,
+        );
+      }
+
       // authState === "consent". Backstop the page classifier with a
       // live-DOM check: if the page actually carries a credential
       // field it is a login form (the text classifier can catch a
@@ -7468,21 +10181,63 @@ export class SignupAgent {
       isSignupOrLoginRoute(this.browser.currentUrl()) &&
       !isOAuthProviderHost(this.browser.currentUrl())
     ) {
-      const root = originRoot(this.browser.currentUrl());
-      if (root !== null) {
+      // Clerk callback: don't immediately navigate away. On a Clerk combined
+      // sign-in/sign-up flow a new-user OAuth completes the account via a
+      // client-side sign-up transfer that takes a beat AFTER the callback lands;
+      // navigating to root unmounts Clerk's JS and interrupts it (the bug behind
+      // the cartesia/braintrust "oauth_session_not_persisted" cluster — proven
+      // not IP). We can't drive the transfer via window.Clerk (patchright's
+      // isolated world hides it), so instead give Clerk's own JS time and detect
+      // success via cookies (world-agnostic). If a session appears, we're signed
+      // in — skip the navigate-away.
+      const onClerkCallback = /sso-callback|\/sso\b/i.test(this.browser.currentUrl());
+      let clerkSignedIn = false;
+      if (onClerkCallback) {
+        clerkSignedIn = await this.browser.waitForClerkSession(12000).catch(() => false);
         steps.push(
-          `OAuth: post-auth landing is a signup/login route (${pathOf(this.browser.currentUrl())}) — ` +
-            `navigating to the app root (${root}) so the service routes us to the dashboard.`,
+          `OAuth: Clerk callback — waited for session establish → ${clerkSignedIn ? "signed in" : "no session (likely login-only OAuth / needs email signup)"}`,
         );
-        try {
-          await this.browser.goto(root);
-          await this.browser.wait(2);
-        } catch {
-          // navigation hiccup — the post-verify loop re-reads regardless.
+      }
+      if (clerkSignedIn) {
+        await this.browser.wait(2);
+      } else {
+        const root = originRoot(this.browser.currentUrl());
+        if (root !== null) {
+          steps.push(
+            `OAuth: post-auth landing is a signup/login route (${pathOf(this.browser.currentUrl())}) — ` +
+              `navigating to the app root (${root}) so the service routes us to the dashboard.`,
+          );
+          try {
+            await this.browser.goto(root);
+            await this.browser.wait(2);
+          } catch {
+            // navigation hiccup — the post-verify loop re-reads regardless.
+          }
         }
       }
     }
     await saveDebugSnapshot(this.browser, "oauth-post-consent");
+
+    if (provider.id === "google" && isGoogleConsumerPostOAuthUrl(this.browser.currentUrl())) {
+      const rawTarget = this.resolvedSignupUrl ?? task.signupUrl;
+      const target =
+        rawTarget !== undefined ? (canonicalGoogleConsoleEntryUrl(rawTarget) ?? rawTarget) : undefined;
+      if (target !== undefined && !isGoogleConsumerPostOAuthUrl(target)) {
+        steps.push(
+          `OAuth: ${provider.label} returned to a Google consumer page (${this.browser.currentUrl()}) ` +
+            `instead of the service — navigating back to ${target}`,
+        );
+        try {
+          await this.browser.goto(target);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          await saveDebugSnapshot(this.browser, "oauth-return-service");
+        } catch (err) {
+          steps.push(
+            `OAuth: return-to-service navigation failed (${err instanceof Error ? err.message : String(err)}) — continuing from current page.`,
+          );
+        }
+      }
+    }
 
     // Captcha-gated OAuth detection (truthful failure, not a false "signed in").
     // exa's login lives at auth.exa.ai/?callbackUrl=… (path "/"), which
@@ -7524,6 +10279,34 @@ export class SignupAgent {
     steps.push(
       `OAuth: signed in via ${provider.label} — driving post-OAuth onboarding to the API key`,
     );
+
+    // Sentry's Google OAuth returns to /extensions/google/setup/ with a
+    // "New Identity" bridge: "Account Settings" links to a login/recovery
+    // dead-end, while the submit button "New Account" is the actual signup
+    // continuation. Generic nav-search used to prefer the settings link and
+    // burn the run. Prefer the continuation button when that exact bridge is
+    // visible, then let the normal post-verify loop handle the org form.
+    {
+      const bridgeState = await this.browser.getState().catch(() => null);
+      const bridgeText = await this.browser.extractVisibleText().catch(() => "");
+      if (
+        bridgeState !== null &&
+        /sentry\.io$/i.test(new URL(bridgeState.url).hostname) &&
+        /\/extensions\/google\/setup\/?/i.test(new URL(bridgeState.url).pathname) &&
+        /new identity/i.test(`${bridgeState.title}\n${bridgeText}`)
+      ) {
+        const inv = await this.browser.extractInteractiveElements().catch(() => [] as InteractiveElement[]);
+        const newAccount = inv.find((e) => {
+          const label = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+          return (e.tag === "button" || e.role === "button") && /^new account$/i.test(label);
+        });
+        if (newAccount !== undefined) {
+          steps.push('OAuth: Sentry New Identity bridge — clicking "New Account" instead of Account Settings.');
+          await this.browser.click(newAccount.selector);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        }
+      }
+    }
 
     // amplitude class — OAuth drops the bot into the service's READ-ONLY DEMO
     // sandbox (app.amplitude.com/analytics/demo) instead of a real account: it
@@ -7687,6 +10470,9 @@ export class SignupAgent {
       // oauth_session_not_persisted and abort. The account simply needs
       // creating via email, so re-route to form-fill instead of bailing.
       if (detectGoogleNoAccount(gateState.url, gateText)) {
+        // Commit to email for the rest of the run — OAuth is login-only here, so
+        // the OAuth-first scan must not re-fire after the form-fill re-route.
+        this.committedToEmailPath = true;
         steps.push(
           `OAuth: ${provider.label} sign-in succeeded but ${task.service} has no account for ` +
             `this identity (login-only OAuth, ${pathOf(gateState.url)}) — abandoning OAuth and ` +
@@ -7715,7 +10501,7 @@ export class SignupAgent {
       // POST /v1/inbox/poll-operator-otp. If a code arrives, push a
       // step trail hint and continue to the post-verify loop —
       // the planner sees the hint and fills the input.
-      if (detectEmailOtpGate(gateState.url, gateState.title, gateText)) {
+      if (detectEmailOtpGate(gateState.url, gateState.title, gateText, gateInv)) {
         const domain = fromDomainFromUrl(gateState.url);
         const machineToken = task.machineToken;
         let otpResult: { code: string | null; reason: string };
@@ -7733,6 +10519,9 @@ export class SignupAgent {
             machineToken,
             ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
             ...(domain !== null ? { fromDomain: domain } : {}),
+            ...(task.oauthAccountEmail !== undefined
+              ? { toAddress: task.oauthAccountEmail }
+              : {}),
             maxWaitSeconds: 90,
           });
         }
@@ -7765,6 +10554,34 @@ export class SignupAgent {
           error:
             `sso_restricted: ${task.service} requires SSO/SAML for token creation. The bot ` +
             `cannot complete an SSO handshake. Finish via your organization's SSO portal.`,
+          steps,
+          ...this.resultTail(),
+        };
+      }
+      // Service-side manual approval can appear as an application form BEFORE
+      // the final "pending approval" page (Baseten: company + LinkedIn + use
+      // case form headed "We need more information to approve your account").
+      // Do not hand this to the post-OAuth planner: there is no key to reach
+      // until a human/service process approves the account, and filling the form
+      // burns a robot into an async waiting room.
+      const reviewGateVerdict = classifyTerminalGate({
+        frame: {
+          frameId: "post-oauth-gate",
+          capturedAt: new Date().toISOString(),
+          state: gateState,
+          inventory: gateInv,
+          visibleText: gateText,
+          domDigest: "",
+        },
+        fallbackText: gateText,
+        lastDoneReason: null,
+      });
+      if (reviewGateVerdict.kind === "account_review") {
+        return {
+          success: false,
+          error:
+            `onboarding_blocked: ${task.service} put the account into a manual review / ` +
+            `approval flow after signup. The bot cannot obtain an API key until the service approves the account.`,
           steps,
           ...this.resultTail(),
         };
@@ -7849,6 +10666,9 @@ export class SignupAgent {
         service: task.service,
         maxRounds: task.postVerifyMaxRounds ?? 24,
         steps,
+        continuationPassword: task.generatePassword(),
+        ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+        verificationEmailAlias: task.email,
         ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
         ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
         ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
@@ -7859,6 +10679,24 @@ export class SignupAgent {
       // (oauth_session_not_persisted) instead of thrashing into
       // oauth_onboarding_failed.
       if (err instanceof OAuthSessionNotPersistedError) {
+        // The handshake completed but the service never created a session — the
+        // Clerk new-user-via-sign-in bounce, surfacing here as a stuck login page
+        // (no explicit "no account" text, so detectGoogleNoAccount missed it
+        // upstream). If the service also offers email signup, creating the account
+        // that way is the recovery — the SAME OAUTH_FALL_BACK_TO_FORM_FILL path the
+        // explicit-text case uses (runSignup re-navigates to the form and runs the
+        // email path with forceFormFill, which suppresses OAuth so it can't bounce
+        // back here). One-shot: an OAuth-only service with no email form then fails
+        // honestly on the re-run instead of looping. Generalizes the cartesia crack
+        // to the whole silent-callback Clerk cluster (openrouter/groq/northflank/…).
+        if (!this.oauthEmailFallbackTried) {
+          this.oauthEmailFallbackTried = true;
+          steps.push(
+            `OAuth callback never persisted a session (Clerk new-user sign-in bounce) — ` +
+              `falling back to email/password signup to create the account.`,
+          );
+          return OAUTH_FALL_BACK_TO_FORM_FILL;
+        }
         return { success: false, error: err.message, steps, ...this.resultTail() };
       }
       throw err;
@@ -7870,10 +10708,7 @@ export class SignupAgent {
     // complete, usable bundle. Require >=2 named (non-metadata) credentials
     // so a lone ID (e.g. just application_id) still fails honestly: an ID
     // without a secret isn't a usable credential.
-    const namedCredCount = Object.keys(credentials).filter(
-      (k) => !NON_CREDENTIAL_KEYS.has(k),
-    ).length;
-    if (credentials.api_key !== undefined || namedCredCount >= 2) {
+    if (hasUsableCredentialBundle(credentials)) {
       return {
         success: true,
         credentials: { ...credentials },
@@ -7888,17 +10723,50 @@ export class SignupAgent {
     // grep. Some services (Koyeb) gate API issuance on a billing
     // confirmation whose visible text doesn't match the regex set
     // but whose planner reason clearly describes the wall.
-    const finalText = await this.browser.extractText().catch(() => "");
-    const paywallCheckText =
-      this.lastPostVerifyDoneReason !== null
-        ? `${finalText}\n${this.lastPostVerifyDoneReason}`
-        : finalText;
-    if (isAtPaywall(paywallCheckText)) {
+    const finalFrame = await this.captureTextObservationFrame().catch(() => null);
+    const finalText =
+      finalFrame !== null ? finalFrame.visibleText : await this.browser.extractText().catch(() => "");
+    const postSignupGate = classifyNoCredentialPostSignup({
+      service: task.service,
+      frame: finalFrame,
+      fallbackText: finalText,
+      lastDoneReason: this.lastPostVerifyDoneReason,
+    });
+    // Closed / invite-only registration — no account can be created at all
+    // (turbopuffer: "Sign-ups are closed"). Terminally unservable; label it
+    // honestly so the operator dequeues rather than seeing a misleading
+    // oauth_onboarding_failed that implies a fixable nav bug.
+    if (postSignupGate.failure?.kind === "signups_closed") {
       return {
         success: false,
-        error:
-          `onboarding_blocked: ${task.service}'s API key sits behind a billing or ` +
-          `payment-method wall the bot will not cross — finish the signup manually.`,
+        error: postSignupGate.failure.error,
+        steps,
+        ...this.resultTail(),
+      };
+    }
+    if (
+      postSignupGate.failure?.kind === "payment" ||
+      postSignupGate.failure?.kind === "phone"
+    ) {
+      return {
+        success: false,
+        error: postSignupGate.failure.error,
+        steps,
+        ...this.resultTail(),
+      };
+    }
+    // Service-side manual-approval gate (waiting room / waitlist / account
+    // pending review). The OAuth handshake succeeded but the service won't
+    // grant a key until a human approves the account — there is no key to
+    // reach autonomously. Same terminal onboarding_blocked status as the
+    // billing wall so it's a non-demoting human-pile outcome, not a
+    // mislabeled oauth_onboarding_failed that wrongly implies a code bug.
+    if (
+      postSignupGate.failure?.kind === "account_review"
+    ) {
+      return {
+        success: false,
+        error: postSignupGate.failure.error,
         steps,
         ...this.resultTail(),
       };
@@ -8152,8 +11020,9 @@ Output rules:
 - Schema:
   {
     "actions": [
-      {"kind":"fill","selector":"<a selector= copied verbatim from the inventory>","value_kind":"email|password|name|username|company|literal","literal":"only when value_kind=literal","reason":"why"},
+      {"kind":"fill","selector":"<a selector= copied verbatim from the inventory>","value_kind":"email|password|name|username|company|phone|literal","literal":"only when value_kind=literal","reason":"why"},
       {"kind":"check","selector":"<from inventory>","reason":"TOS checkbox etc."},
+      {"kind":"select","selector":"<from inventory>","option_text":"<visible option label to pick — optional>","reason":"required dropdown/combobox choice"},
       {"kind":"click","selector":"<from inventory>","reason":"e.g. reveal the email form"}
     ],
     "submit_selector": "<a selector= from the inventory — the primary signup button>",
@@ -8165,6 +11034,8 @@ Output rules:
   modify a selector. A selector not in the inventory is rejected and
   you will be asked to re-plan.
 - Include the TOS/agree checkbox ONLY if the inventory has a real input of type=checkbox for it. If there is no such checkbox, OMIT the check action entirely — never substitute a link or a button.
+- For ANY required dropdown — native select, Ant/MUI/Radix custom combobox, input role=combobox, or button-like picker whose visible text contains "Select parent resource" / "Select workspace" / "Select project" — use {"kind":"select"}. Do NOT use {"kind":"click"} on a dropdown label/trigger unless the goal is only to reveal fields; clicking a dropdown without selecting an option leaves required form state empty.
+- For business/profile dropdowns, choose harmless low-risk defaults: business type "Software" / "SaaS" / "Individual" / "Other" if available; annual revenue choose the lowest non-empty bracket; company size choose the smallest non-empty team size.
 - Email verification-CODE buttons: if the inventory has a button like
   "Send code", "Send verification code", "Get code", or "Email me a
   code" beside an OTP / verification-code field, you MUST include a
@@ -8178,7 +11049,12 @@ Output rules:
 - Skip elements marked [cookie-consent — avoid], and skip optional
   marketing-opt-in checkboxes.
 - Do NOT add a separate password-confirmation fill unless the
-  inventory shows a second password field.
+  inventory shows a second password field. If there is a password
+  confirmation / repeat password / password again field, fill it with
+  value_kind "password", never "literal".
+- Fill required phone/contact-number fields with value_kind "phone".
+  Do not treat a signup contact-number field as an SMS verification
+  wall; only post-submit OTP/SMS challenges are walls.
 - Two-stage pages: if the inventory has only buttons (e.g. "Sign up
   with email" / "Continue with Google") and no input fields, emit a
   single click action on the EMAIL-signup button, and set
@@ -8208,6 +11084,9 @@ ${formatInventory(input.inventory)}`,
       // Deterministic form-fill picks (same rationale as the post-verify
       // planner — D2). Removes a run-to-run flakiness source.
       temperature: 0,
+      // Fix C — pin a single model + provider + seed on the proxy path.
+      // temperature 0 alone leaves the model/provider lottery in play.
+      deterministic: true,
       parse: (raw) => parseSignupPlan(raw, allowed),
     });
   }
@@ -8250,7 +11129,7 @@ ${formatInventory(input.inventory)}`,
     // email verification code" and timed the whole signup out. `code` /
     // `one[- ]?time` / `otp` catch code-based verification subjects too.
     const pattern =
-      /verif|confirm|welcome|activate|complete|finish|set\s*up|\bcode\b|one[\s-]?time|\botp\b|sign[\s-]?up/i;
+      /verif|confirm|welcome|activate|complete|finish|set\s*up|\bcode\b|one[\s-]?time|\botp\b|sign[\s-]?(?:up|in)|log[\s-]?in|magic|link/i;
     let lastErr: unknown = null;
     while (Date.now() < deadline) {
       const remainingSeconds = Math.max(1, Math.floor((deadline - Date.now()) / 1000));
@@ -8301,6 +11180,8 @@ ${formatInventory(input.inventory)}`,
     return this.postVerifyLoop({
       service: task.service,
       credentials: { email: task.email, password },
+      ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+      verificationEmailAlias: task.email,
       // Match the OAuth post-verify budget (24). The onboarding form
       // reached after EMAIL verification is the same multi-step wizard the
       // OAuth path hits — a profile form (name, country, company, role) +
@@ -8517,6 +11398,7 @@ ${formatInventory(input.inventory)}`,
   // the safety net.
   private async attemptMintNewKey(
     steps: string[],
+    service?: string,
   ): Promise<Record<string, string> | null> {
     // The set of keys-page URLs we've navigated, so the fallback walk
     // doesn't revisit one and the create-affordance search doesn't
@@ -8573,15 +11455,53 @@ ${formatInventory(input.inventory)}`,
         );
         return null;
       }
-      // Poll for the freshly-minted key — minting is a server
-      // round-trip (Render/Mistral/Mailtrap render the value into a
-      // modal after the POST returns). Reuse the modal-reveal poll
-      // budget the click branch uses elsewhere (~8s), early-exiting the
-      // moment any tier surfaces a credential. A confirmation dialog
-      // ("Name your key" → Create) is common; fire the reveal pass each
-      // round so a modal that needs a second confirm-then-show click is
-      // still harvested.
-      const deadline = Date.now() + 8000;
+      // Forensic: capture the post-click state so a "modal never minted a key"
+      // failure is diagnosable — what does the create-key dialog render (name
+      // field? an in-modal captcha? a disabled submit?), and is it in our
+      // inventory? Off by default; production runs don't pay the snapshot.
+      if (process.env.BOT_DEBUG_MINT_MODAL === "1") {
+        await this.browser.wait(1.2);
+        await saveDebugSnapshot(this.browser, "mint-after-create-click");
+      }
+      // Drive the "name your key" dialog the create-click opened, then poll for
+      // the freshly-minted value (minting is a server round-trip; Render/Mistral
+      // render the value into the modal after the POST returns).
+      //
+      // Two gates commonly hold the dialog's submit DISABLED until satisfied:
+      //   (1) a non-empty NAME (groq's keyName field), and
+      //   (2) a CAPTCHA token — groq embeds a Cloudflare Turnstile INSIDE the
+      //       create-key modal (cf-turnstile-response), and the submit stays
+      //       disabled until the widget issues a token. The captcha gate never
+      //       ran here (it fires during form-fill, not post-verify mint), so the
+      //       modal sat unsolved and every re-click just reopened it. Satisfy
+      //       both up front: type the name, then run the captcha gate (Tier 1
+      //       behavior / Tier 2 click-and-wait, polling for the token), and only
+      //       then start clicking submit.
+      try {
+        const openInv = await this.browser.extractInteractiveElements();
+        const nameInput = findKeyNameInput(openInv);
+        if (nameInput !== null) {
+          await this.browser.type(nameInput.selector, "trusty-squire").catch(() => {});
+          steps.push("Existing-account recovery: named the new key.");
+        }
+      } catch {
+        // best-effort name fill
+      }
+      // Solve any captcha gating the modal's submit (groq's in-modal Turnstile).
+      // Best-effort: a no-widget result or a solver miss just falls through to
+      // the submit poll below, which still works for modals with no captcha.
+      const mintGate = await this.runCaptchaGate("Mint-modal", steps);
+      if (mintGate.blocked) {
+        steps.push(
+          "Existing-account recovery: the create-key modal's captcha is blocking — cannot mint.",
+        );
+      }
+
+      // Poll: click the modal's affirmative submit (re-clicking is harmless —
+      // it's a no-op while still disabled, and once name+token clear the gate
+      // the click lands), harvesting the minted value each round. No
+      // single-click guard: the gate may enable a beat after we first try.
+      const deadline = Date.now() + 12000;
       while (Date.now() < deadline) {
         await this.browser.wait(0.5);
         const minted = await this.harvestVisibleCredentials();
@@ -8591,17 +11511,20 @@ ${formatInventory(input.inventory)}`,
           );
           return minted;
         }
-        // A two-step create modal: clicking the page-level "Create key"
-        // opened a "name + confirm" dialog. Click a now-visible confirm
-        // affordance once, then keep polling.
         try {
           const modalInv = await this.browser.extractInteractiveElements();
-          const confirmBtn = findCreateKeyAffordance(modalInv);
-          if (
-            confirmBtn !== null &&
-            confirmBtn.selector !== createBtn.selector
-          ) {
-            await this.browser.click(confirmBtn.selector);
+          // Prefer the modal's generic submit ("Submit"/"Create"/…) over
+          // findCreateKeyAffordance: the page-level "Create API Key" button is
+          // still in the background DOM, and re-clicking IT just reopens the
+          // modal (the pre-fix groq failure loop). Fall back to the affordance
+          // matcher for modals whose confirm DOES carry a key noun.
+          let confirmBtn = findKeyModalSubmit(modalInv, createBtn.selector);
+          if (confirmBtn === null) {
+            const aff = findCreateKeyAffordance(modalInv);
+            if (aff !== null && aff.selector !== createBtn.selector) confirmBtn = aff;
+          }
+          if (confirmBtn !== null) {
+            await this.browser.click(confirmBtn.selector).catch(() => {});
           }
         } catch {
           // best-effort confirm
@@ -8632,7 +11555,15 @@ ${formatInventory(input.inventory)}`,
     try {
       const state = await this.browser.getState();
       visitedKeysUrls.add(state.url);
-      if (EXISTING_KEY_URL_HINT.test(state.url)) {
+      const currentInventory = await this.buildInventory(steps, undefined, 80);
+      const currentText = await this.browser.extractText().catch(() => "");
+      if (
+        EXISTING_KEY_URL_HINT.test(state.url) ||
+        (findCreateKeyAffordance(currentInventory) !== null &&
+          /\b(?:api|access|auth|personal\s+access|secret|bearer)\s*(?:keys?|tokens?)\b/i.test(
+            currentText,
+          ))
+      ) {
         const here = await tryHere();
         if (here !== null) return here;
       }
@@ -8646,6 +11577,24 @@ ${formatInventory(input.inventory)}`,
     // control (org-scoped vs account-scoped keys pages).
     let consecutive404 = 0;
     const MAX_CONSECUTIVE_404 = 3;
+    const classifyCurrent404 = async (): Promise<"not_404" | "continue" | "break"> => {
+      try {
+        const after = await this.browser.getState();
+        const bodyText = await this.browser.extractText().catch(() => "");
+        if (!looksLike404(titleFromHtml(after.html), bodyText)) return "not_404";
+        consecutive404 += 1;
+        if (consecutive404 >= MAX_CONSECUTIVE_404) {
+          steps.push(
+            `Existing-account recovery: ${consecutive404} consecutive 404s on guessed keys URLs — ` +
+              `this host's keys path isn't in our list; aborting the walk.`,
+          );
+          return "break";
+        }
+        return "continue";
+      } catch {
+        return "not_404";
+      }
+    };
     for (let i = 0; i < STUCK_LOOP_FALLBACK_PATHS.length; i++) {
       let currentUrl: string;
       try {
@@ -8653,12 +11602,27 @@ ${formatInventory(input.inventory)}`,
       } catch {
         break;
       }
-      const fallback = pickStuckLoopFallbackUrl(currentUrl, visitedKeysUrls);
+      const fallback = pickStuckLoopFallbackUrl(
+        currentUrl,
+        visitedKeysUrls,
+        service,
+        this.resolvedSignupUrl,
+      );
       if (fallback === null) break;
       visitedKeysUrls.add(fallback);
       try {
         await this.browser.goto(fallback);
-        await this.browser.waitForInteractiveDom(5, 15_000);
+        // Some SPA 404 shells (Temporal observed 2026-06-20) never satisfy
+        // the interactive-DOM readiness probe. Detect route-not-found copy
+        // before waiting, otherwise the 404 abort below never gets a chance to
+        // fire and the run appears to hang on the guessed key URL.
+        const early404 = await classifyCurrent404();
+        if (early404 === "break") break;
+        if (early404 === "continue") continue;
+        await Promise.race([
+          this.browser.waitForInteractiveDom(5, 15_000),
+          new Promise<void>((resolve) => setTimeout(resolve, 16_000)),
+        ]);
       } catch {
         continue;
       }
@@ -8667,33 +11631,192 @@ ${formatInventory(input.inventory)}`,
       // 404 too and burn the run's 600s budget (axiom/fathom/loops). A real
       // (non-404) page resets the counter so a host that mixes 404s with a
       // live keys page is still fully walked.
-      try {
-        const after = await this.browser.getState();
-        const bodyText = await this.browser.extractText().catch(() => "");
-        if (looksLike404(titleFromHtml(after.html), bodyText)) {
-          consecutive404 += 1;
-          if (consecutive404 >= MAX_CONSECUTIVE_404) {
-            steps.push(
-              `Existing-account recovery: ${consecutive404} consecutive 404s on guessed keys URLs — ` +
-                `this host's keys path isn't in our list; aborting the walk.`,
-            );
-            break;
-          }
-          continue;
-        }
-        consecutive404 = 0;
-      } catch {
-        // best-effort — fall through to the extract attempt
-      }
+      const after404 = await classifyCurrent404();
+      if (after404 === "break") break;
+      if (after404 === "continue") continue;
+      consecutive404 = 0;
       const here = await tryHere();
       if (here !== null) return here;
     }
     return null;
   }
 
+  // NAV_SEARCH phase (slice 1): drive the post-verify phase with the goal-directed
+  // nav-search engine (nav-search.ts) instead of the greedy planner. Adapts the
+  // BrowserController to the engine's narrow port and wires the extractor, the
+  // capture-chain (sequential rounds → OF#1/auto-promote parity, A2), and the
+  // log. Returns the extracted credentials, or {} (+ a no_self_serve_key done
+  // reason) when the dashboard's navigation has no reachable key surface.
+  private async runNavSearchPhase(
+    args: { service: string; maxRounds: number; steps: string[] },
+    oauth: boolean,
+  ): Promise<Record<string, string>> {
+    const hasRealKey = (c: Record<string, string>): boolean =>
+      Object.keys(c).some((k) => !NON_CREDENTIAL_KEYS.has(k));
+
+    // Already on a key surface at entry (bot landed there directly).
+    const entry = await this.extractCredentials();
+    if (hasRealKey(entry)) return entry;
+
+    // If the curated signup URL is actually a credential/PAT/settings deep link,
+    // revisit it after OAuth/session establishment before searching. OAuth
+    // callbacks often settle on a dashboard/profile page even though the
+    // operator supplied the exact credential route (Ona/Gitpod:
+    // /settings/personal-access-tokens). Starting nav-search from the callback
+    // landing page makes it wander among neighboring settings tabs instead of
+    // preserving the known target surface.
+    const curatedCredentialUrl =
+      this.resolvedSignupUrl !== undefined &&
+      KEYS_DESTINATION_URL.test(this.resolvedSignupUrl)
+        ? this.resolvedSignupUrl
+        : null;
+    if (
+      curatedCredentialUrl !== null &&
+      this.browser.currentUrl() !== curatedCredentialUrl
+    ) {
+      args.steps.push(
+        `nav-search: returning to curated credential URL ${curatedCredentialUrl} after auth`,
+      );
+      await this.browser.goto(curatedCredentialUrl).catch(() => undefined);
+      await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+      const afterCuratedNav = await this.extractCredentials().catch(() => ({}));
+      if (hasRealKey(afterCuratedNav)) return afterCuratedNav;
+    }
+
+    const port: NavSearchBrowserPort = {
+      currentUrl: () => this.browser.currentUrl(),
+      // Visibility-respecting text (innerText) for goal assessment — extractText()
+      // reads textContent, which fuses inline <script> source + display:none nodes
+      // into the page text and poisons every text-based goal/onboarding signal
+      // (the false-shell class). Key extraction still reads RAW text via
+      // extractCredentials() downstream; this is the nav-decision surface only.
+      extractText: () => this.browser.extractVisibleText(),
+      extractInventory: () => this.browser.extractInteractiveElements(),
+      clickSelector: (s) => this.browser.click(s),
+      navigate: (u) => this.browser.goto(u),
+      pressEscape: () => this.browser.pressKey("Escape"),
+      settle: async () => {
+        await this.browser.waitForInteractiveDom(5, 15_000).catch(() => {});
+      },
+      expandLatentNav: () => this.browser.expandLatentNav(),
+    };
+
+    // Cap nav-search's LLM tiebreak calls so the navigation phase can't starve
+    // the greedy planner's budget when we hand off (DEFAULT-ON hybrid): the
+    // per-signup circuit breaker is shared, so an unbounded tiebreak could leave
+    // the form-fill handoff with no budget. Deterministic ranking is unbounded
+    // (free); only the LLM tiebreak is capped. Past the cap, tiebreak returns
+    // null (deterministic-only), which leads to honest exhaustion → handoff.
+    let tiebreakCalls = 0;
+    const MAX_NAV_TIEBREAKS = Number(process.env.NAV_SEARCH_MAX_TIEBREAKS) || 6;
+
+    const deps: NavSearchDeps = {
+      extractKey: async () => {
+        const c = await this.extractCredentials();
+        return hasRealKey(c) ? c : null;
+      },
+      // Mint on a create-gated key surface: reuse the proven existing-account
+      // recovery (readable → reveal → click create → drive the name+confirm
+      // modal → poll the create POST → reveal masked-on-first-show). Without
+      // this, nav-search only bare-clicks "Create API Key" and never submits
+      // the resulting modal (groq's virgin /keys flow).
+      mintKey: async () => {
+        const c = await this.attemptMintNewKey(args.steps, args.service);
+        return c !== null && hasRealKey(c) ? c : null;
+      },
+      // Capture-chain parity (A2 / OF#1): one sequential round per step, full
+      // state + the real selector, so the synthesizer's chain check (no gaps)
+      // still passes and auto-promote keeps minting skills.
+      captureRound: async (ctx) => {
+        const state = await this.browser.getState().catch(() => null);
+        if (state === null) return;
+        const observed: PostVerifyStep =
+          ctx.action === "extract"
+            ? { kind: "extract", reason: "nav-search: extract on key surface" }
+            : ctx.selector !== undefined
+              ? { kind: "click", selector: ctx.selector, reason: `nav-search: ${ctx.action}` }
+              : { kind: "done", reason: `nav-search: ${ctx.action}` };
+        captureOnboardingRound({
+          service: args.service,
+          round: this.captureChainRound,
+          oauth,
+          state,
+          inventory: ctx.inventory,
+          observed,
+          ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+          ...(this.lastResolvedProvider !== undefined
+            ? { resolved_provider: this.lastResolvedProvider }
+            : {}),
+        });
+        this.captureChainRound += 1;
+      },
+      // LLM tiebreak: the deterministic ranker only fires on keys-keyword text /
+      // href. When keys live behind a generically-named affordance (a settings
+      // tab like "Advanced"/"Security", an icon nav), nothing scores and the
+      // ranker can't decide. This is the ONE place the LLM touches the loop —
+      // it picks the single candidate most likely to lead to a key surface, or
+      // null. Cheap (text-only, ≤80 tokens, deterministic) and bounded by the
+      // per-signup LLM budget; a budget/parse failure falls through to null
+      // (honest exhaustion), never throws into the loop.
+      tiebreak: async (candidates) => {
+        if (candidates.length === 0) return null;
+        if (tiebreakCalls >= MAX_NAV_TIEBREAKS) return null; // reserve budget for the handoff
+        tiebreakCalls += 1;
+        const here = this.browser.currentUrl();
+        const list = candidates
+          .map(
+            (c, i) =>
+              `${i}. "${c.text.slice(0, 60)}"${c.href !== null ? ` (href=${c.href})` : ""}`,
+          )
+          .join("\n");
+        const system = `You navigate a SaaS dashboard after signup. Goal: reach the page that SHOWS or CREATES an API key (or any credential — token, secret, access key).
+You are given a numbered list of the clickable affordances on the current page. Pick the ONE most likely to lead toward an API-keys / tokens / developer-credentials surface.
+Reply with a single JSON object and nothing else: {"index": N} (N = the list number) or {"index": null} if NONE plausibly leads to API keys.
+Prefer items naming keys / tokens / API / developer / secrets; then credentials / advanced / settings / account / security. On a B2B product an API key is frequently scoped to an ORGANIZATION / WORKSPACE / PROJECT / TEAM rather than the personal account — so if no personal "API keys" surface exists, an "Organization", "Workspace", "Project", or "Team" link is a strong candidate (its settings usually hold the keys). NEVER pick log out, billing, invoices, usage, docs, pricing, a link back to the current page, or any destructive action (delete, remove, revoke, deactivate, cancel).`;
+        const userBlocks: LLMBlock[] = [
+          { kind: "text", text: `Current URL: ${here}\n\nAffordances:\n${list}` },
+        ];
+        try {
+          return await this.callLLM<string | null>({
+            system,
+            userBlocks,
+            maxTokens: 80,
+            temperature: 0,
+            deterministic: true,
+            parse: (raw) => {
+              const m = raw.match(/\{[\s\S]*\}/);
+              if (m === null) return null;
+              const obj: unknown = JSON.parse(m[0]);
+              const idx =
+                typeof obj === "object" && obj !== null && "index" in obj
+                  ? (obj as { index: unknown }).index
+                  : null;
+              if (typeof idx !== "number") return null;
+              return candidates[idx]?.selector ?? null;
+            },
+          });
+        } catch {
+          return null;
+        }
+      },
+      log: (line) => args.steps.push(line),
+      maxSteps: args.maxRounds,
+    };
+
+    const result = await runNavSearch(port, deps);
+    if (result.kind === "found") return result.credentials;
+    this.lastPostVerifyDoneReason =
+      "no_self_serve_key: nav-search exhausted the dashboard's navigation without " +
+      "reaching an API-key surface";
+    return {};
+  }
+
   private async postVerifyLoop(args: {
     service: string;
     credentials?: { email: string; password: string } | undefined;
+    continuationPassword?: string | undefined;
+    inbox?: AgentInbox | undefined;
+    verificationEmailAlias?: string | undefined;
     maxRounds: number;
     steps: string[];
     scopeHint?: string | undefined;
@@ -8730,52 +11853,36 @@ ${formatInventory(input.inventory)}`,
       // Non-fatal — the planner's explicit extract round will run
       // DOM-proximity again, this is just an opportunistic seed.
     }
-    let loginAttempts = 0;
-    // A5 — on an OAuth run the planner asks to `login` only when it SEES a
-    // login page, which after a good OAuth it shouldn't. Repeated asks
-    // mean the OAuth callback never established a session (the page is
-    // still a social/login screen, e.g. groq's /authenticate). Count them
-    // so the loop can bail with oauth_session_not_persisted instead of
-    // thrashing maxRounds and mislabeling it oauth_onboarding_failed.
-    let oauthLoginRequests = 0;
-    // Consecutive rounds on an OAuth run where the page is STILL a login /
-    // authenticate screen. The planner usually doesn't return {"kind":
-    // "login"} here — it keeps CLICKING "Sign in with Google" (groq,
-    // northflank, amplitude), so the oauthLoginRequests counter above
-    // never trips. But the structural fact is decisive and service-
-    // agnostic: after OAuth, an authenticated bot is on a dashboard, not a
-    // login page. N consecutive login-page rounds ⇒ the callback never
-    // persisted (anti-bot/IP rejection) ⇒ oauth_session_not_persisted, not
-    // a navigation bug. Generalizes without per-service URLs.
-    let consecutiveOauthLoginPageRounds = 0;
-    // Fired once: before declaring the OAuth session dead, reload the page —
-    // an authenticated session whose cookie IS set often shows a transient
-    // login screen (Auth0/WorkOS silent re-auth round-trip, or a slow SPA that
-    // renders the login shell before hydrating the dashboard). A reload lands
-    // the dashboard for those; a genuine callback rejection stays on login
-    // even after reload, so this never masks a real wall.
-    let oauthBounceReloadTried = false;
-    let planFailures = 0;
-    // 0.8.2-rc.6 — separate counter for upstream-blip retries. Doesn't
-    // gate planFailures (so a transient 502 won't push us into the
-    // terminal stop branch after 4 rounds), but is still bounded so a
-    // permanently-down proxy can't loop forever. Generous because each
-    // blip costs ~5s of network + retry-backoff and the run already
-    // has a 10-min top-level timeout — but tight enough that a truly
-    // dead upstream doesn't burn the whole maxRounds budget on noise.
-    let upstreamBlipRetries = 0;
-    const MAX_UPSTREAM_BLIP_RETRIES = 8;
+    const recovery = new PostSignupRecoveryState();
     const oauth = args.credentials === undefined;
-    // Re-plan hint for the next round — set when an `extract` step
-    // found no key, which means the visible key text is masked /
-    // truncated (the S3-class trap: the planner sees a key-shaped
-    // string and keeps asking to extract it forever), or when the
-    // planner's last step was rejected.
+    // NAV_SEARCH (DEFAULT-ON): drive navigation first, then hand off to the
+    // greedy planner from the reached surface if navigation alone finds no key.
+    if (!/^(0|false|off|no)$/i.test(process.env.NAV_SEARCH ?? "")) {
+      try {
+        const navResult = await this.runNavSearchPhase(args, oauth);
+        if (Object.keys(navResult).some((k) => !NON_CREDENTIAL_KEYS.has(k))) {
+          return navResult;
+        }
+        if (
+          this.resolvedSignupUrl !== undefined &&
+          KEYS_DESTINATION_URL.test(this.resolvedSignupUrl)
+        ) {
+          args.steps.push(
+            "nav-search: curated signup_url is a credential surface and no key was found — " +
+              "not handing off to the greedy planner, which would leave the target route",
+          );
+          return navResult;
+        }
+        args.steps.push(
+          "nav-search: no key via navigation alone — handing off to the planner from the current surface",
+        );
+      } catch (err) {
+        args.steps.push(
+          `nav-search: errored (${err instanceof Error ? err.message : String(err)}) — falling back to the planner`,
+        );
+      }
+    }
     let hint: string | undefined = args.initialHint;
-    // rc.27 — when the email_otp gate handler retrieved a code from
-    // the operator's gmail, seed the FIRST round's hint with the
-    // code + explicit fill+submit instructions. Cleared after one
-    // round so it doesn't echo into unrelated downstream rounds.
     if (this.pendingOtpCode !== null) {
       hint =
         `Operator email-OTP retrieved from gmail: code is "${this.pendingOtpCode}". ` +
@@ -8786,139 +11893,6 @@ ${formatInventory(input.inventory)}`,
         `"value":"${this.pendingOtpCode}"} on it. NEXT round, click the Verify/Continue/Submit button.`;
       this.pendingOtpCode = null;
     }
-    // Failed-extract counter. The stuck-loop detector below exempts
-    // `extract` on the theory that "extract is its own progress signal"
-    // — true when extract succeeds, FALSE when it returns no key. A
-    // planner that keeps quoting the on-screen token in its reasoning
-    // but extract keeps returning null means the regex library in
-    // extractApiKeyFromText doesn't recognize the shape (Railway: bare
-    // UUID token). Without this counter the loop burns all 12 rounds
-    // re-extracting the same unrecognized value. Two consecutive
-    // failures triggers a re-plan with a hint that steers the planner
-    // toward Copy buttons or `done`.
-    let consecutiveFailedExtracts = 0;
-    // Stuck-loop detector: when the planner returns the SAME action
-    // (kind+selector) two rounds in a row AND the inventory size hasn't
-    // changed, the page is unaffected by the action and the planner
-    // is in a tight loop (Railway: 3x click "Create Token" with no
-    // form-name fill; 5x scroll the same modal whose Accept button
-    // is gated on something else). Track the prior round's signature
-    // and inject a forced "no-progress" hint on the second repeat.
-    let prevSignature: string | null = null;
-    let prevInventorySize = -1;
-    // Selectors the planner has CLICKED while the inventory count has held
-    // steady. A multi-step onboarding wizard (axiom: role → company-size →
-    // plan) advances by clicking distinct radio-style cards that flip an
-    // aria-checked but add/remove no elements, so inventory.length never
-    // moves — and the kind-level stuck detector below would false-positive
-    // on the 2nd DISTINCT selection. We exempt a brand-new selector (wizard
-    // progress) and only call it stuck once a selector REPEATS (the Railway
-    // Create→Focus→Create cycle). Reset whenever the inventory count changes
-    // (genuine page mutation → fresh wizard step / new page).
-    let clickSelectorsSinceInventoryChange = new Set<string>();
-    // rc.39 — wait-loop tracker. Turso's GitHub OAuth handshake
-    // succeeds, then the SSO-callback page stays empty (0 elements)
-    // while a Cloudflare verification widget runs that never clears
-    // for this Chromium fingerprint. The planner kept emitting wait
-    // for all 12 rounds; the run timed out as oauth_onboarding_failed.
-    // Better classification: anti-bot block. Track consecutive wait
-    // rounds with no inventory change and break out with the proper
-    // status before burning the post-verify budget.
-    let consecutiveWaits = 0;
-    // Writer-class hung-redirect tracker. A post-OAuth interstitial
-    // (app.writer.com/redirect-auth?…&registered=true) renders a spinner
-    // SHELL — non-zero interactive elements — that never resolves because the
-    // new account's bootstrap (workspace/org provisioning) hangs. The planner
-    // correctly emits `wait`, but the 0-element guard above never fires (the
-    // shell has elements), so it waits out the entire 600s budget (MEASURED
-    // 2026-06-11: writer). Track consecutive waits on the SAME url regardless
-    // of element count; reload once (the redirect usually completes on a fresh
-    // load), then break with a clean terminal reason.
-    let consecutiveSameUrlWaits = 0;
-    let lastWaitUrl: string | null = null;
-    let waitReloadTried = false;
-    // rc.39 — navigate-loop tracker. Perplexity / Koyeb / Porter all
-    // had post-verify loops where the planner emitted `navigate`
-    // 5-6 rounds in a row and the URL never changed — the service
-    // silently redirected each attempt back to the same onboarding
-    // page. Track the URL state observed BEFORE each navigate; if
-    // two consecutive navigates fire from the same URL, the previous
-    // navigate produced no progress. Inject a hint forcing a CLICK
-    // on something visible in the current inventory.
-    let prevNavigateFromUrl: string | null = null;
-    // Stalled-wizard breaker. Tracks a content signature of the page +
-    // the effect of each executed action, so we can detect an onboarding
-    // wizard that re-presents itself (clicks don't register) and break
-    // out instead of burning every round on it. See isStalledOnActions.
-    let prevContentSig: string | null = null;
-    let lastActionKind: string | null = null;
-    let lastActionSelector: string | null = null;
-    // Fired once: the unique-org-name recovery on a stall whose real cause is
-    // a "name taken" validation (kinde's business_details — the operator's
-    // prior account already used "tsagent", so the pre-filled name collides
-    // and the auto-derived subdomain is rejected, re-presenting the step).
-    let uniqueNameRetried = false;
-    // Fired once: force-click an available Next/submit when the stall is the
-    // planner re-selecting an option (kinde's tech-stack SDK radios) while the
-    // Next button is already enabled — the selection registered in the wizard's
-    // JS state but the planner kept clicking the option instead of advancing.
-    let forcedAdvanceTried = false;
-    const actionEffects: Array<{
-      kind: string;
-      pageUnchanged: boolean;
-      selector: string | null;
-    }> = [];
-    // 0.8.2-rc.10 — escalation for the stuck-loop detector.
-    //
-    // The existing detector injects a re-plan hint when the planner
-    // returns the same kind+selector twice with no inventory change,
-    // but the planner often ignores the "pick a different KIND" hint
-    // and just picks a slightly different SELECTOR for another click.
-    // Anthropic's batch failure (rc.8) showed 6 wasted rounds of this
-    // before a navigate finally broke the cycle: clicking the sidebar
-    // "API Keys" link on a dashboard that wasn't routing to it.
-    //
-    // Escalation strategy: after N stuck-fires within the SAME URL,
-    // try a hard navigate to a guessed API-keys URL (one per origin).
-    // If the URL has already advanced past the stuck zone, reset the
-    // counter. After every fallback URL is exhausted AND we're still
-    // stuck, mark the run [stuck_loop] so the caller surfaces the
-    // dedicated error code instead of the generic
-    // oauth_onboarding_failed.
-    let stuckFiresAtUrl = 0;
-    let lastStuckFireUrl: string | null = null;
-    const triedFallbackUrls = new Set<string>();
-    // Premature-done guard budget. When the planner gives up (`done`)
-    // with zero credentials captured, we navigate to an unvisited
-    // canonical keys URL and re-plan — bounded so a service that
-    // genuinely has no self-serve key doesn't burn the whole run budget
-    // walking every fallback path.
-    let prematureDoneFallbacks = 0;
-    const MAX_PREMATURE_DONE_FALLBACKS = 3;
-    // Navigate budget. A planner that can't find the key page (project-
-    // scoped URLs it can't construct — supabase; or an SPA that ignores
-    // direct navs and stays put — last9) keeps emitting `navigate` round
-    // after round, burning the entire 600s deadline (MEASURED 2026-06-09).
-    // `navigate` is exempt from the stuck-loop detector (it's meant to
-    // change the URL), so cap the TOTAL navigates: a legit dashboard is
-    // reachable in a handful, and past the cap the planner is just guessing.
-    // Past the cap we force non-navigate planning and, if still nothing,
-    // break — converting a 600s hang into a prompt, honest failure.
-    let navigateCount = 0;
-    const MAX_POST_VERIFY_NAVIGATES = 8;
-    // Dead-URL memory. The planner guesses credential-page URLs
-    // (e.g. /user/personal_access_tokens/new) that 404; without memory it
-    // re-guesses the same dead URL round after round — xata and fly each
-    // burned all their post-verify rounds this way. Record any URL that
-    // lands on a 404 and refuse to re-navigate to it, forcing a click-based
-    // re-plan instead. (Separate from triedFallbackUrls, which is the bot's
-    // OWN escalation guesses; this tracks the PLANNER's dead navigates.)
-    const deadUrls = new Set<string>();
-    let lastNavigatedTo: string | null = null;
-    // 0.8.3-rc.1 — per-URL set of wizard-forward escalations attempted.
-    // Used so we only force-click the visible Next/Submit once per page
-    // state; if it didn't unstick, fall through to URL fallbacks.
-    const triedWizardForward = new Set<string>();
     // 0.8.1 — capture chain index is independent of the planner loop
     // round. The loop has two early-`continue` paths (page mid-navigation
     // throw, planner-rejection re-plan) that increment `round` WITHOUT
@@ -8932,45 +11906,27 @@ ${formatInventory(input.inventory)}`,
     // form-fill phase already captured (captureSignupFormRounds); 0 on the
     // OAuth path, so this is unchanged for OAuth skills.
     let capturedRound = this.captureChainRound;
-    // 0.8.2-rc.12 — multi-cred-aware loop exit. Track the number of
-    // distinct credential keys we've accumulated; if we're in a
-    // multi-cred bundle (cloud_name, api_secret, application_id, …)
-    // keep planning past the first api_key surfacing so siblings can
-    // accumulate. Bounded by `roundsSinceLastNewCredential` so a
-    // page that never produces a sibling doesn't loop forever.
-    let lastCredentialKeyCount = Object.keys(credentials).filter(
-      (k) => !NON_CREDENTIAL_KEYS.has(k),
-    ).length;
-    let roundsSinceLastNewCredential = 0;
-    const MAX_ROUNDS_AWAITING_MORE_CREDENTIALS = 3;
-    // 0.8.2-rc.16 — when the loop's pre-entry seed already had a
-    // credential (Cloudinary's billing/plans page exposes the api_key
-    // via a hidden field that extractCredentials catches), we cannot
-    // trust that result as authoritative for multi-cred: the bot
-    // hasn't navigated to a labeled api-keys page yet, so cloud_name
-    // + api_secret are not yet visible to extractFromDomProximity.
-    // Hold the loop open until the planner has issued at least one
-    // explicit extract step — only then has the bot affirmatively
-    // surveyed the labeled credentials surface.
-    const seedHadCredential =
-      credentials.api_key !== undefined || credentials.username !== undefined;
-    let plannerExtractEmitted = false;
-    // 2026-06-07 — "stops at one" fix. The legacy loop-exit treated a run
-    // as single-cred based on what was ALREADY captured (isMultiCredBundle),
-    // so a page with 3 credentials whose 1st surfaced first — siblings still
-    // masked or missed on the first harvest pass — exited before the rest
-    // were caught. Set once the page is observed to PRESENT >=2 distinct
-    // credentials (masked included); the loop-exit then holds open (bounded
-    // by roundsSinceLastNewCredential) so the reveal pass + DOM harvest get
-    // more rounds to capture the siblings.
-    let pageOffersMultiCred = false;
+    const credentialTracker = new PostSignupCredentialTracker(credentials);
     // Gate URLs we've already polled the operator's gmail for, so a
     // multi-round wait on the same email-OTP page doesn't re-poll.
     const otpPolledUrls = new Set<string>();
+    const emailLinkPolledUrls = new Set<string>();
     // Running summary of the steps the planner has taken, fed back into
     // each planPostVerifyStep call so the (stateless) planner stops
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
+    let lastReachablePostVerifyUrl: string | null = null;
+    const credentialExtractionFlow = new CredentialExtractionFlow();
+    const syntheticCapture = new PostSignupSyntheticCapture();
+    const loginFlow = new PostSignupLoginFlow();
+    const recoveryFlow = new PostSignupRecoveryFlow(recovery);
+    const actionExecutor = new PostSignupActionExecutor(
+      this.browser,
+      {
+        extractCredentials: () => this.extractCredentials(),
+        extractFromDomProximity: () => this.extractFromDomProximity(),
+      },
+    );
     for (let round = 0; round < args.maxRounds; round++) {
       // Top-of-round credential sweep (MEASURED 2026-06-13: langfuse). The
       // credential can become visible on the page BETWEEN planner actions —
@@ -8996,66 +11952,14 @@ ${formatInventory(input.inventory)}`,
       } catch {
         // DOM-proximity miss is non-fatal
       }
-      const currentCredentialKeyCount = Object.keys(credentials).filter(
-        (k) => !NON_CREDENTIAL_KEYS.has(k),
-      ).length;
-      if (currentCredentialKeyCount > lastCredentialKeyCount) {
-        roundsSinceLastNewCredential = 0;
-        lastCredentialKeyCount = currentCredentialKeyCount;
-      } else if (lastCredentialKeyCount > 0) {
-        roundsSinceLastNewCredential += 1;
-      }
-      // Multi-cred services hold the loop open until either the
-      // planner returns `done`, the budget expires, or we've made
-      // no credential progress for MAX_ROUNDS_AWAITING_MORE_CREDENTIALS
-      // consecutive rounds. Single-cred services keep the legacy
-      // behavior of returning the moment api_key surfaces — EXCEPT
-      // when the api_key came from the pre-loop seed and the
-      // planner hasn't yet emitted an explicit extract step. In
-      // that case we let the planner run until extract fires.
-      const inMultiCredMode = isMultiCredBundle(credentials) || pageOffersMultiCred;
-      const haveOnlySeedCredentials = seedHadCredential && !plannerExtractEmitted;
-      if (
-        !inMultiCredMode &&
-        (credentials.api_key !== undefined || credentials.username !== undefined) &&
-        !haveOnlySeedCredentials
-      ) {
-        args.steps.push(`Post-verify: credentials found on round ${round}.`);
-        // 0.8.3-rc.1 — fast-path synthetic capture. When the bot lands
-        // on a page whose pre-loop extractCredentials() already found
-        // the credential (the "fast path" — perplexity-class), the
-        // loop returns here BEFORE any round was captured. Auto-
-        // promote then sees no captures and skips synthesis, so the
-        // next user has no replayable skill. Emit a single
-        // synthetic-extract round so the synthesizer can produce a
-        // minimal-but-correct "navigate + extract" skill. Best-effort
-        // — capture failure must not block returning the credential.
-        await this.writeFastPathSyntheticCapture(
-          args.service,
-          capturedRound,
-          oauth,
-        );
-        return credentials;
-      }
-      if (
-        inMultiCredMode &&
-        roundsSinceLastNewCredential >= MAX_ROUNDS_AWAITING_MORE_CREDENTIALS &&
-        // Pusher-class bundles have NO field literally named api_key
-        // (application_id + app_key + secret), so an api_key/username-only
-        // exit never fired and the loop spun to the LLM budget before the
-        // existing-account fallback rescued it. A stable bundle of >=2 named
-        // credentials is itself a complete, usable result — mirror the final
-        // success gate's namedCredCount>=2 rule here so the loop returns it.
-        (credentials.api_key !== undefined ||
-          credentials.username !== undefined ||
-          currentCredentialKeyCount >= 2)
-      ) {
-        const summary = Object.keys(credentials)
-          .filter((k) => !NON_CREDENTIAL_KEYS.has(k))
-          .join(", ");
-        args.steps.push(
-          `Post-verify: multi-cred bundle stable for ${roundsSinceLastNewCredential} rounds — returning what we have (${summary}).`,
-        );
+      const credentialProgress = credentialTracker.observe(credentials);
+      const credentialExit = credentialTracker.decideEarlyCredentialExit(
+        credentials,
+        credentialProgress,
+        round,
+      );
+      if (credentialExit !== null) {
+        args.steps.push(credentialExit.message);
         await this.writeFastPathSyntheticCapture(
           args.service,
           capturedRound,
@@ -9097,10 +12001,11 @@ ${formatInventory(input.inventory)}`,
       let inventory: InteractiveElement[];
       try {
         // PERF: parallel getState + inventory (independent calls).
-        [state, inventory] = await Promise.all([
-          this.browser.getState(),
-          this.buildInventory(args.steps, undefined, 80),
-        ]);
+        {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
       } catch (err) {
         args.steps.push(
           `Post-verify round ${round}: page was mid-navigation ` +
@@ -9131,64 +12036,392 @@ ${formatInventory(input.inventory)}`,
         );
         await this.browser.wait(2);
         try {
-          [state, inventory] = await Promise.all([
-            this.browser.getState(),
-            this.buildInventory(args.steps, undefined, 80),
-          ]);
+          {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
         } catch {
           // mid-navigation read after the card click — the next round
           // re-reads, so just fall through to it.
         }
         continue;
       }
+      if (/sentry/i.test(args.service)) {
+        const skipSetup = inventory.find((e) => {
+          return [e.visibleText, e.ariaLabel, e.title, e.labelText]
+            .some((label) => /^skip setup$/i.test((label ?? "").trim()));
+        });
+        if (skipSetup !== undefined) {
+          args.steps.push(
+            `Post-verify round ${round}: Sentry onboarding — clicking "Skip setup" to reach the dashboard/API-token surface.`,
+          );
+          try {
+            await this.browser.click(skipSetup.selector);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch (err) {
+            args.steps.push(
+              `Post-verify round ${round}: Sentry Skip setup click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+            );
+          }
+          continue;
+        }
+      }
       // SPA hydration guard. A post-OAuth dashboard (northflank's
       // /settings/access-tokens, PostHog) can render a "Connecting"/loading
       // shell while its JS bundle + websocket finish — slow over a
-      // residential tunnel. The shell often carries a stray element or two
-      // (a logo link, the <noscript>), so gating on an EMPTY inventory
-      // misses it; the loading-shell TEXT is the authoritative "not yet
-      // rendered" signal. Wait while that text persists, then proceed with
-      // whatever's there (an honest "still a shell" beats a premature done —
-      // and if the SPA never hydrates, e.g. a blocked websocket, the bound
-      // keeps us from hanging).
+      // residential tunnel. We gate on POSITIVE readiness — the instant the
+      // page has SHELL_MAX_ELEMENTS visible interactive elements it is
+      // hydrated by definition and we proceed — rather than looping on the
+      // negative "text still says loading" signal. waitForInteractiveDom
+      // returns the moment that count is met (or after the budget), so a fast
+      // page costs ~0 and a slow one waits exactly as long as needed. This is
+      // the fix for the dominant false positive: a fully-rendered dashboard
+      // whose DOM merely CONTAINS a hidden "loading…"/"please wait 30
+      // seconds…" string no longer spins the wait every round to run_timeout.
       //
       // Budget = 6x3s = 18s. MEASURED: a dashboard SPA gated on a websocket
       // (northflank's wss://platform.northflank.com/websocket) hydrates in
-      // ~12-15s over the tunnel. A larger budget BACKFIRES on a page that
-      // will NEVER hydrate (e.g. an authed user stranded on /signup): the
-      // wait re-runs every round and burns the 600s run cap. The escape for
-      // a never-hydrating route is navigate-to-root post-OAuth, not a longer
-      // wait here.
+      // ~12-15s over the tunnel.
       //
       // ADAPTIVE exception (MEASURED 2026-06-04, clerk): an OAuth/SSO
       // CALLBACK route does a token exchange that renders even slower than a
       // plain dashboard — clerk's `/sign-in/sso-callback` outlasts 18s and
       // the bot bailed at the edge with `oauth_session_not_persisted`. On a
-      // callback route the SPA IS making progress, so 12x3s = 36s of
-      // patience is warranted; everywhere else the 6-tick budget holds so a
-      // genuinely-stuck route still hits the navigate-to-root escape fast.
-      // Read the URL fresh each round (it may redirect off the callback).
-      const HYDRATION_TICKS = isOAuthCallbackRoute(state.url) ? 12 : 6;
-      for (
-        let hydrationWait = 0;
-        hydrationWait < HYDRATION_TICKS &&
-        isLoadingShellText(await this.browser.extractText().catch(() => ""));
-        hydrationWait++
-      ) {
-        args.steps.push(
-          `Post-verify round ${round}: ${pathOf(state.url)} is a loading shell ` +
-            `(hydration wait ${hydrationWait + 1}/${HYDRATION_TICKS}) — waiting for the SPA to render`,
-        );
-        await this.browser.wait(3);
-        try {
-          [state, inventory] = await Promise.all([
-            this.browser.getState(),
-            this.buildInventory(args.steps, undefined, 80),
-          ]);
-        } catch {
-          // mid-navigation read — keep the prior state/inventory and let
-          // the next hydration tick (or the planner) retry.
+      // callback route the SPA IS making progress, so 36s of patience is
+      // warranted; everywhere else the 18s budget holds so a genuinely-stuck
+      // route reaches the navigate-to-root escape fast. Read the URL fresh
+      // each round (it may redirect off the callback).
+      const onOAuthCallback = isOAuthCallbackRoute(state.url);
+      const HYDRATION_BUDGET_MS = onOAuthCallback ? 36_000 : 18_000;
+      await this.browser
+        .waitForInteractiveDom(SHELL_MAX_ELEMENTS, HYDRATION_BUDGET_MS)
+        .catch(() => undefined);
+      // Re-read after the wait — the page may have hydrated (or redirected).
+      try {
+        {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
         }
+      } catch {
+        // mid-navigation read — keep the prior state/inventory; the shell
+        // decision below uses whatever count we have.
+      }
+      if (/sentry/i.test(args.service)) {
+        const skipSetup = inventory.find((e) => {
+          return [e.visibleText, e.ariaLabel, e.title, e.labelText]
+            .some((label) => /^skip setup$/i.test((label ?? "").trim()));
+        });
+        if (skipSetup !== undefined) {
+          args.steps.push(
+            `Post-verify round ${round}: Sentry onboarding — clicking "Skip setup" after hydration to reach the dashboard/API-token surface.`,
+          );
+          try {
+            await this.browser.click(skipSetup.selector);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch (err) {
+            args.steps.push(
+              `Post-verify round ${round}: Sentry Skip setup click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+            );
+          }
+          continue;
+        }
+      }
+      const continuationPassword =
+        args.credentials?.password ?? args.continuationPassword;
+      if (
+        continuationPassword !== undefined &&
+        isContinuationFormStep(state.html, inventory)
+      ) {
+        const passwordInputs = inventory.filter(
+          (e) =>
+            e.tag === "input" &&
+            e.type === "password" &&
+            e.visible !== false &&
+            (e.value ?? "") === "",
+        );
+        if (passwordInputs.length > 0) {
+          args.steps.push(
+            `Post-verify round ${round}: continuation password form detected — filling ${passwordInputs.length} password field(s) and submitting.`,
+          );
+          try {
+            for (const input of passwordInputs.slice(0, 3)) {
+              await this.browser.type(input.selector, continuationPassword);
+            }
+            await this.browser.wait(1);
+            const fullInv = await this.browser
+              .extractInteractiveElements()
+              .catch(() => inventory);
+            const submit =
+              pickOnboardingSubmit(fullInv) ??
+              fullInv.find((e) => {
+                if (e.visible === false) return false;
+                if (e.tag !== "button" && e.type !== "submit") return false;
+                const label = [
+                  e.visibleText,
+                  e.ariaLabel,
+                  e.title,
+                  e.labelText,
+                ]
+                  .filter((s): s is string => s !== null && s !== undefined)
+                  .join(" ");
+                return /\b(?:continue|create|finish|submit|done|get started)\b/i.test(
+                  label,
+                );
+              }) ??
+              null;
+            if (submit !== null) {
+              await this.browser.click(submit.selector);
+              await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+              hint = undefined;
+              recovery.prevContentSig = null;
+              recovery.actionEffects.length = 0;
+              continue;
+            }
+            args.steps.push(
+              `Post-verify round ${round}: continuation password fields filled but no submit control was found — planner will handle next step.`,
+            );
+          } catch (err) {
+            args.steps.push(
+              `Post-verify round ${round}: continuation password submit failed (${err instanceof Error ? err.message : String(err)}) — planner will handle next step.`,
+            );
+          }
+        }
+      }
+      const visiblePageText = await this.browser.extractVisibleText().catch(() => "");
+      if (isBrowserNavigationErrorPage(state.url, state.title, visiblePageText)) {
+        if (recovery.lastNavigatedTo !== null) {
+          recovery.deadUrls.add(recovery.lastNavigatedTo);
+        }
+        const fallbackUrl =
+          lastReachablePostVerifyUrl ??
+          (this.resolvedSignupUrl !== undefined
+            ? originRoot(this.resolvedSignupUrl)
+            : null);
+        args.steps.push(
+          `Post-verify round ${round}: browser navigation error page (${state.title || state.url}) — ` +
+            (recovery.lastNavigatedTo !== null
+              ? `marked ${recovery.lastNavigatedTo} as dead and `
+              : "") +
+            (fallbackUrl !== null
+              ? `returning to last reachable page ${fallbackUrl}.`
+              : "no reachable fallback recorded; re-planning in place."),
+        );
+        recovery.lastNavigatedTo = null;
+        hint =
+          "The previous navigation landed on Chrome's network/DNS error page. " +
+          `Do NOT navigate to these dead URLs again: ${[...recovery.deadUrls].join(", ")}. ` +
+          "Use visible in-page links on the reachable service dashboard/marketing page, or choose a different known product subdomain from the page itself.";
+        if (fallbackUrl !== null) {
+          await this.browser.goto(fallbackUrl).catch(() => undefined);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          continue;
+        }
+      } else {
+        lastReachablePostVerifyUrl = state.url;
+      }
+      const emailAlias =
+        args.verificationEmailAlias ??
+        args.credentials?.email ??
+        args.oauthAccountEmail;
+      if (
+        args.inbox !== undefined &&
+        emailAlias !== undefined &&
+        emailAlias.length > 0 &&
+        !emailLinkPolledUrls.has(state.url) &&
+        detectEmailLinkGate(state.url, state.title, visiblePageText, inventory)
+      ) {
+        emailLinkPolledUrls.add(state.url);
+        args.steps.push(
+          `Post-verify round ${round}: email link gate (${pathOf(state.url)}) — polling inbox for a fresh verification/sign-in link.`,
+        );
+        try {
+          const email = await this.waitForVerificationEmail(
+            args.inbox,
+            emailAlias,
+            90,
+          );
+          args.steps.push(`Received: "${email.subject}" from ${email.from_address}`);
+          let serviceHost: string | null = null;
+          try {
+            serviceHost = new URL(state.url).hostname;
+          } catch {
+            // no host fallback
+          }
+          const verifyLink =
+            this.pickVerificationLink(Array.from(email.parsed_links)) ??
+            pickVerificationLinkFromHtml(email.body_html ?? "") ??
+            pickServiceDomainLink(Array.from(email.parsed_links), serviceHost);
+          if (verifyLink !== null) {
+            args.steps.push(`Following post-verify email link: ${verifyLink}`);
+            await this.browser.goto(verifyLink);
+            await this.browser.wait(1);
+            await saveDebugSnapshot(this.browser, "after-post-verify-email-link").catch(
+              () => undefined,
+            );
+            hint = undefined;
+            recovery.prevContentSig = null;
+            recovery.actionEffects.length = 0;
+            continue;
+          }
+          const code =
+            email.parsed_codes[0] ?? extractCodeFromEmailBody(email, emailAlias);
+          if (code !== undefined && code !== null && code.length > 0) {
+            args.steps.push(
+              `Post-verify round ${round}: email had no usable link but carried a code (…${code.slice(-2)}) — handing it to the planner.`,
+            );
+            hint =
+              `Email verification code retrieved: "${code}". The current page has a ` +
+              `verification-code / OTP input. Issue {"kind":"fill","selector":"…","value":"${code}"} ` +
+              `on it, then NEXT round click Verify / Confirm / Continue / Submit.`;
+          } else {
+            args.steps.push(
+              `Post-verify round ${round}: inbox email had no usable link or code — letting the planner proceed.`,
+            );
+          }
+        } catch (err) {
+          args.steps.push(
+            `Post-verify round ${round}: inbox poll for email link failed (${err instanceof Error ? err.message : String(err)}) — letting the planner proceed.`,
+          );
+        }
+      }
+      const relocatedKeysLink = findRelocatedCredentialPageRecoveryLink({
+        currentUrl: state.url,
+        pageText: `${state.title}\n${visiblePageText}`,
+        inventory,
+        alreadyClicked: recovery.clickedKeysLinks,
+      });
+      if (relocatedKeysLink !== null) {
+        recovery.clickedKeysLinks.add(relocatedKeysLink.selector);
+        const label =
+          relocatedKeysLink.visibleText ??
+          relocatedKeysLink.ariaLabel ??
+          relocatedKeysLink.href ??
+          relocatedKeysLink.selector;
+        args.steps.push(
+          `Post-verify round ${round}: credentials page is a relocated/dead route — ` +
+            `following in-page recovery link "${label.slice(0, 60)}" ` +
+            `(${relocatedKeysLink.href ?? relocatedKeysLink.selector}).`,
+        );
+        try {
+          await this.browser.click(relocatedKeysLink.selector);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        } catch (err) {
+          const href = relocatedKeysLink.href ?? "";
+          const fallbackUrl =
+            href.length > 0
+              ? (() => {
+                  try {
+                    return new URL(href, state.url).toString();
+                  } catch {
+                    return null;
+                  }
+                })()
+              : null;
+          if (fallbackUrl !== null) {
+            args.steps.push(
+              `Post-verify: recovery-link click failed (${err instanceof Error ? err.message : String(err)}) — navigating to ${fallbackUrl}.`,
+            );
+            await this.browser.goto(fallbackUrl).catch(() => undefined);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } else {
+            args.steps.push(
+              `Post-verify: recovery-link click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+            );
+          }
+        }
+        recovery.prevSignature = null;
+        recovery.prevInventorySize = -1;
+        hint = undefined;
+        continue;
+      }
+      const scopeEntry = findAccountScopeListEntry({
+        currentUrl: state.url,
+        pageText: `${state.title}\n${visiblePageText}`,
+        inventory,
+        alreadyClicked: recovery.clickedScopeLinks,
+      });
+      if (scopeEntry !== null) {
+        recovery.clickedScopeLinks.add(scopeEntry.selector);
+        const label =
+          scopeEntry.visibleText ??
+          scopeEntry.ariaLabel ??
+          scopeEntry.href ??
+          scopeEntry.selector;
+        args.steps.push(
+          `Post-verify round ${round}: account scope list detected — entering ` +
+            `scope "${label.slice(0, 60)}" (${scopeEntry.href ?? scopeEntry.selector}) before credential navigation.`,
+        );
+        try {
+          await this.browser.click(scopeEntry.selector);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        } catch (err) {
+          args.steps.push(
+            `Post-verify: scope-entry click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+          );
+        }
+        recovery.prevSignature = null;
+        recovery.prevInventorySize = -1;
+        hint = undefined;
+        continue;
+      }
+      // Negative-side decision, now visibility- AND inventory-aware: a shell
+      // requires loading-text in the VISIBLE text AND a sub-threshold
+      // inventory. The OAuth-callback exclusion keeps the navigate-to-root
+      // escape from firing mid-token-exchange (the callback IS making
+      // progress and a navigate-away would abort the session).
+      const stillShell =
+        !onOAuthCallback &&
+        isLoadingShell(
+          visiblePageText,
+          inventory.length,
+        );
+      if (stillShell) {
+        const shellDecision = recoveryFlow.decideShell({
+          round,
+          path: pathOf(state.url),
+          rootUrl: originRoot(state.url) ?? state.url,
+          currentUrl: state.url,
+        });
+        if (shellDecision.kind === "navigate_root") {
+          args.steps.push(shellDecision.message);
+          try {
+            await this.browser.goto(shellDecision.url);
+            await this.browser
+              .waitForInteractiveDom(SHELL_MAX_ELEMENTS, 15_000)
+              .catch(() => undefined);
+            {
+          const frame = await this.capturePostVerifyObservationFrame(args.steps);
+          state = frame.state;
+          inventory = frame.inventory;
+        }
+          } catch {
+            // navigate/read failed — the streak check below bails on the
+            // next shell read.
+          }
+          // Re-evaluate after the root nav. If it hydrated, fall through to
+          // planning; if it's STILL a shell, bail truthfully now rather than
+          // burning the rest of the round budget to run_timeout.
+          const recovered = !isLoadingShell(
+            await this.browser.extractVisibleText().catch(() => ""),
+            inventory.length,
+          );
+          if (recovered) {
+            recoveryFlow.recordShellRecovered();
+          } else {
+            throw new SpaNeverHydratedError(
+              `spa_never_hydrated: ${args.service}'s post-verify page (${pathOf(state.url)}) ` +
+                `stayed a loading shell across ${recovery.shellStreak} rounds and an origin-root reload — ` +
+                `the SPA never rendered an actionable surface (blocked websocket / wedged hydration). ` +
+              `Not a navigation bug; retry or finish the signup manually.`,
+            );
+          }
+        } else {
+          args.steps.push(shellDecision.message);
+        }
+      } else {
+        recoveryFlow.recordNoShell();
       }
       // Stalled-wizard breaker. Build a content signature (URL + each
       // inventory element's selector + label) and judge whether the
@@ -9204,12 +12437,12 @@ ${formatInventory(input.inventory)}`,
           .map((e) => `${e.selector}·${(e.visibleText ?? e.ariaLabel ?? "").slice(0, 24)}`)
           .join("|")
       ).slice(0, 4000);
-      const pageUnchanged = prevContentSig !== null && contentSig === prevContentSig;
-      if (lastActionKind !== null) {
-        actionEffects.push({ kind: lastActionKind, pageUnchanged, selector: lastActionSelector });
+      const pageUnchanged = recovery.prevContentSig !== null && contentSig === recovery.prevContentSig;
+      if (recovery.lastActionKind !== null) {
+        recovery.actionEffects.push({ kind: recovery.lastActionKind, pageUnchanged, selector: recovery.lastActionSelector });
       }
-      prevContentSig = contentSig;
-      if (isStalledOnActions(actionEffects)) {
+      recovery.prevContentSig = contentSig;
+      if (isStalledOnActions(recovery.actionEffects)) {
         // Unique-name-collision recovery (fires ONCE, before giving up). The
         // stall is often NOT "clicks not registering" but a server-side
         // validation: an org/business/workspace NAME the operator's prior
@@ -9240,8 +12473,8 @@ ${formatInventory(input.inventory)}`,
               )} bodyHas_taken=${bodyLow.includes("taken")}`,
           );
         }
-        if (!uniqueNameRetried && nameField !== null) {
-          uniqueNameRetried = true;
+        if (!recovery.uniqueNameRetried && nameField !== null) {
+          recovery.uniqueNameRetried = true;
           const unique = `tsq${Math.floor(100000 + Math.random() * 900000)}`;
           args.steps.push(
             `Post-verify: stall is a name-taken collision — overwriting ${JSON.stringify(
@@ -9257,8 +12490,8 @@ ${formatInventory(input.inventory)}`,
               await this.browser.wait(2);
             }
             // Reset the stall window so the resubmit gets a fair shot.
-            actionEffects.length = 0;
-            prevContentSig = null;
+            recovery.actionEffects.length = 0;
+            recovery.prevContentSig = null;
             hint = undefined;
             continue;
           } catch (err) {
@@ -9274,7 +12507,7 @@ ${formatInventory(input.inventory)}`,
         // of advancing. MEASURED 2026-06-09 (kinde tech-stack: no checked attr,
         // Next not disabled, planner clicked "React" 3×). If a submit/Next that
         // is NOT the just-tried element exists, click it and re-loop.
-        if (!forcedAdvanceTried) {
+        if (!recovery.forcedAdvanceTried) {
           // Read a FULL (uncapped) inventory: a step with many options (kinde's
           // ~29 SDK radios) crowds the Next button out of the ranked/capped
           // post-verify inventory, so pickOnboardingSubmit(inventory) misses it.
@@ -9286,11 +12519,11 @@ ${formatInventory(input.inventory)}`,
             console.error(
               `[force-advance-debug] capped=${inventory.length} full=${fullInv.length} ` +
                 `submit=${submit?.visibleText ?? submit?.ariaLabel ?? submit?.id ?? "null"} ` +
-                `lastSel=${lastActionSelector ?? "?"}`,
+                `lastSel=${recovery.lastActionSelector ?? "?"}`,
             );
           }
-          if (submit !== null && submit.selector !== lastActionSelector) {
-            forcedAdvanceTried = true;
+          if (submit !== null && submit.selector !== recovery.lastActionSelector) {
+            recovery.forcedAdvanceTried = true;
             args.steps.push(
               `Post-verify: stalled re-selecting an option while a submit/Next is available — clicking ` +
                 `${JSON.stringify((submit.visibleText ?? submit.ariaLabel ?? "Next").slice(0, 24))} to advance.`,
@@ -9298,8 +12531,8 @@ ${formatInventory(input.inventory)}`,
             try {
               await this.browser.click(submit.selector);
               await this.browser.wait(2);
-              actionEffects.length = 0;
-              prevContentSig = null;
+              recovery.actionEffects.length = 0;
+              recovery.prevContentSig = null;
               hint = undefined;
               continue;
             } catch (err) {
@@ -9325,49 +12558,40 @@ ${formatInventory(input.inventory)}`,
       // bot has ALREADY authenticated before this loop, so landing on a
       // login page means the callback was rejected. The planner usually
       // keeps clicking "Sign in with Google" rather than returning a
-      // {"kind":"login"} step, so the oauthLoginRequests counter misses
+      // {"kind":"login"} step, so the explicit login-flow counter misses
       // it — track the structural fact (consecutive login-page rounds)
       // instead. Generalizes across services (groq/northflank/amplitude)
       // without per-service URLs; reclassifies these off the misleading
       // oauth_onboarding_failed label into the truthful (and unwinnable-
       // without-residential-egress) oauth_session_not_persisted wall.
-      if (args.credentials === undefined && isLoginPageUrl(state.url)) {
-        consecutiveOauthLoginPageRounds += 1;
-        if (consecutiveOauthLoginPageRounds >= 3 && !oauthBounceReloadTried) {
-          // One reload before giving up. A set session cookie + a transient
-          // login shell (silent re-auth bounce / slow hydration — measured on
-          // the activeloop/galileo/turbopuffer class) lands the dashboard on a
-          // fresh load; a genuine rejection stays on login and bails below.
-          oauthBounceReloadTried = true;
-          args.steps.push(
-            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
-              `${consecutiveOauthLoginPageRounds} rounds — reloading once before bailing ` +
-              `(a set session cookie often lands the dashboard on reload).`,
-          );
-          try {
-            await this.browser.goto(originRoot(state.url) ?? state.url);
-            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
-          } catch {
-            // reload failed — next login-page round bails below
-          }
-          consecutiveOauthLoginPageRounds = 0;
-          continue;
+      const oauthLoginPageDecision = recoveryFlow.decideOAuthLoginPage({
+        isOAuthRun: args.credentials === undefined,
+        isLoginPage: isLoginPageUrl(state.url) || isLoginPageInventory(inventory),
+        path: pathOf(state.url),
+        rootUrl: originRoot(state.url) ?? state.url,
+        currentUrl: state.url,
+      });
+      if (oauthLoginPageDecision.kind === "reload") {
+        args.steps.push(oauthLoginPageDecision.message);
+        try {
+          await this.browser.goto(oauthLoginPageDecision.url);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        } catch {
+          // reload failed — next login-page round bails below
         }
-        if (consecutiveOauthLoginPageRounds >= 3) {
-          args.steps.push(
-            `Post-verify: OAuth run still on a login page (${pathOf(state.url)}) for ` +
-              `${consecutiveOauthLoginPageRounds} rounds (incl. a reload) — the OAuth callback never persisted; bailing.`,
-          );
-          throw new OAuthSessionNotPersistedError(
-            `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
-              `still presents a login screen (${pathOf(state.url)}) after ` +
-              `${consecutiveOauthLoginPageRounds} rounds — the OAuth callback never established a ` +
-              `session (anti-bot / IP rejection of the callback). Not a navigation bug; needs ` +
-              `residential egress or manual signup.`,
-          );
-        }
-      } else {
-        consecutiveOauthLoginPageRounds = 0;
+        continue;
+      }
+      if (oauthLoginPageDecision.kind === "fail") {
+        args.steps.push(oauthLoginPageDecision.message);
+        await this.browser.dumpOAuthDebug(args.service, "callback-not-persisted").catch(() => {});
+        throw new OAuthSessionNotPersistedError(
+          `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the page ` +
+            `still presents a login screen (${pathOf(state.url)}) after ` +
+            `${oauthLoginPageDecision.rounds} rounds — the OAuth callback was rejected at the ` +
+            `automation/fingerprint layer. NOT an IP issue (FALSIFIED 2026-06-14: a clean ` +
+            `residential IP fails this callback identically — see STATE.md), so residential ` +
+            `egress does NOT fix it. Needs a fingerprint/automation fix or manual signup.`,
+        );
       }
       // Email-OTP gate that surfaced AFTER OAuth (the pre-OAuth signup
       // gate never saw it, so pendingOtpCode is unset). Convex's
@@ -9382,7 +12606,12 @@ ${formatInventory(input.inventory)}`,
         args.machineToken !== undefined &&
         args.machineToken.length > 0 &&
         !otpPolledUrls.has(state.url) &&
-        detectEmailOtpGate(state.url, state.title, await this.browser.extractText().catch(() => ""))
+        detectEmailOtpGate(
+          state.url,
+          state.title,
+          await this.browser.extractText().catch(() => ""),
+          inventory,
+        )
       ) {
         otpPolledUrls.add(state.url);
         const domain = fromDomainFromUrl(state.url);
@@ -9394,6 +12623,7 @@ ${formatInventory(input.inventory)}`,
           machineToken: args.machineToken,
           ...(args.apiBase !== undefined ? { apiBase: args.apiBase } : {}),
           ...(domain !== null ? { fromDomain: domain } : {}),
+          ...(args.oauthAccountEmail !== undefined ? { toAddress: args.oauthAccountEmail } : {}),
           maxWaitSeconds: 90,
         });
         if (otp.code !== null) {
@@ -9441,26 +12671,26 @@ ${formatInventory(input.inventory)}`,
         // threshold is wrong — they're not the planner's fault, the
         // upstream is just temporarily unavailable. We allow these to
         // burn a round (forward progress is impossible without a
-        // planner reply) but don't tick planFailures, so a transient
+        // planner reply) but don't tick recovery.planFailures, so a transient
         // blip can't push us into the terminal stop branch.
         const isUpstreamBlip =
           /\b50[234]\b/.test(reason) ||
           /\bupstream_(?:error|unreachable)\b/i.test(reason) ||
           /\bnetwork error\b/i.test(reason);
         if (isUpstreamBlip) {
-          upstreamBlipRetries += 1;
-          if (upstreamBlipRetries > MAX_UPSTREAM_BLIP_RETRIES) {
+          recovery.upstreamBlipRetries += 1;
+          if (recovery.upstreamBlipRetries > MAX_UPSTREAM_BLIP_RETRIES) {
             args.steps.push(
-              `Post-verify round ${round}: upstream proxy degraded for ${upstreamBlipRetries} rounds — stopping (likely sustained outage).`,
+              `Post-verify round ${round}: upstream proxy degraded for ${recovery.upstreamBlipRetries} rounds — stopping (likely sustained outage).`,
             );
             break;
           }
         } else {
-          planFailures += 1;
+          recovery.planFailures += 1;
         }
-        if (planFailures > 3) {
+        if (recovery.planFailures > 3) {
           args.steps.push(
-            `Post-verify round ${round}: planner failed ${planFailures}x (${reason}) — stopping.`,
+            `Post-verify round ${round}: planner failed ${recovery.planFailures}x (${reason}) — stopping.`,
           );
           break;
         }
@@ -9468,7 +12698,7 @@ ${formatInventory(input.inventory)}`,
         args.steps.push(
           `Post-verify round ${round}: ${label} (${reason})` +
             (isUpstreamBlip
-              ? ` — retrying (${upstreamBlipRetries}/${MAX_UPSTREAM_BLIP_RETRIES}).`
+              ? ` — retrying (${recovery.upstreamBlipRetries}/${MAX_UPSTREAM_BLIP_RETRIES}).`
               : " — re-planning."),
         );
         // No re-plan hint on an upstream blip — the planner's previous
@@ -9481,6 +12711,21 @@ ${formatInventory(input.inventory)}`,
             "and never the whole line.";
         }
         continue;
+      }
+      const coercedStep = coercePostVerifyIdentityFillStep(
+        nextStep,
+        inventory,
+        args.credentials,
+      );
+      if (
+        coercedStep.kind === "fill" &&
+        nextStep.kind === "fill" &&
+        coercedStep.value !== nextStep.value
+      ) {
+        args.steps.push(
+          `Post-verify round ${round}: coerced identity fill for ${nextStep.selector} to the active signup credential.`,
+        );
+        nextStep = coercedStep;
       }
       // rc.22 — redact tokens before pushing to the step trail.
       // The planner's reason field sometimes quotes the actual API
@@ -9510,6 +12755,13 @@ ${formatInventory(input.inventory)}`,
       // Default-on as of 0.6.14-rc.11 — writes to
       // ~/.trusty-squire/corpus/onboarding/ unless an env override
       // points elsewhere or disables it.
+      let semanticTransition: SemanticTransitionRecord = inferSemanticTransition({
+        state,
+        inventory,
+        observed: nextStep,
+        oauth,
+      });
+      const semanticCapturedRound = capturedRound;
       captureOnboardingRound({
         service: args.service,
         round: capturedRound,
@@ -9517,6 +12769,11 @@ ${formatInventory(input.inventory)}`,
         state,
         inventory,
         observed: nextStep,
+        semantic: semanticTransition,
+        // Fix C4 — stamp the backend that produced THIS round's plan
+        // (planPostVerifyStep set these via callLLM just above).
+        ...(this.lastResolvedModel !== undefined ? { resolved_model: this.lastResolvedModel } : {}),
+        ...(this.lastResolvedProvider !== undefined ? { resolved_provider: this.lastResolvedProvider } : {}),
       });
       capturedRound += 1;
 
@@ -9550,15 +12807,15 @@ ${formatInventory(input.inventory)}`,
 
       // Dead-URL memory. If the previous step navigated somewhere and we
       // landed on a 404, remember the target so we never go back.
-      if (lastNavigatedTo !== null) {
+      if (recovery.lastNavigatedTo !== null) {
         const t404 = (state.title ?? "").toLowerCase();
         if (t404.includes("404") || t404.includes("not found")) {
-          deadUrls.add(lastNavigatedTo);
+          recovery.deadUrls.add(recovery.lastNavigatedTo);
           args.steps.push(
-            `Post-verify: navigate to ${lastNavigatedTo} hit a 404 — added to the do-not-revisit list (${deadUrls.size} dead URL(s)).`,
+            `Post-verify: navigate to ${recovery.lastNavigatedTo} hit a 404 — added to the do-not-revisit list (${recovery.deadUrls.size} dead URL(s)).`,
           );
         }
-        lastNavigatedTo = null;
+        recovery.lastNavigatedTo = null;
       }
       // Credential-domain grounding. The OAuth provider (GitHub/GitLab) is
       // the LOGIN method, never the API-key source — but the planner, told to
@@ -9592,91 +12849,56 @@ ${formatInventory(input.inventory)}`,
 
       // Refuse to re-navigate to a URL already known to 404 — force a
       // click-based re-plan instead of letting the planner re-guess it.
-      if (nextStep.kind === "navigate" && deadUrls.has(nextStep.url)) {
+      if (nextStep.kind === "navigate" && recovery.deadUrls.has(nextStep.url)) {
         args.steps.push(
           `Post-verify: planner re-picked a known-dead URL (${nextStep.url}) — re-planning.`,
         );
         hint =
           `The URL ${nextStep.url} returns a 404 — do NOT navigate there again. ` +
-          `Dead URLs (404, avoid all): ${[...deadUrls].join(", ")}. ` +
+          `Dead URLs (404, avoid all): ${[...recovery.deadUrls].join(", ")}. ` +
           `Reach the credentials/API-keys page by CLICKING a link in the current ` +
           `inventory (e.g. "API Keys", "Tokens", "Settings"), not by guessing a URL.`;
         continue;
       }
 
-      // rc.39 — navigate-loop detector. Perplexity/Koyeb/Porter spun
-      // 5+ rounds of `navigate` because each navigate landed back at
-      // the same URL — the service redirected past the requested URL.
-      // If THIS plan is also navigate and the URL we're observing now
-      // is the same one we navigated FROM last round, the previous
-      // navigate produced no progress. Inject a hint forcing a click.
-      if (nextStep.kind === "navigate" && prevNavigateFromUrl === state.url) {
-        const candidateClicks = inventory
-          .filter(
-            (e) =>
-              (e.tag === "button" ||
-                e.tag === "a" ||
-                e.role === "button" ||
-                e.role === "link") &&
-              e.interactedThisRun !== true,
-          )
-          .slice(0, 8)
-          .map((e) => {
-            const label =
-              e.visibleText ?? e.ariaLabel ?? e.labelText ?? "(no label)";
-            return `  - ${JSON.stringify(label)} → selector=${e.selector}`;
-          });
-        args.steps.push(
-          `Post-verify: navigate did not advance the page (URL still ${state.url}) — forcing a click on an inventory element.`,
-        );
-        hint =
-          `Your last 'navigate' to a guessed URL did NOT advance the page — the service ` +
-          `redirected you back to ${state.url}. STOP navigating and CLICK an element ` +
-          `from the current inventory below. The page is gating you behind an onboarding ` +
-          `CTA (e.g. "Get started", "Continue", "Activate") or a setup step that must be ` +
-          `clicked before the API console becomes reachable.` +
-          (candidateClicks.length > 0
-            ? `\n\nClickable elements you haven't tried:\n${candidateClicks.join("\n")}`
-            : "");
-        // Don't execute this navigate — re-plan with the hint.
-        prevNavigateFromUrl = null;
-        continue;
-      }
       if (nextStep.kind === "navigate") {
-        navigateCount += 1;
-        if (navigateCount > MAX_POST_VERIFY_NAVIGATES) {
-          // Over budget: the planner is URL-guessing (supabase project-scoped
-          // keys it can't address; last9's SPA that ignores direct navs). One
-          // more shot CLICKING the current inventory, then give up — don't
-          // burn the rest of the 600s deadline on more dead navigates.
-          const clickable = inventory.filter(
-            (e) => e.tag === "button" || e.tag === "a",
-          );
-          if (clickable.length > 0 && navigateCount <= MAX_POST_VERIFY_NAVIGATES + 2) {
-            args.steps.push(
-              `Post-verify: navigate budget (${MAX_POST_VERIFY_NAVIGATES}) exhausted — forcing a click on the current page instead of guessing more URLs.`,
-            );
-            hint =
-              `You have navigated ${navigateCount} times without reaching an API-key page. ` +
-              `STOP navigating to guessed URLs. CLICK an element from the inventory below ` +
-              `to advance the onboarding/dashboard, or emit 'done' if there is genuinely no ` +
-              `key affordance here.`;
-            continue;
-          }
-          this.lastPostVerifyDoneReason =
-            `[stuck_loop] post-verify exhausted the navigate budget (${navigateCount} navigates) without ` +
-            `reaching a credential page — the key is behind onboarding/URL the planner can't address.`;
+        const setupSubmit = findPendingResourceSetupSubmit(inventory);
+        if (setupSubmit !== null) {
           args.steps.push(
-            `Post-verify: navigate budget exhausted (${navigateCount}) with no credential — breaking out instead of burning the run deadline.`,
+            `Post-verify: planner tried to navigate away while a required resource setup form is present — ` +
+              `clicking ${JSON.stringify(setupSubmit.visibleText ?? setupSubmit.ariaLabel ?? "Continue")} first.`,
           );
+          try {
+            await this.browser.click(setupSubmit.selector);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch (err) {
+            args.steps.push(
+              `Post-verify: resource-setup submit failed (${err instanceof Error ? err.message : String(err)}) — re-planning.`,
+            );
+          }
+          recovery.prevSignature = null;
+          recovery.prevInventorySize = -1;
+          hint = undefined;
+          continue;
+        }
+        const navigateDecision = recoveryFlow.decideNavigate({
+          url: state.url,
+          targetUrl: nextStep.url,
+          inventory,
+        });
+        if (navigateDecision.kind === "replan") {
+          args.steps.push(navigateDecision.message);
+          hint = navigateDecision.hint;
+          continue;
+        }
+        if (navigateDecision.kind === "break") {
+          this.lastPostVerifyDoneReason = navigateDecision.doneReason;
+          args.steps.push(navigateDecision.message);
           break;
         }
-        prevNavigateFromUrl = state.url;
-        // Remember where we're going so the next round can blocklist it
-        // if it 404s.
-        lastNavigatedTo = nextStep.url;
+        recoveryFlow.recordNavigateExecution(state.url, nextStep.url);
       } else {
-        prevNavigateFromUrl = null;
+        recoveryFlow.recordNonNavigate();
       }
 
       // Stuck-loop detector. Re-planning steps (done/extract/login/
@@ -9691,8 +12913,8 @@ ${formatInventory(input.inventory)}`,
       // wizard step or a new page. Reset the per-stable-run click-selector
       // memory so distinct clicks on the NEW state aren't judged against the
       // old one.
-      if (inventory.length !== prevInventorySize) {
-        clickSelectorsSinceInventoryChange = new Set<string>();
+      if (inventory.length !== recovery.prevInventorySize) {
+        recovery.clickSelectorsSinceInventoryChange = new Set<string>();
       }
       if (repeatableKinds.has(nextStep.kind)) {
         const sel = "selector" in nextStep ? (nextStep.selector ?? "<none>") : "<none>";
@@ -9704,7 +12926,7 @@ ${formatInventory(input.inventory)}`,
         // (planner cycles through Create, Focus-input, Create again,
         // …). When that happens, force a non-click action.
         const sameSelector =
-          signature === prevSignature && inventory.length === prevInventorySize;
+          signature === recovery.prevSignature && inventory.length === recovery.prevInventorySize;
         // A brand-new click selector (never clicked since the inventory last
         // changed) is wizard PROGRESS, not a cycle — selecting role, then
         // company-size, then a plan flips aria-checked without moving the
@@ -9712,15 +12934,15 @@ ${formatInventory(input.inventory)}`,
         // selector has already been clicked in this stable-inventory run.
         const clickSelectorIsRepeat =
           nextStep.kind === "click" &&
-          clickSelectorsSinceInventoryChange.has(sel);
+          recovery.clickSelectorsSinceInventoryChange.has(sel);
         const stuckOnKind =
           nextStep.kind === "click" &&
-          prevSignature !== null &&
-          prevSignature.startsWith("click|") &&
-          inventory.length === prevInventorySize &&
+          recovery.prevSignature !== null &&
+          recovery.prevSignature.startsWith("click|") &&
+          inventory.length === recovery.prevInventorySize &&
           clickSelectorIsRepeat;
         if (nextStep.kind === "click") {
-          clickSelectorsSinceInventoryChange.add(sel);
+          recovery.clickSelectorsSinceInventoryChange.add(sel);
         }
         if (sameSelector || stuckOnKind) {
           const emptyInputs = inventory
@@ -9795,7 +13017,7 @@ ${formatInventory(input.inventory)}`,
           // button-shaped element with role=combobox OR placeholder-
           // shaped visible text, and NOT touched this run.
           const SELECT_PROMPT_TEXT =
-            /^(?:select|choose|pick)\b|^select an?\b|\bselect\.{3}|\bchoose\.{3}/i;
+            /^(?:select|choose|pick)\b|^select an?\b|\bselect\.{3}|\bchoose\.{3}|select\s+(?:parent\s+)?(?:resource|organization|organisation|workspace|project|account|team)\b/i;
           const customComboboxes = inventory
             .filter(
               (e) =>
@@ -9848,11 +13070,11 @@ ${formatInventory(input.inventory)}`,
           // can switch tactics once the gentle re-plan hint has clearly
           // failed (the planner refuses to break the cycle on its own,
           // see the Anthropic six-round pattern in rc.8).
-          if (lastStuckFireUrl === state.url) {
-            stuckFiresAtUrl += 1;
+          if (recovery.lastStuckFireUrl === state.url) {
+            recovery.stuckFiresAtUrl += 1;
           } else {
-            stuckFiresAtUrl = 1;
-            lastStuckFireUrl = state.url;
+            recovery.stuckFiresAtUrl = 1;
+            recovery.lastStuckFireUrl = state.url;
           }
           // After two stuck fires at the same URL, escalate to a
           // hardcoded /settings/keys-style navigation. Vendors almost
@@ -9862,7 +13084,7 @@ ${formatInventory(input.inventory)}`,
           // ordered most-specific first so a service whose dashboard
           // root happens to share /settings with the API-keys page
           // doesn't land short of the actual page.
-          if (stuckFiresAtUrl >= 2) {
+          if (recovery.stuckFiresAtUrl >= 2) {
             // 0.8.2-rc.12 — when the bot is ALREADY on a URL that names
             // an API-keys page (path contains /keys, /tokens, /api-keys,
             // etc.) AND the page text shows masked-credential markers,
@@ -9906,18 +13128,40 @@ ${formatInventory(input.inventory)}`,
             // it actually moves the page, the next iteration's
             // inventory-change check resets the stuck counter and the
             // bot continues normally.
-            const WIZARD_FORWARD =
-              /^\s*(?:next|continue|submit|finish|done|get\s+started)\s*$/i;
+            const leafChoice = pickOnboardingLeafChoice(
+              inventory,
+              recovery.triedWizardLeafChoices,
+            );
+            if (leafChoice !== null) {
+              recovery.triedWizardLeafChoices.add(leafChoice.selector);
+              args.steps.push(
+                `Post-verify: stuck-loop ${recovery.stuckFiresAtUrl}x at ${state.url} — ` +
+                  `parent role selected but a required leaf role is still available; clicking ` +
+                  `${JSON.stringify(leafChoice.visibleText ?? leafChoice.ariaLabel)} before submitting.`,
+              );
+              try {
+                await this.browser.click(leafChoice.selector);
+                await this.browser.wait(2);
+              } catch (err) {
+                args.steps.push(
+                  `Post-verify: wizard leaf-role click failed (${err instanceof Error ? err.message : String(err)}) — falling through.`,
+                );
+              }
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
+              hint = undefined;
+              continue;
+            }
             const wizardBtn = inventory.find(
               (e) =>
                 (e.tag === "button" || e.role === "button") &&
-                WIZARD_FORWARD.test((e.visibleText ?? e.ariaLabel ?? "").trim()) &&
+                isOnboardingForwardLabel((e.visibleText ?? e.ariaLabel ?? "").trim()) &&
                 e.visible === true,
             );
-            if (wizardBtn !== undefined && !triedWizardForward.has(state.url)) {
-              triedWizardForward.add(state.url);
+            if (wizardBtn !== undefined && !recovery.triedWizardForward.has(state.url)) {
+              recovery.triedWizardForward.add(state.url);
               args.steps.push(
-                `Post-verify: stuck-loop ${stuckFiresAtUrl}x at ${state.url} — wizard-forward escalation: clicking ${JSON.stringify(wizardBtn.visibleText ?? wizardBtn.ariaLabel)}.`,
+                `Post-verify: stuck-loop ${recovery.stuckFiresAtUrl}x at ${state.url} — wizard-forward escalation: clicking ${JSON.stringify(wizardBtn.visibleText ?? wizardBtn.ariaLabel)}.`,
               );
               try {
                 await this.browser.click(wizardBtn.selector);
@@ -9927,20 +13171,21 @@ ${formatInventory(input.inventory)}`,
                   `Post-verify: wizard-forward click failed (${err instanceof Error ? err.message : String(err)}) — falling through to URL fallback.`,
                 );
               }
-              prevSignature = null;
-              prevInventorySize = -1;
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
               hint = undefined;
               continue;
             }
             const fallback = pickStuckLoopFallbackUrl(
               state.url,
-              triedFallbackUrls,
+              recovery.triedFallbackUrls,
               args.service,
+              this.resolvedSignupUrl,
             );
             if (fallback !== null) {
-              triedFallbackUrls.add(fallback);
+              recovery.triedFallbackUrls.add(fallback);
               args.steps.push(
-                `Post-verify: stuck-loop detected ${stuckFiresAtUrl}x at ${state.url} — escalating to a hardcoded API-key URL: ${fallback}`,
+                `Post-verify: stuck-loop detected ${recovery.stuckFiresAtUrl}x at ${state.url} — escalating to a hardcoded API-key URL: ${fallback}`,
               );
               try {
                 await this.browser.goto(fallback);
@@ -9952,11 +13197,11 @@ ${formatInventory(input.inventory)}`,
               }
               // Reset signature tracking so the next round starts clean
               // against the new URL's inventory. Don't reset
-              // stuckFiresAtUrl here — it's keyed by URL and the URL
+              // recovery.stuckFiresAtUrl here — it's keyed by URL and the URL
               // about to be observed will be different, which naturally
               // resets it on the next loop entry.
-              prevSignature = null;
-              prevInventorySize = -1;
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
               hint = undefined;
               // Don't bump capturedRound — captureOnboardingRound above
               // already wrote a capture for this round (the stuck-loop
@@ -9971,8 +13216,8 @@ ${formatInventory(input.inventory)}`,
             // caller surfaces planner_stuck instead of the generic
             // oauth_onboarding_failed, then break out of the loop.
             this.lastPostVerifyDoneReason =
-              `[stuck_loop] planner re-picked the same ${nextStep.kind} step ${stuckFiresAtUrl} times at ${state.url} with no inventory change; ` +
-              `hardcoded API-key URL fallbacks exhausted (tried: ${[...triedFallbackUrls].join(", ") || "none"}). ` +
+              `[stuck_loop] planner re-picked the same ${nextStep.kind} step ${recovery.stuckFiresAtUrl} times at ${state.url} with no inventory change; ` +
+              `hardcoded API-key URL fallbacks exhausted (tried: ${[...recovery.triedFallbackUrls].join(", ") || "none"}). ` +
               `Latest planner reason: ${nextStep.reason}`;
             args.steps.push(
               `Post-verify: stuck-loop unresolvable — breaking out with planner_stuck.`,
@@ -10008,25 +13253,25 @@ ${formatInventory(input.inventory)}`,
             customComboboxHint +
             uncheckedBoxHint +
             stallHint;
-          prevSignature = signature;
-          prevInventorySize = inventory.length;
+          recovery.prevSignature = signature;
+          recovery.prevInventorySize = inventory.length;
           continue;
         }
-        prevSignature = signature;
-        prevInventorySize = inventory.length;
+        recovery.prevSignature = signature;
+        recovery.prevInventorySize = inventory.length;
       } else {
         // Reset the signature on non-repeatable kinds so a `navigate`
         // followed by a `click` doesn't pattern-match the click against
         // a click before the navigate.
-        prevSignature = null;
-        prevInventorySize = inventory.length;
+        recovery.prevSignature = null;
+        recovery.prevInventorySize = inventory.length;
       }
 
       // Record the kind of the step we're ABOUT to execute (all re-plan
       // `continue` guards are behind us here) so next round can judge
       // whether it changed the page — the stalled-wizard breaker above.
-      lastActionKind = nextStep.kind;
-      lastActionSelector =
+      recovery.lastActionKind = nextStep.kind;
+      recovery.lastActionSelector =
         "selector" in nextStep && typeof nextStep.selector === "string"
           ? nextStep.selector
           : null;
@@ -10063,20 +13308,48 @@ ${formatInventory(input.inventory)}`,
         // as "no API keys", which sit under Account Settings. Before
         // accepting `done` with zero credentials captured, navigate to an
         // unvisited canonical keys URL (same fallback list the stuck-loop
-        // escalation uses). Bounded by triedFallbackUrls — once every
+        // escalation uses). Bounded by recovery.triedFallbackUrls — once every
         // candidate is exhausted, `done` is honored.
         const capturedCredCount = Object.keys(credentials).filter(
           (k) => !NON_CREDENTIAL_KEYS.has(k),
         ).length;
-        if (capturedCredCount === 0 && prematureDoneFallbacks < MAX_PREMATURE_DONE_FALLBACKS) {
+        if (capturedCredCount === 0 && recovery.prematureDoneFallbacks < MAX_PREMATURE_DONE_FALLBACKS) {
+          // Prefer CLICKING a real API-keys nav link over guessing a URL.
+          // The dashboard's own sidebar/menu link carries the correct href;
+          // guessing /keys, /api-keys, /settings/api-keys 404s on services
+          // that host keys at a non-standard path (unify-ai). Only when no
+          // such link is in the DOM do we fall through to URL composition.
+          const keysLink = findApiKeysNavLink(inventory, recovery.clickedKeysLinks);
+          if (keysLink !== null) {
+            recovery.prematureDoneFallbacks += 1;
+            recovery.clickedKeysLinks.add(keysLink.selector);
+            const label =
+              (keysLink.visibleText ?? keysLink.ariaLabel ?? keysLink.href ?? keysLink.selector) || keysLink.selector;
+            args.steps.push(
+              `Post-verify: planner emitted done with no credential captured — ` +
+                `clicking the in-page API-keys link "${label.slice(0, 60)}" ` +
+                `(${keysLink.href ?? keysLink.selector}) before guessing a URL`,
+            );
+            try {
+              await this.browser.click(keysLink.selector);
+              await this.browser.waitForInteractiveDom(5, 15_000);
+            } catch (err) {
+              args.steps.push(
+                `Post-verify: API-keys link click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+              );
+            }
+            hint = undefined;
+            continue;
+          }
           const fallback = pickStuckLoopFallbackUrl(
             state.url,
-            triedFallbackUrls,
+            recovery.triedFallbackUrls,
             args.service,
+            this.resolvedSignupUrl,
           );
           if (fallback !== null) {
-            prematureDoneFallbacks += 1;
-            triedFallbackUrls.add(fallback);
+            recovery.prematureDoneFallbacks += 1;
+            recovery.triedFallbackUrls.add(fallback);
             args.steps.push(
               `Post-verify: planner emitted done with no credential captured — ` +
                 `navigating to an unvisited API-keys URL before giving up: ${fallback}`,
@@ -10096,61 +13369,55 @@ ${formatInventory(input.inventory)}`,
         this.lastPostVerifyDoneReason = nextStep.reason;
         break;
       }
-      // rc.39 — wait-loop break. The planner is asking us to wait
-      // round after round on an empty page (Turso's Cloudflare SSO
-      // callback). Cap at three consecutive waits with zero inventory
-      // and surface the empty-page reason so the caller can classify.
-      if (nextStep.kind === "wait" && inventory.length === 0) {
-        consecutiveWaits += 1;
-        if (consecutiveWaits >= 3) {
-          this.lastPostVerifyDoneReason =
-            `post-OAuth landing rendered 0 interactive elements for ${consecutiveWaits} rounds — ` +
-            `most recent planner reason: ${nextStep.reason}`;
-          args.steps.push(
-            `Post-verify: wait-loop on an empty page (${consecutiveWaits} consecutive rounds, 0 elements) — breaking out.`,
-          );
+      if (nextStep.kind === "wait") {
+        const waitDecision = recoveryFlow.decideWait({
+          url: state.url,
+          inventoryCount: inventory.length,
+          reason: nextStep.reason,
+        });
+        if (waitDecision.kind === "break") {
+          this.lastPostVerifyDoneReason = waitDecision.doneReason;
+          args.steps.push(waitDecision.message);
           break;
         }
-      } else {
-        consecutiveWaits = 0;
-      }
-      // Writer-class hung post-OAuth redirect: consecutive waits on the SAME
-      // url even though the page has elements (a spinner shell). Reload once
-      // at the 4th, break at the 6th — don't burn the whole budget waiting.
-      if (nextStep.kind === "wait") {
-        if (state.url === lastWaitUrl) {
-          consecutiveSameUrlWaits += 1;
-        } else {
-          consecutiveSameUrlWaits = 1;
-          lastWaitUrl = state.url;
-        }
-        if (consecutiveSameUrlWaits === 4 && !waitReloadTried) {
-          waitReloadTried = true;
-          args.steps.push(
-            `Post-verify: ${consecutiveSameUrlWaits} consecutive waits on ${state.url} — reloading once to unstick a hung post-OAuth redirect.`,
-          );
+        if (waitDecision.kind === "reload") {
+          args.steps.push(waitDecision.message);
           try {
-            await this.browser.goto(state.url);
+            await this.browser.goto(waitDecision.url);
             await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
           } catch {
             // reload failed — next round's wait will reach the break below
           }
           continue;
         }
-        if (consecutiveSameUrlWaits >= 6) {
-          this.lastPostVerifyDoneReason =
-            `post-OAuth interstitial (${state.url}) never resolved after ${consecutiveSameUrlWaits} waits — ` +
-            `likely a hung redirect or onboarding bootstrap for a freshly-created account`;
-          args.steps.push(
-            `Post-verify: wait-loop on ${state.url} (${consecutiveSameUrlWaits} rounds, page has elements but never advances) — breaking out.`,
-          );
-          break;
-        }
       } else {
-        consecutiveSameUrlWaits = 0;
-        lastWaitUrl = null;
+        recoveryFlow.recordNonWait();
       }
       hint = undefined;
+      let semanticVerdictUpdated = false;
+      const updateSemanticVerdict = async (): Promise<void> => {
+        if (semanticVerdictUpdated) return;
+        semanticVerdictUpdated = true;
+        try {
+          const afterFrame = await this.capturePostVerifyObservationFrame(args.steps);
+          semanticTransition = evaluateSemanticTransition(
+            semanticTransition,
+            { state, inventory, credentialPresent: hasAnyExtractedCredential(credentials) },
+            {
+              state: afterFrame.state,
+              inventory: afterFrame.inventory,
+              credentialPresent: hasAnyExtractedCredential(credentials),
+            },
+          );
+          updateCapturedRoundSemantic(args.service, semanticCapturedRound, semanticTransition);
+          args.steps.push(
+            `Post-verify semantic ${round + 1}/${args.maxRounds}: ${semanticTransition.intent.kind} ` +
+              `predicate=${semanticTransition.predicate.verdict}`,
+          );
+        } catch {
+          // Best-effort diagnostic update; never affect signup control flow.
+        }
+      };
       try {
         if (nextStep.kind === "extract") {
           // rc.16 — record that the planner has now affirmatively
@@ -10159,149 +13426,44 @@ ${formatInventory(input.inventory)}`,
           // from a hidden field on a billing page" (don't exit) from
           // "api_key came from a labeled credential row the planner
           // just observed" (safe to exit on single-cred services).
-          plannerExtractEmitted = true;
-          // 0.8.2-rc.12 — multi-cred preservation + always-on Phase E.
-          //
-          // Pre-rc.12 the extract step was a tower of "if no api_key,
-          // try Phase E; else done." That short-circuit silently lost
-          // cloud_name + api_secret on Cloudinary-class services whose
-          // api_key is plain-visible to the legacy regex extractor —
-          // the legacy path filled credentials.api_key, the if-branch
-          // skipped Phase E entirely, and the loop's top-of-iter exit
-          // returned a partial bundle.
-          //
-          // New shape: run the legacy extractor, Phase E, the reveal
-          // pass, and DOM-proximity UNCONDITIONALLY on every extract
-          // round, merging each into `credentials` first-wins. A later
-          // pass never clobbers a value an earlier pass labeled. This
-          // mirrors the design doc: Phase E is the multi-cred surface;
-          // single-cred is just multi-cred-with-one-key.
-          const [pageText, inputValues] = await Promise.all([
-            this.browser.extractText().catch(() => ""),
-            this.browser.extractAllInputValues().catch(() => [] as string[]),
-          ]);
-          const verifySource = pageText + "\n" + inputValues.join("\n");
+          credentialTracker.recordPlannerExtract();
+          const extractionRound =
+            await credentialExtractionFlow.runPostSignupExtractionRound({
+              credentials,
+              reason: nextStep.reason,
+              round,
+              maxRounds: args.maxRounds,
+              detectPresentedCredentialLabels:
+                !credentialTracker.hasObservedMultiCredPage(),
+              port: {
+                extractText: () => this.browser.extractText(),
+                extractAllInputValues: () => this.browser.extractAllInputValues(),
+                extractCredentials: () => this.extractCredentials(),
+                extractFromDomProximity: () => this.extractFromDomProximity(),
+                revealMaskedCredentials: () =>
+                  this.browser.revealMaskedCredentials(),
+                extractLabeledCredentialCandidates: () =>
+                  this.browser.extractLabeledCredentialCandidates(),
+                countPresentedCredentialLabels: () =>
+                  this.countPresentedCredentialLabels(),
+              },
+            });
+          args.steps.push(...extractionRound.steps);
 
-          // Tier 1 — legacy single-cred extractor (api_key by shape).
-          // Merge into the running accumulator instead of overwriting;
-          // a Phase E label captured on a prior round wins over a
-          // later legacy regex hit.
-          const legacy = await this.extractCredentials();
-          for (const [k, v] of Object.entries(legacy)) {
-            if (credentials[k] === undefined) credentials[k] = v;
-          }
-
-          // Tier 2 — Phase E labeled-token parser over the planner's
-          // reason. Picks up cloud_name='dlq4xgrca' / api_key='4917…'
-          // / application_id='X' / admin_api_key='…' style narrative.
-          const labeled = extractAllLabeledTokensFromReason(
-            nextStep.reason,
-            verifySource,
-          );
-          const labeledNewKeys = Object.keys(labeled).filter(
-            (k) => credentials[k] === undefined,
-          );
-          if (labeledNewKeys.length > 0) {
-            for (const k of labeledNewKeys) credentials[k] = labeled[k]!;
-            const summary = labeledNewKeys
-              .map((k) => `${k}=${labeled[k]!.slice(0, 4)}…${labeled[k]!.slice(-4)}`)
-              .join(", ");
+          if (
+            extractionRound.presentedCredentialCount !== null &&
+            extractionRound.presentedCredentialCount >= 2 &&
+            credentialTracker.recordPageOffersMultiCred()
+          ) {
             args.steps.push(
-              `Post-verify ${round + 1}/${args.maxRounds}: Phase E surfaced ${labeledNewKeys.length} labeled credential(s) (${summary})`,
+              `Post-verify ${round + 1}/${args.maxRounds}: page presents ${extractionRound.presentedCredentialCount} distinct credentials — holding the loop open to harvest all (not just the first).`,
             );
-          }
-
-          // Tier 2.5 — reveal-then-extract when the planner explicitly
-          // flagged a masked credential. Fires whether or not we
-          // already have other credentials — Cloudinary's api_secret
-          // sits beside an already-visible api_key in the table.
-          const MASKED_HINT =
-            /\b(?:masked|hidden|bullets?|asterisks?|••+|\*{3,}|reveal|unmask)\b/i;
-          if (MASKED_HINT.test(nextStep.reason)) {
-            try {
-              const revealRes = await this.browser.revealMaskedCredentials();
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
-              );
-              if (revealRes.clicked > 0) {
-                const labeledAfter = await this.extractFromDomProximity();
-                const afterNewKeys = Object.keys(labeledAfter).filter(
-                  (k) => credentials[k] === undefined,
-                );
-                if (afterNewKeys.length > 0) {
-                  for (const k of afterNewKeys) credentials[k] = labeledAfter[k]!;
-                  args.steps.push(
-                    `Post-verify ${round + 1}/${args.maxRounds}: post-reveal DOM-proximity extracted ${afterNewKeys.length} more (${afterNewKeys.join(", ")})`,
-                  );
-                } else {
-                  // Diagnostic: which candidates were seen on the page?
-                  // Helps debug "Reveal click landed but the value
-                  // didn't appear in proximity to a known label".
-                  const allLabeled =
-                    await this.browser.extractLabeledCredentialCandidates();
-                  const candSummary = allLabeled
-                    .filter((c) => !c.isMasked)
-                    .slice(0, 8)
-                    .map(
-                      (c) =>
-                        `${c.value.slice(0, 6)}…(${c.value.length}ch)/${c.label ?? "no-label"}`,
-                    )
-                    .join(", ");
-                  args.steps.push(
-                    `Post-verify ${round + 1}/${args.maxRounds}: post-reveal had ${allLabeled.length} candidates; visible: ${candSummary}`,
-                  );
-                }
-              }
-            } catch (err) {
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
-              );
-            }
-          }
-
-          // Tier 3 — DOM-proximity labeled extractor. Walks the
-          // visible DOM, pairs credential-shape strings with their
-          // nearest credential-label text. Catches services whose
-          // planner-reason narrative missed sibling labels but whose
-          // DOM still has them as <td>/<dt> pairs.
-          try {
-            const labeledFromDom = await this.extractFromDomProximity();
-            const domNewKeys = Object.keys(labeledFromDom).filter(
-              (k) => credentials[k] === undefined,
-            );
-            if (domNewKeys.length > 0) {
-              for (const k of domNewKeys) credentials[k] = labeledFromDom[k]!;
-              const summary = domNewKeys
-                .map((k) => `${k}=${labeledFromDom[k]!.slice(0, 4)}…${labeledFromDom[k]!.slice(-4)}`)
-                .join(", ");
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: DOM-proximity surfaced ${domNewKeys.length} more (${summary})`,
-              );
-            }
-          } catch {
-            // best-effort; never abort an extract pass on DOM-proximity
-            // failure (page mid-navigation etc).
-          }
-
-          // "Stops at one" guard: does THIS page present >=2 distinct
-          // credentials (masked included)? If so, hold the loop open past
-          // the first key so the reveal pass + DOM harvest get more rounds
-          // to capture the siblings — even when only one value is in hand
-          // right now. Bounded downstream by roundsSinceLastNewCredential.
-          if (!pageOffersMultiCred) {
-            const presented = await this.countPresentedCredentialLabels();
-            if (presented >= 2) {
-              pageOffersMultiCred = true;
-              args.steps.push(
-                `Post-verify ${round + 1}/${args.maxRounds}: page presents ${presented} distinct credentials — holding the loop open to harvest all (not just the first).`,
-              );
-            }
           }
 
           // Anything found across all tiers? hasMultiCredCredentials
           // also catches non-api_key labels (cloud_name, application_id).
-          if (hasAnyExtractedCredential(credentials)) {
-            consecutiveFailedExtracts = 0;
+          if (extractionRound.foundAnyCredential) {
+            recoveryFlow.recordExtractionSuccess();
             continue;
           }
 
@@ -10312,7 +13474,7 @@ ${formatInventory(input.inventory)}`,
           {
             const quoted = extractQuotedTokenFromReason(
               nextStep.reason,
-              verifySource,
+              extractionRound.verifySource,
             );
             if (quoted !== null) {
               credentials.api_key = quoted;
@@ -10320,10 +13482,9 @@ ${formatInventory(input.inventory)}`,
                 `Post-verify ${round + 1}/${args.maxRounds}: extracted token via ` +
                   `planner-quoted fallback (${quoted.slice(0, 4)}…${quoted.slice(-4)})`,
               );
-              consecutiveFailedExtracts = 0;
+              recoveryFlow.recordExtractionSuccess();
               continue;
             }
-            consecutiveFailedExtracts += 1;
             // Best-effort diagnostic upload: when extract returns
             // null despite the planner asserting a credential is
             // visible, capture the DOM + screenshot so the UI shape
@@ -10352,305 +13513,118 @@ ${formatInventory(input.inventory)}`,
                 }
               })();
             }
-            // Two consecutive failed extracts on a DOM the planner
-            // keeps quoting a token from means the value's shape is
-            // not in our regex library (Railway: bare UUID; some
-            // smaller services use opaque alphanumeric tokens with no
-            // recognisable prefix or nearby label). Steer HARD toward
-            // a Copy-button click — the page renders a Copy affordance
-            // far more often than it changes the token's text shape,
-            // and the Copy path is regex-free. Falling back to `done`
-            // is acceptable when the user can copy the token visually.
-            if (consecutiveFailedExtracts >= 2) {
-              args.steps.push(
-                `Post-verify: ${consecutiveFailedExtracts} consecutive failed extracts ` +
-                  `on a page the planner says shows a token — the value's shape is not ` +
-                  `in this build's regex library. Re-planning off extract.`,
-              );
-              hint =
-                "Your last TWO 'extract' attempts returned NO key, even though you " +
-                "said the token is visible. The token's SHAPE is not one this " +
-                "extractor recognises (e.g. a bare UUID with no 'API key:' label " +
-                "nearby). Do NOT issue another 'extract'. Instead: " +
-                "(1) {\"kind\":\"click\"} a 'Copy' / 'Copy token' / 'Copy to clipboard' " +
-                "button near the token — the clipboard path bypasses the regex. " +
-                "(2) If no Copy button exists, issue {\"kind\":\"done\"} — the user " +
-                "will copy the token manually from the screenshot.";
-              consecutiveFailedExtracts = 0;
-            } else {
-              // First failure: keep the existing masked/truncated hint
-              // — most services that fail extract once do so because
-              // the displayed value is dots/ellipsis, and the existing
-              // hint correctly steers to "create a fresh key".
-              hint =
-                "Your last 'extract' found NO key — the key text on the page is " +
-                "masked or truncated (e.g. shows '...' or dots). A masked existing " +
-                "key cannot be extracted. Click 'Create API Key' / 'New API Key' to " +
-                "generate a fresh one — its full value is shown once, on creation.";
+            const failedExtract = recoveryFlow.decideFailedExtract();
+            if (failedExtract.kind === "replan") {
+              args.steps.push(failedExtract.message);
             }
+            hint = failedExtract.hint;
           }
-        } else if (nextStep.kind === "click") {
-          await this.browser.click(nextStep.selector);
-          // F7 / 0.6.15-rc.11 — Modal-based credential reveals
-          // (OpenRouter, Anthropic, OpenAI Create-Key flows) render
-          // the new key into a modal AFTER a server round-trip — the
-          // prior blind 2s wait was racing the API response. The
-          // implicit-extract that follows this branch then found
-          // nothing, the round ended, and by the next round the modal
-          // had auto-closed. Poll up to 8s for the key to appear in
-          // the post-action DOM. Early-exit as soon as
-          // extractCredentials returns one — typical happy path on
-          // services without modal-delay returns in <1s. Saves both
-          // time (no overshoot wait) and correctness (catches the
-          // modal-render race).
-          // 0.8.2-rc.12 — merge polled extract into the running
-          // credentials accumulator (was previously assigned to a
-          // throwaway `pollExtract` local). On modal-key reveal
-          // flows (OpenRouter, Anthropic, OpenAI) the credential
-          // appears only here, and the legacy assignment was lost
-          // unless the next round's top-of-iter re-read just
-          // happened to find it again — a flaky guarantee.
-          //
-          // 0.8.2-rc.15 — also poll DOM-proximity. A click that
-          // reveals an api_secret next to a known label (Cloudinary
-          // reveal click → api_secret becomes visible next to "API
-          // Secret" text) wouldn't surface in the legacy api_key-
-          // shaped regex, so a multi-cred reveal landed nothing
-          // unless the explicit extract round re-fired afterward.
-          const credentialDeadline = Date.now() + 8000;
-          let alertSeen = "";
-          let alertChecked = false;
-          while (Date.now() < credentialDeadline) {
-            await this.browser.wait(0.5);
-            // Reuse the first 0.5s settle to grab any transient toast/notification
-            // a submit-like click raised (validation error, rate-limit, "operation
-            // failed") before it auto-dismisses — otherwise a failed submit reads
-            // as a SILENT no-op. MEASURED 2026-06-11 (deepseek Sign-up).
-            if (!alertChecked) {
-              alertChecked = true;
-              alertSeen = await this.browser.captureTransientAlert(0);
-            }
-            try {
-              const pollExtract = await this.extractCredentials();
-              for (const [k, v] of Object.entries(pollExtract)) {
-                if (credentials[k] === undefined) credentials[k] = v;
-              }
-              try {
-                const pollLabeled = await this.extractFromDomProximity();
-                for (const [k, v] of Object.entries(pollLabeled)) {
-                  if (credentials[k] === undefined) credentials[k] = v;
-                }
-              } catch {
-                // DOM-proximity failure is non-fatal; we'll retry
-                // the next tick or fall through to the next round.
-              }
-              // Early-exit when we have an api_key — most services'
-              // happy path completes in <1s. Multi-cred siblings
-              // (api_secret, cloud_name) keep accumulating across
-              // subsequent rounds; we don't hold the inner poll for
-              // them here.
-              if (credentials.api_key !== undefined) break;
-            } catch {
-              // Page mid-render — keep polling; next tick may settle.
-            }
-          }
-          // A click that raised a notification but yielded no key — surface the
-          // toast text so the planner addresses the real error instead of
-          // re-clicking the same dead button into a stuck-loop.
-          if (credentials.api_key === undefined && alertSeen.length > 0) {
-            args.steps.push(
-              `Post-verify: the page showed a notification after the click: "${alertSeen}"`,
-            );
-            // Forensic snapshot of the page in its post-click error state.
-            // The before-fill/after-submit snapshots only cover the FIRST
-            // submit; a failure on a post-verify re-submit (e.g. deepseek's
-            // "Submitted failed. Please try again." after the OTP is filled)
-            // was otherwise unobservable. Non-fatal by contract.
-            await saveDebugSnapshot(this.browser, "post-verify-alert");
-            hint =
-              `After your last click the page showed this notification: "${alertSeen}". ` +
-              `It likely explains why the page did not advance — address it (fix the named ` +
-              `field, wait, or choose a different action) rather than repeating the same click.`;
-          }
-        } else if (nextStep.kind === "fill") {
-          await this.browser.type(nextStep.selector, nextStep.value);
-        } else if (nextStep.kind === "select") {
-          await this.browser.selectOption(nextStep.selector, nextStep.option_text);
-          await this.browser.wait(1);
-        } else if (nextStep.kind === "check") {
-          // browser.check force-ticks + scrolls into view + verifies —
-          // a styled TOS checkbox a plain click can't flip.
-          await this.browser.check(nextStep.selector);
-          await this.browser.wait(1);
-        } else if (nextStep.kind === "scroll") {
-          // Drive a ToS modal to the bottom so its gated Accept button
-          // enables. Railway-class flow: planner sees a disabled
-          // "Accept" + a long modal body, asks us to scroll it.
-          const result = await this.browser.scrollToEndOfTOS(nextStep.selector);
-          if (result.reason === "no_container") {
-            args.steps.push(
-              `Post-verify: scroll requested but no scrollable container found — re-planning.`,
-            );
-            hint =
-              "Your last 'scroll' found NO scrollable container on the page. " +
-              "Do NOT return scroll again — try clicking a different element, " +
-              "or return done if the gated button still won't enable.";
-          } else if (result.reason === "already_at_bottom") {
-            args.steps.push(
-              `Post-verify: scroll requested but ${result.container} is already at the bottom — re-planning.`,
-            );
-            hint =
-              "Your last 'scroll' was a no-op — the scrollable container is ALREADY at the " +
-              "bottom. Whatever is keeping the Accept button disabled is NOT scroll position. " +
-              "Re-read the page: look for an unticked agreement checkbox, an unfilled required " +
-              "input (name/email), a sub-tab on the modal that hasn't been visited, or a 'I agree' " +
-              "radio button. Do NOT return scroll again.";
-          } else {
-            args.steps.push(`Post-verify: scrolled ToS container (${result.container}) to bottom.`);
-          }
-          await this.browser.wait(1);
-        } else if (nextStep.kind === "navigate") {
-          await this.browser.goto(nextStep.url);
-          // rc.33 — wait for the SPA to actually render before the
-          // next round reads inventory. waitForFormReady (called at
-          // the top of the next round) handles the basic "DOM
-          // parsed" signal, but Porter / Koyeb's API-tokens pages
-          // load over 5-15 seconds — the planner-driven post-verify
-          // loop was running on the empty initial shell and burning
-          // rounds clicking nothing. Wait for at least 5 interactive
-          // elements (Porter's tokens page has 20+ once rendered).
-          await this.browser.waitForInteractiveDom(5, 20_000);
-        } else if (nextStep.kind === "wait") {
-          await this.browser.wait(Math.min(nextStep.seconds, 15));
         } else if (nextStep.kind === "login") {
-          if (args.credentials === undefined) {
-            // OAuth run — no password to give. A single ask can be a
-            // transient mid-render read, but a SECOND ask means the page
-            // keeps presenting login: the OAuth session didn't persist.
-            // Bail with the right classification (A5) instead of thrashing
-            // the rest of maxRounds and ending in oauth_onboarding_failed.
-            oauthLoginRequests += 1;
-            if (oauthLoginRequests >= 2) {
-              const st = await this.browser.getState().catch(() => null);
-              args.steps.push(
-                "Post-verify: planner hit a login page twice on an OAuth run — " +
-                  "the OAuth session didn't persist; bailing.",
-              );
-              throw new OAuthSessionNotPersistedError(
-                `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the ` +
-                  `page still presents a login screen (${st !== null ? pathOf(st.url) : "?"}) — the ` +
-                  `OAuth callback never established a session (anti-bot rejection of the callback, ` +
-                  `or a service-side session-storage issue). Finish the signup manually.`,
-              );
-            }
-            args.steps.push(
-              "Post-verify: planner asked to log in on an OAuth run — already " +
-                "authenticated via Google; skipping (1st ask, may be a transient read).",
-            );
-          } else if (loginAttempts >= 2) {
-            args.steps.push("Post-verify: already attempted login twice — stopping.");
-            break;
-          } else {
-            loginAttempts += 1;
-            await this.loginWithCredentials(
-              args.credentials.email,
-              args.credentials.password,
-              args.steps,
+          const loginResult = await loginFlow.handleLoginRequest({
+            ...(args.credentials !== undefined
+              ? { credentials: args.credentials }
+              : {}),
+            steps: args.steps,
+            port: {
+              getState: () => this.browser.getState(),
+              loginWithCredentials: (email, password, steps) =>
+                this.loginWithCredentials(email, password, steps, {
+                  ...(args.inbox !== undefined ? { inbox: args.inbox } : {}),
+                  verificationEmailAlias:
+                    args.verificationEmailAlias ?? args.credentials?.email ?? email,
+                }),
+            },
+          });
+          if (loginResult.kind === "oauth_session_not_persisted") {
+            throw new OAuthSessionNotPersistedError(
+              `oauth_session_not_persisted: signed in to ${args.service} via OAuth but the ` +
+                `page still presents a login screen (${loginResult.url !== null ? pathOf(loginResult.url) : "?"}) — the ` +
+                `OAuth callback never established a session (anti-bot rejection of the callback, ` +
+                `or a service-side session-storage issue). Finish the signup manually.`,
             );
           }
+          if (loginResult.kind === "break") {
+            break;
+          }
+        } else {
+          const retargetedStep = retargetCredentialAppTypeChoice(nextStep, inventory);
+          const pickerRetargetedStep = retargetSubmitToDefaultedPicker(retargetedStep, inventory);
+          const executableStep = coerceCheckboxClickStep(pickerRetargetedStep, inventory);
+          if (retargetedStep !== nextStep && retargetedStep.kind === "click" && nextStep.kind === "click") {
+            args.steps.push(
+              `Post-verify: retargeted app-type choice from ${JSON.stringify(nextStep.selector)} ` +
+                `to ${JSON.stringify(retargetedStep.selector)}.`,
+            );
+          }
+          if (
+            pickerRetargetedStep !== retargetedStep &&
+            (pickerRetargetedStep.kind === "select" || pickerRetargetedStep.kind === "click") &&
+            retargetedStep.kind === "click"
+          ) {
+            args.steps.push(
+              `Post-verify: retargeted submit click ${JSON.stringify(retargetedStep.selector)} ` +
+                `to required picker ${pickerRetargetedStep.kind} ${JSON.stringify(pickerRetargetedStep.selector)}.`,
+            );
+          }
+          if (executableStep !== pickerRetargetedStep && executableStep.kind === "check" && pickerRetargetedStep.kind === "click") {
+            args.steps.push(
+              `Post-verify: coerced checkbox click ${JSON.stringify(pickerRetargetedStep.selector)} to check.`,
+            );
+          }
+          const submitClick =
+            executableStep.kind === "click" &&
+            inventory.some(
+              (e) =>
+                e.selector === executableStep.selector &&
+                (e.type === "submit" ||
+                  /^(?:continue|next|submit|create|finish|done)\b/i.test(
+                    (e.visibleText ?? e.ariaLabel ?? "").trim(),
+                  )),
+            );
+          const execution = await actionExecutor.execute({
+            step: executableStep as PostSignupExecutableAction,
+            credentials,
+            snapshotPostClickAlert: () =>
+              saveDebugSnapshot(this.browser, "post-verify-alert"),
+            ...(submitClick ? { submitClick: true } : {}),
+          });
+          args.steps.push(...execution.steps);
+          if (execution.hint !== undefined) hint = execution.hint;
         }
       } catch (err) {
+        const errText = err instanceof Error ? err.message : String(err);
         args.steps.push(
-          `Post-verify action failed (${nextStep.kind}): ${err instanceof Error ? err.message : String(err)}`,
+          `Post-verify action failed (${nextStep.kind}): ${errText}`,
         );
         // Don't bail — Claude may recover on the next round.
+      } finally {
+        await updateSemanticVerdict();
       }
-      // Re-extract — but tolerate the page still navigating from the
-      // step just taken; the next round settles and re-reads.
-      // 0.8.2-rc.12 — MERGE into the running accumulator. The pre-
-      // rc.12 unconditional assignment wiped multi-cred fields the
-      // explicit extract round just accumulated (cloud_name, api_secret,
-      // etc.); on the next round's top-of-iter early-exit, only the
-      // legacy single api_key survived.
-      // 0.8.2-rc.12 — count distinct credential keys before re-extract
-      // so the synthetic-extract trigger fires on ANY new key, not just
-      // the legacy api_key / username pair. A cloudinary reveal click
-      // can produce a fresh api_secret while api_key was already set;
-      // the pre-rc.12 trigger silently skipped the synthetic capture
-      // and the synthesizer then rejected on no_extract_step.
-      const credCountBefore = Object.keys(credentials).filter(
-        (k) => !NON_CREDENTIAL_KEYS.has(k),
-      ).length;
-      try {
-        const reExtract = await this.extractCredentials();
-        for (const [k, v] of Object.entries(reExtract)) {
-          if (credentials[k] === undefined) credentials[k] = v;
-        }
-      } catch {
-        // page mid-navigation — next round's waitForFormReady handles it
-      }
-      // rc.16 — synthetic extract round capture. When the implicit
-      // extractCredentials() above pulls a credential out of the page
-      // *without* the planner ever having picked an `extract` step,
-      // the for-loop's early-return at the next iteration's top fires
-      // before any further capture is written. The chain that
-      // auto-promote sees then has no `observed.kind === "extract"`
-      // round, so promoteToSkill rejects with no_extract_step. Fix:
-      // when an implicit extract just succeeded and the planner's
-      // chosen step this round wasn't already `extract`, write a
-      // synthetic extract round with fresh state+inventory captured
-      // RIGHT NOW (the action just ran, the token row is now visible).
-      // Best-effort — a capture failure must never block returning the
-      // credential we already have.
-      const credCountAfter = Object.keys(credentials).filter(
-        (k) => !NON_CREDENTIAL_KEYS.has(k),
-      ).length;
-      const haveNewCredentials = credCountAfter > credCountBefore;
-      if (haveNewCredentials && nextStep.kind !== "extract") {
-        try {
-          const [postState, postInventory] = await Promise.all([
-            this.browser.getState(),
-            this.buildInventory(args.steps, undefined, 80),
-          ]);
-          const syntheticExtract: PostVerifyStep = {
-            kind: "extract",
-            reason: `implicit extract after ${nextStep.kind} — credentials surfaced on the page`,
-          };
-          captureOnboardingRound({
-            service: args.service,
-            round: capturedRound,
-            oauth,
-            state: postState,
-            inventory: postInventory,
-            observed: syntheticExtract,
-          });
-          capturedRound += 1;
-          if (this.roundUploader !== undefined) {
-            void (async () => {
-              try {
-                await this.roundUploader!({
-                  service: args.service,
-                  round: round + 1,
-                  kind: syntheticExtract.kind,
-                  url: postState.url,
-                  title: postState.title,
-                  inventory_count: postInventory.length,
-                  observed_reason: syntheticExtract.reason,
-                  html: postState.html,
-                  ...(postState.screenshot !== undefined && postState.screenshot.length > 0
-                    ? { screenshot_jpeg_base64: postState.screenshot }
-                    : {}),
-                });
-              } catch {
-                // best-effort
-              }
-            })();
-          }
-        } catch {
-          // best-effort — synthetic capture is auto-promote plumbing,
-          // never load-bearing for the parent signup
-        }
-      }
+      const syntheticResult = await syntheticCapture.afterAction({
+        service: args.service,
+        loopRound: round,
+        capturedRound,
+        oauth,
+        actionKind: nextStep.kind,
+        credentials,
+        steps: args.steps,
+        ...(this.lastResolvedModel !== undefined
+          ? { resolvedModel: this.lastResolvedModel }
+          : {}),
+        ...(this.lastResolvedProvider !== undefined
+          ? { resolvedProvider: this.lastResolvedProvider }
+          : {}),
+        ...(this.roundUploader !== undefined
+          ? { roundUploader: this.roundUploader }
+          : {}),
+        port: {
+          extractCredentials: () => this.extractCredentials(),
+          getState: () => this.browser.getState(),
+          buildInventory: () => this.buildInventory(args.steps, undefined, 80),
+          captureRound: captureOnboardingRound,
+        },
+      });
+      capturedRound = syntheticResult.capturedRound;
     }
     // 0.8.2-rc.10 — existing-account-no-extract classifier. Runs once
     // at loop exit when no credential surfaced AND no more specific
@@ -10694,7 +13668,7 @@ ${formatInventory(input.inventory)}`,
       // honest bail.
       let minted: Record<string, string> | null = null;
       try {
-        minted = await this.attemptMintNewKey(args.steps);
+        minted = await this.attemptMintNewKey(args.steps, args.service);
       } catch {
         // best-effort — degrade to the existing classifier below
       }
@@ -10706,6 +13680,12 @@ ${formatInventory(input.inventory)}`,
         if (alreadyExistingAccount) this.lastPostVerifyDoneReason = null;
         args.steps.push(
           "Post-verify: existing-account / already-signed-in dashboard recovered — minted/extracted a usable key instead of bailing.",
+        );
+        await this.writeFastPathSyntheticCapture(
+          args.service,
+          capturedRound,
+          oauth,
+          "existing-account recovery synthetic extract — credentials were minted/extracted after the planner loop",
         );
         return credentials;
       }
@@ -10759,6 +13739,8 @@ ${formatInventory(input.inventory)}`,
     service: string,
     capturedRound: number,
     oauth: boolean,
+    reason =
+      "fast-path synthetic extract — credentials were already on the page before any planner round ran",
   ): Promise<void> {
     try {
       const [state, inventory] = await Promise.all([
@@ -10773,8 +13755,7 @@ ${formatInventory(input.inventory)}`,
         inventory,
         observed: {
           kind: "extract",
-          reason:
-            "fast-path synthetic extract — credentials were already on the page before any planner round ran",
+          reason,
         },
       });
     } catch {
@@ -10793,16 +13774,151 @@ ${formatInventory(input.inventory)}`,
     email: string,
     password: string,
     steps: string[],
+    options?: {
+      inbox?: AgentInbox | undefined;
+      verificationEmailAlias?: string | undefined;
+    },
   ): Promise<boolean> {
-    const inv = await this.buildInventory(steps);
-    const emailEl =
-      inv.find((e) => e.tag === "input" && e.type === "email") ??
-      inv.find(
-        (e) => e.tag === "input" && (e.type === "text" || e.type === null),
-      );
-    const pwEl = inv.find((e) => e.tag === "input" && e.type === "password");
+    const findLoginFields = (inventory: ReadonlyArray<InteractiveElement>) => {
+      const emailEl =
+        inventory.find((e) => e.tag === "input" && e.type === "email") ??
+        inventory.find(
+          (e) => e.tag === "input" && (e.type === "text" || e.type === null),
+        );
+      const pwEl = inventory.find((e) => e.tag === "input" && e.type === "password");
+      return { emailEl, pwEl };
+    };
+    let inv = await this.buildInventory(steps);
+    let { emailEl, pwEl } = findLoginFields(inv);
+
+    // Poll for the form to render after a click. SPA login forms reveal on a
+    // VARIABLE delay — portkey's "Continue with work email" → password form was
+    // a render race where a fixed wait passed one run and missed the next
+    // (stochastic login). Re-reads up to maxAttempts times ~1.2s apart, mutating
+    // inv/emailEl/pwEl, returning as soon as the wanted field(s) appear. Uses a
+    // throwaway steps array so polling doesn't spam the trail.
+    const pollForFields = async (
+      maxAttempts: number,
+      requirePassword: boolean,
+    ): Promise<void> => {
+      for (let i = 0; i < maxAttempts; i++) {
+        await this.browser.wait(1.2);
+        inv = await this.buildInventory([]);
+        ({ emailEl, pwEl } = findLoginFields(inv));
+        const done = requirePassword
+          ? pwEl !== undefined
+          : pwEl !== undefined || emailEl !== undefined;
+        if (done) return;
+      }
+    };
+
+    // Two-stage email login: many login pages render only provider buttons
+    // ("Continue with Google / Microsoft / work email", SSO) and reveal the
+    // email+password inputs ONLY after you click the email option. portkey
+    // (MEASURED 2026-06-17): /login is button-only with "Continue with work
+    // email". Click that affordance — NOT Google/Microsoft/SSO — then re-read.
     if (emailEl === undefined || pwEl === undefined) {
-      steps.push("Login: no email/password fields on the page — skipped.");
+      const emailButton = inv.find((e) => {
+        if (e.tag !== "button" && e.type !== "submit") return false;
+        const t = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.toLowerCase();
+        return (
+          t.includes("email") &&
+          /\b(continue|log ?in|sign ?in|use|with|password)\b/.test(t) &&
+          !/google|microsoft|apple|github|\bsso\b|single sign/.test(t)
+        );
+      });
+      if (emailButton !== undefined) {
+        // The continue button is frequently DISABLED until a Terms/consent
+        // checkbox is ticked (portkey, MEASURED 2026-06-17: "Continue with
+        // work email" stays inert until the TOS box is checked → the click
+        // silently no-ops and the form never reveals). Tick required agreement
+        // boxes first (skips marketing opt-ins; best-effort, never throws).
+        const agreed = await this.browser.checkRequiredAgreementBoxes();
+        if (agreed.length > 0) {
+          steps.push(
+            `Login: ticked terms/consent box(es) [${agreed.join(", ")}] to enable the button.`,
+          );
+          await this.browser.wait(1);
+        }
+        steps.push(
+          `Login: two-stage page — clicking "${(emailButton.visibleText ?? "email")
+            .slice(0, 40)
+            .trim()}" to reveal the email/password form.`,
+        );
+        await this.browser.click(emailButton.selector);
+        // Poll up to ~10s for the form to reveal (render race — see above).
+        await pollForFields(8, false);
+      }
+    }
+
+    // Progressive (email-first) login: some flows reveal ONLY the email field;
+    // you enter it, click Continue, THEN the password field appears on the next
+    // step. portkey (MEASURED 2026-06-17): "Continue with work email" → email
+    // field → Continue → password. Fill the email, advance, and re-read.
+    if (emailEl !== undefined && pwEl === undefined) {
+      await this.browser.type(emailEl.selector, email).catch(() => undefined);
+      const advance =
+        inv.find((e) => e.type === "submit") ??
+        inv.find(
+          (e) =>
+            (e.tag === "button" || e.type === "submit") &&
+            /\b(continue|next|log ?in|sign ?in|submit)\b/i.test(
+              `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`,
+            ),
+        );
+      if (advance !== undefined) {
+        steps.push(
+          "Login: email-first flow — submitted the email, advancing to the password step.",
+        );
+        await this.browser.clickSubmit(advance.selector).catch(() => undefined);
+        // Poll up to ~10s for the password step to render (render race).
+        await pollForFields(8, true);
+      }
+    }
+    if (pwEl === undefined) {
+      if (options?.inbox !== undefined) {
+        const state = await this.browser.getState().catch(() => null);
+        const text = await this.browser.extractVisibleText().catch(() => "");
+        if (
+          state !== null &&
+          detectEmailLinkGate(state.url, state.title, text, inv)
+        ) {
+          const alias = options.verificationEmailAlias ?? email;
+          steps.push(
+            "Login: passwordless email-link gate detected — polling inbox for the sign-in link.",
+          );
+          try {
+            const received = await this.waitForVerificationEmail(
+              options.inbox,
+              alias,
+              90,
+            );
+            steps.push(`Received: "${received.subject}" from ${received.from_address}`);
+            let serviceHost: string | null = null;
+            try {
+              serviceHost = new URL(state.url).hostname;
+            } catch {
+              // leave null
+            }
+            const loginLink =
+              this.pickVerificationLink(Array.from(received.parsed_links)) ??
+              pickVerificationLinkFromHtml(received.body_html ?? "") ??
+              pickServiceDomainLink(Array.from(received.parsed_links), serviceHost);
+            if (loginLink !== null) {
+              steps.push(`Login: following passwordless sign-in link: ${loginLink}`);
+              await this.browser.goto(loginLink);
+              await this.browser.wait(2);
+              return true;
+            }
+            steps.push("Login: passwordless email had no usable link.");
+          } catch (err) {
+            steps.push(
+              `Login: passwordless inbox poll failed (${err instanceof Error ? err.message : String(err)}).`,
+            );
+          }
+        }
+      }
+      steps.push("Login: no password field reachable — skipped.");
       return false;
     }
     // Login submit: a submit-typed button, else one whose text reads
@@ -10818,7 +13934,10 @@ ${formatInventory(input.inventory)}`,
       ) ??
       buttons[0];
     try {
-      await this.browser.type(emailEl.selector, email);
+      // The email may already have been entered on the prior step.
+      if (emailEl !== undefined) {
+        await this.browser.type(emailEl.selector, email);
+      }
       await this.browser.type(pwEl.selector, password);
       steps.push("Login: filled the signup credentials");
       if (submitEl !== undefined) {
@@ -11058,6 +14177,28 @@ ${loginGuidance}
   The API-keys / tokens page appears only AFTER a resource exists. Do NOT
   return {"kind":"done"} or {"kind":"login"} on an empty dashboard while a
   create-resource CTA is visible — that is the path forward, not a dead end.
+- **APP TYPE CHOICES — prefer credential-bearing web/server apps.** When a
+  create-application wizard offers app/client type cards, prefer "Regular Web
+  App", "Traditional web app", "Server-side web app", or a similar backend/web
+  option. Avoid "Machine to Machine", "M2M", "server-to-server", or "API
+  client" choices unless an API/resource is already present and selectable —
+  those choices often require a pre-existing API before the app can be created.
+  Avoid SPA/native/mobile choices when a web/server option is visible because
+  they usually omit client_secret-style credentials.
+- If that wizard first asks for a required TECHNOLOGY / FRAMEWORK choice, pick
+  a backend/server runtime such as Python, Node.js, Express, Django, Java,
+  Ruby, PHP, Go, or .NET when visible. Do NOT pick React, Angular, Vue, Svelte,
+  or other frontend SPA frameworks when a backend/server runtime is available;
+  SPA picks often narrow the next app-type step to non-secret browser clients.
+- **BROKEN DEEP-LINK WITH APP CHECKLIST.** Some authenticated SPAs show a
+  "404 / page does not exist" main panel while an in-app onboarding checklist
+  or resource-creation control is still visible ("Create an index", "Create
+  project", "Skip for now", "Don't show me again"). Treat that as an
+  authenticated app state, not a public 404. Do NOT click "Bring me home",
+  "Go home", browser back, or public marketing/home links as the first action;
+  those often discard the app session and return to /login. Instead use the
+  visible in-app checklist/resource action, dismiss the checklist, or navigate
+  via app-local dashboard/project/settings controls.
 - **API-KEYS / TOKENS PAGE — the path to a key is CREATE, not extract.** On any
   API-keys / tokens / secrets page that offers a "Create" / "Generate" /
   "New token" / "New key" button, CLICK it to mint a fresh key — this holds
@@ -11072,8 +14213,9 @@ ${loginGuidance}
 - **Pre-filled fields are DONE — advance, don't re-touch.** If a required
   onboarding field (first name, company, email) is ALREADY populated, or a
   required selectable is ALREADY selected, do NOT re-fill/re-select it — click
-  Continue / Next / Submit to move forward. Re-filling a satisfied field loops.
-- For ANY dropdown — native (tag=select) OR a custom combobox (role=combobox / aria-haspopup=listbox, common on modern React apps like Sentry / Stripe / Vercel) — use {"kind":"select"}. "click" on a combobox trigger opens it but does not pick an option; do not click it repeatedly.
+  Continue / Next / Submit / Create organization / Create workspace / Create
+  project to move forward. Re-filling a satisfied field loops.
+- For ANY dropdown — native (tag=select) OR a custom combobox / picker (role=combobox / aria-haspopup=listbox, or a button-like trigger whose text contains "Select parent resource", "Select workspace", "Select project"; common on modern React apps like Sentry / Stripe / Vercel / Google consoles) — use {"kind":"select"}. "click" on a combobox trigger opens it but does not pick an option; do not click it repeatedly.
 - When you need a SPECIFIC option from the dropdown — e.g. "Project: Read" on Sentry's permissions picker, or a specific region — include "option_text" with the visible label. The executor matches it case-insensitively as a substring. Omit "option_text" when any option is fine (a placeholder country picker).
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
 - If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
@@ -11086,6 +14228,7 @@ ${loginGuidance}
   ? `The user provided a scope hint: "${input.scopeHint}". Pick option_text values aligned with this on each permission dropdown.`
   : `No scope hint was provided. Default to the HIGHEST available permission level on EVERY permission dropdown (Admin > Write > Read > anything lower). Most agent use-cases need write access; a read-only token will fail downstream when the agent tries to push data. Set "Admin" if offered; "Write" otherwise. Explicitly use option_text to specify — do NOT rely on first-option behavior, which often picks Read.`}
 - On a form with MULTIPLE permission rows (Sentry: Project, Team, Member, Issue, Event, Release, Organization), set EACH ONE before clicking Create. One step per turn — return to this turn-by-turn until every row is set.
+- **Permission/scope grids are local.** When a token modal or API-key form asks for scopes/permissions, choose controls that are inside that modal/form or visually co-located with the named scope row. Do NOT click global app navigation buttons, product tabs, or sidebar items just because their labels look like a permission word ("Browse", "Chat", "Project", "Data"). If the row's Admin/Write/Read/All control is not present in the inventory, leave the current default alone and proceed to the next required field or Create button instead of guessing.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [
@@ -11119,6 +14262,11 @@ ${formatInventory(input.inventory)}${
       // navigation-eval.md). The stall-detector + prior-action memory are the
       // escape from a deterministic loop.
       temperature: 0,
+      // Fix C — pin a single model + provider + seed on the proxy path so
+      // the same dashboard yields the same step regardless of which backend
+      // OpenRouter would otherwise route to (the model/provider lottery
+      // survives temperature 0).
+      deterministic: true,
       parse: (raw) => {
         const step = parsePostVerifyStep(raw, allowed);
         // A `check` must land on a real checkbox/radio — the planner
@@ -11259,7 +14407,7 @@ ${formatInventory(input.inventory)}${
       return null;
     }
     return isContinuationFormStep(html, inventory)
-      ? `password step at ${pathOf(url)}`
+      ? `continuation form at ${pathOf(url)}`
       : null;
   }
 
@@ -11270,8 +14418,7 @@ ${formatInventory(input.inventory)}${
     //    and the browser kept us on one, that's a strong signal —
     //    redirect chains often preserve the path across TLD changes.
     try {
-      const path = new URL(state.url).pathname.toLowerCase();
-      if (/(?:^|\/)(?:signup|register|sign-up|create-account|join)\b/.test(path)) {
+      if (hasSignupIntentPath(state.url) && !isMarketingAuthDeadEndUrl(state.url)) {
         return true;
       }
     } catch {
@@ -11318,6 +14465,18 @@ ${formatInventory(input.inventory)}${
   }
 
   private async extractCredentials(): Promise<Record<string, string>> {
+    // EXTRACTION_ENGINE (default-ON since 2026-06-15, strangler slice 4): route the
+    // cross-pass accumulation + resolution through the pure extraction module
+    // (extraction.ts). Flipped after pass-1 live validation (ipinfo → api_key) on
+    // the dominant path; the truncated/clipboard path (pass 2) reuses the IDENTICAL
+    // I/O as inline — only the unit-tested accumulation differs — and its
+    // truncated-modal services (OpenRouter-class) are currently anti-bot-walled, so
+    // its live blast radius is ~zero. The inline 5-pass body below is kept one cycle
+    // as the explicit opt-out (EXTRACTION_ENGINE=0) and deleted next
+    // (DESIGN-extraction-engine.md migration step 4).
+    if (!/^(0|false|off|no)$/i.test(process.env.EXTRACTION_ENGINE ?? "")) {
+      return this.extractCredentialsViaEngine();
+    }
     // IMPORTANT: pull credentials from the *visible* page, not the raw
     // HTML. Reading from HTML matches anti-bot challenge JS (Cloudflare
     // Turnstile, hCaptcha) whose challenge tokens look like API keys to
@@ -11442,6 +14601,77 @@ ${formatInventory(input.inventory)}${
 
     if (apiKey !== null) credentials.api_key = apiKey;
     return credentials;
+  }
+
+  // EXTRACTION_ENGINE path (strangler slice 4) — the same five-pass extraction as
+  // extractCredentials, but the cross-pass accumulation (first full wins; first
+  // truncated remembered) + final resolution go through the pure module
+  // (extraction.ts). This method owns only the I/O + the per-candidate regex
+  // classification. Faithful to the inline passes (incl. the subtlety that passes
+  // 3 + 4 accept FULL hits only — they never record a truncated stub).
+  private async extractCredentialsViaEngine(): Promise<Record<string, string>> {
+    const curUrl =
+      typeof this.browser.currentUrl === "function" ? this.browser.currentUrl() : "";
+    if (typeof curUrl === "string" && isDocumentationUrl(curUrl)) return {};
+
+    let st = initialExtractionState();
+    const classify = (text: string): CandidateClass => {
+      const hit = extractApiKeyFromText(text);
+      if (hit === null) return { kind: "none" };
+      return isTruncatedCapture(text, hit) ? { kind: "truncated", value: hit } : { kind: "full", value: hit };
+    };
+
+    // Pass 1 — visible candidates (records truncated hits).
+    for (const candidate of await this.browser.extractCredentialCandidates()) {
+      st = accumulateCandidate(st, classify(candidate));
+      if (hasFullHit(st)) return resolveExtraction(st);
+    }
+    // Pass 1b — body text (records truncated hits).
+    if (!hasFullHit(st)) {
+      st = accumulateCandidate(st, classify(await this.browser.extractText()));
+      if (hasFullHit(st)) return resolveExtraction(st);
+    }
+    // Pass 2 — copy-button + clipboard recovery, only when a truncated stub was
+    // seen. The copied value is accepted as a full hit directly (inline does the
+    // same — no re-classification).
+    if (!hasFullHit(st) && st.truncatedHit !== null) {
+      const copied = await this.tryCopyButtonExtraction();
+      if (copied !== null) {
+        st = accumulateCandidate(st, { kind: "full", value: copied });
+        if (hasFullHit(st)) return resolveExtraction(st);
+      }
+    }
+    // Pass 3 — hidden-input scan. FULL hits only (inline ignores truncated here).
+    if (!hasFullHit(st)) {
+      try {
+        for (const value of await this.browser.extractAllInputValues()) {
+          const c = classify(value);
+          if (c.kind !== "full") continue;
+          st = accumulateCandidate(st, c);
+          if (hasFullHit(st)) return resolveExtraction(st);
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    // Pass 4 — copy-button colocation. A bare UUID is accepted directly; otherwise
+    // the normal extractor, FULL only (inline records no truncated here).
+    if (!hasFullHit(st)) {
+      try {
+        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        for (const candidate of await this.browser.extractCredentialsNearCopyButtons()) {
+          const c: CandidateClass = UUID_RE.test(candidate)
+            ? { kind: "full", value: candidate }
+            : classify(candidate);
+          if (c.kind !== "full") continue;
+          st = accumulateCandidate(st, c);
+          if (hasFullHit(st)) return resolveExtraction(st);
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    return resolveExtraction(st);
   }
 
   // F10: click the page's Copy button (whose label typically reads

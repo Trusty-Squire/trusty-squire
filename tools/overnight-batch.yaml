@@ -145,9 +145,9 @@
     offers a workspace-creation step post-OAuth that may trip the
     planner's "looking for API key" assumption — watch for that on
     the first run.
-- slug: together
+- slug: together-ai
   name: Together AI
-  signup_url: https://api.together.xyz/signin
+  signup_url: https://api.together.ai/
   oauth_provider: google
   scope_hint: null
   status: pending
@@ -239,7 +239,7 @@
     visit to dashboard.cohere.com.
 - slug: baseten
   name: Baseten
-  signup_url: https://app.baseten.co/login
+  signup_url: https://app.baseten.co/sign-up
   oauth_provider: google
   scope_hint: null
   status: pending

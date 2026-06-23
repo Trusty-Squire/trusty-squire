@@ -37,6 +37,13 @@ interface ProcInfo {
   cmdline: string;
 }
 
+type HousekeeperRunKind = "single" | "long";
+
+export interface HousekeeperRunClass {
+  kind: HousekeeperRunKind;
+  ceilingS: number;
+}
+
 // Clock ticks per second (almost always 100 on Linux); used to convert
 // /proc/<pid>/stat starttime into wall-clock age. Hardcoded — SC_CLK_TCK isn't
 // exposed to Node, and 100 has been the Linux default for decades.
@@ -80,16 +87,41 @@ function readProc(pid: number, uptime: number): ProcInfo | null {
   }
 }
 
+function hasNodeRuntime(cmdline: string): boolean {
+  return /(^|\s)(node|[^/\s]*\/node)(\s|$)/.test(cmdline);
+}
+
+function hasHousekeeperEntrypoint(cmdline: string): boolean {
+  return /\bbin\.js\s+housekeeper\b/.test(cmdline) || /\bhousekeeper\s+--mode=/.test(cmdline);
+}
+
+function isLongRunningHousekeeper(cmdline: string): boolean {
+  return /\bhousekeeper\s+autoloop\b/.test(cmdline) || /--mode=heal\b/.test(cmdline);
+}
+
+// Exported for tests. Classifies the process once, then every kill decision uses
+// the same result. This avoids the previous drift where `isHousekeeper()` and
+// `ceilingFor()` each had their own regex idea of what a housekeeper run was.
+export function classifyHousekeeperRun(cmdline: string): HousekeeperRunClass | null {
+  if (!hasNodeRuntime(cmdline)) return null;
+  if (!hasHousekeeperEntrypoint(cmdline)) return null;
+  const longRunning = isLongRunningHousekeeper(cmdline);
+  return {
+    kind: longRunning ? "long" : "single",
+    ceilingS: longRunning ? HEAL_CEILING_S : SINGLE_RUN_CEILING_S,
+  };
+}
+
 // Exported for tests. A housekeeper invocation is a node process whose argv
 // runs the bundled CLI in housekeeper mode.
 export function isHousekeeper(cmdline: string): boolean {
-  return /bin\.js\s+housekeeper|housekeeper\b.*--mode=/.test(cmdline) && /\bnode\b/.test(cmdline);
+  return classifyHousekeeperRun(cmdline) !== null;
 }
 
-// Exported for tests. A full heal pass legitimately runs for hours; a single
-// service / discover run does not.
+// Exported for tests. A full heal pass and autoloop legitimately run for hours;
+// a single service / discover run does not.
 export function ceilingFor(cmdline: string): number {
-  return /--mode=heal/.test(cmdline) ? HEAL_CEILING_S : SINGLE_RUN_CEILING_S;
+  return classifyHousekeeperRun(cmdline)?.ceilingS ?? SINGLE_RUN_CEILING_S;
 }
 
 export interface ReapResult {
@@ -125,9 +157,10 @@ export function reapStaleHousekeepers(
     if (pid === self) continue;
     const info = readProc(pid, uptime);
     if (info === null) continue;
-    if (!isHousekeeper(info.cmdline)) continue;
+    const housekeeper = classifyHousekeeperRun(info.cmdline);
+    if (housekeeper === null) continue;
     result.scanned++;
-    if (info.ageS <= ceilingFor(info.cmdline)) continue;
+    if (info.ageS <= housekeeper.ceilingS) continue;
     // Never kill our own group (would suicide the live run).
     if (myPgid > 0 && info.pgid === myPgid) continue;
     const mins = Math.round(info.ageS / 60);
@@ -141,7 +174,7 @@ export function reapStaleHousekeepers(
       result.reaped.push({ pid: info.pid, ageS: info.ageS, cmdline: info.cmdline });
       log(
         `[housekeeper] reaped stale sibling pid=${info.pid} (alive ${mins}min, ` +
-          `> ${Math.round(ceilingFor(info.cmdline) / 60)}min ceiling): ${info.cmdline.slice(0, 80)}`,
+          `> ${Math.round(housekeeper.ceilingS / 60)}min ${housekeeper.kind} ceiling): ${info.cmdline.slice(0, 80)}`,
       );
     } catch {
       // already gone, or EPERM (not ours) — skip

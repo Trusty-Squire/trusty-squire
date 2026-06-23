@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
 import type { InteractiveElement } from "../../bot/browser.js";
 import type { PostVerifyStep } from "../../bot/agent.js";
 import type { OnboardingOutcomeFile } from "../../bot/onboarding-capture.js";
+import type { SemanticTransitionRecord } from "../../bot/semantic-transition.js";
 
 const META: FixBatchMeta = {
   batchId: "batch-1",
@@ -44,11 +45,13 @@ function outcome(
   ok: boolean,
   stage: OnboardingOutcomeFile["outcome"]["failure_stage"],
   terminalRound: number | null = 0,
+  sourceCommit?: string,
 ): OnboardingOutcomeFile {
   return {
     capture_format_version: 1,
     service,
     run_id: runId,
+    ...(sourceCommit !== undefined ? { source_commit: sourceCommit } : {}),
     outcome: {
       ok,
       credential_present: ok,
@@ -106,11 +109,41 @@ describe("buildFixBatch", () => {
   });
 
   it("carries signature, capture refs and planner reasoning", () => {
-    const batch = buildFixBatch([outcome("b", "r2", false, "extract")], META, resolve);
+    const batch = buildFixBatch([outcome("b", "r2", false, "extract", 0, "abc123")], META, resolve);
     const f = batch.failures[0]!;
+    expect(f.source_commit).toBe("abc123");
     expect(f.capture_refs).toEqual(["/cap/b-r2-r0.json"]);
     expect(f.planner_reasoning).toBe("click: open keys");
     expect(f.signature).toHaveLength(16);
+  });
+
+  it("carries terminal semantic transition metadata", () => {
+    const semantic: SemanticTransitionRecord = {
+      schema_version: 1,
+      intent: {
+        kind: "navigate_to_credential_surface",
+        target: "API Tokens (#tokens)",
+        evidence: ["target=API Tokens"],
+      },
+      expected_next_state: "API tokens are visible",
+      forbidden_states: ["docs_page"],
+      predicate: {
+        kind: "credential_surface_reached",
+        description: "tokens page reached",
+        verdict: "violated",
+      },
+      likely_failure_bucket: "wrong_product_surface",
+    };
+    const batch = buildFixBatch([outcome("b", "r2", false, "planner_loop")], META, (o) => ({
+      capture_refs: [`/cap/${o.service}-${o.run_id}-r0.json`],
+      terminal: {
+        url: `https://${o.service}.com/dashboard`,
+        inventory: [el({ role: "button", ariaLabel: "API Tokens" })],
+        observed: step,
+        semantic,
+      },
+    }));
+    expect(batch.failures[0]!.terminal_page?.semantic).toEqual(semantic);
   });
 
   it("counts reproduce_count for shared (service, signature)", () => {
@@ -169,5 +202,71 @@ describe("readFixBatch (IO)", () => {
     const f = batch.failures[0]!;
     expect(f.capture_refs).toHaveLength(2);
     expect(f.planner_reasoning).toBe("click: round 1");
+  });
+
+  it("lets current-commit outcomes supersede stale failures for the same service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "svc-old.outcome.json"),
+      JSON.stringify(outcome("svc", "old", false, "planner_loop", null, "old-commit")),
+    );
+    writeFileSync(
+      join(dir, "svc-new.outcome.json"),
+      JSON.stringify(outcome("svc", "new", true, "none", null, "new-commit")),
+    );
+
+    const batch = readFixBatch(dir, META, undefined, { currentCommit: "new-commit" });
+    expect(batch.failures).toEqual([]);
+  });
+
+  it("keeps the current-commit failure and drops stale failures for that service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "svc-old.outcome.json"),
+      JSON.stringify(outcome("svc", "old", false, "planner_loop", null, "old-commit")),
+    );
+    writeFileSync(
+      join(dir, "svc-new.outcome.json"),
+      JSON.stringify(outcome("svc", "new", false, "extract", null, "new-commit")),
+    );
+
+    const batch = readFixBatch(dir, META, undefined, { currentCommit: "new-commit" });
+    expect(batch.failures.map((f) => [f.run_id, f.source_commit])).toEqual([["new", "new-commit"]]);
+  });
+
+  it("drops historical failures once a later success exists for the same service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    const oldFailure = join(dir, "svc-old.outcome.json");
+    const laterSuccess = join(dir, "svc-new.outcome.json");
+    writeFileSync(oldFailure, JSON.stringify(outcome("svc", "old", false, "planner_loop")));
+    writeFileSync(laterSuccess, JSON.stringify(outcome("svc", "new", true, "none")));
+    utimesSync(oldFailure, new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-01T00:00:00.000Z"));
+    utimesSync(laterSuccess, new Date("2026-06-02T00:00:00.000Z"), new Date("2026-06-02T00:00:00.000Z"));
+
+    const batch = readFixBatch(dir, META);
+    expect(batch.failures).toEqual([]);
+    expect(batch.stats.totalRuns).toBe(1);
+  });
+
+  it("keeps failures that occur after the latest success for the same service", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixbatch-"));
+    dirs.push(dir);
+    mkdirSync(dir, { recursive: true });
+    const firstSuccess = join(dir, "svc-good.outcome.json");
+    const laterFailure = join(dir, "svc-bad.outcome.json");
+    writeFileSync(firstSuccess, JSON.stringify(outcome("svc", "good", true, "none")));
+    writeFileSync(laterFailure, JSON.stringify(outcome("svc", "bad", false, "extract")));
+    utimesSync(firstSuccess, new Date("2026-06-01T00:00:00.000Z"), new Date("2026-06-01T00:00:00.000Z"));
+    utimesSync(laterFailure, new Date("2026-06-02T00:00:00.000Z"), new Date("2026-06-02T00:00:00.000Z"));
+
+    const batch = readFixBatch(dir, META);
+    expect(batch.failures.map((f) => f.run_id)).toEqual(["bad"]);
+    expect(batch.stats.totalRuns).toBe(2);
   });
 });

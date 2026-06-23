@@ -331,6 +331,68 @@ describe("GET /skills/:service", () => {
     await server.close();
   });
 
+  it("resolves the legacy Anthropic slug to the active anthropic-api skill", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          service: "anthropic-api",
+          skill_id: testSkillId("A"),
+          signup_url: "https://platform.claude.com/dashboard",
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/skills/anthropic",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().skill.service).toBe("anthropic-api");
+    await server.close();
+  });
+
+  it("redacts secret-looking copy-button hints from skill responses", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          skill_id: testSkillId("B"),
+          steps: [
+            {
+              kind: "navigate",
+              url: "https://railway.com/account/tokens",
+              provenance: { run_id: "test-run-1", round_index: 0 },
+            },
+            {
+              kind: "extract_via_copy_button",
+              near_text_hint: "db3a32ea-dd1b-4e28-9680-db2991c81e3e",
+              provenance: { run_id: "test-run-1", round_index: 1 },
+            },
+          ],
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: `/skills/by-id/${testSkillId("B")}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().skill.steps[1].near_text_hint).toBe("Copy");
+    await server.close();
+  });
+
   it("by-id status reflects the live row, not the frozen payload status", async () => {
     const { skillStore, signer } = buildTestServer();
     const server = await buildServer({ skillStore, signer });

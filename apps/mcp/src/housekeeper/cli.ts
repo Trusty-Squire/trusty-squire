@@ -35,7 +35,8 @@ import {
   type HousekeeperOpts,
   type ReplayMode,
 } from "./orchestrator.js";
-import { createReplayRunner } from "./modes/verify.js";
+import { createReplayRunner, createProbeRunner, type FreshVerifyRunner } from "./modes/verify.js";
+import { verifyPoolConfigured } from "./identity-pool.js";
 import {
   RegistryVerifierQueue,
   RegistryDiscoverQueue,
@@ -47,6 +48,10 @@ import {
 import { LogNotifier, type Notifier } from "./notifier.js";
 
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
+const DEFAULT_AD_HOC_SERVICE_METADATA = [
+  "tools/housekeeper-services.yaml",
+  "tools/discovery-candidates.yaml",
+] as const;
 
 // Two runners: verify (skill replay) and discover (universal bot).
 // 'discover' is fed by either telemetry candidates or a curated YAML
@@ -56,7 +61,7 @@ const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 // 'fix' (C2) is the output-side step: read the failure batch from the capture
 // dir, drive the holistic fix-agent against the eval gate, commit RCs to the
 // `next` channel. See docs/DESIGN-autonomous-output-loop.md.
-type Mode = "verify" | "discover" | "heal" | "fix" | "fresh-verify";
+type Mode = "verify" | "discover" | "heal" | "fix" | "fresh-verify" | "shopping";
 
 interface ParsedArgs {
   once: boolean;
@@ -67,11 +72,12 @@ interface ParsedArgs {
   service: string | undefined;
   oauthProvider: "google" | "github" | undefined;
   signupUrl: string | undefined; // fresh-verify: override the bot's URL guess
-  skillId: string | undefined; // fresh-verify: report the 2-of-N verdict to this skill
-  retryBudget: number | undefined; // fresh-verify: extra identities to retry transient flakes
+  skillId: string | undefined; // fresh-verify: report the converged verdict to this skill
+  profileMode: "fresh" | "returning";
   seedPath: string | undefined;
   registryUrl: string;
   adminBearer: string | undefined;
+  fixAgent: string | undefined;
   enableTelegram: boolean;
   enableGithubIssues: boolean;
 }
@@ -87,11 +93,12 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     oauthProvider: undefined,
     signupUrl: undefined,
     skillId: undefined,
-    retryBudget: undefined,
+    profileMode: "fresh",
     seedPath: undefined,
     registryUrl:
       process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL,
     adminBearer: process.env.REGISTRY_ADMIN_BEARER,
+    fixAgent: undefined,
     enableTelegram: false,
     enableGithubIssues: false,
   };
@@ -104,6 +111,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--mode=heal") args.mode = "heal";
     else if (arg === "--mode=fix") args.mode = "fix";
     else if (arg === "--mode=fresh-verify") args.mode = "fresh-verify";
+    else if (arg === "--mode=shopping") args.mode = "shopping";
+    else if (arg === "--returning-profile") args.profileMode = "returning";
+    else if (arg === "--fresh-profile") args.profileMode = "fresh";
     else if (arg === "--telegram") args.enableTelegram = true;
     else if (arg === "--github-issues") args.enableGithubIssues = true;
     else if (arg.startsWith("--service=")) {
@@ -112,9 +122,6 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       args.signupUrl = arg.slice("--signup-url=".length);
     } else if (arg.startsWith("--skill-id=")) {
       args.skillId = arg.slice("--skill-id=".length);
-    } else if (arg.startsWith("--retry-budget=")) {
-      const n = Number(arg.slice("--retry-budget=".length));
-      if (Number.isFinite(n) && n >= 0) args.retryBudget = Math.floor(n);
     } else if (arg.startsWith("--oauth-provider=")) {
       const v = arg.slice("--oauth-provider=".length);
       if (v !== "google" && v !== "github") {
@@ -134,6 +141,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       args.registryUrl = arg.slice("--registry-url=".length);
     } else if (arg.startsWith("--admin-bearer=")) {
       args.adminBearer = arg.slice("--admin-bearer=".length);
+    } else if (arg.startsWith("--agent=")) {
+      args.fixAgent = arg.slice("--agent=".length);
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -144,6 +153,21 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     }
   }
   return args;
+}
+
+async function lookupAdHocServiceMetadata(
+  explicitSeedPath: string | undefined,
+  service: string,
+) {
+  const paths =
+    explicitSeedPath !== undefined && explicitSeedPath.length > 0
+      ? [explicitSeedPath]
+      : DEFAULT_AD_HOC_SERVICE_METADATA;
+  for (const path of paths) {
+    const yamlEntry = await lookupServiceInYaml(path, service);
+    if (yamlEntry !== null) return yamlEntry;
+  }
+  return null;
 }
 
 function printHelp(): void {
@@ -170,9 +194,15 @@ Modes (pick one — default: verify):
                             holistic fix-agent against the planner
                             eval gate, and commits surviving fixes to
                             staging (the next/RC channel). Needs git
-                            + a local coding CLI (TRUSTY_SQUIRE_FIX_
-                            AGENT_CLI, default 'claude -p'); set
+                            + the local Codex CLI; set
                             TRUSTY_SQUIRE_FIX_AGENT_PUSH=1 to push.
+  --mode=shopping           Signup-link resolver. Fetches official
+                            pages, follows signup CTAs, classifies the
+                            resulting entrypoint, and prints evidence.
+                            Does not create accounts, use robots, run
+                            verify, or invoke autoloop/fixbot.
+  autoloop                  Live-gated fix-agent loop to convergence.
+                            Always uses Codex. --agent only accepts codex.
   --service=SLUG            Ad-hoc single-service mode. Implies
                             discover. Bot runs once against SLUG.
   --oauth-provider=google|github
@@ -193,6 +223,11 @@ Pacing:
   --limit=N                 Tasks per batch (1..100, default 20).
   --interval-seconds=N      Sleep between batches (default 43200 = 12h).
   --dry / --full            Replay mode for verify mode (default --full).
+  --returning-profile       For --mode=fresh-verify, replay with the shared
+                            authenticated profile and do NOT report a fresh
+                            verifier outcome. Checks post-auth nav/extraction.
+  --fresh-profile           For --mode=fresh-verify, use fresh robot identities
+                            (default; only mode that can promote/demote).
 
   Inter-run (protects the residential exit from reputation burn — env):
   UNIVERSAL_BOT_RUN_COOLDOWN_SEC  Base cooldown between live signups (default 60; 0 disables).
@@ -204,6 +239,8 @@ Pacing:
 Auth:
   --registry-url=URL        Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=TOKEN      Override REGISTRY_ADMIN_BEARER.
+  --agent=AGENT             Fix proposer for --mode=fix/autoloop.
+                            Only codex is accepted.
 
 Required env per mode:
   verify:              REGISTRY_ADMIN_BEARER
@@ -211,7 +248,15 @@ Required env per mode:
                         + TRUSTY_SQUIRE_ACCOUNT_ID
   discover --from=:    TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID
   --service:           same as discover --from=
+  shopping:            none for --from/--service sweeps
 `);
+}
+
+function parseAutoloopAgent(argv: readonly string[]): string | undefined {
+  for (const arg of argv) {
+    if (arg.startsWith("--agent=")) return arg.slice("--agent=".length);
+  }
+  return undefined;
 }
 
 // Auto-load ~/.config/trusty-squire/harvester.env for manual `node dist/bin.js
@@ -271,6 +316,35 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // into args.adminBearer, so loading after it would leave the bearer unseen.
   loadHarvesterEnvFile();
 
+  // Memory-overhaul Phase 4 — the drainable-ledger + STATE.md subcommands are
+  // a different shape from the --mode runs (subcommand + id + flags), so they
+  // dispatch early, before parseArgs. Operator-only (REGISTRY_ADMIN_BEARER).
+  if (argv[0] === "issue" || argv[0] === "state-doc") {
+    const { runLedgerCli } = await import("./modes/ledger-cli.js");
+    return await runLedgerCli(argv);
+  }
+
+  if (argv[0] === "classify-backfill") {
+    const { runClassificationBackfill } = await import("./modes/classify-backfill.js");
+    return runClassificationBackfill();
+  }
+
+  // autonomous-fix-loop Phase 3 — the conductor: live-gated fix-agent looped to
+  // convergence. Operator-only, long-running.
+  if (argv[0] === "autoloop") {
+    const { runAutoloop } = await import("./modes/autoloop.js");
+    const agent = parseAutoloopAgent(argv.slice(1));
+    try {
+      await runAutoloop(agent !== undefined ? { agent } : {});
+      return 0;
+    } catch (err) {
+      console.error(
+        `housekeeper: autoloop fatal: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 1;
+    }
+  }
+
   const args = parseArgs(argv);
 
   // Reap stale sibling housekeeper runs before we touch the shared Chrome
@@ -294,7 +368,34 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // wall guarantees the process dies even if it wedges outside the lock. unref()
   // so it never itself keeps the loop alive. Single-service/discover runs get a
   // tight ceiling; a full heal pass gets a loose backstop.
-  const selfDeadlineS = args.mode === "heal" ? 4 * 60 * 60 : 25 * 60;
+  //
+  // Edge fix (concurrent drains): a CONCURRENT discover batch legitimately runs
+  // far longer than a single-service run — N services in waves of C. Scale the
+  // ceiling by waves, not by C alone. A 40-service 4-wide sweep is ten waves;
+  // with 10min per live signup that needs ~100min before teardown/promote, so
+  // the old 25min*C formula killed the batch while it was still making
+  // progress. Keep an env override for explicit operator runs.
+  const concurrency = Math.max(
+    1,
+    Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1,
+  );
+  const explicitSelfDeadlineS = Number.parseInt(
+    process.env.HOUSEKEEPER_SELF_DEADLINE_SEC ?? "",
+    10,
+  );
+  const requestedLimit =
+    args.limit ?? (args.service !== undefined && args.service.length > 0 ? 1 : 20);
+  const waves = Math.max(1, Math.ceil(requestedLimit / concurrency));
+  const computedSelfDeadlineS =
+    args.mode === "heal"
+      ? 4 * 60 * 60
+      : concurrency > 1
+        ? Math.min(6 * 60 * 60, Math.max(25 * 60, waves * 12 * 60 + 10 * 60))
+        : 25 * 60;
+  const selfDeadlineS =
+    Number.isFinite(explicitSelfDeadlineS) && explicitSelfDeadlineS > 0
+      ? explicitSelfDeadlineS
+      : computedSelfDeadlineS;
   const selfDeadline = setTimeout(() => {
     console.error(
       `[housekeeper] SELF-DEADLINE: process exceeded ${Math.round(
@@ -336,7 +437,9 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   if (args.mode === "fix") {
     const { runFixMode } = await import("./modes/fix.js");
     try {
-      const res = await runFixMode({});
+      const res = await runFixMode({
+        ...(args.fixAgent !== undefined ? { agent: args.fixAgent } : {}),
+      });
       if (res !== null) {
         console.log(
           `[fix] committed=${res.committed.length} walls=${res.walls.length} parked=${res.parked.length}`,
@@ -351,12 +454,63 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     }
   }
 
-  // fresh-verify mode: verify a service by fresh-signing-up as N robot
-  // identities (2-of-N agreement) instead of replaying as a returning user.
-  // Needs a configured identity pool + operator machine token + account id.
+  // shopping mode: signup-link resolver only. It intentionally does not run
+  // the universal signup bot, verifier replay, fresh-verify, or fixbot. It
+  // consumes the same ad-hoc/YAML service sources as discover, but stops at
+  // "verified entrypoint with evidence".
+  if (args.mode === "shopping") {
+    let queue: QueueProvider;
+    if (args.service !== undefined && args.service.length > 0) {
+      let signupUrl = args.signupUrl;
+      const yamlEntry = await lookupAdHocServiceMetadata(args.seedPath, args.service);
+      if (
+        signupUrl === undefined &&
+        yamlEntry !== null &&
+        typeof yamlEntry.signup_url === "string" &&
+        yamlEntry.signup_url.length > 0
+      ) {
+        signupUrl = yamlEntry.signup_url;
+      }
+      queue = new AdHocServiceQueue(args.service, undefined, signupUrl);
+    } else {
+      queue = new YamlSeedQueue({
+        path:
+          args.seedPath !== undefined && args.seedPath.length > 0
+            ? args.seedPath
+            : "tools/housekeeper-services.yaml",
+      });
+    }
+    const { runShoppingBatch } = await import("./modes/shopping.js");
+    try {
+      const res = await runShoppingBatch({
+        queue,
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        config: { log: (line) => console.error(line) },
+      });
+      for (const result of res.results) {
+        console.log(JSON.stringify(result));
+      }
+      console.error(
+        `[shopping] attempted=${res.attempted} verified=${res.verified} bad=${res.bad} blocked=${res.blocked}`,
+      );
+      return res.bad === 0 ? 0 : 1;
+    } catch (err) {
+      console.error(`housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+
+  // fresh-verify mode: verify a stored registry skill by replaying its exact
+  // steps as N robot identities, driving the verdict off the bounded
+  // sequential-confidence sampler (D2). Needs --skill-id, a configured identity
+  // pool, operator machine token, and account id.
   if (args.mode === "fresh-verify") {
     if (args.service === undefined) {
       console.error("housekeeper --mode=fresh-verify needs --service=<slug>");
+      return 2;
+    }
+    if (args.skillId === undefined) {
+      console.error("housekeeper --mode=fresh-verify needs --skill-id=<registry skill id>");
       return 2;
     }
     const { runFreshVerify } = await import("./modes/fresh-verify.js");
@@ -365,18 +519,32 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
         service: args.service,
         ...(args.signupUrl !== undefined ? { signupUrl: args.signupUrl } : {}),
         ...(args.skillId !== undefined ? { skillId: args.skillId } : {}),
-        ...(args.retryBudget !== undefined ? { retryBudget: args.retryBudget } : {}),
+        ...(args.oauthProvider !== undefined ? { oauthProvider: args.oauthProvider } : {}),
+        profileMode: args.profileMode,
       });
       if (res.kind === "not_configured") {
         console.error("[fresh-verify] no identity pool — see ~/.trusty-squire/verify-identities.json");
         return 1;
       }
+      if (res.kind === "returning_verified") {
+        console.log(
+          `[returning-verify] ${args.service}: ${res.success ? "PASS" : "FAIL"} ` +
+            `(skill_id=${res.skillId})${res.reason !== undefined ? ` — ${res.reason}` : ""}`,
+        );
+        return res.success ? 0 : 1;
+      }
       if (res.kind === "insufficient_identities") {
-        console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available}/${res.agreement} unspent) — mint more robots`);
+        console.log(`[fresh-verify] ${args.service}: pool exhausted (${res.available} unspent) — mint more robots`);
         return 1;
       }
-      console.log(`[fresh-verify] ${args.service}: ${res.promoted ? "PROMOTE" : "hold"} (${res.outcomes.filter((o) => o.success).length}/${res.agreement} agreed)`);
-      return res.promoted ? 0 : 1;
+      console.log(
+        `[fresh-verify] ${args.service}: ${res.verdict.toUpperCase()} ` +
+          `(${res.successes}✓/${res.failures}✗, LCB ${res.passRateLcb.toFixed(2)}/` +
+          `UCB ${res.passRateUcb.toFixed(2)}, ${res.samples} sample(s))`,
+      );
+      // promote → 0 (success). reject/hold → 1 (no promotion this pass); hold is
+      // "not enough signal", reject is "the recipe failed", both non-zero.
+      return res.verdict === "promote" ? 0 : 1;
     } catch (err) {
       console.error(`housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
@@ -417,11 +585,40 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       signupUrl?: string;
       allowExtraOAuthScopes?: readonly string[];
     }) => runDiscover(input);
+    // D2.D — wire the fresh-identity confidence sampler into the scheduled
+    // verify batch when an identity pool is configured on this box. The verify
+    // batch then routes OAuth-based skills through N independent stored-skill
+    // replays instead of single-account replay. Email-only skills, and boxes
+    // with no pool, stay on single-account replay (the runner falls back).
+    // Lazy-imported so the bot/inbox deps load only when used.
+    let healFreshVerify: FreshVerifyRunner | undefined;
+    if (verifyPoolConfigured()) {
+      const { runFreshVerify } = await import("./modes/fresh-verify.js");
+      healFreshVerify = (input) =>
+        runFreshVerify({
+          service: input.service,
+          skillId: input.skillId,
+          skill: input.skill,
+          ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
+          ...(input.oauthProvider !== undefined ? { oauthProvider: input.oauthProvider } : {}),
+        });
+      console.error(
+        "[housekeeper] heal: identity pool configured — verify batch uses fresh-identity confidence sampler for OAuth skills",
+      );
+    } else {
+      console.error(
+        "[housekeeper] heal: no identity pool — verify batch stays on single-account replay",
+      );
+    }
     const base = {
       client,
       notifiers,
       replay: createReplayRunner(),
+      // Auto-probe-before-retire: a brittle replay failure on a still-servable
+      // page must not retire a working skill (the fly.io bug).
+      probe: createProbeRunner(),
       discover: healDiscover,
+      ...(healFreshVerify !== undefined ? { freshVerify: healFreshVerify } : {}),
       replayMode: args.replayMode,
       once: args.once,
       ...(args.limit !== undefined ? { limit: args.limit } : {}),
@@ -470,31 +667,29 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     // hit guessSignupUrl(slug) → https://<slug>.com/signup which is
     // wrong for most non-trivial services. Falls back silently to
     // slug-only if the YAML doesn't have the slug or can't be parsed.
-    let signupUrl: string | undefined;
+    let signupUrl = args.signupUrl;
     let oauthProvider = args.oauthProvider;
     let allowExtraOAuthScopes: readonly string[] | undefined;
-    if (args.seedPath !== undefined && args.seedPath.length > 0) {
-      const yamlEntry = await lookupServiceInYaml(args.seedPath, args.service);
-      if (yamlEntry !== null) {
-        if (
-          signupUrl === undefined &&
-          typeof yamlEntry.signup_url === "string" &&
-          yamlEntry.signup_url.length > 0
-        ) {
-          signupUrl = yamlEntry.signup_url;
-        }
-        if (
-          oauthProvider === undefined &&
-          (yamlEntry.oauth_provider === "google" || yamlEntry.oauth_provider === "github")
-        ) {
-          oauthProvider = yamlEntry.oauth_provider;
-        }
-        if (
-          Array.isArray(yamlEntry.allow_extra_oauth_scopes) &&
-          yamlEntry.allow_extra_oauth_scopes.length > 0
-        ) {
-          allowExtraOAuthScopes = yamlEntry.allow_extra_oauth_scopes;
-        }
+    const yamlEntry = await lookupAdHocServiceMetadata(args.seedPath, args.service);
+    if (yamlEntry !== null) {
+      if (
+        signupUrl === undefined &&
+        typeof yamlEntry.signup_url === "string" &&
+        yamlEntry.signup_url.length > 0
+      ) {
+        signupUrl = yamlEntry.signup_url;
+      }
+      if (
+        oauthProvider === undefined &&
+        (yamlEntry.oauth_provider === "google" || yamlEntry.oauth_provider === "github")
+      ) {
+        oauthProvider = yamlEntry.oauth_provider;
+      }
+      if (
+        Array.isArray(yamlEntry.allow_extra_oauth_scopes) &&
+        yamlEntry.allow_extra_oauth_scopes.length > 0
+      ) {
+        allowExtraOAuthScopes = yamlEntry.allow_extra_oauth_scopes;
       }
     }
     queue = new AdHocServiceQueue(args.service, oauthProvider, signupUrl, allowExtraOAuthScopes);
@@ -512,6 +707,35 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // The verifier-only template-value synthesis + BrowserController
   // lifecycle lives in modes/verify.ts; this just wires it.
   const replay = createReplayRunner();
+
+  // Fresh-identity verifier — default verifier mode must use the same robot
+  // fleet as heal mode. Without this wiring, `mcp housekeeper --once` routes
+  // OAuth pending-review skills through createReplayRunner(), which uses the
+  // shared default Chrome profile and produces false needs_login/profile-lock
+  // failures under concurrency.
+  let freshVerify: FreshVerifyRunner | undefined;
+  if (queue.name === "verifier" && verifyPoolConfigured()) {
+    const { runFreshVerify } = await import("./modes/fresh-verify.js");
+    freshVerify = (input) =>
+      runFreshVerify({
+        service: input.service,
+        skillId: input.skillId,
+        skill: input.skill,
+        ...(input.signupUrl !== undefined ? { signupUrl: input.signupUrl } : {}),
+        ...(input.oauthProvider !== undefined ? { oauthProvider: input.oauthProvider } : {}),
+      });
+    console.error(
+      "[housekeeper] verify: identity pool configured — OAuth verifier tasks use fresh-identity confidence sampler",
+    );
+  } else if (queue.name === "verifier") {
+    console.error(
+      "[housekeeper] verify: no identity pool — verifier stays on single-account replay",
+    );
+  }
+
+  // Auto-probe-before-retire runner — invoked by handleReplay when a replay
+  // failure would otherwise count toward demotion, to tell brittleness from rot.
+  const probe = createProbeRunner();
 
   // Discover runner: only required when the queue can produce
   // 'discover' tasks. Lazy-imported so the verifier-only path
@@ -535,9 +759,11 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
     queue,
     client,
     replay,
+    probe,
     replayMode: args.replayMode,
     once: args.once,
     notifiers,
+    ...(freshVerify !== undefined ? { freshVerify } : {}),
     ...(discover !== undefined ? { discover } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
     ...(args.intervalSeconds !== undefined

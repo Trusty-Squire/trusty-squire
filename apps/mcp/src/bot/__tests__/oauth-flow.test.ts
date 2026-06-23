@@ -9,7 +9,7 @@
 // SignupAgent's private methods are reflected here, the same
 // break-the-encapsulation pattern as plan-execute-retry.test.ts.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   SignupAgent,
   detectEmailOtpGate,
@@ -20,9 +20,11 @@ import {
   findOAuthButton,
   findFirstOAuthButton,
   findSignInAdvanceButton,
+  defaultOAuthProviderForService,
   orderOAuthCandidates,
   isLoginLoopState,
   parsePostVerifyStep,
+  hasNativeSignupForm,
   type AgentInbox,
 } from "../agent.js";
 import { scoreSignupButton } from "../browser.js";
@@ -67,6 +69,8 @@ const GITHUB_BTN = mk({
   selector: "#github-oauth",
 });
 const EMAIL_INPUT = mk({ tag: "input", type: "email", selector: "#email" });
+const PASSWORD_INPUT = mk({ tag: "input", type: "password", selector: "#password" });
+const SIGNUP_BTN = mk({ tag: "button", visibleText: "Sign up", selector: "#signup" });
 const API_LINK = mk({ tag: "a", visibleText: "API Keys", selector: "#api" });
 
 // One scripted page: the URL + visible body text the fake serves while
@@ -93,6 +97,12 @@ class FakeOAuthBrowser {
   public consentPageInventory: InteractiveElement[] = [];
   public dashboardInventory: InteractiveElement[] = [];
   public popupClosed = false;
+  public googleGsiAffordance = false;
+  public googleGsiResult: { ok: boolean; via: "fedcm" | "popup" | "redirect" | "none" } = {
+    ok: false,
+    via: "none",
+  };
+  public signupInventoryAfterGoogleGsi: InteractiveElement[] | null = null;
 
   constructor(private readonly script: ScriptPage[]) {}
 
@@ -141,6 +151,15 @@ class FakeOAuthBrowser {
   async extractText(): Promise<string> {
     return this.page().text;
   }
+  // Visibility-respecting body text — the real controller reads innerText;
+  // the fake has no hidden nodes, so the visible text equals extractText().
+  async extractVisibleText(): Promise<string> {
+    return this.page().text;
+  }
+  // Positive-readiness gate. The fake's pages are synchronously "rendered"
+  // (the dashboard inventory is available immediately), so this resolves at
+  // once — mirroring the real controller returning the moment the count is met.
+  async waitForInteractiveDom(): Promise<void> {}
   async extractCredentialCandidates(): Promise<string[]> {
     return this.fieldValuesByIdx[this.idx] ?? [];
   }
@@ -167,7 +186,13 @@ class FakeOAuthBrowser {
   // These tests exercise the classic OAuth-redirect path; report no GSI/FedCM
   // widget so runOAuthFlow takes startOAuth (not tryGoogleGsiLogin).
   async hasGoogleGsiAffordance(): Promise<boolean> {
-    return false;
+    return this.googleGsiAffordance;
+  }
+  async tryGoogleGsiLogin(): Promise<{ ok: boolean; via: "fedcm" | "popup" | "redirect" | "none" }> {
+    if (this.signupInventoryAfterGoogleGsi !== null) {
+      this.signupInventory = this.signupInventoryAfterGoogleGsi;
+    }
+    return this.googleGsiResult;
   }
   currentUrl(): string {
     return this.page().url;
@@ -287,6 +312,15 @@ describe("findOAuthButton", () => {
       selector: "#glued",
     });
     expect(findOAuthButton([glued], "google")?.selector).toBe("#glued");
+  });
+
+  it("matches a provider button with a glued status suffix ('GoogleLast used')", () => {
+    const qovery = mk({
+      tag: "button",
+      visibleText: "Continue with GoogleLast used",
+      selector: "#qovery-google",
+    });
+    expect(findOAuthButton([qovery], "google")?.selector).toBe("#qovery-google");
   });
 
   it("matches a 'Continue with GitHub' button when the provider is github", () => {
@@ -528,17 +562,13 @@ describe("findSignInAdvanceButton", () => {
 // ───────────────────── orderOAuthCandidates ─────────────────────
 
 describe("orderOAuthCandidates", () => {
-  it("leads with Google even over a non-Google pin when Google is warm", () => {
-    // 2026-06-07: GitHub hits an unclearable /authorize 2FA wall, so a warm
-    // Google session must lead even when the service is pinned github (porter/
-    // deepinfra). findFirstOAuthButton still falls through to GitHub on pages
-    // whose Google is One-Tap-only (no button) — e.g. northflank.
-    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["google", "github"]);
-    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["google", "github"]);
+  it("honours a non-Google pin even when Google is warm", () => {
+    expect(orderOAuthCandidates("github", ["google", "github"])).toEqual(["github", "google"]);
+    expect(orderOAuthCandidates("github", ["github", "google"])).toEqual(["github", "google"]);
   });
 
-  it("falls back to Google when the pinned provider's session is NOT warm", () => {
-    expect(orderOAuthCandidates("github", ["google"])).toEqual(["google", "github"]);
+  it("tries a pinned provider even when its session is not warm", () => {
+    expect(orderOAuthCandidates("github", ["google"])).toEqual(["github"]);
   });
 
   it("honours a non-Google pin when there's NO Google session (no regression)", () => {
@@ -555,6 +585,16 @@ describe("orderOAuthCandidates", () => {
     expect(orderOAuthCandidates(undefined, ["github", "google"])).toEqual(["google", "github"]);
     expect(orderOAuthCandidates(undefined, ["github"])).toEqual(["github"]);
     expect(orderOAuthCandidates(undefined, [])).toEqual([]);
+  });
+});
+
+describe("defaultOAuthProviderForService", () => {
+  it("does not preselect an OAuth route by service slug", () => {
+    expect(defaultOAuthProviderForService("fly-io")).toBeUndefined();
+    expect(defaultOAuthProviderForService("fly.io")).toBeUndefined();
+    expect(defaultOAuthProviderForService("clarifai")).toBeUndefined();
+    expect(defaultOAuthProviderForService("nomic")).toBeUndefined();
+    expect(defaultOAuthProviderForService("langfuse")).toBeUndefined();
   });
 });
 
@@ -717,6 +757,31 @@ describe("detectEmailOtpGate (rc.24)", () => {
     expect(
       detectEmailOtpGate("https://x.com/dashboard", "Dashboard", "Your email is configured."),
     ).toBe(false);
+  });
+
+  it("does not fire on Anthropic's normal onboarding form just because it shows the OAuth email", () => {
+    expect(
+      detectEmailOtpGate(
+        "https://console.anthropic.com/onboarding",
+        "Onboarding | Claude Platform",
+        "Display name I am at least 18 years old and agree to Commercial Terms. Don’t want to use verify-12@trustysquire.ai? Log in with another email.",
+        [
+          mk({ tag: "input", name: "displayname", placeholder: "e.g. Claude, CS, Claudius" }),
+          mk({ tag: "input", type: "checkbox", ariaLabel: "Accept terms" }),
+        ],
+      ),
+    ).toBe(false);
+  });
+
+  it("fires on generic page-text code gates only when an OTP-like input exists", () => {
+    expect(
+      detectEmailOtpGate(
+        "https://x.com/onboarding",
+        "Continue",
+        "We sent a 6-digit verification code to verify-12@trustysquire.ai",
+        [mk({ tag: "input", name: "code", placeholder: "Verification code" })],
+      ),
+    ).toBe(true);
   });
 
   it("fires on Convex's post-OAuth radar-challenge 'Enter the code sent to' wall (0.8.10)", () => {
@@ -963,6 +1028,39 @@ describe("planExecuteWithRetry — OAuth-first branch (T6)", () => {
   });
 });
 
+describe("OAuth GSI fallback routing", () => {
+  it("uses native form-fill before falling back to another OAuth provider", async () => {
+    const browser = new FakeOAuthBrowser([{ url: "https://example.com/signup", text: "" }]);
+    browser.googleGsiAffordance = true;
+    browser.googleGsiResult = { ok: false, via: "none" };
+    browser.signupInventory = [
+      GOOGLE_BTN,
+      GITHUB_BTN,
+      mk({ tag: "input", type: null, name: "email", selector: "#email" }),
+      PASSWORD_INPUT,
+      SIGNUP_BTN,
+    ];
+    browser.signupInventoryAfterGoogleGsi = [GITHUB_BTN];
+    expect(hasNativeSignupForm(browser.signupInventory)).toBe(true);
+    const agent = newAgent(browser);
+    const steps: string[] = [];
+    const result = await (
+      agent as unknown as {
+        runOAuthFlow: (
+          task: ReturnType<typeof oauthTask>,
+          selector: string,
+          provider: "google",
+          steps: string[],
+        ) => Promise<unknown>;
+      }
+    ).runOAuthFlow(oauthTask(), "#google-oauth", "google", steps);
+
+    expect(result).toBe("__fall_back_to_form_fill__");
+    expect(steps.join("\n")).toMatch(/original page had a native email\/password signup form/i);
+    expect(steps.join("\n")).not.toMatch(/falling back to github/i);
+  });
+});
+
 // ───────────────────── full OAuth signup ─────────────────────
 
 function oauthTask(): Parameters<SignupAgent["signup"]>[0] {
@@ -1045,6 +1143,64 @@ describe("OAuth signup — happy path (T6/T7)", () => {
 
     expect(result.success).toBe(true);
     expect(result.credentials?.api_key).toBe("rnd_fieldvalueabcdefghij1234567890");
+  });
+});
+
+// Validates the OAUTH_ENGINE wiring (agent.ts) end-to-end through agent.signup,
+// not just the reducer unit. The engine path routes the CONSENT decision through
+// decideOAuthStep; these assert it produces the same outcomes as the inline path
+// (approve basic, hold non-basic, never type into a login form).
+describe("OAuth signup — OAUTH_ENGINE consent wiring", () => {
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env.OAUTH_ENGINE;
+    process.env.OAUTH_ENGINE = "1";
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.OAUTH_ENGINE;
+    else process.env.OAUTH_ENGINE = prev;
+  });
+
+  it("approves basic consent via the reducer (same outcome as inline) + logs the engine step", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      CONSENT_BASIC,
+      PRODUCT_DASH("Dashboard — Your API Key: ts_engine_abcdefghijklmnop12345"),
+    ]);
+    const result = await newAgent(browser).signup(oauthTask());
+    expect(result.success).toBe(true);
+    expect(result.credentials?.api_key).toBe("ts_engine_abcdefghijklmnop12345");
+    expect(browser.advanceCalls).toBe(1);
+    expect(browser.typeCalls).toHaveLength(0);
+    expect(result.steps.some((s) => /OAuth\[engine\].*advance_consent:approve/.test(s))).toBe(true);
+  });
+
+  it("holds a non-basic scope for review via the reducer (never approves)", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      {
+        url: "https://accounts.google.com/signin/oauth/consent?scope=openid+email+https://www.googleapis.com/auth/drive&client_id=abc",
+        text: "Consent",
+      },
+    ]);
+    const result = await newAgent(browser).signup(oauthTask());
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/oauth_consent_needs_review/);
+    expect(browser.advanceCalls).toBe(0);
+    expect(browser.typeCalls).toHaveLength(0);
+  });
+
+  it("aborts needs_login and NEVER types when a consent page is really a login form", async () => {
+    const browser = new FakeOAuthBrowser([
+      { url: "https://render.com/register", text: "" },
+      CONSENT_BASIC, // consent-classified URL …
+    ]);
+    // … but a credential field is live → it's a login form, not a consent screen.
+    browser.consentPageInventory = [mk({ tag: "input", type: "text", selector: "#password" })];
+    const result = await newAgent(browser).signup(oauthTask());
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/needs_login/);
+    expect(browser.typeCalls).toHaveLength(0); // THE D4 guarantee, via the engine
   });
 });
 

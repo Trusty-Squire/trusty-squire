@@ -1,0 +1,142 @@
+// fix-router.ts — autonomous-fix-loop Phase 1 (docs/DESIGN-autonomous-fix-loop.md).
+//
+// Pure classification of an open ledger cluster into one of four routes. This
+// is the gate that keeps the autonomous fix-agent pointed at exactly the
+// failures it can safely fix, and routes everything else away:
+//
+//   drain          — flaky / timing; a re-run resolves it, no code fix
+//   wall           — deprecated/no-op in autonomous mode. We do not predeclare
+//                    walls from stale failure prose; regressions are either
+//                    fixed, retried, or parked for capability work.
+//   fix            — DETERMINISTIC and inside the fix-agent's path-fence
+//                    (the post-OAuth nav planner: planner_loop / extract).
+//                    The ONLY route that spends an autonomous code fix.
+//   capability_gap — deterministic but OUTSIDE the fence; the agent's eval
+//                    doesn't cover it, so it surfaces with evidence instead of
+//                    being hacked. Widening the fence is a deliberate per-class
+//                    step, never automatic.
+//
+// Why these stages are "in fence": the fix-agent may only edit the gated
+// post-OAuth navigation planner (modes/fix.ts DEFAULT_ALLOWED_PATHS). A fix
+// there can only move `planner_loop` (stalled nav) and `extract` (reached the
+// key page, couldn't surface a credential). Everything else — OAuth handshake,
+// account-chooser, email/OTP, captcha, form — lives in code the fence forbids,
+// so its eval is hollow and an "autonomous fix" would be unguarded.
+
+import type { FailureStage } from "../bot/failure-stage.js";
+
+export type FixRoute = "drain" | "wall" | "fix" | "capability_gap";
+export type FailureOwner = "code" | "retry" | "capability" | "external";
+export type FailureDisposition =
+  | "attempt_fix"
+  | "retry_later"
+  | "blocked_wall"
+  | "needs_capability";
+
+export interface RouterInput {
+  service: string;
+  /** Coarse ledger key (token before the first colon), e.g. "oauth_onboarding_failed". */
+  coarseKind: string;
+  /** Failure stage (classifyFailureStage over the original error). */
+  stage: FailureStage;
+  /** Fraction of recent runs for this service that went GREEN (0..1). High =
+   *  flaky (it flips), so a re-run — not a code fix — is the move. */
+  recentGreenRate: number;
+  /** The signup domain resolves. False = dead host → wall. */
+  dnsAlive: boolean;
+  /** Curated `needs-manual` flag (operator-confirmed unservable). */
+  curatedNeedsManual: boolean;
+}
+
+export interface RouterVerdict {
+  route: FixRoute;
+  owner: FailureOwner;
+  disposition: FailureDisposition;
+  reason: string;
+}
+
+// Stages the fix-agent's path-fence can actually move (post-OAuth nav planner).
+export const IN_FENCE_STAGES: ReadonlySet<FailureStage> = new Set<FailureStage>([
+  "planner_loop",
+  "extract",
+]);
+
+// Timing / environment stages where a retry is the correct move, not a fix.
+const FLAKY_STAGES: ReadonlySet<FailureStage> = new Set<FailureStage>([
+  "proxy_timeout",
+  "run_timeout",
+  "hydration",
+]);
+
+// Stages that need a faculty outside the current code fence. These are parked
+// as capability gaps, not walls; prior-green regressions have repeatedly looked
+// like "manual"/"payment"/"phone" in stale prose before a code fix recovered
+// them.
+const CAPABILITY_WALL_STAGES: ReadonlySet<FailureStage> = new Set<FailureStage>([
+  "phone",
+  "payment",
+  "manual",
+]);
+
+// A service that goes green this often on retry is flaky, not deterministically
+// broken — leave it to the drain clock.
+export const RECENT_GREEN_RATE_FLAKY = 0.2;
+
+function verdict(
+  route: FixRoute,
+  reason: string,
+): RouterVerdict {
+  switch (route) {
+    case "fix":
+      return { route, owner: "code", disposition: "attempt_fix", reason };
+    case "drain":
+      return { route, owner: "retry", disposition: "retry_later", reason };
+    case "wall":
+      return { route, owner: "external", disposition: "blocked_wall", reason };
+    case "capability_gap":
+      return { route, owner: "capability", disposition: "needs_capability", reason };
+  }
+}
+
+export function classifyCluster(i: RouterInput): RouterVerdict {
+  // No automatic walls. Operator curation and dead-DNS observations can be stale
+  // or a URL-resolution regression; route in-fence stages to the fixer and park
+  // out-of-fence stages as capability work.
+  if (i.curatedNeedsManual) {
+    return IN_FENCE_STAGES.has(i.stage)
+      ? verdict("fix", "curated/manual marker present, but in-fence regression — attempt fix")
+      : verdict("capability_gap", "curated/manual marker present — requires explicit capability handling");
+  }
+  if (!i.dnsAlive) {
+    return IN_FENCE_STAGES.has(i.stage)
+      ? verdict("fix", "signup domain probe failed, but in-fence regression may be URL resolution — attempt fix")
+      : verdict("capability_gap", "signup domain probe failed — requires URL/capability investigation");
+  }
+  // Flaky overrides stage: if it flips green on retry, a fix would chase noise.
+  if (i.recentGreenRate >= RECENT_GREEN_RATE_FLAKY) {
+    return verdict(
+      "drain",
+      `flaky — ${Math.round(i.recentGreenRate * 100)}% of recent runs green; retry, no fix`,
+    );
+  }
+  // Deterministic + inside the fence → the one route that spends a fix.
+  if (IN_FENCE_STAGES.has(i.stage)) {
+    return verdict(
+      "fix",
+      `deterministic post-OAuth nav failure (stage=${i.stage}) — inside the fix-agent fence`,
+    );
+  }
+  // Deterministic but a timing/env stage → still a retry, not a fix.
+  if (FLAKY_STAGES.has(i.stage)) {
+    return verdict("drain", `timing/env stage=${i.stage} — retry`);
+  }
+  // Needs a faculty outside the current fence → surface, don't call it a wall.
+  if (CAPABILITY_WALL_STAGES.has(i.stage)) {
+    return verdict("capability_gap", `out-of-fence capability stage=${i.stage} — no wall routing`);
+  }
+  // Deterministic, real, but OUTSIDE the fence — surface, don't hack.
+  return verdict(
+    "capability_gap",
+    `deterministic but out-of-fence (stage=${i.stage}) — needs eval coverage before an autonomous fix`,
+  );
+}

@@ -77,6 +77,125 @@ describe("extract-failure routes", () => {
     await server.close();
   });
 
+  it("redacts credential-shaped strings on upload and diagnostic reads", async () => {
+    const server = await buildServer({
+      extractFailureStore: new InMemoryExtractFailureStore(),
+    });
+    const token = "sk-" + "a".repeat(44);
+
+    const upload = await server.inject({
+      method: "POST",
+      url: "/v1/extract-failures",
+      headers: { "x-account-id": "acct-a" },
+      payload: {
+        service: "Railway",
+        mcp_version: "0.6.14-rc.8",
+        url: "https://railway.com/account/tokens",
+        title: "Tokens",
+        step_label: "post-verify round 2/5: extract",
+        extract_reason: `planner saw ${token}`,
+        candidates: [`copy input: ${token}`],
+        html: `<main><input value="${token}"></main>`,
+      },
+    });
+    expect(upload.statusCode).toBe(201);
+    const id = upload.json().id;
+
+    const list = await server.inject({
+      method: "GET",
+      url: "/v1/extract-failures",
+      headers: { "x-account-id": "acct-a" },
+    });
+    expect(JSON.stringify(list.json())).not.toContain(token);
+
+    const detail = await server.inject({
+      method: "GET",
+      url: `/v1/extract-failures/${id}`,
+      headers: { "x-account-id": "acct-a" },
+    });
+    expect(JSON.stringify(detail.json())).not.toContain(token);
+    expect(detail.json().extract_reason).toContain("sk-REDACTED");
+    expect(detail.json().candidates[0]).toContain("sk-REDACTED");
+    expect(detail.json().html).toContain("sk-REDACTED");
+
+    const html = await server.inject({
+      method: "GET",
+      url: `/v1/extract-failures/${id}/html`,
+      headers: { "x-account-id": "acct-a" },
+    });
+    expect(html.body).not.toContain(token);
+    expect(html.body).toContain("sk-REDACTED");
+
+    await server.close();
+  });
+
+  it("redacts historical rows even if they were persisted before upload redaction", async () => {
+    const store = new InMemoryExtractFailureStore();
+    const token = "rnd_" + "b".repeat(32);
+    const persisted = await store.upload("acct-a", {
+      service: "Render",
+      mcp_version: "0.6.14-rc.8",
+      url: "https://dashboard.render.com",
+      title: "API keys",
+      step_label: "extract",
+      extract_reason: `stored reason ${token}`,
+      candidates: [`candidate ${token}`],
+      html: `<main>${token}</main>`,
+    });
+    const server = await buildServer({ extractFailureStore: store });
+
+    const list = await server.inject({
+      method: "GET",
+      url: "/v1/extract-failures",
+      headers: { "x-account-id": "acct-a" },
+    });
+    expect(JSON.stringify(list.json())).not.toContain(token);
+
+    const detail = await server.inject({
+      method: "GET",
+      url: `/v1/extract-failures/${persisted.id}`,
+      headers: { "x-account-id": "acct-a" },
+    });
+    expect(JSON.stringify(detail.json())).not.toContain(token);
+
+    await server.close();
+  });
+
+  it("redacts Deno deploy token-shaped diagnostic text", async () => {
+    const server = await buildServer({
+      extractFailureStore: new InMemoryExtractFailureStore(),
+    });
+    const token = "ddp_" + "c".repeat(36);
+
+    const upload = await server.inject({
+      method: "POST",
+      url: "/v1/extract-failures",
+      headers: { "x-account-id": "acct-a" },
+      payload: {
+        service: "deno-kv",
+        mcp_version: "0.9.17-rc.3",
+        url: "https://dash.deno.com/account",
+        title: "Account Settings",
+        step_label: "round-1-extract",
+        extract_reason: `api_key='${token}'`,
+        candidates: [token],
+        html: `<main>${token}</main>`,
+      },
+    });
+    expect(upload.statusCode).toBe(201);
+    const id = upload.json().id;
+
+    const detail = await server.inject({
+      method: "GET",
+      url: `/v1/extract-failures/${id}`,
+      headers: { "x-account-id": "acct-a" },
+    });
+    expect(JSON.stringify(detail.json())).not.toContain(token);
+    expect(detail.json().extract_reason).toContain("ddp_REDACTED");
+
+    await server.close();
+  });
+
   it("rejects invalid bodies and oversized html", async () => {
     const server = await buildServer({
       extractFailureStore: new InMemoryExtractFailureStore(),

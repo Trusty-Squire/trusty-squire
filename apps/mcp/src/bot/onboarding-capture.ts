@@ -37,28 +37,52 @@
 // set it to `off` to opt out entirely.
 
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep, SignupResult } from "./agent.js";
 import { classifyFailureStage, type FailureStage } from "./failure-stage.js";
+import {
+  classifySemanticFailure,
+  inferSemanticTransition,
+  type SemanticFailureBucket,
+  type SemanticFaultClass,
+  type SemanticTransitionRecord,
+} from "./semantic-transition.js";
 
 // Capture format version. Bumped when round-shape changes incompatibly.
 // The promoter rejects unknown versions (E2). Same-major minor changes
 // (new optional fields) stay forward-compatible.
 export const CAPTURE_FORMAT_VERSION = 1 as const;
 
-// One run-scoped id so a multi-service process (the batch harness)
-// keeps each service's rounds grouped without collisions.
-let runId: string | undefined;
+// Per-service run ids. Housekeeper discovery can run several services in one
+// process; a module-global runId lets one signup's reset erase another
+// in-flight signup's capture state before auto-promote reads it.
+const runIds = new Map<string, string>();
+
+function slugOf(service: string): string {
+  return service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function runIdFor(service: string): string {
+  const slug = slugOf(service);
+  const existing = runIds.get(slug);
+  if (existing !== undefined) return existing;
+  const next = Date.now().toString(36);
+  runIds.set(slug, next);
+  return next;
+}
 
 // Read the in-process runId. Auto-promote needs to know which run's
 // captures to promote after a successful signup. Returns undefined
 // when no rounds have been captured yet — auto-promote then skips
 // with a useful message rather than promoting nothing.
-export function currentRunId(): string | undefined {
-  return runId;
+export function currentRunId(service?: string): string | undefined {
+  if (service !== undefined) return runIds.get(slugOf(service));
+  if (runIds.size === 1) return [...runIds.values()][0];
+  return undefined;
 }
 
 // rc.17 — reset the per-process capture chain state at the start of a
@@ -70,10 +94,19 @@ export function currentRunId(): string | undefined {
 // #3 of the Railway closed-loop test was the canonical case).
 // Called from UniversalSignupBot.runSession() before the bot's first
 // captureOnboardingRound call.
-export function resetCaptureChain(): void {
-  runId = undefined;
-  chainHead.clear();
-  lastRound = undefined;
+export function resetCaptureChain(service?: string): void {
+  if (service === undefined) {
+    runIds.clear();
+    chainHead.clear();
+    lastRounds.clear();
+    return;
+  }
+  const slug = slugOf(service);
+  runIds.delete(slug);
+  lastRounds.delete(slug);
+  for (const key of [...chainHead.keys()]) {
+    if (key.startsWith(`${slug}|`)) chainHead.delete(key);
+  }
 }
 
 // Per-(service, runId) chain head. Each new round's `prev_hash` is the
@@ -90,7 +123,7 @@ const chainHead = new Map<string, string>();
 // captureRunOutcome reads this to stamp `terminal_round` — the round the
 // run reached (where a failure got stuck, or the last onboarding step on
 // success). Reset alongside runId/chainHead at the start of each signup.
-let lastRound: number | undefined;
+const lastRounds = new Map<string, number>();
 
 export interface OnboardingRoundCapture {
   service: string;
@@ -101,6 +134,16 @@ export interface OnboardingRoundCapture {
   // The step the planner actually chose this round — a reference for
   // the curator, NOT ground truth (the planner may have been wrong).
   observed: PostVerifyStep;
+  // Fix C4 — the model/provider the LLM backend actually served for this
+  // round's plan. Optional: undefined when the backend didn't report one,
+  // or on an older client. Persisted so model-swap flakiness is
+  // attributable from the corpus (which round used which backend).
+  resolved_model?: string;
+  resolved_provider?: string;
+  // Machine-readable semantic contract for this planner transition. The raw
+  // observed step remains the source of truth for replay synthesis; this is the
+  // planner-correctness/eval surface.
+  semantic?: SemanticTransitionRecord;
 }
 
 // Wire shape of one dumped round. `expect: null` is the curator slot;
@@ -113,6 +156,15 @@ export interface OnboardingCaseFile {
   state: OnboardingRoundCapture["state"];
   inventory: readonly InteractiveElement[];
   observed: PostVerifyStep;
+  // Fix C4 — served model/provider for this round (see
+  // OnboardingRoundCapture). Optional + only written when present, so the
+  // integrity hash of an older round (no resolved_* keys) is unaffected
+  // and the format stays forward-compatible.
+  resolved_model?: string;
+  resolved_provider?: string;
+  // Additive semantic transition metadata. Optional so old captures remain
+  // readable and future semantic schema versions can coexist.
+  semantic?: SemanticTransitionRecord;
   expect: null;
   prev_hash: string | null;
   content_hash: string;
@@ -176,8 +228,8 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
   if (dir === null) return;
   try {
     mkdirSync(dir, { recursive: true });
-    if (runId === undefined) runId = Date.now().toString(36);
-    const slug = entry.service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const runId = runIdFor(entry.service);
+    const slug = slugOf(entry.service);
     const file = join(dir, `${slug}-${runId}-r${entry.round}.json`);
 
     const chainKey = `${slug}|${runId}`;
@@ -195,6 +247,19 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
       state: entry.state,
       inventory: entry.inventory,
       observed: entry.observed,
+      semantic:
+        entry.semantic ??
+        inferSemanticTransition({
+          state: entry.state,
+          inventory: entry.inventory,
+          observed: entry.observed,
+          oauth: entry.oauth,
+        }),
+      // Only set when present so a round that has no resolved_* (older
+      // client / backend that didn't report) hashes identically to before
+      // — this keeps the integrity chain forward-compatible.
+      ...(entry.resolved_model !== undefined ? { resolved_model: entry.resolved_model } : {}),
+      ...(entry.resolved_provider !== undefined ? { resolved_provider: entry.resolved_provider } : {}),
       prev_hash: prevHash,
     };
     const contentHash = computeContentHash(payload);
@@ -207,9 +272,51 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
     writeFileSync(file, JSON.stringify(corpusCase, null, 2));
 
     chainHead.set(chainKey, contentHash);
-    lastRound = Math.max(lastRound ?? -1, entry.round);
+    lastRounds.set(slug, Math.max(lastRounds.get(slug) ?? -1, entry.round));
   } catch {
     // best-effort — capture is diagnostic, never load-bearing
+  }
+}
+
+// Patch the semantic verdict for the most recently-written round before the
+// next round extends the hash chain. This keeps the existing "one capture per
+// planner step" contract while letting the executor fill in the post-action
+// predicate verdict after it observes the resulting browser state.
+export function updateCapturedRoundSemantic(
+  service: string,
+  round: number,
+  semantic: SemanticTransitionRecord,
+): void {
+  const dir = resolveCaptureDir();
+  const runId = currentRunId(service);
+  if (dir === null || runId === undefined) return;
+  try {
+    const slug = slugOf(service);
+    const file = join(dir, `${slug}-${runId}-r${round}.json`);
+    const current = JSON.parse(readFileSync(file, "utf8")) as OnboardingCaseFile;
+    const payload: Omit<OnboardingCaseFile, "content_hash" | "expect"> = {
+      capture_format_version: current.capture_format_version,
+      name: current.name,
+      service: current.service,
+      oauth: current.oauth,
+      state: current.state,
+      inventory: current.inventory,
+      observed: current.observed,
+      semantic,
+      ...(current.resolved_model !== undefined ? { resolved_model: current.resolved_model } : {}),
+      ...(current.resolved_provider !== undefined ? { resolved_provider: current.resolved_provider } : {}),
+      prev_hash: current.prev_hash,
+    };
+    const contentHash = computeContentHash(payload);
+    const updated: OnboardingCaseFile = {
+      ...payload,
+      expect: current.expect,
+      content_hash: contentHash,
+    };
+    writeFileSync(file, JSON.stringify(updated, null, 2));
+    chainHead.set(`${slug}|${runId}`, contentHash);
+  } catch {
+    // best-effort — semantic verdicts are diagnostic, never load-bearing
   }
 }
 
@@ -239,6 +346,11 @@ export interface RunOutcomeRecord {
   // Which terminal stage a failed run stopped at (B1 taxonomy). "none" on
   // success. See classifyFailureStage in failure-stage.ts.
   failure_stage: FailureStage;
+  // Coarse semantic diagnosis for the terminal failure. These fields make the
+  // denominator explicit: planner-correctable failures are separate from
+  // executor/transition failures and external walls/infra.
+  semantic_failure_bucket?: SemanticFailureBucket;
+  semantic_fault_class?: SemanticFaultClass;
   // Highest captured round index, or null if the run captured no rounds.
   terminal_round: number | null;
 }
@@ -247,14 +359,36 @@ export interface OnboardingOutcomeFile {
   capture_format_version: typeof CAPTURE_FORMAT_VERSION;
   service: string;
   run_id: string;
+  // Git commit of the bot code that produced this outcome. Older captures do
+  // not have it; autoloop treats missing/non-current commits as stale.
+  source_commit?: string;
   outcome: RunOutcomeRecord;
+}
+
+function currentSourceCommit(): string | undefined {
+  const env = process.env.TRUSTY_SQUIRE_SOURCE_COMMIT?.trim();
+  if (env !== undefined && env.length > 0) return env;
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+  } catch {
+    return undefined;
+  }
 }
 
 // True when this run captured at least one post-verify round. Lets the
 // finalizer derive `reachedOnboarding` for the failure-stage classifier
 // without re-reading the disk.
 export function capturedAnyRound(): boolean {
-  return lastRound !== undefined;
+  return lastRounds.size > 0;
+}
+
+export function capturedAnyRoundForService(service: string): boolean {
+  return lastRounds.has(slugOf(service));
 }
 
 // Redaction-safe summary of a finished run. Pure + exported for tests.
@@ -270,31 +404,49 @@ export function summarizeRunOutcome(
         return typeof v === "string" && v.length > 0;
       })
     : [];
+  const failureStage = classifyFailureStage(result, reachedOnboarding);
+  const semantic =
+    failureStage === "none"
+      ? undefined
+      : classifySemanticFailure({
+          failureStage,
+          ...(result.error !== undefined ? { error: result.error } : {}),
+          reachedOnboarding,
+        });
   return {
     ok: result.success,
     credential_present: fields.length > 0,
     credential_fields: fields,
-    failure_stage: classifyFailureStage(result, reachedOnboarding),
+    failure_stage: failureStage,
+    ...(semantic !== undefined
+      ? {
+          semantic_failure_bucket: semantic.bucket,
+          semantic_fault_class: semantic.fault_class,
+        }
+      : {}),
     terminal_round: terminalRound,
   };
 }
 
 // Write the run-outcome sidecar. Best-effort, like the round capture.
-// Skips entirely when the run captured no rounds (runId undefined): the
-// eval is round-keyed, so an outcome with nothing to join against is
-// dead weight.
+// Even zero-round runs get an outcome sidecar: the repair ledger uses later
+// successes to suppress stale failures, and fast-path successes (credentials
+// found immediately after OAuth) may not capture any post-verify rounds.
 export function captureRunOutcome(service: string, result: SignupResult): void {
   const dir = resolveCaptureDir();
   if (dir === null) return;
-  if (runId === undefined) return;
   try {
     mkdirSync(dir, { recursive: true });
-    const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const runId = runIdFor(service);
+    const slug = slugOf(service);
+    const lastRound = lastRounds.get(slug);
     const file = join(dir, `${slug}-${runId}.outcome.json`);
+    const sourceCommit = currentSourceCommit();
     const record: OnboardingOutcomeFile = {
       capture_format_version: CAPTURE_FORMAT_VERSION,
       service,
       run_id: runId,
+      ...(sourceCommit !== undefined ? { source_commit: sourceCommit } : {}),
       outcome: summarizeRunOutcome(result, lastRound !== undefined, lastRound ?? null),
     };
     writeFileSync(file, JSON.stringify(record, null, 2));

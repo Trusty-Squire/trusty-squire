@@ -321,6 +321,19 @@ model ProvisionEvent {
   final_strategy   String? // "replay" | "bot" — what actually served it
   replay_outcome   String? // "ok" | "miss" | "na" — why replay did/didn't serve
   final_outcome    String? // "ok" | "failed" | "blocked"
+  // Memory-overhaul Phase 1 — the housekeeper CONTEXT this run ran in:
+  // "discover" | "verify" | "replay". Distinct from *_strategy (which path
+  // the router tried): an end-user provision and a housekeeper discovery
+  // run can share strategy=bot but differ in mode. Null for legacy rows +
+  // end-user provisions that don't set it.
+  mode String?
+  // Memory-overhaul Phase 1 — captcha SUMMARY (partial fold, decision 4).
+  // The detailed CaptchaEvent (stealth_profile + egress-reputation
+  // correlation) stays in the API DB; the firehose carries just enough to
+  // answer "did this run hit a captcha, which kind, was it blocked".
+  captcha_kind    String? // "turnstile" | "recaptcha" | "hcaptcha" | …
+  captcha_variant String? // e.g. "turnstile" | "recaptcha_v2" | "recaptcha_v3"
+  captcha_blocked Boolean?
   // Optional failure classification — same vocabulary as
   // UniversalBotFailureRecord.error_kind. Populated when status="failed".
   failure_kind String?
@@ -407,4 +420,92 @@ model HealRun {
   mcp_version String?
 
   @@index([ran_at(sort: Desc)])
+}
+
+// ServiceState — memory-overhaul Phase 3. The CANONICAL per-service status
+// (one row per service). Two halves:
+//
+//  1. PROJECTION (recomputed from ProvisionEvent on every insert, via the
+//     SAME buildCompatHealth used by the on-read /health route — so the
+//     materialized status can't drift from the derived one). Pure function
+//     of the recent event slice → convergent under concurrent inserts (a
+//     later green after a blocking run in the same batch wins because the
+//     recompute reads the full committed set, not just "this event").
+//
+//  2. MUTABLE OVERLAY (written by the heal pass / OpenIssue in Phase 4) —
+//     the machine-written diagnosis + human/heal status classification that
+//     a pure event-projection CANNOT hold. recomputeFrom() updates ONLY the
+//     projection fields and NEVER clobbers the overlay.
+//
+// Replaces the hand-written STATE.md as the source of truth (STATE.md
+// becomes a generated projection of this table — a later slice).
+model ServiceState {
+  service String @id
+
+  // ---- projection (buildCompatHealth over the recent ProvisionEvent slice) ----
+  // CompatState: "skill-active" | "working" | "struggling" | "hard-block".
+  status            String
+  confidence        Float // the signed compat_score (positive healthy, negative blocked)
+  successful_count  Int       @default(0)
+  failed_count      Int       @default(0)
+  last_attempt_at   DateTime?
+  last_green_at     DateTime? // most recent SUCCESS occurred_at — the "last_green_run" anchor
+  last_failure_kind String?
+
+  // ---- mutable overlay (Phase 4: heal pass / OpenIssue write these) ----
+  // One-line machine-written hypothesis for the current failure, + a pointer
+  // to the run/evidence that shows it (provision_id or artifacts_uri).
+  current_diagnosis  String?
+  diagnosis_evidence String?
+  // Human/heal classification a projection can't derive: null (let the
+  // projection speak) | "wall" (proven, with a falsification record in
+  // OpenIssue) | "unservable" (dequeued). Advisory over the projection.
+  wall_classification String?
+
+  projection_updated_at DateTime @updatedAt
+
+  @@index([status])
+}
+
+// OpenIssue — memory-overhaul Phase 4. The DRAINABLE work queue: one ticket
+// per (service, failure_kind) while a service isn't servable. The point that
+// makes it more than telemetry is the CLOSE-GATE, enforced SERVER-SIDE: you
+// cannot mark a ticket `resolved` without pointing at a green run, and you
+// cannot mark it `wall` without a falsification record (the experiment that
+// proved the wall + its result). That mechanically blocks "I gave up and
+// called it terrain" under context pressure — the recurring failure mode.
+//
+// Seeded from the ProvisionEvent firehose (NOT UniversalBotFailureRecord —
+// Codex #5: UBF isn't populated on every failure path, which would leave
+// silent all-clear gaps). A success auto-resolves the service's open tickets
+// (drain-on-green); a later failure reopens. Optimistic concurrency (`version`)
+// keeps parallel loop workers (we run concurrency≥2) from stomping each other.
+model OpenIssue {
+  // Stable id "service:failure_kind" — a recurrence updates, not duplicates.
+  id           String @id
+  service      String
+  failure_kind String
+
+  // open → in_progress → resolved | wall. (resolved/wall require evidence;
+  // see the close-gate in routes/issues.ts.)
+  status String @default("open")
+
+  first_seen DateTime @default(now())
+  attempts   Int      @default(1)
+
+  // Close evidence — the gate REQUIRES the matching one for the target status.
+  resolved_run String? // a green ProvisionEvent.provision_id (status=resolved)
+  // { experiment, result, evidence_ref? } — the falsification record (status=wall).
+  falsified Json?
+
+  // Who last transitioned it (loop worker id / "auto" for event-driven paths).
+  actor String?
+  // Optimistic-concurrency token; bumped on every mutation. A claim/resolve/
+  // wall with a stale version is rejected 409.
+  version Int @default(0)
+
+  updated_at DateTime @updatedAt
+
+  @@index([status])
+  @@index([service])
 }

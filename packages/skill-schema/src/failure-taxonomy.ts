@@ -24,6 +24,7 @@ export const WALL_FAILURE_KINDS: ReadonlySet<string> = new Set([
   "captcha_blocked",
   "anti_bot_blocked",
   "captcha",
+  "onboarding_blocked",
 ]);
 
 // Our-side email/inbox delivery failures. The skill submitted the form

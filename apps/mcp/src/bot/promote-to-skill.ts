@@ -46,7 +46,7 @@ import {
 } from "@trusty-squire/skill-schema";
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep } from "./agent.js";
-import { extractAllLabeledTokensFromReason } from "./agent.js";
+import { extractAllLabeledTokensFromReason } from "./credential-extraction-flow.js";
 import {
   verifyCaptureChain,
   type OnboardingCaseFile,
@@ -67,6 +67,20 @@ export interface PromoteInput {
    * synthesizer derives `${SERVICE}_API_KEY` (e.g. RAILWAY_API_KEY).
    */
   env_var_suggestion?: string;
+  /**
+   * Caller-known OAuth provider from curated service metadata. The
+   * synthesizer can infer a provider only when the captured graph includes
+   * the OAuth click itself; fresh-signup captures often start after that
+   * handoff, so callers must be able to preserve the queue's provider pin.
+   */
+  oauthProvider?: "google" | "github";
+  /**
+   * Caller-known service entry URL. OAuth capture chains often start after the
+   * provider callback, so round 0 can be a post-OAuth onboarding page rather
+   * than the replayable service entry. When present, this wins over captured
+   * round URLs for the Skill signup_url.
+   */
+  signupUrl?: string;
   /**
    * Starting status for the synthesized skill. Defaults to
    * `pending-review` (the two-tier registry's staging slot): the
@@ -117,7 +131,11 @@ export interface PromoteRejection {
     // The synthesized graph is schema-valid but can't replay (mirrors the
     // registry's POST /skills gate): an await_email_code with no preceding
     // ${EMAIL_ALIAS} fill + send-code, or a per-run param in signup_url.
-    | "incomplete_replay_graph";
+    | "incomplete_replay_graph"
+    // The captured entry URL is a post-signup/session transaction page, not a
+    // stable replay entry. Publishing it would strand the verifier on a stale
+    // dashboard/auth-confirmation URL and burn robot identities.
+    | "unstable_signup_url";
   message: string;
   offending_round?: number;
   offending_step?: number;
@@ -163,7 +181,6 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // Generalize per-run session params out of the captured entry URL so a stale
   // session token (kinde-class psid=, redirect_to=) doesn't make replay's first
   // navigation dead.
-  const firstRound = verification.rounds[0]!;
   // Pick the entry URL for signup_url. When the capture passed through an
   // OAuth identity provider, round 0's URL can land on the provider's own
   // domain (e.g. accounts.google.com / myaccount.google.com — the bot
@@ -171,13 +188,78 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // it back to the dashboard). That domain is NOT a valid signup entry:
   // replay's first navigation would dead-end on Google instead of the
   // service. Prefer the first captured round whose host is the service's
-  // own (a non-IdP domain); fall back to round 0 only if every round is on
-  // an IdP domain (shouldn't happen for a real signup).
-  const entryRound =
-    verification.rounds.find((r) => !isIdentityProviderUrl(r.state.url)) ??
-    firstRound;
-  const signupUrl = generalizeCapturedUrl(entryRound.state.url);
-  const oauthProvider = inferOAuthProvider(stepsResult.steps);
+  // own (a non-IdP domain) AND whose path is not an auth/session transaction
+  // or terminal onboarding confirmation page. If the capture never saw such a
+  // URL, reject the skill instead of publishing a stale replay entry.
+  const entryRound = verification.rounds.find(
+    (r) =>
+      !isIdentityProviderUrl(r.state.url) &&
+      !isUnstableSignupEntryUrl(r.state.url),
+  );
+  if (entryRound === undefined) {
+    return {
+      kind: "rejected",
+      stage: "synthesis",
+      error_kind: "unstable_signup_url",
+      message:
+        "Capture did not contain a stable service entry URL; all candidate URLs were identity-provider or post-signup/session transaction pages.",
+      offending_round: 0,
+      synthesizer_version: SYNTHESIZER_VERSION,
+    };
+  }
+  const capturedEntryUrl = stableSignupEntryUrl(entryRound.state.url, verification.rounds);
+  const signupUrl = stableSignupEntryUrl(input.signupUrl ?? capturedEntryUrl, verification.rounds);
+  const oauthProvider = resolveOAuthProvider(stepsResult.steps, input.oauthProvider);
+  const shouldNavigateToCapturedEntryAfterOAuth =
+    input.signupUrl !== undefined &&
+    (() => {
+      try {
+        const signup = new URL(signupUrl);
+        const captured = new URL(capturedEntryUrl);
+        return `${signup.origin}${signup.pathname.replace(/\/+$/, "")}` !==
+          `${captured.origin}${captured.pathname.replace(/\/+$/, "")}`;
+      } catch {
+        return signupUrl !== capturedEntryUrl;
+      }
+    })();
+
+  if (
+    input.signupUrl !== undefined &&
+    oauthProvider !== null &&
+    !stepsResult.steps.some((s) => s.kind === "click_oauth_button")
+  ) {
+    const preamble: SkillStep[] = [
+      {
+        kind: "navigate",
+        url: signupUrl,
+        provenance: {
+          run_id: input.run_id,
+          round_index: 0,
+        },
+      },
+      {
+        kind: "click_oauth_button",
+        provider: oauthProvider,
+        text_match: oauthProvider === "google" ? "Google" : "GitHub",
+        provenance: {
+          run_id: input.run_id,
+          round_index: 0,
+        },
+      },
+    ];
+    if (shouldNavigateToCapturedEntryAfterOAuth) {
+      preamble.push({
+        kind: "navigate",
+        url: capturedEntryUrl,
+        provenance: {
+          run_id: input.run_id,
+          round_index: 0,
+        },
+      });
+    }
+    stepsResult.steps.unshift(...preamble);
+  }
+  stepsResult.steps = dropLateRootNavigatesBeforeHrefClicks(stepsResult.steps);
 
   // rc.24 — guarantee the first step is a navigate. When the captured
   // bot got "lucky" — landed on a page that already showed the
@@ -252,10 +334,13 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     );
     const seen = new Set<string>();
     const specs: SkillCredentialSpec[] = [];
+    const visibility = inferVisibilityFromRounds(steps, verification.rounds);
     for (const s of labeledSteps) {
       if (seen.has(s.produces)) continue;
       seen.add(s.produces);
-      specs.push(buildCredentialSpecForMulti(s.produces, "opaque", input.service));
+      specs.push(
+        buildCredentialSpecForMulti(s.produces, "opaque", input.service, visibility),
+      );
     }
     credentials = specs;
   } else if (multiCred) {
@@ -284,7 +369,7 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // skill_id is derived deterministically from the assembled content
   // so the same captures always produce the same skill_id (test
   // determinism + the registry idempotency on (service, skill_id)).
-  const createdAt = firstRound.state.url; // placeholder unused; created_at sourced from generator
+  const createdAt = entryRound.state.url; // placeholder unused; created_at sourced from generator
   void createdAt;
 
   const candidate: Omit<Skill, "skill_id"> = {
@@ -618,7 +703,39 @@ function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
       }
     }
   }
+  const clickKey = (s: SkillStep): string | null => {
+    if (s.kind !== "click") return null;
+    return `${s.text_match}|${s.role_hint ?? ""}|${s.href_hint ?? ""}`;
+  };
+  for (let i = 0; i < out.length; i += 1) {
+    const curKey = clickKey(out[i]!);
+    if (curKey === null) continue;
+    for (let j = i + 1; j < out.length; j += 1) {
+      if (clickKey(out[j]!) !== curKey) continue;
+      const between = out.slice(i + 1, j);
+      if (between.some((s) => s.kind === "fill" || s.kind === "select")) {
+        out.splice(i, 1);
+        i -= 1;
+      }
+      break;
+    }
+  }
   return out;
+}
+
+function dropLateRootNavigatesBeforeHrefClicks(steps: SkillStep[]): SkillStep[] {
+  return steps.filter((step, index) => {
+    if (index === 0 || step.kind !== "navigate") return true;
+    let url: URL;
+    try {
+      url = new URL(step.url);
+    } catch {
+      return true;
+    }
+    if (url.pathname !== "/" || url.search !== "" || url.hash !== "") return true;
+    const next = steps[index + 1];
+    return !(next?.kind === "click" && next.href_hint !== undefined);
+  });
 }
 
 // 0.8.2-rc.21 — structural equality between two skill steps, ignoring
@@ -651,10 +768,32 @@ function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
 // verification/OTP step. Both signals are required — a 4-8 digit value
 // alone could be a postal code or an all-numeric project name, and a
 // "code"-mentioning reason alone could be a coupon field.
-function isOtpCodeFill(observed: PostVerifyStep): boolean {
+function isOtpCodeFill(
+  observed: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): boolean {
   if (observed.kind !== "fill") return false;
   const value = observed.value.trim();
   if (!/^\d{4,8}$/.test(value)) return false;
+  const target = inventory.find((e) => e.selector === observed.selector);
+  const targetText = [
+    target?.id,
+    target?.name,
+    target?.placeholder,
+    target?.ariaLabel,
+    target?.labelText,
+    target?.visibleText,
+    target?.testId,
+  ]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (/\b(?:zip|postal|postcode|billing\s+(?:zip|postal|code)|country)\b/.test(targetText)) {
+    return false;
+  }
+  if (/\b(?:zip|postal|postcode|billing\s+(?:zip|postal|code)|country)\b/i.test(observed.reason)) {
+    return false;
+  }
   return /\b(verif|otp|one[\s-]?time|code|2fa|mfa)\b/i.test(observed.reason);
 }
 
@@ -730,7 +869,7 @@ function translateStep(
       // synthesizing). The await_email_code step re-fetches a fresh code at
       // replay time and finds the input heuristically. label_hint is
       // best-effort — included only when the field happens to be labeled.
-      if (isOtpCodeFill(observed)) {
+      if (isOtpCodeFill(observed, inventory)) {
         const otpHint = resolveLabelHint(observed.selector, inventory, roundIndex);
         return {
           kind: "ok",
@@ -1002,6 +1141,29 @@ export function isIdentityProviderUrl(url: string): boolean {
   }
 }
 
+export function isUnstableSignupEntryUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+    if (path === "/" || path === "/~") return true;
+    if (path === "/overview") return true;
+    if (path.includes("/auth/cx/")) return true;
+    if (path.includes("/register/create-user-new-org-confirmation")) return true;
+    if (path.includes("/oauth/callback") || path.includes("/auth/callback")) return true;
+    if (path.includes("/login/callback") || path.includes("/sso/callback")) return true;
+    if (
+      path.endsWith("/confirmation") ||
+      path.endsWith("/confirm") ||
+      path.endsWith("/reserved")
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function generalizeCapturedUrl(url: string): string {
   try {
     const u = new URL(url);
@@ -1016,6 +1178,51 @@ export function generalizeCapturedUrl(url: string): string {
   } catch {
     return url; // relative / malformed — leave it; the prepended navigate covers entry
   }
+}
+
+function captureLooksLikeSignupForm(rounds: readonly OnboardingCaseFile[]): boolean {
+  return rounds.some((round) => {
+    const observed = round.observed;
+    if (observed.kind !== "fill") return false;
+    if (/\bsign[\s-]?up\b|\bregister\b|\bcreate\s+account\b/i.test(observed.reason)) {
+      return true;
+    }
+    const target = round.inventory.find((el) => el.selector === observed.selector);
+    const targetText = [
+      target?.labelText,
+      target?.placeholder,
+      target?.ariaLabel,
+      target?.id,
+      target?.name,
+    ]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join(" ");
+    return /\bconfirm\s+password\b|\bre-enter\s+password\b/i.test(targetText);
+  });
+}
+
+export function stableSignupEntryUrl(
+  url: string,
+  rounds: readonly OnboardingCaseFile[],
+): string {
+  const generalized = generalizeCapturedUrl(url);
+  if (!captureLooksLikeSignupForm(rounds)) return generalized;
+  try {
+    const u = new URL(generalized);
+    const path = u.pathname;
+    const replacement = path
+      .replace(/\/sign[-_]?in(?=\/|$)/i, "/signup")
+      .replace(/\/log[-_]?in(?=\/|$)/i, "/signup");
+    if (replacement !== path) {
+      u.pathname = replacement;
+      u.search = "";
+      u.hash = "";
+      return u.toString();
+    }
+  } catch {
+    return generalized;
+  }
+  return generalized;
 }
 
 // The path of a link element's href (no origin / query / hash), or null
@@ -1044,6 +1251,23 @@ export function pickHrefHint(el: InteractiveElement): string | null {
   } catch {
     return null;
   }
+}
+
+function pickSameTextAnchorHrefHint(
+  target: InteractiveElement,
+  hint: string,
+  inventory: readonly InteractiveElement[],
+): string | null {
+  const targetHref = pickHrefHint(target);
+  if (targetHref !== null) return targetHref;
+  const anchors = inventory.filter(
+    (el) =>
+      el.selector !== target.selector &&
+      (el.tag === "a" || el.role === "link") &&
+      pickClickText(el) === hint,
+  );
+  const hrefs = [...new Set(anchors.map((el) => pickHrefHint(el)).filter((h): h is string => h !== null))];
+  return hrefs.length === 1 ? hrefs[0]! : null;
 }
 
 function resolveClickHint(
@@ -1089,11 +1313,15 @@ function resolveClickHint(
   // (form labels, "Cancel") provides a unique nearby text that pins
   // the modal context — exactly the same shape pickRowDisambiguator
   // already handles for fill/select.
+  const hrefHint = pickSameTextAnchorHrefHint(match, hint, inventory);
+  const role = inferRoleHint(match) ?? (hrefHint !== null ? "link" : undefined);
   const duplicates = inventory.filter(
-    (e) => pickClickText(e) === hint && e.selector !== selector,
+    (e) =>
+      pickClickText(e) === hint &&
+      e.selector !== selector &&
+      !isOwnFormControlLabelEcho(match, e, hint) &&
+      !(hrefHint !== null && pickHrefHint(e) === hrefHint),
   );
-  const role = inferRoleHint(match);
-  const hrefHint = pickHrefHint(match);
   if (duplicates.length > 0) {
     const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
     if (nearTextHint === null) {
@@ -1123,6 +1351,24 @@ function resolveClickHint(
   const domHint = pickStableDomHint(match);
   if (domHint !== undefined) result.dom_hint = domHint;
   return result;
+}
+
+function isOwnFormControlLabelEcho(
+  target: InteractiveElement,
+  candidate: InteractiveElement,
+  hint: string,
+): boolean {
+  if (
+    target.tag !== "input" ||
+    (target.type !== "radio" && target.type !== "checkbox")
+  ) {
+    return false;
+  }
+  if (candidate.tag !== "label") return false;
+  return (
+    (target.labelText ?? "").trim() === hint &&
+    (candidate.visibleText ?? candidate.labelText ?? "").trim() === hint
+  );
 }
 
 // 0.8.3-rc.1 — does this fill target look like an API-key / token
@@ -1165,6 +1411,19 @@ function looksLikeTokenNameInput(el: InteractiveElement): boolean {
 }
 
 function pickClickText(el: InteractiveElement): string | null {
+  // Radio/checkbox inputs are often visually represented by their
+  // attached <label>, while their stable `name` is shared by every
+  // option in the group (Sentry: two radios named "subscribe"). For
+  // replay, the user-visible option label is the semantic target; using
+  // the shared name collapses distinct choices into an ambiguous hint.
+  if (
+    el.tag === "input" &&
+    (el.type === "radio" || el.type === "checkbox") &&
+    (el.labelText ?? "").trim().length > 0
+  ) {
+    const label = el.labelText!.trim();
+    return label.length > 80 ? label.slice(0, 80) : label;
+  }
   // Prefer visibleText (what humans read); fall back through ariaLabel,
   // title, and iconLabel for icon-only buttons. iconLabel is the most
   // common surface for modern dashboards that ship "Sign in with X"
@@ -1669,10 +1928,31 @@ function pickNearTextHint(
     // Common patterns: "in the 'New Token' section", "under 'New Token'",
     // "after creation". We pull the first quoted phrase if any.
     const quoted = /['"]([^'"]{3,40})['"]/.exec(reasonText);
-    if (quoted !== null && quoted[1] !== undefined) return quoted[1];
+    if (
+      quoted !== null &&
+      quoted[1] !== undefined &&
+      !looksLikeSecretValue(quoted[1])
+    ) {
+      return quoted[1];
+    }
   }
   const fallback = (copyButton.visibleText ?? copyButton.ariaLabel ?? "Copy").trim();
   return fallback.length > 0 ? fallback : "Copy";
+}
+
+function looksLikeSecretValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 12) return false;
+  if (/^(?:sk-|sk_|sk_live_|sk_test_|sk-ant-|sk-or-|re_|rnd_|SG\.|key-)/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return true;
+  }
+  if (/^[A-Za-z0-9_-]{16,}$/.test(trimmed) && /[A-Za-z]/.test(trimmed) && /\d/.test(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 interface CredentialSpecOk {
@@ -1796,6 +2076,46 @@ function inferVisibility(
     if (re.test(joined)) return "show_once_at_creation";
   }
   return "always_visible";
+}
+
+function inferVisibilityFromRounds(
+  steps: readonly SkillStep[],
+  rounds: OnboardingCaseFile[],
+): "always_visible" | "show_once_at_creation" {
+  const extractRoundIndexes = new Set(
+    steps
+      .filter(
+        (s) =>
+          s.kind === "extract_via_copy_button" ||
+          s.kind === "extract_via_regex" ||
+          s.kind === "extract_via_copy_button_named" ||
+          s.kind === "extract_via_regex_named" ||
+          s.kind === "extract_labeled",
+      )
+      .map((s) => s.provenance.round_index),
+  );
+  if (extractRoundIndexes.size === 0) return "always_visible";
+  const haystack: string[] = [];
+  for (let i = 0; i < rounds.length; i++) {
+    if (!extractRoundIndexes.has(i)) continue;
+    const r = rounds[i]!;
+    const observed = r.observed as unknown as { reason?: string } | undefined;
+    if (typeof observed?.reason === "string") haystack.push(observed.reason);
+    if (typeof r.state?.html === "string") {
+      haystack.push(
+        r.state.html
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .slice(0, 8000),
+      );
+    }
+  }
+  const joined = haystack.join(" \n ");
+  return SHOW_ONCE_PHRASES.some((re) => re.test(joined))
+    ? "show_once_at_creation"
+    : "always_visible";
 }
 
 function validatorForShape(
@@ -2077,6 +2397,31 @@ function inferOAuthProvider(steps: SkillStep[]): "google" | "github" | null {
   return null;
 }
 
+function resolveOAuthProvider(
+  steps: SkillStep[],
+  override: "google" | "github" | undefined,
+): "google" | "github" | null {
+  const inferred = inferOAuthProvider(steps);
+  if (inferred !== null) return inferred;
+  if (override === undefined) return null;
+
+  // Curated queue metadata can say "prefer Google/GitHub" even when the bot
+  // ultimately used an email form. If we stamp that override onto an
+  // email-signup graph, the verifier routes it through the OAuth robot fleet
+  // and treats planner solvability as replayability. A graph that fills the
+  // runtime EMAIL_ALIAS is an email-signup recipe; only an actual
+  // click_oauth_button should carry oauth_provider metadata.
+  const fillsRuntimeEmail = steps.some(
+    (step) => step.kind === "fill" && step.value_template.includes("${EMAIL_ALIAS}"),
+  );
+  if (fillsRuntimeEmail) return null;
+
+  // Legacy post-auth captures often begin after the OAuth handoff, so there is
+  // no captured provider button. In that shape the provider override is the
+  // only way for the verifier to pick the right fresh robot profile.
+  return override;
+}
+
 // ── Multi-credential upgrade (Phase C) ──────────────────────────────
 //
 // Post-pass that takes the single-cred output of synthesizeSteps and
@@ -2109,6 +2454,7 @@ function upgradeToMultiCred(
   const seen = new Set<string>();
   const outSteps: SkillStep[] = [];
   const credentialsByName = new Map<string, SkillCredentialSpec>();
+  const visibility = inferVisibilityFromRounds(inputSteps, rounds);
 
   for (let i = 0; i < inputSteps.length; i++) {
     const step = inputSteps[i]!;
@@ -2151,7 +2497,7 @@ function upgradeToMultiCred(
       });
       credentialsByName.set(
         produces,
-        buildCredentialSpecForMulti(produces, "opaque", service),
+        buildCredentialSpecForMulti(produces, "opaque", service, visibility),
       );
       continue;
     }
@@ -2187,7 +2533,7 @@ function upgradeToMultiCred(
       const shape = patternToShapeHint(step.pattern_name);
       credentialsByName.set(
         produces,
-        buildCredentialSpecForMulti(produces, shape, service),
+        buildCredentialSpecForMulti(produces, shape, service, visibility),
       );
       continue;
     }
@@ -2258,6 +2604,7 @@ function buildCredentialSpecForMulti(
   name: string,
   shape: SkillCredentialSpec["shape_hint"],
   service: string,
+  visibility: "always_visible" | "show_once_at_creation" = "always_visible",
 ): SkillCredentialSpec {
   // Env var: <SERVICE>_<PRODUCES>. Twitter + api_key_secret →
   // TWITTER_API_KEY_SECRET. Maintains the "<SERVICE>_<CRED>" convention
@@ -2270,10 +2617,7 @@ function buildCredentialSpecForMulti(
     type: "api_key",
     shape_hint: shape,
     env_var_suggestion: envVar,
-    // Default to absent (== always_visible). Multi-cred skills get
-    // a per-credential visibility flag added by the visibility-
-    // inference pass only when show-once phrasing was detected for
-    // that specific credential.
+    ...(visibility === "show_once_at_creation" ? { visibility } : {}),
     // ID fields (application_id, org_id, account_id) are short — often a
     // numeric handle (pusher's app_id is 7 digits) — so a 16-char floor wrongly
     // rejects them. Use a low floor for *_id; keep 16 for key/secret/token.

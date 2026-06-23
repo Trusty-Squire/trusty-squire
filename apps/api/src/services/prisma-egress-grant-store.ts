@@ -10,7 +10,11 @@
 // conversion boundary between the two.
 
 import type { ApiPrismaClient } from "./api-prisma-client.js";
-import type { EgressGrant, EgressGrantStore } from "./egress-grant.js";
+import {
+  EgressGrantStoreUnavailableError,
+  type EgressGrant,
+  type EgressGrantStore,
+} from "./egress-grant.js";
 
 interface EgressGrantRow {
   id: string;
@@ -37,7 +41,20 @@ function toGrant(row: EgressGrantRow): EgressGrant {
 }
 
 export class PrismaEgressGrantStore implements EgressGrantStore {
-  constructor(private readonly prisma: ApiPrismaClient) {}
+  private readonly cache = new Map<string, { grant: EgressGrant | null; expiresAt: number }>();
+  private readonly liveTtlMs: number;
+  private readonly revokedTtlMs: number;
+
+  constructor(
+    private readonly prisma: ApiPrismaClient,
+    opts: { liveTtlMs?: number; revokedTtlMs?: number; now?: () => number } = {},
+  ) {
+    this.liveTtlMs = opts.liveTtlMs ?? 30_000;
+    this.revokedTtlMs = opts.revokedTtlMs ?? 1_000;
+    this.now = opts.now ?? (() => Date.now());
+  }
+
+  private readonly now: () => number;
 
   async create(grant: EgressGrant): Promise<void> {
     await this.prisma.egressGrant.create({
@@ -52,11 +69,25 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
         revoked_at: grant.revoked_at === null ? null : new Date(grant.revoked_at),
       },
     });
+    this.cache.set(grant.id, {
+      grant,
+      expiresAt: this.now() + (grant.revoked_at === null ? this.liveTtlMs : this.revokedTtlMs),
+    });
   }
 
   async getById(id: string): Promise<EgressGrant | null> {
-    const row = await this.prisma.egressGrant.findUnique({ where: { id } });
-    return row === null ? null : toGrant(row);
+    const cached = this.cache.get(id);
+    if (cached !== undefined && cached.expiresAt > this.now()) return cached.grant;
+    const row = await this.withConnectionRetry(
+      () => this.prisma.egressGrant.findUnique({ where: { id } }),
+      `get egress grant ${id}`,
+    );
+    const grant = row === null ? null : toGrant(row);
+    this.cache.set(id, {
+      grant,
+      expiresAt: this.now() + (grant?.revoked_at === null ? this.liveTtlMs : this.revokedTtlMs),
+    });
+    return grant;
   }
 
   async listByAccount(accountId: string): Promise<EgressGrant[]> {
@@ -70,13 +101,66 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
   // Account-scoped + idempotent: revoking an already-revoked grant returns true
   // without re-stamping, and a grant owned by another account is a miss (false).
   async revoke(id: string, accountId: string, at: string): Promise<boolean> {
-    const row = await this.prisma.egressGrant.findUnique({ where: { id } });
+    const row = await this.withConnectionRetry(
+      () => this.prisma.egressGrant.findUnique({ where: { id } }),
+      `revoke lookup egress grant ${id}`,
+    );
     if (row === null || row.account_id !== accountId) return false;
     if (row.revoked_at !== null) return true;
-    await this.prisma.egressGrant.update({
-      where: { id },
-      data: { revoked_at: new Date(at) },
-    });
+    await this.withConnectionRetry(
+      () =>
+        this.prisma.egressGrant.update({
+          where: { id },
+          data: { revoked_at: new Date(at) },
+        }),
+      `revoke egress grant ${id}`,
+    );
+    this.cache.delete(id);
     return true;
+  }
+
+  private async withConnectionRetry<T>(op: () => Promise<T>, label: string): Promise<T> {
+    try {
+      return await op();
+    } catch (err) {
+      if (!isRetryablePrismaConnectionError(err)) throw err;
+      await disconnectPrisma(this.prisma);
+      try {
+        return await op();
+      } catch (retryErr) {
+        if (isRetryablePrismaConnectionError(retryErr)) {
+          throw new EgressGrantStoreUnavailableError(`${label}: ${prismaErrorMessage(retryErr)}`);
+        }
+        throw retryErr;
+      }
+    }
+  }
+}
+
+export function isRetryablePrismaConnectionError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const code = "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+  if (code === "P1017" || code === "P1001" || code === "P1002") return true;
+  const message = prismaErrorMessage(err).toLowerCase();
+  return (
+    message.includes("server has closed the connection") ||
+    message.includes("connection terminated") ||
+    message.includes("connection pool") ||
+    message.includes("can't reach database server")
+  );
+}
+
+function prismaErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function disconnectPrisma(prisma: ApiPrismaClient): Promise<void> {
+  const maybeDisconnect = (prisma as { $disconnect?: () => Promise<void> }).$disconnect;
+  if (maybeDisconnect === undefined) return;
+  try {
+    await maybeDisconnect.call(prisma);
+  } catch {
+    // A failed disconnect should not prevent the retry; Prisma reconnects lazily
+    // on the next query when possible.
   }
 }

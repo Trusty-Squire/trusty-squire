@@ -49,7 +49,8 @@ Env vars per mode live in CLAUDE.md ("Housekeeper env" table) — values only.
 ## Egress model
 
 **Direct-first since 2026-06-13. The residential proxy is retired as the default.**
-A door-check (`tools/egress-doorcheck.mjs`) loaded 24 curated Google-OAuth signup
+A door-check (`tools/affordance-probe.mjs`, reading its `interstitial` field — the
+standalone `egress-doorcheck.mjs` was folded into the one probe) loaded 24 curated Google-OAuth signup
 pages on the raw datacenter IP: **23/24 cleared the anti-bot door** (only `together`
 blocks — CF 1020). Combined with the heal-run failure distribution (~95%+ of failures
 are nav/OAuth/session/planner bugs, ~2% IP-class), the proxy's entire upside is a
@@ -156,3 +157,77 @@ skill (posthog, kinde, cohere, imagekit, …). Established facts:
 - **Do not** "fix" this by adding interstitial-driving code or flipping egress.
   Work the Diagnosing section first; the working state likely needs restoring,
   not new code.
+
+## Verify-pool provisioning + cost-capped rotation (`tools/provision-verify-robot.mjs`)
+
+The OAuth verify pool is N Cloud Identity Free robots (`verify-NN@trustysquire.ai`,
+profiles at `~/.trusty-squire/profiles/verify-NN`). Full lifecycle is autonomous:
+
+```
+node tools/provision-verify-robot.mjs list                 # pool + per-robot spent@count + google live
+node tools/provision-verify-robot.mjs create [N]            # mint N (REFUSED over the cost cap)
+node tools/provision-verify-robot.mjs warm verify-NN        # AUTOMATED Google login (no human)
+node tools/provision-verify-robot.mjs rotate --make-room=N  # retire N most-spent → mint N fresh (cost-flat)
+node tools/provision-verify-robot.mjs rotate --spent-ge=K   # retire worn-out (spent at ≥K services), refill
+node tools/provision-verify-robot.mjs delete verify-NN
+node tools/provision-verify-robot.mjs licenses [--apply]    # audit / strip paid Workspace seats
+```
+
+- **COST CAP = `ROBOT_POOL_CAP` (default 10) active robots = max billed seats.**
+  `create` refuses to exceed it (`--allow-grow` overrides). `rotate` is
+  **DELETE-BEFORE-CREATE** with a capped refill, so the active count never spikes
+  past the cap mid-rotation — cost can only stay flat or drop, never rise.
+- **Warming is AUTOMATED, not manual.** `warm` delegates to
+  `tools/google-login-fleet.mjs <id>` which drives the real Google login
+  (email→password→ToS) headed under Xvfb with the robot's password from
+  `~/.trusty-squire/verify-passwords.json` (mirror of vault `trustysquire-verify-bots`).
+  This is the path that warmed the original fleet. The "never type into Google's
+  form" guard in `google-login.ts` is about the SIGNUP bot, not warming OUR robots
+  with OUR known passwords. `--all` warms the whole fleet.
+- **Admin auth.** Account create/delete use the Admin SDK Directory API. When an
+  agent drives it interactively it can call the API through the Squire vault
+  (`use_credential`, credential `Google admin sdk` — Refresh + Access token,
+  client_id/secret added 2026-06-14; needs Admin SDK + Enterprise License Manager
+  APIs enabled + the app Internal so `apps.licensing`/`admin.directory.*` scopes
+  grant). For UNATTENDED runs (cron/heal) the node tool reads a LOCAL admin file
+  (`~/.trusty-squire/admin-sa.json` SA key, or `~/.trusty-squire/admin-oauth.json`
+  client_id/secret/refresh_token) via `tools/google-admin-token.mjs`. The local
+  file is NOT needed when an agent drives via the vault proxy.
+- **Billing note (2026-06-15).** Auto-licensing put the robots on paid Business
+  Starter seats (~$8.40/mo each). Google support ticket open to disable
+  auto-licensing → robots become free Cloud Identity. Until then, rotation keeps
+  cost flat (delete frees a seat, create takes one); after the fix, fresh robots
+  are free so rotation reduces cost.
+
+### Auto-replenish in the heal pass (2026-06-15) — the loop refills itself
+
+The heal pass (`runHealPass`, phase 3, after discover) now rotates the pool
+**unattended** so a sole operator never has to manually refill — the one thing
+that kept the "autonomous" loop from being autonomous. Robots are **2SV-OFF**, so
+mint + warm need **NO 2FA and no human**.
+
+- **Opt-IN + gated.** No-op unless `ROBOT_AUTO_REPLENISH=1` AND an unattended admin
+  token exists (`~/.trusty-squire/admin-oauth.json` or `admin-sa.json`). Ships
+  default-off; safe before the token is set up.
+- **Trigger:** a robot is "worn" once spent at `>= ROBOT_REPLENISH_SPENT_GE`
+  (default 8) distinct services. When any are worn, rotate up to
+  `ROBOT_REPLENISH_MAX_PER_PASS` (default 2) per pass (warming is ~minutes each, so
+  it's capped). Cost-flat (`rotate --make-room=N`), then `google-login-fleet.mjs`
+  warms each fresh robot. Best-effort: a failure never breaks the heal. Digest
+  shows `· pool +N fresh`.
+- **One-time operator setup — the unattended admin token (OAuth refresh, keyless,
+  no SA key so the org key-creation block is irrelevant):**
+  1. GCP Console (as `lunchbox@trustysquire.ai`): enable **Admin SDK API** +
+     **Enterprise License Manager API**; OAuth consent screen User type **Internal**;
+     create an OAuth client ID, **Web application**, with redirect URI
+     `https://developers.google.com/oauthplayground`. Copy client_id + client_secret.
+  2. OAuth Playground → gear → "Use your own OAuth credentials" → paste id/secret →
+     authorize BOTH scopes `…/auth/admin.directory.user` + `…/auth/apps.licensing`
+     as the super admin → exchange for tokens → copy the `refresh_token` (`1//…`).
+  3. `~/.trusty-squire/admin-oauth.json` (chmod 600):
+     `{"client_id":"…","client_secret":"…","refresh_token":"1//…"}`.
+  4. Verify: `node tools/google-admin-token.mjs` prints an access token. If the
+     consent step says "app blocked": Admin console → Security → API controls → App
+     access control → Add app by Client ID → mark **Trusted**, re-do step 2.
+  The refresh token self-renews the hourly access token, so refills run hands-off.
+  Enable with `ROBOT_AUTO_REPLENISH=1` in `harvester.env` once verified.

@@ -14,6 +14,7 @@ describe("classifyFailure", () => {
     expect(classifyFailure("captcha_blocked")).toBe("wall");
     expect(classifyFailure("anti_bot_blocked")).toBe("wall");
     expect(classifyFailure("captcha")).toBe("wall");
+    expect(classifyFailure("onboarding_blocked")).toBe("wall");
   });
 
   it("classifies our-side inbox/delivery failures as infra", () => {
@@ -56,6 +57,18 @@ describe("classifyFailure", () => {
     expect(classifyFailure("   ")).toBe("transient");
   });
 
+  it("classifies the bot's spa_never_hydrated status as transient (never demote)", () => {
+    // The post-verify shell-escape's terminal status. It is NOT a skill-schema
+    // export (avoids published-dep-skew) — it rides the unknown-kind transient
+    // default. Locked in here so a never-hydrating SPA route can't retire a
+    // skill, and a leading-token-with-detail string still classifies right.
+    expect(classifyFailure("spa_never_hydrated")).toBe("transient");
+    expect(
+      classifyFailure("spa_never_hydrated: luma-ai's post-verify page stayed a loading shell"),
+    ).toBe("transient");
+    expect(failureCountsTowardDemotion("spa_never_hydrated: ...")).toBe(false);
+  });
+
   it("matches the leading token of '<kind>: <detail>' strings", () => {
     // the bot emits e.g. "verification_not_sent: form submitted but…"
     expect(classifyFailure("verification_not_sent: form submitted but the page never prompted")).toBe("infra");
@@ -73,6 +86,7 @@ describe("classifyFailure", () => {
 
   it("isWallFailure flags only walls", () => {
     expect(isWallFailure("anti_bot_blocked")).toBe(true);
+    expect(isWallFailure("onboarding_blocked: manual approval")).toBe(true);
     expect(isWallFailure("step_failed")).toBe(false);
     expect(isWallFailure("verification_not_sent")).toBe(false);
   });

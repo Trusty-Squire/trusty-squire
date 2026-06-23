@@ -6,12 +6,20 @@
 // Operator-only; never shipped (housekeeper/ is excluded from the npm tarball).
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { lookup } from "node:dns/promises";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { resolveCaptureDir } from "../../bot/onboarding-capture.js";
 import { readFixBatch } from "../fix-batch.js";
-import { runFixAgent, type FixAgentResult } from "../fix-agent.js";
+import {
+  runFixAgent,
+  type FixAgentResult,
+  type FixCluster,
+  type StaleClusterGateResult,
+} from "../fix-agent.js";
 import { appendFixAttempts } from "../fix-ledger.js";
+import type { ServiceRoutingFacts } from "../fix-router-input.js";
 import {
   codingAgentProposer,
   gitCommitter,
@@ -22,7 +30,18 @@ import {
 // Posture (a): the fix-agent may only touch the gated post-OAuth navigation
 // planner. agent.ts holds planPostVerifyStep + its prompt. Anything else
 // (form-fill, other packages) is parked for human review.
-const DEFAULT_ALLOWED_PATHS = ["apps/mcp/src/bot/agent.ts"] as const;
+const DEFAULT_ALLOWED_PATHS = [
+  "apps/mcp/src/bot/agent.ts",
+  "apps/mcp/src/bot/terminal-gate.ts",
+  "apps/mcp/src/bot/state-classifier.ts",
+] as const;
+const DEFAULT_SERVICE_FACTS_PATH = "tools/housekeeper-services.yaml";
+
+const CODEX_AGENT_COMMAND = [
+  "codex",
+  "exec",
+  "--dangerously-bypass-approvals-and-sandbox",
+] as const;
 
 function isTruthy(v: string | undefined): boolean {
   if (v === undefined) return false;
@@ -36,12 +55,126 @@ function defaultSinceMs(): number {
   return Date.now() - hours * 60 * 60 * 1000;
 }
 
+interface YamlServiceFactEntry {
+  slug?: string;
+  status?: string;
+  signup_url?: string;
+}
+
+interface YamlServiceFactFile {
+  services?: YamlServiceFactEntry[];
+}
+
+function serviceFactPath(repoRoot: string): string | null {
+  const raw = process.env.TRUSTY_SQUIRE_FIX_SERVICE_FACTS_YAML;
+  if (raw !== undefined) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0 || trimmed === "off" || trimmed === "0") return null;
+    return trimmed;
+  }
+  const candidate = join(repoRoot, DEFAULT_SERVICE_FACTS_PATH);
+  return existsSync(candidate) ? candidate : null;
+}
+
+function hostnameOf(raw: string | undefined): string | null {
+  if (raw === undefined || raw.trim().length === 0) return null;
+  try {
+    return new URL(raw).hostname;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveServiceRoutingFacts(
+  repoRoot: string,
+  services: readonly string[],
+): Promise<ServiceRoutingFacts> {
+  const path = serviceFactPath(repoRoot);
+  if (path === null) return {};
+  let entries: YamlServiceFactEntry[];
+  try {
+    const parsed = parseYaml(readFileSync(path, "utf8")) as YamlServiceFactFile | YamlServiceFactEntry[];
+    entries = Array.isArray(parsed) ? parsed : (parsed.services ?? []);
+  } catch {
+    return {};
+  }
+  const wanted = new Set(services.map((s) => s.toLowerCase()));
+  const facts: Record<string, { dnsAlive?: boolean; curatedNeedsManual?: boolean }> = {};
+  await Promise.all(entries.map(async (entry) => {
+    if (typeof entry.slug !== "string") return;
+    const service = entry.slug.toLowerCase();
+    if (!wanted.has(service)) return;
+    const status = typeof entry.status === "string" ? entry.status.toLowerCase() : "";
+    const fact = facts[service] ?? {};
+    if (status === "needs-manual" || status === "manual") fact.curatedNeedsManual = true;
+    const host = hostnameOf(entry.signup_url);
+    if (host !== null) {
+      try {
+        await lookup(host);
+        fact.dnsAlive = true;
+      } catch {
+        fact.dnsAlive = false;
+      }
+    }
+    facts[service] = fact;
+  }));
+  return facts;
+}
+
+export function resolveFixAgentCommand(agent: string | undefined): {
+  label: string;
+  command: string[];
+} {
+  const selected =
+    agent ??
+    process.env.TRUSTY_SQUIRE_FIX_AGENT ??
+    process.env.TRUSTY_SQUIRE_FIX_AGENT_CLI;
+  if (selected !== undefined && selected.trim().length > 0) {
+    const trimmed = selected.trim();
+    if (trimmed.toLowerCase() !== "codex") {
+      throw new Error(
+        `unsupported fix proposer agent "${trimmed}". The housekeeper fix loop always uses codex; remove the override or pass --agent=codex.`,
+      );
+    }
+  }
+
+  return { label: "codex", command: [...CODEX_AGENT_COMMAND] };
+}
+
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+export function checkFixAgentCommand(command: readonly string[]): string | null {
+  const cmd = command[0];
+  if (cmd === undefined) return "fix-agent proposer command is empty";
+  try {
+    execFileSync("sh", ["-lc", `command -v ${shellQuote(cmd)}`], {
+      stdio: "ignore",
+    });
+    return null;
+  } catch {
+    return `fix-agent proposer command not found on PATH: ${cmd}`;
+  }
+}
+
 export async function runFixMode(opts: {
   // Only fold in outcomes newer than this (scopes the batch to one pass).
   // Defaults to the last 24h (TRUSTY_SQUIRE_FIX_SINCE_HOURS overrides) so a
   // daily run only re-clusters recent failures, not the accumulated dir.
   sinceMs?: number;
   log?: (line: string) => void;
+  // Fix proposer agent override. Only "codex" is accepted; legacy Claude and
+  // raw-command dispatch are intentionally rejected so the loop cannot silently
+  // burn `claude -p` attempts.
+  agent?: string;
+  // The LIVE ORACLE (Phase 2). When provided, a fix commits only if it also
+  // passes the live gate. The autoloop builds this (canary baseline measured
+  // once); a plain --mode=fix run leaves it undefined (offline-only).
+  liveGate?: (cluster: FixCluster) => Promise<{ passed: boolean; reason: string }>;
+  routerFacts?: ServiceRoutingFacts;
+  currentCommit?: string;
+  staleClusterGate?: (cluster: FixCluster) => Promise<StaleClusterGateResult>;
 }): Promise<FixAgentResult | null> {
   const log = opts.log ?? ((line: string) => console.log(`[fix] ${line}`));
   const sinceMs = opts.sinceMs ?? defaultSinceMs();
@@ -84,28 +217,46 @@ export async function runFixMode(opts: {
       generatedAt: new Date().toISOString(),
     },
     sinceMs,
+    opts.currentCommit !== undefined ? { currentCommit: opts.currentCommit } : {},
   );
 
   if (batch.failures.length === 0) {
     log("no failures in the batch — nothing to fix");
-    return { committed: [], walls: [], parked: [] };
+    return { committed: [], walls: [], parked: [], routed: [] };
   }
 
-  const cliCommand = (process.env.TRUSTY_SQUIRE_FIX_AGENT_CLI ?? "claude -p").split(/\s+/).filter((s) => s.length > 0);
+  const cliCommand = resolveFixAgentCommand(opts.agent);
   const push = isTruthy(process.env.TRUSTY_SQUIRE_FIX_AGENT_PUSH);
+  const commandProblem = checkFixAgentCommand(cliCommand.command);
+  const routerFacts = opts.routerFacts ?? await resolveServiceRoutingFacts(
+    repoRoot,
+    [...new Set(batch.failures.map((f) => f.service))],
+  );
 
   log(
-    `fix pass: ${batch.failures.length} failure(s), bot=${botVersion}, branch=${branch}, push=${push}`,
+    `fix pass: ${batch.failures.length} failure(s), bot=${botVersion}, branch=${branch}, agent=${cliCommand.label}, push=${push}`,
   );
+  if (commandProblem !== null) {
+    log(commandProblem);
+    return {
+      committed: [],
+      walls: [],
+      routed: [],
+      parked: [{ cluster_id: "proposer", reason: commandProblem, touched_paths: [] }],
+    };
+  }
 
   const result = await runFixAgent({
     batch,
     branch,
     currentVersion: botVersion,
     allowedPaths: DEFAULT_ALLOWED_PATHS,
-    propose: codingAgentProposer({ repoRoot, cliCommand, log }),
+    routerFacts,
+    propose: codingAgentProposer({ repoRoot, cliCommand: cliCommand.command, log }),
     gate: makeEvalGateRunner({ repoRoot }),
     replay: makeClusterReplayRunner({ repoRoot }),
+    ...(opts.liveGate !== undefined ? { liveGate: opts.liveGate } : {}),
+    ...(opts.staleClusterGate !== undefined ? { staleClusterGate: opts.staleClusterGate } : {}),
     commit: gitCommitter({ repoRoot, push, log }),
     log,
   });

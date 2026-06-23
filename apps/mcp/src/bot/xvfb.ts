@@ -12,8 +12,9 @@
 // remotely (needed for login). Signups don't need a viewer — just a
 // display. So this helper is intentionally minimal.
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface XvfbRig {
@@ -25,19 +26,79 @@ export function xvfbAvailable(): boolean {
   return binaryOnPath("Xvfb");
 }
 
-// First :N (200..220) whose X socket is free. The login flow uses
-// :99..:120 — we sit above that to reduce the chance of collision if
-// a login and a signup happen to overlap on the same box.
-function pickFreeDisplay(): string {
-  for (let n = 200; n <= 220; n++) {
-    if (!existsSync(`/tmp/.X11-unix/X${n}`)) return `:${n}`;
-  }
-  throw new Error("no free X display number in :200..:220");
-}
+const SHARED_DISPLAY = process.env.UNIVERSAL_BOT_XVFB_DISPLAY ?? ":198";
+const LOCK_DIR = join(tmpdir(), "trusty-squire-xvfb.lock");
+const PID_FILE = join(tmpdir(), "trusty-squire-xvfb.pid");
 
 function binaryOnPath(bin: string): boolean {
   const paths = (process.env.PATH ?? "").split(":");
   return paths.some((p) => p.length > 0 && existsSync(join(p, bin)));
+}
+
+export function displaySocketPath(display: string): string {
+  return `/tmp/.X11-unix/X${display.replace(/^:/, "")}`;
+}
+
+export function pidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readSharedPid(): number | null {
+  try {
+    const raw = readFileSync(PID_FILE, "utf8").trim();
+    const pid = Number(raw);
+    return pidAlive(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+export function displayResponds(display: string): boolean {
+  const res = spawnSync("xdpyinfo", ["-display", display], {
+    encoding: "utf8",
+    timeout: 2_000,
+    stdio: "ignore",
+  });
+  return res.status === 0;
+}
+
+async function withXvfbStartupLock<T>(fn: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      mkdirSync(LOCK_DIR);
+      break;
+    } catch (err) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Timed out waiting for shared Xvfb startup lock at ${LOCK_DIR}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(LOCK_DIR, { recursive: true, force: true });
+  }
+}
+
+async function waitForDisplay(display: string, deadlineMs: number): Promise<boolean> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    if (displayResponds(display)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
 }
 
 // Start a minimal Xvfb instance at 1920x1080x24. Resolves when the
@@ -55,44 +116,56 @@ export async function startXvfb(opts?: {
   // reads as an ordinary laptop/desktop.
   const width = opts?.width ?? 1920;
   const height = opts?.height ?? 1080;
-  const display = pickFreeDisplay();
-  const displayNum = display.slice(1);
+  const display = SHARED_DISPLAY;
+  const socketPath = displaySocketPath(display);
 
-  const proc = spawn(
-    "Xvfb",
-    [display, "-screen", "0", `${width}x${height}x24`, "-ac"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
-  proc.unref();
-
-  // Poll for the X socket to appear — Xvfb is "ready" once it's
-  // listening on /tmp/.X11-unix/X<n>. Max 5s.
-  const socketPath = `/tmp/.X11-unix/X${displayNum}`;
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    if (existsSync(socketPath)) {
+  return withXvfbStartupLock(async () => {
+    if (displayResponds(display)) {
       return {
         display,
-        stop: () => {
-          try {
-            proc.kill("SIGTERM");
-          } catch {
-            // already dead
-          }
-        },
+        stop: () => undefined,
       };
     }
-    await new Promise((r) => setTimeout(r, 100));
-  }
 
-  // Did not come up — kill the process and surface what went wrong.
-  try {
-    proc.kill("SIGTERM");
-  } catch {
-    /* ignore */
-  }
-  throw new Error(
-    `Xvfb at ${display} did not start within 5s (socket ${socketPath} never appeared) — ` +
-      `check that the xvfb package is installed and /tmp/.X11-unix is writable`,
-  );
+    const existingPid = readSharedPid();
+    if (existingPid !== null) {
+      try {
+        process.kill(existingPid, "SIGTERM");
+      } catch {
+        // already dead
+      }
+    }
+    if (existsSync(socketPath)) {
+      rmSync(socketPath, { force: true });
+    }
+    rmSync(PID_FILE, { force: true });
+
+    const proc = spawn(
+      "Xvfb",
+      [display, "-screen", "0", `${width}x${height}x24`, "-ac"],
+      { detached: true, stdio: "ignore" },
+    );
+    proc.unref();
+    if (proc.pid !== undefined) {
+      writeFileSync(PID_FILE, `${proc.pid}\n`);
+    }
+
+    if (await waitForDisplay(display, 5000)) {
+      return {
+        display,
+        stop: () => undefined,
+      };
+    }
+
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+    rmSync(PID_FILE, { force: true });
+    throw new Error(
+      `Xvfb at ${display} did not start within 5s (display did not respond; socket ${socketPath}) — ` +
+        `check that the xvfb package is installed and /tmp/.X11-unix is writable`,
+    );
+  });
 }

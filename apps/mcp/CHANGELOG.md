@@ -1,5 +1,68 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.17 (2026-06-23)
+
+Stable (`latest`). Promotes the 0.9.17 line (rc.1–rc.5) from staging: anti-bot
+fingerprint hardening (in-iframe WebGL spoof + real-GPU remote-CDP), the
+refuse-walled provision gate for BYO anchors, semantic-nav + verifier hardening,
+the egress-grant resilient proxy path, per-service capture isolation, the
+shopping pre-bot signup-link resolver, and the queue/spine + test-debt cleanup
+that gets the suite fully green. See the rc entries below for the detail.
+
+## 0.9.17-rc.5 (2026-06-23)
+
+Prerelease (`next`). Anti-bot fingerprint hardening, the refuse-walled provision
+gate (BYO anchors), and a batch of generalizing bot/nav fixes.
+
+- fix(bot): hCaptcha in-iframe fingerprint spoof — the WebGL/device spoof now
+  reaches the cross-origin captcha iframe's own main world (it was main-frame
+  only, so hCaptcha read the real software-WebGL/20-core profile), timing-hardened
+  until the renderer reads Intel. Generalizes to hCaptcha/Turnstile sites that
+  fingerprint in-iframe. Plus a `BOT_CDP_ENDPOINT` real-GPU remote-CDP path
+  (spoof + Xvfb auto-disabled in remote mode) for the end-user-on-real-hardware
+  path. Stripe stays a multi-layer BYO anchor (see STATE.md).
+- feat(provision): refuse-walled pre-flight — a permanent wall (phone/payment/
+  manual / operator-dequeue) refuses fast and routes to bring-your-own-key
+  instead of botting a KYC wall; temporary walls (anti_bot/nav) still flow to the
+  discover loop. Reuses the registry ServiceState dossier; fails open.
+- fix(bot): per-service capture isolation (multi-service discover no longer
+  cross-contaminates capture chains), terminal-gate legal-onboarding-vs-review
+  disambiguation, nav-search Google-console detour guard, humanized submit routing.
+- feat(housekeeper): `--mode=shopping` — a read-only fetch+regex signup-link
+  resolver/classifier (no accounts, no robots, no LLM).
+- chore: queue the buildable vibe-coder head-spine services; clear pre-existing
+  typecheck + test debt (verifier test files, pick-verification, discover
+  identity-pool isolation).
+
+## 0.9.17-rc.2 (2026-06-17)
+
+Prerelease (`next`). groq cracked end-to-end, the verify-pool warmer no longer
+false-succeeds, and the housekeeper memory overhaul (Phases 1-4) lands.
+
+- fix(bot): mint through groq's in-modal Cloudflare Turnstile — nav-search now reaches the create-key surface (a virgin keys table's headers no longer mis-classify as an existing masked listing), drives the "name your key" modal, and runs the captcha gate INSIDE the modal so the disabled submit enables. groq signs up + extracts a key live; skill auto-promoted.
+- fix(verify-pool): `warm` actually ACTIVATES never-`agreedToTerms` robots instead of reporting a false success off a stale cookie — it prechecks activation and forces a clean ToS login. verify-01..05 recovered.
+- feat(memory): Phase 1 — `ProvisionEvent` carries `mode` (discover/verify/replay) + a captcha summary (firehose unification, no rename).
+- feat(memory): Phase 2 — the discover worker uploads its full per-round failure chain to the registry (redacted: captcha tokens, auth/cookie headers, password values scrubbed before upload), closing the "evidence dies locally" gap.
+- feat(memory): operator ledger CLI — `mcp housekeeper issue list|claim|resolve|wall` drains the registry's failure queue (server-side close-gate: no resolve without a green run, no wall without a falsification), and `state-doc` generates the status doc from materialized `ServiceState`. (Registry-side Phases 3-4 ship via the registry deploy.)
+
+## 0.9.17-rc.1 (2026-06-14)
+
+Prerelease (`next`). Diagnosis-driven bot reliability: a controlled experiment
+falsified the long-standing "it's the IP" story for the OAuth-callback failures,
+and instrumentation found the real, fixable causes. Several services that read
+as anti-bot blocks are now servable (cartesia signs up end-to-end, api_key
+extracted live).
+
+- fix(bot): managed Turnstile post-submit no longer false-`captcha_blocked` — a Clerk/managed Turnstile resolves server-side, so on a post-submit timeout WITH an inbox the bot proceeds to email verification and lets the inbox poll arbitrate (a code = the submit went through). Cracked cartesia (api_key extracted).
+- fix(bot): sticky email-path commit after a login-only OAuth — once Google OAuth is found login-only (Clerk `form_identifier_not_found`), the dispatch loop stops re-clicking Google and stays on email.
+- fix(bot): correct `oauth_session_not_persisted` message + env-gated OAuth network/cookie instrumentation — IP falsified via a direct-vs-residential proxy matrix; cause is the Clerk sign-in-vs-sign-up flow, not egress.
+- fix(bot): Clerk OAuth callback waits for the session via cookies before navigating away (helps Clerk services that auto-transfer).
+- feat(bot): classify closed/invite-only registration as `signups_closed` (dequeue, not a misleading `oauth_onboarding_failed`); turbopuffer dequeued.
+- fix(bot): don't mislabel an email-verification timeout as `onboarding_blocked` (tested pure helper `isOnboardingReviewGate`).
+- fix(bot): click the real in-page API-keys link before guessing a URL; compose key-path guesses onto the app origin, not the auth/IdP subdomain.
+- feat(bot): account-review / waiting-room gate → `onboarding_blocked`; ci: production build job (catches build-order / dep-skew on PR).
+- refactor: relocate mcp-only probe-demotion symbols out of `skill-schema` (kills the published-dep-skew for those symbols).
+
 ## 0.9.16 (2026-06-13)
 
 Stable release. Promotes the staging post-OAuth navigation work to `latest`,

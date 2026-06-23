@@ -14,6 +14,151 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ---
 
+## `oauth_session_not_persisted` (cartesia, braintrust, pinecone, … the "OAuth-callback wall")
+
+### ✗✗ FALSIFIED: "it's IP / needs residential egress" (2026-06-14, controlled matrix)
+
+The error string used to say "anti-bot / IP rejection of the callback — needs
+residential egress." **Proven false.** Controlled direct-vs-proxy matrix on
+cartesia (D1 retry disabled → 1 identity/attempt; `UNIVERSAL_BOT_NO_CLEAN_STATE_RETRY=1`):
+- **DIRECT** (datacenter Miami, ReliableSite AS23470): **4/4 fail** `oauth_session_not_persisted`.
+- **PROXY** (clean residential Seoul, SK Broadband AS9318, egress geo confirmed
+  Asia/Seoul): **2/2 callback attempts fail identically** (+1 proxy-latency
+  run_timeout). Only the egress IP changed; everything else held.
+A clean residential consumer IP fails the callback the same as the datacenter
+IP → **NOT IP, NOT egress.** The Tailscale Mac proxy does NOT help this class —
+do not route it through the proxy. (Matrix logs: `/tmp/cartesia-matrix-*`.)
+
+### ✓ ROOT CAUSE (2026-06-14, instrumented): Clerk new-user OAuth, not a session/cookie bug
+
+`UNIVERSAL_BOT_OAUTH_DEBUG=1` records the Clerk FAPI network + cookies at the
+bail point. cartesia is a **Clerk** app. The tell:
+`POST clerk.cartesia.ai/v1/client/sign_ins` → **422 `form_identifier_not_found`**
+("Couldn't find your account"). The bot drives Google OAuth through Clerk's
+**sign-IN** endpoint for a brand-new identity; Clerk won't sign in a
+non-existent account, and the **`sign_ups` transfer is never called** (0
+sign_ups across the whole run). `__client` cookie IS present (Clerk JS loaded,
+cookies persist) and `__client_uat`="0" (never signed in) → NOT a cookie/
+persistence/fingerprint-at-network bug, NOT captcha (`form_identifier_not_found`,
+not `captcha_*`). It was just mislabeled "anti-bot / IP."
+
+### ✗ FALSIFIED fixes (both tested live on cartesia):
+- **SDK transfer** (`window.Clerk.client.signUp.create({transfer:true})`):
+  unreachable — **patchright runs `page.evaluate` in an ISOLATED world where
+  `window.Clerk` is undefined** (verified: 20 polls/10s → present:false, while
+  clerk.browser.js had loaded). DOM access works in isolated worlds; JS globals
+  don't. So any window.* SDK intervention is blocked under BOT_CDP_HARDENED.
+- **Wait-for-auto-transfer** (stay on /sso-callback, cookie-poll 12s instead of
+  navigating away): Clerk did NOT auto-transfer (still 0 sign_ups, no session).
+  cartesia's Clerk genuinely does not create the account from the Google click.
+
+### ✓✓ CRACKED (2026-06-14) — cartesia signs up end-to-end, api_key extracted
+NOT a bot-detection block at all — two bot bugs, both fixed + validated live
+(normal discovery, `ok`, `api_key=sk_car_…` extracted):
+1. **`captcha_blocked` was a PREMATURE BAIL.** cartesia's email signup uses a
+   Clerk MANAGED Turnstile that resolves SERVER-SIDE. The submit succeeded
+   (cartesia emailed a verification code — the user's tell: "if it was flagged,
+   why send an email?"), but the bot bailed `captcha_blocked` while polling for
+   a client-side token that an invisible Turnstile never populates — ONE STEP
+   before success. Fix: on a POST-submit Turnstile timeout WITH an inbox,
+   proceed to verification and let the inbox poll arbitrate (a code = the submit
+   went through). Genuine pre-submit gates (no inbox / non-Turnstile) still bail.
+2. **OAuth-first re-fired after the login-only fallback.** Google OAuth is
+   login-only (form_identifier_not_found); the bot fell back to email but the
+   dispatch loop's OAuth-first scan re-clicked Google and looped. Fix: a sticky
+   `committedToEmailPath` flag, set on the login-only fallback, honored by
+   `resolveOAuthCandidates`.
+End-to-end now: OAuth login-only → sticky email commit → form fill → managed-
+Turnstile arbiter → inbox code → key. Re-pinned SERVABLE (removed needs-manual).
+
+LESSON: don't label a block "anti-bot/captcha" without the inbox + network
+ground truth. A verification email = the submit succeeded = not flagged.
+
+### Related improvement
+`waitForClerkSession` (cookie-poll before navigate-away) helps Clerk services
+that DO auto-transfer (e.g. pinecone, which succeeds) by not interrupting them.
+The flakiness across the Clerk cluster is which context the OAuth lands in
+(sign-up creates the account → ✓; sign-in for a new user → form_identifier_not_found → fall back to email).
+
+### ✓ GENERALIZED email-fallback (2026-06-15, commit 9f78bfb)
+The cartesia crack only fell back to email when Clerk showed the EXPLICIT "no
+account" text (detectGoogleNoAccount). The rest of the cluster (openrouter, groq,
+northflank, …) fails the callback SILENTLY — no such text — so it surfaced as a
+stuck login page and dead-bailed `oauth_session_not_persisted`. Fix: at that bail
+(the 3-login-page-rounds throw, agent.ts ~10628) return the existing
+`OAUTH_FALL_BACK_TO_FORM_FILL` sentinel instead of failing — runSignup re-creates
+the account via EMAIL (one-shot guarded; forceFormFill suppresses OAuth so no
+bounce-back). Every cluster member with an email signup option becomes servable
+when OAuth lands in the failing context. NOTE: openrouter probes
+`has_email_signup=true`; a 2026-06-15 re-run hit SUCCESS but via stochastic
+OAuth-persist (sign-up context) so the fallback branch wasn't exercised that run —
+it fires on the next not-persisted occurrence. So the "Server-side OAuth-callback
+walls (NOT nav-fixable)" list below is now servable for its EMAIL-capable members
+(probe `has_email_signup` before declaring any of them a wall).
+
+CLUSTER PROBE (2026-06-15, `tools/affordance-probe.mjs`, sequential — the batch
+mode has a concurrent-navigation bug):
+| service     | providers      | has_email_signup | fix helps? |
+|-------------|----------------|------------------|------------|
+| openrouter  | google,github  | true             | ✅ servable |
+| northflank  | google,github  | true             | ✅ servable |
+| hyperbolic  | google,github  | true             | ✅ servable |
+| braintrust  | google         | true             | ✅ servable |
+| groq        | google,github  | false            | ✗ OAuth-only — still walled |
+| turso       | google,github  | false            | ✗ OAuth-only — still walled |
+| activeloop  | google,github  | false            | ✗ OAuth-only — still walled |
+| predibase   | (ERR_NAME_NOT_RESOLVED on app.predibase.com) | — | URL stale; fix the queue URL first |
+The email-fallback opens the 4 email-capable members on the next not-persisted
+occurrence. The 3 OAuth-ONLY members (turso/activeloop) need the harder
+Clerk sign-UP-context transfer (window.Clerk unreachable in the isolated world —
+the remaining open problem; a raw CDP main-world Runtime.evaluate is the untested
+angle). predibase needs a current signup URL before any retry.
+
+### ✅✅ groq CRACKED (2026-06-17) — it was NEVER an OAuth-callback wall; it was an in-modal Turnstile
+The "groq → OAuth-only, still walled" classification above is **FALSIFIED**. groq's
+Google OAuth signs in cleanly (verify-11, end-to-end) and reaches the dashboard.
+The real blocker was post-OAuth, on the **API-key page**, and decomposed into three
+distinct nav/mint bugs — all generalizable, all fixed:
+1. **nav-search wandered off the keys page.** groq's virgin `/keys` renders an
+   EMPTY key table whose column headers ("Key name" / "Created" / "Last used")
+   trip `detectExistingAccountNoExtract` → it returned `on_key_surface`, extraction
+   found nothing, and the loop navigated to `/settings`. FIX: in `assessKeyGoal`, a
+   visible create-key affordance on a keys URL → `create_gated` wins over the
+   existing-account heuristic (mint, don't declare a dead end). `nav-search.ts`.
+2. **nav-search never minted.** The `create_gated` branch bare-clicked "Create API
+   Key" and moved on; it never drove the resulting modal. FIX: wired the proven
+   `attemptMintNewKey` recovery in as a `mintKey` dep.
+3. **THE wall — a Cloudflare Turnstile INSIDE the create-key modal.** Clicking
+   "Create API Key" opens a Radix dialog with a `keyName` field + a hidden
+   `cf-turnstile-response`; the submit ("Create API Key", same label as the page
+   button) stays DISABLED until the Turnstile issues a token. The captcha gate
+   only ran during form-fill, never in post-verify mint, so the modal sat unsolved
+   and every re-click just reopened it (the planner clicked it 6× and gave up).
+   FIX: `attemptMintNewKey` now fills the name, then runs `runCaptchaGate` on the
+   open modal (Tier-1/2 Turnstile) before polling the submit. Live trail:
+   `Mint-modal captcha (turnstile): solved` → `extracted the freshly-minted key` →
+   `groq → ok (2 credentials)`, skill auto-promoted. Generalizes to any service
+   that gates key creation behind a captcha. Helpers: `findKeyModalSubmit` /
+   `findKeyNameInput` (agent.ts).
+
+### ✅ verify-pool health (2026-06-17): verify-01..05 were NEVER-ACTIVATED, now fixed (warm bug)
+groq runs kept failing `needs_login` with `accounts.google.com/v3/signin/deletedaccount`
+on whatever robot got picked, and JIT re-warm couldn't rescue them. Admin-API `users.get`
+nailed it: verify-01..05 had `suspended=false` but **`agreedToTerms=false` +
+`lastLoginTime=1970-01-01Z`** (never activated), while verify-10..14 had `agreedToTerms=true`
++ real logins. A Directory-API-created Google account is OAuth-UNUSABLE (→ `deletedaccount`)
+until a real first sign-in completes Google's ToS. The bug: the fleet warmer
+(`google-login-fleet.mjs`) short-circuited on a stale SID cookie that LANDS on
+myaccount.google.com, so it reported a FALSE `✅ logged in` in ~8s and never reached the
+ToS page. FIX (committed): warm now prechecks `agreedToTerms` and force-clears the session
+(`FLEET_FORCE_FRESH`) to run the full email→password→ToS activation for not-yet-activated
+robots; success is gated on actually landing on myaccount, not cookie-presence. All five
+now `agreedToTerms=true`; pool back to 10. LESSON: `provision-verify-robot.mjs list`
+`google=live` only checks directory existence — NOT activation. A never-activated robot
+looks healthy and silently tanks every run that picks it.
+
+---
+
 ## Cloudflare-Turnstile "wall" (exa, cartesia, render-cron, replit, runpod, turso)
 
 ### ✅✅ ROOT CAUSE FOUND + FIXED (2026-06-12) — it was the Playwright LAUNCH, not the environment
@@ -208,7 +353,7 @@ gost SOCKS5 over Tailscale, `UNIVERSAL_BOT_PROXY_ALWAYS=true`) on the premise th
 its datacenter IP would be blocked. Two independent measurements falsify that the
 proxy is load-bearing post-Turnstile-fix:
 
-1. **Live door-check (`tools/egress-doorcheck.mjs`, DIRECT datacenter IP, Miami).**
+1. **Live door-check (`tools/affordance-probe.mjs`, the `interstitial` field — was the now-removed `egress-doorcheck.mjs`, folded into the one probe; DIRECT datacenter IP, Miami).**
    Loaded 24 curated Google-OAuth signup pages on the raw datacenter IP and
    classified the anti-bot door (`classifyInterstitialText`). **23/24 cleared** —
    sentry, openai, anthropic, neon, render, posthog, cockroachdb, weaviate, etc.
@@ -268,6 +413,16 @@ Dead / acquired / sales-gated — confirmed via WebFetch/WebSearch, marked
   surface — authenticated DOM proven), **cyclic** (AWS-acquired, dead),
   **northflank** (GitHub-app + sudo-2FA, operator-only), **koyeb** ($30/mo +
   card before keys).
+- **baseten** (2026-06-13) — Google OAuth succeeds, but new accounts land in
+  `app.baseten.co/waiting_room`: a MANUAL account-review/approval gate. The API
+  key does not exist until a human approves the account. The bot fills the
+  approval form then the planner correctly reads "account review waiting room,
+  not approved" — but the run falls through to the generic `oauth_onboarding_failed`
+  (a MISCLASSIFICATION; should be `onboarding_blocked`). NOT a wizard/budget bug.
+  Marked `needs-manual` in `tools/housekeeper-services.yaml`. FOLLOW-UP (deferred
+  to avoid colliding with the in-flight kinde stuck-detector edit): add a
+  "waiting room / account review pending" classifier near `isAtPaywall` in
+  agent.ts so these report `onboarding_blocked` and stop counting as bot failures.
 
 ---
 
@@ -279,8 +434,19 @@ correct; these need manual signup or are genuine walls. Don't keep "fixing" nav:
 - **predibase, humanloop** (mislabeled `oauth_loop_detected` — same class),
   **hyperbolic, braintrust** (Clerk `/sso-callback`). The reload fix fires and
   is exhausted; it does not help these.
-- **fly-io** (SSO-required org — tokens can't be UI-created), **xata**
-  (pre-existing account for the operator's identity + email-link gate).
+- ~~**fly-io** (SSO-required org — tokens can't be UI-created)~~ **CORRECTED
+  2026-06-14: fly.io is SERVABLE.** It offers **Google OAuth** (not just GitHub),
+  and personal accounts create tokens via Account → Access Tokens. The prior
+  "SSO/unservable" note was the GitHub-path misdiagnosis; the 2026-06-13 verify
+  retire was replay text_match brittleness ("Tokens" matched 2 elements), NOT
+  rot. Re-pinned to `oauth_provider: google` in discovery-candidates.yaml so the
+  robots can fresh-verify it. Re-discover via Google to regenerate the skill.
+  EVIDENCE (`tools/affordance-probe.mjs fly-io`, 2026-06-14):
+  `providers=[google,github] email=false card=false interstitial=false` — the
+  page itself shows BOTH providers. Plus a 2/2 fresh-verify (real api_key +
+  access_token) and now pending-review in the registry. This is the template:
+  a wall/capability claim cites a dated probe, not prose.
+- **xata** (pre-existing account for the operator's identity + email-link gate).
 
 ---
 
@@ -317,6 +483,117 @@ file. Currently set (names only):
 
 Rule: a key in `harvester.env` or the vault is CONFIGURED. Don't ask for it;
 read it.
+
+## Post-signup nav-search engine (NAV_SEARCH, **DEFAULT-ON** as of T6, 2026-06-15)
+
+**T6 complete — nav-search is now the default**, as a HYBRID with the greedy
+planner (commits 722870b same-site, a84505a handoff, d798c30 default-on).
+Live-validated: neon went FAILED→SUCCESS once the handoff landed, and confirmed
+to engage with NO flag. The architecture is **nav-search navigates → greedy
+planner finishes**: nav-search is strong at navigation (drove neon's org+project
+wizards + dashboard to the exact create-API-key modal where greedy gets lost) but
+nav-only by design; the greedy planner fills the create-key form. On ANY
+nav-search failure (or exhaustion) control falls through to the greedy loop —
+the prior default — so enabling it is worst-case "no worse than before". Safety
+rails: try/catch (never crash a signup), LLM-tiebreak budget cap (reserve budget
+for the handoff), same-site guard (don't wander to marketing/docs). Opt out:
+`NAV_SEARCH=0`. T6 evidence: ipinfo/galileo (entry-extract, no regression), unify
+(nav-loop navigation), neon (hybrid create-key success). Full suite green (1592).
+
+### History — live-validated on unify-ai (2026-06-14)
+
+Goal-directed best-first search over the dashboard's affordances, replacing the
+greedy per-screen LLM step-picker for the post-OAuth → API-key phase
+(`apps/mcp/src/bot/nav-search.ts`, `DESIGN-post-signup-nav-search.md`). Iterating
+it live on unify-ai (Google OAuth → onboarding → dashboard → key) surfaced **6
+generalizable bugs**, each fixed + unit-tested (38 tests) + suite-green
+(commits 2a33eb7, 2ec34c9, 64cdbb3):
+
+1. **Goal signals read `extractText` (textContent) → poisoned by inline `<script>`
+   source + display:none nodes** (the false-shell class again). Switched the port
+   to `extractVisibleText` (innerText). The single biggest fix — every text-based
+   goal/onboarding verdict was reading JS source, not the page.
+2. **`expandLatentNav` is destructive** — it toggles `aria-haspopup` menus
+   blindly, re-closing an already-open avatar/settings dropdown so the post-expand
+   read LOSES the keys-bearing nav. Fix: `mergeInventories` ranks the UNION of the
+   pre- and post-expand reads.
+3. **Clicks on portaled dropdown items (Radix popover/avatar menu) no-op** — the
+   popover closes between read and click, URL never changes. Fix: `resolveNavHref`
+   + href-first navigation for anchor picks (go to the known destination, don't
+   click the fragile node). This is what got unify off the dashboard to `/account`.
+4. **LLM tiebreak** (was deferred) — when keys hide behind a generically-named
+   affordance ("Advanced"/"Security" tab) nothing ranks; one cheap deterministic
+   LLM call picks the best candidate. Explored unify's Profile→Advanced→Security.
+5. **SAFETY: the tiebreak picked "Delete Account"** on a keyless settings page.
+   `enumerateCandidates` now hard-excludes destructive controls
+   (delete/remove/revoke/deactivate/cancel/close-account/leave-org) so neither the
+   ranker nor the tiebreak can ever auto-click one.
+6. **Tiebreak now knows API keys are often org/workspace-scoped** (B2B) — widened
+   its preference list; "usage" excluded.
+
+**unify-ai outcome:** NOT an IP/fingerprint/engine problem. The bot reaches
+`/account` and exhausts its tabs (Profile/Contact/Preferences/Advanced/Security —
+all account-management, **no keys**). The entire nav is Account/Organizations/
+Usage/Billing with **no personal "API keys"/"Developer" link anywhere** ⇒ unify's
+key is almost certainly **org-scoped** (under Organizations) or not self-serve for
+a fresh personal account. The org-scoped tiebreak hint (#6) is meant to reach it;
+**live re-validation is BLOCKED — the 10-robot verify-identity pool is fully spent
+on unify-ai** after this debugging marathon (refill or wait to re-test).
+
+**T6 remaining before flag→default:** multi-service regression validation (assert
+nav-search doesn't regress services the greedy loop already handles, and that
+auto-promote skill-minting stays intact end-to-end). Needs verify-pool refill.
+
+## `stripe` — invisible hCaptcha Enterprise + multi-layer fraud (BYO anchor, 2026-06-23)
+
+Full controlled investigation. Stripe signup (`dashboard.stripe.com/register`,
+email/password `FORCE_FORM` path) is gated by an **invisible hCaptcha Enterprise**
+widget on the "Create account" button (no checkbox/grid visible — screenshot
+confirmed). 2Captcha token solves in ~21–31s but the session is still flagged.
+
+- **H: IP reputation / needs residential.** **✗✗ FALSIFIED.** Identical
+  `captcha_blocked: hcaptcha … the site flagged this session` on the GPU-less
+  harvester box over **datacenter** (172.93.111.86) AND **residential** (Mac
+  SOCKS5, Korea 1.240.236.25) egress — only the exit IP changed. Token solved
+  both times; flagged both times. NOT IP.
+
+- **✓ CONFIRMED + FIXED: the WebGL/device spoof never reached the captcha
+  iframe.** `installWebglSpoofScript` was re-applied on `framenavigated` **only
+  when `frame === mainFrame()`** — so the cross-origin hCaptcha iframe
+  (`newassets.hcaptcha.com`) read the REAL `ANGLE (Mesa, llvmpipe …)` software
+  renderer + 20-core/high-mem/no-taskbar Linux profile. Proven with an in-iframe
+  `UNMASKED_RENDERER` probe: **BEFORE spoof = `llvmpipe`, AFTER = `Intel`**. Fix:
+  `frame.evaluate(installWebglSpoofScript)` into the captcha iframe's own main
+  world, **timing-hardened** (retry ~3s until the renderer reads Intel — the
+  first `framenavigated` often eval-fails mid-commit). **This is the real,
+  GENERALIZABLE win** — most hCaptcha/Turnstile sites read these surfaces
+  in-iframe; this was an unspoofed tell for all of them. (`browser.ts`.)
+  BUT: with the string reliably Intel in-iframe, Stripe **still flagged** → the
+  renderer *string* is not Stripe's gate (it hashes the rendered *pixels*, which
+  string-spoofing can't change — consistent with the exa llvmpipe note above).
+
+- **✓ CONFIRMED ladder (real hardware, user's own Windows laptop: real Intel
+  D3D11 GPU + home residential IP).** Real hardware is a genuine discriminator
+  for Stripe (UNLIKE exa Turnstile): hCaptcha went from **hard-flag (no
+  challenge)** on the VPS → an **interactive solvable challenge** (rune-tile
+  "complete the pattern" + Skip). I.e. the environment moved us from "rejected"
+  to "prove you're human." THEN, after the challenge, Stripe's **account-risk /
+  fraud layer declined anyway**: *"There was an error creating your account.
+  Please contact support."* (Confound: throwaway gmail + repeated same-machine
+  attempts that day likely fed the velocity check — but the multi-layer pattern
+  is the signal.)
+
+- **✓ CONCLUSION: Stripe = multi-layer BYO anchor** — hCaptcha Enterprise
+  (pixel-hash fingerprint) **+** an independent account-risk/fraud decline **+**
+  KYC at payment activation. Not botable even on real hardware. Correctly routed
+  to **bring-your-own-key** by the refuse-walled provision gate. **Do NOT try to
+  bot Stripe again.** The end-user path *is* viable via a brief human-solves-
+  their-own-captcha handoff (real hardware gets a *solvable* challenge), which the
+  headless discovery box can never do.
+
+- **Built (reusable for the end-user / real-GPU path on OTHER hard sites):**
+  `BOT_CDP_ENDPOINT` → attach over CDP to a Chrome on real-GPU hardware (spoof +
+  Xvfb auto-disabled in remote mode), plus `tools/mac-gpu-browser.sh`.
 
 ## Recurring meta-lesson
 

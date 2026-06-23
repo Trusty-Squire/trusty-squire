@@ -26,6 +26,15 @@ describe("looksLike404", () => {
     expect(looksLike404("", "404 page not found")).toBe(true);
   });
 
+  it("temporal: app-rendered route-not-found shell", () => {
+    expect(
+      looksLike404(
+        "Temporal",
+        "404 Uh oh. There's an error. Not found: /settings/api_keys Try a refresh",
+      ),
+    ).toBe(true);
+  });
+
   it("does NOT flag a real keys page", () => {
     expect(
       looksLike404(

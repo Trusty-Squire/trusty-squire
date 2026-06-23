@@ -32,6 +32,10 @@ export interface OtpPollInput {
   // doesn't pick up an unrelated 6-digit code from elsewhere. When
   // unset, matches any sender — risky, only useful in tests.
   from_domain?: string;
+  // Optional recipient address for Workspace catch-all robot identities.
+  // The operator-otp route handles this by delegating to WorkspaceInboxPoller;
+  // this service ignores it when called directly.
+  to_address?: string;
   // Only consider messages received within the last N seconds.
   // Bounded server-side to [10, 600] so a stale OTP from yesterday
   // never gets used and so a misconfigured caller can't sweep the

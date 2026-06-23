@@ -28,6 +28,7 @@ describe("classifyFailureStage (B1 taxonomy)", () => {
     ["anti_bot_blocked: Cloudflare on SSO callback", false, "anti_bot"],
     ["captcha_blocked", false, "captcha"],
     ["oauth_required", false, "oauth_handshake"],
+    ["oauth_session_not_persisted: signed in via OAuth but still presents a login screen", true, "oauth_handshake"],
     ["sso-callback hung", false, "oauth_handshake"],
     ["could not pick account in chooser", false, "account_chooser"],
     ["consent screen scope grant failed", false, "consent"],
@@ -35,7 +36,9 @@ describe("classifyFailureStage (B1 taxonomy)", () => {
     ["Clerk never finished hydration", false, "hydration"],
     ["verification_not_sent", false, "verify_email"],
     ["email_otp_required", false, "verify_email"],
+    ["verification code required", false, "verify_email"],
     ["phone verification gate", false, "phone"],
+    ["sms code required", false, "phone"],
     ["payment_required", false, "payment"],
     ["quota exceeded", false, "payment"],
     ["manual_signup_required: Clerk SPA won't automate", false, "manual"], // AB6

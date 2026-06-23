@@ -27,6 +27,11 @@ import { fileURLToPath } from "node:url";
 import { SignupAgent, type PostVerifyStep } from "./agent.js";
 import type { BrowserController, InteractiveElement } from "./browser.js";
 import { pickLLMPair } from "./llm-client.js";
+import {
+  inferSemanticTransition,
+  scoreSemanticTransition,
+  type SemanticTransitionExpectation,
+} from "./semantic-transition.js";
 
 type StepKind = PostVerifyStep["kind"];
 
@@ -47,6 +52,10 @@ export interface OnboardingExpectation {
   // Omit it when any element of the right kind is acceptable —
   // navigation states legitimately have several valid targets.
   selectorsAnyOf?: readonly string[];
+  // Optional semantic contract. Raw action kind/selector remains the cheap
+  // compatibility gate; semantic scoring answers the harder question: did the
+  // planner choose the right conceptual transition?
+  semantic?: SemanticTransitionExpectation;
 }
 
 export interface OnboardingEvalCase {
@@ -99,6 +108,26 @@ export function scoreOnboardingStep(
     }
   }
   return { pass: true, detail: `chose "${step.kind}" — accepted` };
+}
+
+export function scoreOnboardingDecision(
+  step: PostVerifyStep,
+  c: OnboardingEvalCase,
+): OnboardingScore {
+  const raw = scoreOnboardingStep(step, c.expect);
+  if (!raw.pass || c.expect.semantic === undefined) return raw;
+  const semantic = inferSemanticTransition({
+    state: c.state,
+    inventory: c.inventory,
+    observed: step,
+    oauth: c.oauth,
+  });
+  const semanticScore = scoreSemanticTransition(semantic, c.expect.semantic);
+  if (!semanticScore.pass) return semanticScore;
+  return {
+    pass: true,
+    detail: `${raw.detail}; ${semanticScore.detail}`,
+  };
 }
 
 // ── seed corpus ── synthetic, but each case encodes a real T12 lesson.
@@ -169,6 +198,11 @@ function seedCases(): OnboardingEvalCase[] {
         acceptKinds: ["click", "navigate"],
         rejectKinds: ["extract", "done"],
         selectorsAnyOf: ["#create-key"],
+        semantic: {
+          accept_intents: ["create_credential"],
+          reject_intents: ["extract_credentials", "finish_or_escalate"],
+          targets_any_of: ["Create API Key"],
+        },
       },
     },
     {
@@ -183,7 +217,14 @@ function seedCases(): OnboardingEvalCase[] {
           "<button>Create API Key</button>",
       ),
       inventory: [el({ visibleText: "Create API Key", selector: "#create-key" })],
-      expect: { acceptKinds: ["click"], selectorsAnyOf: ["#create-key"] },
+      expect: {
+        acceptKinds: ["click"],
+        selectorsAnyOf: ["#create-key"],
+        semantic: {
+          accept_intents: ["create_credential"],
+          targets_any_of: ["Create API Key"],
+        },
+      },
     },
     {
       // A post-OAuth onboarding modal blocks the dashboard — dismiss it
@@ -333,7 +374,7 @@ async function main(): Promise<void> {
         inventory: c.inventory,
         ...(c.priorActions !== undefined ? { priorActions: c.priorActions } : {}),
       });
-      const score = scoreOnboardingStep(step, c.expect);
+      const score = scoreOnboardingDecision(step, c);
       if (score.pass) passed += 1;
       console.log(`${score.pass ? "PASS" : "FAIL"}  ${c.name} — ${score.detail}`);
       if (!score.pass) console.log(`        reason given: ${step.reason}`);

@@ -118,6 +118,26 @@ describe("pickStuckLoopFallbackUrl", () => {
     expect(fallback).toBe("https://console.groq.com/keys");
   });
 
+  it("keeps a live console origin instead of composing fallbacks onto a marketing signup host", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.cloudinary.com/app/welcome/",
+      new Set(),
+      "cloudinary",
+      "https://cloudinary.com/users/register_free",
+    );
+    expect(fallback).toBe("https://console.cloudinary.com/pm/developer-dashboard");
+  });
+
+  it("still composes fallbacks onto the app origin from an auth subdomain", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://authkit.anyscale.com/oauth/callback",
+      new Set(),
+      "anyscale",
+      "https://console.anyscale.com",
+    );
+    expect(fallback).toBe("https://console.anyscale.com/api-keys");
+  });
+
   it("resolves the curated path from a multi-word / cased service name via the slug", () => {
     const fallback = pickStuckLoopFallbackUrl(
       "https://app.launchdarkly.com/dashboard",
@@ -125,6 +145,33 @@ describe("pickStuckLoopFallbackUrl", () => {
       "LaunchDarkly",
     );
     expect(fallback).toBe("https://app.launchdarkly.com/settings/authorization");
+  });
+
+  it("tries Sentry's auth-token path before generic 404-prone settings paths", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://trustysquire-m3.sentry.io/onboarding/setup-docs/",
+      new Set(),
+      "sentry",
+    );
+    expect(fallback).toBe("https://trustysquire-m3.sentry.io/settings/account/api/auth-tokens/");
+  });
+
+  it("tries Axiom's documented API-token settings path before generic keys paths", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.axiom.co/dashboard",
+      new Set(),
+      "axiom",
+    );
+    expect(fallback).toBe("https://app.axiom.co/settings/api-tokens");
+  });
+
+  it("tries Anyscale's account API-keys page before generic settings paths", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.anyscale.com/",
+      new Set(),
+      "anyscale",
+    );
+    expect(fallback).toBe("https://console.anyscale.com/api-keys");
   });
 
   it("does NOT compose a curated path onto an unrelated host (host gate)", () => {
@@ -161,6 +208,153 @@ describe("pickStuckLoopFallbackUrl", () => {
       "somevendor",
     );
     expect(fallback).toBe("https://app.somevendor.test/settings/keys");
+  });
+
+  it("composes onto the APP origin, not the auth/IdP origin the run is stuck on", () => {
+    // luma's real bug: post-OAuth the stuck URL is the auth subdomain
+    // (auth.lumalabs.ai) or app.lumalabs.ai, while the documented API-key
+    // URL lives on lumalabs.ai/dream-machine/api/keys.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://auth.lumalabs.ai/sign-up",
+      new Set(),
+      "luma-ai",
+      "https://lumalabs.ai/dream-machine",
+    );
+    expect(fallback).toBe("https://lumalabs.ai/dream-machine/api/keys");
+  });
+
+  it("can return an absolute curated URL when the service slug is not in the host", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.lumalabs.ai/",
+      new Set(),
+      "luma-ai",
+      "https://app.lumalabs.ai/",
+    );
+    expect(fallback).toBe("https://lumalabs.ai/dream-machine/api/keys");
+  });
+
+  it("tries WorkOS' documented dashboard API-key URL first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://workos.com/onboarding",
+      new Set(),
+      "workos",
+      "https://workos.com/",
+    );
+    expect(fallback).toBe("https://dashboard.workos.com/api-keys");
+  });
+
+  it("tries Cloudinary's console credential surface before marketing-host guesses", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://cloudinary.com/users/register_free",
+      new Set(),
+      "cloudinary",
+      "https://cloudinary.com/users/register_free",
+    );
+    expect(fallback).toBe("https://console.cloudinary.com/pm/developer-dashboard");
+  });
+
+  it("tries Mistral's organization API-key page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://console.mistral.ai/",
+      new Set(),
+      "mistral",
+      "https://console.mistral.ai/",
+    );
+    expect(fallback).toBe("https://admin.mistral.ai/organization/api-keys");
+  });
+
+  it("tries Baseten's settings API-key page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.baseten.co/",
+      new Set(),
+      "baseten",
+      "https://app.baseten.co/",
+    );
+    expect(fallback).toBe("https://app.baseten.co/settings/api-keys");
+  });
+
+  it("tries Val Town's new API-token page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://www.val.town/settings/api",
+      new Set(),
+      "val-town",
+      "https://www.val.town/",
+    );
+    expect(fallback).toBe("https://www.val.town/settings/api/new");
+  });
+
+  it("tries Langfuse's cloud API-key settings entrypoint first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://cloud.langfuse.com/onboarding",
+      new Set(),
+      "langfuse",
+      "https://cloud.langfuse.com/",
+    );
+    expect(fallback).toBe("https://cloud.langfuse.com/settings/api-keys");
+  });
+
+  it("tries Kinde's Settings > API Keys route first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.kinde.com/",
+      new Set(),
+      "kinde",
+      "https://app.kinde.com/",
+    );
+    expect(fallback).toBe("https://app.kinde.com/settings/api-keys");
+  });
+
+  it("uses the app origin's host for the curated-path gate", () => {
+    // Stuck on accounts.google.com (OAuth), but the app is console.groq.com.
+    // The curated groq path must compose onto the app host, not the IdP.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://accounts.google.com/oauth/authorize",
+      new Set(),
+      "groq",
+      "https://console.groq.com/login",
+    );
+    expect(fallback).toBe("https://console.groq.com/keys");
+  });
+
+  it("ignores a Google-search app URL and keeps the stuck origin", () => {
+    // resolvedSignupUrl can be a google-search URL when no real signup
+    // page resolved; that's not an app origin, so don't compose onto it.
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://platform.claude.com/dashboard",
+      new Set(),
+      undefined,
+      "https://www.google.com/search?q=claude+signup",
+    );
+    expect(fallback).toBe("https://platform.claude.com/settings/keys");
+  });
+
+  it("falls back to the stuck origin when no app URL is given (back-compat)", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://platform.claude.com/dashboard",
+      new Set(),
+    );
+    expect(fallback).toBe("https://platform.claude.com/settings/keys");
+  });
+
+  it("preserves team/org/workspace route scope before origin-root guesses", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://app.example.test/t/acme-team/dashboard",
+      new Set(),
+    );
+    expect(fallback).toBe("https://app.example.test/t/acme-team/settings/keys");
+
+    const tried = new Set([
+      "https://app.example.test/t/acme-team/settings/keys",
+      "https://app.example.test/t/acme-team/settings/api-keys",
+      "https://app.example.test/t/acme-team/settings/api_keys",
+      "https://app.example.test/t/acme-team/settings/tokens",
+      "https://app.example.test/t/acme-team/settings/api-tokens",
+    ]);
+    expect(
+      pickStuckLoopFallbackUrl(
+        "https://app.example.test/t/acme-team/dashboard",
+        tried,
+      ),
+    ).toBe("https://app.example.test/t/acme-team/settings/api/tokens");
   });
 });
 

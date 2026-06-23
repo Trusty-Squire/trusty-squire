@@ -23,13 +23,21 @@ import type { VerifierRegistryClient } from "./registry-client.js";
 import type { QueueProvider } from "./queues/index.js";
 import type { Notifier, NotifierEvent } from "./notifier.js";
 import type { CleanupOutcome } from "./cleanup.js";
-import { handleReplay, type ReplayMode, type ReplayRunner } from "./modes/verify.js";
+import {
+  handleReplay,
+  type ReplayMode,
+  type ReplayRunner,
+  type SignupProbeRunner,
+  type FreshVerifyRunner,
+} from "./modes/verify.js";
 import { RunPacer, pacingFromEnv } from "./pacing.js";
 import { handleDiscover, type DiscoveryBotRunner } from "./modes/discover.js";
 import { gradeLedgerAgainstPass, describeGrade } from "./fix-ledger.js";
 import { VERSION } from "../version.js";
+import { replenishVerifyPool } from "./robot-replenish.js";
+import { summarizeIdentityAvailability } from "./identity-pool.js";
 
-export type { ReplayMode, ReplayRunner } from "./modes/verify.js";
+export type { ReplayMode, ReplayRunner, SignupProbeRunner, FreshVerifyRunner } from "./modes/verify.js";
 export type { DiscoveryBotRunner } from "./modes/discover.js";
 
 export interface HousekeeperOpts {
@@ -44,9 +52,24 @@ export interface HousekeeperOpts {
   // Optional — runs without a replay handler just won't process
   // 'replay' tasks (they're skipped with a log).
   replay?: ReplayRunner;
+  // Auto-probe-before-retire (modes/verify.ts). When wired, a replay
+  // failure that would otherwise count toward demotion is first checked
+  // against a live probe of the signup page: if the page still shows the
+  // service's entry affordances, the failure is treated as brittleness
+  // (non-demoting) rather than rot. Optional — unset leaves the existing
+  // demote classification untouched.
+  probe?: SignupProbeRunner;
   // Wired by the CLI to runDiscover. Same shape; required for
   // 'discover' tasks.
   discover?: DiscoveryBotRunner;
+  // D2.D — fresh-identity verifier. When wired (heal mode, identity pool
+  // configured), a 'replay' task for a skill with a fresh-identity path
+  // (OAuth-based) routes through the bounded sequential-confidence sampler
+  // (N independent fresh signups) INSTEAD of single-account replay. The sampler
+  // reports its own verdict to the registry and returns the transition. Skills
+  // with NO fresh-identity path (email-only, or when this hook is unwired) fall
+  // back to single-account replay via handleReplay. See modes/fresh-verify.ts.
+  freshVerify?: FreshVerifyRunner;
   // Replay mode for the verifier path. Defaults to 'full'.
   replayMode?: ReplayMode;
   // Per-batch size cap.
@@ -77,6 +100,7 @@ export interface HousekeeperBatchSummary {
   // Verifier-only counters; discovery tasks roll into none.
   transitions: {
     promoted: number;
+    superseded: number;
     retired: number;
     demoted: number;
     quarantined: number;
@@ -94,33 +118,72 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
   const limit = opts.limit ?? 20;
   const tasks = await opts.queue.fetch(limit);
   log(`fetched queue (${opts.queue.name}): ${tasks.length} task(s)`);
+  if (opts.queue.name === "verifier" && opts.freshVerify !== undefined) {
+    const pendingServices = tasks
+      .flatMap((task) =>
+        task.kind === "replay" && task.queueItem.status === "pending-review"
+          ? [task.queueItem.service]
+          : [],
+      );
+    if (pendingServices.length > 0) {
+      const availability = summarizeIdentityAvailability(pendingServices, "google");
+      const short = availability.filter((row) => row.available <= 0);
+      if (short.length > 0) {
+        log(
+          "verify pool preflight: no available robot for " +
+            short.map((row) => `${row.service} (${row.unspent} unspent, ${row.liveProfileHeld} profile-held)`).join(", "),
+        );
+        await replenishVerifyPool({
+          log,
+          force: true,
+          rotateAll: true,
+          maxPerPass: Math.min(4, Math.max(1, short.length)),
+        });
+      } else {
+        const minAvailable = Math.min(...availability.map((row) => row.available));
+        log(`verify pool preflight: ok (${availability.length} service(s), min available=${minAvailable})`);
+      }
+    }
+  }
   const summary: HousekeeperBatchSummary = {
     attempted: 0,
     succeeded: 0,
     failed: 0,
     blocked: 0,
     skipped: 0,
-    transitions: { promoted: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
+    transitions: { promoted: 0, superseded: 0, retired: 0, demoted: 0, quarantined: 0, none: 0 },
     serviceOutcomes: [],
   };
   // Inter-run pacing for live (discover) signups — keeps a clean residential
   // exit clean (see pacing.ts). Replay tasks don't launch the bot, so they're
   // never paced or counted.
   const pacer = new RunPacer(pacingFromEnv(), { log });
-  for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i]!;
+  // Bounded concurrency (HOUSEKEEPER_CONCURRENCY, default 1 = serial). >1 runs
+  // discover slots in parallel — safe because the IP-wall hypothesis the serial
+  // pacing guards against is FALSIFIED (STATE.md: datacenter and residential
+  // fail the per-service callback identically) AND a live 3-wide-OAuth-from-one-
+  // IP test showed no Google anti-abuse. Each concurrent slot takes a DISTINCT
+  // robot via the atomic claim (identity-pool.ts). Size against the LLM proxy
+  // 150/hr cap, not RAM. The per-run cooldown is skipped in concurrent mode; the
+  // daily cap still applies.
+  const concurrency = Math.max(
+    1,
+    Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1,
+  );
+  const processTask = async (
+    task: (typeof tasks)[number],
+    i: number,
+  ): Promise<void> => {
     const isLiveSignup = task.kind !== "replay";
 
     if (isLiveSignup) {
       const cap = pacer.capRemaining();
       if (!cap.allowed) {
-        const left = tasks.length - i;
         log(
-          `[pace] daily signup cap reached (${cap.used}/${cap.cap}) — stopping batch ` +
-            `to rest the IP; ${left} task(s) skipped.`,
+          `[pace] daily signup cap reached (${cap.used}/${cap.cap}) — skipping ${task.service ?? "task"}.`,
         );
-        summary.skipped += left;
-        break;
+        summary.skipped += 1;
+        return;
       }
     }
 
@@ -221,17 +284,42 @@ export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBat
     }
 
     // Count the run + adaptively back off; cooldown only when another live
-    // signup follows (no point sleeping after the last one).
+    // signup follows (no point sleeping after the last one). Concurrent slots
+    // already overlap and the cooldown's IP rationale is falsified, so it's
+    // serial-mode only.
     if (isLiveSignup) {
       pacer.recordRun(pacingReason);
-      const moreLive = tasks.slice(i + 1).some((t) => t.kind !== "replay");
-      if (moreLive) await pacer.cooldown();
+      if (concurrency <= 1) {
+        const moreLive = tasks.slice(i + 1).some((t) => t.kind !== "replay");
+        if (moreLive) await pacer.cooldown();
+      }
+    }
+  };
+
+  if (concurrency > 1) {
+    log(
+      `bounded-concurrency: ${tasks.length} task(s), ${concurrency}-wide ` +
+        `(per-run cooldown skipped, daily cap kept, distinct robot per slot)`,
+    );
+    let nextIdx = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+        for (;;) {
+          const i = nextIdx++;
+          if (i >= tasks.length) return;
+          await processTask(tasks[i]!, i);
+        }
+      }),
+    );
+  } else {
+    for (let i = 0; i < tasks.length; i++) {
+      await processTask(tasks[i]!, i);
     }
   }
   log(
     `batch done: attempted=${summary.attempted} ok=${summary.succeeded} ` +
       `fail=${summary.failed} blocked=${summary.blocked} skipped=${summary.skipped} ` +
-      `promoted=${summary.transitions.promoted} retired=${summary.transitions.retired} ` +
+      `promoted=${summary.transitions.promoted} superseded=${summary.transitions.superseded} retired=${summary.transitions.retired} ` +
       `demoted=${summary.transitions.demoted} quarantined=${summary.transitions.quarantined}`,
   );
   return summary;
@@ -256,9 +344,24 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   discover: HousekeeperBatchSummary;
 }> {
   const log = opts.log ?? ((line: string) => console.log(`[housekeeper] ${line}`));
-  log("heal pass — phase 1/2: verify (demote rot, quarantine walls)");
+  log("heal pass — phase 1/3: verify (demote rot, quarantine walls)");
   const verify = await runOneBatch(opts.verify);
-  log("heal pass — phase 2/2: discover (re-skill freshly-demoted + demand)");
+
+  // Phase 2 (opt-in) — replenish the verify-robot pool BEFORE discover, so (a)
+  // this pass's discover gets the fresh robots immediately (relieving the
+  // insufficient_identities exhaustion that otherwise fails services outright),
+  // and (b) it runs at all: discover routinely burns the whole 240min
+  // self-deadline and hard-exits the process, so anything placed AFTER it never
+  // executes. No-op unless ROBOT_AUTO_REPLENISH=1 + an admin token exists.
+  log("heal pass — phase 2/3: replenish verify-robot pool (cost-flat rotate + warm)");
+  let poolLine = "";
+  try {
+    poolLine = await replenishVerifyPool({ log });
+  } catch (err) {
+    log(`pool replenish failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  log("heal pass — phase 3/3: discover (re-skill freshly-demoted + demand)");
   const discover = await runOneBatch(opts.discover);
 
   // Close-the-loop (#1): grade open fix attempts whose targeted services were
@@ -367,7 +470,7 @@ export async function runHealPass(opts: HealPassOpts): Promise<{
   const digest =
     `verified ${verify.attempted} · demoted ${verify.transitions.demoted} · ` +
     `quarantined ${verify.transitions.quarantined} · re-skilled ${reskilled} · ` +
-    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}${hitLine}${gradedLine}`;
+    `needs human ~${Math.max(0, needsHuman)}${discoverRate}${skillsLine}${hitLine}${gradedLine}${poolLine}`;
   log(`heal pass done: ${digest}`);
   await fanOutNotifier(opts.notifiers ?? [], log, {
     kind: "heal_digest",

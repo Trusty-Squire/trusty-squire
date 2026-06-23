@@ -69,7 +69,8 @@ export function buildCompatHealth(
   hasActiveSkill: boolean,
   opts: CompatScoreOptions = {},
 ): CompatHealth {
-  const compat_score = deriveCompatScore(attempts, opts);
+  const scoringAttempts = currentStateAttempts(attempts);
+  const compat_score = deriveCompatScore(scoringAttempts, opts);
   const state = classifyCompat(compat_score, hasActiveSkill, opts);
   let successful_count = 0;
   let failed_count = 0;
@@ -86,4 +87,21 @@ export function buildCompatHealth(
     failed_count,
     last_attempt_at: last === null ? null : last.toISOString(),
   };
+}
+
+function currentStateAttempts(
+  attempts: readonly ProvisionEventRecord[],
+): readonly ProvisionEventRecord[] {
+  let lastSuccess: Date | null = null;
+  let lastFailure: Date | null = null;
+  for (const a of attempts) {
+    if (a.status === "success") {
+      if (lastSuccess === null || a.occurred_at > lastSuccess) lastSuccess = a.occurred_at;
+    } else if (lastFailure === null || a.occurred_at > lastFailure) {
+      lastFailure = a.occurred_at;
+    }
+  }
+  if (lastSuccess === null) return attempts;
+  if (lastFailure !== null && lastFailure >= lastSuccess) return attempts;
+  return attempts.filter((a) => a.occurred_at >= lastSuccess);
 }

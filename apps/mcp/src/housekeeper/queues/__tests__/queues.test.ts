@@ -171,6 +171,20 @@ describe("YamlSeedQueue", () => {
     expect(tasks.map((t) => (t.kind === "discover" ? t.service : ""))).toEqual(["weaviate"]);
   });
 
+  it("skips a legacy alias when the canonical service already has an active skill", async () => {
+    const yamlText = `services:
+  - { slug: anthropic }
+  - { slug: weaviate }
+`;
+    const queue = new YamlSeedQueue({
+      path: "/fake/path",
+      readFn: async () => yamlText,
+      excludeActiveFn: async () => new Set(["anthropic-api"]),
+    });
+    const tasks = await queue.fetch(10);
+    expect(tasks.map((t) => (t.kind === "discover" ? t.service : ""))).toEqual(["weaviate"]);
+  });
+
   it("falls back to the full pool when the active lookup fails", async () => {
     const yamlText = `services:
   - { slug: a }
@@ -264,7 +278,7 @@ ${Array.from({ length: 30 }, (_, i) => `  - { slug: svc${i} }`).join("\n")}
       signupUrl: "https://ipinfo.io/signup",
     });
     expect(tasks[1]).toMatchObject({
-      service: "anthropic",
+      service: "anthropic-api",
       signupUrl: "https://console.anthropic.com/login",
       oauthProvider: "google",
     });
@@ -313,6 +327,11 @@ describe("AdHocServiceQueue", () => {
     expect(await queue.fetch(10)).toEqual([{ kind: "discover", service: "railway" }]);
   });
 
+  it("canonicalizes known legacy duplicate slugs", async () => {
+    const queue = new AdHocServiceQueue("anthropic");
+    expect(await queue.fetch(10)).toEqual([{ kind: "discover", service: "anthropic-api" }]);
+  });
+
   it("emits an empty list on subsequent fetches (one-shot)", async () => {
     const queue = new AdHocServiceQueue("railway");
     await queue.fetch(10);
@@ -349,6 +368,14 @@ describe("lookupServiceInYaml", () => {
       signup_url: "https://ipinfo.io/signup",
       oauth_provider: "google",
     });
+  });
+
+  it("matches YAML entries by canonical service slug", async () => {
+    const yamlText = `services:
+  - { slug: anthropic, signup_url: 'https://console.anthropic.com/login', oauth_provider: google }
+`;
+    const entry = await lookupServiceInYaml("/fake/path", "anthropic-api", async () => yamlText);
+    expect(entry).toMatchObject({ slug: "anthropic" });
   });
 
   it("returns null when the slug isn't in the file", async () => {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalGoogleConsoleEntryUrl,
   classifySignupHtml,
+  isMarketingAuthDeadEndUrl,
   resolveSignupUrlByProbe,
 } from "../agent.js";
 
@@ -81,6 +83,14 @@ describe("classifySignupHtml", () => {
   });
 });
 
+describe("isMarketingAuthDeadEndUrl", () => {
+  it("flags marketing routes but not signup routes", () => {
+    expect(isMarketingAuthDeadEndUrl("https://acme.com/pricing#plans")).toBe(true);
+    expect(isMarketingAuthDeadEndUrl("https://docs.acme.com/guide")).toBe(true);
+    expect(isMarketingAuthDeadEndUrl("https://app.acme.com/signup")).toBe(false);
+  });
+});
+
 // A tiny fake fetcher driven by a URL→response map. Any URL not in the map
 // returns null (mirrors a fetch failure / unreachable path).
 function fakeFetch(
@@ -100,6 +110,21 @@ function fakeFetch(
 }
 
 describe("resolveSignupUrlByProbe", () => {
+  it("canonicalizes Google product console roots to account-scoped entries", async () => {
+    const hint = "https://console.firebase.google.com/";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "firebase",
+      fakeFetch({
+        "https://console.firebase.google.com/u/0/": {
+          status: 302,
+          body: "<html><body>Redirecting to sign in</body></html>",
+        },
+      }),
+    );
+    expect(resolved).toBe("https://console.firebase.google.com/u/0/");
+  });
+
   it("returns the hint's finalUrl when it already serves a signup form", async () => {
     const hint = "https://acme.com/signup";
     const resolved = await resolveSignupUrlByProbe(
@@ -120,6 +145,58 @@ describe("resolveSignupUrlByProbe", () => {
       }),
     );
     expect(resolved).toBe("https://app.acme.com/signup");
+  });
+
+  it("trusts a signup-shaped redirect even when static HTML is an SPA shell", async () => {
+    const hint = "https://app.acme.com/signup";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "acme",
+      fakeFetch({
+        [hint]: {
+          finalUrl: "https://us.acme.com/signup",
+          body: "<html><body>Acme</body></html>",
+        },
+      }),
+    );
+    expect(resolved).toBe("https://us.acme.com/signup");
+  });
+
+  it("does not trust a signup hint that redirects to a marketing route", async () => {
+    const hint = "https://app.acme.com/signup";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "acme",
+      fakeFetch({
+        [hint]: {
+          finalUrl: "https://acme.com/pricing",
+          body: MARKETING_HTML,
+        },
+      }),
+    );
+    expect(resolved).toBeNull();
+  });
+
+  it("does not replace an auth entry with a 404 page just because the final path is signup", async () => {
+    const hint = "https://console.acme.com/login";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "acme",
+      fakeFetch({
+        [hint]: { body: PLUNK_LOGIN_HTML },
+        "https://console.acme.com/signup": {
+          finalUrl: "https://www.acme.com/signup",
+          status: 404,
+          body: "<html><title>Not Found</title><body>Page not found</body></html>",
+        },
+        "https://acme.com/signup": {
+          finalUrl: "https://www.acme.com/signup",
+          status: 404,
+          body: "<html><title>Not Found</title><body>Page not found</body></html>",
+        },
+      }),
+    );
+    expect(resolved).toBeNull();
   });
 
   it("recovers the plunk case: stale /signup (login) → /auth/signup (308 → next-app)", async () => {
@@ -174,5 +251,45 @@ describe("resolveSignupUrlByProbe", () => {
       }),
     );
     expect(resolved).toBeNull();
+  });
+
+  it("recovers a stale model host with a reachable service-derived cloud console", async () => {
+    const hint = "https://console.cloud.clickhouse.com/signup";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "clickhouse-cloud",
+      fakeFetch({
+        // The LLM-provided hint is unreachable (not present in this map).
+        "https://console.clickhouse.cloud/signup": {
+          body: MARKETING_HTML,
+        },
+      }),
+    );
+    expect(resolved).toBe("https://console.clickhouse.cloud/signup");
+  });
+
+  it("does not recover an unreachable hint through an off-domain service candidate", async () => {
+    const hint = "https://console.cloud.clickhouse.com/signup";
+    const resolved = await resolveSignupUrlByProbe(
+      hint,
+      "clickhouse-cloud",
+      fakeFetch({
+        "https://console.clickhouse.cloud/signup": {
+          finalUrl: "https://evil.example/signup",
+          body: PLUNK_SIGNUP_HTML,
+        },
+      }),
+    );
+    expect(resolved).toBeNull();
+  });
+});
+
+describe("canonicalGoogleConsoleEntryUrl", () => {
+  it("only rewrites bare Google product console roots", () => {
+    expect(canonicalGoogleConsoleEntryUrl("https://console.firebase.google.com/")).toBe(
+      "https://console.firebase.google.com/u/0/",
+    );
+    expect(canonicalGoogleConsoleEntryUrl("https://console.firebase.google.com/u/0/")).toBeNull();
+    expect(canonicalGoogleConsoleEntryUrl("https://aistudio.google.com/")).toBeNull();
   });
 });

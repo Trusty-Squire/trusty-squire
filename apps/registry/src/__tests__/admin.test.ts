@@ -185,6 +185,171 @@ describe("GET /admin/verifier/queue", () => {
     expect(res.json().items).toHaveLength(0);
     await server.close();
   });
+
+  it("prioritizes fresh pending rows over stale high-failure pending rows", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    const staleId = "01HVERIF000000000000000A3";
+    const freshId = "01HVERIF000000000000000A4";
+    const stale = pendingSkill(staleId, "stale-service");
+    stale.created_at = "2026-05-20T04:00:00.000Z";
+    const fresh = pendingSkill(freshId, "fresh-service");
+    fresh.created_at = "2026-05-21T04:00:00.000Z";
+    await skillStore.insert({
+      skill: stale,
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: fresh,
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: staleId,
+      kind: "failure",
+      failure_kind: "nav_timeout",
+      reason: "transient verifier miss",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: staleId,
+      kind: "failure",
+      failure_kind: "nav_timeout",
+      reason: "transient verifier miss",
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue?limit=2",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.items.map((item: { skill_id: string }) => item.skill_id)).toEqual([
+      freshId,
+      staleId,
+    ]);
+    await server.close();
+  });
+
+  it("does not queue covered duplicate pending rows", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    const duplicateActiveId = "01HVERIF000000000000000A5";
+    const duplicatePendingId = "01HVERIF000000000000000A6";
+    const uncoveredPendingId = "01HVERIF000000000000000A7";
+    const dueActiveId = "01HVERIF000000000000000A8";
+    await skillStore.insert({
+      skill: { ...pendingSkill(duplicateActiveId, "covered-service"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: pendingSkill(duplicatePendingId, "covered-service"),
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: pendingSkill(uncoveredPendingId, "uncovered-service"),
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: { ...pendingSkill(dueActiveId, "due-service"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: dueActiveId,
+      kind: "success",
+      reason: "make freshness due",
+      now: new Date("2026-06-01T00:00:00.000Z"),
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue?limit=3",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.items.map((item: { skill_id: string }) => item.skill_id)).toEqual([
+      uncoveredPendingId,
+      duplicateActiveId,
+      dueActiveId,
+    ]);
+    await server.close();
+  });
+
+  it("does not queue a pending-review legacy alias when the canonical service is active", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    await skillStore.insert({
+      skill: { ...pendingSkill("01HVERIF000000000000000B1", "anthropic-api"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: pendingSkill("01HVERIF000000000000000B2", "anthropic"),
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().items.map((item: { skill_id: string }) => item.skill_id)).toEqual([
+      "01HVERIF000000000000000B1",
+    ]);
+    await server.close();
+  });
+
+  it("queues active skills that have no verifier proof yet", async () => {
+    const { skillStore, build } = buildAdminServer();
+    const server = await build();
+    const unprovenActiveId = "01HVERIF000000000000000B3";
+    const provenActiveId = "01HVERIF000000000000000B4";
+    await skillStore.insert({
+      skill: { ...pendingSkill(unprovenActiveId, "unproven-active"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.insert({
+      skill: { ...pendingSkill(provenActiveId, "proven-active"), status: "active" },
+      signature: "x".repeat(64),
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+    await skillStore.recordVerifierOutcome({
+      skill_id: provenActiveId,
+      kind: "success",
+      reason: "already proved",
+      now: new Date(),
+    });
+
+    const res = await server.inject({
+      method: "GET",
+      url: "/admin/verifier/queue?limit=10",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const ids = res.json().items.map((item: { skill_id: string }) => item.skill_id);
+    expect(ids).toContain(unprovenActiveId);
+    expect(ids).not.toContain(provenActiveId);
+    await server.close();
+  });
 });
 
 describe("POST /admin/skills/:id/verifier-outcome", () => {
@@ -386,7 +551,7 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
     await server.close();
   });
 
-  it("REFUSES auto-promotion when the C11 phishing-vector gate trips", async () => {
+  it("supersedes the verified duplicate when the C11 phishing-vector gate trips", async () => {
     // Existing active skill for `frontier-svc` uses GitHub OAuth +
     // a legit signup_url. A new pending-review skill arrives for
     // the same service but with a DIFFERENT signup_url. The verifier
@@ -417,25 +582,18 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
       signed_at: new Date(),
       signed_by: "test",
     });
-    // First success would promote under the N=1 threshold; the C11
-    // gate must hold. Second success exercises that the gate keeps
-    // holding under repeated wins.
-    await server.inject({
-      method: "POST",
-      url: `/admin/skills/${incomingId}/verifier-outcome`,
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "first — would normally promote" },
-    });
+    // One success would promote under the N=1 threshold, but C11 protects the
+    // existing active row. The duplicate should leave the verifier queue.
     const res = await server.inject({
       method: "POST",
       url: `/admin/skills/${incomingId}/verifier-outcome`,
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { kind: "success", reason: "second — gate should still hold" },
+      payload: { kind: "success", reason: "would normally promote" },
     });
     const body = res.json();
-    expect(body.transition).toBe("none");
-    expect(body.status).toBe("pending-review");
-    expect(body.verifier_succeeded).toBe(2);
+    expect(body.transition).toBe("superseded");
+    expect(body.status).toBe("superseded");
+    expect(body.verifier_succeeded).toBe(1);
     await server.close();
   });
 });

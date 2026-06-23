@@ -23,6 +23,10 @@
 // The agent itself only sees LLMClient and never knows which backend won.
 
 import Anthropic from "@anthropic-ai/sdk";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ── Wire format (intentionally narrow — only what the agent uses) ──
 
@@ -50,6 +54,16 @@ export interface LLMRequest {
   // makes the offline eval (eval-onboarding) faithful to production. See
   // docs/DESIGN-planner-navigation-eval.md.
   temperature?: number;
+  // Determinism flag (Fix C). Set by the navigation/form planners. On the
+  // proxy path it tells the server to pin a SINGLE model + backend provider
+  // + seed instead of a `models` routing array / tier=free lottery, so the
+  // planner's reply is reproducible run-to-run (temperature 0 alone is not
+  // enough — model-swap + provider-swap flip the bytes even at temp 0).
+  // Non-planner calls (vision number-match, premium parse retry) omit it.
+  deterministic?: boolean;
+  // Sampling seed forwarded on deterministic calls. Defaults to 1 at the
+  // proxy client. Honored by backends that support it; harmless elsewhere.
+  seed?: number;
 }
 
 export interface LLMResponse {
@@ -61,6 +75,13 @@ export interface LLMResponse {
   // Identifies which backend handled this so the agent can surface it
   // in step logs.
   backend: string;
+  // The model the backend actually served (Fix C4). On the proxy path
+  // this is OpenRouter's reported served model; the agent persists it per
+  // capture round so model-swap flakiness is attributable from the corpus.
+  // Optional — not every backend reports it.
+  resolved_model?: string;
+  // The backend provider OpenRouter routed to, when reported.
+  resolved_provider?: string;
 }
 
 export interface LLMClient {
@@ -107,6 +128,92 @@ export class AnthropicDirectClient implements LLMClient {
       output_tokens: resp.usage.output_tokens,
       backend: this.name,
     };
+  }
+}
+
+// ── Claude Code CLI (`claude -p`) — off the operator's Claude subscription ──
+//
+// Spawns `claude -p --model <m>` per call: zero per-call API spend (uses the
+// operator's subscription), and a far stronger planner than the cheap OpenRouter
+// models — which matters because weak plans (open-dropdown-then-click-in-a-
+// separate-round, missing required fields) are behind a chunk of the
+// oauth_onboarding_failed / planning_failed discover failures. Images are written
+// to temp files and read via the Read tool (claude -p sees them as vision —
+// verified 2026-06-16: it read a meilisearch screenshot accurately).
+//
+// OPT-IN (BOT_PLANNER_CLAUDE_CLI=1) so the heal only uses it when flipped on.
+// CAVEATS the operator accepted: subscription ToS gray-area for automated use,
+// finite rate limits (a signup is ~15-25 calls), ~CLI-spawn latency per call, and
+// NO seed — so skill captures get noisier (the Fix-C determinism pin is a proxy-
+// path feature, unavailable here). Tools are constrained to Read.
+export class ClaudeCliClient implements LLMClient {
+  readonly name: string;
+  private readonly model: string;
+  constructor(opts: { model?: string } = {}) {
+    this.model = opts.model ?? process.env.BOT_PLANNER_CLAUDE_MODEL ?? "haiku";
+    this.name = `claude-cli:${this.model}`;
+  }
+
+  async createMessage(req: LLMRequest): Promise<LLMResponse> {
+    const dir = mkdtempSync(join(tmpdir(), "ts-claude-planner-"));
+    try {
+      const imagePaths: string[] = [];
+      const parts: string[] = [];
+      if (req.system.length > 0) parts.push(req.system);
+      for (const b of req.user) {
+        if (b.kind === "text") {
+          parts.push(b.text);
+        } else {
+          const ext = b.media_type === "image/png" ? "png" : "jpg";
+          const p = join(dir, `img-${imagePaths.length}.${ext}`);
+          writeFileSync(p, Buffer.from(b.data_base64, "base64"));
+          imagePaths.push(p);
+        }
+      }
+      if (imagePaths.length > 0) {
+        parts.push(
+          "IMAGES — use the Read tool to view EACH of these files before answering:\n" +
+            imagePaths.map((p) => `  ${p}`).join("\n"),
+        );
+      }
+      parts.push(
+        "Return ONLY the requested output (the JSON object / answer). " +
+          "No preamble, no explanation, no markdown code fences.",
+      );
+      const prompt = parts.join("\n\n");
+      const text = await new Promise<string>((resolve, reject) => {
+        // SECURITY: the prompt contains UNTRUSTED web-page text (arbitrary signup
+        // sites), so a malicious page could prompt-inject. We do NOT use
+        // --dangerously-skip-permissions. Instead: allow ONLY the Read tool (no
+        // Bash/Write/execution is possible even if injected) and grant directory
+        // access to ONLY the throwaway temp image dir (cwd=that dir; --add-dir it).
+        // Worst case of an injection is therefore "Read a file inside an empty
+        // temp dir" — no code execution, no access to the operator's files.
+        const child = execFile(
+          "claude",
+          ["-p", "--model", this.model, "--allowedTools", "Read", "--add-dir", dir],
+          { cwd: dir, maxBuffer: 16 * 1024 * 1024, timeout: 180_000 },
+          (err, stdout, stderr) => {
+            if (err) {
+              reject(
+                new Error(
+                  `claude -p (${this.model}) failed: ${err.message}` +
+                    (stderr ? ` | ${stderr.slice(0, 200)}` : ""),
+                ),
+              );
+              return;
+            }
+            resolve(stdout.trim());
+          },
+        );
+        child.stdin?.write(prompt);
+        child.stdin?.end();
+      });
+      if (text.length === 0) throw new Error(`claude -p (${this.model}) returned empty output`);
+      return { text, backend: this.name, resolved_model: this.name };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 }
 
@@ -225,6 +332,9 @@ export class OpenRouterClient implements LLMClient {
       ...(data.usage?.prompt_tokens !== undefined ? { input_tokens: data.usage.prompt_tokens } : {}),
       ...(data.usage?.completion_tokens !== undefined ? { output_tokens: data.usage.completion_tokens } : {}),
       backend: data.model !== undefined ? `openrouter:${data.model}` : this.name,
+      // Fix C4 parity — surface the served model on the BYOK path too so
+      // the capture round records it regardless of which backend won.
+      ...(data.model !== undefined ? { resolved_model: data.model } : {}),
     };
   }
 }
@@ -323,6 +433,12 @@ export class ProxyLLMClient implements LLMClient {
       max_tokens: req.max_tokens,
       ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
       tier: this.tier,
+      // Fix C — planner determinism. When the caller marks the request
+      // deterministic we forward the flag plus a seed so the server pins a
+      // single model + backend provider (no models-array / free-tier
+      // lottery). Default the seed to 1 so the client doesn't have to.
+      ...(req.deterministic === true ? { deterministic: true } : {}),
+      ...(req.deterministic === true ? { seed: req.seed ?? 1 } : {}),
     };
     const payload = JSON.stringify(body);
 
@@ -399,12 +515,19 @@ export class ProxyLLMClient implements LLMClient {
         const data = JSON.parse(text) as {
           text: string;
           backend?: string;
+          resolved_model?: string;
+          resolved_provider?: string;
           input_tokens?: number;
           output_tokens?: number;
         };
         return {
           text: data.text,
           backend: data.backend ?? this.name,
+          // Fix C4 — pass the server-reported served model/provider through
+          // so the agent can stamp it onto the capture round. Optional:
+          // an older server that doesn't send them just omits the fields.
+          ...(data.resolved_model !== undefined ? { resolved_model: data.resolved_model } : {}),
+          ...(data.resolved_provider !== undefined ? { resolved_provider: data.resolved_provider } : {}),
           ...(data.input_tokens !== undefined ? { input_tokens: data.input_tokens } : {}),
           ...(data.output_tokens !== undefined ? { output_tokens: data.output_tokens } : {}),
         };
@@ -509,6 +632,12 @@ function resolvePrimaryTier(
 }
 
 export function pickLLMPair(opts: PickLLMClientOpts = {}): LLMPair {
+  // 0. Claude Code CLI off the operator's subscription (opt-in,
+  //    BOT_PLANNER_CLAUDE_CLI=1). Overrides every other backend — no API spend,
+  //    strongest planner, no 402. premium=null (this IS the strong model).
+  if (/^(1|true|on)$/i.test(process.env.BOT_PLANNER_CLAUDE_CLI ?? "")) {
+    return { primary: new ClaudeCliClient(), premium: null };
+  }
   // 1. Trusty Squire proxy (default for MCP installs).
   const machineToken = process.env.TRUSTY_SQUIRE_MACHINE_TOKEN;
   if (machineToken !== undefined && machineToken.length > 0) {
