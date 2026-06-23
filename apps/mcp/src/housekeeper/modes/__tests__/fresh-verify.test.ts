@@ -259,7 +259,7 @@ describe("runFreshVerify", () => {
       usage: UsageRecord[];
     } = { identities: [fresh], usage: [] };
     const loadPool = vi
-      .fn<[], { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
+      .fn<() => { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
       .mockReturnValueOnce(spentPool)
       .mockReturnValueOnce(freshPool);
     const replenish = vi.fn(async () => " · pool +1 fresh");
@@ -348,7 +348,7 @@ describe("runFreshVerify", () => {
     const staleB = identity(`verify-${Date.now().toString(36)}b`);
     const fresh = identity(`verify-${Date.now().toString(36)}c`);
     const loadPool = vi
-      .fn<[], { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
+      .fn<() => { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
       .mockReturnValueOnce({ identities: [staleA, staleB], usage: [] })
       .mockReturnValueOnce({ identities: [fresh], usage: [] });
     const replenish = vi.fn(async () => " · pool rotated");
@@ -412,7 +412,7 @@ describe("runFreshVerify", () => {
       join(tmpdir(), "fresh-verify-mode-"),
     );
     const fresh = identity(`verify-${Date.now().toString(36)}`);
-    const loadPool = vi.fn<[], { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
+    const loadPool = vi.fn<() => { identities: VerifyIdentity[]; usage: UsageRecord[] }>()
       .mockReturnValue({ identities: [fresh], usage: [] });
     const replenish = vi.fn(async () => " · pool rotated");
     const replay = vi.fn(async () => ({

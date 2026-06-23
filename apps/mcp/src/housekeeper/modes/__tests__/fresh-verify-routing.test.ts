@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Skill } from "@trusty-squire/skill-schema";
 import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
-import { handleReplay, type FreshVerifyRunner } from "../verify.js";
+import { handleReplay, type FreshVerifyRunner, type SignupProbeRunner } from "../verify.js";
 import type { HousekeeperOpts } from "../../orchestrator.js";
 import type { HousekeeperTask } from "../../queues/index.js";
 import type { ReplayOutcome } from "../../../bot/replay-skill.js";
@@ -486,12 +486,14 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
         next_freshness_due_at: null,
       })),
     } as unknown as HousekeeperOpts["client"];
-    const probe = vi.fn(async () => ({
+    const probe = vi.fn<SignupProbeRunner>(async () => ({
       providers: ["google"],
       has_email_signup: false,
+      has_email_field: false,
       card_gate: false,
       interstitial: false,
       final_url: "https://fresh.example/signup",
+      inventory_size: 3,
     }));
     const res = await handleReplay(
       TASK,

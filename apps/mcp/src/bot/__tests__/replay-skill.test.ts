@@ -638,7 +638,7 @@ describe("replaySkill — credential validator", () => {
           dom_hint: { testid: "keys-page-create-button" },
           provenance,
         },
-        { kind: "extract_via_regex", pattern_name: "api_key", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
       ]),
       browser: b.controller,
       mode: "full",
@@ -666,7 +666,7 @@ describe("replaySkill — credential validator", () => {
           href_hint: "/kinde-apis/",
           provenance,
         },
-        { kind: "extract_via_regex", pattern_name: "api_key", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
       ]),
       browser: b.controller,
       mode: "full",
@@ -700,7 +700,7 @@ describe("replaySkill — credential validator", () => {
     const result = await replaySkill({
       skill: skillWith([
         { kind: "click", text_match: "Settings", role_hint: "link", provenance },
-        { kind: "extract_via_regex", pattern_name: "api_key", provenance },
+        { kind: "extract_via_regex", pattern_name: "uuid_token", provenance },
       ]),
       browser: b.controller,
       mode: "full",
