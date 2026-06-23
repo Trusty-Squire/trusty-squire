@@ -9,8 +9,11 @@ function mockFetch(scenario: {
   inResponse?: { status?: number; body?: unknown };
   resResponses?: Array<{ status?: number; body?: unknown }>;
   inThrows?: Error;
+  createTaskResponse?: { status?: number; body?: unknown };
+  taskResultResponses?: Array<{ status?: number; body?: unknown }>;
 }): typeof globalThis.fetch {
   let resIdx = 0;
+  let taskIdx = 0;
   return vi.fn(async (url: string | URL | Request) => {
     const u = typeof url === "string" ? url : url.toString();
     if (u.includes("/in.php")) {
@@ -24,6 +27,21 @@ function mockFetch(scenario: {
       if (r === undefined) {
         return new Response(
           JSON.stringify({ status: 0, request: "CAPCHA_NOT_READY" }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    }
+    if (u.includes("/createTask")) {
+      const r = scenario.createTaskResponse ?? { body: { errorId: 0, taskId: 321 } };
+      return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    }
+    if (u.includes("/getTaskResult")) {
+      const r = scenario.taskResultResponses?.[taskIdx];
+      taskIdx += 1;
+      if (r === undefined) {
+        return new Response(
+          JSON.stringify({ errorId: 0, status: "processing" }),
           { status: 200 },
         );
       }
@@ -97,6 +115,84 @@ describe("TwoCaptchaSolver — happy path", () => {
     });
     expect(res).toMatchObject({ kind: "ok", token: "the-token" });
   });
+
+  it("passes hCaptcha invisible mode and browser user agent when provided", async () => {
+    const fetchFn = mockFetch({
+      inResponse: { body: { status: 1, request: "h-id" } },
+      resResponses: [{ body: { status: 1, request: "h-token" } }],
+    });
+    const solver = new TwoCaptchaSolver({
+      apiKey: "k",
+      fetchFn,
+      sleepFn: noSleep,
+    });
+    const res = await solver.solveHcaptcha({
+      sitekey: "89378a0b-0942-4717-89fc-52e01acddedd",
+      pageUrl: "https://dashboard.example/register",
+      invisible: true,
+      userAgent: "Mozilla/5.0 Test Browser",
+      data: "rqdata-bytes",
+    });
+    expect(res).toMatchObject({ kind: "ok", token: "h-token" });
+    const firstCall = vi.mocked(fetchFn).mock.calls[0]?.[0]?.toString() ?? "";
+    const url = new URL(firstCall);
+    expect(url.searchParams.get("method")).toBe("hcaptcha");
+    expect(url.searchParams.get("invisible")).toBe("1");
+    expect(url.searchParams.get("userAgent")).toBe("Mozilla/5.0 Test Browser");
+    expect(url.searchParams.get("data")).toBe("rqdata-bytes");
+  });
+
+  it("submits a coordinate image task and returns click points", async () => {
+    const fetchFn = mockFetch({
+      createTaskResponse: { body: { errorId: 0, taskId: 777 } },
+      taskResultResponses: [
+        { body: { errorId: 0, status: "processing" } },
+        {
+          body: {
+            errorId: 0,
+            status: "ready",
+            solution: { coordinates: [{ x: 42, y: 91 }, { x: "205", y: "310" }] },
+          },
+        },
+      ],
+    });
+    const solver = new TwoCaptchaSolver({
+      apiKey: "k",
+      fetchFn,
+      sleepFn: noSleep,
+    });
+    const res = await solver.solveCoordinates({
+      imageBase64: "png-base64",
+      comment: "Click matching tiles",
+      minClicks: 1,
+      maxClicks: 5,
+    });
+    expect(res).toMatchObject({
+      kind: "ok",
+      coordinates: [{ x: 42, y: 91 }, { x: 205, y: 310 }],
+    });
+
+    const createBody = JSON.parse(
+      vi.mocked(fetchFn).mock.calls[0]?.[1]?.body as string,
+    ) as {
+      clientKey: string;
+      task: {
+        type: string;
+        body: string;
+        comment: string;
+        minClicks: number;
+        maxClicks: number;
+      };
+    };
+    expect(createBody.clientKey).toBe("k");
+    expect(createBody.task).toEqual({
+      type: "CoordinatesTask",
+      body: "png-base64",
+      comment: "Click matching tiles",
+      minClicks: 1,
+      maxClicks: 5,
+    });
+  });
 });
 
 describe("TwoCaptchaSolver — failure modes", () => {
@@ -150,6 +246,28 @@ describe("TwoCaptchaSolver — failure modes", () => {
       sitekey: "x",
       pageUrl: "https://x.example/",
     });
+    expect(res.kind).toBe("solver_error");
+    expect((res as { reason: string }).reason).toBe("ERROR_CAPTCHA_UNSOLVABLE");
+  });
+
+  it("solver_error when a coordinate task is rejected by the worker pool", async () => {
+    const fetchFn = mockFetch({
+      createTaskResponse: { body: { errorId: 0, taskId: 778 } },
+      taskResultResponses: [
+        {
+          body: {
+            errorId: 1,
+            errorCode: "ERROR_CAPTCHA_UNSOLVABLE",
+          },
+        },
+      ],
+    });
+    const solver = new TwoCaptchaSolver({
+      apiKey: "k",
+      fetchFn,
+      sleepFn: noSleep,
+    });
+    const res = await solver.solveCoordinates({ imageBase64: "png-base64" });
     expect(res.kind).toBe("solver_error");
     expect((res as { reason: string }).reason).toBe("ERROR_CAPTCHA_UNSOLVABLE");
   });

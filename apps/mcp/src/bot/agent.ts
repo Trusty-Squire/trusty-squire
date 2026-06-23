@@ -58,6 +58,7 @@ import { saveDebugSnapshot } from "./debug.js";
 import { captureObservationFrame, type ObservationFrame } from "./observation-frame.js";
 import { classifyObservationFrame } from "./state-classifier.js";
 import {
+  classifyTerminalGate,
   isAtAccountReviewGate,
   isAtPaywall,
   isOnboardingReviewGate,
@@ -345,6 +346,74 @@ export function expectsVerificationEmail(pageText: string): boolean {
   return VERIFICATION_EXPECTED_PATTERNS.some((p) => lower.includes(p));
 }
 
+export function detectEmailLinkGate(
+  url: string,
+  title: string,
+  pageText: string,
+  inventory?: readonly InteractiveElement[],
+): boolean {
+  if (detectEmailOtpGate(url, title, pageText, inventory)) return false;
+  if (inventory !== undefined) {
+    const visibleInputs = inventory.filter((e) => {
+      return e.visible !== false && (e.tag === "input" || e.tag === "textarea");
+    });
+    const hasPassword = visibleInputs.some((e) => e.type === "password");
+    if (hasPassword) return false;
+    const hasEmailInput = visibleInputs.some((e) => {
+      const hay = `${e.type ?? ""} ${e.name ?? ""} ${e.id ?? ""} ${e.placeholder ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`;
+      return /\bemail\b/i.test(hay);
+    });
+    const hasSignupSubmit = inventory.some((e) => {
+      if (e.visible === false) return false;
+      const label = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.title ?? ""} ${e.labelText ?? ""}`;
+      return /\b(?:sign up|signup|join|create account|get started|send (?:me )?(?:a )?(?:magic )?link)\b/i.test(
+        label,
+      );
+    });
+    if (hasEmailInput && hasSignupSubmit) return false;
+  }
+
+  let path = "";
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    // ignore malformed URLs; page copy is enough
+  }
+  const text = `${title}\n${pageText}`.toLowerCase();
+  const explicitGate =
+    /\bcheck your (?:email|inbox)\b/.test(text) ||
+    /\bwe(?:'|’)ve sent (?:you )?(?:a )?(?:magic |sign[\s-]?in |login |verification |confirmation )?link\b/.test(
+      text,
+    ) ||
+    /\bwe sent (?:you )?(?:a )?(?:magic |sign[\s-]?in |login |verification |confirmation )?link\b/.test(
+      text,
+    ) ||
+    /\bclick (?:the |that )?(?:magic |sign[\s-]?in |login |verification |confirmation )?link\b/.test(
+      text,
+    ) ||
+    /\bmagic link\b/.test(text);
+  if (explicitGate) return true;
+  return (
+    /\/(?:users\/link|check[-_]?email|check[-_]?inbox|email[-_]?sent|verify[-_]?email|confirm[-_]?email)(?:\/|$)/.test(
+      path,
+    ) && expectsVerificationEmail(text)
+  );
+}
+
+export function isBrowserNavigationErrorPage(
+  url: string,
+  title: string,
+  pageText: string,
+): boolean {
+  const text = `${title}\n${pageText}`.toLowerCase();
+  return (
+    url.startsWith("chrome-error://") ||
+    /\b(?:dns_probe_finished_nxdomain|err_name_not_resolved|err_connection|this site can.t be reached|site can.t be reached)\b/i.test(
+      text,
+    )
+  );
+}
+
 export class LLMCallBudgetExceeded extends Error {
   constructor(budget: number) {
     super(`signup exceeded LLM call budget of ${budget}`);
@@ -382,6 +451,7 @@ const STUCK_LOOP_FALLBACK_PATHS: readonly string[] = [
   "/settings/api_keys",
   "/settings/tokens",
   "/settings/api-tokens",
+  "/settings/api/tokens",
   "/settings/account/api/auth-tokens/",
   // 0.8.3-rc.2 — added after the post-OAuth onboarding drain
   // (amplitude/groq/launchdarkly/modal/weaviate/…). These conventions
@@ -442,9 +512,6 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // Weaviate keys are issued per-cluster, but the org-level admin page
   // is the closest reachable surface; account-scoped guesses all 404.
   weaviate: ["/account", "/settings/api-keys"],
-  // northflank hosts user API keys under the account menu, not a
-  // top-level /settings/keys.
-  northflank: ["/account/api", "/settings/api"],
   // Sentry's personal auth-token UI lives here. The generic fallback
   // order hits three unrelated 404s before this path and the recovery
   // walker aborts after 3 consecutive 404s, so pin the documented path.
@@ -768,6 +835,182 @@ export function findApiKeysNavLink(
   return candidates[0]!.el;
 }
 
+const RELOCATED_PAGE_TEXT =
+  /\b(?:404|page not found|not found|does not exist|no longer exists|has moved|moved|migrated|now (?:lives|exists)|part of .* instead|teams? list|organisations? list|organizations? list)\b/i;
+const CREDENTIAL_CONTEXT_TEXT =
+  /\b(?:api[\s_-]*(?:keys?|tokens?)|access[\s_-]*tokens?|personal[\s_-]*access[\s_-]*tokens?|secret[\s_-]*keys?|auth[\s_-]*tokens?|credentials?|developers?)\b/i;
+const RELOCATION_RECOVERY_TEXT =
+  /\b(?:teams?|organisations?|organizations?|accounts?|settings|profile|dashboard|developers?|api|keys?|tokens?|credentials?)\b/i;
+
+function sameOriginOrRelativeHref(currentUrl: string, href: string): boolean {
+  if (/^(?:#|\/(?!\/)|\?)/.test(href)) return true;
+  try {
+    return new URL(href).origin === new URL(currentUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+// When a guessed credentials URL lands on a provider's own "this page moved /
+// was migrated" screen, the DOM often includes the correct account/team-scoped
+// replacement link. Follow that link before letting the planner declare done
+// or keep guessing URLs. Pure and service-agnostic: it only requires a
+// credential-looking current page plus relocated-page copy plus an in-origin
+// recovery link.
+export function findRelocatedCredentialPageRecoveryLink(input: {
+  currentUrl: string;
+  pageText: string;
+  inventory: readonly InteractiveElement[];
+  alreadyClicked?: ReadonlySet<string> | undefined;
+}): InteractiveElement | null {
+  const relocatedText = `${input.currentUrl}\n${input.pageText}`;
+  if (!RELOCATED_PAGE_TEXT.test(relocatedText)) return null;
+  const hasCredentialContext =
+    CREDENTIAL_CONTEXT_TEXT.test(relocatedText) ||
+    /\/(?:api[-_]?keys?|api[-_]?tokens?|access[-_]?tokens?|auth[-_]?tokens?|secret[-_]?keys?|personal[-_]?access[-_]?tokens?|developers?|keys?|tokens?)(?:[/?#]|$)/i.test(
+      input.currentUrl,
+    );
+  if (!hasCredentialContext) return null;
+
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of input.inventory) {
+    const isLink = el.tag === "a" || el.role === "link";
+    if (!isLink || el.visible === false) continue;
+    if (input.alreadyClicked?.has(el.selector) === true) continue;
+    const href = el.href ?? "";
+    if (href.length === 0 || !sameOriginOrRelativeHref(input.currentUrl, href)) {
+      continue;
+    }
+    const text = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    const haystack = `${href} ${text}`;
+    if (!RELOCATION_RECOVERY_TEXT.test(haystack)) continue;
+    let score = 0;
+    if (API_KEYS_HREF.test(href)) score += 6;
+    if (API_KEYS_TEXT.test(text)) score += 4;
+    if (/\b(?:teams?|organisations?|organizations?)\b/i.test(haystack)) score += 3;
+    if (/\b(?:settings|accounts?|profile|developers?)\b/i.test(haystack)) score += 2;
+    if (/\b(?:dashboard|home)\b/i.test(haystack)) score -= 2;
+    if (el.inViewport === true) score += 1;
+    if (score <= 0) continue;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+const SCOPE_LIST_PATH =
+  /\/(?:teams?|orgs?|organisations?|organizations?|workspaces?|accounts?)(?:[/?#]|$)/i;
+const GENERIC_SCOPE_NAV_LABEL =
+  /^(?:dashboard|teams?|organisations?|organizations?|workspaces?|accounts?|account|settings|security|billing|projects?|create\s+(?:team|organi[sz]ation|workspace|account)|new\s+(?:team|organi[sz]ation|workspace|account)|home|docs?|blog|changelog|support|status)$/i;
+const SCOPE_ENTITY_HREF =
+  /\/(?:t|team|teams|org|orgs|organisation|organisations|organization|organizations|workspace|workspaces|account|accounts)\/[^/?#]+(?:[/?#]|$)/i;
+
+export function findAccountScopeListEntry(input: {
+  currentUrl: string;
+  pageText: string;
+  inventory: readonly InteractiveElement[];
+  alreadyClicked?: ReadonlySet<string> | undefined;
+}): InteractiveElement | null {
+  if (!SCOPE_LIST_PATH.test(input.currentUrl)) {
+    return null;
+  }
+  let currentScopeBase: string | null = null;
+  try {
+    currentScopeBase = scopedDashboardBasePath(new URL(input.currentUrl));
+  } catch {
+    currentScopeBase = null;
+  }
+  const hasListAffordance = input.inventory.some((el) => {
+    const label = [el.visibleText, el.ariaLabel, el.title, el.labelText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+    return /\b(?:create\s+(?:team|organi[sz]ation|workspace|account)|search)\b/i.test(label);
+  });
+  if (!hasListAffordance) return null;
+
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of input.inventory) {
+    const isLink = el.tag === "a" || el.role === "link";
+    if (!isLink || el.visible === false) continue;
+    if (input.alreadyClicked?.has(el.selector) === true) continue;
+    const href = el.href ?? "";
+    if (href.length === 0 || !sameOriginOrRelativeHref(input.currentUrl, href)) continue;
+    const resolved = (() => {
+      try {
+        return new URL(href, input.currentUrl);
+      } catch {
+        return null;
+      }
+    })();
+    if (resolved === null) continue;
+    if (resolved.href.replace(/\/+$/, "") === input.currentUrl.replace(/\/+$/, "")) continue;
+    if (
+      currentScopeBase !== null &&
+      resolved.pathname.replace(/\/+$/, "") === currentScopeBase.replace(/\/+$/, "")
+    ) {
+      continue;
+    }
+    if (/\/(?:new|settings|billing|security|preferences|profile)(?:[/?#]|$)/i.test(resolved.pathname)) {
+      continue;
+    }
+    const label = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (label.length === 0) continue;
+    if (GENERIC_SCOPE_NAV_LABEL.test(label)) continue;
+    let score = 0;
+    if (SCOPE_ENTITY_HREF.test(resolved.pathname)) score += 4;
+    if (/\b(?:team|organi[sz]ation|workspace|account)\b/i.test(label)) score += 2;
+    if (label.length > 12) score += 1;
+    if (el.inViewport === true) score += 1;
+    if (score <= 0) continue;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+const RESOURCE_SETUP_FIELD =
+  /\b(?:project|workspace|team|organi[sz]ation|company|app|application|service|database|cluster|environment|index)\s+name|\bname\s+(?:your|of)\s+(?:project|workspace|team|organi[sz]ation|company|app|application|service|database|cluster|environment|index)\b/i;
+
+export function findPendingResourceSetupSubmit(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const hasResourceField = inventory.some((el) => {
+    if (el.visible === false) return false;
+    if (el.tag !== "input" && el.tag !== "textarea" && el.tag !== "label") return false;
+    const label = [el.name, el.id, el.placeholder, el.labelText, el.ariaLabel, el.visibleText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return RESOURCE_SETUP_FIELD.test(label);
+  });
+  if (!hasResourceField) return null;
+  const submitCandidates = inventory.filter((el) => {
+    if (el.visible === false) return false;
+    return el.tag === "button" || el.role === "button" || el.type === "submit";
+  });
+  const labelFor = (el: InteractiveElement): string =>
+    [el.visibleText, el.ariaLabel, el.title, el.labelText]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ")
+      .trim();
+  return (
+    submitCandidates.find((el) => isOnboardingForwardLabel(labelFor(el))) ??
+    submitCandidates.find((el) => el.type === "submit") ??
+    null
+  );
+}
+
 // Pick the next fallback URL to try, keyed against the origin of the
 // currently-stuck URL. The curated SERVICE_KEYS_PATHS for the run's
 // service (when its host matches the stuck origin) are tried FIRST,
@@ -844,12 +1087,21 @@ export function pickStuckLoopFallbackUrl(
       ? servicePaths
       : [];
 
-  // Curated paths lead; the generic list follows. De-dup so a path that
-  // appears in both (groq's /keys, /settings/keys) isn't offered twice.
+  const scopedBase =
+    parsedCurrent.origin === origin ? scopedDashboardBasePath(parsedCurrent) : null;
+  const routeBases =
+    scopedBase !== null ? [`${origin}${scopedBase}`, origin] : [origin];
+
+  // Curated paths lead; the generic list follows. Absolute curated URLs are
+  // offered first. Relative paths drain under the scoped dashboard base before
+  // origin-root guesses, so `/t/acme/settings/*` is exhausted before
+  // `/settings/*`.
   const seen = new Set<string>();
-  for (const path of [...curated, ...STUCK_LOOP_FALLBACK_PATHS]) {
-    const candidate =
-      /^https?:\/\//i.test(path) ? path : `${origin}${path}`;
+  const allPaths = [...curated, ...STUCK_LOOP_FALLBACK_PATHS];
+  const absolutePaths = allPaths.filter((path) => /^https?:\/\//i.test(path));
+  const relativePaths = allPaths.filter((path) => !/^https?:\/\//i.test(path));
+  for (const path of absolutePaths) {
+    const candidate = path;
     const candidatePath = candidate.replace(/\/+$/, "").toLowerCase();
     if (seen.has(candidatePath)) continue;
     seen.add(candidatePath);
@@ -857,7 +1109,32 @@ export function pickStuckLoopFallbackUrl(
     if (candidate.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
     return candidate;
   }
+  for (const base of routeBases) {
+    for (const path of relativePaths) {
+      const candidate = `${base}${path}`;
+      const candidatePath = candidate.replace(/\/+$/, "").toLowerCase();
+      if (seen.has(candidatePath)) continue;
+      seen.add(candidatePath);
+      if (alreadyTried.has(candidate)) continue;
+      if (candidate.replace(/\/+$/, "").toLowerCase() === currentFull) continue;
+      return candidate;
+    }
+  }
   return null;
+}
+
+function scopedDashboardBasePath(url: URL): string | null {
+  const parts = url.pathname.split("/").filter((part) => part.length > 0);
+  if (parts.length < 2) return null;
+  const scope = parts[0]!.toLowerCase();
+  if (
+    !/^(?:t|team|teams|org|orgs|organization|organizations|workspace|workspaces|account|accounts|u|user|users)$/.test(
+      scope,
+    )
+  ) {
+    return null;
+  }
+  return `/${parts[0]}/${parts[1]}`;
 }
 
 function shouldComposeFallbackOnAppOrigin(current: URL, app: URL): boolean {
@@ -1053,6 +1330,109 @@ export function isGoogleSearchUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function hasSignupIntentPath(url: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return /(?:^|\/)(?:signup|register|sign-up|create-account|join)\b/.test(path);
+  } catch {
+    return false;
+  }
+}
+
+export function isMarketingAuthDeadEndUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (/^docs?\./.test(host)) return true;
+    const path = parsed.pathname.toLowerCase();
+    return /(?:^|\/)(?:pricing|docs?|documentation|blog|customers?|legal|terms|privacy|contact)(?:\/|$)/.test(
+      path,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isAuthEntryPageForPreExtraction(input: {
+  url: string;
+  html?: string;
+  inventory: readonly InteractiveElement[];
+}): boolean {
+  let pathLooksAuth = false;
+  try {
+    const path = new URL(input.url).pathname.toLowerCase();
+    pathLooksAuth = /(?:^|\/)(?:signup|sign-up|register|login|signin|sign-in)(?:\/|$)/.test(path);
+  } catch {
+    pathLooksAuth = false;
+  }
+
+  const hasCredentialInput = input.inventory.some(
+    (e) =>
+      e.tag === "input" &&
+      e.visible !== false &&
+      (e.type === "email" || e.type === "password"),
+  );
+  const hasAuthAffordance = input.inventory.some((e) => {
+    if (e.visible === false) return false;
+    if (e.tag !== "button" && e.tag !== "a" && e.role !== "button" && e.role !== "link") {
+      return false;
+    }
+    const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`.toLowerCase();
+    return /\b(?:sign\s*up|signup|sign\s*in|signin|log\s*in|login|continue with|with google|with github|with gitlab|with bitbucket)\b/.test(
+      text,
+    );
+  });
+  const htmlClass =
+    input.html !== undefined ? classifySignupHtml(input.html) : "other";
+
+  return (
+    (pathLooksAuth && (hasAuthAffordance || hasCredentialInput || htmlClass !== "other")) ||
+    (hasCredentialInput && hasAuthAffordance)
+  );
+}
+
+export function hasNativeSignupForm(
+  inventory: readonly InteractiveElement[],
+): boolean {
+  const visible = inventory.filter((e) => e.visible !== false);
+  const inputSignal = (e: InteractiveElement): string =>
+    [e.name, e.id, e.labelText, e.placeholder, e.ariaLabel]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join(" ");
+  const hasEmail = visible.some((e) => {
+    if (e.tag !== "input") return false;
+    if (e.type === "email") return true;
+    if (e.type !== null && e.type !== "" && e.type !== "text") return false;
+    return /\be-?mail(?:\s+address)?\b/i.test(inputSignal(e));
+  });
+  const hasPassword = visible.some(
+    (e) => e.tag === "input" && e.type === "password",
+  );
+  if (!hasEmail || !hasPassword) return false;
+  return visible.some((e) => {
+    if (
+      e.tag !== "button" &&
+      e.tag !== "a" &&
+      e.role !== "button" &&
+      e.type !== "submit"
+    ) {
+      return false;
+    }
+    const label = [
+      e.visibleText,
+      e.ariaLabel,
+      e.labelText,
+      e.placeholder,
+      e.name,
+    ]
+      .filter((part): part is string => typeof part === "string" && part.length > 0)
+      .join(" ");
+    return /\b(?:sign\s*up|signup|create\s+(?:an\s+)?account|register|get\s+started)\b/i.test(
+      label,
+    );
+  });
 }
 
 // Google's NEWER consent screen (URL form
@@ -1459,6 +1839,7 @@ export function planSimpleEmailOnlySignup(
 // which falls through to credential extraction.
 type PlanExecOutcome =
   | { kind: "submitted" }
+  | { kind: "needs_login"; provider: OAuthProviderId; reason: string }
   | { kind: "captcha_blocked"; captchaKind: string }
   | { kind: "submit_failed"; reason: string }
   | { kind: "planning_failed"; reason: string }
@@ -1533,6 +1914,49 @@ export type PostVerifyStep =
   | { kind: "navigate"; url: string; reason: string }
   | { kind: "wait"; seconds: number; reason: string };
 
+export function coercePostVerifyIdentityFillStep(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+  credentials?: { email: string; password: string } | undefined,
+): PostVerifyStep {
+  if (step.kind !== "fill" || credentials === undefined) return step;
+  const target = inventory.find((e) => e.selector === step.selector);
+  if (target === undefined) return step;
+  const hay = [
+    target.type,
+    target.id,
+    target.name,
+    target.placeholder,
+    target.ariaLabel,
+    target.labelText,
+    target.visibleText,
+    target.testId,
+  ]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(" ")
+    .toLowerCase();
+  if (target.tag === "input" && (target.type === "email" || /\bemail\b/.test(hay))) {
+    if (step.value !== credentials.email) {
+      return {
+        ...step,
+        value: credentials.email,
+        reason: `${step.reason} (runtime coerced invented email to the active signup alias)`,
+      };
+    }
+    return step;
+  }
+  if (target.tag === "input" && target.type === "password") {
+    if (step.value !== credentials.password) {
+      return {
+        ...step,
+        value: credentials.password,
+        reason: `${step.reason} (runtime coerced invented password to the active signup password)`,
+      };
+    }
+  }
+  return step;
+}
+
 // The set of value_kinds the planner is allowed to emit. Kept as a
 // runtime array so validation and the exhaustive `valueFor` switch
 // share one source of truth.
@@ -1602,14 +2026,14 @@ function safeNameToken(token: string | undefined): string | null {
   return titleCaseNameToken(cleaned);
 }
 
-function identityFromEmail(email: string): SignupIdentity {
+export function identityFromEmail(email: string): SignupIdentity {
   const local = email.split("@", 1)[0] ?? "";
   const tokens = local.split(/[^a-z]+/i).map(safeNameToken).filter((token): token is string => token !== null);
   const hash = stableHash(email);
   const firstName = tokens[0] ?? HUMAN_FIRST_NAMES[hash % HUMAN_FIRST_NAMES.length]!;
   const lastName = tokens[1] ?? HUMAN_LAST_NAMES[Math.floor(hash / HUMAN_FIRST_NAMES.length) % HUMAN_LAST_NAMES.length]!;
   const suffix = String(hash % 10_000).padStart(4, "0");
-  const username = `${firstName}.${lastName}.${suffix}`.toLowerCase();
+  const username = `${firstName}${lastName}${suffix}`.toLowerCase();
   return {
     firstName,
     lastName,
@@ -2537,6 +2961,22 @@ export async function resolveSignupUrlByProbe(
   log?: (m: string) => void,
 ): Promise<string | null> {
   const note = (m: string): void => log?.(m);
+  const probeLooksUsableSignup = (res: {
+    finalUrl: string;
+    status: number;
+    bodyText: string;
+  }): { usable: boolean; htmlClass: "signup" | "login" | "other" } => {
+    const htmlClass = classifySignupHtml(res.bodyText);
+    if (res.status >= 400) return { usable: false, htmlClass };
+    return {
+      usable:
+        htmlClass === "signup" ||
+        (htmlClass === "other" &&
+          hasSignupIntentPath(res.finalUrl) &&
+          !isMarketingAuthDeadEndUrl(res.finalUrl)),
+      htmlClass,
+    };
+  };
 
   let hint: URL;
   try {
@@ -2546,10 +2986,22 @@ export async function resolveSignupUrlByProbe(
     return null;
   }
 
+  const googleConsoleEntry = canonicalGoogleConsoleEntryUrl(hintUrl);
+  if (googleConsoleEntry !== null) {
+    const entryRes = await fetchText(googleConsoleEntry);
+    if (entryRes !== null && entryRes.status < 500) {
+      note(`[signup-url] canonicalized Google console root ${hintUrl} → ${googleConsoleEntry}`);
+      return googleConsoleEntry;
+    }
+  }
+
   // Fast path: the hint itself, followed through redirects. A 308 chain
   // (plunk's app. → next-app.) resolves here for free.
   const hintRes = await fetchText(hintUrl);
-  if (hintRes !== null && classifySignupHtml(hintRes.bodyText) === "signup") {
+  const hintProbe =
+    hintRes !== null ? probeLooksUsableSignup(hintRes) : null;
+  const hintClass = hintProbe?.htmlClass ?? "other";
+  if (hintRes !== null && hintProbe?.usable === true) {
     if (hintRes.finalUrl !== hintUrl) {
       note(`[signup-url] hint ${hintUrl} redirected to signup ${hintRes.finalUrl}`);
     } else {
@@ -2561,7 +3013,7 @@ export async function resolveSignupUrlByProbe(
     `[signup-url] hint ${hintUrl} did not classify as signup` +
       (hintRes === null
         ? " (fetch failed)"
-        : ` (${classifySignupHtml(hintRes.bodyText)})`),
+        : ` (${hintClass})`),
   );
 
   // The hint's registered domain (eTLD+1) is the trusted anchor — it's the
@@ -2583,7 +3035,10 @@ export async function resolveSignupUrlByProbe(
     if (candidate === hintUrl) continue; // already tried as the hint
     const res = await fetchText(candidate);
     if (res === null) continue;
-    if (classifySignupHtml(res.bodyText) !== "signup") continue;
+    const candidateProbe = probeLooksUsableSignup(res);
+    if (!candidateProbe.usable) {
+      continue;
+    }
 
     let finalHost: string;
     try {
@@ -2765,6 +3220,24 @@ export function detectAlreadySignedIn(args: {
       ) || /^(?:sign ?up|sign ?in|log ?in|create (?:an )?account)$/.test(t)
     );
   });
+
+  const visibleTextOf = (e: InteractiveElement): string =>
+    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
+
+  const RESOURCE_CREATION_CTA =
+    /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key|database|cluster|instance|service|index|environment)|create(?:\s+(?:new|a|an|project|workspace|database|cluster|instance|deployment|app|service|index|environment))?|get\s+started\s+by\s+sett?ing\s+up\s+(?:a|an)?\s*.*\b(?:project|workspace|app|application|service|database|cluster|index)\b|sett?ing\s+up\s+(?:a|an)?\s*.*\b(?:project|workspace|app|application|service|database|cluster|index)\b)/i;
+  const hasResourceCreationCta = inventory.some((e) =>
+    RESOURCE_CREATION_CTA.test(visibleTextOf(e)),
+  );
+  const ONBOARDING_CHROME =
+    /\b(?:set up your first|create your project|get started by sett?ing up|welcome to|import documents|make a search|don'?t show me again|bring me home|setup checklist|onboarding)\b/i;
+  const hasOnboardingChrome = inventory.some((e) =>
+    ONBOARDING_CHROME.test(visibleTextOf(e)),
+  );
+  if (!hasSignupAffordance && hasResourceCreationCta && hasOnboardingChrome) {
+    return true;
+  }
+
   try {
     if (
       !hasSignupAffordance &&
@@ -2777,9 +3250,6 @@ export function detectAlreadySignedIn(args: {
   } catch {
     // malformed URL — fall through to the other signals
   }
-
-  const visibleTextOf = (e: InteractiveElement): string =>
-    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
 
   // Signal 1 — strict nav-keyword match (the canonical Sentry-class case).
   const AUTH_KEYWORDS =
@@ -2845,12 +3315,10 @@ export function detectAlreadySignedIn(args: {
     // bot's F17 already-signed-in path fell through to form-fill
     // and the planner clicked the CTA thinking it was a signup
     // submit button.
-    const CREATION_CTA =
-      /^\s*(?:\+\s*)?(?:new\s+(?:project|workspace|team|app|site|deployment|api\s*key|database|cluster|instance|service)|create(?:\s+(?:new|a|project|workspace|database|cluster|instance|deployment|app|service|index|environment))?)/i;
     if (
       inventory.some((e) => {
         const t = e.visibleText ?? e.ariaLabel ?? "";
-        return CREATION_CTA.test(t.trim());
+        return RESOURCE_CREATION_CTA.test(t.trim());
       })
     ) {
       return true;
@@ -3484,6 +3952,36 @@ export function detectStuckOnGoogleOAuth(url: string): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+function isGoogleAccountsAuthUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "accounts.google.com" || h.endsWith(".accounts.google.com");
+  } catch {
+    return false;
+  }
+}
+
+export function isGoogleConsumerPostOAuthUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "google.com" || h === "www.google.com" || h === "myaccount.google.com";
+  } catch {
+    return false;
+  }
+}
+
+export function canonicalGoogleConsoleEntryUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (!/^console\.[a-z0-9-]+\.google\.com$/i.test(host)) return null;
+    if (parsed.pathname.replace(/\/+$/, "") !== "") return null;
+    return `${parsed.origin}/u/0/`;
+  } catch {
+    return null;
   }
 }
 
@@ -4131,7 +4629,13 @@ export function pickVerificationLinkFromHtml(bodyHtml: string): string | null {
     ) {
       score += 8;
     }
-    if (/get started|finish setting up|continue|open stackblitz/.test(text)) score += 3;
+    if (
+      /get started|finish setting up|continue|open stackblitz|log in|login|sign in|magic link|open dashboard|go to dashboard/.test(
+        text,
+      )
+    ) {
+      score += 3;
+    }
     try {
       const u = new URL(href);
       if ((u.pathname === "/" || u.pathname === "") && u.search === "" && u.hash === "") {
@@ -4312,10 +4816,125 @@ export function pickOnboardingSubmit(
 ): InteractiveElement | null {
   const buttons = inventory.filter((e) => e.tag === "button" || e.role === "button");
   const ADVANCE_RE = /^(?:next|continue|submit|create|register|get started|finish|done|save)\b/i;
-  const byText = buttons.find((e) => ADVANCE_RE.test((e.visibleText ?? e.ariaLabel ?? "").trim()));
+  const labelFor = (e: InteractiveElement): string =>
+    (e.visibleText ?? e.ariaLabel ?? "").trim();
+  const bySpecificCreate = buttons.find((e) =>
+    /^\s*create\s+(?:organization|organisation|workspace|project|team|account|app|application|service|database|cluster|environment|index)\b/i.test(
+      labelFor(e),
+    ),
+  );
+  if (bySpecificCreate !== undefined) return bySpecificCreate;
+  const byText = buttons.find((e) => ADVANCE_RE.test(labelFor(e)));
   if (byText !== undefined) return byText;
   const bySubmit = buttons.find((e) => e.type === "submit");
   return bySubmit ?? buttons[0] ?? null;
+}
+
+export function isOnboardingForwardLabel(label: string): boolean {
+  return /^\s*(?:next|continue|submit|finish|done|get\s+started|create(?:\s+(?:organization|organisation|workspace|project|team|account|app|application))?|set\s*up(?:\s+(?:organization|organisation|workspace|project|team|account|app|application))?)\s*$/i.test(
+    label,
+  );
+}
+
+export function retargetCredentialAppTypeChoice(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): PostVerifyStep {
+  if (step.kind !== "click") return step;
+  const chosen = inventory.find((e) => e.selector === step.selector);
+  if (chosen === undefined || chosen.visible !== true) return step;
+  const labelFor = (e: InteractiveElement): string =>
+    `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.replace(/\s+/g, " ").trim();
+  const chosenLabel = labelFor(chosen);
+  const buttons = inventory.filter(
+    (e) => (e.tag === "button" || e.role === "button") && e.visible === true,
+  );
+  const frontendFrameworkRe = /^\s*(?:react|angular|vue|svelte|ember)(?:\b|$)|\bsingle[-\s]?page\b|\bspa\b/i;
+  if (frontendFrameworkRe.test(chosenLabel)) {
+    const backendTech =
+      buttons.find((e) => /^(?:python|node(?:\.js)?|express|django|flask|fastapi)\b/i.test(labelFor(e))) ??
+      buttons.find((e) => /^(?:java|spring|ruby|rails|php|laravel|go|golang|\.net|c#)\b/i.test(labelFor(e)));
+    if (backendTech !== undefined) {
+      return {
+        ...step,
+        selector: backendTech.selector,
+        reason:
+          `${step.reason} Retargeted from ${JSON.stringify(chosenLabel)} to ` +
+          `${JSON.stringify(labelFor(backendTech))}: backend/server runtimes keep the app on ` +
+          "a credential-bearing path instead of narrowing creation to SPA/native clients.",
+      };
+    }
+  }
+  const resourceClientRe =
+    /\b(?:machine\s*to\s*machine|m2m|server\s*to\s*server|api\s+client|client\s+credentials)\b/i;
+  if (!resourceClientRe.test(chosenLabel)) return step;
+
+  const preferred =
+    buttons.find((e) => /\bregular\s+web\s+app\b/i.test(labelFor(e))) ??
+    buttons.find((e) =>
+      /\b(?:traditional\s+web|server(?:[-\s]?side)?\s+web|backend\s+web|web\s+app\b.*\bserver)\b/i.test(
+        labelFor(e),
+      ),
+    );
+  if (preferred === undefined) return step;
+  return {
+    ...step,
+    selector: preferred.selector,
+    reason:
+      `${step.reason} Retargeted from ${JSON.stringify(chosenLabel)} to ` +
+      `${JSON.stringify(labelFor(preferred))}: web/server app types expose client credentials ` +
+      "without requiring a pre-existing API/resource.",
+  };
+}
+
+export function coerceCheckboxClickStep(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): PostVerifyStep {
+  if (step.kind !== "click") return step;
+  const target = inventory.find((e) => e.selector === step.selector);
+  if (target === undefined) return step;
+  const isCheckbox =
+    (target.tag === "input" && target.type === "checkbox") || target.role === "checkbox";
+  if (!isCheckbox) return step;
+  return {
+    kind: "check",
+    selector: step.selector,
+    reason:
+      `${step.reason} Coerced from click to check because the selector targets a checkbox; ` +
+      "checking is idempotent and avoids toggling an accepted agreement off.",
+  };
+}
+
+export function retargetSubmitToDefaultedPicker(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): PostVerifyStep {
+  if (step.kind !== "click") return step;
+  const target = inventory.find((e) => e.selector === step.selector);
+  const targetLabel = `${target?.visibleText ?? ""} ${target?.ariaLabel ?? ""}`.trim();
+  if (!/^(?:continue|next|submit|create|finish|done)\b/i.test(targetLabel)) return step;
+  const targetSelector = target?.selector ?? step.selector;
+  if (/\b(?:dialog|modal)\b/i.test(targetSelector)) return step;
+  const picker = inventory.find((e) => {
+    if (e.visible !== true || e.interactedThisRun === true) return false;
+    if (e.tag !== "button" && e.role !== "button" && e.role !== "combobox") return false;
+    const label = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+    return /select\s+(?:parent\s+)?(?:resource|organization|organisation|workspace|project|account|team)\b/i.test(
+      label,
+    );
+  });
+  if (picker === undefined) return step;
+  const reason =
+    `${step.reason} Retargeted before submit: a required-looking picker ` +
+    `${JSON.stringify(picker.visibleText ?? picker.ariaLabel ?? picker.labelText ?? picker.selector)} ` +
+    "is still in its Select state.";
+  if (picker.role === "combobox") {
+    return { kind: "select", selector: picker.selector, reason };
+  }
+  return { kind: "click", selector: picker.selector, reason };
 }
 
 export function pickOnboardingLeafChoice(
@@ -4754,22 +5373,60 @@ export class SignupAgent {
             this.invisibleCaptcha = { kind: "hcaptcha", variant: "hcaptcha" };
             const pageUrl = (await this.browser.getState().catch(() => null))?.url;
             if (pageUrl !== undefined && this.captchaSolver !== undefined) {
+              const solveContext = await this.browser.getHcaptchaSolveContext().catch(() => ({
+                invisible: false,
+                userAgent: null,
+                rqdata: null,
+              }));
               steps.push(
                 `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit`,
               );
               const solveRes = await this.captchaSolver.solveHcaptcha({
                 sitekey: hSitekey,
                 pageUrl,
+                invisible: solveContext.invisible,
+                ...(solveContext.userAgent !== null ? { userAgent: solveContext.userAgent } : {}),
+                ...(solveContext.rqdata !== null ? { data: solveContext.rqdata } : {}),
               });
               if (solveRes.kind === "ok") {
                 const injected = await this.browser.injectHcaptchaToken(solveRes.token);
+                const settled = injected
+                  ? await this.browser.waitForCaptchaChallengeToSettle()
+                  : false;
                 steps.push(
                   injected
                     ? `${label} captcha: invisible hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s + token injected`
+                      + (settled ? "" : " (challenge overlay still visible after token injection)")
                     : `${label} captcha: hCaptcha token arrived but injection failed`,
                 );
                 if (injected) {
-                  return { found: true, solved: true, blocked: false, kind: "hcaptcha" };
+                  if (settled) {
+                    return { found: true, solved: true, blocked: false, kind: "hcaptcha" };
+                  }
+                  const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+                    (input) => this.captchaSolver!.solveCoordinates(input),
+                  );
+                  steps.push(
+                    coordinateSolve.found
+                      ? `${label} captcha: visible hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates` +
+                          ` (${coordinateSolve.clicks} clicks` +
+                          (coordinateSolve.durationMs !== undefined
+                            ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+                            : "") +
+                          ")" +
+                          (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : "")
+                      : `${label} captcha: hCaptcha token injection exposed no coordinate-solvable challenge`,
+                  );
+                  if (coordinateSolve.solved) {
+                    return { found: true, solved: true, blocked: false, kind: "hcaptcha" };
+                  }
+                  this.captchaEncounter = {
+                    kind: "hcaptcha",
+                    variant: "hcaptcha",
+                    challenge_rendered: true,
+                    blocked: true,
+                  };
+                  return { found: true, solved: false, blocked: true, kind: "hcaptcha" };
                 }
               } else {
                 steps.push(
@@ -4820,10 +5477,12 @@ export class SignupAgent {
           if (solveRes.kind === "ok") {
             const injected = await this.browser.injectRecaptchaToken(solveRes.token);
             if (injected) {
+              const settled = await this.browser.waitForCaptchaChallengeToSettle();
               steps.push(
-                `${label} captcha: Tier 3 solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+                `${label} captcha: Tier 3 solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha` +
+                  (settled ? "" : " (challenge overlay still visible after token injection)"),
               );
-              result = { ...result, solved: true };
+              if (settled) result = { ...result, solved: true };
             } else {
               steps.push(
                 `${label} captcha: Tier 3 token arrived but page injection failed — captcha stays blocked`,
@@ -4846,18 +5505,70 @@ export class SignupAgent {
       result.kind === "hcaptcha" &&
       this.captchaSolver?.isAvailable() === true
     ) {
+      const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+        (input) => this.captchaSolver!.solveCoordinates(input),
+      );
+      if (coordinateSolve.found) {
+        steps.push(
+          `${label} captcha: visible hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates before token fallback` +
+            ` (${coordinateSolve.clicks} clicks` +
+            (coordinateSolve.durationMs !== undefined
+              ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+              : "") +
+            ")" +
+            (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : ""),
+        );
+        if (coordinateSolve.solved) result = { ...result, solved: true };
+      }
+    }
+    if (
+      !result.solved &&
+      result.kind === "hcaptcha" &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
       const sitekey = await this.browser.extractHcaptchaSitekey();
       const pageUrl = (await this.browser.getState().catch(() => null))?.url;
       if (sitekey !== null && pageUrl !== undefined) {
+        const solveContext = await this.browser.getHcaptchaSolveContext().catch(() => ({
+          invisible: false,
+          userAgent: null,
+          rqdata: null,
+        }));
         steps.push(`${label} captcha: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`);
-        const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+        const solveRes = await this.captchaSolver.solveHcaptcha({
+          sitekey,
+          pageUrl,
+          invisible: solveContext.invisible,
+          ...(solveContext.userAgent !== null ? { userAgent: solveContext.userAgent } : {}),
+          ...(solveContext.rqdata !== null ? { data: solveContext.rqdata } : {}),
+        });
         if (solveRes.kind === "ok") {
           const injected = await this.browser.injectHcaptchaToken(solveRes.token);
           if (injected) {
+            const settled = await this.browser.waitForCaptchaChallengeToSettle();
             steps.push(
-              `${label} captcha: Tier 3 hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+              `${label} captcha: Tier 3 hCaptcha solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha` +
+                (settled ? "" : " (challenge overlay still visible after token injection)"),
             );
-            result = { ...result, solved: true };
+            if (settled) {
+              result = { ...result, solved: true };
+            } else {
+              const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+                (input) => this.captchaSolver!.solveCoordinates(input),
+              );
+              steps.push(
+                coordinateSolve.found
+                  ? `${label} captcha: visible hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates` +
+                      ` (${coordinateSolve.clicks} clicks` +
+                      (coordinateSolve.durationMs !== undefined
+                        ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+                        : "") +
+                      ")" +
+                      (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : "")
+                  : `${label} captcha: hCaptcha token injection exposed no coordinate-solvable challenge`,
+              );
+              if (coordinateSolve.solved) result = { ...result, solved: true };
+            }
           } else {
             steps.push(
               `${label} captcha: Tier 3 hCaptcha token arrived but page injection failed — captcha stays blocked`,
@@ -4891,10 +5602,12 @@ export class SignupAgent {
         if (solveRes.kind === "ok") {
           const injected = await this.browser.injectTurnstileToken(solveRes.token);
           if (injected) {
+            const settled = await this.browser.waitForCaptchaChallengeToSettle();
             steps.push(
-              `${label} captcha: Tier 3 Turnstile solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha`,
+              `${label} captcha: Tier 3 Turnstile solved in ${Math.round(solveRes.durationMs / 1000)}s via 2Captcha` +
+                (settled ? "" : " (challenge overlay still visible after token injection)"),
             );
-            result = { ...result, solved: true };
+            if (settled) result = { ...result, solved: true };
           } else {
             steps.push(
               `${label} captcha: Tier 3 Turnstile token arrived but page injection failed — captcha stays blocked`,
@@ -4923,6 +5636,32 @@ export class SignupAgent {
     // Classify the widget for spike telemetry — a pure read, after the
     // solve attempt so the challenge grid (if any) has had time to render.
     const detected = await this.browser.detectCaptchaVariant();
+    if (
+      result.solved &&
+      result.kind === "hcaptcha" &&
+      detected.variant === "hcaptcha" &&
+      detected.challengeRendered &&
+      this.captchaSolver?.isAvailable() === true
+    ) {
+      steps.push(
+        `${label} captcha: hCaptcha challenge rendered after the checkbox token — solving visible challenge via 2Captcha coordinates`,
+      );
+      const coordinateSolve = await this.browser.solveVisibleHcaptchaChallengeWithCoordinates(
+        (input) => this.captchaSolver!.solveCoordinates(input),
+      );
+      steps.push(
+        coordinateSolve.found
+          ? `${label} captcha: delayed hCaptcha challenge ${coordinateSolve.solved ? "solved" : "not solved"} via 2Captcha coordinates` +
+              ` (${coordinateSolve.clicks} clicks` +
+              (coordinateSolve.durationMs !== undefined
+                ? `, ${Math.round(coordinateSolve.durationMs / 1000)}s`
+                : "") +
+              ")" +
+              (coordinateSolve.reason !== undefined ? `: ${coordinateSolve.reason}` : "")
+          : `${label} captcha: delayed hCaptcha challenge was no longer visible before coordinate solve`,
+      );
+      if (!coordinateSolve.solved) result = { ...result, solved: false };
+    }
     this.captchaEncounter = {
       kind: result.kind,
       variant: detected.variant,
@@ -5026,6 +5765,7 @@ export class SignupAgent {
     // surfaces the unchecked checkbox. Bounded by the 15-call LLM
     // budget so genuinely-stuck signups still terminate.
     const MAX_PROGRESS_REPLANS = 6;
+    const identity = identityFromEmail(task.email);
     let errorReplans = 0;
     let progressReplans = 0;
     let emptyPlans = 0;
@@ -5102,6 +5842,22 @@ export class SignupAgent {
         this.buildInventory(steps, oauthCandidates),
       ]);
 
+      const googleIdentifierAdvance =
+        await this.advancePinnedGoogleIdentifierPage({
+          task,
+          url: state.url,
+          inventory,
+          steps,
+        });
+      if (googleIdentifierAdvance === "advanced") continue;
+      if (googleIdentifierAdvance === "needs_login") {
+        return {
+          kind: "needs_login",
+          provider: "google",
+          reason: "Google asked for the pinned account password during OAuth-first signup",
+        };
+      }
+
       if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(state.url)) {
         const advanced = await this.browser.advanceOAuthConsent("github");
         steps.push(
@@ -5115,7 +5871,14 @@ export class SignupAgent {
 
       {
         const prePlanCredentials = await this.harvestVisibleCredentials();
-        if (hasAnyExtractedCredential(prePlanCredentials)) {
+        if (
+          hasAnyExtractedCredential(prePlanCredentials) &&
+          !isAuthEntryPageForPreExtraction({
+            url: state.url,
+            html: state.html,
+            inventory,
+          })
+        ) {
           steps.push(
             "Form-fill: credentials are already visible before planning — skipping form actions and extracting in place.",
           );
@@ -5827,12 +6590,24 @@ export class SignupAgent {
       if (postGate.found && postGate.solved) {
         // Re-click submit so the populated token ships with the form.
         try {
-          await this.browser.click(plan.submit_selector);
+          await this.reapplyPlanFieldActionsAfterCaptcha(
+            plan,
+            fillValues,
+            identity,
+            steps,
+          );
+          await this.browser.clickSubmit(plan.submit_selector);
           await this.browser.wait(3);
         } catch (err) {
-          steps.push(
-            `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          const reason = err instanceof Error ? err.message : String(err);
+          steps.push(`⚠ post-captcha submit retry failed: ${reason}`);
+          if (reason.startsWith("submit_disabled")) {
+            if (++progressReplans > MAX_PROGRESS_REPLANS) {
+              return { kind: "submit_failed", reason };
+            }
+            hint = await this.buildSubmitDisabledHint(steps);
+            continue;
+          }
         }
       }
 
@@ -5872,6 +6647,66 @@ export class SignupAgent {
     return captureObservationFrame(this.browser, async () => []);
   }
 
+  private async advancePinnedGoogleIdentifierPage(input: {
+    task: SignupTask;
+    url: string;
+    inventory: ReadonlyArray<InteractiveElement>;
+    steps: string[];
+  }): Promise<"advanced" | "needs_login" | "not_applicable"> {
+    if (input.task.oauthProvider !== "google") return "not_applicable";
+    const account = input.task.oauthAccountEmail?.trim();
+    if (account === undefined || account.length === 0) return "not_applicable";
+    if (!isGoogleAccountsAuthUrl(input.url)) return "not_applicable";
+
+    const passwordField = input.inventory.find(
+      (e) => e.tag === "input" && e.type === "password" && e.visible !== false,
+    );
+    if (passwordField !== undefined) {
+      input.steps.push(
+        "OAuth-first: Google asked for the account password after selecting the pinned account — treating the provider session as stale.",
+      );
+      return "needs_login";
+    }
+
+    const emailField =
+      input.inventory.find(
+        (e) =>
+          e.tag === "input" &&
+          e.visible !== false &&
+          (e.id === "identifierId" ||
+            e.type === "email" ||
+            /\b(?:email|phone|identifier)\b/i.test(
+              `${e.name ?? ""} ${e.placeholder ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
+            )),
+      ) ?? null;
+    if (emailField === null) return "not_applicable";
+
+    const advance =
+      input.inventory.find(
+        (e) =>
+          (e.tag === "button" || e.type === "submit") &&
+          e.visible !== false &&
+          /^\s*next\s*$/i.test(`${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim()),
+      ) ??
+      input.inventory.find(
+        (e) =>
+          (e.tag === "button" || e.type === "submit") &&
+          e.visible !== false &&
+          /\b(?:continue|next|submit)\b/i.test(`${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`),
+      );
+    if (advance === undefined) return "not_applicable";
+
+    input.steps.push(
+      `OAuth-first: Google identifier page — entering pinned account ${account} instead of the signup inbox alias.`,
+    );
+    await this.browser.type(emailField.selector, account);
+    await this.browser.clickSubmit(advance.selector).catch(async () => {
+      await this.browser.click(advance.selector);
+    });
+    await this.browser.wait(3);
+    return "advanced";
+  }
+
   private async capturePostVerifyObservationFrame(
     steps: string[],
   ): Promise<ObservationFrame> {
@@ -5890,6 +6725,7 @@ export class SignupAgent {
   ): Promise<PlanExecOutcome> {
     let state: FormFillState = initialFormFillState(forceFormFill);
     let hint: string | undefined;
+    const identity = identityFromEmail(task.email);
     // Map a reducer terminal outcome to PlanExecOutcome. needs_oauth_provider_session
     // + oauth carry provider IDs the executor holds in typed form — pass those in.
     const toPlanExec = (
@@ -5928,6 +6764,22 @@ export class SignupAgent {
       const browserState = frame.state;
       const inventory = frame.inventory;
 
+      const googleIdentifierAdvance =
+        await this.advancePinnedGoogleIdentifierPage({
+          task,
+          url: browserState.url,
+          inventory,
+          steps,
+        });
+      if (googleIdentifierAdvance === "advanced") continue;
+      if (googleIdentifierAdvance === "needs_login") {
+        return {
+          kind: "needs_login",
+          provider: "google",
+          reason: "Google asked for the pinned account password during OAuth-first signup",
+        };
+      }
+
       if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(browserState.url)) {
         const advanced = await this.browser.advanceOAuthConsent("github");
         steps.push(
@@ -5941,7 +6793,14 @@ export class SignupAgent {
 
       {
         const prePlanCredentials = await this.harvestVisibleCredentials();
-        if (hasAnyExtractedCredential(prePlanCredentials)) {
+        if (
+          hasAnyExtractedCredential(prePlanCredentials) &&
+          !isAuthEntryPageForPreExtraction({
+            url: browserState.url,
+            html: browserState.html,
+            inventory,
+          })
+        ) {
           steps.push(
             "Form-fill: credentials are already visible before planning — skipping form actions and extracting in place.",
           );
@@ -6286,12 +7145,19 @@ export class SignupAgent {
           postGateKind = postGate.kind;
           if (!postGate.blocked && postGate.found && postGate.solved) {
             try {
-              await this.browser.click(submitSelector);
+              await this.reapplyPlanFieldActionsAfterCaptcha(
+                plan,
+                fillValues,
+                identity,
+                steps,
+              );
+              await this.browser.clickSubmit(submitSelector);
               await this.browser.wait(3);
             } catch (err) {
-              steps.push(
-                `⚠ post-captcha submit retry failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
+              submitError = err instanceof Error ? err.message : String(err);
+              submitDisabled = submitError.startsWith("submit_disabled");
+              submitTimeout = !submitDisabled && isSubmitTimeout(submitError);
+              steps.push(`⚠ post-captcha submit retry failed: ${submitError}`);
             }
           }
           if (!postGate.blocked) {
@@ -6357,6 +7223,53 @@ export class SignupAgent {
           await this.captureSignupFormRounds(task.service, plan, inventory, fillValues);
         }
         return toPlanExec(ps.action.outcome);
+      }
+    }
+  }
+
+  private async reapplyPlanFieldActionsAfterCaptcha(
+    plan: SignupPlan,
+    fillValues: Record<FillValueKind, string>,
+    identity: SignupIdentity,
+    steps: string[],
+  ): Promise<void> {
+    const fieldActions = plan.actions.filter(
+      (action) =>
+        action.kind === "fill" ||
+        action.kind === "check" ||
+        action.kind === "select",
+    );
+    if (fieldActions.length === 0) return;
+    const inventory = await this.buildInventory([], undefined, 80);
+    const bySelector = new Map(inventory.map((e) => [e.selector, e]));
+    for (const action of fieldActions) {
+      const el = bySelector.get(action.selector);
+      if (el !== undefined && el.inConsentWidget) continue;
+      try {
+        if (action.kind === "fill") {
+          const value = resolvePlannedFillValue(action, fillValues, el, identity);
+          if (el !== undefined && el.tag === "select") {
+            steps.push(`Post-captcha reselect ${action.selector}`);
+            await this.browser.selectOption(action.selector);
+          } else {
+            steps.push(`Post-captcha refill ${action.value_kind} → ${action.selector}`);
+            await this.browser.type(action.selector, value);
+          }
+        } else if (action.kind === "check") {
+          steps.push(`Post-captcha recheck ${action.selector}`);
+          await this.browser.check(action.selector);
+        } else {
+          steps.push(
+            action.option_text !== undefined
+              ? `Post-captcha reselect ${action.selector} → ${action.option_text}`
+              : `Post-captcha reselect ${action.selector}`,
+          );
+          await this.browser.selectOption(action.selector, action.option_text);
+        }
+      } catch (err) {
+        steps.push(
+          `Post-captcha field reapply skipped ${action.selector}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   }
@@ -7408,6 +8321,9 @@ export class SignupAgent {
               const label =
                 el.visibleText ?? el.ariaLabel ?? el.iconLabel ?? el.title ?? "";
               if (label.trim().length === 0) continue;
+              if (typeof el.href === "string" && isMarketingAuthDeadEndUrl(el.href)) {
+                continue;
+              }
               const score = scoreSignupButton(label, ["google", "github"]);
               if (best === null || score > best.score) best = { el, score };
             }
@@ -7421,7 +8337,11 @@ export class SignupAgent {
               const clickedInventory = await this.browser.extractInteractiveElements();
               const clickedOAuth = findFirstOAuthButton(clickedInventory, ["google", "github"]);
               const landedClass = classifySignupHtml(landed);
-              if (landedClass === "signup" || clickedOAuth !== null) {
+              if (isMarketingAuthDeadEndUrl(landedState.url)) {
+                steps.push(
+                  `[signup-url] Tier B CTA landed on marketing route ${landedState.url} — rejecting as signup entry`,
+                );
+              } else if (landedClass === "signup" || clickedOAuth !== null) {
                 const url = this.browser.currentUrl();
                 steps.push(
                   clickedOAuth !== null
@@ -7535,6 +8455,17 @@ export class SignupAgent {
           await this.runPrewarm(found, steps);
           steps.push(`Found signup link: ${found}`);
           await this.browser.goto(found);
+          const foundState = await this.browser.getState();
+          if (isMarketingAuthDeadEndUrl(foundState.url)) {
+            return {
+              success: false,
+              error:
+                `no_signup_link: searched for ${task.service}'s signup page but ` +
+                `${found} redirected to a marketing route (${foundState.url}), not a signup entry.`,
+              steps,
+              ...this.resultTail(),
+            };
+          }
           // PERF: planner loop's waitForFormReady is next; no dwell.
         } else {
           // BUG-1 GUARD: findSignupLink filters off-domain candidates
@@ -7617,6 +8548,15 @@ export class SignupAgent {
           return {
             success: false,
             error: `planning_failed: ${outcome.reason}`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "needs_login":
+          return {
+            success: false,
+            error:
+              `needs_login: ${OAUTH_PROVIDERS[outcome.provider].label} session is missing or stale — ` +
+              `${outcome.reason}. Re-run provider login or let housekeeper re-warm the identity, then retry.`,
             steps,
             ...this.resultTail(),
           };
@@ -7766,6 +8706,8 @@ export class SignupAgent {
               maxRounds: task.postVerifyMaxRounds ?? 24,
               steps,
               continuationPassword: password,
+              ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+              verificationEmailAlias: task.email,
               ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
               ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
@@ -8077,6 +9019,8 @@ export class SignupAgent {
                   credentials = await this.postVerifyLoop({
                     service: task.service,
                     credentials: { email: task.email, password },
+                    ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+                    verificationEmailAlias: task.email,
                     maxRounds,
                     steps,
                     ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
@@ -8325,10 +9269,21 @@ export class SignupAgent {
           const sitekey = await this.browser.extractHcaptchaSitekey();
           const pageUrl = (await this.browser.getState().catch(() => null))?.url;
           if (sitekey !== null && pageUrl !== undefined) {
+            const solveContext = await this.browser.getHcaptchaSolveContext().catch(() => ({
+              invisible: false,
+              userAgent: null,
+              rqdata: null,
+            }));
             steps.push(
               `OAuth: Tier 3 — submitting hCaptcha sitekey to 2Captcha (${sitekey.slice(0, 10)}…)`,
             );
-            const solveRes = await this.captchaSolver.solveHcaptcha({ sitekey, pageUrl });
+            const solveRes = await this.captchaSolver.solveHcaptcha({
+              sitekey,
+              pageUrl,
+              invisible: solveContext.invisible,
+              ...(solveContext.userAgent !== null ? { userAgent: solveContext.userAgent } : {}),
+              ...(solveContext.rqdata !== null ? { data: solveContext.rqdata } : {}),
+            });
             if (solveRes.kind === "ok") {
               const injected = await this.browser.injectHcaptchaToken(solveRes.token);
               if (injected) {
@@ -8418,8 +9373,13 @@ export class SignupAgent {
     // session never persists (northflank). Detect GSI and drive it over CDP.
     let gsiHandled = false;
     let gsiAttempted = false;
+    let nativeSignupFormBeforeGsi = false;
     if (provider.id === "google" && (await this.browser.hasGoogleGsiAffordance())) {
       gsiAttempted = true;
+      nativeSignupFormBeforeGsi = await this.browser
+        .extractInteractiveElements()
+        .then((inv) => hasNativeSignupForm(inv))
+        .catch(() => false);
       const gsi = await this.browser.tryGoogleGsiLogin(oauthSelector);
       // Only count GSI as handled when it ACTUALLY resolved. On via:"none"
       // (FedCM dialog never fired AND no popup) we must fall through to the
@@ -8462,6 +9422,13 @@ export class SignupAgent {
     // caller a TRY_NEXT_PROVIDER signal so it re-dispatches via that provider
     // instead of dead-ending on Google. meilisearch offers both.
     if (gsiAttempted && !gsiHandled) {
+      if (nativeSignupFormBeforeGsi) {
+        this.committedToEmailPath = true;
+        steps.push(
+          "OAuth: Google GSI/FedCM is a dead end, but the original page had a native email/password signup form — falling back to form-fill instead of another OAuth provider.",
+        );
+        return OAUTH_FALL_BACK_TO_FORM_FILL;
+      }
       // The GSI click commonly leaves the page mid-SPA-transition (netlify:
       // the button[name="google"] goes invisible, the page hasn't navigated
       // anywhere useful), so a single inventory read here can THROW or return
@@ -9251,6 +10218,27 @@ export class SignupAgent {
     }
     await saveDebugSnapshot(this.browser, "oauth-post-consent");
 
+    if (provider.id === "google" && isGoogleConsumerPostOAuthUrl(this.browser.currentUrl())) {
+      const rawTarget = this.resolvedSignupUrl ?? task.signupUrl;
+      const target =
+        rawTarget !== undefined ? (canonicalGoogleConsoleEntryUrl(rawTarget) ?? rawTarget) : undefined;
+      if (target !== undefined && !isGoogleConsumerPostOAuthUrl(target)) {
+        steps.push(
+          `OAuth: ${provider.label} returned to a Google consumer page (${this.browser.currentUrl()}) ` +
+            `instead of the service — navigating back to ${target}`,
+        );
+        try {
+          await this.browser.goto(target);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          await saveDebugSnapshot(this.browser, "oauth-return-service");
+        } catch (err) {
+          steps.push(
+            `OAuth: return-to-service navigation failed (${err instanceof Error ? err.message : String(err)}) — continuing from current page.`,
+          );
+        }
+      }
+    }
+
     // Captcha-gated OAuth detection (truthful failure, not a false "signed in").
     // exa's login lives at auth.exa.ai/?callbackUrl=… (path "/"), which
     // isLoginPageUrl doesn't recognise, so the settle loop above declares
@@ -9576,7 +10564,19 @@ export class SignupAgent {
       // Do not hand this to the post-OAuth planner: there is no key to reach
       // until a human/service process approves the account, and filling the form
       // burns a robot into an async waiting room.
-      if (isAtAccountReviewGate(gateText)) {
+      const reviewGateVerdict = classifyTerminalGate({
+        frame: {
+          frameId: "post-oauth-gate",
+          capturedAt: new Date().toISOString(),
+          state: gateState,
+          inventory: gateInv,
+          visibleText: gateText,
+          domDigest: "",
+        },
+        fallbackText: gateText,
+        lastDoneReason: null,
+      });
+      if (reviewGateVerdict.kind === "account_review") {
         return {
           success: false,
           error:
@@ -9667,6 +10667,8 @@ export class SignupAgent {
         maxRounds: task.postVerifyMaxRounds ?? 24,
         steps,
         continuationPassword: task.generatePassword(),
+        ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+        verificationEmailAlias: task.email,
         ...(task.oauthAccountEmail !== undefined ? { oauthAccountEmail: task.oauthAccountEmail } : {}),
         ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
         ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
@@ -10032,7 +11034,7 @@ Output rules:
   modify a selector. A selector not in the inventory is rejected and
   you will be asked to re-plan.
 - Include the TOS/agree checkbox ONLY if the inventory has a real input of type=checkbox for it. If there is no such checkbox, OMIT the check action entirely — never substitute a link or a button.
-- For ANY required dropdown — native select, Ant/MUI/Radix custom combobox, or input role=combobox — use {"kind":"select"}. Do NOT use {"kind":"click"} on a dropdown label/trigger unless the goal is only to reveal fields; clicking a dropdown without selecting an option leaves required form state empty.
+- For ANY required dropdown — native select, Ant/MUI/Radix custom combobox, input role=combobox, or button-like picker whose visible text contains "Select parent resource" / "Select workspace" / "Select project" — use {"kind":"select"}. Do NOT use {"kind":"click"} on a dropdown label/trigger unless the goal is only to reveal fields; clicking a dropdown without selecting an option leaves required form state empty.
 - For business/profile dropdowns, choose harmless low-risk defaults: business type "Software" / "SaaS" / "Individual" / "Other" if available; annual revenue choose the lowest non-empty bracket; company size choose the smallest non-empty team size.
 - Email verification-CODE buttons: if the inventory has a button like
   "Send code", "Send verification code", "Get code", or "Email me a
@@ -10127,7 +11129,7 @@ ${formatInventory(input.inventory)}`,
     // email verification code" and timed the whole signup out. `code` /
     // `one[- ]?time` / `otp` catch code-based verification subjects too.
     const pattern =
-      /verif|confirm|welcome|activate|complete|finish|set\s*up|\bcode\b|one[\s-]?time|\botp\b|sign[\s-]?up/i;
+      /verif|confirm|welcome|activate|complete|finish|set\s*up|\bcode\b|one[\s-]?time|\botp\b|sign[\s-]?(?:up|in)|log[\s-]?in|magic|link/i;
     let lastErr: unknown = null;
     while (Date.now() < deadline) {
       const remainingSeconds = Math.max(1, Math.floor((deadline - Date.now()) / 1000));
@@ -10178,6 +11180,8 @@ ${formatInventory(input.inventory)}`,
     return this.postVerifyLoop({
       service: task.service,
       credentials: { email: task.email, password },
+      ...(task.inbox !== undefined ? { inbox: task.inbox } : {}),
+      verificationEmailAlias: task.email,
       // Match the OAuth post-verify budget (24). The onboarding form
       // reached after EMAIL verification is the same multi-step wizard the
       // OAuth path hits — a profile form (name, country, company, role) +
@@ -10811,6 +11815,8 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     service: string;
     credentials?: { email: string; password: string } | undefined;
     continuationPassword?: string | undefined;
+    inbox?: AgentInbox | undefined;
+    verificationEmailAlias?: string | undefined;
     maxRounds: number;
     steps: string[];
     scopeHint?: string | undefined;
@@ -10904,10 +11910,12 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // Gate URLs we've already polled the operator's gmail for, so a
     // multi-round wait on the same email-OTP page doesn't re-poll.
     const otpPolledUrls = new Set<string>();
+    const emailLinkPolledUrls = new Set<string>();
     // Running summary of the steps the planner has taken, fed back into
     // each planPostVerifyStep call so the (stateless) planner stops
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
+    let lastReachablePostVerifyUrl: string | null = null;
     const credentialExtractionFlow = new CredentialExtractionFlow();
     const syntheticCapture = new PostSignupSyntheticCapture();
     const loginFlow = new PostSignupLoginFlow();
@@ -11181,6 +12189,183 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           }
         }
       }
+      const visiblePageText = await this.browser.extractVisibleText().catch(() => "");
+      if (isBrowserNavigationErrorPage(state.url, state.title, visiblePageText)) {
+        if (recovery.lastNavigatedTo !== null) {
+          recovery.deadUrls.add(recovery.lastNavigatedTo);
+        }
+        const fallbackUrl =
+          lastReachablePostVerifyUrl ??
+          (this.resolvedSignupUrl !== undefined
+            ? originRoot(this.resolvedSignupUrl)
+            : null);
+        args.steps.push(
+          `Post-verify round ${round}: browser navigation error page (${state.title || state.url}) — ` +
+            (recovery.lastNavigatedTo !== null
+              ? `marked ${recovery.lastNavigatedTo} as dead and `
+              : "") +
+            (fallbackUrl !== null
+              ? `returning to last reachable page ${fallbackUrl}.`
+              : "no reachable fallback recorded; re-planning in place."),
+        );
+        recovery.lastNavigatedTo = null;
+        hint =
+          "The previous navigation landed on Chrome's network/DNS error page. " +
+          `Do NOT navigate to these dead URLs again: ${[...recovery.deadUrls].join(", ")}. ` +
+          "Use visible in-page links on the reachable service dashboard/marketing page, or choose a different known product subdomain from the page itself.";
+        if (fallbackUrl !== null) {
+          await this.browser.goto(fallbackUrl).catch(() => undefined);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          continue;
+        }
+      } else {
+        lastReachablePostVerifyUrl = state.url;
+      }
+      const emailAlias =
+        args.verificationEmailAlias ??
+        args.credentials?.email ??
+        args.oauthAccountEmail;
+      if (
+        args.inbox !== undefined &&
+        emailAlias !== undefined &&
+        emailAlias.length > 0 &&
+        !emailLinkPolledUrls.has(state.url) &&
+        detectEmailLinkGate(state.url, state.title, visiblePageText, inventory)
+      ) {
+        emailLinkPolledUrls.add(state.url);
+        args.steps.push(
+          `Post-verify round ${round}: email link gate (${pathOf(state.url)}) — polling inbox for a fresh verification/sign-in link.`,
+        );
+        try {
+          const email = await this.waitForVerificationEmail(
+            args.inbox,
+            emailAlias,
+            90,
+          );
+          args.steps.push(`Received: "${email.subject}" from ${email.from_address}`);
+          let serviceHost: string | null = null;
+          try {
+            serviceHost = new URL(state.url).hostname;
+          } catch {
+            // no host fallback
+          }
+          const verifyLink =
+            this.pickVerificationLink(Array.from(email.parsed_links)) ??
+            pickVerificationLinkFromHtml(email.body_html ?? "") ??
+            pickServiceDomainLink(Array.from(email.parsed_links), serviceHost);
+          if (verifyLink !== null) {
+            args.steps.push(`Following post-verify email link: ${verifyLink}`);
+            await this.browser.goto(verifyLink);
+            await this.browser.wait(1);
+            await saveDebugSnapshot(this.browser, "after-post-verify-email-link").catch(
+              () => undefined,
+            );
+            hint = undefined;
+            recovery.prevContentSig = null;
+            recovery.actionEffects.length = 0;
+            continue;
+          }
+          const code =
+            email.parsed_codes[0] ?? extractCodeFromEmailBody(email, emailAlias);
+          if (code !== undefined && code !== null && code.length > 0) {
+            args.steps.push(
+              `Post-verify round ${round}: email had no usable link but carried a code (…${code.slice(-2)}) — handing it to the planner.`,
+            );
+            hint =
+              `Email verification code retrieved: "${code}". The current page has a ` +
+              `verification-code / OTP input. Issue {"kind":"fill","selector":"…","value":"${code}"} ` +
+              `on it, then NEXT round click Verify / Confirm / Continue / Submit.`;
+          } else {
+            args.steps.push(
+              `Post-verify round ${round}: inbox email had no usable link or code — letting the planner proceed.`,
+            );
+          }
+        } catch (err) {
+          args.steps.push(
+            `Post-verify round ${round}: inbox poll for email link failed (${err instanceof Error ? err.message : String(err)}) — letting the planner proceed.`,
+          );
+        }
+      }
+      const relocatedKeysLink = findRelocatedCredentialPageRecoveryLink({
+        currentUrl: state.url,
+        pageText: `${state.title}\n${visiblePageText}`,
+        inventory,
+        alreadyClicked: recovery.clickedKeysLinks,
+      });
+      if (relocatedKeysLink !== null) {
+        recovery.clickedKeysLinks.add(relocatedKeysLink.selector);
+        const label =
+          relocatedKeysLink.visibleText ??
+          relocatedKeysLink.ariaLabel ??
+          relocatedKeysLink.href ??
+          relocatedKeysLink.selector;
+        args.steps.push(
+          `Post-verify round ${round}: credentials page is a relocated/dead route — ` +
+            `following in-page recovery link "${label.slice(0, 60)}" ` +
+            `(${relocatedKeysLink.href ?? relocatedKeysLink.selector}).`,
+        );
+        try {
+          await this.browser.click(relocatedKeysLink.selector);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        } catch (err) {
+          const href = relocatedKeysLink.href ?? "";
+          const fallbackUrl =
+            href.length > 0
+              ? (() => {
+                  try {
+                    return new URL(href, state.url).toString();
+                  } catch {
+                    return null;
+                  }
+                })()
+              : null;
+          if (fallbackUrl !== null) {
+            args.steps.push(
+              `Post-verify: recovery-link click failed (${err instanceof Error ? err.message : String(err)}) — navigating to ${fallbackUrl}.`,
+            );
+            await this.browser.goto(fallbackUrl).catch(() => undefined);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } else {
+            args.steps.push(
+              `Post-verify: recovery-link click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+            );
+          }
+        }
+        recovery.prevSignature = null;
+        recovery.prevInventorySize = -1;
+        hint = undefined;
+        continue;
+      }
+      const scopeEntry = findAccountScopeListEntry({
+        currentUrl: state.url,
+        pageText: `${state.title}\n${visiblePageText}`,
+        inventory,
+        alreadyClicked: recovery.clickedScopeLinks,
+      });
+      if (scopeEntry !== null) {
+        recovery.clickedScopeLinks.add(scopeEntry.selector);
+        const label =
+          scopeEntry.visibleText ??
+          scopeEntry.ariaLabel ??
+          scopeEntry.href ??
+          scopeEntry.selector;
+        args.steps.push(
+          `Post-verify round ${round}: account scope list detected — entering ` +
+            `scope "${label.slice(0, 60)}" (${scopeEntry.href ?? scopeEntry.selector}) before credential navigation.`,
+        );
+        try {
+          await this.browser.click(scopeEntry.selector);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+        } catch (err) {
+          args.steps.push(
+            `Post-verify: scope-entry click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+          );
+        }
+        recovery.prevSignature = null;
+        recovery.prevInventorySize = -1;
+        hint = undefined;
+        continue;
+      }
       // Negative-side decision, now visibility- AND inventory-aware: a shell
       // requires loading-text in the VISIBLE text AND a sub-threshold
       // inventory. The OAuth-callback exclusion keeps the navigate-to-root
@@ -11189,7 +12374,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       const stillShell =
         !onOAuthCallback &&
         isLoadingShell(
-          await this.browser.extractVisibleText().catch(() => ""),
+          visiblePageText,
           inventory.length,
         );
       if (stillShell) {
@@ -11527,6 +12712,21 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         }
         continue;
       }
+      const coercedStep = coercePostVerifyIdentityFillStep(
+        nextStep,
+        inventory,
+        args.credentials,
+      );
+      if (
+        coercedStep.kind === "fill" &&
+        nextStep.kind === "fill" &&
+        coercedStep.value !== nextStep.value
+      ) {
+        args.steps.push(
+          `Post-verify round ${round}: coerced identity fill for ${nextStep.selector} to the active signup credential.`,
+        );
+        nextStep = coercedStep;
+      }
       // rc.22 — redact tokens before pushing to the step trail.
       // The planner's reason field sometimes quotes the actual API
       // value it just observed ("The full API token 'sbp_xxx' is
@@ -11662,6 +12862,25 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       }
 
       if (nextStep.kind === "navigate") {
+        const setupSubmit = findPendingResourceSetupSubmit(inventory);
+        if (setupSubmit !== null) {
+          args.steps.push(
+            `Post-verify: planner tried to navigate away while a required resource setup form is present — ` +
+              `clicking ${JSON.stringify(setupSubmit.visibleText ?? setupSubmit.ariaLabel ?? "Continue")} first.`,
+          );
+          try {
+            await this.browser.click(setupSubmit.selector);
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          } catch (err) {
+            args.steps.push(
+              `Post-verify: resource-setup submit failed (${err instanceof Error ? err.message : String(err)}) — re-planning.`,
+            );
+          }
+          recovery.prevSignature = null;
+          recovery.prevInventorySize = -1;
+          hint = undefined;
+          continue;
+        }
         const navigateDecision = recoveryFlow.decideNavigate({
           url: state.url,
           targetUrl: nextStep.url,
@@ -11798,7 +13017,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           // button-shaped element with role=combobox OR placeholder-
           // shaped visible text, and NOT touched this run.
           const SELECT_PROMPT_TEXT =
-            /^(?:select|choose|pick)\b|^select an?\b|\bselect\.{3}|\bchoose\.{3}/i;
+            /^(?:select|choose|pick)\b|^select an?\b|\bselect\.{3}|\bchoose\.{3}|select\s+(?:parent\s+)?(?:resource|organization|organisation|workspace|project|account|team)\b/i;
           const customComboboxes = inventory
             .filter(
               (e) =>
@@ -11933,12 +13152,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
               hint = undefined;
               continue;
             }
-            const WIZARD_FORWARD =
-              /^\s*(?:next|continue|submit|finish|done|get\s+started)\s*$/i;
             const wizardBtn = inventory.find(
               (e) =>
                 (e.tag === "button" || e.role === "button") &&
-                WIZARD_FORWARD.test((e.visibleText ?? e.ariaLabel ?? "").trim()) &&
+                isOnboardingForwardLabel((e.visibleText ?? e.ariaLabel ?? "").trim()) &&
                 e.visible === true,
             );
             if (wizardBtn !== undefined && !recovery.triedWizardForward.has(state.url)) {
@@ -12311,7 +13528,11 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             port: {
               getState: () => this.browser.getState(),
               loginWithCredentials: (email, password, steps) =>
-                this.loginWithCredentials(email, password, steps),
+                this.loginWithCredentials(email, password, steps, {
+                  ...(args.inbox !== undefined ? { inbox: args.inbox } : {}),
+                  verificationEmailAlias:
+                    args.verificationEmailAlias ?? args.credentials?.email ?? email,
+                }),
             },
           });
           if (loginResult.kind === "oauth_session_not_persisted") {
@@ -12326,18 +13547,54 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             break;
           }
         } else {
+          const retargetedStep = retargetCredentialAppTypeChoice(nextStep, inventory);
+          const pickerRetargetedStep = retargetSubmitToDefaultedPicker(retargetedStep, inventory);
+          const executableStep = coerceCheckboxClickStep(pickerRetargetedStep, inventory);
+          if (retargetedStep !== nextStep && retargetedStep.kind === "click" && nextStep.kind === "click") {
+            args.steps.push(
+              `Post-verify: retargeted app-type choice from ${JSON.stringify(nextStep.selector)} ` +
+                `to ${JSON.stringify(retargetedStep.selector)}.`,
+            );
+          }
+          if (
+            pickerRetargetedStep !== retargetedStep &&
+            (pickerRetargetedStep.kind === "select" || pickerRetargetedStep.kind === "click") &&
+            retargetedStep.kind === "click"
+          ) {
+            args.steps.push(
+              `Post-verify: retargeted submit click ${JSON.stringify(retargetedStep.selector)} ` +
+                `to required picker ${pickerRetargetedStep.kind} ${JSON.stringify(pickerRetargetedStep.selector)}.`,
+            );
+          }
+          if (executableStep !== pickerRetargetedStep && executableStep.kind === "check" && pickerRetargetedStep.kind === "click") {
+            args.steps.push(
+              `Post-verify: coerced checkbox click ${JSON.stringify(pickerRetargetedStep.selector)} to check.`,
+            );
+          }
+          const submitClick =
+            executableStep.kind === "click" &&
+            inventory.some(
+              (e) =>
+                e.selector === executableStep.selector &&
+                (e.type === "submit" ||
+                  /^(?:continue|next|submit|create|finish|done)\b/i.test(
+                    (e.visibleText ?? e.ariaLabel ?? "").trim(),
+                  )),
+            );
           const execution = await actionExecutor.execute({
-            step: nextStep as PostSignupExecutableAction,
+            step: executableStep as PostSignupExecutableAction,
             credentials,
             snapshotPostClickAlert: () =>
               saveDebugSnapshot(this.browser, "post-verify-alert"),
+            ...(submitClick ? { submitClick: true } : {}),
           });
           args.steps.push(...execution.steps);
           if (execution.hint !== undefined) hint = execution.hint;
         }
       } catch (err) {
+        const errText = err instanceof Error ? err.message : String(err);
         args.steps.push(
-          `Post-verify action failed (${nextStep.kind}): ${err instanceof Error ? err.message : String(err)}`,
+          `Post-verify action failed (${nextStep.kind}): ${errText}`,
         );
         // Don't bail — Claude may recover on the next round.
       } finally {
@@ -12517,6 +13774,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     email: string,
     password: string,
     steps: string[],
+    options?: {
+      inbox?: AgentInbox | undefined;
+      verificationEmailAlias?: string | undefined;
+    },
   ): Promise<boolean> {
     const findLoginFields = (inventory: ReadonlyArray<InteractiveElement>) => {
       const emailEl =
@@ -12615,6 +13876,48 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       }
     }
     if (pwEl === undefined) {
+      if (options?.inbox !== undefined) {
+        const state = await this.browser.getState().catch(() => null);
+        const text = await this.browser.extractVisibleText().catch(() => "");
+        if (
+          state !== null &&
+          detectEmailLinkGate(state.url, state.title, text, inv)
+        ) {
+          const alias = options.verificationEmailAlias ?? email;
+          steps.push(
+            "Login: passwordless email-link gate detected — polling inbox for the sign-in link.",
+          );
+          try {
+            const received = await this.waitForVerificationEmail(
+              options.inbox,
+              alias,
+              90,
+            );
+            steps.push(`Received: "${received.subject}" from ${received.from_address}`);
+            let serviceHost: string | null = null;
+            try {
+              serviceHost = new URL(state.url).hostname;
+            } catch {
+              // leave null
+            }
+            const loginLink =
+              this.pickVerificationLink(Array.from(received.parsed_links)) ??
+              pickVerificationLinkFromHtml(received.body_html ?? "") ??
+              pickServiceDomainLink(Array.from(received.parsed_links), serviceHost);
+            if (loginLink !== null) {
+              steps.push(`Login: following passwordless sign-in link: ${loginLink}`);
+              await this.browser.goto(loginLink);
+              await this.browser.wait(2);
+              return true;
+            }
+            steps.push("Login: passwordless email had no usable link.");
+          } catch (err) {
+            steps.push(
+              `Login: passwordless inbox poll failed (${err instanceof Error ? err.message : String(err)}).`,
+            );
+          }
+        }
+      }
       steps.push("Login: no password field reachable — skipped.");
       return false;
     }
@@ -12874,6 +14177,28 @@ ${loginGuidance}
   The API-keys / tokens page appears only AFTER a resource exists. Do NOT
   return {"kind":"done"} or {"kind":"login"} on an empty dashboard while a
   create-resource CTA is visible — that is the path forward, not a dead end.
+- **APP TYPE CHOICES — prefer credential-bearing web/server apps.** When a
+  create-application wizard offers app/client type cards, prefer "Regular Web
+  App", "Traditional web app", "Server-side web app", or a similar backend/web
+  option. Avoid "Machine to Machine", "M2M", "server-to-server", or "API
+  client" choices unless an API/resource is already present and selectable —
+  those choices often require a pre-existing API before the app can be created.
+  Avoid SPA/native/mobile choices when a web/server option is visible because
+  they usually omit client_secret-style credentials.
+- If that wizard first asks for a required TECHNOLOGY / FRAMEWORK choice, pick
+  a backend/server runtime such as Python, Node.js, Express, Django, Java,
+  Ruby, PHP, Go, or .NET when visible. Do NOT pick React, Angular, Vue, Svelte,
+  or other frontend SPA frameworks when a backend/server runtime is available;
+  SPA picks often narrow the next app-type step to non-secret browser clients.
+- **BROKEN DEEP-LINK WITH APP CHECKLIST.** Some authenticated SPAs show a
+  "404 / page does not exist" main panel while an in-app onboarding checklist
+  or resource-creation control is still visible ("Create an index", "Create
+  project", "Skip for now", "Don't show me again"). Treat that as an
+  authenticated app state, not a public 404. Do NOT click "Bring me home",
+  "Go home", browser back, or public marketing/home links as the first action;
+  those often discard the app session and return to /login. Instead use the
+  visible in-app checklist/resource action, dismiss the checklist, or navigate
+  via app-local dashboard/project/settings controls.
 - **API-KEYS / TOKENS PAGE — the path to a key is CREATE, not extract.** On any
   API-keys / tokens / secrets page that offers a "Create" / "Generate" /
   "New token" / "New key" button, CLICK it to mint a fresh key — this holds
@@ -12888,8 +14213,9 @@ ${loginGuidance}
 - **Pre-filled fields are DONE — advance, don't re-touch.** If a required
   onboarding field (first name, company, email) is ALREADY populated, or a
   required selectable is ALREADY selected, do NOT re-fill/re-select it — click
-  Continue / Next / Submit to move forward. Re-filling a satisfied field loops.
-- For ANY dropdown — native (tag=select) OR a custom combobox (role=combobox / aria-haspopup=listbox, common on modern React apps like Sentry / Stripe / Vercel) — use {"kind":"select"}. "click" on a combobox trigger opens it but does not pick an option; do not click it repeatedly.
+  Continue / Next / Submit / Create organization / Create workspace / Create
+  project to move forward. Re-filling a satisfied field loops.
+- For ANY dropdown — native (tag=select) OR a custom combobox / picker (role=combobox / aria-haspopup=listbox, or a button-like trigger whose text contains "Select parent resource", "Select workspace", "Select project"; common on modern React apps like Sentry / Stripe / Vercel / Google consoles) — use {"kind":"select"}. "click" on a combobox trigger opens it but does not pick an option; do not click it repeatedly.
 - When you need a SPECIFIC option from the dropdown — e.g. "Project: Read" on Sentry's permissions picker, or a specific region — include "option_text" with the visible label. The executor matches it case-insensitively as a substring. Omit "option_text" when any option is fine (a placeholder country picker).
 - A post-OAuth onboarding form (organization name, region, terms) is normal — fill/select/check its fields and click Continue to advance toward the dashboard; do not return "done" just because it is a form.
 - If a "Create"/"Continue" button is disabled, look for a required terms-of-service / agreement checkbox and tick it with {"kind":"check"} — use the checkbox's own inventory selector (an entry with type=checkbox), NOT the adjacent "Terms of Service" link. A "click" on a styled checkbox often fails to flip it; use "check".
@@ -12902,6 +14228,7 @@ ${loginGuidance}
   ? `The user provided a scope hint: "${input.scopeHint}". Pick option_text values aligned with this on each permission dropdown.`
   : `No scope hint was provided. Default to the HIGHEST available permission level on EVERY permission dropdown (Admin > Write > Read > anything lower). Most agent use-cases need write access; a read-only token will fail downstream when the agent tries to push data. Set "Admin" if offered; "Write" otherwise. Explicitly use option_text to specify — do NOT rely on first-option behavior, which often picks Read.`}
 - On a form with MULTIPLE permission rows (Sentry: Project, Team, Member, Issue, Event, Release, Organization), set EACH ONE before clicking Create. One step per turn — return to this turn-by-turn until every row is set.
+- **Permission/scope grids are local.** When a token modal or API-key form asks for scopes/permissions, choose controls that are inside that modal/form or visually co-located with the named scope row. Do NOT click global app navigation buttons, product tabs, or sidebar items just because their labels look like a permission word ("Browse", "Chat", "Project", "Data"). If the row's Admin/Write/Read/All control is not present in the inventory, leave the current default alone and proceed to the next required field or Create button instead of guessing.
 - Round ${input.round + 1} of ${input.maxRounds}. Prefer "done" if you're not making progress.`;
 
     const userBlocks: LLMBlock[] = [
@@ -13091,8 +14418,7 @@ ${formatInventory(input.inventory)}${
     //    and the browser kept us on one, that's a strong signal —
     //    redirect chains often preserve the path across TLD changes.
     try {
-      const path = new URL(state.url).pathname.toLowerCase();
-      if (/(?:^|\/)(?:signup|register|sign-up|create-account|join)\b/.test(path)) {
+      if (hasSignupIntentPath(state.url) && !isMarketingAuthDeadEndUrl(state.url)) {
         return true;
       }
     } catch {

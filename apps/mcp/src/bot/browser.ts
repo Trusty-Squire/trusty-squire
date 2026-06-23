@@ -38,6 +38,7 @@ import {
   waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
@@ -144,6 +145,71 @@ export interface BrowserState {
   screenshot: string; // base64
 }
 
+const HCAPTCHA_UUID_RE =
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
+export function extractHcaptchaSitekeyFromHtml(html: string): string | null {
+  if (!/hcaptcha\.com|h-captcha|hcaptcha/i.test(html)) return null;
+  const normalized = html
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"')
+    .replace(/&amp;/g, "&");
+  for (const src of normalized.matchAll(/<iframe[^>]+src=["']([^"']*hcaptcha[^"']*)["']/gi)) {
+    const raw = src[1];
+    if (raw === undefined) continue;
+    try {
+      const url = new URL(raw, "https://example.invalid");
+      const direct = url.searchParams.get("sitekey");
+      if (direct !== null && direct.length > 10) return direct;
+      const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+      const fromHash = new URLSearchParams(hash).get("sitekey");
+      if (fromHash !== null && fromHash.length > 10) return fromHash;
+    } catch {
+      const match = raw.match(new RegExp(`[?#&]sitekey=(${HCAPTCHA_UUID_RE})`, "i"));
+      if (match?.[1] !== undefined) return match[1];
+    }
+  }
+  const patterns = [
+    // Standard hCaptcha/SDK naming.
+    new RegExp(
+      `(?:sitekey|site_key|site-key|hcaptcha_key|captchaApiKey|data-(?:hcaptcha-)?sitekey)["'\\s]*[:=]\\s*["'](${HCAPTCHA_UUID_RE})["']`,
+      "i",
+    ),
+    // Stripe and similar app config JSON often names keys
+    // `express_hcaptcha_site_key` or `hcaptcha_login_main_site_key`.
+    new RegExp(
+      `(?:hcaptcha[^"'<>]{0,80}site[_-]?key|express_hcaptcha_site_key)["'\\s]*[:=]\\s*["'](${HCAPTCHA_UUID_RE})["']`,
+      "i",
+    ),
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (match?.[1] !== undefined) return match[1];
+  }
+  return null;
+}
+
+export function extractHcaptchaResponseKeyFromToken(token: string): string | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  const payload = parts[1];
+  if (payload === undefined || payload.length === 0) return null;
+  try {
+    const json = Buffer.from(
+      payload.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64",
+    ).toString("utf8");
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    for (const key of ["ekey", "eKey", "respKey", "responseKey", "key", "kr"]) {
+      const value = parsed[key];
+      if (typeof value === "string" && value.trim().length > 0) return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export interface BrowserControllerOptions {
   // Adds human-like timing to clicks, typing, and page loads. Defaults
   // to true in production (we want to pass Cloudflare/reCAPTCHA scoring)
@@ -229,6 +295,29 @@ export type CaptchaSolveResult =
   | { found: false }
   | { found: true; solved: true; kind: CaptchaKind }
   | { found: true; solved: false; kind: CaptchaKind };
+
+export type HcaptchaCoordinateSolveResult =
+  | { found: false; solved: false; reason: "no_visible_challenge" }
+  | {
+      found: true;
+      solved: boolean;
+      reason?: string;
+      clicks: number;
+      durationMs?: number;
+    };
+
+function pngDimensions(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24) return null;
+  if (
+    buf[0] !== 0x89 ||
+    buf[1] !== 0x50 ||
+    buf[2] !== 0x4e ||
+    buf[3] !== 0x47
+  ) {
+    return null;
+  }
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
 
 // Real-Chromium-family browser channels we'll prefer over the bundled
 // Chromium binary when available. Chromium ships without Widevine,
@@ -623,10 +712,10 @@ export class BrowserController {
   // F13 — which launch path start() took. Surfaced via .launchMode so
   // the agent can push it into the run's step trail and we can see
   // (from outside the box) whether the bot ran headed.
-  private launchedMode: "display" | "xvfb" | "headless" | "unknown" =
+  private launchedMode: "display" | "xvfb" | "headless" | "remote" | "unknown" =
     "unknown";
 
-  get launchMode(): "display" | "xvfb" | "headless" | "unknown" {
+  get launchMode(): "display" | "xvfb" | "headless" | "remote" | "unknown" {
     return this.launchedMode;
   }
 
@@ -695,6 +784,27 @@ export class BrowserController {
     env: NodeJS.ProcessEnv;
     window: { width: number; height: number };
   }): Promise<BrowserContext> {
+    // Remote-CDP attach: BOT_CDP_ENDPOINT points at a Chrome already running on
+    // another host (e.g. a real-GPU Mac), reachable over Tailscale. We do NOT
+    // spawn or own the binary — the remote host launched it with its own
+    // profile, real GPU, and (residential) egress. Just attach over CDP. This
+    // is the real-GPU path: software-WebGL output (llvmpipe) is what
+    // hCaptcha-Enterprise-class anti-bot scores, and only real hardware fixes
+    // the rendered-pixel fingerprint that JS spoofing can't.
+    const remoteEndpoint = (process.env.BOT_CDP_ENDPOINT ?? "").trim();
+    if (remoteEndpoint.length > 0) {
+      const launcher = getChromium();
+      const browser = await launcher.connectOverCDP(remoteEndpoint);
+      this.cdpBrowser = browser;
+      this.launchedMode = "remote";
+      const ctx = browser.contexts()[0];
+      if (ctx === undefined) {
+        throw new Error(
+          `remote Chrome (BOT_CDP_ENDPOINT=${remoteEndpoint}) exposed no default browser context`,
+        );
+      }
+      return ctx;
+    }
     const endpoint = await withChromeStartupLock(async () => {
       const port = await findFreePort();
       clearStaleSingletonLock(this.profileDir);
@@ -834,12 +944,29 @@ export class BrowserController {
       `[universal-bot] launching browser channel=${channel ?? "bundled-chromium"} ` +
         `proxy=${proxy?.server ?? "direct"}`,
     );
+    // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
+    // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
+    // across Tailscale. The remote machine IS a real device, so we spoof
+    // NOTHING — no WebGL/device fingerprint patch (a fake-Intel string over a
+    // real Apple-GPU output would be its own mismatch tell), no local Xvfb, no
+    // egress-geo override (the remote host's real timezone + residential IP are
+    // authentic). software-WebGL output is exactly what the toughest anti-bot
+    // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
+    // fingerprint, which is the whole point of this path.
+    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    if (remoteMode) {
+      console.error(
+        `[universal-bot] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
+          `(real-host GPU + egress; local fingerprint spoof + Xvfb DISABLED)`,
+      );
+    }
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).
     // Done before the real launch: launchPersistentContext bakes the
-    // timezone in at creation, with no way to set it afterward.
-    const geo = await this.probeEgressGeo(channel, proxy);
+    // timezone in at creation, with no way to set it afterward. Skipped in
+    // remote mode — the remote host's own clock/IP are the authentic truth.
+    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
     if (geo !== null) {
       console.error(
         `[universal-bot] egress geo: timezone=${geo.timezoneId}` +
@@ -1189,7 +1316,7 @@ export class BrowserController {
         }
       }
     })();`;
-    await context.addInitScript({ content: installWebglSpoofScript });
+    if (!remoteMode) await context.addInitScript({ content: installWebglSpoofScript });
     this.page = context.pages()[0] ?? (await context.newPage());
     // addInitScript covers document-start page JS, but Playwright's
     // page.evaluate utility execution can run in a separate realm. Install the
@@ -1202,6 +1329,7 @@ export class BrowserController {
     // most page JS), so a late WebGL query (reCAPTCHA scores seconds in) sees
     // the spoofed strings; a document-start fingerprinter could still race it.
     const reapplyWebglSpoof = (): void => {
+      if (remoteMode) return; // real-GPU remote host: spoof nothing
       const pg = this.page;
       if (pg === null) return;
       void (async () => {
@@ -1211,8 +1339,64 @@ export class BrowserController {
         });
       })();
     };
+    // A CROSS-ORIGIN captcha iframe (hCaptcha / Turnstile / reCAPTCHA) is its own
+    // realm: the main-frame page.evaluate above never reaches it, so the captcha's
+    // OWN fingerprint read sees the real software-WebGL renderer (llvmpipe /
+    // SwiftShader) + 20-core / high-memory / no-taskbar Linux profile — a
+    // headless/VM tell. MEASURED 2026-06-23: Stripe's invisible hCaptcha
+    // Enterprise flags the session before any token, identically on a datacenter
+    // AND a residential exit IP (IP falsified) — the discriminator is this
+    // unspoofed in-iframe fingerprint. Patch the iframe's own main world too.
+    // frame.evaluate reaches a cross-origin frame's main world at the driver
+    // level (same path that wins the main-frame race), re-applied at
+    // navigation-commit before the captcha's scoring JS queries WebGL.
+    const CAPTCHA_FRAME_RE =
+      /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
+    // String probe (no compiled-fn __name shim needed): the UNMASKED renderer
+    // a captcha would read. Logged only under CAPTCHA_TRACE to prove the fix.
+    const RENDERER_PROBE = String.raw`(() => { try { const c = document.createElement("canvas"); const gl = c.getContext("webgl") || c.getContext("webgl2"); if (!gl) return "no-gl"; const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "no-ext"; } catch (err) { return "err:" + (err && err.message); } })()`;
+    const trace = process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1";
     this.page.on("framenavigated", (frame) => {
-      if (this.page !== null && frame === this.page.mainFrame()) reapplyWebglSpoof();
+      if (remoteMode) return; // real-GPU remote host: no in-iframe spoof
+      if (this.page === null) return;
+      if (frame === this.page.mainFrame()) {
+        reapplyWebglSpoof();
+        return;
+      }
+      if (!CAPTCHA_FRAME_RE.test(frame.url())) return;
+      const cfHost = (() => {
+        try {
+          return new URL(frame.url()).host;
+        } catch {
+          return "captcha-frame";
+        }
+      })();
+      void (async () => {
+        if (trace) {
+          const before = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
+          // eslint-disable-next-line no-console
+          console.error(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
+        }
+        // Retry until the spoof STICKS. The first framenavigated commonly
+        // eval-fails (frame mid-commit, or a throwaway about:blank hCaptcha
+        // replaces), and hCaptcha reads the fingerprint during its widget
+        // lifecycle — a single best-effort apply loses the race. Re-apply on a
+        // ~3s budget until the iframe's renderer reads Intel, so the spoof is in
+        // place before the scoring read.
+        let landed = false;
+        for (let i = 0; i < 20 && !landed; i++) {
+          await frame.evaluate(installWebglSpoofScript).catch(() => undefined);
+          const r = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
+          if (typeof r === "string" && r.includes("Intel")) landed = true;
+          else await new Promise((res) => setTimeout(res, 150));
+        }
+        if (trace) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[captcha-fp] ${cfHost} renderer AFTER spoof:  ${landed ? "Intel (landed)" : "FAILED to land in budget"}`,
+          );
+        }
+      })();
     });
     this.page.on("load", reapplyWebglSpoof);
 
@@ -1227,13 +1411,20 @@ export class BrowserController {
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
       this.page.on("response", async (resp) => {
         const url = resp.url();
-        if (!/challenges\.cloudflare\.com|google\.com\/recaptcha/.test(url)) {
+        if (
+          !/challenges\.cloudflare\.com|google\.com\/recaptcha|hcaptcha\.com|newassets\.hcaptcha\.com/.test(
+            url,
+          )
+        ) {
           return;
         }
         const status = resp.status();
         const ct = resp.headers()["content-type"] ?? "";
         let bodyPreview = "";
-        if (/json|javascript|html|plain/.test(ct)) {
+        if (
+          /json|javascript|html|plain/.test(ct) ||
+          /api\.hcaptcha\.com\/(?:checksiteconfig|getcaptcha|checkcaptcha)/.test(url)
+        ) {
           try {
             const body = await resp.text();
             bodyPreview =
@@ -2687,6 +2878,8 @@ export class BrowserController {
       '[role="option"]:visible',
       '[role="menuitem"]:visible',
       '[role="menuitemradio"]:visible',
+      'mat-option:visible',
+      '.mat-mdc-option:visible',
       '[id^="react-select-"][role*="menu"]:visible',
       '[role="listbox"]:visible li:visible',
     ];
@@ -3290,6 +3483,10 @@ export class BrowserController {
         return false;
       });
       if (solved) {
+        if (widget.kind === "hcaptcha") {
+          const settled = await this.waitForCaptchaChallengeToSettle(15_000, 10_000);
+          if (!settled) return { found: true, solved: false, kind: widget.kind };
+        }
         return { found: true, solved: true, kind: widget.kind };
       }
     }
@@ -3608,6 +3805,16 @@ export class BrowserController {
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
         }
+        for (const el of Array.from(
+          document.querySelectorAll<HTMLElement>("[data-hcaptcha-widget-id], .h-captcha"),
+        )) {
+          el.setAttribute("data-hcaptcha-response", tok);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        const form = inputs[0]?.closest("form");
+        form?.dispatchEvent(new Event("input", { bubbles: true }));
+        form?.dispatchEvent(new Event("change", { bubbles: true }));
         // 2. Fire the widget's onSuccess callback if registered. The
         //    callbacks are stored on `___grecaptcha_cfg.clients`; the
         //    exact tree is undocumented and shifts across versions
@@ -3822,7 +4029,7 @@ export class BrowserController {
   async extractHcaptchaSitekey(): Promise<string | null> {
     if (!this.page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate(() => {
+      const fromDom = await this.page.evaluate(() => {
         const div = document.querySelector<HTMLElement>(".h-captcha[data-sitekey], [data-hcaptcha-sitekey]");
         if (div !== null) {
           const k =
@@ -3834,67 +4041,396 @@ export class BrowserController {
           'iframe[src*="hcaptcha.com"]',
         );
         if (iframe !== null) {
-          const k = new URL(iframe.src).searchParams.get("sitekey");
+          const url = new URL(iframe.src);
+          const k =
+            url.searchParams.get("sitekey") ??
+            new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash).get(
+              "sitekey",
+            );
           if (k !== null && k.length > 10) return k;
-        }
-        // INVISIBLE hCaptcha (huggingface, 2026-06-17): no .h-captcha div, no
-        // rendered iframe — the sitekey lives in the page's JS config
-        // (`captchaApiKey:"<uuid>"`, `sitekey:"<uuid>"`). Scan the HTML for a
-        // UUID-shaped key next to a sitekey/captcha hint, but ONLY when an
-        // hCaptcha script is present (so an unrelated config UUID can't match).
-        // UUID shape excludes reCAPTCHA `6L…` and Turnstile `0x…` keys.
-        const html = document.documentElement.outerHTML;
-        if (/hcaptcha\.com|h-captcha|hcaptcha/i.test(html)) {
-          const m = html.match(
-            /(?:sitekey|captchaApiKey|data-(?:hcaptcha-)?sitekey)["'\s]*[:=]\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/i,
-          );
-          if (m !== null && m[1] !== undefined) return m[1];
         }
         return null;
       });
+      if (fromDom !== null) return fromDom;
+      // INVISIBLE hCaptcha (Hugging Face, Stripe): no .h-captcha div, no
+      // iframe `?sitekey=` param — the sitekey lives in the page's JS/JSON
+      // config (`captchaApiKey`, `express_hcaptcha_site_key`,
+      // `hcaptcha_login_main_site_key`, etc.). Scan the HTML for a UUID-shaped
+      // key next to a sitekey/captcha hint, but only when an hCaptcha marker is
+      // present so an unrelated config UUID cannot match.
+      const html = await this.page.evaluate(() => document.documentElement.outerHTML);
+      return extractHcaptchaSitekeyFromHtml(html);
     } catch {
       return null;
     }
   }
 
+  async getBrowserUserAgent(): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => navigator.userAgent);
+    } catch {
+      return null;
+    }
+  }
+
+  async getHcaptchaSolveContext(): Promise<{
+    invisible: boolean;
+    userAgent: string | null;
+    rqdata: string | null;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page.evaluate(() => {
+        let invisible = false;
+        let rqdata: string | null = null;
+        const useRqdata = (value: string | null): void => {
+          if (rqdata === null && value !== null && value.trim().length > 0) rqdata = value;
+        };
+        for (const el of Array.from(
+          document.querySelectorAll<HTMLElement>(".h-captcha, [data-hcaptcha-widget-id]"),
+        )) {
+          const size = el.getAttribute("data-size") ?? el.getAttribute("size");
+          if (size?.toLowerCase() === "invisible") invisible = true;
+          useRqdata(el.getAttribute("data-rqdata"));
+        }
+        for (const iframe of Array.from(
+          document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
+        )) {
+          try {
+            const url = new URL(iframe.src);
+            const hashParams = new URLSearchParams(
+              url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
+            );
+            const size = url.searchParams.get("size") ?? hashParams.get("size");
+            const frame = url.searchParams.get("frame") ?? hashParams.get("frame");
+            useRqdata(url.searchParams.get("rqdata") ?? hashParams.get("rqdata"));
+            const clientOptions = url.searchParams.get("clientOptions") ?? hashParams.get("clientOptions");
+            if (clientOptions !== null) {
+              try {
+                const parsed = JSON.parse(clientOptions) as { rqdata?: unknown };
+                if (typeof parsed.rqdata === "string") useRqdata(parsed.rqdata);
+              } catch {
+                // ignore non-JSON client options
+              }
+            }
+            if (
+              size?.toLowerCase() === "invisible" ||
+              frame?.toLowerCase() === "checkbox-invisible"
+            ) {
+              invisible = true;
+            }
+          } catch {
+            // ignore malformed extension/proxy iframe URLs
+          }
+        }
+        return { invisible, userAgent: navigator.userAgent, rqdata };
+      });
+    } catch {
+      return {
+        invisible: false,
+        userAgent: await this.getBrowserUserAgent().catch(() => null),
+        rqdata: null,
+      };
+    }
+  }
+
   // Inject a 2Captcha-resolved hCaptcha token into the page's
-  // h-captcha-response textarea(s) and fire the widget's data-callback
-  // if the page registered one. Mirrors injectRecaptchaToken; hCaptcha
-  // also mirrors the response token into a g-recaptcha-response textarea
-  // on some compat installs, so populate both names if present.
+  // h-captcha-response textarea(s), update hCaptcha runtime response
+  // accessors, and fire registered callbacks. Mirrors injectRecaptchaToken;
+  // hCaptcha also mirrors the response token into a g-recaptcha-response
+  // textarea on some compat installs, so populate both names if present.
   async injectHcaptchaToken(token: string): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate((tok: string) => {
+      const responseKey = extractHcaptchaResponseKeyFromToken(token);
+      return await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
+        const widgetIds = new Set<string>();
         const inputs = Array.from(
           document.querySelectorAll<HTMLTextAreaElement>(
             'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
           ),
         );
-        if (inputs.length === 0) return false;
         for (const input of inputs) {
           input.value = tok;
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
         }
-        // Fire the data-callback the page registered on the .h-captcha
-        // host (hCaptcha calls it by name on window). Best-effort — the
-        // populated textarea is what server-side validation reads.
+        for (const host of Array.from(
+          document.querySelectorAll<HTMLElement>(
+            ".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]",
+          ),
+        )) {
+          host.setAttribute("data-hcaptcha-response", tok);
+          const id =
+            host.getAttribute("data-hcaptcha-widget-id") ??
+            host.getAttribute("data-hcaptcha-widget-id".toLowerCase());
+          if (id !== null && id.length > 0) widgetIds.add(id);
+          host.dispatchEvent(new Event("input", { bubbles: true }));
+          host.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        for (const iframe of Array.from(
+          document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
+        )) {
+          try {
+            const url = new URL(iframe.src);
+            const params = new URLSearchParams(
+              url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
+            );
+            const id = params.get("id");
+            if (id !== null && id.length > 0) widgetIds.add(id);
+          } catch {
+            // ignore malformed extension/proxy iframe URLs
+          }
+        }
+
+        const win = window as unknown as Record<string, unknown>;
+        const hcaptcha = win.hcaptcha as
+          | {
+              getResponse?: (id?: string) => string;
+              getRespKey?: (id?: string) => string;
+            }
+          | undefined;
+        if (hcaptcha !== undefined) {
+          const originalGetResponse = hcaptcha.getResponse?.bind(hcaptcha);
+          const originalGetRespKey = hcaptcha.getRespKey?.bind(hcaptcha);
+          hcaptcha.getResponse = (id?: string) => {
+            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return tok;
+            return originalGetResponse?.(id) ?? tok;
+          };
+          hcaptcha.getRespKey = (id?: string) => {
+            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return key ?? "";
+            return originalGetRespKey?.(id) ?? key ?? "";
+          };
+        }
+
+        let callbackFired = false;
+        const fire = (fn: unknown): void => {
+          if (typeof fn !== "function") return;
+          callbackFired = true;
+          try {
+            (fn as (t: string, k?: string) => void)(tok, key ?? undefined);
+          } catch {
+            // A page callback can be stale after React remounts a widget.
+          }
+        };
+
+        // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
         try {
-          const host = document.querySelector<HTMLElement>(".h-captcha[data-callback]");
-          const name = host?.getAttribute("data-callback");
-          if (name !== null && name !== undefined) {
-            const fn = (window as unknown as Record<string, unknown>)[name];
-            if (typeof fn === "function") (fn as (t: string) => void)(tok);
+          for (const host of Array.from(
+            document.querySelectorAll<HTMLElement>(".h-captcha[data-callback]"),
+          )) {
+            const name = host.getAttribute("data-callback");
+            if (name !== null && name !== undefined) fire(win[name]);
           }
         } catch {
-          // no named callback — DOM injection stands.
+          // no named callback, continue to runtime config scan.
         }
-        return true;
-      }, token);
+
+        // Programmatic hCaptcha integrations pass function callbacks to
+        // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
+        // generically so React/Vue wrappers are handled like plain forms.
+        const seen = new Set<unknown>();
+        const scan = (value: unknown, depth: number): void => {
+          if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
+          seen.add(value);
+          if (typeof value === "function") return;
+          if (typeof value !== "object") return;
+          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+            const normalized = key.toLowerCase();
+            if (
+              typeof child === "function" &&
+              (normalized === "callback" ||
+                normalized === "success-callback" ||
+                normalized === "verify-callback" ||
+                normalized === "onverify" ||
+                normalized === "onsuccess")
+            ) {
+              fire(child);
+              continue;
+            }
+            if (typeof child === "object" && child !== null) scan(child, depth + 1);
+          }
+        };
+        scan(win.___hcaptcha_cfg, 0);
+        scan(win.hcaptcha, 0);
+
+        return inputs.length > 0 || widgetIds.size > 0 || callbackFired;
+      }, { tok: token, key: responseKey });
     } catch {
       return false;
     }
+  }
+
+  async solveVisibleHcaptchaChallengeWithCoordinates(
+    solve: (input: {
+      imageBase64: string;
+      comment?: string;
+      minClicks?: number;
+      maxClicks?: number;
+    }) => Promise<TwoCaptchaCoordinatesResult>,
+  ): Promise<HcaptchaCoordinateSolveResult> {
+    if (!this.page) throw new Error("Browser not started");
+
+    const challenge = await this.findVisibleHcaptchaChallengeFrame();
+    if (challenge === null) {
+      return { found: false, solved: false, reason: "no_visible_challenge" };
+    }
+
+    let shot: Buffer;
+    try {
+      shot = await challenge.locator.screenshot({ type: "png", timeout: 8_000 });
+    } catch (err) {
+      return {
+        found: true,
+        solved: false,
+        reason: `screenshot_failed:${err instanceof Error ? err.message : String(err)}`,
+        clicks: 0,
+      };
+    }
+
+    const dims = pngDimensions(shot);
+    if (dims === null || dims.width <= 0 || dims.height <= 0) {
+      return {
+        found: true,
+        solved: false,
+        reason: "invalid_challenge_screenshot",
+        clicks: 0,
+      };
+    }
+
+    const solveRes = await solve({
+      imageBase64: shot.toString("base64"),
+      comment:
+        "hCaptcha challenge screenshot. Click all matching image targets requested by the prompt. If a Verify or Submit button is visible, click it after selecting targets.",
+      minClicks: 1,
+      maxClicks: 12,
+    });
+    if (solveRes.kind !== "ok") {
+      return {
+        found: true,
+        solved: false,
+        reason:
+          `2captcha_${solveRes.kind}` +
+          ("reason" in solveRes ? `:${solveRes.reason}` : ""),
+        clicks: 0,
+        ...("durationMs" in solveRes ? { durationMs: solveRes.durationMs } : {}),
+      };
+    }
+
+    let clicks = 0;
+    for (const point of solveRes.coordinates) {
+      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
+      if (box === null || box.width <= 0 || box.height <= 0) break;
+      const x = box.x + (point.x / dims.width) * box.width;
+      const y = box.y + (point.y / dims.height) * box.height;
+      await this.bezierMouseTo(x, y);
+      await this.sleep(rand(100, 260));
+      await this.page.mouse.click(x, y);
+      this.mouseX = x;
+      this.mouseY = y;
+      clicks += 1;
+    }
+
+    await this.sleep(650);
+    let settled = await this.waitForCaptchaChallengeToSettle(2_500).catch(() => false);
+    if (!settled && clicks > 0) {
+      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
+      if (box !== null && box.width > 0 && box.height > 0) {
+        const verifyX = box.x + Math.min(box.width - 32, Math.max(32, box.width * 0.84));
+        const verifyY = box.y + Math.min(box.height - 24, Math.max(24, box.height * 0.92));
+        await this.bezierMouseTo(verifyX, verifyY);
+        await this.sleep(rand(120, 320));
+        await this.page.mouse.click(verifyX, verifyY);
+        this.mouseX = verifyX;
+        this.mouseY = verifyY;
+      }
+      settled = await this.waitForCaptchaChallengeToSettle(10_000).catch(() => false);
+    }
+
+    const responsePresent = await this.page
+      .evaluate(() => {
+        const ta = document.querySelector(
+          'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
+        ) as HTMLTextAreaElement | null;
+        return ta !== null && ta.value.length > 0;
+      })
+      .catch(() => false);
+
+    const out: HcaptchaCoordinateSolveResult = {
+      found: true,
+      solved: settled || responsePresent,
+      clicks,
+      durationMs: solveRes.durationMs,
+    };
+    if (!out.solved) out.reason = "challenge_still_visible";
+    return out;
+  }
+
+  private async findVisibleHcaptchaChallengeFrame(): Promise<{
+    locator: Locator;
+    box: { x: number; y: number; width: number; height: number };
+  } | null> {
+    if (!this.page) throw new Error("Browser not started");
+    const selectors = [
+      'iframe[src*="hcaptcha.com"][src*="frame=challenge"]',
+      'iframe[src*="newassets.hcaptcha.com"][src*="frame=challenge"]',
+      'iframe[src*="hcaptcha.com"][src*="/challenge"]',
+      'iframe[src*="newassets.hcaptcha.com"][src*="/challenge"]',
+    ];
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      for (const selector of selectors) {
+        const locator = this.page.locator(selector);
+        const count = await locator.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          const el = locator.nth(i);
+          const box = await el.boundingBox({ timeout: 1_000 }).catch(() => null);
+          if (box === null) continue;
+          if (box.width < 180 || box.height < 160) continue;
+          return { locator: el, box };
+        }
+      }
+      await this.sleep(250);
+    }
+    return null;
+  }
+
+  async waitForCaptchaChallengeToSettle(timeoutMs = 4000, stableClearMs = 2_500): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const hasVisibleChallenge = async (): Promise<boolean> =>
+      await this.page!.evaluate(() => {
+        const visible = (el: Element): boolean => {
+          const style = window.getComputedStyle(el as HTMLElement);
+          if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+            return false;
+          }
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 8 && r.height > 8;
+        };
+        const selectors = [
+          'iframe[src*="hcaptcha.com"][src*="frame=challenge"]',
+          'iframe[src*="newassets.hcaptcha.com"][src*="frame=challenge"]',
+          'iframe[src*="recaptcha/api2/bframe"]',
+          'iframe[src*="challenges.cloudflare.com"]',
+        ];
+        return selectors.some((sel) =>
+          Array.from(document.querySelectorAll(sel)).some((el) => visible(el)),
+        );
+      });
+    const deadline = Date.now() + timeoutMs;
+    let clearSince: number | null = null;
+    while (Date.now() < deadline) {
+      const visible = await hasVisibleChallenge().catch(() => false);
+      if (!visible) {
+        clearSince ??= Date.now();
+        if (Date.now() - clearSince >= stableClearMs) return true;
+      } else {
+        clearSince = null;
+      }
+      await this.sleep(250);
+    }
+    return false;
   }
 
   // Small mouse wiggle near the current position. Used during prewarm
@@ -3931,6 +4467,7 @@ export class BrowserController {
       fullPage: false,
       type: "jpeg",
       quality: 70,
+      timeout: 8_000,
     });
     return buffer.toString("base64");
   }
@@ -3957,7 +4494,7 @@ export class BrowserController {
       url: this.page.url(),
       title: await this.page.title(),
       html: await this.page.content(),
-      screenshot: await this.screenshot(),
+      screenshot: await this.screenshot().catch(() => ""),
     };
   }
 

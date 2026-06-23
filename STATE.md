@@ -544,6 +544,57 @@ on unify-ai** after this debugging marathon (refill or wait to re-test).
 nav-search doesn't regress services the greedy loop already handles, and that
 auto-promote skill-minting stays intact end-to-end). Needs verify-pool refill.
 
+## `stripe` — invisible hCaptcha Enterprise + multi-layer fraud (BYO anchor, 2026-06-23)
+
+Full controlled investigation. Stripe signup (`dashboard.stripe.com/register`,
+email/password `FORCE_FORM` path) is gated by an **invisible hCaptcha Enterprise**
+widget on the "Create account" button (no checkbox/grid visible — screenshot
+confirmed). 2Captcha token solves in ~21–31s but the session is still flagged.
+
+- **H: IP reputation / needs residential.** **✗✗ FALSIFIED.** Identical
+  `captcha_blocked: hcaptcha … the site flagged this session` on the GPU-less
+  harvester box over **datacenter** (172.93.111.86) AND **residential** (Mac
+  SOCKS5, Korea 1.240.236.25) egress — only the exit IP changed. Token solved
+  both times; flagged both times. NOT IP.
+
+- **✓ CONFIRMED + FIXED: the WebGL/device spoof never reached the captcha
+  iframe.** `installWebglSpoofScript` was re-applied on `framenavigated` **only
+  when `frame === mainFrame()`** — so the cross-origin hCaptcha iframe
+  (`newassets.hcaptcha.com`) read the REAL `ANGLE (Mesa, llvmpipe …)` software
+  renderer + 20-core/high-mem/no-taskbar Linux profile. Proven with an in-iframe
+  `UNMASKED_RENDERER` probe: **BEFORE spoof = `llvmpipe`, AFTER = `Intel`**. Fix:
+  `frame.evaluate(installWebglSpoofScript)` into the captcha iframe's own main
+  world, **timing-hardened** (retry ~3s until the renderer reads Intel — the
+  first `framenavigated` often eval-fails mid-commit). **This is the real,
+  GENERALIZABLE win** — most hCaptcha/Turnstile sites read these surfaces
+  in-iframe; this was an unspoofed tell for all of them. (`browser.ts`.)
+  BUT: with the string reliably Intel in-iframe, Stripe **still flagged** → the
+  renderer *string* is not Stripe's gate (it hashes the rendered *pixels*, which
+  string-spoofing can't change — consistent with the exa llvmpipe note above).
+
+- **✓ CONFIRMED ladder (real hardware, user's own Windows laptop: real Intel
+  D3D11 GPU + home residential IP).** Real hardware is a genuine discriminator
+  for Stripe (UNLIKE exa Turnstile): hCaptcha went from **hard-flag (no
+  challenge)** on the VPS → an **interactive solvable challenge** (rune-tile
+  "complete the pattern" + Skip). I.e. the environment moved us from "rejected"
+  to "prove you're human." THEN, after the challenge, Stripe's **account-risk /
+  fraud layer declined anyway**: *"There was an error creating your account.
+  Please contact support."* (Confound: throwaway gmail + repeated same-machine
+  attempts that day likely fed the velocity check — but the multi-layer pattern
+  is the signal.)
+
+- **✓ CONCLUSION: Stripe = multi-layer BYO anchor** — hCaptcha Enterprise
+  (pixel-hash fingerprint) **+** an independent account-risk/fraud decline **+**
+  KYC at payment activation. Not botable even on real hardware. Correctly routed
+  to **bring-your-own-key** by the refuse-walled provision gate. **Do NOT try to
+  bot Stripe again.** The end-user path *is* viable via a brief human-solves-
+  their-own-captcha handoff (real hardware gets a *solvable* challenge), which the
+  headless discovery box can never do.
+
+- **Built (reusable for the end-user / real-GPU path on OTHER hard sites):**
+  `BOT_CDP_ENDPOINT` → attach over CDP to a Chrome on real-GPU hardware (spoof +
+  Xvfb auto-disabled in remote mode), plus `tools/mac-gpu-browser.sh`.
+
 ## Recurring meta-lesson
 
 **Stop concluding "IP" or "fingerprint" from a single observation.** Every time
