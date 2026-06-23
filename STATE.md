@@ -34,18 +34,38 @@ Shipped `BOT_GOOGLE_PROFILE_DIR` (+ `mcp login --profile-dir`) to pin a personal
 Google identity for Google-OAuth discover, bypassing the robot pool (commit
 `35323cb`). A personal Gmail creates projects under "No organization" freely.
 
-### ? OPEN (blocked on account config): Firebase MANDATES 2-Step Verification
+### ✓ CLEARED (2026-06-23): MFA + org + project-creation, with personal Gmail + 2SV
 
-With a fresh personal Gmail (no 2SV), `console.firebase.google.com` replaces the
-whole console with **"Enable Multi-factor Authentication (MFA) … You must enable
-MFA to gain access to Firebase / Turn on 2SV"** — a hard gate, no dismiss. The
-bot can't enable 2SV (needs a phone/authenticator on the account). Now correctly
-classified `mfa_setup_required` (was burning ~16 loading-shell retries then
-mislabeling `oauth_required`; detector `looksLikeMfaEnrollmentGate`). The robots
-never saw it (Workspace org-enforced/exempt 2SV). **NEXT:** enable 2SV on the
-personal account, re-run; project creation should clear, leaving only the
-firebase config-object extraction ({apiKey, projectId}) to build. GCP shares the
-project-creation wall, so the same personal+2SV identity cracks it too.
+With a fresh personal Gmail (no 2SV), `console.firebase.google.com` first
+replaced the whole console with **"Enable MFA … You must enable MFA to gain
+access to Firebase / Turn on 2SV"** — a hard gate (now classified
+`mfa_setup_required`; was mislabeling `oauth_required` after ~16 loading-shell
+retries; detector `looksLikeMfaEnrollmentGate`). After the user enabled 2SV on
+methoxine@gmail.com, the re-run **cleared everything down the stack**: MFA gone,
+"No organization" available (org wall cleared), and **project creation SUCCEEDED**
+— `ts-firebase-project` was created end-to-end (name + terms + Continue + Create
++ provisioning wait). Only the final key extraction failed (planner wandered
+into Gemini chat / Service Accounts, then 404'd guessing /settings/keys).
+
+### ? OPEN (last mile): deterministic API-key extraction surface — PROVEN reachable
+
+The credential AUTO-EXISTS. Every Firebase project auto-creates a **"Browser key
+(auto created by Firebase)"** in the underlying GCP project, even with NO web app
+registered. PROVEN surface (capture, methoxine's ts-firebase-project):
+`https://console.cloud.google.com/apis/credentials?project=<projectId>` → API
+Keys table → row "Browser key (auto created by Firebase)" → "Show key" (Material
+`<button>`, `mdc-button__label` "Show key") reveals the `AIzaSy[0-9A-Za-z_-]{33}`
+value. **This same key is BOTH the firebase web apiKey AND a GCP API key — one
+extractor cracks firebase + gcp.** projectId is derivable at runtime from the
+post-creation URL `console.firebase.google.com/u/0/project/<projectId>/overview`.
+(Alternative surface: firebase console → settings/general → register a Web app
+[`[data-test-id="create-web-app"]` → nickname input `input.fire-input-field`
+needs REAL keystrokes / pressSequentially, not .fill() — Angular value accessor →
+"Register app"] → firebaseConfig.apiKey. Messier than the GCP credentials page.)
+**NEXT:** build a deterministic firebase/gcp post-creation extractor that navs to
+the GCP credentials URL, clicks the Browser-key row's "Show key", and reads the
+AIzaSy. Then add `gcp` to the queue (shares project creation; create an explicit
+API key via Create credentials → API key if no Firebase auto-key exists).
 
 ---
 
