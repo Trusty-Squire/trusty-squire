@@ -61,7 +61,7 @@ const DEFAULT_AD_HOC_SERVICE_METADATA = [
 // 'fix' (C2) is the output-side step: read the failure batch from the capture
 // dir, drive the holistic fix-agent against the eval gate, commit RCs to the
 // `next` channel. See docs/DESIGN-autonomous-output-loop.md.
-type Mode = "verify" | "discover" | "heal" | "fix" | "fresh-verify";
+type Mode = "verify" | "discover" | "heal" | "fix" | "fresh-verify" | "shopping";
 
 interface ParsedArgs {
   once: boolean;
@@ -111,6 +111,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     else if (arg === "--mode=heal") args.mode = "heal";
     else if (arg === "--mode=fix") args.mode = "fix";
     else if (arg === "--mode=fresh-verify") args.mode = "fresh-verify";
+    else if (arg === "--mode=shopping") args.mode = "shopping";
     else if (arg === "--returning-profile") args.profileMode = "returning";
     else if (arg === "--fresh-profile") args.profileMode = "fresh";
     else if (arg === "--telegram") args.enableTelegram = true;
@@ -195,6 +196,11 @@ Modes (pick one — default: verify):
                             staging (the next/RC channel). Needs git
                             + the local Codex CLI; set
                             TRUSTY_SQUIRE_FIX_AGENT_PUSH=1 to push.
+  --mode=shopping           Signup-link resolver. Fetches official
+                            pages, follows signup CTAs, classifies the
+                            resulting entrypoint, and prints evidence.
+                            Does not create accounts, use robots, run
+                            verify, or invoke autoloop/fixbot.
   autoloop                  Live-gated fix-agent loop to convergence.
                             Always uses Codex. --agent only accepts codex.
   --service=SLUG            Ad-hoc single-service mode. Implies
@@ -242,6 +248,7 @@ Required env per mode:
                         + TRUSTY_SQUIRE_ACCOUNT_ID
   discover --from=:    TRUSTY_SQUIRE_MACHINE_TOKEN + TRUSTY_SQUIRE_ACCOUNT_ID
   --service:           same as discover --from=
+  shopping:            none for --from/--service sweeps
 `);
 }
 
@@ -363,20 +370,32 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
   // tight ceiling; a full heal pass gets a loose backstop.
   //
   // Edge fix (concurrent drains): a CONCURRENT discover batch legitimately runs
-  // far longer than a single-service run — N services in waves of C. The flat
-  // 25-min ceiling killed a 19-service 5-wide drain at service 8. Scale the
-  // ceiling with concurrency (each ~8-min run, waves = N/C) up to a 2h cap, so
-  // a big concurrent drain finishes instead of hard-exiting mid-batch.
+  // far longer than a single-service run — N services in waves of C. Scale the
+  // ceiling by waves, not by C alone. A 40-service 4-wide sweep is ten waves;
+  // with 10min per live signup that needs ~100min before teardown/promote, so
+  // the old 25min*C formula killed the batch while it was still making
+  // progress. Keep an env override for explicit operator runs.
   const concurrency = Math.max(
     1,
     Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1,
   );
-  const selfDeadlineS =
+  const explicitSelfDeadlineS = Number.parseInt(
+    process.env.HOUSEKEEPER_SELF_DEADLINE_SEC ?? "",
+    10,
+  );
+  const requestedLimit =
+    args.limit ?? (args.service !== undefined && args.service.length > 0 ? 1 : 20);
+  const waves = Math.max(1, Math.ceil(requestedLimit / concurrency));
+  const computedSelfDeadlineS =
     args.mode === "heal"
       ? 4 * 60 * 60
       : concurrency > 1
-        ? Math.min(2 * 60 * 60, 25 * 60 * concurrency)
+        ? Math.min(6 * 60 * 60, Math.max(25 * 60, waves * 12 * 60 + 10 * 60))
         : 25 * 60;
+  const selfDeadlineS =
+    Number.isFinite(explicitSelfDeadlineS) && explicitSelfDeadlineS > 0
+      ? explicitSelfDeadlineS
+      : computedSelfDeadlineS;
   const selfDeadline = setTimeout(() => {
     console.error(
       `[housekeeper] SELF-DEADLINE: process exceeded ${Math.round(
@@ -431,6 +450,52 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<number
       console.error(
         `housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return 1;
+    }
+  }
+
+  // shopping mode: signup-link resolver only. It intentionally does not run
+  // the universal signup bot, verifier replay, fresh-verify, or fixbot. It
+  // consumes the same ad-hoc/YAML service sources as discover, but stops at
+  // "verified entrypoint with evidence".
+  if (args.mode === "shopping") {
+    let queue: QueueProvider;
+    if (args.service !== undefined && args.service.length > 0) {
+      let signupUrl = args.signupUrl;
+      const yamlEntry = await lookupAdHocServiceMetadata(args.seedPath, args.service);
+      if (
+        signupUrl === undefined &&
+        yamlEntry !== null &&
+        typeof yamlEntry.signup_url === "string" &&
+        yamlEntry.signup_url.length > 0
+      ) {
+        signupUrl = yamlEntry.signup_url;
+      }
+      queue = new AdHocServiceQueue(args.service, undefined, signupUrl);
+    } else {
+      queue = new YamlSeedQueue({
+        path:
+          args.seedPath !== undefined && args.seedPath.length > 0
+            ? args.seedPath
+            : "tools/housekeeper-services.yaml",
+      });
+    }
+    const { runShoppingBatch } = await import("./modes/shopping.js");
+    try {
+      const res = await runShoppingBatch({
+        queue,
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        config: { log: (line) => console.error(line) },
+      });
+      for (const result of res.results) {
+        console.log(JSON.stringify(result));
+      }
+      console.error(
+        `[shopping] attempted=${res.attempted} verified=${res.verified} bad=${res.bad} blocked=${res.blocked}`,
+      );
+      return res.bad === 0 ? 0 : 1;
+    } catch (err) {
+      console.error(`housekeeper: fatal: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }
