@@ -47,25 +47,31 @@ methoxine@gmail.com, the re-run **cleared everything down the stack**: MFA gone,
 + provisioning wait). Only the final key extraction failed (planner wandered
 into Gemini chat / Service Accounts, then 404'd guessing /settings/keys).
 
-### ? OPEN (last mile): deterministic API-key extraction surface — PROVEN reachable
+### ✓ CRACKED (2026-06-23): deterministic API-key extraction — firebase → ok, 1 credential
 
-The credential AUTO-EXISTS. Every Firebase project auto-creates a **"Browser key
-(auto created by Firebase)"** in the underlying GCP project, even with NO web app
-registered. PROVEN surface (capture, methoxine's ts-firebase-project):
-`https://console.cloud.google.com/apis/credentials?project=<projectId>` → API
-Keys table → row "Browser key (auto created by Firebase)" → "Show key" (Material
-`<button>`, `mdc-button__label` "Show key") reveals the `AIzaSy[0-9A-Za-z_-]{33}`
-value. **This same key is BOTH the firebase web apiKey AND a GCP API key — one
-extractor cracks firebase + gcp.** projectId is derivable at runtime from the
-post-creation URL `console.firebase.google.com/u/0/project/<projectId>/overview`.
-(Alternative surface: firebase console → settings/general → register a Web app
-[`[data-test-id="create-web-app"]` → nickname input `input.fire-input-field`
-needs REAL keystrokes / pressSequentially, not .fill() — Angular value accessor →
-"Register app"] → firebaseConfig.apiKey. Messier than the GCP credentials page.)
-**NEXT:** build a deterministic firebase/gcp post-creation extractor that navs to
-the GCP credentials URL, clicks the Browser-key row's "Show key", and reads the
-AIzaSy. Then add `gcp` to the queue (shares project creation; create an explicit
-API key via Create credentials → API key if no Firebase auto-key exists).
+Two fixes completed the chain (commit `fe0bde3`), both shipped + live-validated:
+
+1. **Authenticated-console routing.** console.firebase.google.com /
+   console.cloud.google.com are heavy Angular SPAs the OAuth-first scan read as a
+   perpetual "loading shell" (no provider button — you're already in) → it looped
+   and bailed the misleading `oauth_required`. A logged-OUT visitor is redirected
+   to accounts.google.com, so simply BEING on the console host = an established
+   session → route to post-verify (already_oauth). (`isAuthenticatedGoogleConsoleUrl`)
+2. **Deterministic Browser-key extractor.** Every Firebase project auto-creates a
+   "Browser key (auto created by Firebase)" in its GCP project (= firebaseConfig.
+   apiKey AND a GCP API key) even with no web app. Once postVerifyLoop sees a
+   projectId in the URL (`parseGoogleProjectId`), it navs to
+   `console.cloud.google.com/apis/credentials?project=<id>`, clicks the
+   Browser-key row's "Show key", and reads the row-scoped AIzaSy
+   (`extractGoogleApiKeyFromCredentials`). One extractor covers firebase + gcp.
+
+**Live (2026-06-23):** `discover firebase → ok` (project ts-firebase-project-fc076,
+Browser key extracted, 1 credential). **gcp** added to the queue on the SAME path
+(a Firebase project IS a GCP project; the Browser key IS a GCP API key). Requires
+the personal Google identity + 2SV (`BOT_GOOGLE_PROFILE_DIR`, methoxine@gmail.com);
+the Workspace robots still can't (org wall). GCP-native key creation
+(console.cloud.google.com → Create credentials → API key, no firebase) is a future
+refinement — the firebase path already yields a valid GCP credential.
 
 ---
 

@@ -1455,9 +1455,18 @@
   signup_url: https://console.firebase.google.com/
   oauth_provider: google
   scope_hint: null
-  status: needs-manual
+  status: pending
   last_probed: 2026-06-23
-  notes: 'Google-account-bound; free Spark tier needs no billing. Credential is
+  notes: 'CRACKED 2026-06-23 (live: discover firebase -> ok, 1 credential). Needs
+    a PERSONAL Google identity with 2SV (BOT_GOOGLE_PROFILE_DIR=~/.trusty-squire/
+    personal-google, account methoxine@gmail.com) — Workspace robots cannot create
+    GCP projects. The bot OAuths in, creates a Firebase project, and the
+    deterministic extractor pulls the auto-created "Browser key" from the GCP
+    credentials page (= firebaseConfig.apiKey AND a GCP API key). Historical
+    diagnosis below.
+
+
+    Google-account-bound; free Spark tier needs no billing. Credential is
 
     a web-app config object (apiKey/projectId), not a bearer token — extraction
 
@@ -1505,7 +1514,26 @@
 
     project creation should clear, leaving only config-object extraction
 
-    ({apiKey, projectId}) to build.
+    ({apiKey, projectId}) to build. [RESOLVED — see the CRACKED note at top.]
+
+    '
+- slug: gcp
+  name: Google Cloud Platform
+  signup_url: https://console.firebase.google.com/
+  oauth_provider: google
+  scope_hint: null
+  status: pending
+  last_probed: 2026-06-23
+  notes: 'Shares firebase''s identity wall + extraction. A Firebase project IS a
+    Google Cloud project, and the auto-created "Browser key" IS a usable GCP API
+    key (Maps / Gemini API / Translate / etc.), so gcp provisions via the SAME
+    proven path as firebase: personal Google identity + 2SV
+    (BOT_GOOGLE_PROFILE_DIR), create a project on the firebase console, extract
+    the Browser key from console.cloud.google.com/apis/credentials. The "gcp"
+    slug is in FIREBASE_GCP_SLUGS so the deterministic extractor fires. A
+    GCP-native flow (console.cloud.google.com -> Create credentials -> API key,
+    no firebase) is a future refinement; the firebase path already yields a valid
+    GCP credential.
 
     '
 - slug: auth0
