@@ -1,5 +1,30 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.17-rc.4 (2026-06-23)
+
+Prerelease (`next`). Anti-bot fingerprint hardening, the refuse-walled provision
+gate (BYO anchors), and a batch of generalizing bot/nav fixes.
+
+- fix(bot): hCaptcha in-iframe fingerprint spoof — the WebGL/device spoof now
+  reaches the cross-origin captcha iframe's own main world (it was main-frame
+  only, so hCaptcha read the real software-WebGL/20-core profile), timing-hardened
+  until the renderer reads Intel. Generalizes to hCaptcha/Turnstile sites that
+  fingerprint in-iframe. Plus a `BOT_CDP_ENDPOINT` real-GPU remote-CDP path
+  (spoof + Xvfb auto-disabled in remote mode) for the end-user-on-real-hardware
+  path. Stripe stays a multi-layer BYO anchor (see STATE.md).
+- feat(provision): refuse-walled pre-flight — a permanent wall (phone/payment/
+  manual / operator-dequeue) refuses fast and routes to bring-your-own-key
+  instead of botting a KYC wall; temporary walls (anti_bot/nav) still flow to the
+  discover loop. Reuses the registry ServiceState dossier; fails open.
+- fix(bot): per-service capture isolation (multi-service discover no longer
+  cross-contaminates capture chains), terminal-gate legal-onboarding-vs-review
+  disambiguation, nav-search Google-console detour guard, humanized submit routing.
+- feat(housekeeper): `--mode=shopping` — a read-only fetch+regex signup-link
+  resolver/classifier (no accounts, no robots, no LLM).
+- chore: queue the buildable vibe-coder head-spine services; clear pre-existing
+  typecheck + test debt (verifier test files, pick-verification, discover
+  identity-pool isolation).
+
 ## 0.9.17-rc.2 (2026-06-17)
 
 Prerelease (`next`). groq cracked end-to-end, the verify-pool warmer no longer
