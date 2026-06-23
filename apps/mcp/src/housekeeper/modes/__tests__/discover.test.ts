@@ -96,6 +96,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -116,6 +117,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -136,6 +138,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -155,6 +158,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -174,6 +178,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -193,6 +198,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -280,6 +286,7 @@ describe("runDiscover — outcome mapping", () => {
         accountId: "acct",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -342,6 +349,7 @@ describe("runDiscover — auto-promote logging", () => {
           accountId: "acct-flush",
           inboxClient: stubInbox(),
           bot,
+          identityPool: stubPool(),
           // skipAutoPromote NOT set — we want the real auto-promote path.
         },
       );
@@ -422,6 +430,7 @@ describe("runDiscover — telemetry emit (D1 gap fix)", () => {
         accountId: "acct-telemetry",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
@@ -464,6 +473,7 @@ describe("runDiscover — telemetry emit (D1 gap fix)", () => {
         accountId: "acct-telemetry",
         inboxClient: stubInbox(),
         bot,
+        identityPool: stubPool(),
         skipAutoPromote: true,
       },
     );
