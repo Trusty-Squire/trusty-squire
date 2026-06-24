@@ -662,6 +662,24 @@ export function isProviderCapabilityBlocker(
   return false;
 }
 
+// A hold whose needs_login draws ALL bailed at the SAME replay step is a
+// deterministic login wall: every robot follows the identical stored steps to
+// the same dead end (MEASURED 2026-06-24 — northflank's step-8 navigates to a
+// hardcoded per-account team URL `/t/<capture-team>/…` that bounces any fresh
+// robot to /login). Rotating + re-warming the whole pool can't move a
+// deterministic wall, so the runFreshVerify guard skips that (expensive) churn.
+// Requires >=2 agreeing draws so a single transient flake can't trip it.
+export function isDeterministicLoginWall(
+  reasons: ReadonlyArray<string | undefined>,
+): boolean {
+  const steps = reasons
+    .filter((r): r is string => r !== undefined && failureCode(r) === "needs_login")
+    .map((r) => /\bstep=(\d+)\b/.exec(r)?.[1])
+    .filter((s): s is string => s !== undefined);
+  if (steps.length < 2) return false;
+  return steps.every((s) => s === steps[0]);
+}
+
 // How many `needs_login` re-draws a single verify pass will spend chasing a
 // session-fresh robot before giving up and HOLDing. Bounded so a genuinely
 // login-walled skill (no robot has the session) can't drain the pool, but high

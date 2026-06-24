@@ -5,6 +5,7 @@ import {
   freshVerifyService,
   isHardFailure,
   isNonObservation,
+  isDeterministicLoginWall,
   isNonRedrawableNonObservation,
   NEEDS_LOGIN_REDRAW_CAP,
   nonObservationRequiredProvider,
@@ -590,6 +591,25 @@ describe("isNonRedrawableNonObservation", () => {
       ),
     ).toBe(false);
     expect(isNonRedrawableNonObservation("nav_timeout: tunnel stall")).toBe(false);
+  });
+});
+
+describe("isDeterministicLoginWall", () => {
+  const R = (step: number) => `needs_login: stored-skill replay provider=google step=${step}`;
+  it("fires when >=2 needs_login draws agree on the same step (northflank step-8)", () => {
+    expect(isDeterministicLoginWall([R(8), R(8), R(8)])).toBe(true);
+  });
+  it("does NOT fire on a single draw (could be a one-off flake)", () => {
+    expect(isDeterministicLoginWall([R(8)])).toBe(false);
+  });
+  it("does NOT fire when draws disagree on the step (non-deterministic)", () => {
+    expect(isDeterministicLoginWall([R(8), R(3)])).toBe(false);
+  });
+  it("ignores non-needs_login reasons when checking agreement", () => {
+    expect(
+      isDeterministicLoginWall([R(8), "step_failed: stored-skill replay step=2 x", R(8)]),
+    ).toBe(true);
+    expect(isDeterministicLoginWall(["nav_timeout", "transient"])).toBe(false);
   });
 });
 

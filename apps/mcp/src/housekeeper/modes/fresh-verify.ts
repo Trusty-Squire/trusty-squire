@@ -31,6 +31,7 @@ import { passwordForRobot } from "../verify-passwords.js";
 import {
   freshVerifyService,
   freshVerifyConfidenceFromEnv,
+  isDeterministicLoginWall,
   isProviderCapabilityBlocker,
   type ConfidenceOpts,
   type FreshVerifyResult,
@@ -450,10 +451,13 @@ export async function runFreshVerify(
     result.outcomes.length > 0 &&
     result.outcomes.every((o) => o.observation === "non_observation")
   ) {
-    if (result.outcomes.some((o) => isProviderCapabilityBlocker(o.reason, provider))) {
+    if (
+      result.outcomes.some((o) => isProviderCapabilityBlocker(o.reason, provider)) ||
+      isDeterministicLoginWall(result.outcomes.map((o) => o.reason))
+    ) {
       log(
         `[fresh-verify] ${input.service}: no informative samples because replay hit a ` +
-          `provider/session blocker — not rotating the pool`,
+          `provider/session blocker or a deterministic login wall — not rotating the pool`,
       );
     } else {
     log(
