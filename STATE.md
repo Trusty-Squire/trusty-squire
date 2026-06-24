@@ -32,14 +32,29 @@ Driving the uncracked spine (openai/auth0/mongodb-atlas/huggingface/meilisearch)
   cluster→billing path, and the whole flow exceeds the 600s budget. NEXT: pin mongodb's
   credential surface to the org-scoped Access-Manager API-keys route (skip cluster
   creation) + give this multi-step service a longer deadline.
-- **huggingface → RECLASSIFIED (servable via proxy + a nav fix), not a captcha wall.**
-  Direct from the datacenter IP, `/join` returns a temporary `403 suspicious activity ~30
-  min`. **Through the Mac residential proxy (`socks5://100.104.88.126:1081`, egress
-  1.240.236.25) the 403 is GONE** — the bot reaches the signup form via the GitHub path
-  with NO hCaptcha hit, then fails on a stale planner `submit_selector "div > form >
-  button"` (a nav/form bug, not the Enterprise-hCaptcha email wall). NEXT: run HF through
-  the proxy + fix the submit-selector planning. The Enterprise-hCaptcha note applied to
-  the email-form path; the GitHub-OAuth path through a clean IP sidesteps it.
+  - **UPDATE (later 2026-06-23):** bumping the wall-clock budget (`UNIVERSAL_BOT_RUN_TIMEOUT_MS=
+    900000`) did NOT help — the limit is the **24-round post-verify budget**, not wall-clock.
+    The data-type autocomplete fill (`input[role=combobox][aria-autocomplete]` -> ArrowDown +
+    pick) is UNRELIABLE: MongoDB's "data types" field didn't surface options on ArrowDown, so
+    Finish stays disabled and the planner burns the round budget looping. mongodb's full path
+    to a key = ToS + LeafyGreen survey (CRACKED) + data-type autocomplete (flaky) + a
+    cluster->billing detour OR Access-Manager routing + a multi-step keypair modal — the
+    hardest spine service. Needs: reliable autocomplete fill (type-to-filter, not ArrowDown),
+    a `postVerifyMaxRounds` bump, and credential-surface routing to skip the cluster.
+- **huggingface → form-flow CRACKED via proxy; residual = hCaptcha-Enterprise + email.**
+  Direct datacenter IP → `/join` `403 suspicious activity ~30min`. Through the Mac
+  residential proxy (`socks5://100.104.88.126:1081`, egress 1.240.236.25; set
+  `UNIVERSAL_BOT_PROXY_URL` + `UNIVERSAL_BOT_PROXY_ALWAYS=true`) the 403 is gone. The
+  form-fill then died `planning_failed: submit_selector "div > form > button"` because
+  HF's "Next" submit scored 0 in scoreSignupButton and got capped out of the 25-button
+  inventory among nav anchors. FIXED (commit `8039bf2`): scoreSignupButton gives Next/
+  Submit/Join a weak positive so the submit survives ranking, + parseSignupPlan
+  substitutes the best inventory submit when the planner hallucinates one. Live: the bot
+  now FILLS the email form and clicks the REAL submit. RESIDUAL (the documented hard
+  parts): the invisible hCaptcha is **Enterprise** (sitekey bd5f2066…) — 2Captcha
+  returns a token but injection fails — and the verification email is withheld
+  (fresh-domain anti-abuse on trustysquire.ai). `verification_not_sent`. Not the
+  form/nav bug anymore.
 
 ### The generalizable win: deterministic onboarding-survey filler (commit `0c088d5`)
 
