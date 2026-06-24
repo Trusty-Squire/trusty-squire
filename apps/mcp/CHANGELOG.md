@@ -1,5 +1,23 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.18 (2026-06-24)
+
+Stable (`latest`). Verify-replay hardening that drove meilisearch pending-review
+→ active end-to-end, plus the egress 503 mitigation (#231/#227).
+
+- fix(verify): replay drives the OAuth login inline instead of bailing
+  `needs_login`; restores the product page after a popup-OAuth handshake
+  (`settleAfterOAuth` on the primary path); fills required onboarding-survey
+  comboboxes before a disabled submit.
+- fix(verify): same-provider `needs_login` is redrawable (per-robot session
+  variance, bounded cap); reclaim robots that bail `needs_login`; post-OAuth +
+  deterministic login-wall guards stop a single wall starving the heal sweep.
+- fix(replay): a visible auth gate dominates weak nav keywords in
+  `detectAlreadySignedIn` (no more skipping the OAuth step on a /login shell).
+- fix(egress): `Retry-After` + `scope:"proxy"` on the 503, plus a short-TTL
+  credential-lookup cache — a proxy outage no longer burns escalation rungs and
+  the per-request DB pressure (P1017, #227) is relieved.
+
 ## 0.9.18-rc.1 (2026-06-23)
 
 Prerelease (`next`). Three services cracked end-to-end (meilisearch, firebase,
@@ -24,6 +42,15 @@ gcp) plus the generalizing bot fixes that did it.
   (`extractGoogleApiKeyFromCredentials`) pulls the auto-created "Browser key"
   from the GCP credentials page once a project exists — the same AIzaSy is the
   firebase web apiKey AND a GCP API key, so one extractor covers both.
+
+## 0.9.17 (2026-06-23)
+
+Stable (`latest`). Promotes the 0.9.17 line (rc.1–rc.5) from staging: anti-bot
+fingerprint hardening (in-iframe WebGL spoof + real-GPU remote-CDP), the
+refuse-walled provision gate for BYO anchors, semantic-nav + verifier hardening,
+the egress-grant resilient proxy path, per-service capture isolation, the
+shopping pre-bot signup-link resolver, and the queue/spine + test-debt cleanup
+that gets the suite fully green. See the rc entries below for the detail.
 
 ## 0.9.17-rc.5 (2026-06-23)
 
