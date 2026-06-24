@@ -1749,8 +1749,23 @@ async function executeStep(
     case "click": {
       let inventory = await browser.extractInteractiveElements();
       inventory = await maybeRefreshInventoryForHydratedClick(step, browser, inventory);
-      if (isLikelySubmitClick(step)) {
+      // Fill the preconditions of a disabled submit BEFORE clicking it. The
+      // text-gated isLikelySubmitClick only catches "create account / sign up"
+      // wording; a post-OAuth ONBOARDING SURVEY (meilisearch: a required
+      // role/use-case dropdown gating a "Continue") has a neutral button label,
+      // so detect the disabled-submit state directly. fillRequiredComboboxes is
+      // exactly what the discover bot runs here — the replay just never did, so
+      // every survey-gated skill died "target is disabled after 15s" the moment
+      // it cleared OAuth. Cheap DOM check; only fills when something is actually
+      // unselected.
+      if (isLikelySubmitClick(step) || (await browser.hasDisabledSubmit().catch(() => false))) {
         await autofillCommonIdentityFieldsBeforeSubmit(browser, templateValues);
+        const picked = await browser.fillRequiredComboboxes().catch(() => [] as string[]);
+        if (picked.length > 0) {
+          console.error(
+            `[replay] filled ${picked.length} required combobox(es) before submit: ${picked.join(", ")}`,
+          );
+        }
         inventory = await browser.extractInteractiveElements().catch(() => inventory);
       }
       await checkRequiredAgreementBoxesBeforeSubmitClick(browser, step);
