@@ -2336,6 +2336,13 @@ async function executeStep(
     }
 
     case "extract_via_regex": {
+      // Settle any navigation the previous step triggered before polling —
+      // MEASURED 2026-06-24: clerk's "Create application" click (step 5)
+      // redirects to the app dashboard where the sk_ key renders async, so the
+      // poll below could start (and exhaust) against the pre-redirect page.
+      // verify-244 raced this and missed the key; verify-245 didn't. A DOM-
+      // interactive settle makes the poll start on the right surface.
+      await browser.waitForInteractiveDom().catch(() => undefined);
       // rc.18 — poll the page text for the credential. The previous
       // step (click Create / Generate / etc.) returns after a fixed
       // 1s settle, but services like Railway render the new-token
