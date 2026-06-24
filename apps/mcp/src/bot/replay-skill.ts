@@ -124,6 +124,20 @@ export interface ReplayInput {
    */
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>;
   /**
+   * Drives an interactive provider sign-in when the OAuth walk lands on a
+   * login/identifier page instead of a chooser/consent. Replay otherwise bails
+   * `needs_login` here — but the full discover bot would just type the
+   * password, and a freshly-created robot account lands on the identifier page
+   * the first time a given relying party requests OAuth even with a live
+   * session. The verifier wires this to the robot's credentials
+   * (verify-passwords.json) + `browser.loginGoogleInline`; the live-user
+   * router omits it (no stored end-user password to drive). Resolves true when
+   * the sign-in progressed (walk continues), false to fall through to the
+   * existing needs_login bail. Same caller-injected-transport separation as
+   * `fetchEmailCode`.
+   */
+  driveOAuthLogin?: (provider: OAuthProviderId) => Promise<boolean>;
+  /**
    * Chrome profile whose OAuth-session marker should be trusted for
    * replay-time provider checks. Fresh-identity verifier replays pass the
    * robot profile; normal router replays omit this and use the default profile.
@@ -560,6 +574,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         input.profileDir,
         input.preferredOAuthProvider,
         skill.steps[i + 1],
+        input.driveOAuthLogin,
       );
       if (execOutcome.kind === "needs_login") {
         return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
@@ -1602,6 +1617,7 @@ async function executeStep(
   profileDir?: string,
   preferredOAuthProvider?: OAuthProviderId,
   nextStep?: SkillStep,
+  driveOAuthLogin?: (provider: OAuthProviderId) => Promise<boolean>,
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
     case "navigate": {
@@ -1714,7 +1730,7 @@ async function executeStep(
       // chooser + basic consent out of band so a one-account capture replays for
       // an N-account user. Fast no-op when the round-trip already auto-completed
       // (single account → first state is not_provider / popup-closed → "ok").
-      const walk = await walkOAuthConsent(browser, step.provider);
+      const walk = await walkOAuthConsent(browser, step.provider, driveOAuthLogin);
       if (walk === "needs_login") {
         return { kind: "needs_login", provider: step.provider };
       }
@@ -4354,9 +4370,25 @@ async function clickConsentAffordance(browser: BrowserController): Promise<boole
 export async function walkOAuthConsent(
   browser: BrowserController,
   providerId: OAuthProviderId,
+  driveOAuthLogin?: (provider: OAuthProviderId) => Promise<boolean>,
 ): Promise<"ok" | "needs_login"> {
   const provider = OAUTH_PROVIDERS[providerId];
   const MAX_NAV = 6;
+  // Bound the inline-login drive to ONE attempt — a credential that doesn't
+  // clear the identifier/challenge after a full type-through is a real wall
+  // (wrong password, 2SV the verifier can't satisfy), and re-driving would just
+  // burn MAX_NAV iterations re-typing into the same dead form.
+  let loginDriven = false;
+  // When the provider supports an inline login drive, the identifier page is
+  // recoverable, not terminal: try the credential type-through before bailing.
+  const tryDriveLogin = async (): Promise<boolean> => {
+    if (driveOAuthLogin === undefined || loginDriven) return false;
+    loginDriven = true;
+    console.error(`[replay-oauth] ${providerId} login page — driving inline sign-in`);
+    const ok = await driveOAuthLogin(providerId).catch(() => false);
+    console.error(`[replay-oauth] inline sign-in ${ok ? "progressed" : "did not clear the login page"}`);
+    return ok;
+  };
   for (let i = 0; i < MAX_NAV; i++) {
     if (browser.oauthPageClosed()) return "ok"; // popup closed → back on service
     const url = browser.currentUrl();
@@ -4391,6 +4423,7 @@ export async function walkOAuthConsent(
       continue;
     }
     if (providerId === "google" && /\/signin\/identifier\b/i.test(url)) {
+      if (await tryDriveLogin()) continue;
       console.error(`[replay-oauth] google identifier page — needs_login`);
       return "needs_login";
     }
@@ -4398,6 +4431,10 @@ export async function walkOAuthConsent(
     console.error(`[replay-oauth] state=${state} url=${url.slice(0, 100)}`);
     if (state === "not_provider") return "ok"; // flow left the provider
     if (state === "challenge" || state === "needs_login") {
+      // A password/identifier screen is recoverable when we hold the
+      // credential — drive the sign-in once before treating it as terminal.
+      // (A genuine 2SV/verify-it's-you challenge won't clear and falls through.)
+      if (await tryDriveLogin()) continue;
       if (process.env.REPLAY_DEBUG) {
         try {
           writeFileSync(

@@ -6798,6 +6798,92 @@ export class BrowserController {
     return this.page === null || this.page.isClosed();
   }
 
+  // Drive a Google sign-in on the ACTIVE OAuth page (already sitting at
+  // accounts.google.com/.../identifier). The whole point: replay must not bail
+  // `needs_login` where the full discover bot would just type the password —
+  // a freshly-created robot account lands on the identifier page the first time
+  // a given relying party requests OAuth even with a live session, and the
+  // robot's credentials are available to the verifier. Mirrors the proven
+  // tools/google-login-fleet.mjs in-page steps (email → Enter → password →
+  // Enter → ToS/continue speedbumps) but operates on `this.page` instead of
+  // navigating to myaccount — in the OAuth flow the success terminus is the
+  // consent screen or the return to the relying party, NOT myaccount. Returns
+  // true when the flow progressed off the Google identifier/password screens
+  // (or the popup closed); false on any failure, so the caller can fall back to
+  // its existing needs_login path. Never logs the password.
+  async loginGoogleInline(email: string, password: string): Promise<boolean> {
+    const page = this.page;
+    if (page === null || page.isClosed()) return false;
+    const onIdentifierOrPwd = (): boolean =>
+      /\/signin\/(?:identifier|v\d+\/(?:identifier|challenge|signin)|challenge|pwd|password)/i.test(
+        page.url(),
+      );
+    try {
+      // Cookie-consent wall (EU surfaces) — best-effort.
+      await page
+        .evaluate(() => {
+          const want = /^(accept all|i agree|agree|accept|reject all)$/i;
+          for (const b of Array.from(document.querySelectorAll("button,[role=button]"))) {
+            if (want.test((b.textContent ?? "").trim())) {
+              (b as HTMLElement).click();
+              return;
+            }
+          }
+        })
+        .catch(() => undefined);
+      await page.waitForTimeout(1200);
+      // Email — #identifierId, never input[type=email] alone (Google uses a
+      // custom input). Only fill if the identifier field is actually present;
+      // a flow already past identifier (parked on the password screen) skips it.
+      const EMAIL = '#identifierId, input[name="identifier"], input[type="email"]';
+      const emailField = await page.$(EMAIL);
+      if (emailField !== null) {
+        await page.fill(EMAIL, email).catch(() => undefined);
+        await page.waitForTimeout(400);
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(6000);
+      }
+      // Password.
+      const PW = 'input[type="password"][name="Passwd"], input[type="password"]';
+      await page.waitForSelector(PW, { state: "visible", timeout: 15_000 });
+      await page.fill(PW, password).catch(() => undefined);
+      await page.waitForTimeout(400);
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(7000);
+      // New-account ToS speedbump + OAuth follow-ons — patient (renders late).
+      for (let i = 0; i < 8; i++) {
+        if (page.isClosed()) return true; // popup closed → handshake done
+        const clicked = await page
+          .evaluate(() => {
+            const want =
+              /^(not now|skip|confirm|i understand|i agree|accept|agree|got it|continue|allow|done|maybe later|next)$/i;
+            for (const b of Array.from(
+              document.querySelectorAll("button,[role=button],a,input[type=submit]"),
+            )) {
+              const t = (b.textContent ?? (b as HTMLInputElement).value ?? "").trim();
+              if (want.test(t)) {
+                (b as HTMLElement).click();
+                return t;
+              }
+            }
+            return null;
+          })
+          .catch(() => null);
+        if (clicked !== null) {
+          await page.waitForTimeout(3500);
+        } else {
+          if (!onIdentifierOrPwd()) break; // left the sign-in screens → progressed
+          await page.waitForTimeout(2500);
+        }
+      }
+      // Success = we are no longer parked on a Google identifier/password
+      // screen (moved to consent / back to the relying party / popup closed).
+      return page.isClosed() || !onIdentifierOrPwd();
+    } catch {
+      return false;
+    }
+  }
+
   // Which OAuth providers have a LIVE session in this profile's cookie jar.
   // The logged-in-providers.json marker is a memo that drifts out of sync
   // (a --force-relogin clears it, a misclassified run clears it, a parallel

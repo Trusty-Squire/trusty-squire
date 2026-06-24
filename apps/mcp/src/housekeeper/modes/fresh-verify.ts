@@ -26,6 +26,7 @@ import {
   verifyPoolConfigured,
 } from "../identity-pool.js";
 import { replenishVerifyPool } from "../robot-replenish.js";
+import { passwordForRobot } from "../verify-passwords.js";
 import {
   freshVerifyService,
   freshVerifyConfidenceFromEnv,
@@ -204,6 +205,23 @@ async function defaultReplayStoredSkill(
     await browser.start();
     const preferredOAuthProvider =
       input.preferredOAuthProvider ?? input.identity.providers[0];
+    // Inline OAuth login drive: when the walk hits a Google identifier/password
+    // screen, type the robot's credential through instead of bailing
+    // needs_login — the discover bot would do exactly this, and a freshly-minted
+    // robot account lands on the identifier page the first time a given relying
+    // party requests OAuth even with a live session. Google-only for now (the
+    // pool is Cloud Identity / google-provider); other providers fall through.
+    const robotPassword = passwordForRobot({
+      id: input.identity.id,
+      email: input.identity.email,
+    });
+    const driveOAuthLogin =
+      robotPassword !== null
+        ? async (provider: OAuthProviderId): Promise<boolean> => {
+            if (provider !== "google") return false;
+            return browser.loginGoogleInline(input.identity.email, robotPassword);
+          }
+        : undefined;
     const replay = replaySkill({
       skill: input.skill,
       browser,
@@ -213,6 +231,7 @@ async function defaultReplayStoredSkill(
       templateValues: verifierTemplateValues(input.skill, input.emailAlias),
       ...(preferredOAuthProvider !== undefined ? { preferredOAuthProvider } : {}),
       ...(input.fetchEmailCode !== undefined ? { fetchEmailCode: input.fetchEmailCode } : {}),
+      ...(driveOAuthLogin !== undefined ? { driveOAuthLogin } : {}),
     });
     if (input.replayTimeoutMs === undefined) return await replay;
     return await Promise.race([
