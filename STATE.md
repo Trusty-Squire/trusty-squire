@@ -14,6 +14,38 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ---
 
+## High-value spine sweep (2026-06-23) — 3/5 cracked + a generalizable survey filler
+
+Driving the uncracked spine (openai/auth0/mongodb-atlas/huggingface/meilisearch):
+
+- **auth0 → ok** (2 creds). The existing bot already handles it — a free win once attempted.
+- **openai → ok** (1 api_key). Google-OAuth signup reached a key with no phone gate on the run.
+- **meilisearch → ok** (1 api_key). CRACKED via the new onboarding-survey filler (below).
+- **mongodb-atlas → OPEN** (`oauth_onboarding_failed`). Same survey-gate CLASS, different
+  widget: MongoDB's **LeafyGreen UI** comboboxes are `<div role="combobox">` with NO
+  data-cy anchor (only a dynamic `aria-controls`/shared class) + an autocomplete-input
+  multi-select ("data types"). The filler detects the disabled submit but finds no
+  data-cy-addressable trigger → no-op. Needs a LeafyGreen-specific selector strategy.
+- **huggingface → OPEN.** `/join` returned a temporary IP block (`403 suspicious activity
+  from your network, ~30 min`) from prior datacenter-IP activity, so the GitHub-OAuth
+  bypass of its hCaptcha-Enterprise email wall couldn't even be tested. Retry from a clean
+  IP / residential proxy; the email path stays an Enterprise-hCaptcha wall (rqdata blob).
+
+### The generalizable win: deterministic onboarding-survey filler (commit `0c088d5`)
+
+The dominant `oauth_onboarding_failed` blocker is a post-OAuth "tell us about yourself"
+survey whose required cmdk/Radix selects gate a disabled submit; the greedy planner opens
+the dropdowns but never commits, loops on a Next it can't enable, and stalls.
+`hasDisabledSubmit()` + `fillRequiredComboboxes()` (browser.ts), fired once in
+postVerifyLoop, open each unfilled required select and commit the first option via a real
+Playwright locator click. Unfilled is detected by Radix's `data-placeholder` attribute
+(present even when the trigger PREVIEWS the first option — meilisearch's role→Founder/CTO
+stayed uncommitted), empty text, or a Select/Choose/Pick placeholder. Live: meilisearch
+satisfied all 4 selects → Next enabled → project created → key extracted. Covers the
+cmdk/Radix majority; LeafyGreen (mongodb) and native-tile surveys are separate widgets.
+
+---
+
 ## `firebase` / `gcp` — Google Cloud project-creation is an IDENTITY wall, then an MFA wall (2026-06-23)
 
 ### ✓ CONFIRMED: the verify-robot pool can't create GCP projects (org-policy), not a nav/form bug
