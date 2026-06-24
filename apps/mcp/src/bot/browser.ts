@@ -4144,7 +4144,7 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     try {
       const responseKey = extractHcaptchaResponseKeyFromToken(token);
-      return await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
+      const diag = await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
         const widgetIds = new Set<string>();
         const inputs = Array.from(
           document.querySelectorAll<HTMLTextAreaElement>(
@@ -4255,8 +4255,21 @@ export class BrowserController {
         scan(win.___hcaptcha_cfg, 0);
         scan(win.hcaptcha, 0);
 
-        return inputs.length > 0 || widgetIds.size > 0 || callbackFired;
+        return {
+          ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
+          textareas: inputs.length,
+          widgets: widgetIds.size,
+          callbackFired,
+          hasHcaptchaGlobal: win.hcaptcha !== undefined,
+        };
       }, { tok: token, key: responseKey });
+      if (process.env.UNIVERSAL_BOT_OAUTH_DEBUG) {
+        console.error(
+          `[captcha] hCaptcha inject diag: ok=${diag.ok} textareas=${diag.textareas} ` +
+            `widgets=${diag.widgets} callbackFired=${diag.callbackFired} hcaptchaGlobal=${diag.hasHcaptchaGlobal}`,
+        );
+      }
+      return diag.ok;
     } catch {
       return false;
     }

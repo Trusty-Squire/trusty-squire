@@ -5501,7 +5501,12 @@ export class SignupAgent {
                 rqdata: null,
               }));
               steps.push(
-                `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit`,
+                `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit ` +
+                  `[invisible=${solveContext.invisible} rqdata=${
+                    solveContext.rqdata !== null
+                      ? `present(${solveContext.rqdata.length}ch)`
+                      : "MISSING"
+                  } ua=${solveContext.userAgent !== null ? "set" : "none"}]`,
               );
               const solveRes = await this.captchaSolver.solveHcaptcha({
                 sitekey: hSitekey,
