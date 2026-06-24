@@ -314,6 +314,38 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(runSignup).toHaveBeenCalledTimes(2);
   });
 
+  it("reclaims a robot that bailed needs_login (markUnspent) but keeps a post-OAuth step_failed spent", async () => {
+    const marked: string[] = [];
+    const unmarked: string[] = [];
+    let call = 0;
+    const runSignup = vi.fn(async () => {
+      call += 1;
+      // 1st: bailed at provider login (never touched the service) → reclaim.
+      // 2nd: failed AFTER OAuth (account created) → stays spent. 3rd: success.
+      if (call === 1)
+        return { success: false, reason: "needs_login: stored-skill replay provider=google step=1" };
+      if (call === 2)
+        return { success: false, reason: "step_failed: stored-skill replay step=4 target is disabled" };
+      return { success: true, credential: "k" };
+    });
+    await freshVerifyService({
+      service: "meilisearch",
+      provider: "google",
+      identities: POOL8,
+      usage: [],
+      runSignup,
+      markSpent: (id) => marked.push(id),
+      markUnspent: (id) => unmarked.push(id),
+    });
+
+    // Every attempted robot was marked spent up-front; only the needs_login one
+    // was reclaimed.
+    expect(unmarked).toHaveLength(1);
+    expect(marked).toContain(unmarked[0]);
+    // The post-OAuth step_failed robot is NOT reclaimed.
+    expect(unmarked).not.toContain(marked[1]);
+  });
+
   it("same-provider needs_login holds at the redraw cap WITHOUT draining the pool", async () => {
     // A service where NO robot has the session must not burn all 8 — the cap
     // bounds the login draws well below pool size.

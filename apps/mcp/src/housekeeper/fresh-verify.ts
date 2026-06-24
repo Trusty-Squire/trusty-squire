@@ -242,6 +242,11 @@ export async function freshVerifyService(opts: {
     identity: VerifyIdentity,
   ) => Promise<{ success: boolean; credential?: string; reason?: string }>;
   markSpent: (identityId: string, service: string) => void;
+  // Inverse of markSpent — reclaim a robot the verifier marked spent up-front
+  // but which then bailed at the PROVIDER login (needs_login), never touching
+  // the service. Optional: callers without an unspend store keep the
+  // burn-on-attempt behaviour.
+  markUnspent?: (identityId: string, service: string) => void;
   log?: (msg: string) => void;
 }): Promise<FreshVerifyResult> {
   const confidence = opts.confidence ?? {
@@ -383,6 +388,13 @@ export async function freshVerifyService(opts: {
     if (observation === "non_observation") {
       const code = failureCode(res.reason);
       const requiredProvider = nonObservationRequiredProvider(res.reason);
+      // needs_login means the robot bailed at the PROVIDER login and never
+      // touched the service — it is NOT a returning user, so reclaim the seat
+      // the up-front markSpent took. (step_failed AFTER OAuth means an account
+      // WAS created → stays spent.)
+      if (code === "needs_login") {
+        opts.markUnspent?.(identity.id, opts.service);
+      }
       const holdNonRedrawable = (): void => {
         lastEval = evaluateConfidence(successes, failures, {
           ...confidence,

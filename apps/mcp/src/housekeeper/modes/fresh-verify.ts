@@ -23,6 +23,7 @@ import {
   loadIdentities,
   loadUsage,
   recordSpent,
+  recordUnspent,
   verifyPoolConfigured,
 } from "../identity-pool.js";
 import { replenishVerifyPool } from "../robot-replenish.js";
@@ -418,6 +419,7 @@ export async function runFreshVerify(
     usage: pool.usage,
     runSignup,
     markSpent: (id, svc) => recordSpent(id, svc, new Date().toISOString()),
+    markUnspent: (id, svc) => recordUnspent(id, svc),
     log,
   });
 
