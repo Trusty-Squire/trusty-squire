@@ -4585,6 +4585,141 @@ export class BrowserController {
     return null;
   }
 
+  // Deterministically satisfy required, currently-EMPTY combobox/listbox
+  // selectors (cmdk / Radix / Headless UI multi-selects) that gate a disabled
+  // submit. The dominant `oauth_onboarding_failed` blocker is a post-OAuth
+  // "tell us about yourself" survey whose required multi-selects the greedy
+  // planner opens but never commits — it concludes "all filled", clicks the
+  // disabled Next, and stalls (MEASURED 2026-06-23, meilisearch
+  // /welcome-informations: `[data-cy=...-trigger]` role=combobox → cmdk-list of
+  // `[role=option][cmdk-item]`). For each unfilled trigger: open it, click the
+  // first non-disabled option (Playwright locator click COMMITS where a raw
+  // coordinate click drops — same as the post-verify combobox path), and Escape
+  // to close the multi-select popover. Returns the labels it satisfied. Tightly
+  // scoped: only acts on placeholder-showing (empty) comboboxes, never a
+  // combobox that already holds a value.
+  async fillRequiredComboboxes(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    let triggerSelectors: string[] = [];
+    try {
+      triggerSelectors = await page.evaluate(() => {
+        const isVisible = (el: Element): boolean => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const out: string[] = [];
+        const seen = new Set<string>();
+        // Candidate trigger elements: an ARIA combobox/listbox-popup, OR a
+        // shadcn/Radix `*-trigger` data-cy button. MEASURED 2026-06-23
+        // (meilisearch): the clickable trigger carries `data-cy="…-trigger"`
+        // but role=combobox lives on a separate inner node with NO data-cy, so
+        // a role-only query found an un-addressable element. Collect both and
+        // resolve each to its nearest stable data-cy selector.
+        const candidates = new Set<Element>();
+        for (const e of Array.from(
+          document.querySelectorAll(
+            "[role='combobox'],[aria-haspopup='listbox'],button[data-cy$='-trigger']",
+          ),
+        )) {
+          candidates.add(e);
+        }
+        for (const el of Array.from(candidates)) {
+          if (!isVisible(el)) continue;
+          const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          // Unfilled signals: (1) Radix sets `data-placeholder` on a SelectTrigger
+          // until a value is committed — present even when the trigger PREVIEWS
+          // the first option (meilisearch's role/referral show "Founder/CTO" /
+          // "Open Source" but stay uncommitted, so Next stays disabled); (2) empty
+          // text; (3) a clear "Select…/Choose…/Pick…" placeholder. NOT
+          // "search"/"add"/"type" — those are filter inputs we must not auto-pick.
+          const hasPlaceholderAttr =
+            el.hasAttribute("data-placeholder") ||
+            el.querySelector("[data-placeholder]") !== null;
+          const placeholderish =
+            hasPlaceholderAttr ||
+            txt.length === 0 ||
+            /^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt);
+          if (!placeholderish) continue;
+          // Resolve a stable data-cy selector — own, or nearest ancestor — so
+          // the locator click can't drift after the portal re-renders.
+          const dcEl =
+            el.getAttribute("data-cy") !== null ? el : el.closest("[data-cy]");
+          const dc = dcEl !== null ? dcEl.getAttribute("data-cy") : null;
+          const sel = dc !== null && dc.length > 0 ? `[data-cy="${dc}"]` : null;
+          if (sel === null || seen.has(sel)) continue;
+          seen.add(sel);
+          out.push(sel);
+        }
+        return out.slice(0, 6);
+      });
+    } catch {
+      return [];
+    }
+    const filled: string[] = [];
+    for (const sel of triggerSelectors) {
+      try {
+        const trigger = page.locator(sel).first();
+        if ((await trigger.count().catch(() => 0)) === 0) continue;
+        await trigger.click({ timeout: 5000 });
+        await page.waitForTimeout(600);
+        const option = page
+          .locator(
+            "[role='option']:not([aria-disabled='true']):not([data-disabled='true'])," +
+              "[cmdk-item]:not([aria-disabled='true']):not([data-disabled='true'])",
+          )
+          .first();
+        if ((await option.count().catch(() => 0)) > 0) {
+          const name = ((await option.textContent().catch(() => "")) ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 40);
+          await option.click({ timeout: 5000 });
+          filled.push(`${sel} → ${name}`);
+          await page.waitForTimeout(300);
+        }
+        // Close the (multi-select) popover so the next trigger isn't occluded.
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(200);
+      } catch {
+        // Best-effort per combobox — a miss falls back to the planner.
+      }
+    }
+    return filled;
+  }
+
+  // True when a visible advance/submit button (Next / Continue / Create /
+  // Register / Submit / Get started / Finish) is currently DISABLED. The gate
+  // for the deterministic combobox filler: only auto-satisfy a survey's
+  // required selects when something is actually blocking forward progress.
+  async hasDisabledSubmit(): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      return await this.page.evaluate(() => {
+        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up)\b/i;
+        for (const el of Array.from(document.querySelectorAll("button,[role='button']"))) {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          const disabled =
+            (el as HTMLButtonElement).disabled === true ||
+            el.getAttribute("aria-disabled") === "true" ||
+            el.getAttribute("disabled") !== null;
+          if (!disabled) continue;
+          // A disabled advance/submit button gates the survey. Match by verb
+          // text OR by type=submit (meilisearch's button-register is a
+          // type=submit whose visible label is icon+text, so a text-only match
+          // missed it).
+          const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          const isSubmit = (el as HTMLButtonElement).type === "submit";
+          if (re.test(txt) || isSubmit) return true;
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
+  }
+
   async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(async (rawPrefix) => {

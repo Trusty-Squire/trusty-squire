@@ -12085,6 +12085,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // to the planner instead of re-navigating the credentials page every round.
     const firebaseGcpSlug = args.service.toLowerCase().replace(/[^a-z0-9]/g, "");
     const triedProjectIds = new Set<string>();
+    // Post-OAuth onboarding-survey guard: deterministically satisfy required
+    // cmdk/Radix multi-selects that gate a disabled submit, at most once, so the
+    // greedy planner doesn't loop on a Next it can't enable.
+    let comboboxFillAttempted = false;
     const credentialExtractionFlow = new CredentialExtractionFlow();
     const syntheticCapture = new PostSignupSyntheticCapture();
     const loginFlow = new PostSignupLoginFlow();
@@ -12160,6 +12164,35 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           args.steps.push(
             `firebase/gcp: no Browser key on the credentials page for ${pid} yet — ` +
               `falling back to the planner`,
+          );
+        }
+      }
+      // Onboarding-survey unblock. The dominant `oauth_onboarding_failed`
+      // blocker is a post-OAuth survey whose required cmdk/Radix multi-selects
+      // the planner opens but never commits — it then loops on a disabled Next
+      // and stalls. When an advance button is DISABLED, deterministically pick
+      // the first option in each unfilled required select once, so the gate
+      // clears and the planner can advance. Tightly gated (disabled submit +
+      // empty placeholder selects only) and at most once per loop.
+      if (!comboboxFillAttempted) {
+        try {
+          if (await this.browser.hasDisabledSubmit()) {
+            comboboxFillAttempted = true;
+            const picked = await this.browser.fillRequiredComboboxes();
+            args.steps.push(
+              picked.length > 0
+                ? `Post-verify: satisfied ${picked.length} required onboarding select(s) ` +
+                    `to clear a disabled submit — ${picked.join(", ")}`
+                : `Post-verify: disabled submit detected but no fillable required select ` +
+                    `found (combobox-fill no-op)`,
+            );
+            if (picked.length > 0) {
+              await this.browser.waitForFormReady().catch(() => undefined);
+            }
+          }
+        } catch (err) {
+          args.steps.push(
+            `Post-verify: combobox-fill errored (${err instanceof Error ? err.message : String(err)})`,
           );
         }
       }
