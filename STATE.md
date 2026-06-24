@@ -21,15 +21,25 @@ Driving the uncracked spine (openai/auth0/mongodb-atlas/huggingface/meilisearch)
 - **auth0 → ok** (2 creds). The existing bot already handles it — a free win once attempted.
 - **openai → ok** (1 api_key). Google-OAuth signup reached a key with no phone gate on the run.
 - **meilisearch → ok** (1 api_key). CRACKED via the new onboarding-survey filler (below).
-- **mongodb-atlas → OPEN** (`oauth_onboarding_failed`). Same survey-gate CLASS, different
-  widget: MongoDB's **LeafyGreen UI** comboboxes are `<div role="combobox">` with NO
-  data-cy anchor (only a dynamic `aria-controls`/shared class) + an autocomplete-input
-  multi-select ("data types"). The filler detects the disabled submit but finds no
-  data-cy-addressable trigger → no-op. Needs a LeafyGreen-specific selector strategy.
-- **huggingface → OPEN.** `/join` returned a temporary IP block (`403 suspicious activity
-  from your network, ~30 min`) from prior datacenter-IP activity, so the GitHub-OAuth
-  bypass of its hCaptcha-Enterprise email wall couldn't even be tested. Retry from a clean
-  IP / residential proxy; the email path stays an Enterprise-hCaptcha wall (rqdata blob).
+- **mongodb-atlas → survey CRACKED, OPEN on billing+budget.** Its onboarding uses
+  MongoDB's **LeafyGreen UI** (`<button data-lgid="lg-button">Select</button>`, no
+  data-cy/data-placeholder) + an autocomplete-input "data types" multiselect. The filler
+  now handles both (lg-button by index, autocomplete-list inputs by ArrowDown+pick) and
+  the survey clears fully (commits `b0003ed`, `2f07f37`). Past the survey the bot reaches
+  **"Create deployment" → a billing-address form (name + country)** AND, on a different
+  run, **"Create API Key"** directly. RESIDUAL: the Admin API key is under Access
+  Manager and needs NO cluster, but the planner sometimes detours into the
+  cluster→billing path, and the whole flow exceeds the 600s budget. NEXT: pin mongodb's
+  credential surface to the org-scoped Access-Manager API-keys route (skip cluster
+  creation) + give this multi-step service a longer deadline.
+- **huggingface → RECLASSIFIED (servable via proxy + a nav fix), not a captcha wall.**
+  Direct from the datacenter IP, `/join` returns a temporary `403 suspicious activity ~30
+  min`. **Through the Mac residential proxy (`socks5://100.104.88.126:1081`, egress
+  1.240.236.25) the 403 is GONE** — the bot reaches the signup form via the GitHub path
+  with NO hCaptcha hit, then fails on a stale planner `submit_selector "div > form >
+  button"` (a nav/form bug, not the Enterprise-hCaptcha email wall). NEXT: run HF through
+  the proxy + fix the submit-selector planning. The Enterprise-hCaptcha note applied to
+  the email-form path; the GitHub-OAuth path through a clean IP sidesteps it.
 
 ### The generalizable win: deterministic onboarding-survey filler (commit `0c088d5`)
 
