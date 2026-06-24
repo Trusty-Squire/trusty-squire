@@ -800,15 +800,38 @@ async function preValidateStep(
     }
 
     case "click_oauth_button": {
-      const inventory = await browser.extractInteractiveElements();
-      const matches = preferNonConsentClickMatches(
+      let inventory = await browser.extractInteractiveElements();
+      let matches = preferNonConsentClickMatches(
         inventory.filter((el) => matchesClickHint(el, step.text_match)),
         step.text_match,
       );
+      // Hardening (MEASURED 2026-06-24, the verifier sweep): the synthesizer
+      // hardcodes step.text_match to "Google"/"GitHub", but the OAuth button
+      // often (a) renders only after the SPA hydrates, or (b) is an icon /
+      // "Continue with Google" affordance the literal-word match misses — and a
+      // step-1 OAuth miss kills the WHOLE replay (the dominant verifier-hold
+      // mode). So when text_match finds nothing: re-read after a hydration
+      // settle, then fall back to the bot's provider-based finder
+      // (findOAuthButton matches by provider keyword in text/aria/href + OAuth
+      // scoring — the SAME logic discover used to find this button to begin
+      // with). The button identity is the provider, not a literal string.
       if (matches.length === 0) {
+        await browser.wait(2);
+        await browser.waitForInteractiveDom().catch(() => undefined);
+        inventory = await browser.extractInteractiveElements().catch(() => inventory);
+        matches = preferNonConsentClickMatches(
+          inventory.filter((el) => matchesClickHint(el, step.text_match)),
+          step.text_match,
+        );
+      }
+      if (matches.length === 0) {
+        const byProvider = findOAuthButton(inventory, step.provider);
+        if (byProvider !== null) {
+          return { ok: true, match: byProvider };
+        }
         return {
           ok: false,
-          reason: `No element matches text_match=${JSON.stringify(step.text_match)} for ${step.provider} OAuth button.`,
+          reason: `No ${step.provider} OAuth button found (text_match=${JSON.stringify(step.text_match)} + provider scan).`,
         };
       }
       // Multiple matches — the disambiguator (C3) picks by role first,
@@ -1590,7 +1613,18 @@ async function executeStep(
       const targetUrl = normalizeKindeReplayNavigateUrl(
         rebaseSubdomain(step.url, browser.currentUrl()),
       );
-      await browser.goto(targetUrl);
+      try {
+        await browser.goto(targetUrl);
+      } catch (err) {
+        // A goto can crash transiently ("Target page, context or browser has
+        // been closed") under heavy concurrency or a redirect race. Retry once
+        // before failing — a genuinely-dead context throws again and surfaces a
+        // clean reason instead of a raw Playwright stack. (MEASURED 2026-06-24,
+        // verifier sweep: step-2 goto crashes under 2-wide concurrency.)
+        await browser.wait(1);
+        await browser.goto(targetUrl);
+        void err;
+      }
       // Settle for SPA-style apps that fire route handlers post-
       // DOMContentLoaded. A fixed 2s under-waits heavy authenticated
       // dashboards (pusher's App Keys, imagekit's onboarding step rendered
