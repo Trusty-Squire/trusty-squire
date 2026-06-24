@@ -52,6 +52,11 @@ export class PostSignupRecoveryState {
   lastNavigatedTo: string | null = null;
   triedWizardForward = new Set<string>();
   triedWizardLeafChoices = new Set<string>();
+  // Once true, the STALLED-wizard escape-to-dashboard has been attempted — a
+  // re-presenting onboarding wizard whose clicks don't register overlays the
+  // real product dashboard, so we navigate to a settings/keys/home nav link to
+  // reach the credential surface behind it (cloudinary /app/welcome).
+  triedWizardEscape = false;
 }
 
 export interface RecoveryClickableElement {

@@ -796,6 +796,49 @@ const API_KEYS_HREF =
 const API_KEYS_TEXT =
   /\b(?:api|access|secret|auth|personal\s+access)\s*(?:keys?|tokens?)\b/i;
 
+// Find a settings / API-keys / dashboard nav link to ESCAPE a stuck onboarding
+// wizard. MEASURED 2026-06-24 (cloudinary /app/welcome): the welcome survey's
+// clicks don't register (STALLED), but it's an OVERLAY on the real product
+// dashboard whose sidebar — Home → /app/home, Settings → /app/settings — is
+// already in the inventory. Navigating to settings/keys/home reaches the
+// credential surface behind the wizard. Prefers settings/account/keys (where
+// API credentials live) over a bare home/dashboard link. Anchor href is
+// authoritative; text is the backstop (cloudinary's Settings link is icon-only,
+// no visible text — only the href identifies it).
+const WIZARD_ESCAPE_HREF =
+  /\/(?:settings|account|api[-_]?keys?|developers?|dashboard|home|console)(?:\/|$|\?)/i;
+const WIZARD_ESCAPE_TEXT =
+  /\b(?:settings|account|dashboard|api\s*keys?|developers?|console)\b/i;
+export function findWizardEscapeNavLink(
+  inventory: readonly InteractiveElement[],
+  alreadyClicked: ReadonlySet<string> = new Set(),
+): InteractiveElement | null {
+  let best: { el: InteractiveElement; score: number } | null = null;
+  for (const el of inventory) {
+    // Escape via a NAV LINK (anchor), not a wizard survey button — a role
+    // option like "Back End Developer" is a button and must never be mistaken
+    // for a "Developers" settings link.
+    const isNavLink = el.tag === "a" || el.role === "link";
+    if (!isNavLink || el.visible === false) continue;
+    if (alreadyClicked.has(el.selector)) continue;
+    const href = el.href ?? "";
+    const text = [el.visibleText, el.ariaLabel, el.title, el.labelText, el.iconLabel]
+      .filter((s): s is string => s !== null && s !== undefined)
+      .join(" ");
+    const hrefHit = href.length > 0 && WIZARD_ESCAPE_HREF.test(href);
+    const textHit = WIZARD_ESCAPE_TEXT.test(text);
+    if (!hrefHit && !textHit) continue;
+    let score = 0;
+    if (hrefHit) score += 4; // a navigable target beats a text guess
+    // settings/account/keys are where API credentials live — rank above home.
+    if (/\/(?:settings|account|api[-_]?keys?|developers?)(?:\/|$|\?)/i.test(href)) score += 3;
+    if (/\b(?:settings|account|api\s*keys?|developers?)\b/i.test(text)) score += 2;
+    if (el.tag === "a" && href.length > 0) score += 1;
+    if (best === null || score > best.score) best = { el, score };
+  }
+  return best?.el ?? null;
+}
+
 export function findApiKeysNavLink(
   inventory: readonly InteractiveElement[],
   alreadyClicked: ReadonlySet<string> = new Set(),
@@ -12881,6 +12924,41 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             } catch (err) {
               args.steps.push(
                 `Post-verify: force-advance click failed (${err instanceof Error ? err.message : String(err)}) — falling through.`,
+              );
+            }
+          }
+        }
+        // Wizard-escape before giving up. A re-presenting onboarding wizard
+        // whose clicks don't register is an OVERLAY on the real product
+        // dashboard — its sidebar (Home/Settings/API Keys) is already in the
+        // inventory. Navigate to a settings/keys/home nav link to reach the
+        // credential surface behind it (MEASURED 2026-06-24, cloudinary
+        // /app/welcome: the survey no-ops but Settings → /app/settings is right
+        // there). One attempt, then honor the stall.
+        if (!recovery.triedWizardEscape) {
+          recovery.triedWizardEscape = true;
+          const escapeLink = findWizardEscapeNavLink(inventory, recovery.clickedKeysLinks);
+          if (escapeLink !== null) {
+            recovery.clickedKeysLinks.add(escapeLink.selector);
+            const label = escapeLink.visibleText ?? escapeLink.ariaLabel ?? escapeLink.href ?? "the dashboard";
+            args.steps.push(
+              `Post-verify: STALLED in an onboarding wizard — escaping to ${JSON.stringify(label.slice(0, 40))} ` +
+                `(the wizard overlays the product dashboard; the key surface is behind it).`,
+            );
+            try {
+              if (escapeLink.href !== undefined && escapeLink.href !== null && escapeLink.href.length > 0) {
+                await this.browser.goto(new URL(escapeLink.href, state.url).toString());
+              } else {
+                await this.browser.click(escapeLink.selector);
+              }
+              await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+              recovery.actionEffects.length = 0;
+              recovery.prevContentSig = null;
+              hint = undefined;
+              continue;
+            } catch (err) {
+              args.steps.push(
+                `Post-verify: wizard-escape navigate failed (${err instanceof Error ? err.message : String(err)}) — honoring the stall.`,
               );
             }
           }
