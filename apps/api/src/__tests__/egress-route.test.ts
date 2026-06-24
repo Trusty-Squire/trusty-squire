@@ -200,8 +200,43 @@ describe("Egress Grants — /v1/egress", () => {
       payload: {},
     });
     expect(res.statusCode).toBe(503);
-    expect(res.json()).toEqual({ error: "egress_temporarily_unavailable", retryable: true });
+    // #231 — the 503 must carry a Retry-After (so a client backs off past the
+    // outage window instead of burning a fixed retry budget) and a scope marker
+    // (so it's distinguishable from an upstream model 503 and treated as
+    // non-rung-consuming).
+    expect(res.headers["retry-after"]).toBe("30");
+    const body = res.json();
+    expect(body.error).toBe("egress_temporarily_unavailable");
+    expect(body.retryable).toBe(true);
+    expect(body.scope).toBe("proxy");
+    expect(body.retry_after_seconds).toBe(30);
     expect(seen).toHaveLength(0);
+  });
+
+  it("serves a repeat request from the credential cache (one DB read per streaming burst, #227/#231)", async () => {
+    const account = await h.deps.accountStore.createAccount("cache@example.test", "C");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const originalFindActive = h.deps.credentialStore.findActive.bind(h.deps.credentialStore);
+    let findActiveCalls = 0;
+    h.deps.credentialStore.findActive = async (reference: string) => {
+      findActiveCalls += 1;
+      return originalFindActive(reference);
+    };
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    for (let i = 0; i < 3; i++) {
+      const res = await h.server.inject({
+        method: "POST",
+        url: `/v1/egress/${grant_id}/v1/chat/completions`,
+        headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
+    }
+    // Three proxied requests, one credential DB read — the rest are cache hits.
+    expect(findActiveCalls).toBe(1);
   });
 
   it("resolves the granted credential by reference instead of listing every account credential", async () => {
