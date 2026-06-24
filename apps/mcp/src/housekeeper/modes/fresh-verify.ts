@@ -167,7 +167,14 @@ function describeReplayOutcomeForFreshVerify(outcome: ReplayOutcome): string {
     case "extraction_failed":
       return `extraction_failed: stored-skill replay step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
     case "needs_login":
-      return `needs_login: stored-skill replay provider=${outcome.provider} step=${outcome.stepIndex}`;
+      // `after_oauth` marks a needs_login that hit AFTER an OAuth step already
+      // authed — a deterministic mid-flow re-auth wall, not the per-robot
+      // session-freshness variance of a handshake-step needs_login. The sampler
+      // keys off this to HOLD immediately instead of redrawing/rotating.
+      return (
+        `needs_login: stored-skill replay provider=${outcome.provider} step=${outcome.stepIndex}` +
+        (outcome.afterOAuth ? " after_oauth" : "")
+      );
     case "skill_demoted":
       return `skill_demoted: stored-skill replay ${outcome.reason}`;
   }

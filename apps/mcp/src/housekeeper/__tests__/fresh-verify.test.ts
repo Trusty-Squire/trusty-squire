@@ -346,6 +346,28 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(unmarked).not.toContain(marked[1]);
   });
 
+  it("a POST-OAuth needs_login (mid-flow re-auth wall) holds on the FIRST draw — no redraw churn", async () => {
+    // MEASURED 2026-06-24 (northflank step=8): a needs_login that hits AFTER
+    // OAuth already authed is a deterministic wall every robot reaches — redraw
+    // + pool rotation only burns the sweep budget. It must HOLD immediately.
+    const marked: string[] = [];
+    const runSignup = vi.fn(async () => ({
+      success: false,
+      reason: "needs_login: stored-skill replay provider=google step=8 after_oauth",
+    }));
+    const res = await freshVerifyService({
+      service: "northflank",
+      provider: "google",
+      identities: POOL8,
+      usage: [],
+      runSignup,
+      markSpent: (id) => marked.push(id),
+    });
+
+    expect(res.verdict).toBe("hold");
+    expect(runSignup).toHaveBeenCalledOnce(); // no redraw on a deterministic wall
+  });
+
   it("same-provider needs_login holds at the redraw cap WITHOUT draining the pool", async () => {
     // A service where NO robot has the session must not burn all 8 — the cap
     // bounds the login draws well below pool size.

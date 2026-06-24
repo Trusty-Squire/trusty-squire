@@ -620,10 +620,19 @@ export function isNonObservation(reason: string | undefined): boolean {
 // non-redrawable HELD the whole skill on one unlucky first draw. The sampler
 // bounds needs_login re-draws separately (NEEDS_LOGIN_REDRAW_CAP) so a service
 // where NO robot has a session still can't burn the entire fleet.
+// A post-OAuth needs_login (the replay already authed, then hit a mid-flow
+// re-auth wall — marked `after_oauth`) is DETERMINISTIC: every robot follows the
+// same stored steps to the same wall, so redrawing or rotating the pool only
+// burns the sweep budget. Treat it like a structural capability gap.
+function isPostOAuthLoginWall(reason: string | undefined): boolean {
+  if (reason === undefined) return false;
+  return failureCode(reason) === "needs_login" && /\bafter_oauth\b/.test(reason);
+}
+
 export function isNonRedrawableNonObservation(reason: string | undefined): boolean {
   if (!isNonObservation(reason)) return false;
   const code = failureCode(reason);
-  return code === "needs_oauth_provider_session";
+  return code === "needs_oauth_provider_session" || isPostOAuthLoginWall(reason);
 }
 
 // A provider/session CAPABILITY blocker (rotating the pool can't fix it):
@@ -643,6 +652,9 @@ export function isProviderCapabilityBlocker(
   if (!isNonObservation(reason)) return false;
   const code = failureCode(reason);
   if (code === "needs_oauth_provider_session") return true;
+  // A post-OAuth re-auth wall can't be rotated away — every robot deterministically
+  // reaches the same mid-flow wall — so don't churn the pool retrying it.
+  if (isPostOAuthLoginWall(reason)) return true;
   if (code === "needs_login") {
     const required = nonObservationRequiredProvider(reason);
     return required !== undefined && required !== runProvider;

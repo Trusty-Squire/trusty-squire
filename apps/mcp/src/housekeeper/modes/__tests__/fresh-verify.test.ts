@@ -190,7 +190,7 @@ describe("runFreshVerify", () => {
     const replay = vi.fn(async () => ({
       kind: "needs_login" as const,
       provider: "github" as const,
-      stepIndex: 0,
+      stepIndex: 0, afterOAuth: false,
     }));
 
     await runFreshVerify(
@@ -418,7 +418,7 @@ describe("runFreshVerify", () => {
     const replay = vi.fn(async () => ({
       kind: "needs_login" as const,
       provider: "github" as const,
-      stepIndex: 0,
+      stepIndex: 0, afterOAuth: false,
     }));
 
     const result = await runFreshVerify(

@@ -194,7 +194,14 @@ export type ReplayOutcome =
   | { kind: "step_failed"; stepIndex: number; reason: string; capturedStep: SkillStep }
   | { kind: "validator_failed"; stepIndex: number; got: string; reason: string }
   | { kind: "extraction_failed"; stepIndex: number; reason: string }
-  | { kind: "needs_login"; provider: "google" | "github"; stepIndex: number }
+  // `afterOAuth` distinguishes the TWO needs_login shapes the verifier must
+  // treat differently: at the OAuth handshake itself (afterOAuth=false) it's
+  // per-robot session-freshness variance (redraw helps); AFTER an OAuth step
+  // already authed (afterOAuth=true) it's a deterministic mid-flow re-auth wall
+  // every robot hits identically — redrawing/rotating the pool only burns the
+  // sweep budget (MEASURED 2026-06-24: northflank ate ~20min of a 25min sweep
+  // churning a step-8 post-OAuth needs_login, starving 18 other services).
+  | { kind: "needs_login"; provider: "google" | "github"; stepIndex: number; afterOAuth: boolean }
   | { kind: "skill_demoted"; reason: string }
   | { kind: "dry_pass"; stepsWalked: number };
 
@@ -445,7 +452,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       if (recovered.kind === "ok") {
         validation = await preValidateStep(step, browser, templateValues);
       } else if (recovered.kind === "needs_login") {
-        return { kind: "needs_login", provider: recovered.provider, stepIndex: i };
+        return { kind: "needs_login", provider: recovered.provider, stepIndex: i, afterOAuth: authedViaOAuth };
       }
     }
     let stepToExecute = step;
@@ -487,7 +494,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       if (fallbackResult.kind === "use_substitute") {
         stepToExecute = fallbackResult.substitute;
       } else if (fallbackResult.kind === "needs_login") {
-        return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i };
+        return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i, afterOAuth: authedViaOAuth };
       } else if (
         step.kind === "fill" &&
         isSkippableAbsentFill(step, validation.reason, i, skill.steps)
@@ -577,7 +584,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         input.driveOAuthLogin,
       );
       if (execOutcome.kind === "needs_login") {
-        return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
+        return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i, afterOAuth: authedViaOAuth };
       }
       // OAuth click succeeded (needs_login already returned above) → we're in
       // an authenticated returning-user session for the rest of the replay.
