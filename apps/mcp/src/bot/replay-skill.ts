@@ -1218,7 +1218,16 @@ export function labelMatchesHint(label: string | null, hint: string): boolean {
 
 function isLikelySubmitClick(step: Extract<SkillStep, { kind: "click" }>): boolean {
   const text = step.text_match.toLowerCase();
-  return /\b(create account|sign up|signup|register|submit)\b/.test(text);
+  // The text that gates the pre-submit prep (identity autofill + required
+  // combobox fill). Beyond the signup-button vocabulary, a "Create <noun>"
+  // button (Create organization / workspace / team / project / app) is the
+  // submit of a post-OAuth onboarding form whose required selects must be
+  // satisfied first. Some of these (posthog's "Create organization") are NOT
+  // html-disabled, so hasDisabledSubmit alone misses them — matching the text
+  // ensures the pre-submit combobox fill runs for the recognized control types.
+  return /\b(?:create\s+(?:account|organi[sz]ation|workspace|team|project|app|application|site|instance)|sign\s?up|signup|register|submit)\b/.test(
+    text,
+  );
 }
 
 async function autofillCommonIdentityFieldsBeforeSubmit(
