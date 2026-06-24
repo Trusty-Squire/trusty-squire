@@ -4674,6 +4674,23 @@ export class BrowserController {
           seen.add(sel);
           out.push(sel);
         }
+        // Autocomplete-list combobox INPUTS that are part of the survey and
+        // still EMPTY (mongodb's required "data types" multiselect). These are
+        // distinct from free-text search boxes: `aria-autocomplete=list/both`
+        // means a fixed option list, and an empty value means unfilled. Click +
+        // pick-first via the same option locator. Addressed by index.
+        const acInputs = Array.from(
+          document.querySelectorAll("input[role='combobox'][aria-autocomplete]"),
+        );
+        for (let i = 0; i < acInputs.length; i++) {
+          const el = acInputs[i] as HTMLInputElement | undefined;
+          if (el === undefined || !isVisible(el)) continue;
+          if ((el.value ?? "").trim().length > 0) continue;
+          const sel = `input[role='combobox'][aria-autocomplete] >> nth=${i}`;
+          if (seen.has(sel)) continue;
+          seen.add(sel);
+          out.push(sel);
+        }
         return out.slice(0, 8);
       });
     } catch {
@@ -4686,6 +4703,12 @@ export class BrowserController {
         if ((await trigger.count().catch(() => 0)) === 0) continue;
         await trigger.click({ timeout: 5000 });
         await page.waitForTimeout(600);
+        // An autocomplete input may only render its option list after a
+        // keystroke — nudge it with ArrowDown so the option locator can resolve.
+        if (sel.includes("input[")) {
+          await page.keyboard.press("ArrowDown").catch(() => undefined);
+          await page.waitForTimeout(400);
+        }
         const option = page
           .locator(
             "[role='option']:not([aria-disabled='true']):not([data-disabled='true'])," +
