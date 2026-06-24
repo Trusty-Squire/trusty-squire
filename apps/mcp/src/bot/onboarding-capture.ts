@@ -146,6 +146,20 @@ export function hasCapturedExtractRound(service: string): boolean {
   return extractCaptured.has(`${slugOf(service)}|${runIdFor(service)}`);
 }
 
+// True iff ANY round has been captured this run. A salvage extract round is only
+// worth writing when there are prior signup-flow rounds to chain it onto — a
+// LONE extract round has no navigate/OAuth steps and can't be replayed (the
+// no_rounds class). Callers gate the salvage on this.
+export function hasCapturedAnyRound(service: string): boolean {
+  return lastRounds.has(slugOf(service));
+}
+
+// The next round index to use for a synthesized/salvage capture round — one past
+// the highest captured round (0 when none captured yet).
+export function nextCaptureRound(service: string): number {
+  return (lastRounds.get(slugOf(service)) ?? -1) + 1;
+}
+
 export interface OnboardingRoundCapture {
   service: string;
   round: number;

@@ -102,7 +102,9 @@ export {
 } from "./credential-extraction-flow.js";
 import {
   captureOnboardingRound,
+  hasCapturedAnyRound,
   hasCapturedExtractRound,
+  nextCaptureRound,
   updateCapturedRoundSemantic,
 } from "./onboarding-capture.js";
 import {
@@ -9325,6 +9327,9 @@ export class SignupAgent {
       }
 
       if (credentials.api_key !== undefined || credentials.username !== undefined) {
+        // Form-fill + email success returns here WITHOUT entering the post-verify
+        // loop, so its extract-round salvage never ran — write one now (mailjet).
+        await this.salvageExtractCaptureIfNeeded(task.service, credentials, false);
         return {
           success: true,
           credentials: { ...credentials, password, email: task.email },
@@ -14064,17 +14069,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // never promoted). When we're about to return a real credential but no
     // extract round was captured this run, write one for the final page so the
     // success becomes a replayable skill instead of an OF#2-only win.
-    if (
-      hasAnyExtractedCredential(credentials) &&
-      !hasCapturedExtractRound(args.service)
-    ) {
-      await this.writeFastPathSyntheticCapture(
-        args.service,
-        capturedRound,
-        oauth,
-        "salvage synthetic extract — credential captured via tracker/background extraction; no planner extract round ran",
-      );
-    }
+    await this.salvageExtractCaptureIfNeeded(args.service, credentials, oauth);
     return credentials;
   }
 
@@ -14093,6 +14088,30 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
   //
   // Best-effort: a capture failure here must NEVER block returning
   // the credential we already have.
+  // Salvage the synthesis path for ANY successful exit (not just the post-verify
+  // loop). When a run returns a real credential but no `extract` round was
+  // captured — the form-fill+email path (mailjet) returns before the post-verify
+  // loop ever runs, so its salvage never fires — write a synthetic extract round
+  // for the final page so the success becomes a replayable skill. Gated on
+  // hasCapturedAnyRound: a LONE extract round (no captured nav/OAuth steps — the
+  // no_rounds class, e.g. galileo's OAuth-fast-path) can't be replayed and would
+  // synth-reject anyway, so don't write one. Idempotent via hasCapturedExtractRound.
+  private async salvageExtractCaptureIfNeeded(
+    service: string,
+    credentials: Record<string, string>,
+    oauth: boolean,
+  ): Promise<void> {
+    if (!hasAnyExtractedCredential(credentials)) return;
+    if (hasCapturedExtractRound(service)) return;
+    if (!hasCapturedAnyRound(service)) return;
+    await this.writeFastPathSyntheticCapture(
+      service,
+      nextCaptureRound(service),
+      oauth,
+      "salvage synthetic extract — credential captured on a non-post-verify exit; no planner extract round ran",
+    );
+  }
+
   private async writeFastPathSyntheticCapture(
     service: string,
     capturedRound: number,

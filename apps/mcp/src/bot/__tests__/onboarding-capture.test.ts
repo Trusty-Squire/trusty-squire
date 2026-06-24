@@ -13,7 +13,9 @@ import {
   CAPTURE_FORMAT_VERSION,
   captureOnboardingRound,
   captureRunOutcome,
+  hasCapturedAnyRound,
   hasCapturedExtractRound,
+  nextCaptureRound,
   resetCaptureChain,
   resolveCaptureDir,
   summarizeRunOutcome,
@@ -580,6 +582,25 @@ describe("hasCapturedExtractRound (synthesis-salvage gate)", () => {
       // Reset clears it for the next run.
       resetCaptureChain(service);
       expect(hasCapturedExtractRound(service)).toBe(false);
+    });
+  });
+});
+
+describe("hasCapturedAnyRound / nextCaptureRound (salvage gating)", () => {
+  it("tracks round presence + next index, and gates the no_rounds case", () => {
+    withCaptureDir(() => {
+      const service = uniqueService();
+      resetCaptureChain(service);
+      // No rounds yet — a lone salvage extract round must NOT be written.
+      expect(hasCapturedAnyRound(service)).toBe(false);
+      expect(nextCaptureRound(service)).toBe(0);
+      captureOnboardingRound(mockRound(0, service));
+      captureOnboardingRound(mockRound(1, service));
+      expect(hasCapturedAnyRound(service)).toBe(true);
+      expect(nextCaptureRound(service)).toBe(2);
+      // A salvage at this point chains onto round 1.
+      resetCaptureChain(service);
+      expect(hasCapturedAnyRound(service)).toBe(false);
     });
   });
 });
