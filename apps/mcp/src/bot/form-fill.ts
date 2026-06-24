@@ -220,12 +220,24 @@ export interface FormFillState {
   lastRoundPageSig: string | null;
   lastNoProgressClickSelectors: ReadonlySet<string>;
   // one-way control-state (review A3): once on the email path, suppress the
-  // OAuth-first scan so a two-stage chooser can't reroute back to Google.
+  // email-CODE gate / submit handling so the flow finishes the email signup.
+  // Set when an email affordance is touched OR a login→signup link is advanced.
   committedToEmailPath: boolean;
+  // STRICT PREFERENCE (Google → email → GitHub). committedToEmailPath alone used
+  // to suppress the OAuth-first scan — so clicking a "Sign up"/"Create one" link
+  // or an email field permanently abandoned a Google button sitting on the very
+  // form we advanced TO (MEASURED 2026-06-24: clerk/the general "hierarchy
+  // ignored" complaint). OAuth suppression now keys off THIS flag instead, which
+  // is set ONLY when Google has been PROVEN unavailable for signup — the
+  // re-route after a no-account Google bounce (detectGoogleNoAccount →
+  // forceFormFill). So a present, un-attempted Google is re-scanned and tried
+  // FIRST; email only wins when Google is absent or proven login-only.
+  oauthProvenUnavailable: boolean;
 }
 
-// The fresh FormFillState at loop entry. `forceFormFill` seeds committedToEmailPath
-// (the re-route after a no-account Google bounce — agent.ts:4645).
+// The fresh FormFillState at loop entry. `forceFormFill` (the re-route after a
+// no-account Google bounce, or UNIVERSAL_BOT_FORCE_FORM) seeds BOTH the email
+// commit and the proven-unavailable flag, so the OAuth scan stays suppressed.
 export function initialFormFillState(forceFormFill = false): FormFillState {
   return {
     errorReplans: 0,
@@ -239,6 +251,7 @@ export function initialFormFillState(forceFormFill = false): FormFillState {
     lastRoundPageSig: null,
     lastNoProgressClickSelectors: new Set(),
     committedToEmailPath: forceFormFill,
+    oauthProvenUnavailable: forceFormFill,
   };
 }
 
@@ -398,8 +411,11 @@ export function decideFormFillStep(
       if (state.committedToEmailPath && obs.codeGate) {
         return terminal({ kind: "submitted" });
       }
-      // OAuth-first scan — suppressed once committed to the email path. [4778]
-      if (obs.oauthCandidatesPresent && !state.committedToEmailPath) {
+      // OAuth-first scan (STRICT Google → email → GitHub). Suppressed ONLY when
+      // Google is proven unavailable for signup (oauthProvenUnavailable), NOT
+      // merely because an email field/link was touched — so a Google button
+      // present on the form we advanced to is still tried FIRST.
+      if (obs.oauthCandidatesPresent && !state.oauthProvenUnavailable) {
         if (obs.oauthButtonHit !== null) {
           return terminal({
             kind: "oauth",

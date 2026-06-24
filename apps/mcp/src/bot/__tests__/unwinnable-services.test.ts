@@ -5,14 +5,17 @@ import { classifyUnwinnable } from "../unwinnable-services.js";
 
 describe("classifyUnwinnable", () => {
   it("routes the known 0% services to manual with a gate + reason", () => {
-    expect(classifyUnwinnable("clerk")?.gate).toBe("spa_broken");
     expect(classifyUnwinnable("cloudflare")?.gate).toBe("max_antibot");
     expect(classifyUnwinnable("vercel")?.gate).toBe("sms_phone");
     expect(classifyUnwinnable("circleci")?.gate).toBe("credit_card");
     expect(classifyUnwinnable("northflank")?.gate).toBe("github_2fa");
-    for (const svc of ["clerk", "cloudflare", "betterstack"]) {
+    for (const svc of ["cloudflare", "vercel", "betterstack"]) {
       expect((classifyUnwinnable(svc)?.reason.length ?? 0)).toBeGreaterThan(10);
     }
+  });
+
+  it("clerk is no longer denylisted (stale spa_broken flag removed 2026-06-24)", () => {
+    expect(classifyUnwinnable("clerk")).toBeNull();
   });
 
   it("normalizes slugs (case / separators / spaces)", () => {

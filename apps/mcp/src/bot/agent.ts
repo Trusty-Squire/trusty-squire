@@ -6981,7 +6981,7 @@ export class SignupAgent {
       // no provider button hit yet). Computing it unconditionally would fire a
       // spurious extractText() every round and diverge from the inline path.
       const needScanShell =
-        oauthCandidates.length > 0 && !state.committedToEmailPath && oauthButtonHitRaw === null;
+        oauthCandidates.length > 0 && !state.oauthProvenUnavailable && oauthButtonHitRaw === null;
       const oauthScanShell =
         needScanShell &&
         (inventory.length <= 1 ||

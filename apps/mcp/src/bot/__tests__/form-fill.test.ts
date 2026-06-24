@@ -131,13 +131,21 @@ describe("decideFormFillStep — C1 pre_plan", () => {
     });
     expect(step.action).toEqual({ kind: "terminal", outcome: { kind: "oauth", selector: "#g", provider: "google" } });
   });
-  it("committedToEmailPath SUPPRESSES the OAuth-first scan (no reroute)", () => {
-    const step = decideFormFillStep(S({ committedToEmailPath: true }), {
+  it("oauthProvenUnavailable SUPPRESSES the OAuth-first scan (no reroute)", () => {
+    const step = decideFormFillStep(S({ oauthProvenUnavailable: true }), {
       ...PRE,
       oauthCandidatesPresent: true,
       oauthButtonHit: { selector: "#g", provider: "google" },
     });
     expect(step.action.kind).toBe("run_planner"); // scan skipped → falls through to planner
+  });
+  it("committedToEmailPath alone does NOT suppress OAuth — a present Google button is still preferred (strict Google→email→GitHub order)", () => {
+    const step = decideFormFillStep(S({ committedToEmailPath: true }), {
+      ...PRE,
+      oauthCandidatesPresent: true,
+      oauthButtonHit: { selector: "#g", provider: "google" },
+    });
+    expect(step.action).toEqual({ kind: "terminal", outcome: { kind: "oauth", selector: "#g", provider: "google" } });
   });
   it("no provider button yet → async-render wait, retry++ (2 for a form, 8 for a shell)", () => {
     const form = decideFormFillStep(S(), { ...PRE, oauthCandidatesPresent: true, oauthScanShell: false });
