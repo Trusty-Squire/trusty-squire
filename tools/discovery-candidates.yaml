@@ -18,23 +18,20 @@
 # --from=tools/discovery-candidates.yaml.
 
 # ── LLM / AI inference APIs ──────────────────────────────────────────
-- { slug: groq, name: Groq, signup_url: https://console.groq.com, oauth_provider: google }
-- { slug: mistral, name: Mistral AI, signup_url: https://console.mistral.ai/, oauth_provider: google }
 - { slug: deepseek, name: DeepSeek, signup_url: https://platform.deepseek.com/sign_up, oauth_provider: google }
 - { slug: fireworks-ai, name: Fireworks AI, signup_url: https://fireworks.ai/login, oauth_provider: google }
-- { slug: huggingface, name: Hugging Face, signup_url: https://huggingface.co/join, oauth_provider: github, status: needs-manual }  # wall: /join gated by hCaptcha ENTERPRISE (page carries "Enterprise" + sitekey bd5f2066-…). Bot now DETECTS + routes the invisible hCaptcha to 2Captcha (c2c1305), but Enterprise hCaptcha needs an rqdata blob 2Captcha can't get → solve_timeout (180s) → submit rejected. Re-check if HF drops Enterprise or we add rqdata extraction (2026-06-17).
+- { slug: huggingface, name: Hugging Face, signup_url: https://huggingface.co/join, oauth_provider: github, status: needs-manual, last_probed: 2026-06-23 }  # wall: /join gated by hCaptcha ENTERPRISE (page carries "Enterprise" + sitekey bd5f2066-…). Bot now DETECTS + routes the invisible hCaptcha to 2Captcha (c2c1305), but Enterprise hCaptcha needs an rqdata blob 2Captcha can't get → solve_timeout (180s) → submit rejected. Re-check if HF drops Enterprise or we add rqdata extraction (2026-06-17).
 - { slug: deepgram, name: Deepgram, signup_url: https://console.deepgram.com/signup, oauth_provider: google }
 - { slug: assemblyai, name: AssemblyAI, signup_url: https://www.assemblyai.com/dashboard/signup, oauth_provider: google }
 - { slug: cerebras, name: Cerebras, signup_url: https://cloud.cerebras.ai/, oauth_provider: google }
 - { slug: sambanova, name: SambaNova Cloud, signup_url: https://cloud.sambanova.ai/, oauth_provider: google }
 - { slug: novita-ai, name: Novita AI, signup_url: https://novita.ai/user/register, oauth_provider: google }
-- { slug: hyperbolic, name: Hyperbolic, signup_url: https://app.hyperbolic.xyz/, oauth_provider: google }
 - { slug: nebius-ai, name: Nebius AI Studio, signup_url: https://tokenfactory.nebius.com/project/api-keys, oauth_provider: google, status: needs-manual, last_probed: 2026-06-20 }  # unservable: live repro signs in via Google and creates the account, but post-signup billing details require Card details/Add card with a temporary $0 authorization before API-key access.
 - { slug: lepton-ai, name: Lepton AI, signup_url: https://www.lepton.ai/, oauth_provider: google, status: needs-manual }  # dead/unservable: acquired by NVIDIA → DGX Cloud (enterprise/sales-gated); no self-serve API signup (discover 2026-06-12)
 - { slug: anyscale, name: Anyscale, signup_url: https://console.anyscale.com/register, oauth_provider: google }
 - { slug: runpod, name: RunPod, signup_url: https://www.runpod.io/console/signup, oauth_provider: google }
 - { slug: lambda-labs, name: Lambda, signup_url: https://cloud.lambdalabs.com/sign-up, oauth_provider: google, status: needs-manual }  # unservable: payment method required before API keys (discover 2026-06-11)
-- { slug: predibase, name: Predibase, signup_url: https://predibase.com/free-trial, oauth_provider: google, status: needs-manual }  # unservable: app.predibase.com is NXDOMAIN AND predibase.com serves a TLS cert that EXPIRED Apr 22 2026 (ERR_CERT_DATE_INVALID, verified via openssl 2026-06-16) — site broken (post-Rubrik-acquisition). Re-check if cert restored.
+- { slug: predibase, name: Predibase, signup_url: https://predibase.com/free-trial, oauth_provider: google, status: needs-manual, last_probed: 2026-06-23 }  # unservable: app.predibase.com is NXDOMAIN AND predibase.com serves a TLS cert that EXPIRED Apr 22 2026 (ERR_CERT_DATE_INVALID, verified via openssl 2026-06-16) — site broken (post-Rubrik-acquisition). Re-check if cert restored.
 - { slug: clarifai, name: Clarifai, signup_url: https://clarifai.com/signup, oauth_provider: google }
 - { slug: ai21, name: AI21 Labs, signup_url: https://studio.ai21.com/sign-up, oauth_provider: google }
 - { slug: voyage-ai, name: Voyage AI, signup_url: https://dashboard.voyageai.com/, oauth_provider: google }
@@ -56,7 +53,7 @@
 - { slug: ideogram, name: Ideogram, signup_url: https://ideogram.ai/, oauth_provider: google }
 - { slug: luma-ai, name: Luma AI, signup_url: https://lumalabs.ai/dream-machine/api, oauth_provider: google }
 - { slug: cartesia, name: Cartesia, signup_url: https://play.cartesia.ai/sign-up, oauth_provider: google }  # SERVABLE (cracked 2026-06-14, api_key extracted live): Google OAuth is login-only → bot commits to email fallback → managed-Turnstile inbox-arbiter → email code → key. NOT IP (proxy matrix falsified).
-- { slug: playht, name: PlayHT, signup_url: https://play.ht/signup/, oauth_provider: google, status: needs-manual }  # unservable: play.ht / playht.com / www.playht.com / app.play.ht all public NXDOMAIN (dig @1.1.1.1, 2026-06-16) — domain dead/moved. Re-check for a new domain.
+- { slug: playht, name: PlayHT, signup_url: https://play.ht/signup/, oauth_provider: google, status: needs-manual, last_probed: 2026-06-23 }  # unservable: play.ht / playht.com / www.playht.com / app.play.ht all public NXDOMAIN (dig @1.1.1.1, 2026-06-16) — domain dead/moved. Re-check for a new domain.
 - { slug: gladia, name: Gladia, signup_url: https://app.gladia.io/auth/signup, oauth_provider: google }
 - { slug: sieve, name: Sieve, signup_url: https://www.sievedata.com/, oauth_provider: google, status: needs-manual }  # dead/unservable: rebranded to data-licensing sieve.ai; no self-serve dev signup (discover 2026-06-12)
 - { slug: octoai, name: OctoAI, signup_url: https://octoai.cloud/, oauth_provider: google, status: needs-manual }  # dead: OctoAI acquired by NVIDIA; octoai.cloud serves an nvidia.com cert (ERR_CERT_COMMON_NAME_INVALID) + redirects to nvidia.com — no self-serve signup (discover 2026-06-11)
@@ -65,43 +62,32 @@
 - { slug: pinecone-assistant, name: Pinecone Assistant, signup_url: https://app.pinecone.io/?sessionType=signup, oauth_provider: google }
 - { slug: nvidia-nim, name: NVIDIA NIM, signup_url: https://build.nvidia.com/settings/api-keys, oauth_provider: google }
 - { slug: friendliai, name: FriendliAI, signup_url: https://suite.friendli.ai/, oauth_provider: google }
-- { slug: inferless, name: Inferless, signup_url: https://console.inferless.com/, oauth_provider: github, status: needs-manual }  # unservable: console.inferless.com (their site's ONLY signup host) is public NXDOMAIN — dig @1.1.1.1 returns no record for console./api.inferless.com (2026-06-16). Re-enable if they restore the subdomain.
+- { slug: inferless, name: Inferless, signup_url: https://console.inferless.com/, oauth_provider: github, status: needs-manual, last_probed: 2026-06-23 }  # unservable: console.inferless.com (their site's ONLY signup host) is public NXDOMAIN — dig @1.1.1.1 returns no record for console./api.inferless.com (2026-06-16). Re-enable if they restore the subdomain.
 
 # ── Vector DB / search ───────────────────────────────────────────────
-- { slug: pinecone, name: Pinecone, signup_url: https://app.pinecone.io/?sessionType=signup, oauth_provider: google }
 - { slug: zilliz, name: Zilliz Cloud, signup_url: https://cloud.zilliz.com/signup, oauth_provider: google }
 - { slug: typesense, name: Typesense Cloud, signup_url: https://cloud.typesense.org/, oauth_provider: github, status: needs-manual }  # unservable: GitHub sudo-mode 2FA gate to mint a PAT (discover 2026-06-11)
-- { slug: meilisearch, name: Meilisearch Cloud, signup_url: https://cloud.meilisearch.com/register, oauth_provider: github }
 - { slug: turbopuffer, name: Turbopuffer, signup_url: https://turbopuffer.com/login, oauth_provider: google, status: needs-manual, last_probed: 2026-06-19 }  # unservable: /signup is 404; /login is the live WorkOS entrypoint but returns "Sign-ups are not allowed for this domain" for fresh robots.
 - { slug: marqo, name: Marqo, signup_url: https://cloud.marqo.ai/, oauth_provider: google, status: needs-manual }  # unservable: demo-gated ("request a demo for access") (discover 2026-06-11)
 - { slug: lancedb, name: LanceDB, signup_url: https://accounts.lancedb.com/sign-up, oauth_provider: google }
 - { slug: vectorize, name: Vectorize, signup_url: https://platform.vectorize.io/, oauth_provider: google }
 - { slug: superlinked, name: Superlinked, signup_url: https://superlinked.com/, oauth_provider: google, status: needs-manual }  # unservable: no self-serve signup — self-hosted SIE (github.com/superlinked/sie) + sales "Contact us" only; no app/cloud console, no API-key issuance (discover 2026-06-11)
 - { slug: activeloop, name: Activeloop, signup_url: https://app.activeloop.ai/register, oauth_provider: google }
-- { slug: trieve, name: Trieve, signup_url: https://dashboard.trieve.ai/, oauth_provider: github, status: needs-manual }  # unservable: dashboard.trieve.ai unresponsive — page.goto 60s timeout x2 from our box AND a 60s timeout from independent Anthropic egress (2026-06-17). Host down/hung. Re-check later.
+- { slug: trieve, name: Trieve, signup_url: https://dashboard.trieve.ai/, oauth_provider: github, status: needs-manual, last_probed: 2026-06-23 }  # unservable: dashboard.trieve.ai unresponsive — page.goto 60s timeout x2 from our box AND a 60s timeout from independent Anthropic egress (2026-06-17). Host down/hung. Re-check later.
 - { slug: meorphis, name: SearchAPI, signup_url: https://www.searchapi.io/users/sign_up, oauth_provider: google }  # was /dashboard (404 → no_signup_link); /users/sign_up is the real form (2026-06-16)
 - { slug: serpapi, name: SerpApi, signup_url: https://serpapi.com/users/sign_up, oauth_provider: google }
 - { slug: exa, name: Exa, signup_url: https://dashboard.exa.ai/login, oauth_provider: google }
 - { slug: tavily, name: Tavily, signup_url: https://app.tavily.com/, oauth_provider: google }
 - { slug: brave-search, name: Brave Search API, signup_url: https://api-dashboard.search.brave.com/register, oauth_provider: google }
-- { slug: paddle, name: Paddle Billing, signup_url: https://login.paddle.com/signup, oauth_provider: google }
 
 # ── Infra / compute / hosting ────────────────────────────────────────
 - { slug: fly-io, name: Fly.io, signup_url: https://fly.io/app/sign-up, oauth_provider: google }  # Google OAuth available (more reliable than the flaky GitHub-session path); robots can fresh-verify it. Token UI: Account -> Access Tokens. Was mis-pinned to github + mislabeled SSO-unservable (2026-06-14).
-- { slug: koyeb, name: Koyeb, signup_url: https://app.koyeb.com/auth/signup, oauth_provider: github, status: needs-manual }  # unservable: $30/mo Pro plan + card required before API keys (discover 2026-06-11)
-- { slug: northflank, name: Northflank, signup_url: https://app.northflank.com/signup, oauth_provider: github }
 - { slug: deno-deploy, name: Deno Deploy, signup_url: https://dash.deno.com/signin, oauth_provider: github }
 - { slug: scaleway, name: Scaleway, signup_url: https://console.scaleway.com/register, oauth_provider: google, status: needs-manual }
-- { slug: digitalocean, name: DigitalOcean, signup_url: https://cloud.digitalocean.com/registrations/new, oauth_provider: google, status: needs-manual }
-- { slug: vercel, name: Vercel, signup_url: https://vercel.com/signup, oauth_provider: github, status: needs-manual }
 - { slug: netlify, name: Netlify, signup_url: https://app.netlify.com/signup, oauth_provider: github }
-- { slug: cloudflare, name: Cloudflare, signup_url: https://dash.cloudflare.com/sign-up, oauth_provider: google, status: needs-manual }
 - { slug: heroku, name: Heroku, signup_url: https://signup.heroku.com/, oauth_provider: github, status: needs-manual }
 - { slug: glitch, name: Glitch, signup_url: https://glitch.com/signin, oauth_provider: github, status: needs-manual }  # dead/unservable: Glitch discontinued app hosting/signups (2025) (discover 2026-06-12)
-- { slug: replit, name: Replit, signup_url: https://replit.com/signup, oauth_provider: google, status: needs-manual, last_probed: 2026-06-20 }  # unservable: authenticated captures reached Replit, but /settings/api_keys is a 404 and settings/security expose no account-level API key. Replit docs now point users to app/project Secrets and managed integrations, not a self-serve account token.
-- { slug: stackblitz, name: StackBlitz, signup_url: https://stackblitz.com/, oauth_provider: github, status: needs-manual, last_probed: 2026-06-20 }  # unservable: no user API key exposed via the web UI (discover 2026-06-11)
 - { slug: gitpod, name: Gitpod, signup_url: https://app.gitpod.io/settings/personal-access-tokens, oauth_provider: github, status: needs-manual, last_probed: 2026-06-20 } # Ona PAT page renders, but New token routes to /settings/tokens 404.
-- { slug: daytona, name: Daytona, signup_url: https://app.daytona.io/, oauth_provider: github }
 - { slug: cyclic, name: Cyclic, signup_url: https://app.cyclic.sh/, oauth_provider: github, status: needs-manual }  # dead: Cyclic.sh acquired by AWS + shut down (2024); app.cyclic.sh unreachable (ERR_SOCKS_CONNECTION_FAILED, host gone) — no signup (discover 2026-06-11)
 - { slug: railpack, name: Sevalla, signup_url: https://sevalla.com/signup/, oauth_provider: google }
 - { slug: zerops, name: Zerops, signup_url: https://app.zerops.io/registration, oauth_provider: github }
@@ -119,14 +105,11 @@
 - { slug: wasmer, name: Wasmer Edge, signup_url: https://wasmer.io/signup, oauth_provider: github }
 
 # ── Databases / data platforms ───────────────────────────────────────
-- { slug: turso, name: Turso, signup_url: https://app.turso.tech/, oauth_provider: github }
-- { slug: xata, name: Xata, signup_url: https://app.xata.io/signin, oauth_provider: github }
 - { slug: tinybird, name: Tinybird, signup_url: https://www.tinybird.co/signup, oauth_provider: github }
 - { slug: motherduck, name: MotherDuck, signup_url: https://app.motherduck.com/, oauth_provider: google }
 - { slug: nile, name: Nile, signup_url: https://console.thenile.dev/, oauth_provider: github }
 - { slug: cockroachdb, name: CockroachDB Cloud, signup_url: https://cockroachlabs.cloud/signup, oauth_provider: github }
 - { slug: aiven, name: Aiven, signup_url: https://console.aiven.io/signup, oauth_provider: google }
-- { slug: redis-cloud, name: Redis Cloud, signup_url: https://redis.io/try-free/, oauth_provider: google }
 - { slug: fauna, name: Fauna, signup_url: https://dashboard.fauna.com/register, oauth_provider: github, status: needs-manual }  # dead/unservable: FaunaDB service shut down 2025-05-30; dashboard gone (discover 2026-06-12)
 - { slug: surrealdb, name: SurrealDB Cloud, signup_url: https://app.surrealdb.com/, oauth_provider: github }
 - { slug: edgedb, name: Gel (EdgeDB), signup_url: https://cloud.geldata.com/, oauth_provider: github }
@@ -149,13 +132,10 @@
 - { slug: questdb, name: QuestDB Cloud, signup_url: https://cloud.questdb.com/, oauth_provider: github }
 
 # ── Email / messaging / comms / realtime ─────────────────────────────
-- { slug: sendgrid, name: SendGrid, signup_url: https://signup.sendgrid.com/, oauth_provider: google, status: needs-manual }
-- { slug: mailgun, name: Mailgun, signup_url: https://signup.mailgun.com/new/signup, oauth_provider: google }
 - { slug: loops, name: Loops, signup_url: https://app.loops.so/signup, oauth_provider: google }
 - { slug: courier, name: Courier, signup_url: https://app.courier.com/signup, oauth_provider: google }
 - { slug: knock, name: Knock, signup_url: https://dashboard.knock.app/signup, oauth_provider: google }
 - { slug: novu, name: Novu, signup_url: https://dashboard.novu.co/auth/signup, oauth_provider: github }
-- { slug: mailersend, name: MailerSend, signup_url: https://www.mailersend.com/signup, oauth_provider: google, status: needs-manual }
 - { slug: sendpulse, name: SendPulse, signup_url: https://login.sendpulse.com/registration/, oauth_provider: google }
 - { slug: elasticemail, name: Elastic Email, signup_url: https://app.elasticemail.com/account/registration, oauth_provider: google }
 - { slug: mailjet, name: Mailjet, signup_url: https://app.mailjet.com/signup, oauth_provider: google }
@@ -185,10 +165,7 @@
 - { slug: webhook-relay, name: Webhook Relay, signup_url: https://my.webhookrelay.com/register, oauth_provider: github }
 
 # ── Auth / identity ──────────────────────────────────────────────────
-- { slug: clerk, name: Clerk, signup_url: https://dashboard.clerk.com/sign-up, oauth_provider: github }
 - { slug: auth0, name: Auth0, signup_url: https://auth0.com/signup, oauth_provider: google }
-- { slug: stytch, name: Stytch, signup_url: https://stytch.com/dashboard, oauth_provider: google }
-- { slug: workos, name: WorkOS, signup_url: https://dashboard.workos.com/signup, oauth_provider: google }
 - { slug: supertokens, name: SuperTokens, signup_url: https://supertokens.com/dashboard-saas, oauth_provider: github }
 - { slug: descope, name: Descope, signup_url: https://www.descope.com/sign-up, oauth_provider: google }
 - { slug: ory, name: Ory Network, signup_url: https://console.ory.sh/registration, oauth_provider: github }
@@ -208,9 +185,7 @@
 - { slug: betterstack, name: Better Stack, signup_url: https://betterstack.com/users/sign-up, oauth_provider: github }
 - { slug: betterstack-logs, name: Better Stack Logs, signup_url: https://betterstack.com/users/sign-up, oauth_provider: null }
 - { slug: betterstack-uptime, name: Better Stack Uptime, signup_url: https://betterstack.com/users/sign-up, oauth_provider: null }
-- { slug: highlight, name: Highlight.io, signup_url: https://app.highlight.io/sign_up, oauth_provider: google }
 - { slug: hyperdx, name: HyperDX, signup_url: https://www.hyperdx.io/, oauth_provider: google }
-- { slug: grafana-cloud, name: Grafana Cloud, signup_url: https://grafana.com/auth/sign-up/create-user, oauth_provider: github }
 - { slug: baselime, name: Baselime, signup_url: https://console.baselime.io/, oauth_provider: github }
 - { slug: dash0, name: Dash0, signup_url: https://www.dash0.com/sign-up, oauth_provider: google }
 - { slug: signoz, name: SigNoz Cloud, signup_url: https://signoz.io/teams/, oauth_provider: google }
@@ -223,12 +198,10 @@
 - { slug: logsnag, name: LogSnag, signup_url: https://app.logsnag.com/sign-up, oauth_provider: google }
 - { slug: tinybird-analytics, name: Plausible, signup_url: https://plausible.io/register, oauth_provider: google }
 - { slug: umami, name: Umami Cloud, signup_url: https://cloud.umami.is/signup, oauth_provider: google }
-- { slug: mixpanel, name: Mixpanel, signup_url: https://mixpanel.com/register/, oauth_provider: google }
 - { slug: amplitude, name: Amplitude, signup_url: https://amplitude.com/get-started, oauth_provider: google }
 - { slug: june, name: June, signup_url: https://analytics.june.so/, oauth_provider: google }
 - { slug: openpanel, name: OpenPanel, signup_url: https://dashboard.openpanel.dev/register, oauth_provider: github }
 - { slug: flagsmith, name: Flagsmith, signup_url: https://www.flagsmith.com/sign-up, oauth_provider: github }
-- { slug: growthbook, name: GrowthBook, signup_url: https://app.growthbook.io/, oauth_provider: github }
 - { slug: launchdarkly, name: LaunchDarkly, signup_url: https://app.launchdarkly.com/signup, oauth_provider: google, status: needs-manual }
 - { slug: hypertune, name: Hypertune, signup_url: https://app.hypertune.com/, oauth_provider: github }
 - { slug: unleash, name: Unleash, signup_url: https://www.getunleash.io/, oauth_provider: github }
@@ -310,7 +283,6 @@
 - { slug: webhook-site, name: Webhook.site, signup_url: https://webhook.site/register, oauth_provider: google }
 - { slug: requestbin, name: Pipedream, signup_url: https://pipedream.com/auth/signup, oauth_provider: github }
 - { slug: val-cron, name: Trigger.dev, signup_url: https://cloud.trigger.dev/login, oauth_provider: github }
-- { slug: inngest, name: Inngest, signup_url: https://app.inngest.com/sign-up, oauth_provider: github }
 - { slug: zeplo, name: Zeplo, signup_url: https://zeplo.io/, oauth_provider: github }
 - { slug: defer, name: Mergent, signup_url: https://app.mergent.co/signup, oauth_provider: google }
 - { slug: qstash, name: Upstash QStash, signup_url: https://console.upstash.com/qstash, oauth_provider: github }

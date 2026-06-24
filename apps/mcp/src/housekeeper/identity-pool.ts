@@ -374,6 +374,28 @@ export function recordSpent(identityId: string, service: string, at: string): vo
   });
 }
 
+// Remove a spent (identity, service) record — the inverse of recordSpent. The
+// verifier marks a robot spent BEFORE the attempt (crash-safety: an interrupted
+// run may have left it a returning user). But a CLEAN `needs_login` outcome
+// proves the robot bailed at the PROVIDER login page and never touched the
+// service — it is NOT a returning user, so reusing it for this service is safe
+// and reclaims the seat instead of burning the fleet on a per-robot session
+// flake. Only call this on an OBSERVED clean bail, never speculatively.
+export function recordUnspent(identityId: string, service: string): void {
+  withUsageLock(() => {
+    const usage = loadUsage();
+    const next = usage.filter(
+      (record) => !(record.identityId === identityId && record.service === service),
+    );
+    if (next.length === usage.length) return; // nothing to remove
+    const path = usagePath();
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ spent: next }, null, 2)}\n`);
+    renameSync(tmp, path);
+  });
+}
+
 // Exposed so the housekeeper can log where it's reading the fleet from.
 export function poolPaths(): { pool: string; usage: string; configured: boolean } {
   return { pool: poolPath(), usage: usagePath(), configured: existsSync(poolPath()) };

@@ -293,6 +293,9 @@ export async function runDiscover(
      * sensitive grants (Drive/Gmail/contacts) regardless.
      */
     allowExtraOAuthScopes?: readonly string[];
+    // Pin a personal Google identity (BOT_GOOGLE_PROFILE_DIR) and never draw a
+    // verify-robot — firebase/gcp gate on "No organization" a robot can't pick.
+    requiresPersonalIdentity?: boolean;
   },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
@@ -427,6 +430,41 @@ export async function runDiscover(
     | { leaseConflict: string }
   > => {
     if (isGoogleOAuth) {
+      // BOT_GOOGLE_PROFILE_DIR pins an ISOLATED personal Google profile in
+      // place of the verify-robot pool. The robots are trustysquire.ai
+      // Workspace (Cloud Identity) accounts: they're FORCED into the org and
+      // cannot create a Google Cloud project under "No organization", so
+      // org-gated targets (firebase, gcp / google-cloud) stall on the
+      // parent-resource picker ("Continue" stays disabled — MEASURED
+      // 2026-06-23). A personal consumer Gmail defaults to "No organization"
+      // and creates projects freely. Log one in once with
+      // `mcp login --provider=google --profile-dir=<dir> --force-relogin`,
+      // then point discover at it via this env. No identityId → not a robot,
+      // so the spent-ledger/lease machinery is bypassed (a personal account
+      // is reused across services, not one-shot like a robot).
+      const personalProfile = process.env.BOT_GOOGLE_PROFILE_DIR;
+      if (personalProfile !== undefined && personalProfile.length > 0) {
+        const email = process.env.BOT_GOOGLE_ACCOUNT_EMAIL;
+        return {
+          profileDir: personalProfile,
+          ...(email !== undefined && email.length > 0
+            ? { oauthAccountEmail: email }
+            : {}),
+        };
+      }
+      // A service flagged `requires_personal_identity` (firebase/gcp) is doomed
+      // on a Workspace robot — it gates project creation on "No organization"
+      // the robot can't pick. Don't burn a robot; surface a clear skip so the
+      // operator sets BOT_GOOGLE_PROFILE_DIR (a personal Gmail) and re-runs.
+      if (input.requiresPersonalIdentity === true) {
+        stepsSink.push(
+          `[discovery] ${input.service} requires a PERSONAL Google identity ` +
+            `(requires_personal_identity) but BOT_GOOGLE_PROFILE_DIR is unset — ` +
+            `skipping the robot pool (a Workspace robot can't create a project ` +
+            `under "No organization"). Set BOT_GOOGLE_PROFILE_DIR + re-run.`,
+        );
+        return { exhausted: true };
+      }
       // BOT_FORCE_IDENTITY pins a specific robot regardless of spent-state —
       // for controlled experiments (e.g. the concurrent-OAuth-from-one-IP A/B,
       // where each parallel slot must take a DIFFERENT robot rather than the
@@ -492,14 +530,21 @@ export async function runDiscover(
     oauthAccountEmail?: string;
     identityId?: string;
   }): string => {
+    const personalProfile = process.env.BOT_GOOGLE_PROFILE_DIR;
+    const isPersonalGoogle =
+      personalProfile !== undefined &&
+      personalProfile.length > 0 &&
+      plan.profileDir === personalProfile;
     const mode =
       plan.identityId !== undefined
         ? "robot"
-        : plan.profileDir !== undefined
-          ? "ephemeral"
-          : isGithubOAuth
-            ? "shared-github"
-            : "shared-default";
+        : isPersonalGoogle
+          ? "personal-google"
+          : plan.profileDir !== undefined
+            ? "ephemeral"
+            : isGithubOAuth
+              ? "shared-github"
+              : "shared-default";
     return [
       `[discovery] profile-plan service=${input.service}`,
       `mode=${mode}`,

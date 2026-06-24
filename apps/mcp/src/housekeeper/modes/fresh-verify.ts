@@ -23,13 +23,16 @@ import {
   loadIdentities,
   loadUsage,
   recordSpent,
+  recordUnspent,
   verifyPoolConfigured,
 } from "../identity-pool.js";
 import { replenishVerifyPool } from "../robot-replenish.js";
+import { passwordForRobot } from "../verify-passwords.js";
 import {
   freshVerifyService,
   freshVerifyConfidenceFromEnv,
-  isNonRedrawableNonObservation,
+  isDeterministicLoginWall,
+  isProviderCapabilityBlocker,
   type ConfidenceOpts,
   type FreshVerifyResult,
 } from "../fresh-verify.js";
@@ -165,7 +168,14 @@ function describeReplayOutcomeForFreshVerify(outcome: ReplayOutcome): string {
     case "extraction_failed":
       return `extraction_failed: stored-skill replay step=${outcome.stepIndex} ${outcome.reason}`.slice(0, 800);
     case "needs_login":
-      return `needs_login: stored-skill replay provider=${outcome.provider} step=${outcome.stepIndex}`;
+      // `after_oauth` marks a needs_login that hit AFTER an OAuth step already
+      // authed — a deterministic mid-flow re-auth wall, not the per-robot
+      // session-freshness variance of a handshake-step needs_login. The sampler
+      // keys off this to HOLD immediately instead of redrawing/rotating.
+      return (
+        `needs_login: stored-skill replay provider=${outcome.provider} step=${outcome.stepIndex}` +
+        (outcome.afterOAuth ? " after_oauth" : "")
+      );
     case "skill_demoted":
       return `skill_demoted: stored-skill replay ${outcome.reason}`;
   }
@@ -204,6 +214,23 @@ async function defaultReplayStoredSkill(
     await browser.start();
     const preferredOAuthProvider =
       input.preferredOAuthProvider ?? input.identity.providers[0];
+    // Inline OAuth login drive: when the walk hits a Google identifier/password
+    // screen, type the robot's credential through instead of bailing
+    // needs_login — the discover bot would do exactly this, and a freshly-minted
+    // robot account lands on the identifier page the first time a given relying
+    // party requests OAuth even with a live session. Google-only for now (the
+    // pool is Cloud Identity / google-provider); other providers fall through.
+    const robotPassword = passwordForRobot({
+      id: input.identity.id,
+      email: input.identity.email,
+    });
+    const driveOAuthLogin =
+      robotPassword !== null
+        ? async (provider: OAuthProviderId): Promise<boolean> => {
+            if (provider !== "google") return false;
+            return browser.loginGoogleInline(input.identity.email, robotPassword);
+          }
+        : undefined;
     const replay = replaySkill({
       skill: input.skill,
       browser,
@@ -213,6 +240,7 @@ async function defaultReplayStoredSkill(
       templateValues: verifierTemplateValues(input.skill, input.emailAlias),
       ...(preferredOAuthProvider !== undefined ? { preferredOAuthProvider } : {}),
       ...(input.fetchEmailCode !== undefined ? { fetchEmailCode: input.fetchEmailCode } : {}),
+      ...(driveOAuthLogin !== undefined ? { driveOAuthLogin } : {}),
     });
     if (input.replayTimeoutMs === undefined) return await replay;
     return await Promise.race([
@@ -399,6 +427,7 @@ export async function runFreshVerify(
     usage: pool.usage,
     runSignup,
     markSpent: (id, svc) => recordSpent(id, svc, new Date().toISOString()),
+    markUnspent: (id, svc) => recordUnspent(id, svc),
     log,
   });
 
@@ -422,10 +451,13 @@ export async function runFreshVerify(
     result.outcomes.length > 0 &&
     result.outcomes.every((o) => o.observation === "non_observation")
   ) {
-    if (result.outcomes.some((o) => isNonRedrawableNonObservation(o.reason))) {
+    if (
+      result.outcomes.some((o) => isProviderCapabilityBlocker(o.reason, provider)) ||
+      isDeterministicLoginWall(result.outcomes.map((o) => o.reason))
+    ) {
       log(
         `[fresh-verify] ${input.service}: no informative samples because replay hit a ` +
-          `provider/session blocker — not rotating the pool`,
+          `provider/session blocker or a deterministic login wall — not rotating the pool`,
       );
     } else {
     log(

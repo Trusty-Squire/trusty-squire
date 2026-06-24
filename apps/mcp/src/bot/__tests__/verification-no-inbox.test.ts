@@ -82,6 +82,9 @@ class SubmitsOkBrowser {
       screenshot: "",
     };
   }
+  currentUrl(): string {
+    return "https://acme.test/signup";
+  }
   async clickSubmit(_selector: string): Promise<void> {
     // Submit lands cleanly — the opposite of submit-failure.test.ts.
   }

@@ -283,7 +283,7 @@ describe("D2.D handleReplay → fresh-verify routing", () => {
       async (): Promise<ReplayOutcome> => ({
         kind: "needs_login",
         provider: "google",
-        stepIndex: 0,
+        stepIndex: 0, afterOAuth: false,
       }),
     );
     const skill = oauthSkill(null);

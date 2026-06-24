@@ -1864,6 +1864,13 @@ type PlanExecOutcome =
   // own status so the user gets accurate guidance (manual signup) vs.
   // the misleading oauth_required ("there is no form").
   | { kind: "anti_bot_blocked"; vendor: string }
+  // A mandatory MFA / 2-Step-Verification enrollment gate blocks the
+  // authenticated console (Google mandates 2SV for Firebase/GCP; a personal
+  // Gmail without 2SV is locked out at "Turn on 2SV"). The bot can't enable
+  // 2SV — that needs a phone/authenticator on the account — so this is a
+  // distinct account-config terminal, not oauth_required. See
+  // looksLikeMfaEnrollmentGate.
+  | { kind: "mfa_setup_required" }
   // T6: an OAuth-first signup found its provider affordance — the
   // selector of the "Sign in with Google" button to click. signup()
   // hands off to the OAuth consent flow instead of credential extraction.
@@ -2248,9 +2255,45 @@ function validateAction(value: unknown, index: number): FillAction {
   }
 }
 
+// Best-effort submit button from a signup-form inventory — the recovery target
+// when the planner hallucinates a submit_selector. Picks the shortest-labelled
+// button/[type=submit] whose text reads like a form submit (Next / Continue /
+// Sign up / Create account / Join / Submit / Register), preferring the shortest
+// label (the bare "Next" over "Next, by continuing you agree…"). Returns null
+// when nothing matches — the caller then keeps the hard rejection.
+export function pickFormSubmitSelector(
+  inventory: readonly InteractiveElement[],
+): string | null {
+  const SUBMIT_RE =
+    /\b(?:next|continue|sign ?up|log ?in|create (?:an? )?account|create account|join(?: hugging face)?|get started|submit|register|agree (?:and|&) (?:join|continue))\b/i;
+  let best: string | null = null;
+  let bestLen = Number.POSITIVE_INFINITY;
+  for (const e of inventory) {
+    const isButton =
+      e.tag === "button" || e.type === "submit" || e.role === "button";
+    if (!isButton) continue;
+    const t = (e.visibleText ?? e.ariaLabel ?? "").replace(/\s+/g, " ").trim();
+    if (t.length === 0 || !SUBMIT_RE.test(t)) continue;
+    if (t.length < bestLen) {
+      best = e.selector;
+      bestLen = t.length;
+    }
+  }
+  return best;
+}
+
 export function parseSignupPlan(
   raw: string,
   allowedSelectors?: ReadonlySet<string>,
+  // Recovery for a hallucinated submit_selector. The planner sometimes invents
+  // a generic CSS path ("div > form > button") that isn't a bot-computed
+  // inventory selector, which used to hard-reject the whole plan and re-loop to
+  // planning_failed (MEASURED 2026-06-23, huggingface). When the planner's
+  // submit_selector is invalid but the inventory HAS a recognizable submit
+  // button, substitute it — the planner's intent (submit now) is preserved, only
+  // its selector was wrong. ACTION selectors still hard-reject (a wrong fill/click
+  // target is a real error, not a recoverable one).
+  fallbackSubmitSelector?: string,
 ): SignupPlan {
   const obj = extractJsonObject(raw);
   const rawActions = obj["actions"];
@@ -2258,7 +2301,7 @@ export function parseSignupPlan(
     throw new Error("signup plan missing actions[]");
   }
   const actions = rawActions.map((a, i) => validateAction(a, i));
-  const submitSelector = requireString(obj, "submit_selector", "signup plan");
+  let submitSelector = requireString(obj, "submit_selector", "signup plan");
   const confidence = obj["confidence"];
   if (confidence !== "high" && confidence !== "medium" && confidence !== "low") {
     throw new Error(`signup plan: invalid confidence ${JSON.stringify(confidence)}`);
@@ -2278,9 +2321,16 @@ export function parseSignupPlan(
       }
     }
     if (!allowedSelectors.has(submitSelector)) {
-      throw new Error(
-        `signup plan: submit_selector ${JSON.stringify(submitSelector)} is not in the page inventory`,
-      );
+      if (
+        fallbackSubmitSelector !== undefined &&
+        allowedSelectors.has(fallbackSubmitSelector)
+      ) {
+        submitSelector = fallbackSubmitSelector;
+      } else {
+        throw new Error(
+          `signup plan: submit_selector ${JSON.stringify(submitSelector)} is not in the page inventory`,
+        );
+      }
     }
   }
   const notes = typeof obj["notes"] === "string" ? obj["notes"] : undefined;
@@ -2603,6 +2653,78 @@ export function looksLike404(title: string, bodyText: string): boolean {
   // A bare "404" token, or a clear not-found phrase, is enough — guessed
   // keys URLs that hit either are dead ends.
   return has404Token || notFoundPhrase;
+}
+
+// Services whose credential is the auto-created Firebase/GCP "Browser key"
+// reachable from the Google Cloud API Credentials page. Both share the same
+// project-creation flow and the SAME AIzaSy key (it's both the firebase web
+// apiKey and a GCP API key), so one deterministic extractor covers both.
+// Keyed by the alphanumeric-stripped slug (matches the serviceSlug normalization
+// used elsewhere: lowercased, non-alphanumerics removed).
+const FIREBASE_GCP_SLUGS = new Set(["firebase", "gcp", "googlecloud"]);
+
+// Pull the Google Cloud / Firebase projectId out of a console URL. After
+// project creation the bot lands on
+// console.firebase.google.com/u/0/project/<projectId>/overview, and the GCP
+// console carries it as a ?project=<projectId> query param. Returns null
+// before any project exists (the console root has no projectId), which is the
+// signal NOT to run the deterministic key extractor yet.
+export function parseGoogleProjectId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (!/\.google\.com$/i.test(u.hostname) && !/\.google\.com$/.test(u.hostname)) {
+      // still accept console.cloud.google.com / console.firebase.google.com
+    }
+    const fromQuery = u.searchParams.get("project");
+    if (fromQuery !== null && /^[a-z][a-z0-9-]{4,29}$/i.test(fromQuery)) return fromQuery;
+    const m = u.pathname.match(/\/project\/([a-z][a-z0-9-]{4,29})(?:\/|$)/i);
+    if (m?.[1] !== undefined) return m[1];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// True when the URL is an authenticated Google Cloud / Firebase console host.
+// A LOGGED-OUT visitor to console.firebase.google.com / console.cloud.google.com
+// is redirected to accounts.google.com, so simply BEING on the console host means
+// an established session. The console is a heavy Angular SPA the OAuth-first scan
+// reads as a perpetual "loading shell" (no provider button — you're already in),
+// so without this it loops and bails the misleading `oauth_required`. Routing to
+// post-verify (already_oauth) instead is where firebase/gcp project creation +
+// the deterministic Browser-key extractor run.
+export function isAuthenticatedGoogleConsoleUrl(url: string): boolean {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h === "console.firebase.google.com" || h === "console.cloud.google.com";
+  } catch {
+    return false;
+  }
+}
+
+// True when a page is a mandatory MFA / 2-Step-Verification enrollment gate
+// that BLOCKS the authenticated console until the account-holder turns on 2SV.
+// Google now mandates this across console products (MEASURED 2026-06-23:
+// console.firebase.google.com replaced the entire console with an "Enable
+// Multi-factor Authentication (MFA) … You must enable MFA to gain access to
+// Firebase / Turn on 2SV" card for a personal Gmail without 2SV; GCP enforces
+// the same). The bot can't satisfy this — enabling 2SV needs a phone /
+// authenticator on the account itself — so it's a distinct, account-config
+// terminal, NOT the misleading `oauth_required` ("no signup form") it used to
+// emit after burning ~16 loading-shell retries on the gate card. Account-level
+// (the org-managed verify robots have org-enforced/exempt 2SV and never see
+// it); reported so the operator enables 2SV on that identity once.
+export function looksLikeMfaEnrollmentGate(text: string): boolean {
+  const hay = text.toLowerCase().replace(/\s+/g, " ").slice(0, 1200);
+  // Require BOTH an MFA/2SV noun AND a "required to access" verb phrase, so a
+  // page that merely links to security settings doesn't trip it.
+  const mfaNoun =
+    /multi-?factor authentication|2-?step verification|\bmfa\b|\b2sv\b/.test(hay);
+  const mandatoryAccess =
+    /must enable mfa|must enable.*(?:mfa|2sv|2-?step)|required (?:for users|to (?:gain )?access)|now required|enable (?:mfa|2sv).*to (?:gain )?access|turn on 2sv/.test(
+      hay,
+    );
+  return mfaNoun && mandatoryAccess;
 }
 
 // Pull the <title> text out of a raw HTML string (lowercased work is left to
@@ -3221,6 +3343,7 @@ export function detectAlreadySignedIn(args: {
     );
   });
 
+
   const visibleTextOf = (e: InteractiveElement): string =>
     `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
 
@@ -3252,11 +3375,24 @@ export function detectAlreadySignedIn(args: {
   }
 
   // Signal 1 — strict nav-keyword match (the canonical Sentry-class case).
-  const AUTH_KEYWORDS =
-    /^\s*(?:sign out|log out|dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
-  if (
-    inventory.some((e) => AUTH_KEYWORDS.test((e.visibleText ?? e.ariaLabel ?? "").trim()))
-  ) {
+  // STRONG markers (sign out / log out) PROVE a session — you can't sign out if
+  // you're not signed in — so they fire even next to a decoration "Continue with
+  // Google" (account-linking) button. WEAK markers (dashboard / projects /
+  // settings / …) are ordinary nav labels that ALSO appear on a logged-out
+  // marketing or /login page, so they must NOT override a visible auth gate:
+  // gate them on !hasSignupAffordance. Without this split, northflank's /login
+  // (which renders "Continue with Google" alongside "Projects"/"Settings") was
+  // mis-read as signed-in → the replay skipped click_oauth_button → the fresh
+  // robot never logged in and bailed needs_login deep in the flow (MEASURED
+  // 2026-06-24).
+  const STRONG_AUTH_KEYWORDS = /^\s*(?:sign out|log out)\s*$/i;
+  const WEAK_AUTH_KEYWORDS =
+    /^\s*(?:dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
+  const textOf = (e: InteractiveElement): string => (e.visibleText ?? e.ariaLabel ?? "").trim();
+  if (inventory.some((e) => STRONG_AUTH_KEYWORDS.test(textOf(e)))) {
+    return true;
+  }
+  if (!hasSignupAffordance && inventory.some((e) => WEAK_AUTH_KEYWORDS.test(textOf(e)))) {
     return true;
   }
 
@@ -5379,7 +5515,12 @@ export class SignupAgent {
                 rqdata: null,
               }));
               steps.push(
-                `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit`,
+                `${label} captcha: invisible hCaptcha (sitekey ${hSitekey.slice(0, 10)}…) — solving via 2Captcha before submit ` +
+                  `[invisible=${solveContext.invisible} rqdata=${
+                    solveContext.rqdata !== null
+                      ? `present(${solveContext.rqdata.length}ch)`
+                      : "MISSING"
+                  } ua=${solveContext.userAgent !== null ? "set" : "none"}]`,
               );
               const solveRes = await this.captchaSolver.solveHcaptcha({
                 sitekey: hSitekey,
@@ -6925,6 +7066,34 @@ export class SignupAgent {
         });
       }
       if (preAct.kind === "oauth_scan_wait") {
+        // A mandatory MFA-enrollment gate renders as a tiny "loading shell"
+        // (one warning card, no provider button), so the scan would burn its
+        // full retry budget then mislabel it `oauth_required`. Detect the gate
+        // and surface the honest, actionable terminal immediately.
+        if (looksLikeMfaEnrollmentGate(await this.browser.extractText().catch(() => ""))) {
+          steps.push(
+            `OAuth-first[engine]: page is a mandatory MFA / 2-Step-Verification ` +
+              `enrollment gate — the account must enable 2SV before the console grants access`,
+          );
+          return { kind: "mfa_setup_required" };
+        }
+        // An authenticated Google console (firebase/gcp) renders as a perpetual
+        // loading shell with no provider button — you're already signed in. Stop
+        // looping toward the misleading oauth_required and route to post-verify,
+        // where project creation + the deterministic Browser-key extractor run.
+        // Gated past the first couple frames so a genuinely-rendering page isn't
+        // cut short.
+        if (
+          state.oauthScanRetries >= 2 &&
+          isAuthenticatedGoogleConsoleUrl(this.browser.currentUrl())
+        ) {
+          steps.push(
+            `OAuth-first[engine]: on an authenticated Google console ` +
+              `(${pathOf(this.browser.currentUrl())}) with no provider affordance — ` +
+              `already signed in, routing to post-verify`,
+          );
+          return { kind: "already_oauth" };
+        }
         steps.push(
           `OAuth-first[engine]: no provider affordance yet — waiting for async render ` +
             `(retry ${state.oauthScanRetries}${oauthScanShell ? ", loading shell" : ""})`,
@@ -8107,6 +8276,33 @@ export class SignupAgent {
       // effort: a page with no interstitial returns fast.
       await this.browser.waitForFormReady().catch(() => undefined);
 
+      // Stale-probe 404 fallback. The HTTP probe (resolveSignupUrlByProbe)
+      // can't see a client-rendered 404: an SPA serves the SAME 200
+      // index.html shell for /login and /signup, so the probe may "upgrade"
+      // a working curated /login to a /signup that only renders "page does
+      // not exist" once React mounts. MEASURED 2026-06-23 (meilisearch):
+      // curated /login → probe /signup → live 404 ("cute baby seal
+      // sleeping") → the bot burned the whole run on a dead page (OAuth-first
+      // engine read the 404 as a loading shell, then nav-search clicked the
+      // 404's "Bring me home" into a degraded post-verify loop). When the
+      // probe moved us off the original hint AND the resolved URL renders a
+      // 404, fall back to the hint and re-read before any downstream
+      // classification runs.
+      if (signupUrl !== guessed && !isGoogleSearchUrl(guessed)) {
+        const afterGoto = await this.browser.getState();
+        const afterText = await this.browser.extractText().catch(() => "");
+        if (looksLike404(afterGoto.title, afterText)) {
+          steps.push(
+            `[signup-url] resolved ${signupUrl} renders a client-side 404 — ` +
+              `falling back to the original hint ${guessed}`,
+          );
+          signupUrl = guessed;
+          this.resolvedSignupUrl = signupUrl;
+          await this.browser.goto(signupUrl);
+          await this.browser.waitForFormReady().catch(() => undefined);
+        }
+      }
+
       // After load: does the rendered page look like a signup form?
       // looksLikeSignupPage() can't tell signup from login (both have
       // email+password), so we ALSO classify the rendered HTML's copy via
@@ -8152,6 +8348,26 @@ export class SignupAgent {
         inventory: landedInventory,
         url: landed.url,
       });
+      // 404 veto — a route-not-found shell is NEVER an authenticated
+      // dashboard, even when the host's persistent chrome nav (Projects /
+      // Settings / Dashboard links) trips Signal 1 of detectAlreadySignedIn.
+      // MEASURED 2026-06-23: meilisearch's curated /login went stale, the
+      // signup-url resolver switched to /signup, and cloud.meilisearch.com/
+      // signup 404s ("the page you are looking for does not exist") while
+      // still rendering full app nav chrome. The bot logged "already
+      // authenticated … skipping signup", nav-search-looped over more 404s,
+      // and bailed no_credentials_after_already_signed_in. Treat a 404
+      // landing as a wrong-URL signal: clear signedIn so the recovery path
+      // (Tier B CTA → real signup entry) runs instead of skipping signup.
+      const landedBodyText = await this.browser.extractText().catch(() => "");
+      const landed404 = looksLike404(landed.title, landedBodyText);
+      if (landed404 && signedIn) {
+        signedIn = false;
+        steps.push(
+          `${task.service}: landing ${pathOf(landed.url)} is a 404 shell, not an ` +
+            `authenticated dashboard — recovering the real signup entry`,
+        );
+      }
       // SPA-settle re-check (returning-user cluster). An authenticated SPA
       // redirects the session AFTER the first read — pinecone's
       // `/?sessionType=signup` routes to `/organizations/registration` once
@@ -8162,7 +8378,7 @@ export class SignupAgent {
       // dwell once and re-read before classifying. Safe: a real login/signup
       // page renders its credential input or signup affordance, so
       // detectAlreadySignedIn stays false on the re-check (no false positive).
-      if (!signedIn && landedInventory.length <= 4) {
+      if (!signedIn && !landed404 && landedInventory.length <= 4) {
         const hasCredInput = landedInventory.some(
           (e) =>
             e.tag === "input" &&
@@ -8564,6 +8780,16 @@ export class SignupAgent {
           return {
             success: false,
             error: `oauth_required: ${task.service} offers only OAuth/SSO signup — there is no email/password form to automate.`,
+            steps,
+            ...this.resultTail(),
+          };
+        case "mfa_setup_required":
+          return {
+            success: false,
+            error:
+              `mfa_setup_required: ${task.service} requires the signed-in Google account to have ` +
+              `2-Step Verification (MFA) enabled before the console grants access. ` +
+              `Enable 2SV on that account at myaccount.google.com/security, then retry.`,
             steps,
             ...this.resultTail(),
           };
@@ -11077,6 +11303,8 @@ ${formatInventory(input.inventory)}`,
 
     // F3 T4: the planner may only pick selectors the bot supplied.
     const allowed = new Set(input.inventory.map((e) => e.selector));
+    // Recovery target for a hallucinated submit_selector (huggingface).
+    const fallbackSubmit = pickFormSubmitSelector(input.inventory) ?? undefined;
     return this.callLLM({
       system: systemPrompt,
       userBlocks,
@@ -11087,7 +11315,7 @@ ${formatInventory(input.inventory)}`,
       // Fix C — pin a single model + provider + seed on the proxy path.
       // temperature 0 alone leaves the model/provider lottery in play.
       deterministic: true,
-      parse: (raw) => parseSignupPlan(raw, allowed),
+      parse: (raw) => parseSignupPlan(raw, allowed, fallbackSubmit),
     });
   }
 
@@ -11916,6 +12144,18 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // re-doing completed onboarding steps and re-navigating dead URLs.
     const priorActions: string[] = [];
     let lastReachablePostVerifyUrl: string | null = null;
+    // Firebase/GCP deterministic-extraction guard: attempt the GCP-credentials
+    // Browser-key pull at most once per projectId so a transient miss falls back
+    // to the planner instead of re-navigating the credentials page every round.
+    const firebaseGcpSlug = args.service.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const triedProjectIds = new Set<string>();
+    // Post-OAuth onboarding-survey guard: deterministically satisfy required
+    // selects that gate a disabled submit. A multi-step wizard (e.g. mongodb:
+    // ToS step → personalization survey) may show a disabled submit BEFORE the
+    // survey renders, so a one-shot gate gets spent on the wrong step. Retry on
+    // a no-op (capped) and only stop once it actually fills something.
+    let comboboxFilled = false;
+    let comboboxNoOpAttempts = 0;
     const credentialExtractionFlow = new CredentialExtractionFlow();
     const syntheticCapture = new PostSignupSyntheticCapture();
     const loginFlow = new PostSignupLoginFlow();
@@ -11951,6 +12191,85 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         }
       } catch {
         // DOM-proximity miss is non-fatal
+      }
+      // Deterministic Firebase/GCP key extraction. Once the planner has created
+      // a project (projectId appears in the console URL), skip its unreliable
+      // key-hunt and pull the auto-created "Browser key" straight from the GCP
+      // credentials page. The same AIzaSy is the firebase web apiKey AND a GCP
+      // API key, so this covers both services. At most once per projectId.
+      if (
+        credentials.api_key === undefined &&
+        FIREBASE_GCP_SLUGS.has(firebaseGcpSlug)
+      ) {
+        const pid = parseGoogleProjectId(this.browser.currentUrl());
+        if (pid !== null && !triedProjectIds.has(pid)) {
+          triedProjectIds.add(pid);
+          args.steps.push(
+            `firebase/gcp: project ${pid} detected — extracting the auto-created ` +
+              `Browser key from the GCP credentials page`,
+          );
+          const k = await this.browser
+            .extractGoogleApiKeyFromCredentials(pid)
+            .catch((e) => {
+              args.steps.push(
+                `firebase/gcp: extraction errored (${e instanceof Error ? e.message : String(e)})`,
+              );
+              return null;
+            });
+          if (k !== null) {
+            credentials.api_key = k;
+            args.steps.push(
+              `firebase/gcp: extracted Browser key (project=${pid}) — credential captured`,
+            );
+            await this.writeFastPathSyntheticCapture(
+              args.service,
+              capturedRound,
+              oauth,
+            );
+            return credentials;
+          }
+          args.steps.push(
+            `firebase/gcp: no Browser key on the credentials page for ${pid} yet — ` +
+              `falling back to the planner`,
+          );
+        }
+      }
+      // Onboarding-survey unblock. The dominant `oauth_onboarding_failed`
+      // blocker is a post-OAuth survey whose required cmdk/Radix multi-selects
+      // the planner opens but never commits — it then loops on a disabled Next
+      // and stalls. When an advance button is DISABLED, deterministically pick
+      // the first option in each unfilled required select once, so the gate
+      // clears and the planner can advance. Tightly gated (disabled submit +
+      // empty placeholder selects only) and at most once per loop.
+      if (!comboboxFilled && comboboxNoOpAttempts < 5) {
+        try {
+          if (await this.browser.hasDisabledSubmit()) {
+            const picked = await this.browser.fillRequiredComboboxes();
+            if (picked.length > 0) {
+              comboboxFilled = true;
+              args.steps.push(
+                `Post-verify: satisfied ${picked.length} required onboarding select(s) ` +
+                  `to clear a disabled submit — ${picked.join(", ")}`,
+              );
+              await this.browser.waitForFormReady().catch(() => undefined);
+            } else {
+              comboboxNoOpAttempts += 1;
+              // A disabled submit with no fillable select yet is usually an
+              // EARLIER wizard step (ToS / welcome) — keep retrying as the
+              // wizard advances. Log once to avoid per-round spam.
+              if (comboboxNoOpAttempts === 1) {
+                args.steps.push(
+                  `Post-verify: disabled submit but no fillable required select yet — ` +
+                    `will retry as the onboarding wizard advances`,
+                );
+              }
+            }
+          }
+        } catch (err) {
+          args.steps.push(
+            `Post-verify: combobox-fill errored (${err instanceof Error ? err.message : String(err)})`,
+          );
+        }
       }
       const credentialProgress = credentialTracker.observe(credentials);
       const credentialExit = credentialTracker.decideEarlyCredentialExit(

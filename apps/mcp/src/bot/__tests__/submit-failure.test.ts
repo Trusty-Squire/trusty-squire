@@ -74,6 +74,9 @@ class SubmitFailsBrowser {
       screenshot: "",
     };
   }
+  currentUrl(): string {
+    return "https://resend.com/signup";
+  }
   async clickSubmit(selector: string): Promise<void> {
     throw new Error(
       `submit selector "${selector}" matched 3 buttons, none scoring as a signup button`,

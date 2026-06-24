@@ -112,6 +112,28 @@ export interface HousekeeperBatchSummary {
   serviceOutcomes: Array<{ service: string; succeeded: boolean }>;
 }
 
+// A registry-admin auth rejection (401 on /admin/* — the REGISTRY_ADMIN_BEARER
+// no longer matches the registry's deployed secret). Distinct from a transient
+// network error: it NEVER self-heals by waiting, so the batch loop must fail
+// loudly (non-zero exit) instead of logging "sleeping" and exiting 0.
+export function isRegistryAuthFailure(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return /\b401\b|unauthorized/.test(msg) && /fetchqueue|\/admin\/|verifier|bearer/.test(msg);
+}
+
+function logRegistryAuthFatal(
+  log: (line: string) => void,
+  err: unknown,
+): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  log(
+    `FATAL: registry admin auth REJECTED (${msg}). REGISTRY_ADMIN_BEARER does ` +
+      `not match the registry's deployed secret — reveal/rotate it and sync ` +
+      `harvester.env. Exiting non-zero instead of sleeping (a 401 never ` +
+      `self-heals; verify checks tools/system-truth.sh).`,
+  );
+}
+
 export async function runOneBatch(opts: HousekeeperOpts): Promise<HousekeeperBatchSummary> {
   const log = opts.log ?? ((line: string) => console.log(`[housekeeper] ${line}`));
   const notifiers = opts.notifiers ?? [];
@@ -503,6 +525,10 @@ export async function runHealLoop(opts: HealPassOpts & {
     try {
       await runHealPass(opts);
     } catch (err) {
+      if (isRegistryAuthFailure(err)) {
+        logRegistryAuthFatal(log, err);
+        throw err;
+      }
       log(`ERROR: heal pass failed (${err instanceof Error ? err.message : String(err)}) — sleeping`);
     }
     if (opts.once === true) return;
@@ -519,6 +545,15 @@ export async function runHousekeeperLoop(opts: HousekeeperOpts): Promise<void> {
     try {
       await runOneBatch(opts);
     } catch (err) {
+      // A registry-admin 401 never self-heals (REGISTRY_ADMIN_BEARER drifted
+      // from the deployed secret) — failing loudly instead of swallowing it +
+      // sleeping 12h is what surfaces the drift in minutes, not a week. (The
+      // verify phase was silently dead Jun 17–24 2026 because a 401 was logged
+      // as a benign "sleeping" and exited 0 under --once.)
+      if (isRegistryAuthFailure(err)) {
+        logRegistryAuthFatal(log, err);
+        throw err;
+      }
       log(
         `ERROR: batch failed (${err instanceof Error ? err.message : String(err)}) — sleeping`,
       );

@@ -180,6 +180,9 @@ class FakeBrowser {
   async getState(): Promise<BrowserState> {
     return { url: this.stateUrl, title: "Sign up", html: "", screenshot: "" };
   }
+  currentUrl(): string {
+    return this.stateUrl;
+  }
   async extractText(): Promise<string> {
     const i = Math.min(this.textCalls, this.extractTextValues.length - 1);
     this.textCalls += 1;

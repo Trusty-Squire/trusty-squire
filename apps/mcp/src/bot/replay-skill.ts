@@ -124,6 +124,20 @@ export interface ReplayInput {
    */
   fetchEmailCode?: (input: { alias: string }) => Promise<string | null>;
   /**
+   * Drives an interactive provider sign-in when the OAuth walk lands on a
+   * login/identifier page instead of a chooser/consent. Replay otherwise bails
+   * `needs_login` here — but the full discover bot would just type the
+   * password, and a freshly-created robot account lands on the identifier page
+   * the first time a given relying party requests OAuth even with a live
+   * session. The verifier wires this to the robot's credentials
+   * (verify-passwords.json) + `browser.loginGoogleInline`; the live-user
+   * router omits it (no stored end-user password to drive). Resolves true when
+   * the sign-in progressed (walk continues), false to fall through to the
+   * existing needs_login bail. Same caller-injected-transport separation as
+   * `fetchEmailCode`.
+   */
+  driveOAuthLogin?: (provider: OAuthProviderId) => Promise<boolean>;
+  /**
    * Chrome profile whose OAuth-session marker should be trusted for
    * replay-time provider checks. Fresh-identity verifier replays pass the
    * robot profile; normal router replays omit this and use the default profile.
@@ -180,7 +194,14 @@ export type ReplayOutcome =
   | { kind: "step_failed"; stepIndex: number; reason: string; capturedStep: SkillStep }
   | { kind: "validator_failed"; stepIndex: number; got: string; reason: string }
   | { kind: "extraction_failed"; stepIndex: number; reason: string }
-  | { kind: "needs_login"; provider: "google" | "github"; stepIndex: number }
+  // `afterOAuth` distinguishes the TWO needs_login shapes the verifier must
+  // treat differently: at the OAuth handshake itself (afterOAuth=false) it's
+  // per-robot session-freshness variance (redraw helps); AFTER an OAuth step
+  // already authed (afterOAuth=true) it's a deterministic mid-flow re-auth wall
+  // every robot hits identically — redrawing/rotating the pool only burns the
+  // sweep budget (MEASURED 2026-06-24: northflank ate ~20min of a 25min sweep
+  // churning a step-8 post-OAuth needs_login, starving 18 other services).
+  | { kind: "needs_login"; provider: "google" | "github"; stepIndex: number; afterOAuth: boolean }
   | { kind: "skill_demoted"; reason: string }
   | { kind: "dry_pass"; stepsWalked: number };
 
@@ -431,7 +452,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       if (recovered.kind === "ok") {
         validation = await preValidateStep(step, browser, templateValues);
       } else if (recovered.kind === "needs_login") {
-        return { kind: "needs_login", provider: recovered.provider, stepIndex: i };
+        return { kind: "needs_login", provider: recovered.provider, stepIndex: i, afterOAuth: authedViaOAuth };
       }
     }
     let stepToExecute = step;
@@ -473,7 +494,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       if (fallbackResult.kind === "use_substitute") {
         stepToExecute = fallbackResult.substitute;
       } else if (fallbackResult.kind === "needs_login") {
-        return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i };
+        return { kind: "needs_login", provider: fallbackResult.provider, stepIndex: i, afterOAuth: authedViaOAuth };
       } else if (
         step.kind === "fill" &&
         isSkippableAbsentFill(step, validation.reason, i, skill.steps)
@@ -560,9 +581,10 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         input.profileDir,
         input.preferredOAuthProvider,
         skill.steps[i + 1],
+        input.driveOAuthLogin,
       );
       if (execOutcome.kind === "needs_login") {
-        return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i };
+        return { kind: "needs_login", provider: execOutcome.provider, stepIndex: i, afterOAuth: authedViaOAuth };
       }
       // OAuth click succeeded (needs_login already returned above) → we're in
       // an authenticated returning-user session for the rest of the replay.
@@ -800,15 +822,38 @@ async function preValidateStep(
     }
 
     case "click_oauth_button": {
-      const inventory = await browser.extractInteractiveElements();
-      const matches = preferNonConsentClickMatches(
+      let inventory = await browser.extractInteractiveElements();
+      let matches = preferNonConsentClickMatches(
         inventory.filter((el) => matchesClickHint(el, step.text_match)),
         step.text_match,
       );
+      // Hardening (MEASURED 2026-06-24, the verifier sweep): the synthesizer
+      // hardcodes step.text_match to "Google"/"GitHub", but the OAuth button
+      // often (a) renders only after the SPA hydrates, or (b) is an icon /
+      // "Continue with Google" affordance the literal-word match misses — and a
+      // step-1 OAuth miss kills the WHOLE replay (the dominant verifier-hold
+      // mode). So when text_match finds nothing: re-read after a hydration
+      // settle, then fall back to the bot's provider-based finder
+      // (findOAuthButton matches by provider keyword in text/aria/href + OAuth
+      // scoring — the SAME logic discover used to find this button to begin
+      // with). The button identity is the provider, not a literal string.
       if (matches.length === 0) {
+        await browser.wait(2);
+        await browser.waitForInteractiveDom().catch(() => undefined);
+        inventory = await browser.extractInteractiveElements().catch(() => inventory);
+        matches = preferNonConsentClickMatches(
+          inventory.filter((el) => matchesClickHint(el, step.text_match)),
+          step.text_match,
+        );
+      }
+      if (matches.length === 0) {
+        const byProvider = findOAuthButton(inventory, step.provider);
+        if (byProvider !== null) {
+          return { ok: true, match: byProvider };
+        }
         return {
           ok: false,
-          reason: `No element matches text_match=${JSON.stringify(step.text_match)} for ${step.provider} OAuth button.`,
+          reason: `No ${step.provider} OAuth button found (text_match=${JSON.stringify(step.text_match)} + provider scan).`,
         };
       }
       // Multiple matches — the disambiguator (C3) picks by role first,
@@ -1579,6 +1624,7 @@ async function executeStep(
   profileDir?: string,
   preferredOAuthProvider?: OAuthProviderId,
   nextStep?: SkillStep,
+  driveOAuthLogin?: (provider: OAuthProviderId) => Promise<boolean>,
 ): Promise<ExecutionOutcome> {
   switch (step.kind) {
     case "navigate": {
@@ -1590,7 +1636,18 @@ async function executeStep(
       const targetUrl = normalizeKindeReplayNavigateUrl(
         rebaseSubdomain(step.url, browser.currentUrl()),
       );
-      await browser.goto(targetUrl);
+      try {
+        await browser.goto(targetUrl);
+      } catch (err) {
+        // A goto can crash transiently ("Target page, context or browser has
+        // been closed") under heavy concurrency or a redirect race. Retry once
+        // before failing — a genuinely-dead context throws again and surfaces a
+        // clean reason instead of a raw Playwright stack. (MEASURED 2026-06-24,
+        // verifier sweep: step-2 goto crashes under 2-wide concurrency.)
+        await browser.wait(1);
+        await browser.goto(targetUrl);
+        void err;
+      }
       // Settle for SPA-style apps that fire route handlers post-
       // DOMContentLoaded. A fixed 2s under-waits heavy authenticated
       // dashboards (pusher's App Keys, imagekit's onboarding step rendered
@@ -1680,18 +1737,42 @@ async function executeStep(
       // chooser + basic consent out of band so a one-account capture replays for
       // an N-account user. Fast no-op when the round-trip already auto-completed
       // (single account → first state is not_provider / popup-closed → "ok").
-      const walk = await walkOAuthConsent(browser, step.provider);
+      const walk = await walkOAuthConsent(browser, step.provider, driveOAuthLogin);
       if (walk === "needs_login") {
         return { kind: "needs_login", provider: step.provider };
       }
+      // Restore the product page. Google Identity Services (meilisearch et al.)
+      // runs OAuth in a POPUP that closes once consent posts the credential back
+      // to the opener; without switching `this.page` off the now-closed popup,
+      // the next replay step (a navigate/extract) runs against a dead page and
+      // dies "Target page, context or browser has been closed". The OAuth
+      // RECOVERY path already settles; the primary click_oauth_button path did
+      // not — so popup-OAuth skills broke on the very next step the moment they
+      // finally cleared OAuth. No-op for the same-tab redirect transport.
+      await browser.settleAfterOAuth().catch(() => undefined);
       return { kind: "clicked" };
     }
 
     case "click": {
       let inventory = await browser.extractInteractiveElements();
       inventory = await maybeRefreshInventoryForHydratedClick(step, browser, inventory);
-      if (isLikelySubmitClick(step)) {
+      // Fill the preconditions of a disabled submit BEFORE clicking it. The
+      // text-gated isLikelySubmitClick only catches "create account / sign up"
+      // wording; a post-OAuth ONBOARDING SURVEY (meilisearch: a required
+      // role/use-case dropdown gating a "Continue") has a neutral button label,
+      // so detect the disabled-submit state directly. fillRequiredComboboxes is
+      // exactly what the discover bot runs here — the replay just never did, so
+      // every survey-gated skill died "target is disabled after 15s" the moment
+      // it cleared OAuth. Cheap DOM check; only fills when something is actually
+      // unselected.
+      if (isLikelySubmitClick(step) || (await browser.hasDisabledSubmit().catch(() => false))) {
         await autofillCommonIdentityFieldsBeforeSubmit(browser, templateValues);
+        const picked = await browser.fillRequiredComboboxes().catch(() => [] as string[]);
+        if (picked.length > 0) {
+          console.error(
+            `[replay] filled ${picked.length} required combobox(es) before submit: ${picked.join(", ")}`,
+          );
+        }
         inventory = await browser.extractInteractiveElements().catch(() => inventory);
       }
       await checkRequiredAgreementBoxesBeforeSubmitClick(browser, step);
@@ -4320,9 +4401,25 @@ async function clickConsentAffordance(browser: BrowserController): Promise<boole
 export async function walkOAuthConsent(
   browser: BrowserController,
   providerId: OAuthProviderId,
+  driveOAuthLogin?: (provider: OAuthProviderId) => Promise<boolean>,
 ): Promise<"ok" | "needs_login"> {
   const provider = OAUTH_PROVIDERS[providerId];
   const MAX_NAV = 6;
+  // Bound the inline-login drive to ONE attempt — a credential that doesn't
+  // clear the identifier/challenge after a full type-through is a real wall
+  // (wrong password, 2SV the verifier can't satisfy), and re-driving would just
+  // burn MAX_NAV iterations re-typing into the same dead form.
+  let loginDriven = false;
+  // When the provider supports an inline login drive, the identifier page is
+  // recoverable, not terminal: try the credential type-through before bailing.
+  const tryDriveLogin = async (): Promise<boolean> => {
+    if (driveOAuthLogin === undefined || loginDriven) return false;
+    loginDriven = true;
+    console.error(`[replay-oauth] ${providerId} login page — driving inline sign-in`);
+    const ok = await driveOAuthLogin(providerId).catch(() => false);
+    console.error(`[replay-oauth] inline sign-in ${ok ? "progressed" : "did not clear the login page"}`);
+    return ok;
+  };
   for (let i = 0; i < MAX_NAV; i++) {
     if (browser.oauthPageClosed()) return "ok"; // popup closed → back on service
     const url = browser.currentUrl();
@@ -4357,6 +4454,7 @@ export async function walkOAuthConsent(
       continue;
     }
     if (providerId === "google" && /\/signin\/identifier\b/i.test(url)) {
+      if (await tryDriveLogin()) continue;
       console.error(`[replay-oauth] google identifier page — needs_login`);
       return "needs_login";
     }
@@ -4364,6 +4462,10 @@ export async function walkOAuthConsent(
     console.error(`[replay-oauth] state=${state} url=${url.slice(0, 100)}`);
     if (state === "not_provider") return "ok"; // flow left the provider
     if (state === "challenge" || state === "needs_login") {
+      // A password/identifier screen is recoverable when we hold the
+      // credential — drive the sign-in once before treating it as terminal.
+      // (A genuine 2SV/verify-it's-you challenge won't clear and falls through.)
+      if (await tryDriveLogin()) continue;
       if (process.env.REPLAY_DEBUG) {
         try {
           writeFileSync(

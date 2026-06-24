@@ -130,6 +130,17 @@ function stubBrowser(): StubBrowser {
     async startOAuth(selector: string) {
       history.push({ method: "startOAuth", args: [selector] });
     },
+    async settleAfterOAuth() {
+      history.push({ method: "settleAfterOAuth", args: [] });
+    },
+    async hasDisabledSubmit() {
+      history.push({ method: "hasDisabledSubmit", args: [] });
+      return false;
+    },
+    async fillRequiredComboboxes() {
+      history.push({ method: "fillRequiredComboboxes", args: [] });
+      return [];
+    },
     async readClipboard() {
       history.push({ method: "readClipboard", args: [] });
       return clipboard;

@@ -119,6 +119,13 @@ type Argv = {
   // scripted runs that still want a normal Chrome confirm (i.e. don't
   // imply --skip-browser).
   noInteractive: boolean;
+  // --profile-dir=<path>: for `login`, target an ISOLATED Chrome profile
+  // dir instead of the shared bot profile. Use this to keep a secondary
+  // Google identity (e.g. a personal consumer Gmail that can create GCP
+  // projects under "No organization", which the trustysquire.ai Workspace
+  // robots cannot) in its own profile without clobbering the operator's
+  // session. Pair with BOT_GOOGLE_PROFILE_DIR on the discover side.
+  profileDir?: string;
   // 0.8.1: choices the interactive picker collected (or that --llm /
   // --byok-key flags pre-filled). Threaded into writeAgentConfig.
   llmChoice?: import("./interactive.js").LlmChoice;
@@ -148,6 +155,7 @@ function parseArgs(argv: string[]): Argv {
   let registryUrl: string | undefined;
   let noRegistry = false;
   let providerArg: ProviderArg | undefined;
+  let profileDir: string | undefined;
   let skipBrowser = false;
   let forceRelogin = false;
   let noInteractive = false;
@@ -175,6 +183,8 @@ function parseArgs(argv: string[]): Argv {
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
       if (p === "google" || p === "github") providerArg = p;
+    } else if (arg.startsWith("--profile-dir=")) {
+      profileDir = arg.slice("--profile-dir=".length);
     } else if (arg === "--skip-browser" || arg === "--skip-login") {
       // --skip-login kept as an alias for the 0.5.0 spelling so any
       // scripted callers still work.
@@ -201,6 +211,7 @@ function parseArgs(argv: string[]): Argv {
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (registryUrl !== undefined && registryUrl.length > 0) args.registryUrl = registryUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
+  if (profileDir !== undefined && profileDir.length > 0) args.profileDir = profileDir;
   return args;
 }
 
@@ -949,6 +960,9 @@ async function login(args: Argv): Promise<void> {
   const result = await ensureOAuthSession({
     provider,
     apiBaseUrl: args.apiBase,
+    // --profile-dir pins login to an isolated profile (a secondary
+    // personal Google identity) instead of the shared bot profile.
+    ...(args.profileDir !== undefined ? { profileDir: args.profileDir } : {}),
     // 0.8.3-rc.1 — --force-relogin now also applies to the bare
     // `login` command. Without this, a valid cached session
     // short-circuits the flow and the operator has no way to open

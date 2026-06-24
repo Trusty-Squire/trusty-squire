@@ -381,6 +381,23 @@ describe("detectAlreadySignedIn (F17)", () => {
     }
   });
 
+  it("does NOT fire on a /login wall that ALSO shows nav keywords (northflank: affordance dominates)", () => {
+    // northflank's /login renders "Continue with Google" alongside app-shell nav
+    // links ("Projects"/"Settings"). Signal 1 (AUTH_KEYWORDS) would otherwise
+    // mis-read it as signed-in → the replay skips click_oauth_button → the fresh
+    // robot never logs in. A visible auth gate must dominate the nav keywords.
+    expect(
+      detectAlreadySignedIn({
+        url: "https://app.northflank.com/login",
+        inventory: [
+          mkEl({ tag: "button", visibleText: "Continue with Google" }),
+          mkEl({ tag: "a", visibleText: "Projects" }),
+          mkEl({ tag: "a", visibleText: "Settings" }),
+        ],
+      }),
+    ).toBe(false);
+  });
+
   // rc.18 — Railway's /new project-creation page has none of the
   // strict nav keywords. The only post-login signal is the "$X.XX
   // left / Trial" billing widget. Signal 2 (billing) covers this.

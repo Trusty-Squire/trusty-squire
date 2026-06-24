@@ -4144,7 +4144,7 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     try {
       const responseKey = extractHcaptchaResponseKeyFromToken(token);
-      return await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
+      const diag = await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
         const widgetIds = new Set<string>();
         const inputs = Array.from(
           document.querySelectorAll<HTMLTextAreaElement>(
@@ -4255,8 +4255,21 @@ export class BrowserController {
         scan(win.___hcaptcha_cfg, 0);
         scan(win.hcaptcha, 0);
 
-        return inputs.length > 0 || widgetIds.size > 0 || callbackFired;
+        return {
+          ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
+          textareas: inputs.length,
+          widgets: widgetIds.size,
+          callbackFired,
+          hasHcaptchaGlobal: win.hcaptcha !== undefined,
+        };
       }, { tok: token, key: responseKey });
+      if (process.env.UNIVERSAL_BOT_OAUTH_DEBUG) {
+        console.error(
+          `[captcha] hCaptcha inject diag: ok=${diag.ok} textareas=${diag.textareas} ` +
+            `widgets=${diag.widgets} callbackFired=${diag.callbackFired} hcaptchaGlobal=${diag.hasHcaptchaGlobal}`,
+        );
+      }
+      return diag.ok;
     } catch {
       return false;
     }
@@ -4516,6 +4529,255 @@ export class BrowserController {
   async extractVisibleText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(() => document.body?.innerText ?? "");
+  }
+
+  // Deterministic Firebase/GCP credential extraction. Every Firebase project
+  // auto-creates a "Browser key (auto created by Firebase)" in its underlying
+  // Google Cloud project — the SAME AIzaSy value as firebaseConfig.apiKey AND a
+  // usable GCP API key — even with NO web app registered. PROVEN surface
+  // (2026-06-23): console.cloud.google.com/apis/credentials?project=<projectId>
+  // → API Keys row "Browser key (auto created by Firebase)" → "Show key" reveals
+  // the AIzaSy value inline in that row. Row-scoped so it never grabs one of the
+  // console's own internal AIzaSy keys (which live in script/attribute data, not
+  // the visible row text). Returns the key, or null when the page didn't render
+  // a Browser key (project not provisioned yet / different surface).
+  async extractGoogleApiKeyFromCredentials(projectId: string): Promise<string | null> {
+    if (!this.page) throw new Error("Browser not started");
+    const KEY_RE = /AIzaSy[0-9A-Za-z_-]{33}/;
+    const url = `https://console.cloud.google.com/apis/credentials?project=${encodeURIComponent(projectId)}`;
+    await this.page.goto(url, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+    // The credentials table renders async (heavy Angular console). Poll for it.
+    for (let i = 0; i < 12; i++) {
+      await this.wait(2.5);
+      const ready = await this.page
+        .evaluate(() => /Browser key|API Keys|Create credentials/i.test(document.body?.innerText ?? ""))
+        .catch(() => false);
+      if (ready) break;
+    }
+    // Locate the Firebase Browser-key row; return its AIzaSy if already shown,
+    // else click the row's "Show key" button to reveal it.
+    const readRowKey = (): Promise<string | null> =>
+      this.page!
+        .evaluate(() => {
+          const rows = Array.from(document.querySelectorAll("tr"));
+          const row =
+            rows.find((r) => /browser key \(auto created by firebase\)/i.test(r.textContent ?? "")) ??
+            rows.find((r) => /browser key/i.test(r.textContent ?? ""));
+          if (row === undefined) return null;
+          const m = (row.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
+          if (m !== null) return m[0];
+          const btn = Array.from(row.querySelectorAll("button,a")).find((b) =>
+            /show key/i.test(b.textContent ?? ""),
+          );
+          if (btn !== undefined) (btn as HTMLElement).click();
+          return null;
+        })
+        .catch(() => null);
+    const first = await readRowKey();
+    if (first !== null && KEY_RE.test(first)) return first;
+    // After the Show-key click, poll the row (reveal is async) and any dialog
+    // / readonly input the console may surface the value in.
+    for (let i = 0; i < 8; i++) {
+      await this.wait(1.5);
+      const revealed = await this.page
+        .evaluate(() => {
+          const rows = Array.from(document.querySelectorAll("tr"));
+          const row = rows.find((r) => /browser key/i.test(r.textContent ?? ""));
+          const inRow = (row?.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
+          if (inRow !== null) return inRow[0];
+          for (const inp of Array.from(document.querySelectorAll("input"))) {
+            const v = (inp as HTMLInputElement).value ?? "";
+            const m = v.match(/AIzaSy[0-9A-Za-z_-]{33}/);
+            if (m !== null) return m[0];
+          }
+          return null;
+        })
+        .catch(() => null);
+      if (revealed !== null && KEY_RE.test(revealed)) return revealed;
+    }
+    return null;
+  }
+
+  // Deterministically satisfy required, currently-EMPTY combobox/listbox
+  // selectors (cmdk / Radix / Headless UI multi-selects) that gate a disabled
+  // submit. The dominant `oauth_onboarding_failed` blocker is a post-OAuth
+  // "tell us about yourself" survey whose required multi-selects the greedy
+  // planner opens but never commits — it concludes "all filled", clicks the
+  // disabled Next, and stalls (MEASURED 2026-06-23, meilisearch
+  // /welcome-informations: `[data-cy=...-trigger]` role=combobox → cmdk-list of
+  // `[role=option][cmdk-item]`). For each unfilled trigger: open it, click the
+  // first non-disabled option (Playwright locator click COMMITS where a raw
+  // coordinate click drops — same as the post-verify combobox path), and Escape
+  // to close the multi-select popover. Returns the labels it satisfied. Tightly
+  // scoped: only acts on placeholder-showing (empty) comboboxes, never a
+  // combobox that already holds a value.
+  async fillRequiredComboboxes(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    let triggerSelectors: string[] = [];
+    try {
+      triggerSelectors = await page.evaluate(() => {
+        const isVisible = (el: Element): boolean => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const out: string[] = [];
+        const seen = new Set<string>();
+        // Candidate trigger elements: an ARIA combobox/listbox-popup, OR a
+        // shadcn/Radix `*-trigger` data-cy button. MEASURED 2026-06-23
+        // (meilisearch): the clickable trigger carries `data-cy="…-trigger"`
+        // but role=combobox lives on a separate inner node with NO data-cy, so
+        // a role-only query found an un-addressable element. Collect both and
+        // resolve each to its nearest stable data-cy selector.
+        const candidates = new Set<Element>();
+        for (const e of Array.from(
+          document.querySelectorAll(
+            "[role='combobox'],[aria-haspopup='listbox'],button[data-cy$='-trigger']",
+          ),
+        )) {
+          candidates.add(e);
+        }
+        for (const el of Array.from(candidates)) {
+          if (!isVisible(el)) continue;
+          // Skip text/autocomplete inputs (role=combobox is also set on search
+          // multiselects like MongoDB's "data types") — we click-to-pick from a
+          // dropdown, never type into a filter box.
+          if (el.tagName === "INPUT") continue;
+          const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          // Unfilled signals: (1) Radix sets `data-placeholder` on a SelectTrigger
+          // until a value is committed — present even when the trigger PREVIEWS
+          // the first option (meilisearch's role/referral show "Founder/CTO" /
+          // "Open Source" but stay uncommitted, so Next stays disabled); (2) empty
+          // text; (3) a clear "Select…/Choose…/Pick…" placeholder. NOT
+          // "search"/"add"/"type" — those are filter inputs we must not auto-pick.
+          const hasPlaceholderAttr =
+            el.hasAttribute("data-placeholder") ||
+            el.querySelector("[data-placeholder]") !== null;
+          const placeholderish =
+            hasPlaceholderAttr ||
+            txt.length === 0 ||
+            /^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt);
+          if (!placeholderish) continue;
+          // Resolve a stable data-cy selector — own, or nearest ancestor — so
+          // the locator click can't drift after the portal re-renders.
+          const dcEl =
+            el.getAttribute("data-cy") !== null ? el : el.closest("[data-cy]");
+          const dc = dcEl !== null ? dcEl.getAttribute("data-cy") : null;
+          const sel = dc !== null && dc.length > 0 ? `[data-cy="${dc}"]` : null;
+          if (sel === null || seen.has(sel)) continue;
+          seen.add(sel);
+          out.push(sel);
+        }
+        // LeafyGreen (MongoDB Atlas) path. Its select triggers are
+        // `<button data-lgid="lg-button">Select</button>` with NO data-cy and NO
+        // data-placeholder — the placeholder is the literal text "Select".
+        // Address each by its index among lg-buttons (Playwright `>> nth=`),
+        // since there's no stable per-trigger attribute. MEASURED 2026-06-23
+        // (mongodb-atlas /atlas onboarding personalization wizard).
+        const lgButtons = Array.from(
+          document.querySelectorAll("button[data-lgid='lg-button']"),
+        );
+        for (let i = 0; i < lgButtons.length; i++) {
+          const el = lgButtons[i];
+          if (el === undefined || !isVisible(el)) continue;
+          const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
+          const sel = `button[data-lgid="lg-button"] >> nth=${i}`;
+          if (seen.has(sel)) continue;
+          seen.add(sel);
+          out.push(sel);
+        }
+        // Autocomplete-list combobox INPUTS that are part of the survey and
+        // still EMPTY (mongodb's required "data types" multiselect). These are
+        // distinct from free-text search boxes: `aria-autocomplete=list/both`
+        // means a fixed option list, and an empty value means unfilled. Click +
+        // pick-first via the same option locator. Addressed by index.
+        const acInputs = Array.from(
+          document.querySelectorAll("input[role='combobox'][aria-autocomplete]"),
+        );
+        for (let i = 0; i < acInputs.length; i++) {
+          const el = acInputs[i] as HTMLInputElement | undefined;
+          if (el === undefined || !isVisible(el)) continue;
+          if ((el.value ?? "").trim().length > 0) continue;
+          const sel = `input[role='combobox'][aria-autocomplete] >> nth=${i}`;
+          if (seen.has(sel)) continue;
+          seen.add(sel);
+          out.push(sel);
+        }
+        return out.slice(0, 8);
+      });
+    } catch {
+      return [];
+    }
+    const filled: string[] = [];
+    for (const sel of triggerSelectors) {
+      try {
+        const trigger = page.locator(sel).first();
+        if ((await trigger.count().catch(() => 0)) === 0) continue;
+        await trigger.click({ timeout: 5000 });
+        await page.waitForTimeout(600);
+        // An autocomplete input may only render its option list after a
+        // keystroke — nudge it with ArrowDown so the option locator can resolve.
+        if (sel.includes("input[")) {
+          await page.keyboard.press("ArrowDown").catch(() => undefined);
+          await page.waitForTimeout(400);
+        }
+        const option = page
+          .locator(
+            "[role='option']:not([aria-disabled='true']):not([data-disabled='true'])," +
+              "[cmdk-item]:not([aria-disabled='true']):not([data-disabled='true'])," +
+              "[data-lgid='lg-option']:not([aria-disabled='true'])",
+          )
+          .first();
+        if ((await option.count().catch(() => 0)) > 0) {
+          const name = ((await option.textContent().catch(() => "")) ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 40);
+          await option.click({ timeout: 5000 });
+          filled.push(`${sel} → ${name}`);
+          await page.waitForTimeout(300);
+        }
+        // Close the (multi-select) popover so the next trigger isn't occluded.
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(200);
+      } catch {
+        // Best-effort per combobox — a miss falls back to the planner.
+      }
+    }
+    return filled;
+  }
+
+  // True when a visible advance/submit button (Next / Continue / Create /
+  // Register / Submit / Get started / Finish) is currently DISABLED. The gate
+  // for the deterministic combobox filler: only auto-satisfy a survey's
+  // required selects when something is actually blocking forward progress.
+  async hasDisabledSubmit(): Promise<boolean> {
+    if (!this.page) return false;
+    try {
+      return await this.page.evaluate(() => {
+        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up)\b/i;
+        for (const el of Array.from(document.querySelectorAll("button,[role='button']"))) {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          const disabled =
+            (el as HTMLButtonElement).disabled === true ||
+            el.getAttribute("aria-disabled") === "true" ||
+            el.getAttribute("disabled") !== null;
+          if (!disabled) continue;
+          // A disabled advance/submit button gates the survey. Match by verb
+          // text OR by type=submit (meilisearch's button-register is a
+          // type=submit whose visible label is icon+text, so a text-only match
+          // missed it).
+          const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          const isSubmit = (el as HTMLButtonElement).type === "submit";
+          if (re.test(txt) || isSubmit) return true;
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
   }
 
   async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
@@ -6536,6 +6798,92 @@ export class BrowserController {
     return this.page === null || this.page.isClosed();
   }
 
+  // Drive a Google sign-in on the ACTIVE OAuth page (already sitting at
+  // accounts.google.com/.../identifier). The whole point: replay must not bail
+  // `needs_login` where the full discover bot would just type the password —
+  // a freshly-created robot account lands on the identifier page the first time
+  // a given relying party requests OAuth even with a live session, and the
+  // robot's credentials are available to the verifier. Mirrors the proven
+  // tools/google-login-fleet.mjs in-page steps (email → Enter → password →
+  // Enter → ToS/continue speedbumps) but operates on `this.page` instead of
+  // navigating to myaccount — in the OAuth flow the success terminus is the
+  // consent screen or the return to the relying party, NOT myaccount. Returns
+  // true when the flow progressed off the Google identifier/password screens
+  // (or the popup closed); false on any failure, so the caller can fall back to
+  // its existing needs_login path. Never logs the password.
+  async loginGoogleInline(email: string, password: string): Promise<boolean> {
+    const page = this.page;
+    if (page === null || page.isClosed()) return false;
+    const onIdentifierOrPwd = (): boolean =>
+      /\/signin\/(?:identifier|v\d+\/(?:identifier|challenge|signin)|challenge|pwd|password)/i.test(
+        page.url(),
+      );
+    try {
+      // Cookie-consent wall (EU surfaces) — best-effort.
+      await page
+        .evaluate(() => {
+          const want = /^(accept all|i agree|agree|accept|reject all)$/i;
+          for (const b of Array.from(document.querySelectorAll("button,[role=button]"))) {
+            if (want.test((b.textContent ?? "").trim())) {
+              (b as HTMLElement).click();
+              return;
+            }
+          }
+        })
+        .catch(() => undefined);
+      await page.waitForTimeout(1200);
+      // Email — #identifierId, never input[type=email] alone (Google uses a
+      // custom input). Only fill if the identifier field is actually present;
+      // a flow already past identifier (parked on the password screen) skips it.
+      const EMAIL = '#identifierId, input[name="identifier"], input[type="email"]';
+      const emailField = await page.$(EMAIL);
+      if (emailField !== null) {
+        await page.fill(EMAIL, email).catch(() => undefined);
+        await page.waitForTimeout(400);
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(6000);
+      }
+      // Password.
+      const PW = 'input[type="password"][name="Passwd"], input[type="password"]';
+      await page.waitForSelector(PW, { state: "visible", timeout: 15_000 });
+      await page.fill(PW, password).catch(() => undefined);
+      await page.waitForTimeout(400);
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(7000);
+      // New-account ToS speedbump + OAuth follow-ons — patient (renders late).
+      for (let i = 0; i < 8; i++) {
+        if (page.isClosed()) return true; // popup closed → handshake done
+        const clicked = await page
+          .evaluate(() => {
+            const want =
+              /^(not now|skip|confirm|i understand|i agree|accept|agree|got it|continue|allow|done|maybe later|next)$/i;
+            for (const b of Array.from(
+              document.querySelectorAll("button,[role=button],a,input[type=submit]"),
+            )) {
+              const t = (b.textContent ?? (b as HTMLInputElement).value ?? "").trim();
+              if (want.test(t)) {
+                (b as HTMLElement).click();
+                return t;
+              }
+            }
+            return null;
+          })
+          .catch(() => null);
+        if (clicked !== null) {
+          await page.waitForTimeout(3500);
+        } else {
+          if (!onIdentifierOrPwd()) break; // left the sign-in screens → progressed
+          await page.waitForTimeout(2500);
+        }
+      }
+      // Success = we are no longer parked on a Google identifier/password
+      // screen (moved to consent / back to the relying party / popup closed).
+      return page.isClosed() || !onIdentifierOrPwd();
+    } catch {
+      return false;
+    }
+  }
+
   // Which OAuth providers have a LIVE session in this profile's cookie jar.
   // The logged-in-providers.json marker is a memo that drifts out of sync
   // (a --force-relogin clears it, a misclassified run clears it, a parallel
@@ -7359,6 +7707,12 @@ export function scoreSignupButton(
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
   if (t.includes("continue")) score += 2;
+  // "Next" / "Submit" / "Join" are the real form-submit verb on a multi-step
+  // signup (huggingface /join step 1's button is "Next"). Weak positive so the
+  // submit survives the button cap among many 0-scored nav anchors — otherwise
+  // the planner can't see it and hallucinates a submit_selector. Loses to any
+  // real signup CTA / OAuth marker. MEASURED 2026-06-23 (huggingface).
+  if (/\bnext\b/.test(t) || /\bsubmit\b/.test(t) || /\bjoin\b/.test(t)) score += 2;
   // Post-signup dashboards reveal the key behind a "Create API Key" /
   // "Add key" / "Generate key" / "Get API Key" CTA — the run's actual
   // goal once the account exists. These score 0 on signup vocabulary, so

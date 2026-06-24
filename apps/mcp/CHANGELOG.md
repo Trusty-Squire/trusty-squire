@@ -1,5 +1,48 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.18 (2026-06-24)
+
+Stable (`latest`). Verify-replay hardening that drove meilisearch pending-review
+→ active end-to-end, plus the egress 503 mitigation (#231/#227).
+
+- fix(verify): replay drives the OAuth login inline instead of bailing
+  `needs_login`; restores the product page after a popup-OAuth handshake
+  (`settleAfterOAuth` on the primary path); fills required onboarding-survey
+  comboboxes before a disabled submit.
+- fix(verify): same-provider `needs_login` is redrawable (per-robot session
+  variance, bounded cap); reclaim robots that bail `needs_login`; post-OAuth +
+  deterministic login-wall guards stop a single wall starving the heal sweep.
+- fix(replay): a visible auth gate dominates weak nav keywords in
+  `detectAlreadySignedIn` (no more skipping the OAuth step on a /login shell).
+- fix(egress): `Retry-After` + `scope:"proxy"` on the 503, plus a short-TTL
+  credential-lookup cache — a proxy outage no longer burns escalation rungs and
+  the per-request DB pressure (P1017, #227) is relieved.
+
+## 0.9.18-rc.1 (2026-06-23)
+
+Prerelease (`next`). Three services cracked end-to-end (meilisearch, firebase,
+gcp) plus the generalizing bot fixes that did it.
+
+- fix(bot): meilisearch — SPA stale-URL 404 trap. cloud.meilisearch.com serves
+  one 200 shell for /login and /signup, so the HTTP probe "upgraded" a working
+  /login to a /signup that only 404s after React mounts. Added a live
+  `looksLike404` fallback (revert to the original hint when the resolved URL
+  renders a client-side 404) + a 404 veto on the already-authenticated
+  classifier. Generalizes to any SPA whose curated URL goes stale. meilisearch
+  now OAuths through end-to-end.
+- feat(bot): crack firebase + gcp (live: discover firebase → ok, gcp → ok). The
+  wall was identity + MFA, not nav: the Workspace verify robots can't create GCP
+  projects (org policy). New `BOT_GOOGLE_PROFILE_DIR` (+ `mcp login
+  --profile-dir`) pins an isolated PERSONAL Google identity for org-gated
+  targets. A mandatory 2SV gate is now classified `mfa_setup_required`
+  (`looksLikeMfaEnrollmentGate`) instead of a misleading `oauth_required`. The
+  authenticated Google console (firebase/gcp), which the OAuth scan read as a
+  perpetual loading shell, now routes to post-verify
+  (`isAuthenticatedGoogleConsoleUrl`). And a deterministic extractor
+  (`extractGoogleApiKeyFromCredentials`) pulls the auto-created "Browser key"
+  from the GCP credentials page once a project exists — the same AIzaSy is the
+  firebase web apiKey AND a GCP API key, so one extractor covers both.
+
 ## 0.9.17 (2026-06-23)
 
 Stable (`latest`). Promotes the 0.9.17 line (rc.1–rc.5) from staging: anti-bot

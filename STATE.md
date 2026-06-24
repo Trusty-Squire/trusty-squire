@@ -14,6 +14,182 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
 ---
 
+## High-value spine sweep (2026-06-23) — 3/5 cracked + a generalizable survey filler
+
+Driving the uncracked spine (openai/auth0/mongodb-atlas/huggingface/meilisearch):
+
+- **auth0 → ok** (2 creds). The existing bot already handles it — a free win once attempted.
+- **openai → ok** (1 api_key). Google-OAuth signup reached a key with no phone gate on the run.
+- **meilisearch → ok** (1 api_key). CRACKED via the new onboarding-survey filler (below).
+- **mongodb-atlas → survey CRACKED, OPEN on billing+budget.** Its onboarding uses
+  MongoDB's **LeafyGreen UI** (`<button data-lgid="lg-button">Select</button>`, no
+  data-cy/data-placeholder) + an autocomplete-input "data types" multiselect. The filler
+  now handles both (lg-button by index, autocomplete-list inputs by ArrowDown+pick) and
+  the survey clears fully (commits `b0003ed`, `2f07f37`). Past the survey the bot reaches
+  **"Create deployment" → a billing-address form (name + country)** AND, on a different
+  run, **"Create API Key"** directly. RESIDUAL: the Admin API key is under Access
+  Manager and needs NO cluster, but the planner sometimes detours into the
+  cluster→billing path, and the whole flow exceeds the 600s budget. NEXT: pin mongodb's
+  credential surface to the org-scoped Access-Manager API-keys route (skip cluster
+  creation) + give this multi-step service a longer deadline.
+  - **UPDATE (later 2026-06-23):** bumping the wall-clock budget (`UNIVERSAL_BOT_RUN_TIMEOUT_MS=
+    900000`) did NOT help — the limit is the **24-round post-verify budget**, not wall-clock.
+    The data-type autocomplete fill (`input[role=combobox][aria-autocomplete]` -> ArrowDown +
+    pick) is UNRELIABLE: MongoDB's "data types" field didn't surface options on ArrowDown, so
+    Finish stays disabled and the planner burns the round budget looping. mongodb's full path
+    to a key = ToS + LeafyGreen survey (CRACKED) + data-type autocomplete (flaky) + a
+    cluster->billing detour OR Access-Manager routing + a multi-step keypair modal — the
+    hardest spine service. Needs: reliable autocomplete fill (type-to-filter, not ArrowDown),
+    a `postVerifyMaxRounds` bump, and credential-surface routing to skip the cluster.
+- **huggingface → form-flow CRACKED via proxy; residual = hCaptcha-Enterprise + email.**
+  Direct datacenter IP → `/join` `403 suspicious activity ~30min`. Through the Mac
+  residential proxy (`socks5://100.104.88.126:1081`, egress 1.240.236.25; set
+  `UNIVERSAL_BOT_PROXY_URL` + `UNIVERSAL_BOT_PROXY_ALWAYS=true`) the 403 is gone. The
+  form-fill then died `planning_failed: submit_selector "div > form > button"` because
+  HF's "Next" submit scored 0 in scoreSignupButton and got capped out of the 25-button
+  inventory among nav anchors. FIXED (commit `8039bf2`): scoreSignupButton gives Next/
+  Submit/Join a weak positive so the submit survives ranking, + parseSignupPlan
+  substitutes the best inventory submit when the planner hallucinates one. Live: the bot
+  now FILLS the email form and clicks the REAL submit. RESIDUAL (the documented hard
+  parts): the invisible hCaptcha is **Enterprise** (sitekey bd5f2066…) — 2Captcha
+  returns a token but injection fails — and the verification email is withheld
+  (fresh-domain anti-abuse on trustysquire.ai). `verification_not_sent`. Not the
+  form/nav bug anymore.
+  - **✓ EVIDENCED WALL (2026-06-23): Enterprise + dynamic-rqdata, not 2Captcha-solvable.**
+    Diagnostics (commit `50e93d0`) made it legible: solve context = `invisible=false
+    rqdata=MISSING`, 2Captcha returns `ERROR_CAPTCHA_UNSOLVABLE`. Page probe (via proxy)
+    confirmed: sitekey is in a JS config (`"captchaApiKey":"bd5f2066…"`), the page is
+    explicitly **Enterprise** hCaptcha, invoked invisibly + PROGRAMMATICALLY on submit (NO
+    pre-rendered widget/iframe), so rqdata is minted dynamically server-side at
+    execute()-time and is NOT in the static DOM for the pre-submit solver. `___hcaptcha_cfg`
+    is empty pre-execute. NO OAuth/SSO signup button on /join to bypass it. 2Captcha needs
+    rqdata for Enterprise; capturing it would require intercepting the
+    `hcaptcha.com/getcaptcha` request at submit-time + a solve-AFTER-submit redesign, and
+    HF's Enterprise variant likely binds the token to the session anyway. Genuinely
+    unservable via the automated email path; manual signup / a non-fresh inbox domain are
+    the realistic calls. FALSIFIER: a run that captures rqdata AND gets a 2Captcha token
+    accepted would overturn this.
+
+### The generalizable win: deterministic onboarding-survey filler (commit `0c088d5`)
+
+The dominant `oauth_onboarding_failed` blocker is a post-OAuth "tell us about yourself"
+survey whose required cmdk/Radix selects gate a disabled submit; the greedy planner opens
+the dropdowns but never commits, loops on a Next it can't enable, and stalls.
+`hasDisabledSubmit()` + `fillRequiredComboboxes()` (browser.ts), fired once in
+postVerifyLoop, open each unfilled required select and commit the first option via a real
+Playwright locator click. Unfilled is detected by Radix's `data-placeholder` attribute
+(present even when the trigger PREVIEWS the first option — meilisearch's role→Founder/CTO
+stayed uncommitted), empty text, or a Select/Choose/Pick placeholder. Live: meilisearch
+satisfied all 4 selects → Next enabled → project created → key extracted. Covers the
+cmdk/Radix majority; LeafyGreen (mongodb) and native-tile surveys are separate widgets.
+
+---
+
+## `firebase` / `gcp` — Google Cloud project-creation is an IDENTITY wall, then an MFA wall (2026-06-23)
+
+### ✓ CONFIRMED: the verify-robot pool can't create GCP projects (org-policy), not a nav/form bug
+
+Fresh robot run reproduced the documented wall exactly: the bot OAuths into the
+authenticated Firebase console and gets all the way into project creation (fills
+name, accepts terms, clicks Continue) — then dies on the **parent-resource
+picker** (`fire-cloud-resource-chip` → `cdk-tree-node`) that only offers
+`trustysquire.ai`. The `verify-NN@trustysquire.ai` robots are Workspace (Cloud
+Identity) accounts: FORCED into the org, no "No organization" option,
+`resourcemanager.projects.create` denied → "Continue" stays disabled, the bot
+loops on "Expand the trustysquire.ai folder" and stalls. Pure
+identity-authorization wall.
+
+### Fix in motion: personal consumer Gmail (defaults to "No organization")
+
+Shipped `BOT_GOOGLE_PROFILE_DIR` (+ `mcp login --profile-dir`) to pin a personal
+Google identity for Google-OAuth discover, bypassing the robot pool (commit
+`35323cb`). A personal Gmail creates projects under "No organization" freely.
+
+### ✓ CLEARED (2026-06-23): MFA + org + project-creation, with personal Gmail + 2SV
+
+With a fresh personal Gmail (no 2SV), `console.firebase.google.com` first
+replaced the whole console with **"Enable MFA … You must enable MFA to gain
+access to Firebase / Turn on 2SV"** — a hard gate (now classified
+`mfa_setup_required`; was mislabeling `oauth_required` after ~16 loading-shell
+retries; detector `looksLikeMfaEnrollmentGate`). After the user enabled 2SV on
+methoxine@gmail.com, the re-run **cleared everything down the stack**: MFA gone,
+"No organization" available (org wall cleared), and **project creation SUCCEEDED**
+— `ts-firebase-project` was created end-to-end (name + terms + Continue + Create
++ provisioning wait). Only the final key extraction failed (planner wandered
+into Gemini chat / Service Accounts, then 404'd guessing /settings/keys).
+
+### ✓ CRACKED (2026-06-23): deterministic API-key extraction — firebase → ok, 1 credential
+
+Two fixes completed the chain (commit `fe0bde3`), both shipped + live-validated:
+
+1. **Authenticated-console routing.** console.firebase.google.com /
+   console.cloud.google.com are heavy Angular SPAs the OAuth-first scan read as a
+   perpetual "loading shell" (no provider button — you're already in) → it looped
+   and bailed the misleading `oauth_required`. A logged-OUT visitor is redirected
+   to accounts.google.com, so simply BEING on the console host = an established
+   session → route to post-verify (already_oauth). (`isAuthenticatedGoogleConsoleUrl`)
+2. **Deterministic Browser-key extractor.** Every Firebase project auto-creates a
+   "Browser key (auto created by Firebase)" in its GCP project (= firebaseConfig.
+   apiKey AND a GCP API key) even with no web app. Once postVerifyLoop sees a
+   projectId in the URL (`parseGoogleProjectId`), it navs to
+   `console.cloud.google.com/apis/credentials?project=<id>`, clicks the
+   Browser-key row's "Show key", and reads the row-scoped AIzaSy
+   (`extractGoogleApiKeyFromCredentials`). One extractor covers firebase + gcp.
+
+**Live (2026-06-23):** `discover firebase → ok` (project ts-firebase-project-fc076,
+Browser key extracted, 1 credential). **gcp** added to the queue on the SAME path
+(a Firebase project IS a GCP project; the Browser key IS a GCP API key). Requires
+the personal Google identity + 2SV (`BOT_GOOGLE_PROFILE_DIR`, methoxine@gmail.com);
+the Workspace robots still can't (org wall). GCP-native key creation
+(console.cloud.google.com → Create credentials → API key, no firebase) is a future
+refinement — the firebase path already yields a valid GCP credential.
+
+---
+
+## `meilisearch` — SPA stale-URL 404 trap (CRACKED 2026-06-23) → onboarding-wizard residual
+
+### ✓ CONFIRMED + FIXED: the "no_credentials_after_already_signed_in" was a 404 false-positive, NOT an auth wall
+
+meilisearch failed discover as `no_credentials_after_already_signed_in`. It
+read like an OAuth/session wall; it was not. Two chained bugs, both fixed
+generalizably (commit `649e1a1`):
+
+1. **SPA serves one 200 shell for every route.** `cloud.meilisearch.com/login`
+   and `/signup` both return the SAME 200 `index.html`; `/signup` only renders
+   "Sorry, the page you are looking for does not exist" (the *cute baby seal*
+   404) once React mounts. The static HTTP probe (`resolveSignupUrlByProbe`)
+   can't see a client-rendered 404, so it "upgraded" the working curated
+   `/login` to the dead `/signup`. **Fix:** a live `looksLike404` fallback
+   after `goto`+`waitForFormReady` — when the probe moved us off the hint AND
+   the resolved URL renders a 404, fall back to the original hint and re-read.
+2. **404 page mistaken for an authenticated dashboard.** The 404 still ships
+   meili's chrome nav (Projects/Settings links), which tripped Signal 1 of
+   `detectAlreadySignedIn` → the bot logged "already authenticated … skipping
+   signup" and routed to key-extraction over more 404s. **Fix:** a 404 veto on
+   the already-signed-in classifier.
+
+**Live-validated 2026-06-23:** with both fixes, meilisearch lands `/login`,
+takes the Google OAuth path, and signs in end-to-end (reaches
+`/welcome-informations`). The IP/fingerprint/session hypotheses never applied.
+
+### ? OPEN (residual): `oauth_onboarding_failed` — required cmdk multi-select on the onboarding wizard
+
+After OAuth, `/welcome-informations` ("Tell us about yourself") gates the
+"Next" button (`[data-cy="button-register"]`) behind two **required cmdk
+multi-select comboboxes** (`[data-cy="meilisearch_reasons-trigger"]`,
+`[data-cy="sdk_languages-trigger"]`). The post-OAuth path drives this with
+**nav-search (button navigation) → post-verify planner**, NOT the form-fill
+engine, so it never systematically selects an option in each required
+multi-select; the planner concludes "all fields filled," clicks the disabled
+Next, and STALLs. The executor's cmdk option-commit (2026-06-16 fix) works in
+isolation — the gap is *upstream*: post-OAuth onboarding must run real
+form-fill over a required multi-field survey. This is the tracked
+`oauth_onboarding_failed` workstream (dominant promote-blocker); fix belongs
+there (planner/form-fill over onboarding surveys, gated by LLM-shadow eval),
+not a meili-specific patch.
+
+---
+
 ## `oauth_session_not_persisted` (cartesia, braintrust, pinecone, … the "OAuth-callback wall")
 
 ### ✗✗ FALSIFIED: "it's IP / needs residential egress" (2026-06-14, controlled matrix)

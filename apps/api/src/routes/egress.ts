@@ -14,7 +14,11 @@
 
 import { z } from "zod";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import { AllowlistViolationError, CredentialNotFoundError } from "@trusty-squire/vault";
+import {
+  AllowlistViolationError,
+  CredentialNotFoundError,
+  type CredentialRecord,
+} from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
 import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
 import {
@@ -79,8 +83,32 @@ function proxyErrorStatus(code: ProxyError["code"]): number {
   }
 }
 
+// A 503 from the egress proxy is ALWAYS an infra blip (DB connection pressure on
+// the per-request grant/credential lookup — see #227/#231), never an upstream
+// model error. Two things make that actionable for consumers:
+//   - Retry-After: tells a client to back off PAST the outage window instead of
+//     exhausting a fixed transient-retry budget inside it (which silently burned
+//     the expensive escalation rungs in the Castellan dogfood, #231).
+//   - scope:"proxy": lets a consumer distinguish a pure-proxy outage from an
+//     upstream model 503 (which is proxied through with the model's own body),
+//     so it can treat this as NON-rung-consuming.
+const EGRESS_RETRY_AFTER_SECONDS = (() => {
+  const raw = Number(process.env.EGRESS_503_RETRY_AFTER_SECONDS);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30;
+})();
+
 function sendEgressStoreUnavailable(reply: FastifyReply): void {
-  reply.code(503).send({ error: "egress_temporarily_unavailable", retryable: true });
+  reply.header("Retry-After", String(EGRESS_RETRY_AFTER_SECONDS));
+  reply.code(503).send({
+    error: "egress_temporarily_unavailable",
+    retryable: true,
+    scope: "proxy",
+    retry_after_seconds: EGRESS_RETRY_AFTER_SECONDS,
+    message:
+      "Squire egress proxy is briefly unavailable (database connection pressure). " +
+      "This is an infra outage, NOT an upstream model error — back off for the " +
+      "indicated delay before retrying; do not consume escalation/retry budget on it.",
+  });
 }
 
 export const registerEgressRoutes: FastifyPluginAsync<{
@@ -102,6 +130,21 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       bodyTimeoutMs: 120_000,
     });
   const limiter = new GrantRateLimiter();
+  // Per-credential lookup cache (#227/#231). The grant lookup is already cached
+  // in the store (30s), but the credential resolve (credentialStore.findActive)
+  // ran on EVERY proxied request — a streaming LLM run fires many requests on
+  // the SAME grant/credential per second, so each was a fresh DB round-trip and
+  // the connection pool exhausted under load → P1017 → the 503 windows that
+  // burned escalation rungs. Caching the resolved credential absorbs the burst.
+  // SHORT TTL by design: proxyRecord decrypts THIS record's ciphertext, so a
+  // rotated secret would be served stale for at most the TTL — 15s keeps that
+  // window tiny while still collapsing a streaming burst to one DB read. Only
+  // positive (active) results are cached; misses fall straight through.
+  const credCache = new Map<string, { cred: CredentialRecord; expiresAt: number }>();
+  const CRED_CACHE_TTL_MS = (() => {
+    const raw = Number(process.env.EGRESS_CRED_CACHE_TTL_MS);
+    return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 15_000;
+  })();
   const now = opts.now ?? (() => new Date());
   // Limits are OPT-IN: 0 = unlimited. A grant only gets a rate cap when the
   // caller passes rate_limit_per_hour; spend_cap is likewise null unless asked.
@@ -221,16 +264,31 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       }
 
       // Resolve the credential (account-scoped to the grant) for its upstream
-      // host + auth_shape. The secret itself is injected by vault.proxy.
-      let cred;
-      try {
-        cred = await opts.deps.credentialStore.findActive(grant.credential_ref);
-      } catch (err) {
-        if (isRetryablePrismaConnectionError(err)) {
-          sendEgressStoreUnavailable(reply);
-          return;
+      // host + auth_shape. The secret itself is injected by vault.proxy. Served
+      // from the short-TTL cache when warm so a streaming burst doesn't hammer
+      // the connection pool (#227/#231).
+      let cred: CredentialRecord | null;
+      const cachedCred = credCache.get(grant.credential_ref);
+      if (cachedCred !== undefined && cachedCred.expiresAt > now().getTime()) {
+        cred = cachedCred.cred;
+      } else {
+        try {
+          cred = await opts.deps.credentialStore.findActive(grant.credential_ref);
+        } catch (err) {
+          if (isRetryablePrismaConnectionError(err)) {
+            sendEgressStoreUnavailable(reply);
+            return;
+          }
+          throw err;
         }
-        throw err;
+        if (cred !== null) {
+          credCache.set(grant.credential_ref, {
+            cred,
+            expiresAt: now().getTime() + CRED_CACHE_TTL_MS,
+          });
+        } else {
+          credCache.delete(grant.credential_ref);
+        }
       }
       if (cred !== null && cred.account_id !== grant.account_id) {
         cred = null;
