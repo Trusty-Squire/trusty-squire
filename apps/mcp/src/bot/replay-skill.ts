@@ -1734,6 +1734,15 @@ async function executeStep(
       if (walk === "needs_login") {
         return { kind: "needs_login", provider: step.provider };
       }
+      // Restore the product page. Google Identity Services (meilisearch et al.)
+      // runs OAuth in a POPUP that closes once consent posts the credential back
+      // to the opener; without switching `this.page` off the now-closed popup,
+      // the next replay step (a navigate/extract) runs against a dead page and
+      // dies "Target page, context or browser has been closed". The OAuth
+      // RECOVERY path already settles; the primary click_oauth_button path did
+      // not — so popup-OAuth skills broke on the very next step the moment they
+      // finally cleared OAuth. No-op for the same-tab redirect transport.
+      await browser.settleAfterOAuth().catch(() => undefined);
       return { kind: "clicked" };
     }
 

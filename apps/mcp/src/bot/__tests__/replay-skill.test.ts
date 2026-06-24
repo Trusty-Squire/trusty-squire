@@ -130,6 +130,9 @@ function stubBrowser(): StubBrowser {
     async startOAuth(selector: string) {
       history.push({ method: "startOAuth", args: [selector] });
     },
+    async settleAfterOAuth() {
+      history.push({ method: "settleAfterOAuth", args: [] });
+    },
     async readClipboard() {
       history.push({ method: "readClipboard", args: [] });
       return clipboard;
