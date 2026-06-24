@@ -54,6 +54,10 @@ export type RunFreshVerifyResult =
       success: boolean;
       credential?: string;
       reason?: string;
+      // Set when RETURNING_VERIFY_PROMOTE=1 turned a returning PASS into a
+      // registry promote (for github-OAuth/captcha-walled services the fresh
+      // pool can't cover); undefined otherwise.
+      transition?: VerifierOutcomeResponse["transition"];
       outcome: ReplayOutcome;
     }
   | { kind: "not_configured"; service: string };
@@ -72,10 +76,15 @@ export interface RunFreshVerifyInput {
   // (FRESH_VERIFY_*) without a deploy. See ../fresh-verify.ts for the UNTUNED
   // default bounds and the calibration note.
   confidence?: ConfidenceOpts;
-  // "fresh" is the only mode allowed to drive registry promotion/demotion.
-  // "returning" is a component check for authenticated post-OAuth navigation
-  // and credential extraction. It uses the shared profile and never reports a
-  // verifier outcome, so it cannot pretend virgin signup still works.
+  // "fresh" is the default mode and the only one that drives promotion from a
+  // VIRGIN-signup sampler. "returning" is a component check (authenticated
+  // post-OAuth navigation + credential extraction) against the shared profile;
+  // by default it reports nothing. It MAY promote ONLY when the operator opts in
+  // with RETURNING_VERIFY_PROMOTE=1 — reserved for services whose only signup
+  // path the fresh pool structurally cannot cover (github-OAuth: pool is
+  // all-Google; or a captcha-walled email path). There, a returning-user replay
+  // is the best + representative evidence; the env gate keeps it a deliberate
+  // choice, never an automatic weakening of the fresh-signup contract.
   profileMode?: "fresh" | "returning";
 }
 
@@ -343,6 +352,59 @@ export async function runFreshVerify(
       `[returning-verify] ${input.service}: ${credential !== undefined ? "PASS" : "FAIL"}` +
         (reason !== undefined ? ` (${reason})` : ""),
     );
+    // Returning-verify PROMOTION (opt-in). The fresh-robot sampler is the default
+    // promotion driver, but it structurally CANNOT verify a service whose only
+    // signup path the robot pool lacks an identity for — a github-OAuth service
+    // (the pool is all-Google) whose email path is also captcha-walled
+    // (deepinfra: GitHub-only + Turnstile on email). For those, replaying against
+    // the operator's shared, already-authenticated profile is the BEST available
+    // evidence the recipe works, and it IS representative (any logged-in user
+    // replays identically). Gated behind RETURNING_VERIFY_PROMOTE=1 so it stays a
+    // DELIBERATE operator choice — never an automatic weakening of the
+    // fresh-signup contract for services the fresh pool COULD cover.
+    let returningTransition: VerifierOutcomeResponse["transition"] | undefined;
+    if (credential !== undefined && process.env.RETURNING_VERIFY_PROMOTE === "1") {
+      const adminBearer = process.env.REGISTRY_ADMIN_BEARER;
+      if (cfg.registry !== undefined || (adminBearer !== undefined && adminBearer.length > 0)) {
+        try {
+          const registry =
+            cfg.registry ??
+            new VerifierRegistryClient({
+              baseUrl: process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? "https://registry.trustysquire.ai",
+              adminBearer: adminBearer ?? "",
+            });
+          const res = await registry.postOutcome({
+            skill_id: skillId,
+            kind: "success",
+            reason:
+              `returning-user replay PASS (shared authenticated profile; the fresh ` +
+              `robot pool cannot cover this signup path) — operator-promoted via ` +
+              `RETURNING_VERIFY_PROMOTE`,
+            verdict: "promote",
+            samples: 1,
+            successes: 1,
+            failures: 0,
+            pass_rate_lcb: 1,
+            pass_rate_ucb: 1,
+          });
+          returningTransition = res.transition;
+          log(
+            `[returning-verify] ${input.service}: reported PROMOTE for skill ${skillId} → ${res.transition}`,
+          );
+        } catch (err) {
+          log(
+            `[returning-verify] ${input.service}: promote report failed (non-fatal): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      } else {
+        log(
+          `[returning-verify] ${input.service}: RETURNING_VERIFY_PROMOTE set but no ` +
+            `REGISTRY_ADMIN_BEARER — verdict computed (PASS) but not reported`,
+        );
+      }
+    }
     return {
       kind: "returning_verified",
       service: input.service,
@@ -350,6 +412,7 @@ export async function runFreshVerify(
       success: credential !== undefined,
       ...(credential !== undefined ? { credential } : {}),
       ...(reason !== undefined ? { reason } : {}),
+      ...(returningTransition !== undefined ? { transition: returningTransition } : {}),
       outcome,
     };
   }

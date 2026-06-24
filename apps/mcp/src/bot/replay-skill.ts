@@ -2120,10 +2120,28 @@ async function executeStep(
         const selectorOrdinal = copyButtons
           .slice(0, targetIndex + 1)
           .filter((candidate) => candidate.selector === target.selector).length - 1;
-        if (typeof browser.clickNth === "function") {
-          await browser.clickNth(target.selector, selectorOrdinal);
-        } else {
-          await browser.click(target.selector);
+        // The copy-click populates the clipboard, but it must NOT fail the whole
+        // extraction: the key is usually also in the (often modal) DOM, which the
+        // candidate/body tiers below read regardless. When the click is INTERCEPTED
+        // by a modal backdrop (MUI dialog — deepinfra's new-key dialog timed out
+        // "intercepts pointer events"), retry with a force click so the clipboard
+        // still gets the key; then proceed either way.
+        try {
+          if (typeof browser.clickNth === "function") {
+            await browser.clickNth(target.selector, selectorOrdinal);
+          } else {
+            await browser.click(target.selector);
+          }
+        } catch {
+          if (typeof browser.clickForce === "function") {
+            await browser.clickForce(target.selector, selectorOrdinal).catch(() => undefined);
+          }
+        }
+        // Also fire a JS-dispatched click: some React copy buttons populate the
+        // clipboard only on the synthetic onClick a positional click doesn't
+        // reproduce (deepinfra). The real click above supplied user-activation.
+        if (typeof browser.clickViaJs === "function") {
+          await browser.clickViaJs(target.selector, selectorOrdinal).catch(() => undefined);
         }
         await browser.wait(1);
       }

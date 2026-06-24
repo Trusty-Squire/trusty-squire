@@ -2047,6 +2047,38 @@ export class BrowserController {
     await this.humanClick(selector);
   }
 
+  // Force-click bypasses Playwright's actionability + interception checks — for a
+  // button that is visible / enabled / stable but whose pointer events are eaten
+  // by a modal-dialog backdrop layered over it (MUI `<div class="MuiDialog-
+  // container">`, e.g. deepinfra's new-API-key dialog). A normal click() there
+  // times out with "intercepts pointer events"; force dispatches at the element.
+  async clickForce(selector: string, index = 0): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const safeIndex = Math.max(0, Math.floor(index));
+    await this.page.locator(selector).nth(safeIndex).click({ force: true, timeout: 8000 });
+  }
+
+  // Dispatch a DOM .click() in the page context. Some React copy buttons fire
+  // their onClick (and thus navigator.clipboard.writeText) on the synthetic
+  // event a real Playwright mouse click doesn't reliably reproduce (deepinfra's
+  // "copy key": a JS click populated the clipboard in a probe where the
+  // positional click did not). Used as a copy-extraction fallback; the preceding
+  // real click supplies the transient user-activation writeText needs.
+  async clickViaJs(selector: string, index = 0): Promise<void> {
+    if (!this.page) return;
+    const safeIndex = Math.max(0, Math.floor(index));
+    await this.page
+      .evaluate(
+        ({ sel, i }) => {
+          const els = Array.from(document.querySelectorAll<HTMLElement>(sel));
+          const el = els[i] ?? els[0];
+          if (el !== undefined) el.click();
+        },
+        { sel: selector, i: safeIndex },
+      )
+      .catch(() => undefined);
+  }
+
   async clickNth(selector: string, index: number): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     const safeIndex = Math.max(0, Math.floor(index));
@@ -4904,6 +4936,14 @@ export class BrowserController {
   // failure (caller catches and falls through to other paths).
   async readClipboard(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
+    // navigator.clipboard.readText() REJECTS ("Document is not focused") unless
+    // the page has focus — which a sequence of Playwright actions + page.evaluate
+    // reads between the copy-click and here can drop, silently yielding "". Bring
+    // the tab to front and focus the document first. MEASURED 2026-06-24
+    // (deepinfra: the copy-key clipboard held the 32-char key in a probe but the
+    // replay's read came back empty — focus was the difference).
+    await this.page.bringToFront().catch(() => undefined);
+    await this.page.evaluate(() => window.focus()).catch(() => undefined);
     return await this.page.evaluate(async () => {
       try {
         return await navigator.clipboard.readText();
