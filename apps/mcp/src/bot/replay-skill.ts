@@ -2013,6 +2013,23 @@ async function executeStep(
             "inbox alias) to poll for the verification email.",
         );
       }
+      // Post-submit captcha gate. A managed Turnstile can gate the just-submitted
+      // signup: the service won't accept it (and never dispatches the
+      // verification email) until the Turnstile clears. The universal bot's
+      // discover path runs runCaptchaGate here; the replay previously clicked
+      // submit and went straight to polling, so a Turnstile-gated email signup
+      // (MEASURED 2026-06-24, clerk: URL stuck on /sign-up at this step, no OTP
+      // ever sent) timed out forever. Engage the widget (humanized click + wait
+      // for the token, no-op when absent) and give the page up to ~24s to
+      // advance to a verify surface before polling — mirrors discover.
+      if (!/verif|confirm/i.test(browser.currentUrl())) {
+        await browser.solveVisibleCaptcha().catch(() => undefined);
+        for (let i = 0; i < 12; i += 1) {
+          await browser.waitForInteractiveDom().catch(() => undefined);
+          if (/verif|confirm/i.test(browser.currentUrl())) break;
+          await browser.wait(2);
+        }
+      }
       const code = await fetchEmailCode({ alias });
       if (code === null || code.length === 0) {
         throw new Error(
