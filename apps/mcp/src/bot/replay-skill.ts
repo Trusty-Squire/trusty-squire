@@ -1647,6 +1647,28 @@ async function executeStep(
           rebaseSubdomain(step.url, browser.currentUrl()),
         ),
       );
+      // Skip a redundant navigate to a page we're already on. MEASURED
+      // 2026-06-24 (posthog): after the Google OAuth step, posthog's OWN
+      // callback already lands the user on the /organization/confirm-creation
+      // onboarding form (role-picker + org name). The captured step-2 navigate
+      // then RE-loads that same path, which drops the post-OAuth-initialized
+      // form ("signup form gone" at the next step) so org-create never enables.
+      // Re-navigating to the exact page you're already on is at best a no-op and
+      // at worst resets a freshly-initialized SPA form — skip it.
+      const hereUrl = browser.currentUrl();
+      const alreadyHere = ((): boolean => {
+        try {
+          const a = new URL(hereUrl);
+          const b = new URL(targetUrl);
+          return a.host === b.host && a.pathname.replace(/\/$/, "") === b.pathname.replace(/\/$/, "");
+        } catch {
+          return false;
+        }
+      })();
+      if (alreadyHere) {
+        await browser.waitForInteractiveDom().catch(() => undefined);
+        return { kind: "navigated" };
+      }
       try {
         await browser.goto(targetUrl);
       } catch (err) {
