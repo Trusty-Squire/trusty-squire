@@ -31,6 +31,7 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   /\bsbp_[A-Za-z0-9]{30,}/gi,
   /\bnapi_[a-zA-Z0-9]{30,80}/g,
   /\br8_[a-zA-Z0-9]{30,60}/g,
+  /\bphx_[A-Za-z0-9]{40,60}/g, // PostHog personal API key (lockstep w/ agent.ts)
   // rc.23 / rc.35 — Baseten (6-12 alnum . 30+ alnum)
   /\b[A-Za-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/g,
   // rc.23 / rc.34 / rc.36 — Qdrant Cloud (UUID|opaque-55+, allowing _ and - in body)

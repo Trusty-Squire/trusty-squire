@@ -4541,6 +4541,16 @@ export function extractApiKeyFromText(text: string): string | null {
     // pattern only fires on Zeabur-style keys. Surfaced from the
     // rc.23 snapshot review.
     /\bsk-[a-z0-9]{28,38}\b/, // Zeabur
+    // PostHog PERSONAL API key — `phx_<43+ alnum>`. MEASURED 2026-06-24: the
+    // post-OAuth create-personal-api-key flow mints a `phx_`-prefixed secret —
+    // the planner SAW it (and even OCR-transcribed it with errors), but no regex
+    // matched so the DOM extractor stored nothing and the run bailed
+    // oauth_onboarding_failed while a real key sat on the page. The {40,60}
+    // bound keeps it clear of short prefixed noise. Deliberately NOT matching
+    // the `phc_` PROJECT key —
+    // that's a PUBLIC analytics key embedded in client JS on every PostHog site
+    // (see extract-credentials.test "ignores a PostHog project key").
+    /\bphx_[A-Za-z0-9]{40,60}\b/, // PostHog personal API key
     // OpenRouter, Anthropic, OpenAI — these are the dominant
     // OAuth-completed-then-copy-needed services. Specific-prefix
     // patterns first so a labeled-pattern fallback isn't load-

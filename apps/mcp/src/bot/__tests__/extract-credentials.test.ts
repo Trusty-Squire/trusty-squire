@@ -58,6 +58,14 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText("checkout pk_live_examplePUBkey0000000000abcd")).toBeNull();
   });
 
+  it("extracts a PostHog personal API key by its phx_ prefix (bare, no label)", () => {
+    // MEASURED 2026-06-24: the create-personal-api-key modal shows the secret
+    // once with no "API key:" label adjacent; the bare-prefix path must catch
+    // it or the whole posthog crack bails oauth_onboarding_failed.
+    const key = "phx_" + "synthETICposthogPERSONALkey00000000000000abcd";
+    expect(extractApiKeyFromText(`Personal API key ${key}`)).toBe(key);
+  });
+
   it("ignores a PostHog project key — public analytics key, not a credential", () => {
     // phc_ project keys ship in client-side analytics JS on every
     // PostHog-using site; matching one surfaced Mistral's embedded
