@@ -4626,6 +4626,10 @@ export class BrowserController {
         }
         for (const el of Array.from(candidates)) {
           if (!isVisible(el)) continue;
+          // Skip text/autocomplete inputs (role=combobox is also set on search
+          // multiselects like MongoDB's "data types") — we click-to-pick from a
+          // dropdown, never type into a filter box.
+          if (el.tagName === "INPUT") continue;
           const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
           // Unfilled signals: (1) Radix sets `data-placeholder` on a SelectTrigger
           // until a value is committed — present even when the trigger PREVIEWS
@@ -4651,7 +4655,26 @@ export class BrowserController {
           seen.add(sel);
           out.push(sel);
         }
-        return out.slice(0, 6);
+        // LeafyGreen (MongoDB Atlas) path. Its select triggers are
+        // `<button data-lgid="lg-button">Select</button>` with NO data-cy and NO
+        // data-placeholder — the placeholder is the literal text "Select".
+        // Address each by its index among lg-buttons (Playwright `>> nth=`),
+        // since there's no stable per-trigger attribute. MEASURED 2026-06-23
+        // (mongodb-atlas /atlas onboarding personalization wizard).
+        const lgButtons = Array.from(
+          document.querySelectorAll("button[data-lgid='lg-button']"),
+        );
+        for (let i = 0; i < lgButtons.length; i++) {
+          const el = lgButtons[i];
+          if (el === undefined || !isVisible(el)) continue;
+          const txt = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
+          const sel = `button[data-lgid="lg-button"] >> nth=${i}`;
+          if (seen.has(sel)) continue;
+          seen.add(sel);
+          out.push(sel);
+        }
+        return out.slice(0, 8);
       });
     } catch {
       return [];
@@ -4666,7 +4689,8 @@ export class BrowserController {
         const option = page
           .locator(
             "[role='option']:not([aria-disabled='true']):not([data-disabled='true'])," +
-              "[cmdk-item]:not([aria-disabled='true']):not([data-disabled='true'])",
+              "[cmdk-item]:not([aria-disabled='true']):not([data-disabled='true'])," +
+              "[data-lgid='lg-option']:not([aria-disabled='true'])",
           )
           .first();
         if ((await option.count().catch(() => 0)) > 0) {

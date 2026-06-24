@@ -12086,9 +12086,12 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     const firebaseGcpSlug = args.service.toLowerCase().replace(/[^a-z0-9]/g, "");
     const triedProjectIds = new Set<string>();
     // Post-OAuth onboarding-survey guard: deterministically satisfy required
-    // cmdk/Radix multi-selects that gate a disabled submit, at most once, so the
-    // greedy planner doesn't loop on a Next it can't enable.
-    let comboboxFillAttempted = false;
+    // selects that gate a disabled submit. A multi-step wizard (e.g. mongodb:
+    // ToS step → personalization survey) may show a disabled submit BEFORE the
+    // survey renders, so a one-shot gate gets spent on the wrong step. Retry on
+    // a no-op (capped) and only stop once it actually fills something.
+    let comboboxFilled = false;
+    let comboboxNoOpAttempts = 0;
     const credentialExtractionFlow = new CredentialExtractionFlow();
     const syntheticCapture = new PostSignupSyntheticCapture();
     const loginFlow = new PostSignupLoginFlow();
@@ -12174,20 +12177,28 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // the first option in each unfilled required select once, so the gate
       // clears and the planner can advance. Tightly gated (disabled submit +
       // empty placeholder selects only) and at most once per loop.
-      if (!comboboxFillAttempted) {
+      if (!comboboxFilled && comboboxNoOpAttempts < 5) {
         try {
           if (await this.browser.hasDisabledSubmit()) {
-            comboboxFillAttempted = true;
             const picked = await this.browser.fillRequiredComboboxes();
-            args.steps.push(
-              picked.length > 0
-                ? `Post-verify: satisfied ${picked.length} required onboarding select(s) ` +
-                    `to clear a disabled submit — ${picked.join(", ")}`
-                : `Post-verify: disabled submit detected but no fillable required select ` +
-                    `found (combobox-fill no-op)`,
-            );
             if (picked.length > 0) {
+              comboboxFilled = true;
+              args.steps.push(
+                `Post-verify: satisfied ${picked.length} required onboarding select(s) ` +
+                  `to clear a disabled submit — ${picked.join(", ")}`,
+              );
               await this.browser.waitForFormReady().catch(() => undefined);
+            } else {
+              comboboxNoOpAttempts += 1;
+              // A disabled submit with no fillable select yet is usually an
+              // EARLIER wizard step (ToS / welcome) — keep retrying as the
+              // wizard advances. Log once to avoid per-round spam.
+              if (comboboxNoOpAttempts === 1) {
+                args.steps.push(
+                  `Post-verify: disabled submit but no fillable required select yet — ` +
+                    `will retry as the onboarding wizard advances`,
+                );
+              }
             }
           }
         } catch (err) {
