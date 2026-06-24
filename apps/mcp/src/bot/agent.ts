@@ -3343,6 +3343,7 @@ export function detectAlreadySignedIn(args: {
     );
   });
 
+
   const visibleTextOf = (e: InteractiveElement): string =>
     `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
 
@@ -3374,11 +3375,24 @@ export function detectAlreadySignedIn(args: {
   }
 
   // Signal 1 — strict nav-keyword match (the canonical Sentry-class case).
-  const AUTH_KEYWORDS =
-    /^\s*(?:sign out|log out|dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
-  if (
-    inventory.some((e) => AUTH_KEYWORDS.test((e.visibleText ?? e.ariaLabel ?? "").trim()))
-  ) {
+  // STRONG markers (sign out / log out) PROVE a session — you can't sign out if
+  // you're not signed in — so they fire even next to a decoration "Continue with
+  // Google" (account-linking) button. WEAK markers (dashboard / projects /
+  // settings / …) are ordinary nav labels that ALSO appear on a logged-out
+  // marketing or /login page, so they must NOT override a visible auth gate:
+  // gate them on !hasSignupAffordance. Without this split, northflank's /login
+  // (which renders "Continue with Google" alongside "Projects"/"Settings") was
+  // mis-read as signed-in → the replay skipped click_oauth_button → the fresh
+  // robot never logged in and bailed needs_login deep in the flow (MEASURED
+  // 2026-06-24).
+  const STRONG_AUTH_KEYWORDS = /^\s*(?:sign out|log out)\s*$/i;
+  const WEAK_AUTH_KEYWORDS =
+    /^\s*(?:dashboard|projects|settings|profile|my account|account settings|workspaces)\s*$/i;
+  const textOf = (e: InteractiveElement): string => (e.visibleText ?? e.ariaLabel ?? "").trim();
+  if (inventory.some((e) => STRONG_AUTH_KEYWORDS.test(textOf(e)))) {
+    return true;
+  }
+  if (!hasSignupAffordance && inventory.some((e) => WEAK_AUTH_KEYWORDS.test(textOf(e)))) {
     return true;
   }
 
