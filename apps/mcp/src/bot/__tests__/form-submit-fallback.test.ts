@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { pickFormSubmitSelector, parseSignupPlan } from "../agent.js";
-import type { InteractiveElement } from "../agent.js";
+import type { InteractiveElement } from "../browser.js";
 
 const btn = (over: Partial<InteractiveElement>): InteractiveElement =>
   ({ tag: "button", selector: "x", ...over }) as InteractiveElement;
