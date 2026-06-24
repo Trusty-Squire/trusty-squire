@@ -55,6 +55,20 @@ Driving the uncracked spine (openai/auth0/mongodb-atlas/huggingface/meilisearch)
   returns a token but injection fails — and the verification email is withheld
   (fresh-domain anti-abuse on trustysquire.ai). `verification_not_sent`. Not the
   form/nav bug anymore.
+  - **✓ EVIDENCED WALL (2026-06-23): Enterprise + dynamic-rqdata, not 2Captcha-solvable.**
+    Diagnostics (commit `50e93d0`) made it legible: solve context = `invisible=false
+    rqdata=MISSING`, 2Captcha returns `ERROR_CAPTCHA_UNSOLVABLE`. Page probe (via proxy)
+    confirmed: sitekey is in a JS config (`"captchaApiKey":"bd5f2066…"`), the page is
+    explicitly **Enterprise** hCaptcha, invoked invisibly + PROGRAMMATICALLY on submit (NO
+    pre-rendered widget/iframe), so rqdata is minted dynamically server-side at
+    execute()-time and is NOT in the static DOM for the pre-submit solver. `___hcaptcha_cfg`
+    is empty pre-execute. NO OAuth/SSO signup button on /join to bypass it. 2Captcha needs
+    rqdata for Enterprise; capturing it would require intercepting the
+    `hcaptcha.com/getcaptcha` request at submit-time + a solve-AFTER-submit redesign, and
+    HF's Enterprise variant likely binds the token to the session anyway. Genuinely
+    unservable via the automated email path; manual signup / a non-fresh inbox domain are
+    the realistic calls. FALSIFIER: a run that captures rqdata AND gets a 2Captcha token
+    accepted would overturn this.
 
 ### The generalizable win: deterministic onboarding-survey filler (commit `0c088d5`)
 
