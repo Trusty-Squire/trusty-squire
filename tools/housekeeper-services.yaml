@@ -365,35 +365,6 @@
     or counting it as a terminal signup failure.
 
     '
-- slug: netlify
-  name: Netlify
-  signup_url: https://app.netlify.com/signup
-  oauth_provider: github
-  scope_hint: null
-  notes: '2026-06-22 live discover passed after shared extraction guard
-
-    prevented public signup pages from short-circuiting as credential
-
-    pages. GitHub OAuth landed at /teams/lunchboxfortwo/projects and
-
-    extracted api_key. Command:
-
-    node apps/mcp/dist/bin.js housekeeper --mode=discover --service=netlify --once
-
-    Result: SUCCESS; extracted api_key. Auto-promote did not synthesize
-
-    because no planner capture rounds were needed on the authenticated
-
-    dashboard path.
-
-
-    Static + edge hosting. GitHub OAuth is the dominant path (deploys
-
-    are git-driven); Google + GitLab + Bitbucket also offered. PAT in
-
-    user settings post-signup.
-
-    '
 - slug: fly
   name: Fly.io
   signup_url: https://fly.io/app/sign-up
@@ -587,37 +558,6 @@
     tier; API key generated post-signup.
 
     '
-- slug: cockroachdb
-  name: CockroachDB Cloud
-  signup_url: https://cockroachlabs.cloud/signup
-  oauth_provider: google
-  scope_hint: null
-  notes: '2026-06-23 live discover passed after shared browser snapshot
-
-    hardening made screenshot capture best-effort with an 8s timeout instead
-
-    of aborting signup. The first Google OAuth callback bounced to login, the
-
-    bot recovered through native email/password signup, solved reCAPTCHA,
-
-    verified email, completed account/cluster onboarding, and extracted
-
-    api_key, password, email. Command:
-
-    node apps/mcp/dist/bin.js housekeeper --mode=discover --service=cockroachdb --once
-
-    Result: SUCCESS. Auto-promote did not publish because the capture chain
-
-    failed verification with prev_hash_mismatch at round 2.
-
-
-    Distributed Postgres-compatible DB. Google + GitHub + Azure
-
-    OAuth. Free serverless tier; cluster creation needed before
-
-    connection string surfaces.
-
-    '
 - slug: weaviate
   name: Weaviate Cloud
   signup_url: https://console.weaviate.cloud
@@ -661,17 +601,6 @@
 
 
     2026-05-29 retry: Confirmed via screenshot 2026-05-29: highlight''s `/join_workspace` page shows ''Creating new workspaces is disabled.'' message with a greyed-out ''Join Workspace'' button. Highlight has shut down new-workspace creation. No automation path exists; service is closed.'
-- slug: betterstack-logs
-  name: Better Stack Logs
-  signup_url: https://logs.betterstack.com/users/sign-up
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Log management (formerly Logtail). Google + GitHub OAuth. Source
-
-    creation step post-OAuth surfaces an ingest token.
-
-    '
 - slug: axiom
   name: Axiom
   signup_url: https://app.axiom.co/register
@@ -705,26 +634,6 @@
     before API key surfaces.
 
     '
-- slug: baselime
-  name: Baselime
-  signup_url: https://baselime.io/
-  oauth_provider: github
-  scope_hint: null
-  status: pending
-  notes: 'Serverless observability (acquired by Cloudflare). GitHub OAuth
-
-    is the canonical path.
-
-    '
-- slug: last9
-  name: Last9
-  signup_url: https://app.last9.io/login
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'OpenTelemetry observability. Google + GitHub OAuth.
-
-    '
 - slug: mixpanel
   name: Mixpanel
   signup_url: https://mixpanel.com/register
@@ -740,17 +649,6 @@
 
 
     2026-05-29 deep-iteration: After 0.8.3-rc.1 GIS-iframe + onboarding-path + wizard-forward fixes, the bot now drives Mixpanel''s post-OAuth onboarding 14+ rounds deep (name → work-type → role → org → industry). It stops at the ''Create your organization'' step''s industry combobox — Mixpanel uses a custom search-as-you-type react-select widget with specific labels (typing ''Technology'' / ''Internet'' returns ''No options''). Even if industry were unstuck, downstream the bot would need to: pick a data-center (custom widget), create the org, create a project, then navigate to `/project/<project_id>/settings/api-keys` — the project-scoped URL pattern requires knowing the project_id which only appears after project creation. Manual recommendation: finish a Mixpanel signup once via the operator account; the bot can then re-enter via Google OAuth and hit a real dashboard.'
-- slug: amplitude
-  name: Amplitude
-  signup_url: https://amplitude.com/signup
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Product analytics. Google OAuth. Org + workspace creation step
-
-    post-OAuth before project API key surfaces.
-
-    '
 - slug: plausible
   name: Plausible
   signup_url: https://plausible.io/register
@@ -771,15 +669,6 @@
   notes: 'Privacy-friendly web analytics. Google OAuth on /register.
 
     Free trial; site creation step before tracking code surfaces.
-
-    '
-- slug: loops
-  name: Loops
-  signup_url: https://app.loops.so/register
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Email for SaaS. Google + email OAuth.
 
     '
 - slug: plunk
@@ -906,17 +795,6 @@
     before API key surfaces.
 
     '
-- slug: typesense
-  name: Typesense Cloud
-  signup_url: https://cloud.typesense.org/
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Search engine. Google + GitHub OAuth. Cluster provisioning step
-
-    before API key surfaces.
-
-    '
 - slug: clerk
   name: Clerk
   signup_url: https://dashboard.clerk.com/sign-up
@@ -1014,17 +892,6 @@
   notes: 'Merchant-of-record payments. Google OAuth. KYC heavy.
 
     '
-- slug: launchdarkly
-  name: LaunchDarkly
-  signup_url: https://app.launchdarkly.com/signup
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Feature flags. Google OAuth. SDK keys per environment surface
-
-    post project setup.
-
-    '
 - slug: statsig
   name: Statsig
   signup_url: https://console.statsig.com/sign_up
@@ -1047,17 +914,6 @@
     root redirects to Auth0 and renders the Register form; old
 
     /auth/signup route 404s.
-
-    '
-- slug: flagsmith
-  name: Flagsmith
-  signup_url: https://www.flagsmith.com/sign-up
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Feature flags. Google + GitHub OAuth. App /signup is a 404;
-
-    marketing /sign-up is the current live entry.
 
     '
 - slug: e2b
@@ -1259,57 +1115,6 @@
     dashboard.
 
     '
-- slug: browserbase
-  name: Browserbase
-  signup_url: https://www.browserbase.com/sign-in
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Headless browser-as-a-service for AI agents. Google + GitHub
-
-    OAuth. API key in project settings.
-
-    '
-- slug: betterstack-uptime
-  name: Better Stack Uptime
-  signup_url: https://uptime.betterstack.com/users/sign-up
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Uptime monitoring. Google + GitHub OAuth. Team token in account
-
-    settings post-OAuth.
-
-    '
-- slug: cronitor
-  name: Cronitor
-  signup_url: https://cronitor.io/sign-up
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Cron + heartbeat monitoring. Google OAuth.
-
-    '
-- slug: cloudinary
-  name: Cloudinary
-  signup_url: https://console.cloudinary.com/users/register_free
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Image + video CDN. Google + GitHub OAuth. API credentials on
-
-    dashboard post-OAuth.
-
-    '
-- slug: uploadcare
-  name: Uploadcare
-  signup_url: https://app.uploadcare.com/accounts/signup/
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'File uploads + CDN. Google + GitHub OAuth.
-
-    '
 - slug: imagekit
   name: ImageKit
   signup_url: https://imagekit.io/registration/
@@ -1326,17 +1131,6 @@
   scope_hint: null
   status: pending
   notes: 'Voice synthesis API. Google OAuth. API key in profile settings.
-
-    '
-- slug: lambda-labs
-  name: Lambda Labs API
-  signup_url: https://cloud.lambda.ai/sign-up
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'GPU cloud (Lambda Cloud + Inference API). Google OAuth. May
-
-    require payment for inference keys.
 
     '
 - slug: modal
@@ -1402,27 +1196,6 @@
     is used as `Authorization: Key <id>:<secret>` against fal.run.
 
     '
-- slug: ipdata
-  name: ipdata
-  signup_url: https://dashboard.ipdata.co/sign-up.html
-  oauth_provider: google
-  scope_hint: null
-  status: pending
-  notes: 'Corrected 2026-05-30: real signup is dashboard.ipdata.co/sign-up.html.
-
-    The slug-guess https://ipdata.com/signup 404s. Target for the
-
-    "no credentials found" extractor reproduction.
-
-    '
-# ── vibe-coder head spine (added 2026-06-22) ─────────────────────────────
-# Buildable free-tier gaps from the head-50 coverage analysis. BYO anchors
-# (openai / stripe / github / twilio) are intentionally NOT queued — the
-# refuse-walled provision gate handles them. vercel is BYO too (SMS phone
-# gate; already status:skip). lemon-squeezy / polar (payments, merchant-KYC)
-# left BYO per the same call. The rest of the spine (clerk, posthog, netlify,
-# meilisearch, loops, cloudinary, workos, sendgrid, …) is already queued — its
-# lever is bot fixes, not re-queuing.
 - slug: google-ai
   name: Google AI Studio
   signup_url: https://aistudio.google.com/apikey
@@ -1534,40 +1307,6 @@
     GCP-native flow (console.cloud.google.com -> Create credentials -> API key,
     no firebase) is a future refinement; the firebase path already yields a valid
     GCP credential.
-
-    '
-- slug: auth0
-  name: Auth0
-  signup_url: https://auth0.com/signup
-  oauth_provider: google
-  scope_hint: null
-  notes: 'Auth provider, free tier. Tier-2 auth alternate (clerk is the Tier-0
-
-    auth target, already queued pending).
-
-
-    2026-06-22 live discover passed after shared post-verify planner fixes:
-
-    app-creation wizards now prefer backend/server technologies and Regular
-
-    Web App style client types over SPA/M2M branches that hide or gate
-
-    client_secret extraction. Command:
-
-    node apps/mcp/dist/bin.js housekeeper --mode=discover --service=auth0 --once
-
-    Result: SUCCESS; extracted client_id and client_secret.
-
-    '
-- slug: uploadthing
-  name: UploadThing
-  signup_url: https://uploadthing.com/
-  oauth_provider: github
-  scope_hint: null
-  status: pending
-  notes: 'Next.js-native uploader; GitHub OAuth login (robot fleet identity).
-
-    Tier-1 storage/media gap (0/3 storage covered).
 
     '
 - slug: expo
