@@ -2023,7 +2023,9 @@ async function executeStep(
       // for the token, no-op when absent) and give the page up to ~24s to
       // advance to a verify surface before polling — mirrors discover.
       if (!/verif|confirm/i.test(browser.currentUrl())) {
-        await browser.solveVisibleCaptcha().catch(() => undefined);
+        if (typeof browser.solveVisibleCaptcha === "function") {
+          await browser.solveVisibleCaptcha().catch(() => undefined);
+        }
         for (let i = 0; i < 12; i += 1) {
           await browser.waitForInteractiveDom().catch(() => undefined);
           if (/verif|confirm/i.test(browser.currentUrl())) break;
@@ -2054,6 +2056,16 @@ async function executeStep(
       // Read the boxes back and re-type per-box — explicit targeting, no
       // auto-advance dependency — anything that didn't stick.
       await fixupOtpDistribution(browser, code, otpPageUrl);
+      // The OTP submit redirects to the post-signup surface (clerk: /apps/new
+      // with a "Create application" CTA the NEXT step clicks). Wait for that
+      // navigation + hydration so the following step doesn't race an unpainted
+      // page — MEASURED 2026-06-24: clerk's step-5 "Create application" click
+      // bailed "No element matches" because it ran before the redirect painted.
+      for (let i = 0; i < 8; i += 1) {
+        await browser.waitForInteractiveDom().catch(() => undefined);
+        if (browser.currentUrl() !== otpPageUrl) break;
+        await browser.wait(2);
+      }
       return { kind: "filled" };
     }
 
