@@ -4780,6 +4780,88 @@ export class BrowserController {
     return filled;
   }
 
+  // Satisfy an API-key/token creation form's required ACCESS-SCOPE controls when
+  // its submit is disabled. Distinct from fillRequiredComboboxes (cmdk/Radix/
+  // LeafyGreen survey selects): the "create a scoped credential" pattern gates
+  // submit behind (a) a segmented "All access" / "Full access" button group that
+  // starts unselected, and (b) a LemonSelect-style preset trigger
+  // (`button[aria-haspopup="true"]` showing "Select…/Choose…") whose options
+  // render in a body-portal Popover as `[role="menuitem"]` — NOT an
+  // aria listbox, so the combobox filler's role/listbox query never sees it.
+  // MEASURED 2026-06-24 (posthog /settings/user-api-keys "Create personal API
+  // key": an "Organization & project access" segmented control + a "Select
+  // preset" scopes dropdown both gate the aria-disabled "Create key"; picking
+  // "All access" on each enables it and mints a phx_ key). Prefers the broadest
+  // option so the resulting credential isn't dead-on-arrival. Idempotent and
+  // tightly gated (callers only invoke it on a disabled submit).
+  async satisfyScopePresets(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const done: string[] = [];
+    const dialog = page.locator('[role="dialog"]').first();
+    const root =
+      (await dialog.count().catch(() => 0)) > 0 ? dialog : page.locator("body");
+
+    // (1) Segmented access-scope buttons that start unselected. Exclude select
+    // triggers (aria-haspopup) — those are handled in (2); a selected preset
+    // trigger can also read "All access" and we must not re-open it here.
+    try {
+      const allAccess = root.locator(
+        'button:not([aria-haspopup="true"])',
+        { hasText: /^(?:all access|full access|all scopes)$/i },
+      );
+      const n = Math.min(await allAccess.count().catch(() => 0), 3);
+      for (let i = 0; i < n; i += 1) {
+        const b = allAccess.nth(i);
+        if (!(await b.isVisible().catch(() => false))) continue;
+        await b.click({ timeout: 4000 }).catch(() => undefined);
+        done.push("access:all-access");
+        await page.waitForTimeout(300);
+      }
+    } catch {
+      // best-effort
+    }
+
+    // (2) LemonSelect-style preset triggers still showing a placeholder.
+    try {
+      const triggers = root.locator('button[aria-haspopup="true"]');
+      const n = Math.min(await triggers.count().catch(() => 0), 4);
+      for (let i = 0; i < n; i += 1) {
+        const t = triggers.nth(i);
+        if (!(await t.isVisible().catch(() => false))) continue;
+        const txt = ((await t.textContent().catch(() => "")) ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
+        // Only act on an UNSELECTED select (a "Select…/Choose…/Pick…"
+        // placeholder) — never re-pick one that already holds a value.
+        if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
+        await t.click({ timeout: 4000 }).catch(() => undefined);
+        await page.waitForTimeout(700);
+        const options = page.locator(
+          '.Popover [role="menuitem"], .Popover [role="option"], ' +
+            '[role="listbox"] [role="option"], .LemonDropdown [role="menuitem"]',
+        );
+        const broad = options.filter({ hasText: /all access|full access/i }).first();
+        const pick =
+          (await broad.count().catch(() => 0)) > 0 ? broad : options.first();
+        if ((await pick.count().catch(() => 0)) > 0) {
+          const name = ((await pick.textContent().catch(() => "")) ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 30);
+          await pick.click({ timeout: 4000 }).catch(() => undefined);
+          done.push(`preset:${name}`);
+          await page.waitForTimeout(400);
+        } else {
+          await page.keyboard.press("Escape").catch(() => undefined);
+        }
+      }
+    } catch {
+      // best-effort
+    }
+    return done;
+  }
+
   // True when a visible advance/submit button (Next / Continue / Create /
   // Register / Submit / Get started / Finish) is currently DISABLED. The gate
   // for the deterministic combobox filler: only auto-satisfy a survey's
@@ -4788,7 +4870,7 @@ export class BrowserController {
     if (!this.page) return false;
     try {
       return await this.page.evaluate(() => {
-        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up)\b/i;
+        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up|create key|create token|create personal)\b/i;
         for (const el of Array.from(document.querySelectorAll("button,[role='button']"))) {
           const r = (el as HTMLElement).getBoundingClientRect();
           if (r.width <= 0 || r.height <= 0) continue;

@@ -35,6 +35,13 @@ describe("CredentialExtractionFlow credential policy", () => {
     expect(isMultiCredBundle({ access_token: "ddp_example_token" })).toBe(false);
   });
 
+  it("treats a lone personal_api_key / project_api_key as single-sufficient", () => {
+    // posthog mints a `phx_…` personal_api_key — a complete credential on its
+    // own. It must end the post-signup loop, not bail oauth_onboarding_failed.
+    expect(hasUsableCredentialBundle({ personal_api_key: "phx_abc123" })).toBe(true);
+    expect(hasUsableCredentialBundle({ project_api_key: "phc_def456" })).toBe(true);
+  });
+
   it("normalizes personal_api_key planner labels to a usable api_key", () => {
     expect(
       extractAllLabeledTokensFromReason(

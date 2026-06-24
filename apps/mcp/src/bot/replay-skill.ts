@@ -1782,6 +1782,17 @@ async function executeStep(
             `[replay] filled ${picked.length} required combobox(es) before submit: ${picked.join(", ")}`,
           );
         }
+        // API-key creation forms gate submit behind access-scope presets
+        // (segmented "All access" + a LemonSelect preset) the combobox filler
+        // can't see — satisfy those too so the disabled "Create key" enables.
+        if (picked.length === 0) {
+          const scoped = await browser.satisfyScopePresets().catch(() => [] as string[]);
+          if (scoped.length > 0) {
+            console.error(
+              `[replay] satisfied ${scoped.length} access-scope preset(s) before submit: ${scoped.join(", ")}`,
+            );
+          }
+        }
         inventory = await browser.extractInteractiveElements().catch(() => inventory);
       }
       await checkRequiredAgreementBoxesBeforeSubmitClick(browser, step);

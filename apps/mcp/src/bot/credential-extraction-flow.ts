@@ -26,8 +26,14 @@ export function credentialFieldNames(
 // Credential fields that are usable by themselves. Other named fields can be
 // part of a credential bundle, but a lone identifier such as cloud_name,
 // application_id, client_id, or org_id must not end the post-signup loop.
+// personal_api_key / project_api_key are full single-use secrets in their own
+// right (MEASURED 2026-06-24: posthog mints a personal_api_key `phx_…` — a
+// complete credential — but the loop bailed oauth_onboarding_failed because the
+// lone field wasn't single-sufficient and 1 < 2 failed the bundle fallback).
 export const SINGLE_CREDENTIAL_FIELDS = new Set<string>([
   "api_key",
+  "personal_api_key",
+  "project_api_key",
   "username",
   "access_token",
 ]);

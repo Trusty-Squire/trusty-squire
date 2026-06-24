@@ -12245,11 +12245,19 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         try {
           if (await this.browser.hasDisabledSubmit()) {
             const picked = await this.browser.fillRequiredComboboxes();
-            if (picked.length > 0) {
+            // The scope/preset pattern (API-key creation forms) gates submit
+            // behind a segmented "All access" + a LemonSelect preset the
+            // combobox filler can't see — satisfy those too before giving up.
+            const scoped =
+              picked.length > 0
+                ? []
+                : await this.browser.satisfyScopePresets().catch(() => [] as string[]);
+            const satisfied = [...picked, ...scoped];
+            if (satisfied.length > 0) {
               comboboxFilled = true;
               args.steps.push(
-                `Post-verify: satisfied ${picked.length} required onboarding select(s) ` +
-                  `to clear a disabled submit — ${picked.join(", ")}`,
+                `Post-verify: satisfied ${satisfied.length} required onboarding select(s) ` +
+                  `to clear a disabled submit — ${satisfied.join(", ")}`,
               );
               await this.browser.waitForFormReady().catch(() => undefined);
             } else {
