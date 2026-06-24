@@ -135,7 +135,7 @@ export function findSignupLinkOnLoginPage(input: {
   if (/sign[-_/ ]?up|register|create[-_/ ]?account/.test(path)) return null;
   const looksLikeLogin =
     /\b(sign in|log in|login)\b/.test(text) &&
-    /\b(no account|no account yet|don't have an account|do not have an account|new to|sign up|register|create account)\b/.test(text);
+    /\b(no account|no account yet|don't have an account|do not have an account|new to|sign up|register|create an? account|create one)\b/.test(text);
   if (!looksLikeLogin) return null;
 
   const candidates = input.inventory
@@ -145,7 +145,13 @@ export function findSignupLinkOnLoginPage(input: {
       const label = elementLabel(el).toLowerCase();
       let score = 0;
       if (/\bsign up\b/.test(label)) score += 30;
-      if (/\b(register|create account|get started|start free)\b/.test(label)) score += 20;
+      // "Create one" / "Create an account" is the canonical login→signup TOGGLE
+      // link (deepinfra: "Already have an account? Log in / … Create one" flips
+      // the submit from "Log in" to "Sign up"). MEASURED 2026-06-24 — without
+      // this it scored 0 and the bot bailed oauth_required on a service that DOES
+      // offer email signup.
+      if (/\bcreate\s+(?:an?\s+)?(?:account|one)\b/.test(label)) score += 28;
+      if (/\b(register|get started|start free)\b/.test(label)) score += 20;
       if (el.tag === "a" && typeof el.href === "string" && /sign[-_/]?up|register|signup/.test(el.href)) score += 15;
       if (/\b(sign in|log in|login|google|github|sso)\b/.test(label)) score -= 40;
       if (typeof el.href === "string" && /oauth|sso|google|github|microsoft/.test(el.href)) score -= 40;

@@ -232,6 +232,21 @@ describe("form-fill selector helpers", () => {
     expect(hit?.selector).toBe("#signup");
   });
 
+  it("detects a 'Create one' login→signup toggle (deepinfra) over noise", () => {
+    const hit = findSignupLinkOnLoginPage({
+      url: "https://deepinfra.com/login",
+      title: "Log In - DeepInfra",
+      htmlOrText: "Log in to your account. Don't have an account? Create one",
+      inventory: [
+        { tag: "button", selector: "#login", visibleText: "Log in", visible: true },
+        { tag: "a", selector: "#announce", visibleText: "read the announcement", href: "/blog", visible: true },
+        { tag: "a", selector: "#createone", visibleText: "Create one", visible: true, inViewport: true },
+        { tag: "a", selector: "#gh", visibleText: "Continue with Github", href: "/oauth/github", visible: true },
+      ],
+    });
+    expect(hit?.selector).toBe("#createone");
+  });
+
   it("prefers Send Code over a marketing Sign up now anchor on email-code pages", () => {
     expect(
       pickEmailCodeSubmitSelector({
