@@ -63,6 +63,12 @@ export type HousekeeperTask =
       // Opt-in per service; without it the bot aborts oauth_consent_needs_review
       // on a non-basic scope.
       allowExtraOAuthScopes?: readonly string[];
+      // This service needs a PERSONAL Google identity (BOT_GOOGLE_PROFILE_DIR),
+      // not a Workspace verify-robot — firebase/gcp gate on "No organization"
+      // which a robot can't pick. When set, discover pins the personal profile
+      // and never draws a robot (a robot run is doomed). From the YAML
+      // `requires_personal_identity: true`.
+      requiresPersonalIdentity?: boolean;
       // Optional metadata for the notifier surfaces (telegram, GH issue).
       // Discovery candidates come with telemetry counts; seed/ad-hoc
       // tasks leave this null.
@@ -134,6 +140,13 @@ interface YamlServiceEntry {
   // Operator-pre-approved extra OAuth scopes for this service (e.g.
   // [read:org] for defang's GitHub consent). Opt-in, per service.
   allow_extra_oauth_scopes?: string[];
+  // This service needs a PERSONAL (consumer) Google identity, not a
+  // trustysquire.ai Workspace verify-robot. Firebase/GCP gate project creation
+  // on "No organization", which a Workspace robot can't pick — so a robot run
+  // is doomed. When set, discover uses BOT_GOOGLE_PROFILE_DIR (the personal
+  // profile, e.g. methoxine@gmail.com) and never draws a robot. MEASURED
+  // 2026-06-23 (firebase/gcp cracked only with the personal identity).
+  requires_personal_identity?: boolean;
   notes?: string;
 }
 
@@ -202,6 +215,7 @@ export class YamlSeedQueue implements QueueProvider {
         ...(Array.isArray(e.allow_extra_oauth_scopes) && e.allow_extra_oauth_scopes.length > 0
           ? { allowExtraOAuthScopes: e.allow_extra_oauth_scopes }
           : {}),
+        ...(e.requires_personal_identity === true ? { requiresPersonalIdentity: true } : {}),
       };
     });
   }

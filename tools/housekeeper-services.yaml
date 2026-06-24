@@ -1227,6 +1227,7 @@
   name: Firebase
   signup_url: https://console.firebase.google.com/
   oauth_provider: google
+  requires_personal_identity: true
   scope_hint: null
   status: pending
   last_probed: 2026-06-23
@@ -1294,6 +1295,7 @@
   name: Google Cloud Platform
   signup_url: https://console.firebase.google.com/
   oauth_provider: google
+  requires_personal_identity: true
   scope_hint: null
   status: pending
   last_probed: 2026-06-23

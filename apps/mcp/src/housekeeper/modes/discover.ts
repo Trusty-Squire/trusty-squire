@@ -293,6 +293,9 @@ export async function runDiscover(
      * sensitive grants (Drive/Gmail/contacts) regardless.
      */
     allowExtraOAuthScopes?: readonly string[];
+    // Pin a personal Google identity (BOT_GOOGLE_PROFILE_DIR) and never draw a
+    // verify-robot — firebase/gcp gate on "No organization" a robot can't pick.
+    requiresPersonalIdentity?: boolean;
   },
   cfg: DiscoveryBotConfig = {},
 ): Promise<DiscoveryBotOutcome> {
@@ -448,6 +451,19 @@ export async function runDiscover(
             ? { oauthAccountEmail: email }
             : {}),
         };
+      }
+      // A service flagged `requires_personal_identity` (firebase/gcp) is doomed
+      // on a Workspace robot — it gates project creation on "No organization"
+      // the robot can't pick. Don't burn a robot; surface a clear skip so the
+      // operator sets BOT_GOOGLE_PROFILE_DIR (a personal Gmail) and re-runs.
+      if (input.requiresPersonalIdentity === true) {
+        stepsSink.push(
+          `[discovery] ${input.service} requires a PERSONAL Google identity ` +
+            `(requires_personal_identity) but BOT_GOOGLE_PROFILE_DIR is unset — ` +
+            `skipping the robot pool (a Workspace robot can't create a project ` +
+            `under "No organization"). Set BOT_GOOGLE_PROFILE_DIR + re-run.`,
+        );
+        return { exhausted: true };
       }
       // BOT_FORCE_IDENTITY pins a specific robot regardless of spent-state —
       // for controlled experiments (e.g. the concurrent-OAuth-from-one-IP A/B,
