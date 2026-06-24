@@ -30,7 +30,7 @@ import { passwordForRobot } from "../verify-passwords.js";
 import {
   freshVerifyService,
   freshVerifyConfidenceFromEnv,
-  isNonRedrawableNonObservation,
+  isProviderCapabilityBlocker,
   type ConfidenceOpts,
   type FreshVerifyResult,
 } from "../fresh-verify.js";
@@ -441,7 +441,7 @@ export async function runFreshVerify(
     result.outcomes.length > 0 &&
     result.outcomes.every((o) => o.observation === "non_observation")
   ) {
-    if (result.outcomes.some((o) => isNonRedrawableNonObservation(o.reason))) {
+    if (result.outcomes.some((o) => isProviderCapabilityBlocker(o.reason, provider))) {
       log(
         `[fresh-verify] ${input.service}: no informative samples because replay hit a ` +
           `provider/session blocker — not rotating the pool`,

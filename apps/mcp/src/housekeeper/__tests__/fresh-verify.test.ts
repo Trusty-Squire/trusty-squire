@@ -6,6 +6,7 @@ import {
   isHardFailure,
   isNonObservation,
   isNonRedrawableNonObservation,
+  NEEDS_LOGIN_REDRAW_CAP,
   nonObservationRequiredProvider,
   wilsonInterval,
   DEFAULT_PROMOTE_FLOOR,
@@ -287,6 +288,55 @@ describe("freshVerifyService (sampler-driven)", () => {
     expect(marked).toEqual(["verify-01"]);
   });
 
+  it("same-provider needs_login is redrawable: skips the session-stale robot and promotes", async () => {
+    // MEASURED 2026-06-24 (meilisearch): one pool yields chooser robots (live
+    // session → pass) AND identifier robots (needs_login) for the SAME provider.
+    // The stale first draw must NOT hold the whole skill — redraw and promote.
+    const marked: string[] = [];
+    let call = 0;
+    const runSignup = vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? { success: false, reason: "needs_login: stored-skill replay provider=google step=1" }
+        : { success: true, credential: "k-meili" };
+    });
+    const res = await freshVerifyService({
+      service: "meilisearch",
+      provider: "google",
+      identities: POOL8,
+      usage: [],
+      runSignup,
+      markSpent: (id) => marked.push(id),
+    });
+
+    expect(res.kind).toBe("verified");
+    expect(res.verdict).toBe("promote");
+    expect(runSignup).toHaveBeenCalledTimes(2);
+  });
+
+  it("same-provider needs_login holds at the redraw cap WITHOUT draining the pool", async () => {
+    // A service where NO robot has the session must not burn all 8 — the cap
+    // bounds the login draws well below pool size.
+    const marked: string[] = [];
+    const runSignup = vi.fn(async () => ({
+      success: false,
+      reason: "needs_login: stored-skill replay provider=google step=1",
+    }));
+    const res = await freshVerifyService({
+      service: "meilisearch",
+      provider: "google",
+      identities: POOL8,
+      usage: [],
+      runSignup,
+      markSpent: (id) => marked.push(id),
+    });
+
+    expect(res.verdict).toBe("hold");
+    expect(res.samples).toBe(0); // non-observations never move the posterior
+    expect(runSignup).toHaveBeenCalledTimes(NEEDS_LOGIN_REDRAW_CAP);
+    expect(marked.length).toBeLessThan(POOL8.length);
+  });
+
   it("one HARD wall holds; two independent HARD walls reject", async () => {
     const marked: string[] = [];
     const res = await freshVerifyService({
@@ -461,13 +511,22 @@ describe("isNonObservation", () => {
 });
 
 describe("isNonRedrawableNonObservation", () => {
-  it("treats provider/session blockers as non-redrawable verifier capability gaps", () => {
-    expect(
-      isNonRedrawableNonObservation("needs_login: stored-skill replay provider=github step=0"),
-    ).toBe(true);
+  it("treats an explicit provider-session capability gap as non-redrawable", () => {
     expect(
       isNonRedrawableNonObservation("needs_oauth_provider_session: google profile stale"),
     ).toBe(true);
+  });
+
+  it("does NOT mark needs_login non-redrawable — the sampler decides per-provider", () => {
+    // needs_login is per-robot session-freshness variance, not a uniform gap
+    // (MEASURED 2026-06-24). Same-provider → bounded redraw; cross-provider →
+    // reroute/HOLD — both decided in the sampler, not this pure classifier.
+    expect(
+      isNonRedrawableNonObservation("needs_login: stored-skill replay provider=google step=1"),
+    ).toBe(false);
+    expect(
+      isNonRedrawableNonObservation("needs_login: stored-skill replay provider=github step=0"),
+    ).toBe(false);
   });
 
   it("keeps stale returning-user divergence redrawable by pool rotation", () => {

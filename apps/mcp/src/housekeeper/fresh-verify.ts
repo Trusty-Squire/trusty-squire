@@ -294,6 +294,7 @@ export async function freshVerifyService(opts: {
   let successes = 0;
   let failures = 0;
   let hardWalls = 0;
+  let needsLoginRedraws = 0;
   let failureKind: string | undefined;
   let lastEval = evaluateConfidence(0, 0, { ...confidence, drawsRemaining: 1 });
 
@@ -380,36 +381,9 @@ export async function freshVerifyService(opts: {
     // spending more robots only burns the fleet until the provider capability is
     // fixed (e.g. GitHub-warmed robots or a repaired Google session).
     if (observation === "non_observation") {
-      if (isNonRedrawableNonObservation(res.reason)) {
-        const requiredProvider = nonObservationRequiredProvider(res.reason);
-        if (
-          requiredProvider !== undefined &&
-          requiredProvider !== opts.provider &&
-          !candidates.some(
-            (candidate, idx) => idx > i && candidate.providers.includes(requiredProvider),
-          )
-        ) {
-          const seen = new Set(outcomes.map((o) => o.identityId));
-          const rerouteCandidates = pickUnspentIdentities(
-            opts.identities,
-            opts.usage,
-            opts.service,
-            requiredProvider,
-            maxPull,
-          ).filter((candidate) => !seen.has(candidate.id));
-          if (rerouteCandidates.length > 0) {
-            candidates = [
-              ...candidates.slice(0, i + 1),
-              ...rerouteCandidates,
-            ];
-            log(
-              `[fresh-verify] ${opts.service}: replay discovered provider=${requiredProvider}; ` +
-                `rerouting from ${opts.provider} to ${rerouteCandidates.length} ` +
-                `${requiredProvider}-capable identit${rerouteCandidates.length === 1 ? "y" : "ies"}`,
-            );
-            continue;
-          }
-        }
+      const code = failureCode(res.reason);
+      const requiredProvider = nonObservationRequiredProvider(res.reason);
+      const holdNonRedrawable = (): void => {
         lastEval = evaluateConfidence(successes, failures, {
           ...confidence,
           drawsRemaining: 0,
@@ -418,7 +392,69 @@ export async function freshVerifyService(opts: {
           `[fresh-verify] ${opts.service}: non-redrawable verifier blocker ` +
             `(${res.reason ?? "unknown"}) — HOLD without spending more identities`,
         );
+      };
+
+      // CROSS-PROVIDER blocker: the stored skill wants a provider this robot
+      // lacks (needs_login provider=github while sampling google, or an
+      // explicit needs_oauth_provider_session). Reroute to a capable identity;
+      // if the pool has none, it's a genuine capability gap → non-redrawable.
+      if (
+        (code === "needs_login" || code === "needs_oauth_provider_session") &&
+        requiredProvider !== undefined &&
+        requiredProvider !== opts.provider
+      ) {
+        const capableAlreadyQueued = candidates.some(
+          (candidate, idx) => idx > i && candidate.providers.includes(requiredProvider),
+        );
+        if (capableAlreadyQueued) {
+          continue; // the loop will reach the capable identity on its own
+        }
+        const seen = new Set(outcomes.map((o) => o.identityId));
+        const rerouteCandidates = pickUnspentIdentities(
+          opts.identities,
+          opts.usage,
+          opts.service,
+          requiredProvider,
+          maxPull,
+        ).filter((candidate) => !seen.has(candidate.id));
+        if (rerouteCandidates.length > 0) {
+          candidates = [...candidates.slice(0, i + 1), ...rerouteCandidates];
+          log(
+            `[fresh-verify] ${opts.service}: replay discovered provider=${requiredProvider}; ` +
+              `rerouting from ${opts.provider} to ${rerouteCandidates.length} ` +
+              `${requiredProvider}-capable identit${rerouteCandidates.length === 1 ? "y" : "ies"}`,
+          );
+          continue;
+        }
+        holdNonRedrawable();
         break;
+      }
+
+      // SAME-PROVIDER capability gap (the robot's provider session is
+      // structurally missing/stale, not per-run noise) → non-redrawable HOLD.
+      if (isNonRedrawableNonObservation(res.reason)) {
+        holdNonRedrawable();
+        break;
+      }
+
+      // SAME-PROVIDER needs_login is per-robot session-freshness variance
+      // (MEASURED 2026-06-24: chooser on some robots, identifier on others from
+      // ONE pool) → redrawable, but bounded so a service where NO robot has the
+      // session can't drain the fleet. After NEEDS_LOGIN_REDRAW_CAP fruitless
+      // login draws, HOLD.
+      if (code === "needs_login") {
+        needsLoginRedraws += 1;
+        if (needsLoginRedraws >= NEEDS_LOGIN_REDRAW_CAP) {
+          lastEval = evaluateConfidence(successes, failures, {
+            ...confidence,
+            drawsRemaining: 0,
+          });
+          log(
+            `[fresh-verify] ${opts.service}: ${needsLoginRedraws} needs_login draws without a ` +
+              `session-fresh robot — HOLD (provider login wall, not a stored-skill defect)`,
+          );
+          break;
+        }
       }
       continue;
     }
@@ -563,11 +599,51 @@ export function isNonObservation(reason: string | undefined): boolean {
 // only consumes fresh robots until the missing provider/session capability is
 // repaired out-of-band. Keep returning-user/stale-service divergence redrawable
 // so a rotated clean pool can still recover those cases.
+//
+// `needs_login` is NOT in this set. MEASURED 2026-06-24 (meilisearch): a single
+// OAuth replay pass drew robots that got the account CHOOSER (live session →
+// pass) AND robots that got the identifier page (needs_login) FROM THE SAME
+// POOL — it is per-robot session-freshness variance, not a uniform capability
+// gap, so re-drawing genuinely CAN find a passing robot. Treating it as
+// non-redrawable HELD the whole skill on one unlucky first draw. The sampler
+// bounds needs_login re-draws separately (NEEDS_LOGIN_REDRAW_CAP) so a service
+// where NO robot has a session still can't burn the entire fleet.
 export function isNonRedrawableNonObservation(reason: string | undefined): boolean {
   if (!isNonObservation(reason)) return false;
   const code = failureCode(reason);
-  return code === "needs_login" || code === "needs_oauth_provider_session";
+  return code === "needs_oauth_provider_session";
 }
+
+// A provider/session CAPABILITY blocker (rotating the pool can't fix it):
+//   - needs_oauth_provider_session (any) — the provider session is structurally
+//     missing for this provider, and
+//   - needs_login naming a provider the RUN isn't sampling (e.g. the skill wants
+//     GitHub but the pass runs Google robots) with no capable robot.
+// SAME-provider needs_login is excluded — that's per-robot session-freshness
+// variance, which rotating to fresh robots genuinely CAN repair. Used by the
+// runFreshVerify replenish guard: rotate on variance, don't rotate on a
+// capability gap (MEASURED: the gap can't be rotated away, only re-warmed/minted
+// out of band).
+export function isProviderCapabilityBlocker(
+  reason: string | undefined,
+  runProvider: IdentityProvider,
+): boolean {
+  if (!isNonObservation(reason)) return false;
+  const code = failureCode(reason);
+  if (code === "needs_oauth_provider_session") return true;
+  if (code === "needs_login") {
+    const required = nonObservationRequiredProvider(reason);
+    return required !== undefined && required !== runProvider;
+  }
+  return false;
+}
+
+// How many `needs_login` re-draws a single verify pass will spend chasing a
+// session-fresh robot before giving up and HOLDing. Bounded so a genuinely
+// login-walled skill (no robot has the session) can't drain the pool, but high
+// enough to clear per-robot variance (run5: ~3/8 robots hit the identifier
+// page, so ~3 redraws reliably reaches a chooser robot).
+export const NEEDS_LOGIN_REDRAW_CAP = 4;
 
 export function nonObservationRequiredProvider(
   reason: string | undefined,
