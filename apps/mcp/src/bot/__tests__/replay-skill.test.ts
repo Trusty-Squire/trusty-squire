@@ -2997,6 +2997,24 @@ describe("settledOnProductPage (same-domain hosted-login settle)", () => {
   });
 });
 
+describe("stripVolatileIdentityParams (synthesizer-baked per-run identity in navigate URLs)", () => {
+  it("strips the discovering robot's identity params (posthog org-create step 2)", async () => {
+    const { stripVolatileIdentityParams } = await import("../replay-skill.js");
+    expect(
+      stripVolatileIdentityParams(
+        "https://us.posthog.com/organization/confirm-creation?organization_name=&first_name=Verify+Robot+241&next=",
+      ),
+    ).toBe("https://us.posthog.com/organization/confirm-creation?next=");
+  });
+  it("leaves non-identity params (and param-less URLs) untouched", async () => {
+    const { stripVolatileIdentityParams } = await import("../replay-skill.js");
+    expect(stripVolatileIdentityParams("https://x.com/p?code=abc&redirect_url=/y")).toBe(
+      "https://x.com/p?code=abc&redirect_url=/y",
+    );
+    expect(stripVolatileIdentityParams("https://x.com/signup")).toBe("https://x.com/signup");
+  });
+});
+
 describe("rebaseSubdomain (per-account subdomain, kinde class)", () => {
   it("rewrites a captured account subdomain to the live session's subdomain", async () => {
     const { rebaseSubdomain } = await import("../replay-skill.js");

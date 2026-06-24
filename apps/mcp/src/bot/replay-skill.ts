@@ -1642,8 +1642,10 @@ async function executeStep(
       // account's host, so a captured deep-nav URL with a stale subdomain
       // gets rewritten to the current one. No-op for same-host / cross-product
       // / first-navigate (about:blank) cases.
-      const targetUrl = normalizeKindeReplayNavigateUrl(
-        rebaseSubdomain(step.url, browser.currentUrl()),
+      const targetUrl = stripVolatileIdentityParams(
+        normalizeKindeReplayNavigateUrl(
+          rebaseSubdomain(step.url, browser.currentUrl()),
+        ),
       );
       try {
         await browser.goto(targetUrl);
@@ -4283,6 +4285,46 @@ export function normalizeKindeReplayNavigateUrl(url: string): string {
     return url;
   } catch {
     return url;
+  }
+}
+
+// Per-run identity query params a synthesizer may have baked into a captured
+// navigate URL. MEASURED 2026-06-24 (posthog): the org-create skill's step-2 URL
+// was captured as `…/organization/confirm-creation?organization_name=&first_name=
+// Verify+Robot+241&next=` — the DISCOVERING robot's literal name. Replaying that
+// on a different robot pre-seeds a stale identity into the form and diverges the
+// session ("returning-user divergence"), so the org-create submit never enables.
+// These params are always per-run and never load-bearing for reaching the page;
+// stripping them lets the form initialize from the live session instead. Belt-
+// and-suspenders for the synthesizer, which should template/strip them at
+// capture time.
+const VOLATILE_IDENTITY_PARAMS = new Set<string>([
+  "first_name",
+  "last_name",
+  "full_name",
+  "name",
+  "display_name",
+  "email",
+  "organization_name",
+  "org_name",
+  "company",
+  "username",
+  "user",
+]);
+
+export function stripVolatileIdentityParams(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    let changed = false;
+    for (const key of [...u.searchParams.keys()]) {
+      if (VOLATILE_IDENTITY_PARAMS.has(key.toLowerCase())) {
+        u.searchParams.delete(key);
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : rawUrl;
+  } catch {
+    return rawUrl;
   }
 }
 
