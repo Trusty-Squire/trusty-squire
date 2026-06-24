@@ -102,6 +102,7 @@ export {
 } from "./credential-extraction-flow.js";
 import {
   captureOnboardingRound,
+  hasCapturedExtractRound,
   updateCapturedRoundSemantic,
 } from "./onboarding-capture.js";
 import {
@@ -14053,6 +14054,26 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           // best-effort classifier — never block returning credentials
         }
       }
+    }
+    // Salvage the synthesis path. The bot's credential-tracker / background
+    // extraction can populate `credentials` without a planner `extract` action
+    // ever running — the loop then ends on a `done`/`click`, so the on-disk
+    // capture has no extract round and the synthesizer REJECTS it
+    // (no_extract_step) even though the run SUCCEEDED. MEASURED 2026-06-24
+    // (serpapi/galileo/mailjet: extracted api_key, last round was `done`, skill
+    // never promoted). When we're about to return a real credential but no
+    // extract round was captured this run, write one for the final page so the
+    // success becomes a replayable skill instead of an OF#2-only win.
+    if (
+      hasAnyExtractedCredential(credentials) &&
+      !hasCapturedExtractRound(args.service)
+    ) {
+      await this.writeFastPathSyntheticCapture(
+        args.service,
+        capturedRound,
+        oauth,
+        "salvage synthetic extract — credential captured via tracker/background extraction; no planner extract round ran",
+      );
     }
     return credentials;
   }

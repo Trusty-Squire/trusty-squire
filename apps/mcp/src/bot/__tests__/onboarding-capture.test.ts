@@ -13,6 +13,7 @@ import {
   CAPTURE_FORMAT_VERSION,
   captureOnboardingRound,
   captureRunOutcome,
+  hasCapturedExtractRound,
   resetCaptureChain,
   resolveCaptureDir,
   summarizeRunOutcome,
@@ -558,6 +559,27 @@ describe("captureRunOutcome — sidecar file", () => {
       expect(written.outcome.ok).toBe(true);
       expect(written.outcome.terminal_round).toBeNull();
       expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-fast");
+    });
+  });
+});
+
+describe("hasCapturedExtractRound (synthesis-salvage gate)", () => {
+  it("is false until an extract round is captured, true after, and resets", () => {
+    withCaptureDir(() => {
+      const service = uniqueService();
+      resetCaptureChain(service);
+      // A click round does not count.
+      captureOnboardingRound(mockRound(0, service));
+      expect(hasCapturedExtractRound(service)).toBe(false);
+      // An extract round flips it.
+      captureOnboardingRound({
+        ...mockRound(1, service),
+        observed: { kind: "extract", reason: "salvage synthetic extract" },
+      });
+      expect(hasCapturedExtractRound(service)).toBe(true);
+      // Reset clears it for the next run.
+      resetCaptureChain(service);
+      expect(hasCapturedExtractRound(service)).toBe(false);
     });
   });
 });
