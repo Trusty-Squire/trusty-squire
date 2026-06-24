@@ -7608,6 +7608,12 @@ export function scoreSignupButton(
   // Weak positive: "Continue" is often the real submit on single-field
   // forms; it should beat nothing but lose to OAuth markers.
   if (t.includes("continue")) score += 2;
+  // "Next" / "Submit" / "Join" are the real form-submit verb on a multi-step
+  // signup (huggingface /join step 1's button is "Next"). Weak positive so the
+  // submit survives the button cap among many 0-scored nav anchors — otherwise
+  // the planner can't see it and hallucinates a submit_selector. Loses to any
+  // real signup CTA / OAuth marker. MEASURED 2026-06-23 (huggingface).
+  if (/\bnext\b/.test(t) || /\bsubmit\b/.test(t) || /\bjoin\b/.test(t)) score += 2;
   // Post-signup dashboards reveal the key behind a "Create API Key" /
   // "Add key" / "Generate key" / "Get API Key" CTA — the run's actual
   // goal once the account exists. These score 0 on signup vocabulary, so

@@ -2255,9 +2255,45 @@ function validateAction(value: unknown, index: number): FillAction {
   }
 }
 
+// Best-effort submit button from a signup-form inventory — the recovery target
+// when the planner hallucinates a submit_selector. Picks the shortest-labelled
+// button/[type=submit] whose text reads like a form submit (Next / Continue /
+// Sign up / Create account / Join / Submit / Register), preferring the shortest
+// label (the bare "Next" over "Next, by continuing you agree…"). Returns null
+// when nothing matches — the caller then keeps the hard rejection.
+export function pickFormSubmitSelector(
+  inventory: readonly InteractiveElement[],
+): string | null {
+  const SUBMIT_RE =
+    /\b(?:next|continue|sign ?up|log ?in|create (?:an? )?account|create account|join(?: hugging face)?|get started|submit|register|agree (?:and|&) (?:join|continue))\b/i;
+  let best: string | null = null;
+  let bestLen = Number.POSITIVE_INFINITY;
+  for (const e of inventory) {
+    const isButton =
+      e.tag === "button" || e.type === "submit" || e.role === "button";
+    if (!isButton) continue;
+    const t = (e.visibleText ?? e.ariaLabel ?? "").replace(/\s+/g, " ").trim();
+    if (t.length === 0 || !SUBMIT_RE.test(t)) continue;
+    if (t.length < bestLen) {
+      best = e.selector;
+      bestLen = t.length;
+    }
+  }
+  return best;
+}
+
 export function parseSignupPlan(
   raw: string,
   allowedSelectors?: ReadonlySet<string>,
+  // Recovery for a hallucinated submit_selector. The planner sometimes invents
+  // a generic CSS path ("div > form > button") that isn't a bot-computed
+  // inventory selector, which used to hard-reject the whole plan and re-loop to
+  // planning_failed (MEASURED 2026-06-23, huggingface). When the planner's
+  // submit_selector is invalid but the inventory HAS a recognizable submit
+  // button, substitute it — the planner's intent (submit now) is preserved, only
+  // its selector was wrong. ACTION selectors still hard-reject (a wrong fill/click
+  // target is a real error, not a recoverable one).
+  fallbackSubmitSelector?: string,
 ): SignupPlan {
   const obj = extractJsonObject(raw);
   const rawActions = obj["actions"];
@@ -2265,7 +2301,7 @@ export function parseSignupPlan(
     throw new Error("signup plan missing actions[]");
   }
   const actions = rawActions.map((a, i) => validateAction(a, i));
-  const submitSelector = requireString(obj, "submit_selector", "signup plan");
+  let submitSelector = requireString(obj, "submit_selector", "signup plan");
   const confidence = obj["confidence"];
   if (confidence !== "high" && confidence !== "medium" && confidence !== "low") {
     throw new Error(`signup plan: invalid confidence ${JSON.stringify(confidence)}`);
@@ -2285,9 +2321,16 @@ export function parseSignupPlan(
       }
     }
     if (!allowedSelectors.has(submitSelector)) {
-      throw new Error(
-        `signup plan: submit_selector ${JSON.stringify(submitSelector)} is not in the page inventory`,
-      );
+      if (
+        fallbackSubmitSelector !== undefined &&
+        allowedSelectors.has(fallbackSubmitSelector)
+      ) {
+        submitSelector = fallbackSubmitSelector;
+      } else {
+        throw new Error(
+          `signup plan: submit_selector ${JSON.stringify(submitSelector)} is not in the page inventory`,
+        );
+      }
     }
   }
   const notes = typeof obj["notes"] === "string" ? obj["notes"] : undefined;
@@ -11241,6 +11284,8 @@ ${formatInventory(input.inventory)}`,
 
     // F3 T4: the planner may only pick selectors the bot supplied.
     const allowed = new Set(input.inventory.map((e) => e.selector));
+    // Recovery target for a hallucinated submit_selector (huggingface).
+    const fallbackSubmit = pickFormSubmitSelector(input.inventory) ?? undefined;
     return this.callLLM({
       system: systemPrompt,
       userBlocks,
@@ -11251,7 +11296,7 @@ ${formatInventory(input.inventory)}`,
       // Fix C — pin a single model + provider + seed on the proxy path.
       // temperature 0 alone leaves the model/provider lottery in play.
       deterministic: true,
-      parse: (raw) => parseSignupPlan(raw, allowed),
+      parse: (raw) => parseSignupPlan(raw, allowed, fallbackSubmit),
     });
   }
 
