@@ -5,6 +5,8 @@ import {
   hostAllowed,
   elementRef,
   parseVerification,
+  looksLikeCodeIdentifier,
+  findCredentialTokens,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -117,6 +119,43 @@ describe("parseVerification (email OTP + link extraction)", () => {
     ]);
     expect(r.code).toBe("778201");
     expect(r.link).toContain("confirm");
+  });
+});
+
+describe("looksLikeCodeIdentifier (false-green guard)", () => {
+  it("rejects the X-tombstone JS function name that leaked as a key", () => {
+    expect(looksLikeCodeIdentifier("loader.tweetUnavailableTombstoneHandler")).toBe(true);
+  });
+
+  it("accepts real prefixed keys (no dots)", () => {
+    expect(looksLikeCodeIdentifier("xai-abc123DEF456ghi789")).toBe(false);
+    expect(looksLikeCodeIdentifier("vsk_sandbox_write_20af25f2668a65ae")).toBe(false);
+    expect(looksLikeCodeIdentifier("sk-lw-QQgBj9Z2abcdefghij")).toBe(false);
+  });
+
+  it("accepts a JWT despite its dots (eyJ prefix)", () => {
+    expect(looksLikeCodeIdentifier("eyJhbGciOi.eyJzdWIiOi.sigPart")).toBe(false);
+  });
+});
+
+describe("findCredentialTokens (multi-credential extraction)", () => {
+  it("finds both VouchFlow keys of the same shape", () => {
+    const page =
+      "Sandbox write key vsk_sandbox_write_20af25f2668a65ae268625ab2235e765 " +
+      "Sandbox read key vsk_sandbox_read_02ae44b1c9d3e6f7a8b9c0d1e2f3a4b5";
+    const toks = findCredentialTokens(page);
+    expect(toks).toContain("vsk_sandbox_write_20af25f2668a65ae268625ab2235e765");
+    expect(toks).toContain("vsk_sandbox_read_02ae44b1c9d3e6f7a8b9c0d1e2f3a4b5");
+  });
+
+  it("does NOT pick up the dotted function-name false positive", () => {
+    expect(findCredentialTokens("loader.tweetUnavailableTombstoneHandler")).toEqual([]);
+  });
+
+  it("ignores prose and short/digitless tokens", () => {
+    expect(findCredentialTokens("Welcome to your dashboard. Get started now.")).toEqual([]);
+    // has a separator but no digit → not a key
+    expect(findCredentialTokens("user_account_settings_panel")).toEqual([]);
   });
 });
 

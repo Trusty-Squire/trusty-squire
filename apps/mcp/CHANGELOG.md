@@ -1,5 +1,22 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.3 (2026-06-25)
+
+Prerelease (`next`). Two extraction-correctness fixes from the first fresh-agent
+field test (Grok + VouchFlow):
+
+- fix(provision): reject code-identifier false-greens. X's anti-bot tombstone
+  ("JavaScript is not available…") leaked `loader.tweetUnavailableTombstoneHandler`
+  (a JS function name) into `provision_extract`, which wrote it to the vault as
+  an api_key and reported success — a false-green. Any dotted member-access
+  token is now rejected (JWTs excepted via their `eyJ` prefix).
+- fix(provision): multi-credential extraction. The single-key extraction policy
+  stopped at the first key, so VouchFlow's sandbox **read** key was dropped when
+  the **write** key was captured. `provision_extract` now also collects every
+  distinct credential-shaped token (prefix + body + digit) and surfaces the
+  extras as `api_key_2`, `api_key_3`, …
+- Both guarded by unit tests against the exact field-test strings.
+
 ## 0.9.19-rc.2 (2026-06-25)
 
 Prerelease (`next`). Boot-crash fix — 0.9.19-rc.1 pinned the stale-by-content

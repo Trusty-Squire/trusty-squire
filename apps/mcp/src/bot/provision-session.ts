@@ -317,6 +317,39 @@ const normLabelKey = (label: string): string =>
     .toLowerCase()
     .slice(0, 40);
 
+// A real credential never looks like a code identifier. X's anti-bot tombstone
+// ("JavaScript is not available…") leaked `loader.tweetUnavailableTombstoneHandler`
+// (a JS function name) into the extractor, which wrote it to the vault as a key
+// — a false-green. Reject any dotted member-access token (JWTs are the one
+// legitimate dotted credential, guarded by their `eyJ` prefix).
+export function looksLikeCodeIdentifier(s: string): boolean {
+  const t = s.trim();
+  if (t.startsWith("eyJ")) return false;
+  return /[A-Za-z]\.[A-Za-z]/.test(t);
+}
+
+// Collect every distinct credential-SHAPED token in a blob of page text:
+// a short prefix + separator + a long body that carries at least one digit
+// (vsk_sandbox_write_…, xai-…, sk-lw-…, re_…). Used to surface the SECOND key a
+// multi-credential service shows (e.g. VouchFlow's sandbox read alongside write)
+// that the single-key extraction.ts policy stops short of. The `[_-]` and
+// has-digit requirements exclude the dotted-function-name false positive.
+const CRED_TOKEN_RE = /\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g;
+export function findCredentialTokens(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const m of text.matchAll(CRED_TOKEN_RE)) {
+    const t = m[0];
+    if (seen.has(t)) continue;
+    if (t.length < 16) continue;
+    if (!/[0-9]/.test(t)) continue; // real keys carry digits; dictionary words don't
+    if (/^[A-Z][A-Z0-9_]*$/.test(t)) continue; // env-var name
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+}
+
 // Reveal masked keys, then classify every on-page string source through the
 // SAME exported regex policy the bot uses (extractApiKeyFromText +
 // isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
@@ -353,6 +386,8 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     // Reject too-short non-secrets (UI noise like "Ctrl+K"). Real API keys are
     // long; a sub-12-char "key" is a false positive, never a credential.
     if (key.trim().length < 12) continue;
+    // Reject a code identifier scraped off a page (the X-tombstone false-green).
+    if (looksLikeCodeIdentifier(key)) continue;
     const cls: CandidateClass = isTruncatedCapture(src, key)
       ? { kind: "truncated", value: key }
       : { kind: "full", value: key };
@@ -366,6 +401,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   for (const c of labeled) {
     if (c.label === null || c.isMasked) continue;
     if (/^[A-Z][A-Z0-9_]{2,}=?$/.test(c.value.trim())) continue;
+    if (looksLikeCodeIdentifier(c.value)) continue;
     const k = normLabelKey(c.label);
     if (k.length > 0 && !(k in named)) named[k] = c.value;
   }
@@ -373,7 +409,22 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // resolveExtraction (the regex-found primary key) wins over a same-named
   // labeled candidate, so a "API Key" label carrying the env-var snippet can
   // never clobber the real `api_key`.
-  const credentials = { ...named, ...resolveExtraction(state) };
+  const credentials: Record<string, string> = { ...named, ...resolveExtraction(state) };
+
+  // Multi-credential: a service may present several keys of the same shape
+  // (VouchFlow shows sandbox write AND read). The single-key extraction.ts
+  // policy stops at the first; collect every distinct credential-shaped token
+  // and surface the ones the primary missed as api_key_2, api_key_3, …
+  const haystack = [...labeled.map((c) => c.value), ...inputs, ...nearCopy, clip, text].join("\n");
+  const have = new Set(Object.values(credentials));
+  let n = 1;
+  for (const tok of findCredentialTokens(haystack)) {
+    if (have.has(tok)) continue;
+    if (n >= 8) break; // cap extras so page noise can't flood the result
+    have.add(tok);
+    n += 1;
+    credentials[`api_key_${n}`] = tok;
+  }
   audit(sessionId, "extract", {
     found: Object.keys(credentials).length > 0,
     candidate_count: labeled.length,
