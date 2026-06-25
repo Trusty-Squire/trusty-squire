@@ -7,6 +7,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../install/cli.js";
+import { normalizeProxyUrl } from "../install/proxy-url.js";
 
 describe("parseArgs --proxy-url", () => {
   it("parses --proxy-url into proxyUrl", () => {
@@ -31,6 +32,16 @@ describe("parseArgs --proxy-url", () => {
     ]);
     expect(a.target).toBe("claude-code");
     expect(a.proxyUrl).toBe("http://user:pass@host:8080");
+  });
+
+  it("rejects whitespace/control characters in proxy URLs", () => {
+    expect(normalizeProxyUrl("http://host:8080\nBAD=1")).toBeUndefined();
+  });
+
+  it("keeps valid socks5 proxy URLs", () => {
+    expect(normalizeProxyUrl(" socks5://127.0.0.1:1080 ")).toBe(
+      "socks5://127.0.0.1:1080",
+    );
   });
 });
 

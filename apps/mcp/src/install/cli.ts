@@ -72,6 +72,7 @@ import {
   showOutro,
 } from "./interactive.js";
 import chalk from "chalk";
+import { normalizeProxyUrl } from "./proxy-url.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 // Managed skill-registry URL. Advanced setup decides whether this is written
@@ -180,7 +181,15 @@ function parseArgs(argv: string[]): Argv {
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
     } else if (arg.startsWith("--proxy-url=")) {
-      proxyUrl = arg.slice("--proxy-url=".length);
+      const rawProxyUrl = arg.slice("--proxy-url=".length);
+      const normalized = normalizeProxyUrl(rawProxyUrl);
+      if (rawProxyUrl.length > 0 && normalized === undefined) {
+        console.error(
+          "invalid --proxy-url. Use http://user:pass@host:port or socks5://host:port.",
+        );
+        process.exit(64);
+      }
+      proxyUrl = normalized;
     } else if (arg.startsWith("--registry-url=")) {
       console.warn(
         "[trusty-squire] --registry-url is no longer supported; " +

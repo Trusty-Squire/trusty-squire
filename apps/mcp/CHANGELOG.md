@@ -15,6 +15,8 @@ account-switching and consent tests.
   redacted signup/navigation traces can become reusable skills.
 - changed(connect): registry participation, matching-service email OTP polling,
   and proxy URL moved into Advanced settings. OTP polling defaults to off.
+- fix(connect): proxy URLs from the CLI or browser claim are parsed and
+  whitespace/control characters are rejected before they reach MCP config env.
 - changed(connect): stale LLM/provider setup copy was removed from the install
   flow; signups are now described as session-agent driven.
 

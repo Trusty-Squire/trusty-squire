@@ -21,6 +21,7 @@ import {
 import chalk from "chalk";
 
 import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
+import { normalizeProxyUrl } from "./proxy-url.js";
 
 // What the picker resolves to. The caller spreads this into its Argv
 // + threads the LLM bits into writeAgentConfig. The picker no longer
@@ -170,14 +171,14 @@ async function pickAdvancedOptionsWithDefaults(opts: {
         await text({
           message: "Proxy URL (http://user:pass@host:port or socks5://…)",
           validate: (v) => {
-            if (v === undefined || !/^(http|https|socks5):\/\//.test(v)) {
+            if (v === undefined || normalizeProxyUrl(v) === undefined) {
               return "URL must start with http://, https://, or socks5://";
             }
             return undefined;
           },
         }),
       );
-      proxyUrl = (url ?? "").trim();
+      proxyUrl = normalizeProxyUrl(url ?? "");
     }
   }
 

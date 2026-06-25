@@ -17,8 +17,24 @@ import { buildInMemoryDeps } from "../services/deps.js";
 import { loadVouchflowConfig } from "../config/vouchflow.js";
 import type { FastifyInstance } from "fastify";
 import type { ApiDeps } from "../services/deps.js";
+import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
+const SESSION_SECRET = "test-secret-not-used";
+
+async function makeWebSession(
+  deps: ApiDeps,
+  accountId: string,
+): Promise<string> {
+  const { record, jwt } = issueSession({
+    account_id: accountId,
+    ip: null,
+    user_agent: null,
+    now: new Date(),
+  });
+  await deps.sessionStore.insert(record);
+  return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
+}
 
 describe("single-tier install handshake", () => {
   let app: FastifyInstance;
@@ -26,7 +42,7 @@ describe("single-tier install handshake", () => {
 
   beforeEach(async () => {
     deps = buildInMemoryDeps({
-      sessionSecret: "test-secret-not-used",
+      sessionSecret: SESSION_SECRET,
       customerId: loadVouchflowConfig().customerId,
     });
     app = await buildServer({ deps });
@@ -86,6 +102,31 @@ describe("single-tier install handshake", () => {
         proxy_url: "socks5://proxy.test:1080",
       },
     });
+  });
+
+  it("rejects malformed proxy preferences at the browser claim boundary", async () => {
+    const initiate = await app.inject({
+      method: "POST",
+      url: "/v1/mcp/install/initiate",
+      headers: JSON_HEADERS,
+      payload: { agent_identity: "goose" },
+    });
+    const { setup_code } = initiate.json() as { setup_code: string };
+    const cookie = await makeWebSession(deps, "acct-pref");
+
+    const claim = await app.inject({
+      method: "POST",
+      url: `/v1/mcp/install/${setup_code}/claim`,
+      headers: { ...JSON_HEADERS, cookie },
+      payload: {
+        registry_enabled: true,
+        consent_operator_inbox_otp: true,
+        proxy_url: "http://proxy.test:8080\nBAD=1",
+      },
+    });
+
+    expect(claim.statusCode).toBe(400);
+    expect(claim.json()).toMatchObject({ error: "invalid_request" });
   });
 
   it("emits payment_required + cta_billing_url at the free-quota limit", async () => {

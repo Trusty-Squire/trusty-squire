@@ -26,6 +26,22 @@ import { issueAgentSession } from "../auth/agent.js";
 import { issuePairingToken } from "../auth/pairing-token.js";
 import type { ApiDeps } from "../services/deps.js";
 
+const ALLOWED_PROXY_PROTOCOLS = new Set(["http:", "https:", "socks5:"]);
+
+function normalizeProxyUrl(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  if (/[\s\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    if (!ALLOWED_PROXY_PROTOCOLS.has(parsed.protocol)) return undefined;
+    if (parsed.hostname.length === 0) return undefined;
+    return trimmed;
+  } catch {
+    return undefined;
+  }
+}
+
 const initiateBody = z
   .object({
     target: z.string().min(1).max(60).optional(),
@@ -45,9 +61,11 @@ const claimBody = z
     consent_operator_inbox_otp: z.boolean().optional(),
     proxy_url: z
       .string()
-      .trim()
       .max(500)
-      .regex(/^(http|https|socks5):\/\//)
+      .transform((value) => normalizeProxyUrl(value))
+      .refine((value): value is string => value !== undefined, {
+        message: "proxy_url must be http://, https://, or socks5:// without whitespace",
+      })
       .optional()
       .or(z.literal("").transform(() => undefined)),
   })
