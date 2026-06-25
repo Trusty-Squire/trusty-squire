@@ -1,5 +1,25 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.8 (2026-06-25)
+
+Prerelease (`next`). Account-switching and privacy gates for the session-agent
+signup flow.
+
+- fix(connect): `connect --force-relogin` now waits for the bot Chrome profile
+  to be free, then clears the whole bot browser profile. This wipes the
+  Trusty Squire app session as well as provider cookies, so the Google sign-in
+  button prompts for a fresh account instead of silently reusing the old
+  install session.
+- feat(connect): install now asks two explicit permissions: whether successful
+  signup/navigation traces may become reusable skills without personal data or
+  secrets, and whether the squire may poll only matching OTP/verification
+  emails for the requested service.
+- fix(provision): the persisted consent flags are enforced at runtime. Missing
+  or declined consent disables auto-promotion/skillification and disables
+  operator-inbox OTP/device-link polling.
+- chore(connect): the interactive setup copy no longer asks users to configure
+  or provision their own LLM. Signups are described as session-agent driven.
+
 ## 0.9.19-rc.7 (2026-06-25)
 
 Prerelease (`next`). Extraction fails CLOSED on a login wall — kills the

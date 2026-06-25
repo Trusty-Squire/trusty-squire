@@ -4,7 +4,7 @@
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
@@ -108,5 +108,17 @@ export async function clearProviderCookies(
     /* best-effort — Chrome might be holding the lock, or the DB
        doesn't exist yet on first install. The OAuth flow will still
        work; it just won't be forced this run. */
+  }
+}
+
+// Wipe the whole bot Chrome profile. Used only for `connect --force-relogin`:
+// switching accounts must clear provider cookies AND Trusty Squire's own app
+// session, otherwise the confirm page can reuse the old account and skip the
+// Google credential prompt.
+export function clearBrowserProfile(profileDir: string = CHROME_PROFILE_DIR): void {
+  try {
+    rmSync(profileDir, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
   }
 }

@@ -1667,6 +1667,7 @@ export interface SignupTask {
   // env var leave these undefined and notify-api.ts falls back to env.
   machineToken?: string | undefined;
   apiBase?: string | undefined;
+  allowOperatorInboxOtp?: boolean | undefined;
 }
 
 // Best-effort callback the MCP layer wires into SignupAgent so the
@@ -8994,6 +8995,7 @@ export class SignupAgent {
               ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
               ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
               ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+              allowOperatorInboxOtp: task.allowOperatorInboxOtp === true,
             });
           }
           if (hasUsableCredentialBundle(credentials)) {
@@ -9308,6 +9310,7 @@ export class SignupAgent {
                     ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
                     ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
                     ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+                    allowOperatorInboxOtp: task.allowOperatorInboxOtp === true,
                   });
                 }
               } else if (email.parsed_codes.length > 0) {
@@ -10034,7 +10037,8 @@ export class SignupAgent {
         if (
           provider.id === "github" &&
           task.machineToken !== undefined &&
-          task.machineToken.length > 0
+          task.machineToken.length > 0 &&
+          task.allowOperatorInboxOtp === true
         ) {
           steps.push(
             "GitHub: verify-it's-you challenge — polling operator inbox for a device-confirmation link (up to 60s)",
@@ -10795,6 +10799,8 @@ export class SignupAgent {
           machineToken.length === 0
         ) {
           otpResult = { code: null, reason: "no_machine_token" };
+        } else if (task.allowOperatorInboxOtp !== true) {
+          otpResult = { code: null, reason: "operator_inbox_consent_missing" };
         } else {
           steps.push(
             `Email-OTP gate detected (${pathOf(gateState.url)}) — polling operator inbox for the code` +
@@ -10958,6 +10964,7 @@ export class SignupAgent {
         ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
         ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
         ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+        allowOperatorInboxOtp: task.allowOperatorInboxOtp === true,
       });
     } catch (err) {
       // A5 — OAuth bounced back to a login page; classify correctly
@@ -11481,6 +11488,7 @@ ${formatInventory(input.inventory)}`,
       ...(task.scopeHint !== undefined ? { scopeHint: task.scopeHint } : {}),
       ...(task.machineToken !== undefined ? { machineToken: task.machineToken } : {}),
       ...(task.apiBase !== undefined ? { apiBase: task.apiBase } : {}),
+      allowOperatorInboxOtp: task.allowOperatorInboxOtp === true,
     });
   }
 
@@ -12113,6 +12121,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // signup gate does.
     machineToken?: string | undefined;
     apiBase?: string | undefined;
+    allowOperatorInboxOtp?: boolean | undefined;
     // Seed the planner's first round with a hint — e.g. a verification
     // CODE pulled from the signup email (plausible) that the bot must type
     // into the on-page code input rather than click a link.
@@ -13061,6 +13070,7 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         hint === undefined &&
         args.machineToken !== undefined &&
         args.machineToken.length > 0 &&
+        args.allowOperatorInboxOtp === true &&
         !otpPolledUrls.has(state.url) &&
         detectEmailOtpGate(
           state.url,

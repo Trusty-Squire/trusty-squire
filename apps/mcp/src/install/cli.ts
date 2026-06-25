@@ -62,11 +62,13 @@ import {
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
   clearAllProviderMarkers,
+  clearBrowserProfile,
   clearProviderCookies,
   clearProviderLoggedIn,
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
+import { waitForProfileFree } from "../bot/profile.js";
 import type { BrowserContext } from "playwright";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
@@ -130,6 +132,8 @@ type Argv = {
   // --byok-key flags pre-filled). Threaded into writeAgentConfig.
   llmChoice?: import("./interactive.js").LlmChoice;
   byokKey?: string;
+  consentSkillifyTelemetry?: boolean;
+  consentOperatorInboxOtp?: boolean;
 };
 
 function parseArgs(argv: string[]): Argv {
@@ -415,6 +419,7 @@ async function connect(args: Argv): Promise<void> {
     const preflight = await checkAlreadyProvisioned();
     if (preflight !== null) {
       ui.divider();
+      await ensureConsentRecorded();
       await writeAgentConfig(target, agent, args);
       const provNote =
         preflight.providers.length > 0
@@ -442,8 +447,25 @@ async function connect(args: Argv): Promise<void> {
   // clean slate. The user signs in fresh inside the bot Chrome.
   if (args.forceRelogin) {
     clearAllProviderMarkers();
+    const free = await waitForProfileFree(undefined, {
+      deadlineMs: 120_000,
+      onWait: () =>
+        ui.hint("Waiting for the bot browser to finish before clearing the old session…"),
+    });
+    if (!free) {
+      ui.fail(
+        "The bot browser is still using the profile, so I can't safely switch accounts yet. " +
+          "Close the running signup/login browser and retry with --force-relogin.",
+      );
+      process.exit(1);
+    }
+    clearBrowserProfile();
     await clearProviderCookies();
   }
+
+  const consent = await collectInstallConsent();
+  args.consentSkillifyTelemetry = consent.skillifyTelemetry;
+  args.consentOperatorInboxOtp = consent.operatorInboxOtp;
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
@@ -484,6 +506,8 @@ async function connect(args: Argv): Promise<void> {
     api_base_url: args.apiBase,
     saved_at: new Date().toISOString(),
     machine_token: machine.machine_token,
+    consent_skillify_telemetry: consent.skillifyTelemetry,
+    consent_operator_inbox_otp: consent.operatorInboxOtp,
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser);
   if (session === null) {
@@ -694,6 +718,53 @@ async function promptYesNo(message: string, defaultYes: boolean): Promise<boolea
     return trimmed === "y" || trimmed === "yes";
   } finally {
     rl.close();
+  }
+}
+
+async function collectInstallConsent(): Promise<{
+  skillifyTelemetry: boolean;
+  operatorInboxOtp: boolean;
+}> {
+  ui.panel(
+    `Two squire permissions before we continue:\n\n` +
+      `1. Let successful signup/navigation traces become reusable skills for other users. ` +
+      `The squire keeps the recipe, not your personal details or secrets.\n\n` +
+      `2. Let the squire poll your email only for OTP or verification messages that match ` +
+      `the service you asked it to help with. It does not browse your inbox.`,
+    { title: "Permissions", color: "wine" },
+  );
+  const skillifyTelemetry = await promptYesNo(
+    "May Trusty Squire turn successful signup/navigation traces into reusable skills, with personal information and secrets excluded?",
+    false,
+  );
+  const operatorInboxOtp = await promptYesNo(
+    "May Trusty Squire poll only matching OTP/verification emails for the service you requested?",
+    false,
+  );
+  return { skillifyTelemetry, operatorInboxOtp };
+}
+
+async function ensureConsentRecorded(): Promise<void> {
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (session === null) return;
+    if (
+      session.consent_skillify_telemetry !== undefined &&
+      session.consent_operator_inbox_otp !== undefined
+    ) {
+      return;
+    }
+    const consent = await collectInstallConsent();
+    await storage.write({
+      ...session,
+      saved_at: new Date().toISOString(),
+      consent_skillify_telemetry: consent.skillifyTelemetry,
+      consent_operator_inbox_otp: consent.operatorInboxOtp,
+    });
+  } catch {
+    // Best-effort. If we can't persist consent, runtime treats missing
+    // fields as not approved.
   }
 }
 

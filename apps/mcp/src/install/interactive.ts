@@ -1,6 +1,6 @@
 // Interactive install picker — the Goose / impeccable.style-flavored
-// TUI that walks the user through agent selection, OAuth providers,
-// and LLM provider config before the install ceremony fires.
+// TUI that walks the user through agent selection and advanced setup
+// before the install ceremony fires.
 //
 // Powered by @clack/prompts (select / text / confirm /
 // note / intro / outro primitives, with consistent box styling).
@@ -28,8 +28,9 @@ import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
 // bot's Chrome owns that conversation as of 0.8.2.
 export interface InteractiveConfig {
   target: AgentTarget;
-  // Which LLM call path the universal bot should use. Maps to
-  // UNIVERSAL_BOT_LLM_TIER + optional BYOK key in the written MCP config.
+  // Legacy shape retained for config-writing compatibility. The signup
+  // session agent now drives planning through the Trusty Squire backend by
+  // default, so the picker no longer asks users to choose an LLM.
   llmChoice: LlmChoice;
   byokKey?: string;
   // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
@@ -124,74 +125,14 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
   return value as AgentTarget;
 }
 
-async function pickLlmConfig(): Promise<{ choice: LlmChoice; byokKey?: string }> {
-  const choice = bailIfCancelled(
-    await select<LlmChoice>({
-      message: "Which LLM should the bot use for form planning?",
-      initialValue: "managed_free",
-      options: [
-        {
-          value: "managed_free",
-          label: "Managed (default)",
-          hint: "Trusty Squire pays for LLM calls via our routed free + paid fallback chain",
-        },
-        {
-          value: "byok_openrouter",
-          label: "OpenRouter",
-          hint: "BYOK — your own OpenRouter key pays for LLM calls",
-        },
-        {
-          value: "byok_anthropic",
-          label: "Anthropic",
-          hint: "BYOK — your own Anthropic key (direct Claude API)",
-        },
-        {
-          value: "byok_openai",
-          label: "OpenAI",
-          hint: "BYOK — your own OpenAI key (GPT-4 vision)",
-        },
-        {
-          value: "skip",
-          label: "Skip — I'll configure LLM env vars manually",
-          hint: "Advanced",
-        },
-      ],
-    }),
-  );
-  if (choice === "managed_free" || choice === "skip") return { choice };
-
-  // BYOK chosen → ask for the key. clack's text() shows the input
-  // inline; we don't echo "***" because that flickers more than it
-  // protects, and the key is going to disk in the MCP config anyway.
-  const providerLabel =
-    choice === "byok_openrouter"
-      ? "OpenRouter"
-      : choice === "byok_anthropic"
-        ? "Anthropic"
-        : "OpenAI";
-  const key = bailIfCancelled(
-    await text({
-      message: `Paste your ${providerLabel} API key`,
-      placeholder: choice === "byok_anthropic" ? "sk-ant-…" : "sk-…",
-      validate: (v) => {
-        if (v === undefined || v.length < 8) return "That key looks too short.";
-        return undefined;
-      },
-    }),
-  );
-  return { choice, byokKey: (key ?? "").trim() };
-}
-
 async function pickAdvancedOptions(): Promise<{
   proxyUrl?: string;
   registryEnabled: boolean;
   registryUrl?: string;
-  llmChoice?: LlmChoice;
-  byokKey?: string;
 }> {
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (LLM provider, proxy, skill registry)",
+      message: "Configure advanced options? (proxy, skill registry)",
       initialValue: false,
     }),
   );
@@ -200,13 +141,6 @@ async function pickAdvancedOptions(): Promise<{
     // never touch these — the install just goes.
     return { registryEnabled: true };
   }
-
-  // LLM provider. Most users want the managed default — Trusty Squire
-  // pays via the routed free + paid fallback chain. BYOK is for users
-  // who want Anthropic / OpenAI / OpenRouter billing on their own
-  // account (still pays after ACCOUNT_FREE_QUOTA for the service
-  // either way — that's a separate axis from who pays for LLM calls).
-  const { choice: llmChoice, byokKey } = await pickLlmConfig();
 
   // Residential proxy. Most users skip this — datacenter egress is
   // re-routed through our proxy automatically when configured; only
@@ -268,8 +202,6 @@ async function pickAdvancedOptions(): Promise<{
 
   return {
     registryEnabled,
-    llmChoice,
-    ...(byokKey !== undefined ? { byokKey } : {}),
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
     ...(registryUrl !== undefined ? { registryUrl } : {}),
   };
@@ -279,7 +211,7 @@ function summarize(config: InteractiveConfig): void {
   const lines: string[] = [];
   const agentLabel = AGENTS[config.target].display_name;
   lines.push(`${chalk.dim("Agent:        ")}${chalk.bold(agentLabel)}`);
-  lines.push(`${chalk.dim("LLM:          ")}${llmChoiceLabel(config.llmChoice)}`);
+  lines.push(`${chalk.dim("Signup:       ")}${chalk.dim("session agent")}`);
   lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
   if (config.proxyUrl !== undefined) {
     lines.push(`${chalk.dim("Proxy:        ")}${config.proxyUrl}`);
@@ -290,21 +222,6 @@ function summarize(config: InteractiveConfig): void {
     lines.push(`${chalk.dim("Registry:     ")}${config.registryUrl}`);
   }
   note(lines.join("\n"), "Setup summary");
-}
-
-function llmChoiceLabel(c: LlmChoice): string {
-  switch (c) {
-    case "managed_free":
-      return "Managed (Trusty Squire pays for LLM)";
-    case "byok_openrouter":
-      return "OpenRouter (BYOK)";
-    case "byok_anthropic":
-      return "Anthropic (BYOK)";
-    case "byok_openai":
-      return "OpenAI (BYOK)";
-    case "skip":
-      return chalk.dim("(none configured — you'll set env vars manually)");
-  }
 }
 
 // The main entry point. Walks the user through pickers and returns a
@@ -341,14 +258,11 @@ export async function runInteractiveSetup(opts: {
         }
       : await pickAdvancedOptions();
 
-  // LLM defaults to managed_free when the user skipped Advanced.
-  const llmChoice: LlmChoice = advanced.llmChoice ?? "managed_free";
-  const byokKey = advanced.byokKey;
+  const llmChoice: LlmChoice = "managed_free";
 
   const config: InteractiveConfig = {
     target,
     llmChoice,
-    ...(byokKey !== undefined ? { byokKey } : {}),
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
     ...(advanced.registryUrl !== undefined ? { registryUrl: advanced.registryUrl } : {}),

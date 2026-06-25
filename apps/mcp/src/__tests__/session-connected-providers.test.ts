@@ -62,4 +62,21 @@ describe("SessionData.connected_providers (rc.5)", () => {
     expect(back?.machine_token).toBe("tsm_old_token");
     expect(back?.connected_providers).toBeUndefined();
   });
+
+  it("round-trips install privacy consent flags", async () => {
+    const store = new FileStorage(tmpFile);
+    await store.write({
+      api_base_url: "https://api.test",
+      saved_at: "2026-06-25T00:00:00.000Z",
+      machine_token: "tsm_token",
+      agent_session_token: "mcp_sess",
+      account_id: "acc",
+      consent_skillify_telemetry: true,
+      consent_operator_inbox_otp: false,
+    });
+
+    const back = await store.read();
+    expect(back?.consent_skillify_telemetry).toBe(true);
+    expect(back?.consent_operator_inbox_otp).toBe(false);
+  });
 });

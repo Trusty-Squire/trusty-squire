@@ -366,6 +366,8 @@ export const provisionTool = {
       agentSessionToken: session.agent_session_token,
       stepsSink,
       accountId: session.account_id,
+      consentOperatorInboxOtp: session.consent_operator_inbox_otp === true,
+      consentSkillifyTelemetry: session.consent_skillify_telemetry === true,
       provisionRun,
     });
 
@@ -495,6 +497,8 @@ interface RunContext {
   // The account_id the session is bound to; passed to the registry
   // client so replay-outcome writes are attributable.
   accountId: string;
+  consentOperatorInboxOtp: boolean;
+  consentSkillifyTelemetry: boolean;
   // Set true by tryReplayLearnedSkill when an active skill exists and a
   // replay was attempted. Read by the single ProvisionEvent emit to
   // distinguish "replay fell back to bot" (initial=replay, replay=miss)
@@ -934,7 +938,9 @@ async function runSignupTask(
       // fail at extract. Default-on as of 0.6.14-rc.11 so stuck-loop
       // bugs (Railway token-create no-op) are diagnosable without
       // needing to reproduce the run locally.
-      roundUploader: buildRoundUploader(ctx.accountId, provisionId),
+      ...(ctx.consentSkillifyTelemetry
+        ? { roundUploader: buildRoundUploader(ctx.accountId, provisionId) }
+        : {}),
       // Heightened-auth notifier credentials — the agent's
       // notifyHeightenedAuth call (Google number-match) reads these
       // because session.json's machine_token is NOT exported as an
@@ -942,6 +948,7 @@ async function runSignupTask(
       // call silently no-ops (rc.12 and earlier).
       machineToken: ctx.machineToken,
       apiBase: ctx.apiBase,
+      allowOperatorInboxOtp: ctx.consentOperatorInboxOtp,
     });
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
@@ -1047,7 +1054,11 @@ async function runSignupTask(
     // provider changes (lands as pending-review, not active).
     // Fire-and-forget — failures push to stepsSink with `[auto-
     // promote]` prefix and never fail the signup.
-    if (result.success && isAutoPromoteEnabled(process.env)) {
+    if (
+      result.success &&
+      ctx.consentSkillifyTelemetry &&
+      isAutoPromoteEnabled(process.env)
+    ) {
       void runAutoPromote({
         service: input.service,
         stepsSink: ctx.stepsSink,

@@ -53,4 +53,9 @@ describe("parseArgs --provider / --skip-browser", () => {
     // --skip-login kept as a legacy alias for the 0.5.0 spelling.
     expect(parseArgs(["install", "--skip-login"]).skipBrowser).toBe(true);
   });
+
+  it("parses --force-relogin for account switching", () => {
+    expect(parseArgs(["install"]).forceRelogin).toBe(false);
+    expect(parseArgs(["install", "--force-relogin"]).forceRelogin).toBe(true);
+  });
 });
