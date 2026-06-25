@@ -172,10 +172,12 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   name: "provision_extract",
   description:
     "Reveal masked keys and extract credentials from the current page: returns " +
-    "{credentials, candidate_count}. credentials may include `api_key` (or " +
-    "`api_key_truncated` if only a masked display was reachable) plus named " +
-    "fields for multi-credential services. Call when you have navigated to the " +
-    "page that shows the keys.",
+    "{credentials, candidate_count, blocked_reason?}. credentials may include " +
+    "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
+    "plus named fields for multi-credential services. If `blocked_reason` is set, " +
+    "the page is a login wall / anti-bot interstitial with NO credential present " +
+    "(do not treat the empty result as a real key) — drive an interactive login " +
+    "or hand back to the user. Call when you have navigated to the keys page.",
   inputSchema: extractSchema,
   jsonInputSchema: {
     type: "object",

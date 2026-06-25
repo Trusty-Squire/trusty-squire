@@ -331,6 +331,11 @@ export interface ExtractResult {
   // How many labeled credential candidates the page presented — diagnostic so
   // the host can tell "found nothing" from "found masked values it couldn't read".
   candidate_count: number;
+  // Set when extraction failed CLOSED: the page is a login wall / anti-bot
+  // interstitial with no credential to give (Grok/X tombstone), so the extractor
+  // refused to surface junk. The host should drive an interactive login or hand
+  // back to the user rather than treat an empty result as "service issued none".
+  blocked_reason?: string;
 }
 
 const normLabelKey = (label: string): string =>
@@ -349,6 +354,36 @@ export function looksLikeCodeIdentifier(s: string): boolean {
   const t = s.trim();
   if (t.startsWith("eyJ")) return false;
   return /[A-Za-z]\.[A-Za-z]/.test(t);
+}
+
+// A credentials page that is actually a login wall / anti-bot interstitial has
+// no key to give — every token on it (CSRF cookie, asset hash, guest id) is
+// junk. Grok is the standing case: x.ai routes signup through X (Twitter) OAuth,
+// and X serves headless Chromium its "JavaScript is not available" tombstone, so
+// the extractor would otherwise scrape session tokens and hand one back as a
+// false-green key. Detect that state and fail CLOSED — return no credential plus
+// an explicit reason the host agent can act on (drive an interactive login),
+// rather than surfacing a bogus value. The phrases below are the load-bearing
+// markers of X's tombstone + the four anti-bot vendors waitForFormReady knows.
+const LOGIN_WALL_MARKERS: readonly RegExp[] = [
+  /javascript is not available/i,
+  /enable javascript/i,
+  /verifying you are human/i,
+  /checking your browser/i,
+  /just a moment/i,
+  /review the security of your connection/i,
+  /unusual (traffic|activity) (from|on)/i,
+];
+export function detectExtractionBlock(pageText: string): string | null {
+  // Require a SHORT page — a real keys page that merely mentions "enable
+  // JavaScript" in a footer is not a wall. A tombstone/interstitial is sparse.
+  if (pageText.trim().length > 600) return null;
+  for (const re of LOGIN_WALL_MARKERS) {
+    if (re.test(pageText)) {
+      return "login_wall: the page is an anti-bot/login interstitial (no credential present) — drive an interactive login or hand back to the user";
+    }
+  }
+  return null;
 }
 
 // Collect every distinct credential-SHAPED token in a blob of page text:
@@ -389,6 +424,22 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const inputs = await browser.extractAllInputValues();
   const nearCopy = await browser.extractCredentialsNearCopyButtons();
   const text = await browser.extractVisibleText();
+
+  // Fail CLOSED on a login wall / anti-bot interstitial: scraping it yields only
+  // session/CSRF/asset tokens, and handing one back is a false-green. Refuse,
+  // and tell the host why so it can drive an interactive login instead.
+  const blocked = detectExtractionBlock(text);
+  if (blocked !== null) {
+    audit(sessionId, "extract", { found: false, blocked_reason: blocked });
+    return {
+      session_id: sessionId,
+      url: browser.currentUrl(),
+      credentials: {},
+      candidate_count: 0,
+      blocked_reason: blocked,
+    };
+  }
+
   // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
   // the value into the DOM — it goes to the clipboard on a "Copy" click. Read
   // it (clipboard-read is granted at context creation).

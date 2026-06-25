@@ -7,6 +7,7 @@ import {
   parseVerification,
   looksLikeCodeIdentifier,
   findCredentialTokens,
+  detectExtractionBlock,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -156,6 +157,30 @@ describe("findCredentialTokens (multi-credential extraction)", () => {
     expect(findCredentialTokens("Welcome to your dashboard. Get started now.")).toEqual([]);
     // has a separator but no digit → not a key
     expect(findCredentialTokens("user_account_settings_panel")).toEqual([]);
+  });
+});
+
+describe("detectExtractionBlock (fail-closed on a login wall)", () => {
+  it("flags X's anti-bot tombstone (the Grok false-green source)", () => {
+    const tombstone = "JavaScript is not available.\nWe've detected that JavaScript is disabled in this browser.";
+    expect(detectExtractionBlock(tombstone)).not.toBeNull();
+    expect(detectExtractionBlock(tombstone)).toContain("login_wall");
+  });
+
+  it("flags the Cloudflare 'Just a moment' interstitial", () => {
+    expect(detectExtractionBlock("Just a moment...\nVerifying you are human.")).not.toBeNull();
+  });
+
+  it("does NOT flag a real keys page that merely mentions enabling JavaScript", () => {
+    // A long, content-rich page is not a wall even if the phrase appears in a footer.
+    const realPage =
+      "Your API keys\nProduction key sk-live-abc123def456ghi789\n".repeat(20) +
+      "Note: enable JavaScript for the best experience.";
+    expect(detectExtractionBlock(realPage)).toBeNull();
+  });
+
+  it("returns null for an ordinary short dashboard with a key", () => {
+    expect(detectExtractionBlock("Dashboard\nAPI key: xai-abc123DEF456ghi789")).toBeNull();
   });
 });
 

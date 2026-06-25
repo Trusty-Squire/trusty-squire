@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.7 (2026-06-25)
+
+Prerelease (`next`). Extraction fails CLOSED on a login wall — kills the
+last class of false-green (the Grok/X case from the field test).
+
+- fix(provision): `provision_extract` now detects an anti-bot / login-wall page
+  (X's "JavaScript is not available" tombstone, Cloudflare's "Just a moment",
+  "Verifying you are human", etc.) and refuses to scrape it. Such a page has no
+  credential — every token on it is a session/CSRF/asset value — so returning one
+  is a false-green. The tool returns `{credentials:{}, blocked_reason}` instead,
+  telling the host to drive an interactive login or hand back to the user.
+- Net: Grok is a genuine X-login wall (x.ai signup routes through X/Twitter
+  OAuth, which blocks headless Chromium). No hint can overcome X's anti-bot on
+  the login step; the bot now says so explicitly rather than handing back junk.
+
 ## 0.9.19-rc.6 (2026-06-25)
 
 Prerelease (`next`). Login-agnostic hints — makes ALL registry skills usable for
