@@ -57,6 +57,12 @@ export class PostSignupRecoveryState {
   // real product dashboard, so we navigate to a settings/keys/home nav link to
   // reach the credential surface behind it (cloudinary /app/welcome).
   triedWizardEscape = false;
+  // Once true, the STALLED-wizard JS-click recovery has been attempted — the
+  // dominant wizard-stall cause is a custom radio-card selection whose React
+  // onClick a coordinate/CDP click doesn't fire (auth0 Account-Type, cloudinary
+  // survey, posthog role-picker). Re-dispatching the recent clicks via
+  // page.evaluate(el.click()) fires the handler the wizard was waiting on.
+  triedWizardJsClick = false;
 }
 
 export interface RecoveryClickableElement {

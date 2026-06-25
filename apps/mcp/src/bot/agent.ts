@@ -12928,6 +12928,41 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
             }
           }
         }
+        // JS-click recovery FIRST. The dominant wizard-stall cause is a custom
+        // radio-card selection whose React onClick a normal (coordinate/CDP)
+        // click doesn't fire, so the page never changes and "Next" stays
+        // inert — MEASURED 2026-06-24 (auth0 Account-Type Personal/Company,
+        // cloudinary survey, posthog role-picker class). Re-dispatch the recent
+        // page-mutating clicks via page.evaluate(el.click()) (clickViaJs), which
+        // fires the handler; the selection commits and the next forward click
+        // advances. One attempt, then fall through to the escape/stall.
+        if (!recovery.triedWizardJsClick && typeof this.browser.clickViaJs === "function") {
+          recovery.triedWizardJsClick = true;
+          const recentClickSelectors = recovery.actionEffects
+            .filter((e) => e.kind === "click" && e.selector !== null)
+            .map((e) => e.selector!)
+            .filter((s, i, a) => a.indexOf(s) === i);
+          if (recentClickSelectors.length > 0) {
+            args.steps.push(
+              `Post-verify: STALLED in a wizard — re-dispatching ${recentClickSelectors.length} recent click(s) via JS ` +
+                `(custom radio-card onClick that the normal click didn't fire).`,
+            );
+            for (const sel of recentClickSelectors) {
+              await this.browser.clickViaJs(sel).catch(() => undefined);
+              await this.browser.wait(1);
+            }
+            // Then JS-click a forward/submit button so a now-enabled Next advances.
+            const fwd = pickOnboardingSubmit(inventory);
+            if (fwd !== null) {
+              await this.browser.clickViaJs(fwd.selector).catch(() => undefined);
+            }
+            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+            recovery.actionEffects.length = 0;
+            recovery.prevContentSig = null;
+            hint = undefined;
+            continue;
+          }
+        }
         // Wizard-escape before giving up. A re-presenting onboarding wizard
         // whose clicks don't register is an OVERLAY on the real product
         // dashboard — its sidebar (Home/Settings/API Keys) is already in the
