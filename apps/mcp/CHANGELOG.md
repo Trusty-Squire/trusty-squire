@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.2 (2026-06-25)
+
+Prerelease (`next`). Boot-crash fix — 0.9.19-rc.1 pinned the stale-by-content
+`@trusty-squire/skill-schema@0.1.2` (published before the `canonicalizeServiceSlug`
+export), so `npx @next` crashed on boot with "does not provide an export named
+'canonicalizeServiceSlug'". Republished skill-schema as `0.1.3-rc.1` with the
+matching content; this build pins it. No feature changes from rc.1.
+
 ## 0.9.19-rc.1 (2026-06-25)
 
 Prerelease (`next`). Phase 1 of the host-as-planner architecture: an
