@@ -153,6 +153,64 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+// Parse a /skills/* response body into a SkillFetchOutcome. Shared by the
+// by-service and by-host fetchers. Defensive: a version mismatch or bad deploy
+// fails open (unavailable) rather than throwing.
+async function parseSkillBody(response: Response): Promise<SkillFetchOutcome> {
+  if (response.status === 404) return { kind: "not_found" };
+  if (!response.ok) {
+    return { kind: "unavailable", reason: `registry returned HTTP ${response.status}` };
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (err) {
+    return {
+      kind: "unavailable",
+      reason: `malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("skill" in body) ||
+    !("signed_by" in body)
+  ) {
+    return { kind: "unavailable", reason: "response missing skill or signed_by fields" };
+  }
+  const envelope = body as {
+    ok?: boolean;
+    skill: unknown;
+    signed_by: string;
+    counters?: {
+      replays_succeeded?: number;
+      replays_failed?: number;
+      consecutive_failures?: number;
+    };
+  };
+  let skill: Skill;
+  try {
+    skill = parseSkill(envelope.skill);
+  } catch (err) {
+    return {
+      kind: "unavailable",
+      reason: `skill failed schema validation: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return {
+    kind: "found",
+    result: {
+      skill,
+      signed_by: envelope.signed_by,
+      counters: {
+        replays_succeeded: envelope.counters?.replays_succeeded ?? 0,
+        replays_failed: envelope.counters?.replays_failed ?? 0,
+        consecutive_failures: envelope.counters?.consecutive_failures ?? 0,
+      },
+    },
+  };
+}
+
 export class SkillRegistryClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -203,77 +261,28 @@ export class SkillRegistryClient {
     if (attempt.kind === "err") {
       return { kind: "unavailable", reason: attempt.reason };
     }
-    const response = attempt.response;
+    const outcome = await parseSkillBody(attempt.response);
+    if (outcome.kind === "found") this.writeCache(serviceSlug, outcome.result);
+    return outcome;
+  }
 
-    if (response.status === 404) {
-      return { kind: "not_found" };
+  /**
+   * Resolve a skill by its signup_url HOST rather than its slug — so an
+   * end-user provisioning https://x.ai reaches the "xai-grok" skill whose slug
+   * doesn't derive from the URL. Returns the best available skill (active >
+   * pending-review) for HINT purposes. Not cached by slug (the host→skill
+   * mapping is the registry's to own).
+   */
+  async fetchSkillByHost(host: string, provisionId: string): Promise<SkillFetchOutcome> {
+    const url = `${this.baseUrl}/skills/by-host?host=${encodeURIComponent(host)}`;
+    const attempt = await this.fetchGetWithRetry(url, {
+      "x-account-id": this.accountId,
+      "x-provision-id": provisionId,
+    });
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
     }
-
-    if (!response.ok) {
-      return {
-        kind: "unavailable",
-        reason: `registry returned HTTP ${response.status}`,
-      };
-    }
-
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch (err) {
-      return {
-        kind: "unavailable",
-        reason: `malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-
-    // Defensive parsing. The registry should always return this
-    // shape, but a version mismatch or bad deploy could send something
-    // we don't recognise — fail open rather than crash.
-    if (
-      typeof body !== "object" ||
-      body === null ||
-      !("skill" in body) ||
-      !("signed_by" in body)
-    ) {
-      return {
-        kind: "unavailable",
-        reason: "response missing skill or signed_by fields",
-      };
-    }
-
-    const envelope = body as {
-      ok?: boolean;
-      skill: unknown;
-      signed_by: string;
-      counters?: {
-        replays_succeeded?: number;
-        replays_failed?: number;
-        consecutive_failures?: number;
-      };
-    };
-
-    let skill: Skill;
-    try {
-      skill = parseSkill(envelope.skill);
-    } catch (err) {
-      return {
-        kind: "unavailable",
-        reason: `skill failed schema validation: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-
-    const result: FetchSkillResult = {
-      skill,
-      signed_by: envelope.signed_by,
-      counters: {
-        replays_succeeded: envelope.counters?.replays_succeeded ?? 0,
-        replays_failed: envelope.counters?.replays_failed ?? 0,
-        consecutive_failures: envelope.counters?.consecutive_failures ?? 0,
-      },
-    };
-
-    this.writeCache(serviceSlug, result);
-    return { kind: "found", result };
+    return await parseSkillBody(attempt.response);
   }
 
   /**

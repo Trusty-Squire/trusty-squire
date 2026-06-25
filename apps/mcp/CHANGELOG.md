@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.5 (2026-06-25)
+
+Prerelease (`next`). Registry-hint reachability (Gap 1) — the hint now finds
+skills whose slug doesn't derive from the URL.
+
+- feat(provision): resolve the route hint by **signup_url host**, not just slug.
+  A skill promoted under a curated name (x.ai → "xai-grok") is unreachable by
+  the URL-canonicalized slug ("x-ai"); `provision_start` now falls back to a new
+  registry lookup (`GET /skills/by-host`) that returns the best skill (active or
+  pending-review) whose signup_url host matches. Requires the registry deploy
+  that adds the endpoint; degrades gracefully (no hint) against an older registry.
+- fix(provision): `renderSkillHint` reads the skill's top-level `oauth_provider`
+  field (the source of truth), not just a click_oauth_button step — so a skill
+  that records its login method surfaces it correctly.
+
 ## 0.9.19-rc.4 (2026-06-25)
 
 Prerelease (`next`). Registry-route hints — the map the host agent was missing.

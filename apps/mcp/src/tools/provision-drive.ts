@@ -31,7 +31,14 @@ async function resolveRouteHint(serviceUrl: string): Promise<string | undefined>
     if (client === null) return undefined;
     const slug = serviceSlugFromUrl(serviceUrl);
     if (slug === null) return undefined;
-    const outcome = await client.fetchActiveSkill(slug, generateProvisionId());
+    const provisionId = generateProvisionId();
+    // Try the slug first; fall back to resolving by signup_url host so a
+    // custom-named skill (x.ai → "xai-grok") is reachable from its URL.
+    let outcome = await client.fetchActiveSkill(slug, provisionId);
+    if (outcome.kind !== "found") {
+      const host = new URL(serviceUrl).hostname.toLowerCase().replace(/^www\./, "");
+      outcome = await client.fetchSkillByHost(host, provisionId);
+    }
     return outcome.kind === "found" ? renderSkillHint(outcome.result.skill) : undefined;
   } catch {
     return undefined;

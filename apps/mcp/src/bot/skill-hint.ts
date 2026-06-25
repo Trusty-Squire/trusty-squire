@@ -28,15 +28,20 @@ export function renderSkillHint(skill: Skill): string {
     `- entry: ${skill.signup_url}`,
   ];
 
-  // Login method — the OAuth provider this service uses, or a form.
+  // Login method — the skill's top-level oauth_provider field is the source of
+  // truth; fall back to a click_oauth_button step, then to a form.
   const oauthStep = skill.steps.find(
     (s): s is Extract<SkillStep, { kind: "click_oauth_button" }> =>
       s.kind === "click_oauth_button",
   );
+  const provider =
+    typeof skill.oauth_provider === "string" && skill.oauth_provider.length > 0
+      ? skill.oauth_provider
+      : oauthStep?.provider;
   lines.push(
-    oauthStep !== undefined
-      ? `- login: "Continue with ${oauthStep.provider}" (if the account already ` +
-          `exists, log in that way — don't try to sign up again)`
+    provider !== undefined
+      ? `- login: "Continue with ${provider}" (if the account already exists, ` +
+          `log in that way — don't try to sign up again)`
       : `- login: email/password form`,
   );
 
