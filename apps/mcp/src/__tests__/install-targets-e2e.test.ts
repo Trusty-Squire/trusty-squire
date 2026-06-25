@@ -160,6 +160,29 @@ describe("install --target=<agent> writes a valid config", () => {
     expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
   });
 
+  it("defaults advanced privacy consent to off for non-interactive installs", async () => {
+    await install({
+      command: "install",
+      target: TARGETS[0]!,
+      apiBase: "https://test.invalid",
+      skipBrowser: true,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: false,
+    });
+    const sessionPath = path.join(
+      process.env.XDG_CONFIG_HOME!,
+      "trusty-squire",
+      "session.json",
+    );
+    const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
+      consent_skillify_telemetry?: boolean;
+      consent_operator_inbox_otp?: boolean;
+    };
+    expect(session.consent_skillify_telemetry).toBe(false);
+    expect(session.consent_operator_inbox_otp).toBe(false);
+  });
+
   it("always writes the managed registry URL for user installs", async () => {
     const prev = process.env.TRUSTY_SQUIRE_REGISTRY_URL;
     process.env.TRUSTY_SQUIRE_REGISTRY_URL = "https://staging.registry.test";

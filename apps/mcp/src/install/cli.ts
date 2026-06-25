@@ -37,7 +37,6 @@ import process from "node:process";
 import { cpSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { loadHarvesterEnvFile } from "../operator-env.js";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
@@ -123,9 +122,15 @@ type Argv = {
   // --byok-key flags pre-filled). Threaded into writeAgentConfig.
   llmChoice?: import("./interactive.js").LlmChoice;
   byokKey?: string;
+  advancedConfigured?: boolean;
   consentSkillifyTelemetry?: boolean;
   consentOperatorInboxOtp?: boolean;
 };
+
+interface InstallConsent {
+  skillifyTelemetry: boolean;
+  operatorInboxOtp: boolean;
+}
 
 function parseArgs(argv: string[]): Argv {
   const positional = argv.filter((a) => !a.startsWith("--"));
@@ -382,11 +387,20 @@ async function connect(args: Argv): Promise<void> {
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
       ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
+      initialRegistryEnabled: !args.noRegistry,
     });
     args.target = picker.target;
     args.llmChoice = picker.llmChoice;
     if (picker.byokKey !== undefined) args.byokKey = picker.byokKey;
     if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
+    args.noRegistry = !picker.registryEnabled;
+    args.advancedConfigured = picker.advancedConfigured;
+    if (picker.consentSkillifyTelemetry !== undefined) {
+      args.consentSkillifyTelemetry = picker.consentSkillifyTelemetry;
+    }
+    if (picker.consentOperatorInboxOtp !== undefined) {
+      args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp;
+    }
   } else {
     ui.heading("Trusty Squire");
     ui.hint("Setting up this machine.");
@@ -404,7 +418,7 @@ async function connect(args: Argv): Promise<void> {
     const preflight = await checkAlreadyProvisioned();
     if (preflight !== null) {
       ui.divider();
-      await ensureConsentRecorded();
+      await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
       await writeAgentConfig(target, agent, args);
       const provNote =
         preflight.providers.length > 0
@@ -448,9 +462,7 @@ async function connect(args: Argv): Promise<void> {
     await clearProviderCookies();
   }
 
-  const consent = await collectInstallConsent();
-  args.consentSkillifyTelemetry = consent.skillifyTelemetry;
-  args.consentOperatorInboxOtp = consent.operatorInboxOtp;
+  const consent = consentFromArgs(args);
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
@@ -686,61 +698,28 @@ async function recordConnectedProvider(provider: OAuthProviderId): Promise<void>
   }
 }
 
-// Y/n prompt with a default answer. Returns true on yes, false on no.
-// Default is taken when the user just hits enter or when stdin isn't
-// a TTY (CI / scripted contexts). Designed to match what the user
-// expects from common CLI tooling — `[Y/n]` means default-yes.
-async function promptYesNo(message: string, defaultYes: boolean): Promise<boolean> {
-  if (!process.stdin.isTTY) return defaultYes;
-  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    const answer: string = await new Promise((resolve) => {
-      rl.question(`${message} ${suffix} `, resolve);
-    });
-    const trimmed = answer.trim().toLowerCase();
-    if (trimmed.length === 0) return defaultYes;
-    return trimmed === "y" || trimmed === "yes";
-  } finally {
-    rl.close();
-  }
+function consentFromArgs(args: Argv): InstallConsent {
+  return {
+    skillifyTelemetry: args.consentSkillifyTelemetry === true,
+    operatorInboxOtp: args.consentOperatorInboxOtp === true,
+  };
 }
 
-async function collectInstallConsent(): Promise<{
-  skillifyTelemetry: boolean;
-  operatorInboxOtp: boolean;
-}> {
-  ui.panel(
-    `Two squire permissions before we continue:\n\n` +
-      `1. Let successful signup/navigation traces become reusable skills for other users. ` +
-      `The squire keeps the recipe, not your personal details or secrets.\n\n` +
-      `2. Let the squire poll your email only for OTP or verification messages that match ` +
-      `the service you asked it to help with. It does not browse your inbox.`,
-    { title: "Permissions", color: "wine" },
-  );
-  const skillifyTelemetry = await promptYesNo(
-    "May Trusty Squire turn successful signup/navigation traces into reusable skills, with personal information and secrets excluded?",
-    false,
-  );
-  const operatorInboxOtp = await promptYesNo(
-    "May Trusty Squire poll only matching OTP/verification emails for the service you requested?",
-    false,
-  );
-  return { skillifyTelemetry, operatorInboxOtp };
-}
-
-async function ensureConsentRecorded(): Promise<void> {
+async function ensureConsentRecorded(
+  consent: InstallConsent,
+  overwrite: boolean,
+): Promise<void> {
   try {
     const storage = await openSessionStorage();
     const session = await storage.read();
     if (session === null) return;
     if (
+      !overwrite &&
       session.consent_skillify_telemetry !== undefined &&
       session.consent_operator_inbox_otp !== undefined
     ) {
       return;
     }
-    const consent = await collectInstallConsent();
     await storage.write({
       ...session,
       saved_at: new Date().toISOString(),

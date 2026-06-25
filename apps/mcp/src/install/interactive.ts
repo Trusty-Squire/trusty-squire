@@ -35,6 +35,15 @@ export interface InteractiveConfig {
   byokKey?: string;
   // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
   proxyUrl?: string;
+  // Managed registry router. The endpoint is product-owned; advanced setup only
+  // controls whether this install uses it.
+  registryEnabled: boolean;
+  // Privacy-sensitive advanced choices. Undefined means the user did not open
+  // advanced settings during this run, so existing session choices should not
+  // be overwritten on a config refresh.
+  consentSkillifyTelemetry?: boolean;
+  consentOperatorInboxOtp?: boolean;
+  advancedConfigured: boolean;
 }
 
 export type LlmChoice =
@@ -120,46 +129,89 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
   return value as AgentTarget;
 }
 
-async function pickAdvancedOptions(): Promise<{
+async function pickAdvancedOptionsWithDefaults(opts: {
+  initialProxyUrl?: string;
+  initialRegistryEnabled?: boolean;
+}): Promise<{
+  advancedConfigured: boolean;
   proxyUrl?: string;
+  registryEnabled: boolean;
+  consentSkillifyTelemetry?: boolean;
+  consentOperatorInboxOtp?: boolean;
 }> {
+  const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (proxy)",
-      initialValue: false,
+      message: "Configure advanced options? (proxy, registry, OTP)",
+      initialValue: opts.initialProxyUrl !== undefined || !initialRegistryEnabled,
     }),
   );
   if (!wantAdvanced) {
-    return {};
+    return {
+      advancedConfigured: false,
+      registryEnabled: initialRegistryEnabled,
+      ...(opts.initialProxyUrl !== undefined ? { proxyUrl: opts.initialProxyUrl } : {}),
+    };
   }
 
   // Residential proxy. Most users skip this — datacenter egress is
   // re-routed through our proxy automatically when configured; only
   // power users running on a misclassified residential network ever
   // touch this.
-  const wantProxy = bailIfCancelled(
+  let proxyUrl = opts.initialProxyUrl;
+  if (proxyUrl === undefined) {
+    const wantProxy = bailIfCancelled(
+      await confirm({
+        message: "Route the bot through a residential proxy?",
+        initialValue: false,
+      }),
+    );
+    if (wantProxy) {
+      const url = bailIfCancelled(
+        await text({
+          message: "Proxy URL (http://user:pass@host:port or socks5://…)",
+          validate: (v) => {
+            if (v === undefined || !/^(http|https|socks5):\/\//.test(v)) {
+              return "URL must start with http://, https://, or socks5://";
+            }
+            return undefined;
+          },
+        }),
+      );
+      proxyUrl = (url ?? "").trim();
+    }
+  }
+
+  const registryEnabled = bailIfCancelled(
     await confirm({
-      message: "Route the bot through a residential proxy?",
+      message: "Use the managed skill registry for faster signups?",
+      initialValue: initialRegistryEnabled,
+    }),
+  );
+
+  const consentSkillifyTelemetry = registryEnabled
+    ? bailIfCancelled(
+        await confirm({
+          message:
+            "Let successful signup/navigation traces become reusable registry skills? The squire keeps the recipe, not personal details or secrets.",
+          initialValue: false,
+        }),
+      )
+    : false;
+
+  const consentOperatorInboxOtp = bailIfCancelled(
+    await confirm({
+      message:
+        "Let the squire poll only matching OTP/verification emails for requested services?",
       initialValue: false,
     }),
   );
-  let proxyUrl: string | undefined;
-  if (wantProxy) {
-    const url = bailIfCancelled(
-      await text({
-        message: "Proxy URL (http://user:pass@host:port or socks5://…)",
-        validate: (v) => {
-          if (v === undefined || !/^(http|https|socks5):\/\//.test(v)) {
-            return "URL must start with http://, https://, or socks5://";
-          }
-          return undefined;
-        },
-      }),
-    );
-    proxyUrl = (url ?? "").trim();
-  }
 
   return {
+    advancedConfigured: true,
+    registryEnabled,
+    consentSkillifyTelemetry,
+    consentOperatorInboxOtp,
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
   };
 }
@@ -172,6 +224,17 @@ function summarize(config: InteractiveConfig): void {
   lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
   if (config.proxyUrl !== undefined) {
     lines.push(`${chalk.dim("Proxy:        ")}${config.proxyUrl}`);
+  }
+  lines.push(
+    `${chalk.dim("Registry:     ")}${config.registryEnabled ? "managed" : chalk.yellow("disabled")}`,
+  );
+  if (config.advancedConfigured) {
+    lines.push(
+      `${chalk.dim("Skillify:     ")}${config.consentSkillifyTelemetry === true ? "allowed" : "off"}`,
+    );
+    lines.push(
+      `${chalk.dim("Email OTP:    ")}${config.consentOperatorInboxOtp === true ? "allowed" : "off"}`,
+    );
   }
   note(lines.join("\n"), "Setup summary");
 }
@@ -186,6 +249,7 @@ export async function runInteractiveSetup(opts: {
   // picker but with their choices baked in. Each is optional.
   initialTarget?: AgentTarget;
   initialProxyUrl?: string;
+  initialRegistryEnabled?: boolean;
 }): Promise<InteractiveConfig> {
   showIntro();
 
@@ -197,10 +261,12 @@ export async function runInteractiveSetup(opts: {
   // carry the value straight through rather than asking yes/no. Signup
   // planning is driven by the session agent, so there is no user-facing LLM
   // picker here.
-  const advanced =
-    opts.initialProxyUrl !== undefined
-      ? { proxyUrl: opts.initialProxyUrl }
-      : await pickAdvancedOptions();
+  const advanced = await pickAdvancedOptionsWithDefaults({
+    ...(opts.initialProxyUrl !== undefined ? { initialProxyUrl: opts.initialProxyUrl } : {}),
+    ...(opts.initialRegistryEnabled !== undefined
+      ? { initialRegistryEnabled: opts.initialRegistryEnabled }
+      : {}),
+  });
 
   const llmChoice: LlmChoice = "managed_free";
 
@@ -208,6 +274,14 @@ export async function runInteractiveSetup(opts: {
     target,
     llmChoice,
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
+    registryEnabled: advanced.registryEnabled,
+    ...(advanced.consentSkillifyTelemetry !== undefined
+      ? { consentSkillifyTelemetry: advanced.consentSkillifyTelemetry }
+      : {}),
+    ...(advanced.consentOperatorInboxOtp !== undefined
+      ? { consentOperatorInboxOtp: advanced.consentOperatorInboxOtp }
+      : {}),
+    advancedConfigured: advanced.advancedConfigured,
   };
 
   summarize(config);
