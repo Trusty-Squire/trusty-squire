@@ -36,12 +36,12 @@ export interface InteractiveConfig {
   // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
   proxyUrl?: string;
   // Managed registry router. The endpoint is product-owned; advanced setup only
-  // controls whether this install uses it.
+  // controls whether this install uses it. User-facing registry ON also means
+  // successful non-personal signup recipes may be contributed back to it.
   registryEnabled: boolean;
   // Privacy-sensitive advanced choices. Undefined means the user did not open
   // advanced settings during this run, so existing session choices should not
   // be overwritten on a config refresh.
-  consentSkillifyTelemetry?: boolean;
   consentOperatorInboxOtp?: boolean;
   advancedConfigured: boolean;
 }
@@ -136,14 +136,13 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   advancedConfigured: boolean;
   proxyUrl?: string;
   registryEnabled: boolean;
-  consentSkillifyTelemetry?: boolean;
   consentOperatorInboxOtp?: boolean;
 }> {
-  const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
+  const initialRegistryEnabled = opts.initialRegistryEnabled ?? false;
   const wantAdvanced = bailIfCancelled(
     await confirm({
       message: "Configure advanced options? (proxy, registry, OTP)",
-      initialValue: opts.initialProxyUrl !== undefined || !initialRegistryEnabled,
+      initialValue: opts.initialProxyUrl !== undefined,
     }),
   );
   if (!wantAdvanced) {
@@ -184,20 +183,11 @@ async function pickAdvancedOptionsWithDefaults(opts: {
 
   const registryEnabled = bailIfCancelled(
     await confirm({
-      message: "Use the managed skill registry for faster signups?",
-      initialValue: initialRegistryEnabled,
+      message:
+        "Use the managed skill registry? This reuses shared signup recipes and lets successful non-personal recipes improve the registry.",
+      initialValue: false,
     }),
   );
-
-  const consentSkillifyTelemetry = registryEnabled
-    ? bailIfCancelled(
-        await confirm({
-          message:
-            "Let successful signup/navigation traces become reusable registry skills? The squire keeps the recipe, not personal details or secrets.",
-          initialValue: false,
-        }),
-      )
-    : false;
 
   const consentOperatorInboxOtp = bailIfCancelled(
     await confirm({
@@ -210,7 +200,6 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   return {
     advancedConfigured: true,
     registryEnabled,
-    consentSkillifyTelemetry,
     consentOperatorInboxOtp,
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
   };
@@ -229,9 +218,6 @@ function summarize(config: InteractiveConfig): void {
     `${chalk.dim("Registry:     ")}${config.registryEnabled ? "managed" : chalk.yellow("disabled")}`,
   );
   if (config.advancedConfigured) {
-    lines.push(
-      `${chalk.dim("Skillify:     ")}${config.consentSkillifyTelemetry === true ? "allowed" : "off"}`,
-    );
     lines.push(
       `${chalk.dim("Email OTP:    ")}${config.consentOperatorInboxOtp === true ? "allowed" : "off"}`,
     );
@@ -275,9 +261,6 @@ export async function runInteractiveSetup(opts: {
     llmChoice,
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
-    ...(advanced.consentSkillifyTelemetry !== undefined
-      ? { consentSkillifyTelemetry: advanced.consentSkillifyTelemetry }
-      : {}),
     ...(advanced.consentOperatorInboxOtp !== undefined
       ? { consentOperatorInboxOtp: advanced.consentOperatorInboxOtp }
       : {}),

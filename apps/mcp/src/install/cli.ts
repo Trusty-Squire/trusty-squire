@@ -26,9 +26,8 @@
 //                        their own browser (CI / scripted installs)
 //   --proxy-url=<url>    bake a residential proxy into the MCP config's
 //                        env (UNIVERSAL_BOT_PROXY_URL)
-//   --no-registry        omit TRUSTY_SQUIRE_REGISTRY_URL from the
-//                        config → mcp skips the router entirely and
-//                        every signup goes through the universal bot
+//   --no-registry        legacy hidden escape hatch; registry participation
+//                        is normally controlled in Advanced setup
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -70,11 +69,8 @@ import { runInteractiveSetup, shouldRunInteractive, showOutro } from "./interact
 import chalk from "chalk";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
-// Default skill-registry URL. Wired into the MCP config's env block
-// so users don't have to set it manually — without it, mcp skips the
-// Tier-2 router and every signup goes through the universal bot
-// (fail-open by design, but a worse experience than just using the
-// closed loop).
+// Managed skill-registry URL. Advanced setup decides whether this is written
+// into the MCP config; the URL itself is product-owned and not user-editable.
 const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 
 type ProviderArg = "google" | "github";
@@ -87,9 +83,9 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
-  // Skill registry is product-owned infrastructure. Connect writes the
-  // production registry by default; --no-registry is a hidden escape hatch for
-  // pure universal-bot mode.
+  // Skill registry is product-owned infrastructure. Advanced setup controls
+  // whether this install participates; registry ON is also the user's consent
+  // to contribute successful non-personal signup recipes back to the registry.
   noRegistry: boolean;
   // OAuth provider — for `login`, picks which provider to sign in to.
   // For `install`, the provider is chosen by the user inside the
@@ -123,7 +119,6 @@ type Argv = {
   llmChoice?: import("./interactive.js").LlmChoice;
   byokKey?: string;
   advancedConfigured?: boolean;
-  consentSkillifyTelemetry?: boolean;
   consentOperatorInboxOtp?: boolean;
 };
 
@@ -152,7 +147,7 @@ function parseArgs(argv: string[]): Argv {
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
-  let noRegistry = false;
+  let noRegistry = true;
   let providerArg: ProviderArg | undefined;
   let profileDir: string | undefined;
   let skipBrowser = false;
@@ -395,9 +390,6 @@ async function connect(args: Argv): Promise<void> {
     if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = picker.advancedConfigured;
-    if (picker.consentSkillifyTelemetry !== undefined) {
-      args.consentSkillifyTelemetry = picker.consentSkillifyTelemetry;
-    }
     if (picker.consentOperatorInboxOtp !== undefined) {
       args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp;
     }
@@ -700,7 +692,7 @@ async function recordConnectedProvider(provider: OAuthProviderId): Promise<void>
 
 function consentFromArgs(args: Argv): InstallConsent {
   return {
-    skillifyTelemetry: args.consentSkillifyTelemetry === true,
+    skillifyTelemetry: !args.noRegistry,
     operatorInboxOtp: args.consentOperatorInboxOtp === true,
   };
 }
@@ -751,9 +743,9 @@ async function writeAgentConfig(
   if (args.proxyUrl !== undefined) {
     env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
   }
-  // Skill registry URL — wired by default so the Tier-2 router is on
-  // out of the box. The registry endpoint is not user-configurable; opt out
-  // entirely with --no-registry (which omits the var → router skips).
+  // Skill registry URL. The endpoint is not user-configurable; Advanced setup
+  // controls whether it is written at all. Registry participation is also the
+  // user's consent to contribute successful non-personal signup recipes.
   if (!args.noRegistry) {
     env.TRUSTY_SQUIRE_REGISTRY_URL = DEFAULT_REGISTRY_URL;
   }
@@ -796,7 +788,7 @@ async function writeAgentConfig(
     ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
   if (args.noRegistry) {
-    ui.hint("  Skill registry disabled (--no-registry) — every signup goes through the universal bot");
+    ui.hint("  Skill registry disabled — every signup goes through the universal bot");
   }
 }
 
@@ -1038,7 +1030,6 @@ function printHelp(): void {
   console.warn(`  --skip-login                 don't launch a browser (CI mode)`);
   console.warn(`  --force-relogin              switch the bound account`);
   console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
-  console.warn(`  --no-registry                disable the Tier-2 router entirely`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);

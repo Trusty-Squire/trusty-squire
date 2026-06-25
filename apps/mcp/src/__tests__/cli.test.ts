@@ -61,6 +61,14 @@ describe("parseArgs --provider / --skip-browser", () => {
 });
 
 describe("parseArgs registry", () => {
+  it("defaults registry participation off", () => {
+    expect(parseArgs(["connect"]).noRegistry).toBe(true);
+  });
+
+  it("keeps the legacy --no-registry flag as an explicit off switch", () => {
+    expect(parseArgs(["connect", "--no-registry"]).noRegistry).toBe(true);
+  });
+
   it("does not accept a custom registry URL", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
