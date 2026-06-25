@@ -58,6 +58,33 @@ export interface ObservedElement {
   // The site's own stable test hook (data-testid/-cy/-qa), the most
   // refactor-resilient target when present.
   testId: string | null;
+  // DOM-derived screen context for non-vision host agents. `path` is a compact
+  // targetable label such as "dialog:finish-account > button:create-account".
+  path: string | null;
+  container: string | null;
+  topmost: boolean | null;
+  occluded_by: string | null;
+}
+
+export interface ScreenRegion {
+  id: string;
+  role: string;
+  topmost: boolean;
+  occluded_by: string | null;
+  children: Array<{
+    ref: string;
+    role: string | null;
+    text: string | null;
+    href: string | null;
+    topmost: boolean | null;
+    occluded_by: string | null;
+  }>;
+}
+
+export interface ScreenOutline {
+  foreground: string | null;
+  mode_markers: string[];
+  regions: ScreenRegion[];
 }
 
 export interface Observation {
@@ -69,6 +96,12 @@ export interface Observation {
   // Layout-aware page prose (innerText) so the agent can read passages,
   // questions, masked-key hints, etc. Capped to keep tool payloads bounded.
   text: string;
+  // Domain-aware steering for the host planner. This is not a script; it is
+  // guardrail context for states the raw page text routinely misleads agents on.
+  guidance?: string;
+  // Compact relational view of interactive DOM regions. This is intentionally
+  // smaller than raw DOM but preserves hierarchy/occlusion that flat text loses.
+  screen?: ScreenOutline;
   elements: ObservedElement[];
 }
 
@@ -130,9 +163,21 @@ export function elementRef(el: InteractiveElement): string {
   return label.length > 0 ? label.slice(0, 80) : `${el.tag}#${el.index}`;
 }
 
+function elementTargetKeys(el: InteractiveElement): string[] {
+  return [
+    el.screenPath ?? null,
+    el.testId ?? null,
+    elementRef(el),
+  ].flatMap((s) => {
+    const v = (s ?? "").replace(/\s+/g, " ").trim();
+    return v.length > 0 ? [v] : [];
+  });
+}
+
 // Resolve a host-supplied target string to one live element. Matching is by
-// label text (+ role tiebreak), scored exact > startsWith > contains. Returns
-// null when nothing matches — the caller surfaces that rather than guessing.
+// structured path, test id, or label text, scored exact > startsWith > contains.
+// Returns null when nothing matches — the caller surfaces that rather than
+// guessing.
 export function resolveTarget(
   elements: readonly InteractiveElement[],
   target: string,
@@ -141,16 +186,19 @@ export function resolveTarget(
   if (want.length === 0) return null;
   let best: { el: InteractiveElement; score: number } | null = null;
   for (const el of elements) {
-    const label = norm(elementRef(el));
-    let score = 0;
-    if (label === want) score = 100;
-    else if (label.startsWith(want)) score = 70;
-    else if (label.includes(want)) score = 50;
-    else if (want.includes(label) && label.length >= 2) score = 30;
-    if (score === 0) continue;
-    // Prefer shorter labels at equal score (a more specific match).
-    const adjusted = score - label.length * 0.01;
-    if (best === null || adjusted > best.score) best = { el, score: adjusted };
+    for (const [i, raw] of elementTargetKeys(el).entries()) {
+      const label = norm(raw);
+      let score = 0;
+      const exact = i === 0 ? 120 : i === 1 ? 110 : 100;
+      if (label === want) score = exact;
+      else if (label.startsWith(want)) score = 70;
+      else if (label.includes(want)) score = 50;
+      else if (want.includes(label) && label.length >= 2) score = 30;
+      if (score === 0) continue;
+      // Prefer shorter labels at equal score (a more specific match).
+      const adjusted = score - label.length * 0.01;
+      if (best === null || adjusted > best.score) best = { el, score: adjusted };
+    }
   }
   return best?.el ?? null;
 }
@@ -171,6 +219,173 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
+}
+
+function visibleModeMarkers(pageText: string): string[] {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  const markers: string[] = [];
+  if (/\b(?:test|sandbox)\s+mode\b/i.test(text)) markers.push("test/sandbox mode");
+  if (/\b(?:live|production)\s+mode\b/i.test(text)) markers.push("live/production mode");
+  return markers;
+}
+
+function appSurfaceMarkers(pageText: string): string[] {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  const markers: string[] = [];
+  const defs: Array<[string, RegExp]> = [
+    ["dashboard", /\bdashboard\b/i],
+    ["products", /\bproducts?\b/i],
+    ["customers", /\bcustomers?\b/i],
+    ["payments", /\bpayments?\b/i],
+    ["developers", /\bdevelopers?\b/i],
+    ["api keys", /\bapi\s+keys?\b/i],
+    ["settings", /\bsettings\b/i],
+    ["workspace", /\bworkspace\b/i],
+    ["project", /\bproject\b/i],
+    ["billing", /\bbilling\b/i],
+    ["usage", /\busage\b/i],
+    ["team", /\bteam\b/i],
+  ];
+  for (const [name, re] of defs) {
+    if (re.test(text)) markers.push(name);
+  }
+  for (const mode of visibleModeMarkers(text)) markers.push(mode);
+  return [...new Set(markers)].slice(0, 8);
+}
+
+function authenticatedAppSurfaceMarkers(pageText: string): string[] {
+  const markers = appSurfaceMarkers(pageText);
+  const modeMarkers = visibleModeMarkers(pageText);
+  if (modeMarkers.length > 0) return markers;
+  return markers.length >= 2 ? markers : [];
+}
+
+function hasAccountSetupOverlay(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  return (
+    /\b(?:finish|complete|set up|setup)\s+(?:creating\s+|setting\s+up\s+)?(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(text) ||
+    /\bcreate\s+(?:your\s+)?account\b/i.test(text) ||
+    /\btell us about (?:yourself|your business|your organization|your company)\b/i.test(text)
+  );
+}
+
+function isAccountSetupActionTarget(target: string): boolean {
+  return /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
+    target,
+  );
+}
+
+function isBillingObjectActionTarget(target: string): boolean {
+  return /\b(create|save|add|finish)\b/i.test(target) &&
+    /\b(product|price|pricing|subscription|billing|payment|invoice|checkout)\b/i.test(target);
+}
+
+export function provisionPerceptionGuidance(pageText: string): string | undefined {
+  const appMarkers = authenticatedAppSurfaceMarkers(pageText);
+  const modeMarkers = visibleModeMarkers(pageText);
+  const setupOverlay = hasAccountSetupOverlay(pageText);
+  const parts: string[] = [];
+
+  if (modeMarkers.length > 0) {
+    parts.push(`Mode marker visible: ${modeMarkers.join(", ")}.`);
+  } else if (appMarkers.length > 0 || setupOverlay) {
+    parts.push(
+      "No test/sandbox/live mode marker is visible. For mode-sensitive tasks, do not create or save objects until the required mode is visible.",
+    );
+  }
+
+  if (setupOverlay && appMarkers.length > 0) {
+    parts.push(
+      `Screen perception: account/setup overlay text is present while authenticated app markers are also visible (${appMarkers.join(", ")}). This often means a foreground onboarding modal is blocking an already-authenticated app, not that OAuth failed. Do not restart OAuth or navigate to login solely because the overlay says create/finish account; either satisfy the minimal required setup once, or use same-origin app navigation/direct dashboard URLs toward the user's goal.`,
+    );
+  } else if (appMarkers.length > 0) {
+    parts.push(
+      `Screen perception: authenticated app markers are visible (${appMarkers.join(", ")}). Prefer app navigation over restarting OAuth unless the current URL is clearly an identity-provider login page.`,
+    );
+  }
+
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+export function shouldBlockUnsafeProvisionAction(
+  pageText: string,
+  action: ProvisionAction,
+): string | null {
+  if (!("target" in action)) return null;
+  const appMarkers = authenticatedAppSurfaceMarkers(pageText);
+  if (
+    appMarkers.length > 0 &&
+    isAccountSetupActionTarget(action.target) &&
+    hasAccountSetupOverlay(pageText)
+  ) {
+    return (
+      `Perception guard: "${action.target}" looks like an account/setup overlay action, ` +
+      `but authenticated app markers are already visible (${appMarkers.join(", ")}). ` +
+      `Do not retry OAuth or repeatedly press this overlay; use app navigation/direct ` +
+      `same-origin URLs or complete only the minimal required setup.`
+    );
+  }
+  if (
+    isBillingObjectActionTarget(action.target) &&
+    /\b(?:live|production)\s+mode\b/i.test(pageText)
+  ) {
+    return (
+      `Mode safety guard: "${action.target}" can create or save billing objects, ` +
+      `but live/production mode is visible. Switch to the required test/sandbox mode before acting.`
+    );
+  }
+  return null;
+}
+
+export function buildScreenOutline(
+  elements: readonly InteractiveElement[],
+  pageText: string,
+): ScreenOutline | undefined {
+  if (elements.length === 0) return undefined;
+  const byRegion = new Map<string, ScreenRegion>();
+  for (const el of elements) {
+    const id = el.container ?? "body:root";
+    const role = id.split(":")[0] ?? "region";
+    const existing = byRegion.get(id);
+    const region: ScreenRegion = existing ?? {
+      id,
+      role,
+      topmost: false,
+      occluded_by: null,
+      children: [],
+    };
+    if (el.topmost === true) {
+      region.topmost = true;
+      region.occluded_by = null;
+    } else if (
+      region.occluded_by === null &&
+      el.occludedBy !== null &&
+      el.occludedBy !== undefined
+    ) {
+      region.occluded_by = el.occludedBy;
+    }
+    if (region.children.length < 10) {
+      region.children.push({
+        ref: el.screenPath ?? elementRef(el),
+        role: el.role,
+        text: elementRef(el),
+        href: el.href ?? null,
+        topmost: el.topmost ?? null,
+        occluded_by: el.occludedBy ?? null,
+      });
+    }
+    byRegion.set(id, region);
+  }
+  const regions = [...byRegion.values()].slice(0, 12);
+  const foreground =
+    regions.find((r) => r.topmost && r.role === "dialog")?.id ??
+    regions.find((r) => r.topmost)?.id ??
+    null;
+  return {
+    foreground,
+    mode_markers: visibleModeMarkers(pageText),
+    regions,
+  };
 }
 
 function registrableHost(url: string): string | null {
@@ -242,10 +457,15 @@ async function observeSession(session: Session): Promise<Observation> {
   const elements = await session.browser.extractInteractiveElements();
   session.lastElements = elements;
   const text = await session.browser.extractVisibleText();
+  const normalizedText = text.replace(/\s+/g, " ").trim().slice(0, 4000);
+  const guidance = provisionPerceptionGuidance(normalizedText);
+  const screen = buildScreenOutline(elements, normalizedText);
   return {
     session_id: session.id,
     url: session.browser.currentUrl(),
-    text: text.replace(/\s+/g, " ").trim().slice(0, 4000),
+    text: normalizedText,
+    ...(guidance !== undefined ? { guidance } : {}),
+    ...(screen !== undefined ? { screen } : {}),
     elements: elements.map((el) => ({
       ref: elementRef(el),
       tag: el.tag,
@@ -255,6 +475,10 @@ async function observeSession(session: Session): Promise<Observation> {
       checked: el.checked ?? null,
       href: el.href ?? null,
       testId: el.testId ?? null,
+      path: el.screenPath ?? null,
+      container: el.container ?? null,
+      topmost: el.topmost ?? null,
+      occluded_by: el.occludedBy ?? null,
     })),
   };
 }
@@ -295,6 +519,11 @@ export async function act(
     case "js_click":
     case "type":
     case "oauth_click": {
+      const blockReason = shouldBlockUnsafeProvisionAction(
+        await browser.extractVisibleText(),
+        action,
+      );
+      if (blockReason !== null) throw new Error(blockReason);
       // Re-resolve against FRESH elements every act — never trust a stale index.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
@@ -302,7 +531,10 @@ export async function act(
       if (el === null) {
         throw new Error(
           `no element matched target "${action.target}". Visible: ` +
-            fresh.map((e) => `"${elementRef(e)}"`).slice(0, 20).join(", "),
+            fresh
+              .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+              .slice(0, 20)
+              .join(", "),
         );
       }
       if (action.kind === "click") await browser.click(el.selector);

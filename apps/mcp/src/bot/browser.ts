@@ -6181,6 +6181,75 @@ export class BrowserController {
         }
       };
 
+      const slug = (s: string | null, fallback: string): string => {
+        const base = (s ?? fallback)
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 48);
+        return base.length > 0 ? base : fallback;
+      };
+
+      const directLabel = (el: Element): string | null =>
+        clean(el.getAttribute("aria-label")) ??
+        clean(el.getAttribute("title")) ??
+        clean(el.getAttribute("name")) ??
+        clean(el.textContent);
+
+      const regionFor = (el: Element): Element | null =>
+        el.closest(
+          '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
+        );
+
+      const regionName = (region: Element | null): string | null => {
+        if (region === null) return null;
+        const role = region.getAttribute("role");
+        const tag = region.tagName.toLowerCase();
+        const kind =
+          role === "dialog" || tag === "dialog" || region.getAttribute("aria-modal") === "true"
+            ? "dialog"
+            : tag === "nav"
+              ? "navigation"
+              : tag;
+        const labelledBy = region.getAttribute("aria-labelledby");
+        let label: string | null = null;
+        if (labelledBy !== null && labelledBy.length > 0) {
+          try {
+            label = clean(document.getElementById(labelledBy)?.textContent);
+          } catch {
+            label = null;
+          }
+        }
+        label =
+          label ??
+          clean(region.getAttribute("aria-label")) ??
+          clean(region.querySelector("h1,h2,h3,[role='heading']")?.textContent) ??
+          clean(region.textContent)?.slice(0, 60) ??
+          kind;
+        return `${kind}:${slug(label, kind)}`;
+      };
+
+      const elementKind = (el: Element): string => {
+        const role = el.getAttribute("role");
+        const tag = el.tagName.toLowerCase();
+        if (role !== null && role.length > 0) return role;
+        if (tag === "a") return "link";
+        return tag;
+      };
+
+      const topmostStatus = (el: Element): { topmost: boolean; occludedBy: string | null } => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return { topmost: false, occludedBy: null };
+        const x = Math.min(window.innerWidth - 1, Math.max(0, r.left + r.width / 2));
+        const y = Math.min(window.innerHeight - 1, Math.max(0, r.top + r.height / 2));
+        const top = document.elementFromPoint(x, y);
+        if (top === null) return { topmost: false, occludedBy: null };
+        if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
+        return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
+      };
+
       // N1 onboarding-wizard cards (2026-06-08). Chakra/React card pickers
       // (imagekit's step-1/3 objective cards, axiom/pusher role cards) render
       // each selectable card as a BARE clickable div — cursor:pointer, but no
@@ -6268,6 +6337,10 @@ export class BrowserController {
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
+        screenPath: string | null;
+        container: string | null;
+        topmost: boolean | null;
+        occludedBy: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -6314,6 +6387,12 @@ export class BrowserController {
         const isGoogleGSIIframe =
           el instanceof HTMLIFrameElement &&
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
+        const container = regionName(regionFor(el));
+        const status = topmostStatus(el);
+        const pathLabel =
+          isGoogleGSIIframe
+            ? "Continue with Google"
+            : directLabel(el) ?? labelFor(el) ?? iconLabelFor(el);
         out.push({
           tag: isGoogleGSIIframe ? "button" : el.tagName.toLowerCase(),
           type: el.getAttribute("type"),
@@ -6402,6 +6481,12 @@ export class BrowserController {
               ? clean(el.options[el.selectedIndex]?.textContent ?? null)
               : null,
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
+          screenPath:
+            `${container ?? "body:root"} > ${elementKind(el)}:` +
+            slug(pathLabel, `${elementKind(el)}-${out.length}`),
+          container,
+          topmost: status.topmost,
+          occludedBy: status.occludedBy,
         });
       }
       return { out, clusterMeta };
@@ -7716,6 +7801,15 @@ export interface InteractiveElement {
   // the warning every round and the planner gets stuck in a select
   // loop. Default false (or absent).
   interactedThisRun?: boolean;
+  // Compact visual/structural context for non-vision host agents.
+  // screenPath is a stable-ish human target path like
+  // "dialog:finish-account > button:create-account"; container names the
+  // closest dialog/nav/main/form/etc.; topmost/occludedBy report whether the
+  // element is actually reachable at its center point.
+  screenPath?: string | null;
+  container?: string | null;
+  topmost?: boolean | null;
+  occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are
   // part of a "choose one of these N visually-similar siblings" group:
   // onboarding wizards like Cloudinary's "What are you using
