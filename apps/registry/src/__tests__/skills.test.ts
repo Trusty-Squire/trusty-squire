@@ -302,6 +302,52 @@ describe("POST /skills", () => {
   });
 });
 
+// ── GET /skills/by-host ─────────────────────────────────────────────
+
+describe("GET /skills/by-host", () => {
+  it("resolves a skill by its signup_url host even when the slug differs", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    // Slug "xai-grok" doesn't derive from host "x.ai" — the whole point.
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          service: "xai-grok",
+          skill_id: testSkillId("H"),
+          signup_url: "https://x.ai/sign-up",
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    const res = await server.inject({ method: "GET", url: "/skills/by-host?host=x.ai" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().skill.service).toBe("xai-grok");
+    await server.close();
+  });
+
+  it("404s when no skill's signup_url matches the host", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    const res = await server.inject({
+      method: "GET",
+      url: "/skills/by-host?host=nonexistent.example",
+    });
+    expect(res.statusCode).toBe(404);
+    await server.close();
+  });
+
+  it("400s when host is missing", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    const res = await server.inject({ method: "GET", url: "/skills/by-host" });
+    expect(res.statusCode).toBe(400);
+    await server.close();
+  });
+});
+
 // ── GET /skills/:service ────────────────────────────────────────────
 
 describe("GET /skills/:service", () => {

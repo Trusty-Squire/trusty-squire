@@ -190,6 +190,45 @@ export const registerSkillsRoute: FastifyPluginAsync<SkillsRouteDeps> = async (
     },
   );
 
+  // ── GET /skills/by-host?host=<host> ─────────────────────────────
+  // Resolve a skill by its signup_url HOST, not its slug. An end-user
+  // provisioning https://x.ai canonicalizes to slug "x-ai", but the skill was
+  // promoted under the curated-queue name "xai-grok" — unreachable by slug.
+  // Matching on signup_url host bridges that. Returns the BEST available skill
+  // (active > pending-review) because this powers a HINT (a route map, not a
+  // verified replay), and a pending skill still carries a valid route. Static
+  // path → Fastify prioritizes it over the /skills/:service param route.
+  fastify.get<{ Querystring: { host?: string } }>(
+    "/skills/by-host",
+    async (req, reply) => {
+      const host = (req.query.host ?? "").toLowerCase().replace(/^www\./, "").trim();
+      if (host.length === 0) {
+        return reply.code(400).send({ ok: false, error: "host_required" });
+      }
+      const hostOf = (u: string): string | null => {
+        try {
+          return new URL(u).hostname.toLowerCase().replace(/^www\./, "");
+        } catch {
+          return null;
+        }
+      };
+      const records = await opts.store.listSkills({ limit: 500 });
+      const matches = records.filter((r) => {
+        const h = hostOf(r.payload.signup_url);
+        return h !== null && (h === host || h.endsWith(`.${host}`) || host.endsWith(`.${h}`));
+      });
+      const rank = (s: string): number => (s === "active" ? 0 : s === "pending-review" ? 1 : 2);
+      matches.sort(
+        (a, b) => rank(a.status) - rank(b.status) || b.created_at.getTime() - a.created_at.getTime(),
+      );
+      const best = matches[0];
+      if (best === undefined) {
+        return reply.code(404).send({ ok: false, error: "no_skill_for_host" });
+      }
+      return sendSkillResponse(reply, best);
+    },
+  );
+
   // ── GET /skills ─────────────────────────────────────────────────
   // T28 — list endpoint backing the `skill list` CLI subcommand.
   // Filter by service and/or status; default limit 100, max 500.
