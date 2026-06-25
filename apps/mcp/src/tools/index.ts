@@ -16,6 +16,7 @@ import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failur
 import { storeCredentialTool } from "./store-credential.js";
 import { useCredentialTool } from "./use-credential.js";
 import { grantAppAccessTool } from "./grant-app-access.js";
+import { PROVISION_DRIVE_TOOLS, provisionDriveToolsEnabled } from "./provision-drive.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -69,6 +70,10 @@ export const TOOLS: Tool[] = [
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
   getExtractFailureTool,
+  // Phase 1 — interactive host-driven provisioning (provision_start/observe/
+  // act/captcha_gate/await_verification/extract/finish). Default-on; opt out
+  // with PROVISION_DRIVE_TOOLS=0.
+  ...(provisionDriveToolsEnabled() ? PROVISION_DRIVE_TOOLS : []),
 ] as Tool[];
 
 export function findTool(name: string): Tool | null {
