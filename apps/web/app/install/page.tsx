@@ -21,9 +21,10 @@ import { useQueryParam } from "../lib/use-query-param";
 import { Shield } from "../components/Shield";
 
 type Provider = "google" | "github";
+type InstallPairingStatus = "pending" | "claimed" | "delivered" | "expired";
 
 interface InstallStatus {
-  status: string;
+  status: InstallPairingStatus;
   agent_identity?: string | null;
 }
 
@@ -42,6 +43,10 @@ type PageState =
   | "wizard"
   | "expired"
   | "error";
+
+function isInstallConfirmed(status: InstallStatus["status"]): boolean {
+  return status === "claimed" || status === "delivered";
+}
 
 export default function InstallPage() {
   const router = useRouter();
@@ -77,7 +82,7 @@ export default function InstallPage() {
         }
         setAgent(state.agent_identity ?? null);
         setIdentities(whoami.identities);
-        setInstallClaimed(state.status === "claimed");
+        setInstallClaimed(isInstallConfirmed(state.status));
         setPage("wizard");
       } catch (err) {
         if (cancelled) return;
@@ -96,8 +101,9 @@ export default function InstallPage() {
 
   // Auto-claim after the OAuth round-trip returns. The wizard's
   // step 1 ✓ depends on BOTH whoami.identities ⊇ ["google"] AND the
-  // install being claimed. The claim is idempotent so re-firing on
-  // a refresh is safe.
+  // install being claimed. Once the CLI receives the agent token, the
+  // server state moves from `claimed` to `delivered`; both are confirmed
+  // from the browser's point of view.
   useEffect(() => {
     if (
       !returnedFromAuth ||
@@ -127,6 +133,21 @@ export default function InstallPage() {
           // Fall through to the wizard — step 1 will still surface
           // Continue-with-Google.
           return;
+        }
+        if (err instanceof ApiError && err.status === 409 && err.message === "not_pending") {
+          const state = await apiGet<InstallStatus>(
+            `/v1/mcp/install/${encodeURIComponent(token)}/state`,
+          );
+          if (cancelled) return;
+          if (state.status === "expired") {
+            setPage("expired");
+            return;
+          }
+          if (isInstallConfirmed(state.status)) {
+            setInstallClaimed(true);
+            router.replace(`/install?token=${encodeURIComponent(token)}`);
+            return;
+          }
         }
         setPage("error");
         setErrorText(
