@@ -1,5 +1,32 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.1 (2026-06-25)
+
+Prerelease (`next`). Phase 1 of the host-as-planner architecture: an
+interactive, host-driven provisioning tool surface a frontier coding agent
+drives directly. The agent is the planner; Trusty Squire is the browser + the
+credential-broker moat.
+
+- feat(provision): interactive `provision_*` tool surface (DEFAULT-ON; opt out
+  with `PROVISION_DRIVE_TOOLS=0`). The host agent drives a real signup on the
+  user's machine via a session-held browser: `provision_start` →
+  `provision_observe` / `provision_act` → `provision_captcha_gate` /
+  `provision_await_verification` → `provision_extract` → `provision_finish`.
+  Backed by the existing `BrowserController` substrate (OAuth popup adoption,
+  captcha gate, extraction). Elements are targeted by text/role with
+  re-resolution every action (never a stale index); agent-initiated `goto` is
+  domain-scoped to the target + its identity providers; the vault stays
+  write-only; every action is audit-logged with no credential values.
+- feat(provision): `provision_await_verification` reads the user's OWN inbox
+  through their signed-in browser session (no IMAP, no mail token) — a scoped
+  Gmail search-and-extract for the OTP code / verification link.
+- Validated live end-to-end: a fresh-identity virgin LangWatch signup (Auth0 →
+  Google OAuth → onboarding wizard → API key) driven entirely through the
+  tools. `parseVerification` (OTP/link parsing) and the targeting/scoping logic
+  are unit-tested. Full mcp suite green (2148 passed).
+- Design + remaining hardening (consent-at-install) tracked in
+  `docs/DESIGN-host-planner-perception.md`.
+
 ## 0.9.18-rc.1 (2026-06-23)
 
 Prerelease (`next`). Three services cracked end-to-end (meilisearch, firebase,
