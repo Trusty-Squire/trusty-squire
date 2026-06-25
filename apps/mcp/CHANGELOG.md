@@ -1,5 +1,23 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.9 (2026-06-25)
+
+Prerelease (`next`). Tightens the session-agent install flow after the first
+account-switching and consent tests.
+
+- fix(connect): `--force-relogin=google|github` can now clear a single provider
+  session while bare `--force-relogin` still resets the full browser profile for
+  a true account switch.
+- fix(connect): duplicate install claims recover from the paired state instead
+  of surfacing `not_pending` after the user completes browser sign-in.
+- changed(connect): managed skill registry and skillification consent are now
+  one user-facing choice. Registry participation controls whether successful,
+  redacted signup/navigation traces can become reusable skills.
+- changed(connect): registry participation, matching-service email OTP polling,
+  and proxy URL moved into Advanced settings. OTP polling defaults to off.
+- changed(connect): stale LLM/provider setup copy was removed from the install
+  flow; signups are now described as session-agent driven.
+
 ## 0.9.19-rc.8 (2026-06-25)
 
 Prerelease (`next`). Account-switching and privacy gates for the session-agent
