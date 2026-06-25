@@ -525,12 +525,25 @@ function synthesizeSteps(
     }
     // Soft-drop intermediate click/check rounds with text-resolution
     // failures — see the policy comment above.
-    const isSoftDroppable =
+    const isSoftDroppableClick =
       (round.observed.kind === "click" || round.observed.kind === "check") &&
       (translated.error_kind === "missing_text_hint" ||
         translated.error_kind === "ambiguous_text_match" ||
         translated.error_kind === "inventory_entry_not_found");
-    if (isSoftDroppable) {
+    // A CONFIRMATION-modal fill on an unlabeled input is also droppable. MEASURED
+    // 2026-06-24 (pubnub: `fill value="UPDATE"` into an attribute-less modal input
+    // — "Confirm the secret key update by typing UPDATE"). These "type X to
+    // confirm" gates guard a destructive regenerate/revoke the replay never needs
+    // (it reads the EXISTING credential shown on the page), and they're unlabeled
+    // by nature. Detect by a bare confirmation-token value so a real data fill
+    // (which is load-bearing — Sentry's permission grid) is never dropped.
+    const fillValue =
+      round.observed.kind === "fill" ? (round.observed.value ?? "").trim() : "";
+    const isConfirmationFill =
+      round.observed.kind === "fill" &&
+      translated.error_kind === "missing_text_hint" &&
+      /^(?:UPDATE|DELETE|CONFIRM|REVOKE|REGENERATE|DISABLE|ENABLE|REMOVE|YES)$/i.test(fillValue);
+    if (isSoftDroppableClick || isConfirmationFill) {
       if (firstSoftRejection === null) firstSoftRejection = translated;
       continue;
     }

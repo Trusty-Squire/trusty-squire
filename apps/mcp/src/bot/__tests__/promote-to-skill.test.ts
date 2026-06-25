@@ -380,6 +380,76 @@ describe("promoteToSkill — auth0-class unstable entry URL", () => {
   });
 });
 
+describe("promoteToSkill — confirmation-modal fill (pubnub class)", () => {
+  it("soft-drops an unlabeled 'type UPDATE to confirm' fill instead of hard-rejecting missing_text_hint", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: {
+          url: "https://admin.pubnub.com/account/1/app/2/key/3",
+          title: "Keyset",
+          html: "<html><body><h4>Confirm</h4><input></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({ index: 0, tag: "input", type: "text", selector: "div > div:nth-of-type(2) > div > input" }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "div > div:nth-of-type(2) > div > input",
+          value: "UPDATE",
+          reason: "Confirm the secret key update by typing UPDATE.",
+        },
+      },
+      {
+        service,
+        round: 1,
+        oauth: false,
+        state: {
+          url: "https://admin.pubnub.com/account/1/app/2/key/3",
+          title: "Keyset",
+          html: "<html><body>Subscribe Key sub-c-db3a32ea-dd1b-4e28-9680-db2991c81e3e <button>Copy</button></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({ index: 0, tag: "button", visibleText: "Copy", selector: "button.copy", role: "button", ariaLabel: "Copy to clipboard" }),
+        ],
+        observed: {
+          kind: "extract",
+          reason: "The subscribe key sub-c-db3a32ea-dd1b-4e28-9680-db2991c81e3e is shown.",
+        },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.skill.steps.some((s) => s.kind === "fill")).toBe(false);
+    expect(result.skill.steps.some((s) => s.kind.startsWith("extract"))).toBe(true);
+  });
+
+  it("still HARD-rejects an unlabeled fill whose value is real data (load-bearing, not a confirmation)", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service,
+        round: 0,
+        oauth: false,
+        state: { url: "https://x.com/new", title: "New", html: "<html><body><input></body></html>", screenshot: "data:image/png;base64,iVBORw0KGgo=" },
+        inventory: [inventoryElement({ index: 0, tag: "input", type: "text", selector: "div > input" })],
+        observed: { kind: "fill", selector: "div > input", value: "my-project-name", reason: "Name the project." },
+      },
+    ];
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("rejected");
+    if (result.kind === "rejected") expect(result.error_kind).toBe("missing_text_hint");
+  });
+});
+
 // ── Happy path ───────────────────────────────────────────────────────
 
 describe("promoteToSkill — Railway-style 3-round capture", () => {
