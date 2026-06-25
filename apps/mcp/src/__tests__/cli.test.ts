@@ -5,7 +5,7 @@
 // so the provider session lands in the profile as a side effect of
 // the install confirm itself.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../install/cli.js";
 
 describe("parseArgs --proxy-url", () => {
@@ -57,5 +57,20 @@ describe("parseArgs --provider / --skip-browser", () => {
   it("parses --force-relogin for account switching", () => {
     expect(parseArgs(["install"]).forceRelogin).toBe(false);
     expect(parseArgs(["install", "--force-relogin"]).forceRelogin).toBe(true);
+  });
+});
+
+describe("parseArgs registry", () => {
+  it("does not accept a custom registry URL", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const args = parseArgs(["connect", "--registry-url=https://staging.registry.test"]);
+      expect("registryUrl" in args).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("--registry-url is no longer supported"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

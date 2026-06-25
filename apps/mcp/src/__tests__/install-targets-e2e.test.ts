@@ -160,18 +160,25 @@ describe("install --target=<agent> writes a valid config", () => {
     expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
   });
 
-  it("--registry-url=<url> overrides the default", async () => {
-    await install({
-      command: "install",
-      target: TARGETS[0]!,
-      apiBase: "https://test.invalid",
-      skipBrowser: true,
-      forceRelogin: false,
-      noRegistry: false,
-      noInteractive: false,
-      registryUrl: "https://staging.registry.test",
-    });
-    const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
-    expect(raw).toMatch(/staging\.registry\.test/);
+  it("always writes the managed registry URL for user installs", async () => {
+    const prev = process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+    process.env.TRUSTY_SQUIRE_REGISTRY_URL = "https://staging.registry.test";
+    try {
+      await install({
+        command: "install",
+        target: TARGETS[0]!,
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: false,
+      });
+      const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
+      expect(raw).toMatch(/registry\.trustysquire\.ai/);
+      expect(raw).not.toMatch(/staging\.registry\.test/);
+    } finally {
+      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+      else process.env.TRUSTY_SQUIRE_REGISTRY_URL = prev;
+    }
   });
 });

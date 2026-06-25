@@ -35,11 +35,6 @@ export interface InteractiveConfig {
   byokKey?: string;
   // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
   proxyUrl?: string;
-  // Whether to wire TRUSTY_SQUIRE_REGISTRY_URL (default yes — the
-  // closed-loop router needs it; only off for "I want pure universal-bot
-  // mode" power users).
-  registryEnabled: boolean;
-  registryUrl?: string;
 }
 
 export type LlmChoice =
@@ -127,19 +122,15 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
 
 async function pickAdvancedOptions(): Promise<{
   proxyUrl?: string;
-  registryEnabled: boolean;
-  registryUrl?: string;
 }> {
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (proxy, skill registry)",
+      message: "Configure advanced options? (proxy)",
       initialValue: false,
     }),
   );
   if (!wantAdvanced) {
-    // Defaults: managed LLM, skill registry on, no proxy. Most users
-    // never touch these — the install just goes.
-    return { registryEnabled: true };
+    return {};
   }
 
   // Residential proxy. Most users skip this — datacenter egress is
@@ -168,42 +159,8 @@ async function pickAdvancedOptions(): Promise<{
     proxyUrl = (url ?? "").trim();
   }
 
-  // Skill registry. Default on (Tier-2 router); off bypasses it
-  // entirely (every signup goes through the universal bot).
-  const registryEnabled = bailIfCancelled(
-    await confirm({
-      message: "Enable the skill registry router? (Recommended — reuses cached recipes for ~30s signups)",
-      initialValue: true,
-    }),
-  );
-  let registryUrl: string | undefined;
-  if (registryEnabled) {
-    const wantCustomRegistry = bailIfCancelled(
-      await confirm({
-        message: "Use a custom registry URL? (default: production)",
-        initialValue: false,
-      }),
-    );
-    if (wantCustomRegistry) {
-      const url = bailIfCancelled(
-        await text({
-          message: "Registry base URL",
-          placeholder: "https://registry.trustysquire.ai",
-          validate: (v) => {
-            if (v === undefined || !/^https?:\/\//.test(v))
-              return "Must be an http:// or https:// URL.";
-            return undefined;
-          },
-        }),
-      );
-      registryUrl = (url ?? "").trim();
-    }
-  }
-
   return {
-    registryEnabled,
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
-    ...(registryUrl !== undefined ? { registryUrl } : {}),
   };
 }
 
@@ -215,11 +172,6 @@ function summarize(config: InteractiveConfig): void {
   lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
   if (config.proxyUrl !== undefined) {
     lines.push(`${chalk.dim("Proxy:        ")}${config.proxyUrl}`);
-  }
-  if (!config.registryEnabled) {
-    lines.push(`${chalk.dim("Registry:     ")}${chalk.yellow("disabled")}`);
-  } else if (config.registryUrl !== undefined) {
-    lines.push(`${chalk.dim("Registry:     ")}${config.registryUrl}`);
   }
   note(lines.join("\n"), "Setup summary");
 }
@@ -234,8 +186,6 @@ export async function runInteractiveSetup(opts: {
   // picker but with their choices baked in. Each is optional.
   initialTarget?: AgentTarget;
   initialProxyUrl?: string;
-  initialRegistryUrl?: string;
-  registryEnabled: boolean;
 }): Promise<InteractiveConfig> {
   showIntro();
 
@@ -244,18 +194,12 @@ export async function runInteractiveSetup(opts: {
   const target = opts.initialTarget ?? (await pickAgent(detected));
 
   // Default-no advanced when --proxy-url isn't passed; if it IS passed,
-  // jump straight to confirming the value rather than asking yes/no.
-  // LLM picker is INSIDE advanced — most users don't touch it; the
-  // managed default works out of the box.
+  // carry the value straight through rather than asking yes/no. Signup
+  // planning is driven by the session agent, so there is no user-facing LLM
+  // picker here.
   const advanced =
-    opts.initialProxyUrl !== undefined || opts.initialRegistryUrl !== undefined
-      ? {
-          registryEnabled: opts.registryEnabled,
-          ...(opts.initialProxyUrl !== undefined ? { proxyUrl: opts.initialProxyUrl } : {}),
-          ...(opts.initialRegistryUrl !== undefined
-            ? { registryUrl: opts.initialRegistryUrl }
-            : {}),
-        }
+    opts.initialProxyUrl !== undefined
+      ? { proxyUrl: opts.initialProxyUrl }
       : await pickAdvancedOptions();
 
   const llmChoice: LlmChoice = "managed_free";
@@ -264,8 +208,6 @@ export async function runInteractiveSetup(opts: {
     target,
     llmChoice,
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
-    registryEnabled: advanced.registryEnabled,
-    ...(advanced.registryUrl !== undefined ? { registryUrl: advanced.registryUrl } : {}),
   };
 
   summarize(config);
