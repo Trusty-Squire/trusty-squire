@@ -1,5 +1,18 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.4 (2026-06-25)
+
+Prerelease (`next`). Registry-route hints — the map the host agent was missing.
+
+- feat(provision): `provision_start` now consults the registry for a known skill
+  for the target service and, when one exists, attaches a `hint` to the first
+  observation: the route (login method, where the key lives + its shape, how
+  many credentials to expect). The agent reads the map and drives toward it
+  instead of making ad-hoc decisions (the Grok flail: try Google → "account
+  exists" → tombstone → scrape junk). Best-effort: no skill / no registry /
+  network error → no hint, agent drives as before. Pure `renderSkillHint` +
+  `serviceSlugFromUrl` are unit-tested.
+
 ## 0.9.19-rc.3 (2026-06-25)
 
 Prerelease (`next`). Two extraction-correctness fixes from the first fresh-agent

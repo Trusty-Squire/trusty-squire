@@ -61,6 +61,9 @@ export interface ObservedElement {
 export interface Observation {
   session_id: string;
   url: string;
+  // Registry route guidance, present ONLY on the first (start) observation when
+  // a skill exists for the service. The host agent reads it before driving.
+  hint?: string;
   // Layout-aware page prose (innerText) so the agent can read passages,
   // questions, masked-key hints, etc. Capped to keep tool payloads bounded.
   text: string;
@@ -186,6 +189,9 @@ export interface StartOptions {
   proxyUrl?: string;
   // Extra hosts to widen domain-scope (e.g. a known custom IdP/mail host).
   extraAllowedHosts?: readonly string[];
+  // Registry route guidance the tool layer resolved (renderSkillHint). Attached
+  // to the start observation so the agent reads the map before driving.
+  hint?: string;
 }
 
 export async function startProvisionSession(
@@ -204,9 +210,14 @@ export async function startProvisionSession(
   ];
   const session: Session = { id, browser, allowedHosts, lastElements: [] };
   sessions.set(id, session);
-  audit(id, "start", { service_url: opts.serviceUrl, allowed_hosts: allowedHosts });
+  audit(id, "start", {
+    service_url: opts.serviceUrl,
+    allowed_hosts: allowedHosts,
+    has_hint: opts.hint !== undefined,
+  });
   await browser.goto(opts.serviceUrl);
-  return await observeSession(session);
+  const observation = await observeSession(session);
+  return opts.hint !== undefined ? { ...observation, hint: opts.hint } : observation;
 }
 
 export async function observe(sessionId: string): Promise<Observation> {

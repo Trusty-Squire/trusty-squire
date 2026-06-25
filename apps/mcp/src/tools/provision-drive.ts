@@ -17,6 +17,26 @@ import {
   finishProvisionSession,
   type ProvisionAction,
 } from "../bot/provision-session.js";
+import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
+import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
+
+// Best-effort: ask the registry for a known route for this service so the agent
+// drives on rails instead of ad-hoc. Returns undefined on any miss (no skill,
+// no registry configured, network error) — the agent just drives without it.
+async function resolveRouteHint(serviceUrl: string): Promise<string | undefined> {
+  try {
+    const accountId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    if (accountId === undefined || accountId.length === 0) return undefined;
+    const client = clientFromEnv(accountId);
+    if (client === null) return undefined;
+    const slug = serviceSlugFromUrl(serviceUrl);
+    if (slug === null) return undefined;
+    const outcome = await client.fetchActiveSkill(slug, generateProvisionId());
+    return outcome.kind === "found" ? renderSkillHint(outcome.result.skill) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const startSchema = z.object({
   service_url: z.string().url(),
@@ -31,7 +51,10 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "YOU are the planner — read the observation, then drive the signup with " +
     "provision_act, re-read with provision_observe, and call provision_extract " +
     "when you reach the credentials. Always provision_finish when done. The " +
-    "browser is domain-scoped to the target + its identity providers.",
+    "browser is domain-scoped to the target + its identity providers. If the " +
+    "registry knows this service, the first observation includes a `hint` — the " +
+    "route (login method, where the key lives, how many credentials). Read it and " +
+    "drive toward it; fall back to your own judgment if the live page diverges.",
   inputSchema: startSchema,
   jsonInputSchema: {
     type: "object",
@@ -42,11 +65,13 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     },
   },
   async handler(args) {
+    const hint = await resolveRouteHint(args.service_url);
     return await startProvisionSession({
       serviceUrl: args.service_url,
       ...(args.extra_allowed_hosts !== undefined
         ? { extraAllowedHosts: args.extra_allowed_hosts }
         : {}),
+      ...(hint !== undefined ? { hint } : {}),
     });
   },
 };
