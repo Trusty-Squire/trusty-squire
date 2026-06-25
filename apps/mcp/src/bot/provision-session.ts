@@ -19,6 +19,8 @@
 import { randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
 import { extractApiKeyFromText, isTruncatedCapture, pickVerificationLink } from "./agent.js";
+import { loginSessionGuidance } from "./skill-hint.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   initialExtractionState,
   accumulateCandidate,
@@ -217,7 +219,17 @@ export async function startProvisionSession(
   });
   await browser.goto(opts.serviceUrl);
   const observation = await observeSession(session);
-  return opts.hint !== undefined ? { ...observation, hint: opts.hint } : observation;
+  // Tell the agent which provider the user actually has a live session for
+  // (Google-preferred) — the bot knows from the profile cookies, so the agent
+  // doesn't have to guess. Composed with the skill route hint (if any).
+  const liveProviders = await browser
+    .detectSessionProviders()
+    .catch(() => [] as OAuthProviderId[]);
+  const hintParts = [
+    loginSessionGuidance(liveProviders),
+    ...(opts.hint !== undefined ? [opts.hint] : []),
+  ];
+  return { ...observation, hint: hintParts.join("\n") };
 }
 
 export async function observe(sessionId: string): Promise<Observation> {

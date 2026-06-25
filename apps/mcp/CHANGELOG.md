@@ -1,5 +1,24 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.6 (2026-06-25)
+
+Prerelease (`next`). Login-agnostic hints — makes ALL registry skills usable for
+end users regardless of how the discoverer signed up, dissolving the thin-skill
+problem (81% of skills carry no usable login provider).
+
+- feat(provision): the route hint no longer prescribes a login method. A skill's
+  recorded login reflects how the *housekeeper* signed up (usually an email
+  alias), not how the user will. The hint now carries the durable, reusable part
+  — entry URL, the **post-auth navigation breadcrumb** to the keys page, and an
+  always-on "grab EVERY credential, not just the first" exhortation.
+- feat(provision): `provision_start` tells the agent which provider the user
+  **actually has a live session for** (read from profile cookies via
+  `detectSessionProviders`), Google-preferred, with "the account may exist — log
+  IN, don't re-sign-up." So the agent doesn't guess the login.
+- Net: even a skill with `oauth_provider:null` + single-cred now yields a useful
+  hint. (xai-grok's hint now points straight at `console.x.ai` — the keys page —
+  which would have prevented the Grok flail.)
+
 ## 0.9.19-rc.5 (2026-06-25)
 
 Prerelease (`next`). Registry-hint reachability (Gap 1) — the hint now finds

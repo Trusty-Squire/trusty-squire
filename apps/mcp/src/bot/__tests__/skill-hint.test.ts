@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Skill } from "@trusty-squire/skill-schema";
-import { renderSkillHint, serviceSlugFromUrl } from "../skill-hint.js";
+import { renderSkillHint, serviceSlugFromUrl, loginSessionGuidance } from "../skill-hint.js";
 
 // renderSkillHint reads only a handful of Skill fields (service, signup_url,
 // steps, credentials). A full valid Skill is heavy to construct; cast a minimal
@@ -20,6 +20,28 @@ describe("serviceSlugFromUrl", () => {
   });
 });
 
+describe("loginSessionGuidance", () => {
+  it("prefers Google when the user has multiple live sessions", () => {
+    const g = loginSessionGuidance(["github", "google"]);
+    expect(g).toContain('use "google"');
+    expect(g).toContain("LIVE session for google, github");
+  });
+
+  it("uses the only live session when there's one", () => {
+    expect(loginSessionGuidance(["github"])).toContain('use "github"');
+  });
+
+  it("falls back to method-agnostic guidance when no live session", () => {
+    const g = loginSessionGuidance([]);
+    expect(g.toLowerCase()).toContain("whichever method");
+    expect(g.toLowerCase()).toContain("log in");
+  });
+
+  it("always says log in, not re-sign-up", () => {
+    expect(loginSessionGuidance(["google"]).toLowerCase()).toContain("don't re-sign-up");
+  });
+});
+
 describe("renderSkillHint", () => {
   const hint = renderSkillHint(
     fixture({
@@ -27,9 +49,12 @@ describe("renderSkillHint", () => {
       signup_url: "https://vouchflow.dev",
       steps: [
         { kind: "click_oauth_button", provider: "google" },
+        { kind: "click", text_match: "Settings" },
+        { kind: "click", text_match: "API Keys" },
         { kind: "extract_via_copy_button", near_text_hint: "Sandbox write key" },
       ] as unknown as Skill["steps"],
-      credentials: [{}, {}] as unknown as Skill["credentials"],
+      // Single-cred capture — the hint must STILL exhort grab-all.
+      credentials: [{}] as unknown as Skill["credentials"],
     }),
   );
 
@@ -38,28 +63,40 @@ describe("renderSkillHint", () => {
     expect(hint).toContain("https://vouchflow.dev");
   });
 
-  it("surfaces the login method", () => {
-    expect(hint).toContain("Continue with google");
+  it("carries NO login line — login is composed from live sessions at start", () => {
+    expect(hint).not.toContain("Continue with google");
+    expect(hint).not.toContain("- login:");
+  });
+
+  it("surfaces the post-auth navigation breadcrumb (the durable value)", () => {
+    expect(hint).toContain("Settings → API Keys");
   });
 
   it("surfaces where the key lives", () => {
     expect(hint).toContain("Sandbox write key");
   });
 
-  it("flags a multi-credential service", () => {
-    expect(hint).toContain("2");
-    expect(hint.toLowerCase()).toContain("extract all");
+  it("always exhorts grab-all even for a single-cred capture", () => {
+    expect(hint.toLowerCase()).toContain("every credential");
+    expect(hint.toLowerCase()).toContain("do not stop at the first");
   });
 
-  it("falls back to a form login when there is no oauth step", () => {
-    const formHint = renderSkillHint(
+  it("drops login/signup affordances from the breadcrumb", () => {
+    const h = renderSkillHint(
       fixture({
-        service: "resend",
-        signup_url: "https://resend.com/signup",
-        steps: [] as unknown as Skill["steps"],
+        service: "x",
+        signup_url: "https://x.ai",
+        steps: [
+          { kind: "click", text_match: "Sign up" },
+          { kind: "click", text_match: "Continue with Google" },
+          { kind: "click", text_match: "Team" },
+          { kind: "extract_via_regex", regex_name: "generic_api_key" },
+        ] as unknown as Skill["steps"],
         credentials: [{}] as unknown as Skill["credentials"],
       }),
     );
-    expect(formHint).toContain("email/password form");
+    expect(h).toContain("Team");
+    expect(h).not.toContain("Sign up →");
+    expect(h).not.toContain("Continue with Google →");
   });
 });
