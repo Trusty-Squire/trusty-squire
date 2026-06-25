@@ -97,9 +97,9 @@ The agent uses the key immediately. You see the signup happen in your vault.
 |---|---|---|
 | `running` | Bot is mid-flow. Response carries `recent_steps[]` + `user_action_required` flag. | Poll again in ~30s. If `user_action_required=true`, surface the latest step to the user. |
 | `success` | Credentials extracted + stored. | Done. Show credentials. |
-| `verification_not_sent` | Service withheld the verification email (anti-abuse on fresh domains). | Manual signup. |
+| `verification_not_sent` | Service needs email verification that the bot could not complete. | Run `npx @trusty-squire/mcp settings`, enable matching OTP polling in Advanced settings, then retry; or finish manually. |
 | `captcha_blocked` | Site uses a captcha the bot can't pass. | Manual signup. |
-| `oauth_required` | Service only offers OAuth/SSO. The bot's Google session is missing. | Run `npx @trusty-squire/mcp login` then retry. |
+| `oauth_required` | Service only offers OAuth/SSO. The needed bot Google/GitHub session is missing. | Run `npx @trusty-squire/mcp login --provider=<google|github>` then retry. |
 | `oauth_consent_needs_review` | Service requested OAuth scopes beyond basic identity. Response lists `requested_scopes` and `unauthorized_scopes`. | Show the list to the user; on approval, retry with `allow_extra_oauth_scopes=[...]`. |
 | `anti_bot_blocked` | Site's anti-bot gateway (Cloudflare/Sucuri/DataDome/Imperva) refused the bot's IP/fingerprint risk score. | Manual signup. |
 | `onboarding_blocked` | Signed in OK, but the API key sits behind a billing/payment wall. | User must add a payment method, then retry. |
@@ -111,10 +111,10 @@ The agent uses the key immediately. You see the signup happen in your vault.
 Trusty Squire is a thin local MCP server that delegates the actual signup work to a bundled universal bot:
 
 - **Browser:** real Chrome (channel = `chrome`) via Playwright + `playwright-extra` stealth plugin. Runs headed against an on-demand Xvfb on headless boxes — modern SaaS detect Chromium-headless and gate their forms.
-- **OAuth-first:** when the page offers `Continue with Google` and your profile has a valid Google session, the bot takes the OAuth path. Consent screens are auto-approved only for basic identity scopes (`openid` / `email` / `profile`). Anything broader surfaces to you for approval.
+- **OAuth-first:** when the page offers Google or GitHub OAuth and the bot profile has that provider session, the bot takes the OAuth path. Consent screens are auto-approved only for basic identity scopes (`openid` / `email` / `profile`). Anything broader surfaces to you for approval.
 - **Email fallback:** for services without OAuth, the bot uses a per-run alias under `@trustysquire.com`, reads inbound mail via AWS SES → S3 → SNS → our API.
 - **Captcha handling:** Tier 1 (behavior simulation — bezier mouse paths, variable typing, post-load dwell) for invisible Turnstile / reCAPTCHA v3 scoring. Tier 2 (click-and-wait) for visible Turnstile / reCAPTCHA v2 checkboxes. Tier 3 image grids are out of scope.
-- **Vision-planned form-fill:** when no OAuth + no native adapter, Claude (or Gemini Flash as the cheap default) reads a DOM-grounded element inventory + a page screenshot and emits a single JSON plan per turn. Selectors are picked from the inventory, never invented.
+- **Session-agent form-fill:** when no OAuth + no native adapter exists, the Trusty Squire session agent drives signup from DOM-grounded page structure and screenshots. Selectors are picked from observed inventory, never invented.
 
 ## Configuration
 

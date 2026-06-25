@@ -50,6 +50,44 @@ describe("single-tier install handshake", () => {
     expect(record?.machine_token).toBe(machine_token);
   });
 
+  it("returns browser install preferences with the one-time agent token", async () => {
+    const initiate = await app.inject({
+      method: "POST",
+      url: "/v1/mcp/install/initiate",
+      headers: JSON_HEADERS,
+      payload: { agent_identity: "goose" },
+    });
+    const { setup_code } = initiate.json() as { setup_code: string };
+
+    await deps.pairingTokenStore.claim(
+      setup_code,
+      "acct-pref",
+      "agent_raw",
+      new Date(),
+      {
+        registry_enabled: true,
+        consent_operator_inbox_otp: true,
+        proxy_url: "socks5://proxy.test:1080",
+      },
+    );
+
+    const status = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: "claimed",
+      agent_session_token: "agent_raw",
+      account_id: "acct-pref",
+      install_preferences: {
+        registry_enabled: true,
+        consent_operator_inbox_otp: true,
+        proxy_url: "socks5://proxy.test:1080",
+      },
+    });
+  });
+
   it("emits payment_required + cta_billing_url at the free-quota limit", async () => {
     const issue = await app.inject({ method: "POST", url: "/v1/install" });
     const { machine_token } = issue.json() as { machine_token: string };

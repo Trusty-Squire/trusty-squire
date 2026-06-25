@@ -65,8 +65,16 @@ describe("parseArgs registry", () => {
     expect(parseArgs(["connect"]).noRegistry).toBe(true);
   });
 
+  it("enables registry participation with --registry", () => {
+    const args = parseArgs(["connect", "--registry"]);
+    expect(args.noRegistry).toBe(false);
+    expect(args.registryConfigured).toBe(true);
+  });
+
   it("keeps the legacy --no-registry flag as an explicit off switch", () => {
-    expect(parseArgs(["connect", "--no-registry"]).noRegistry).toBe(true);
+    const args = parseArgs(["connect", "--no-registry"]);
+    expect(args.noRegistry).toBe(true);
+    expect(args.registryConfigured).toBe(true);
   });
 
   it("does not accept a custom registry URL", () => {
@@ -80,5 +88,19 @@ describe("parseArgs registry", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("parseArgs --force-relogin", () => {
+  it("supports the full-profile form", () => {
+    const args = parseArgs(["connect", "--force-relogin"]);
+    expect(args.forceRelogin).toBe(true);
+    expect(args.forceReloginProvider).toBeUndefined();
+  });
+
+  it("supports provider-scoped relogin", () => {
+    const args = parseArgs(["connect", "--force-relogin=github"]);
+    expect(args.forceRelogin).toBe(true);
+    expect(args.forceReloginProvider).toBe("github");
   });
 });

@@ -448,6 +448,11 @@ export interface InstallStatusResponse {
   status: "pending" | "claimed" | "expired";
   agent_session_token?: string;
   account_id?: string;
+  install_preferences?: {
+    registry_enabled?: boolean;
+    consent_operator_inbox_otp?: boolean;
+    proxy_url?: string;
+  };
 }
 
 export async function installPoll(

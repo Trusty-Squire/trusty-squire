@@ -41,8 +41,29 @@ const claimBody = z
   .object({
     agent_identity: z.string().min(1).max(60).optional(),
     agent_version: z.string().min(1).max(60).optional(),
+    registry_enabled: z.boolean().optional(),
+    consent_operator_inbox_otp: z.boolean().optional(),
+    proxy_url: z
+      .string()
+      .trim()
+      .max(500)
+      .regex(/^(http|https|socks5):\/\//)
+      .optional()
+      .or(z.literal("").transform(() => undefined)),
   })
   .optional();
+
+function installPreferences(record: {
+  registry_enabled: boolean | null;
+  consent_operator_inbox_otp: boolean | null;
+  proxy_url: string | null;
+}) {
+  return {
+    registry_enabled: record.registry_enabled === true,
+    consent_operator_inbox_otp: record.consent_operator_inbox_otp === true,
+    ...(record.proxy_url !== null ? { proxy_url: record.proxy_url } : {}),
+  };
+}
 
 export const registerMcpInstallRoute: FastifyPluginAsync<{
   deps: ApiDeps;
@@ -103,6 +124,7 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
           status: "claimed",
           agent_session_token: raw,
           account_id: record.account_id,
+          install_preferences: installPreferences(record),
         });
       }
       // delivered / expired
@@ -176,6 +198,12 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
         auth.account_id,
         raw_token,
         now,
+        {
+          registry_enabled: parsed.data?.registry_enabled === true,
+          consent_operator_inbox_otp:
+            parsed.data?.consent_operator_inbox_otp === true,
+          proxy_url: parsed.data?.proxy_url ?? null,
+        },
       );
       if (!claimed) {
         reply.code(409).send({ error: "claim_failed" });

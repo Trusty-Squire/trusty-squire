@@ -210,8 +210,10 @@ RESPONSES:
   user_action_required is true, relay the latest prompt to the user
   and poll again in ~10s. Otherwise poll again in ~30-60s.
 - status="success" + credentials → signup done; show the credentials to the user.
-- status="verification_not_sent" → the service needs an email verification the bot
-  can't complete; show the message and tell the user to sign up manually.
+- status="verification_not_sent" → the service needs email verification. Show the
+  message. If the user wants Trusty Squire to poll only matching OTP emails for
+  requested services, tell them to run \`npx @trusty-squire/mcp settings\`, open
+  Advanced settings, enable email verification polling, then retry.
 - status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
 - status="anti_bot_blocked" → the site's anti-bot gateway (Cloudflare/Sucuri/DataDome/Imperva)
@@ -1265,7 +1267,10 @@ export function buildSignupResponse(
       browser_channel: result.browser_channel ?? null,
       message:
         `${input.service} requires an email verification that Trusty Squire's automated ` +
-        `signup couldn't complete. Tell the user to finish signing up manually at ` +
+        `signup couldn't complete. To let the squire poll only matching OTP emails ` +
+        `for requested services, run ` +
+        `npx @trusty-squire/mcp settings, open Advanced settings, enable email ` +
+        `verification polling, then retry. Or finish manually at ` +
         `${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
     };
   }

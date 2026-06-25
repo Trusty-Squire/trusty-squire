@@ -185,7 +185,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
     await confirm({
       message:
         "Use the managed skill registry? This reuses shared signup recipes and lets successful non-personal recipes improve the registry.",
-      initialValue: false,
+      initialValue: initialRegistryEnabled,
     }),
   );
 
@@ -280,6 +280,45 @@ export async function runInteractiveSetup(opts: {
     process.exit(0);
   }
 
+  return config;
+}
+
+export async function runSettingsSetup(opts: {
+  initialTarget?: AgentTarget;
+  initialProxyUrl?: string;
+  initialRegistryEnabled?: boolean;
+  initialConsentOperatorInboxOtp?: boolean;
+} = {}): Promise<InteractiveConfig> {
+  intro("Trusty Squire settings");
+  const detected = await detectInstalledAgents();
+  const target = opts.initialTarget ?? (await pickAgent(detected));
+  const advanced = await pickAdvancedOptionsWithDefaults({
+    ...(opts.initialProxyUrl !== undefined ? { initialProxyUrl: opts.initialProxyUrl } : {}),
+    ...(opts.initialRegistryEnabled !== undefined
+      ? { initialRegistryEnabled: opts.initialRegistryEnabled }
+      : {}),
+  });
+  const consentOperatorInboxOtp =
+    advanced.consentOperatorInboxOtp ?? opts.initialConsentOperatorInboxOtp ?? false;
+  const config: InteractiveConfig = {
+    target,
+    llmChoice: "managed_free",
+    ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
+    registryEnabled: advanced.registryEnabled,
+    consentOperatorInboxOtp,
+    advancedConfigured: true,
+  };
+  summarize(config);
+  const proceed = bailIfCancelled(
+    await confirm({
+      message: "Save these settings?",
+      initialValue: true,
+    }),
+  );
+  if (!proceed) {
+    cancel("Settings unchanged.");
+    process.exit(0);
+  }
   return config;
 }
 

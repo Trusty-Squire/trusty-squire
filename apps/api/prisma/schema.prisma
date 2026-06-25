@@ -137,6 +137,10 @@ model PairingToken {
   // token at /initiate, the eventual /claim marks the machine token
   // paired so the quota counter stops.
   machine_token             String?
+  // Browser-side install choices returned to the CLI on first status poll.
+  registry_enabled          Boolean?
+  consent_operator_inbox_otp Boolean?
+  proxy_url                 String?
 
   @@index([machine_token])
   @@index([status, expires_at])

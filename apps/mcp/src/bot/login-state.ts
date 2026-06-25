@@ -87,6 +87,7 @@ export function clearAllProviderMarkers(
 // so the install can still proceed.
 export async function clearProviderCookies(
   profileDir: string = CHROME_PROFILE_DIR,
+  provider?: OAuthProviderId,
 ): Promise<void> {
   const dbPath = join(profileDir, "Default", "Cookies");
   try {
@@ -95,12 +96,16 @@ export async function clearProviderCookies(
     const sqlite = await import("node:sqlite").catch(() => null);
     if (sqlite === null) return;
     const db = new sqlite.DatabaseSync(dbPath);
+    const hosts =
+      provider === "google"
+        ? ["%google.com%"]
+        : provider === "github"
+          ? ["%github.com%"]
+          : ["%google.com%", "%github.com%"];
     try {
-      db.exec(
-        "DELETE FROM cookies WHERE " +
-          "host_key LIKE '%google.com%' OR " +
-          "host_key LIKE '%github.com%';",
-      );
+      const where = hosts.map((_, i) => `host_key LIKE ?${i + 1}`).join(" OR ");
+      const stmt = db.prepare(`DELETE FROM cookies WHERE ${where};`);
+      stmt.run(...hosts);
     } finally {
       db.close();
     }

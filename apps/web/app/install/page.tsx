@@ -34,6 +34,34 @@ interface WhoamiResponse {
   identities: Provider[];
 }
 
+interface InstallPreferences {
+  registry_enabled: boolean;
+  consent_operator_inbox_otp: boolean;
+  proxy_url?: string;
+}
+
+function readStoredInstallPreferences(): InstallPreferences {
+  const fallback: InstallPreferences = {
+    registry_enabled: false,
+    consent_operator_inbox_otp: false,
+  };
+  if (typeof window === "undefined") return fallback;
+  const token = new URLSearchParams(window.location.search).get("token");
+  if (token === null) return fallback;
+  try {
+    const raw = window.localStorage.getItem(`ts-install-prefs:${token}`);
+    if (raw === null) return fallback;
+    const parsed = JSON.parse(raw) as Partial<InstallPreferences>;
+    return {
+      registry_enabled: parsed.registry_enabled === true,
+      consent_operator_inbox_otp: parsed.consent_operator_inbox_otp === true,
+      ...(typeof parsed.proxy_url === "string" ? { proxy_url: parsed.proxy_url } : {}),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 // Page-level state machine. Most renders are determined by `step` +
 // the wizard step states; the rarer ones (loading the page, expired
 // install, server error) get their own branches. The missing-token
@@ -57,6 +85,13 @@ export default function InstallPage() {
   const [installClaimed, setInstallClaimed] = useState(false);
   const [skippedGithub, setSkippedGithub] = useState(false);
   const [errorText, setErrorText] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [preferences, setPreferences] = useState<InstallPreferences>(
+    readStoredInstallPreferences,
+  );
+  const registryEnabled = preferences.registry_enabled;
+  const otpEnabled = preferences.consent_operator_inbox_otp;
+  const proxyUrl = preferences.proxy_url ?? "";
 
   // Returning from the OAuth round-trip — fire the claim if we
   // weren't already claimed. The wizard then continues to step 2.
@@ -99,6 +134,21 @@ export default function InstallPage() {
     };
   }, [token]);
 
+  useEffect(() => {
+    if (token === null) return;
+    const proxy = proxyUrl.trim();
+    const prefs: InstallPreferences = {
+      registry_enabled: registryEnabled,
+      consent_operator_inbox_otp: otpEnabled,
+      ...(proxy.length > 0 ? { proxy_url: proxy } : {}),
+    };
+    try {
+      window.localStorage.setItem(`ts-install-prefs:${token}`, JSON.stringify(prefs));
+    } catch {
+      /* storage is advisory; the live React state still drives claim */
+    }
+  }, [token, registryEnabled, otpEnabled, proxyUrl]);
+
   // Auto-claim after the OAuth round-trip returns. The wizard's
   // step 1 ✓ depends on BOTH whoami.identities ⊇ ["google"] AND the
   // install being claimed. Once the CLI receives the agent token, the
@@ -118,7 +168,12 @@ export default function InstallPage() {
       try {
         await apiPost(
           `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
-          agent !== null ? { agent_identity: agent } : {},
+          {
+            ...(agent !== null ? { agent_identity: agent } : {}),
+            registry_enabled: registryEnabled,
+            consent_operator_inbox_otp: otpEnabled,
+            ...(proxyUrl.trim().length > 0 ? { proxy_url: proxyUrl.trim() } : {}),
+          },
         );
         if (cancelled) return;
         setInstallClaimed(true);
@@ -134,7 +189,7 @@ export default function InstallPage() {
           // Continue-with-Google.
           return;
         }
-        if (err instanceof ApiError && err.status === 409 && err.message === "not_pending") {
+        if (err instanceof ApiError && err.status === 409) {
           const state = await apiGet<InstallStatus>(
             `/v1/mcp/install/${encodeURIComponent(token)}/state`,
           );
@@ -158,7 +213,18 @@ export default function InstallPage() {
     return () => {
       cancelled = true;
     };
-  }, [returnedFromAuth, token, page, installClaimed, identities, agent, router]);
+  }, [
+    returnedFromAuth,
+    token,
+    page,
+    installClaimed,
+    identities,
+    agent,
+    router,
+    registryEnabled,
+    otpEnabled,
+    proxyUrl,
+  ]);
 
   // Light polling on whoami — covers the case where the user does
   // step 2 (GitHub) and the round-trip's redirect re-renders the
@@ -202,8 +268,15 @@ export default function InstallPage() {
   }, []);
 
   const finish = useCallback(() => {
+    if (token !== null) {
+      try {
+        window.localStorage.removeItem(`ts-install-prefs:${token}`);
+      } catch {
+        /* ignore */
+      }
+    }
     router.push("/install/done");
-  }, [router]);
+  }, [router, token]);
 
   // ---- Render branches -----------------------------------------------
 
@@ -266,6 +339,39 @@ export default function InstallPage() {
           ? "Connect your coding agent to your account."
           : `Connect ${agent} to your account.`}
       </p>
+
+      <div className="provider-state" aria-label="Provider connection status">
+        <StatusPill label="Google" connected={identities.includes("google")} />
+        <StatusPill label="GitHub" connected={identities.includes("github")} />
+      </div>
+
+      <AdvancedInstallSettings
+        open={showAdvanced}
+        disabled={installClaimed}
+        registryEnabled={registryEnabled}
+        otpEnabled={otpEnabled}
+        proxyUrl={proxyUrl}
+        onToggle={() => setShowAdvanced((v) => !v)}
+        onRegistryChange={(value) =>
+          setPreferences((current) => ({ ...current, registry_enabled: value }))
+        }
+        onOtpChange={(value) =>
+          setPreferences((current) => ({
+            ...current,
+            consent_operator_inbox_otp: value,
+          }))
+        }
+        onProxyChange={(value) =>
+          setPreferences((current) => {
+            if (value.trim().length > 0) return { ...current, proxy_url: value };
+            const rest: InstallPreferences = {
+              registry_enabled: current.registry_enabled,
+              consent_operator_inbox_otp: current.consent_operator_inbox_otp,
+            };
+            return rest;
+          })
+        }
+      />
 
       <ol className="wizard">
         <WizardStep
@@ -345,6 +451,88 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 type StepStatus = "pending" | "done" | "skipped";
+
+function StatusPill({ label, connected }: { label: string; connected: boolean }) {
+  return (
+    <span className={`status-pill ${connected ? "on" : ""}`}>
+      <span className={`status-dot ${connected ? "on" : ""}`} />
+      {label}: {connected ? "connected" : "not connected"}
+    </span>
+  );
+}
+
+function AdvancedInstallSettings({
+  open,
+  disabled,
+  registryEnabled,
+  otpEnabled,
+  proxyUrl,
+  onToggle,
+  onRegistryChange,
+  onOtpChange,
+  onProxyChange,
+}: {
+  open: boolean;
+  disabled: boolean;
+  registryEnabled: boolean;
+  otpEnabled: boolean;
+  proxyUrl: string;
+  onToggle: () => void;
+  onRegistryChange: (value: boolean) => void;
+  onOtpChange: (value: boolean) => void;
+  onProxyChange: (value: string) => void;
+}) {
+  return (
+    <section className="install-advanced" aria-label="Advanced install settings">
+      <button
+        type="button"
+        className="advanced-toggle"
+        onClick={onToggle}
+        disabled={disabled}
+      >
+        Advanced settings
+        <span>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div className="advanced-panel">
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={registryEnabled}
+              disabled={disabled}
+              onChange={(event) => onRegistryChange(event.currentTarget.checked)}
+            />
+            <span>
+              <b>Managed skill registry</b>
+              Reuse shared signup recipes and let successful non-personal recipes improve the registry.
+            </span>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={otpEnabled}
+              disabled={disabled}
+              onChange={(event) => onOtpChange(event.currentTarget.checked)}
+            />
+            <span>
+              <b>Email verification polling</b>
+              Allow polling only for OTP messages matching services you ask the squire to handle.
+            </span>
+          </label>
+          <label className="field compact">
+            <span>Proxy URL</span>
+            <input
+              value={proxyUrl}
+              disabled={disabled}
+              placeholder="http://user:pass@host:port or socks5://..."
+              onChange={(event) => onProxyChange(event.currentTarget.value)}
+            />
+          </label>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function WizardStep({
   number,
