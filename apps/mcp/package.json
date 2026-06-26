@@ -11,8 +11,6 @@
   "files": [
     "dist",
     "assets",
-    "!dist/housekeeper",
-    "!dist/housekeeper/**",
     "!dist/bot/eval-*",
     "!dist/bot/build-corpus.*",
     "!dist/bot/label-target.*",
