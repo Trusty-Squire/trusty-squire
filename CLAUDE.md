@@ -47,17 +47,17 @@ should move at least one of them up and neither down:
    `discover_succeeded / discover_attempted` per heal pass.
 
 **How they're driven + monitored:** the daily **verify pass** (`ts-housekeeper`,
-systemd timer in `tools/systemd/`) keeps the registry honest — promote skills
-that still work, demote ones that don't. New-skill growth (OF#1) now comes from
-**auto-promote on real provisions** (the bot/host-driven `provision_*` captures),
-NOT a housekeeper discover sweep.
+now its own repo `Trusty-Squire/trusty-squire-housekeeper`) keeps the registry
+honest — promote skills that still work, demote ones that don't. New-skill growth
+(OF#1) now comes from **auto-promote on real provisions** (the bot/host-driven
+`provision_*` captures), NOT a housekeeper discover sweep.
 
 > ⚠️ **OF framing needs a strategic revisit (2026-06-26).** The codex-verify
 > refactor deleted the housekeeper's proactive **discover** sweep, so OF#2 as
 > defined ("`discover_succeeded / discover_attempted` per heal pass") no longer
 > has a housekeeper-driven source — discovery moved to on-provision auto-promote.
 > OF#1 (active-skill count) still stands. Re-derive OF#2 against the new model
-> before relying on it. See `docs/DESIGN-housekeeper-codex-verify.md`.
+> before relying on it.
 
 **Honest tension:** OF#1 and OF#2 can pull against each other — as the bot
 covers the easy services, the residual discovery queue gets harder, so OF#2
@@ -559,40 +559,23 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
-### Housekeeper env (`ts-housekeeper`)
+### Housekeeper — extracted to its own repo
 
-The housekeeper is now a **codex-driven registry verify pass** — its own
-operator-only package `@trusty-squire/housekeeper` (`apps/housekeeper/`, the
-`ts-housekeeper` bin), NOT part of the mcp tarball. Each pass pulls the registry
-verifier queue and, per skill, runs `codex exec` holding the
-`@trusty-squire/mcp@next` MCP to reproduce the signup; the registry applies the
-**mechanical rule** (one success promotes pending-review → active, the 3rd
-consecutive *rot* failure demotes). There is no discover, no fix-agent, no LLM
-proxy, no robot fleet — codex is the only intelligence. Design:
-`docs/DESIGN-housekeeper-codex-verify.md`.
+The registry verify pass (codex-driven promote/demote) was **moved out of this
+monorepo into its own closed-source operator repo:
+`Trusty-Squire/trusty-squire-housekeeper`** (the `@trusty-squire/housekeeper` /
+`ts-housekeeper` package). It depends on the published
+`@trusty-squire/skill-schema`, runs from a source checkout (never npm-published),
+and carries its own README + `docs/` + systemd units.
 
-**→ Operational runbook: `docs/HOUSEKEEPER-OPERATIONS.md`.** Install/timer:
-`tools/systemd/README.md`. Run a pass:
-```bash
-node apps/housekeeper/dist/bin.js --check        # preflight: codex on PATH + bearer set
-node apps/housekeeper/dist/bin.js --once [--dry]  # one verify pass (--dry posts nothing)
-```
-
-Verify runs as the **operator's own connect-identity Google session** (codex+MCP
-act as the operator). A dead session → every skill returns `login_wall`, which is
-*transient by design* and never demotes — so the worst a broken box does is
-verify nothing; it can never demote good skills (fail-closed).
-
-| Env var | Default | Effect |
-|---|---|---|
-| `REGISTRY_ADMIN_BEARER` | — (required) | `/admin/*` auth: reads the verifier queue + posts outcomes. |
-| `TRUSTY_SQUIRE_REGISTRY_URL` | `https://registry.trustysquire.ai` | Registry base URL. |
-| `HOUSEKEEPER_MAX_SKILLS_PER_RUN` | `20` | Per-pass cap (codex per skill is real wall-clock + token cost). |
-| `HOUSEKEEPER_CODEX_CMD` | `codex` | The codex CLI invocation (the runner appends `exec <prompt>`). |
-| `HOUSEKEEPER_PROMOTE_MIN_SUCCESSES` | `1` | Successes to promote (one is enough; bump for flaky services). |
-
-Prereq: the **codex CLI** on PATH, configured with `@trusty-squire/mcp@next`.
-Verify the box with `ts-housekeeper --check`.
+Monorepo-side relationship: it talks to the registry's `/admin/verifier/queue`,
+`/skills/by-id/:id`, and `/admin/skills/:id/verifier-outcome` endpoints
+(`apps/registry`), which own the **mechanical rule** — one success promotes
+pending-review → active, the 3rd consecutive *rot* failure demotes
+(`VERIFIER_PROMOTION_THRESHOLD = 1` / `VERIFIER_FAILURE_THRESHOLD = 3` in
+`apps/registry/src/skill-store.ts`). So changing the promote/demote behavior is a
+**registry** change here; changing how skills are verified is a change in the
+housekeeper repo.
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |

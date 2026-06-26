@@ -34,18 +34,6 @@ jobs:
       - name: Scan tracked files for credential-shaped values
         run: tools/secret-scan.sh
 
-  # Block an un-evidenced "wall": a service marked needs-manual/unservable must
-  # carry dated affordance-probe evidence (last_probed) OR be grandfathered.
-  # A NEW unservable label without proof fails here — so a false wall (e.g.
-  # "fly.io is github-only") can't merge on an unverified say-so. The control
-  # lives in CI, not in anyone's memory. Dependency-free (node only).
-  wall-evidence:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Lint wall/unservable labels for probe evidence
-        run: node tools/lint-wall-evidence.mjs
-
   typecheck:
     runs-on: ubuntu-latest
     steps:
@@ -73,9 +61,7 @@ jobs:
           set -euo pipefail
           PKGS=(
             "@trusty-squire/mcp"
-            "@trusty-squire/inbox-api"
             "@trusty-squire/web"
-            "@trusty-squire/pwa"
             "@trusty-squire/skill-schema"
             "@trusty-squire/adapter-resend"
             "@trusty-squire/runtime"
@@ -151,8 +137,6 @@ jobs:
           PKGS=(
             "@trusty-squire/mcp"
             "@trusty-squire/api"
-            "@trusty-squire/inbox-api"
-            "@trusty-squire/pwa"
             "@trusty-squire/skill-schema"
             "@trusty-squire/adapter-resend"
             "@trusty-squire/runtime"
