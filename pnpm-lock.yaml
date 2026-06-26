@@ -97,6 +97,31 @@ importers:
         specifier: ^1.2.0
         version: 1.6.1(@types/node@20.19.40)
 
+  apps/housekeeper:
+    dependencies:
+      '@trusty-squire/skill-schema':
+        specifier: workspace:*
+        version: link:../../packages/skill-schema
+      yaml:
+        specifier: ^2.6.1
+        version: 2.8.4
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.19
+      '@vitest/coverage-v8':
+        specifier: ^1.6.1
+        version: 1.6.1(vitest@1.6.1)
+      tsx:
+        specifier: ^4.7.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^1.2.0
+        version: 1.6.1(@types/node@22.19.19)
+
   apps/mcp:
     dependencies:
       '@anthropic-ai/sdk':
