@@ -1140,6 +1140,17 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
 
 // ── email verification (thick tool — user-inbox-via-browser) ──
 
+// Flow A hand-back (wall-handoff design): the inbox poll found no code, but the
+// thick session is STILL LIVE, so this is resumable, not a give-up. The host
+// asks the user for the code (SMS / authenticator / not-yet-delivered email),
+// then types it with provision_act and keeps driving. Session + vault moat
+// preserved. See docs/DESIGN-wall-handoff.md.
+export interface NeedsUserCode {
+  wall: "verification_code";
+  message: string;
+  resume: "code";
+}
+
 export interface VerificationResult {
   session_id: string;
   found: boolean;
@@ -1148,6 +1159,9 @@ export interface VerificationResult {
   // A verification/confirm link if present, else null. The host decides whether
   // to goto it (it is within the target's own domain → already domain-scoped).
   link: string | null;
+  // Set when found=false: the code wasn't auto-retrievable from the inbox. The
+  // session is alive — ASK THE USER for the code and type it, don't abandon.
+  needs_user?: NeedsUserCode;
 }
 
 export interface AwaitVerificationOptions {
@@ -1178,6 +1192,29 @@ export function parseVerification(
     code = m !== null ? (m[1] ?? null) : null;
   }
   return { code, link };
+}
+
+// Pure: assemble the verification result. When neither a code nor a link was
+// found, the thick session is still live, so this is a RESUMABLE hand-back
+// (Flow A) — the host asks the user for the code and types it — not a give-up.
+// Exported for unit tests.
+export function buildVerificationResult(
+  sessionId: string,
+  code: string | null,
+  link: string | null,
+): VerificationResult {
+  const found = code !== null || link !== null;
+  if (found) return { session_id: sessionId, found, code, link };
+  const needs_user: NeedsUserCode = {
+    wall: "verification_code",
+    message:
+      "No verification code found in the inbox automatically. The service may " +
+      "have sent it by SMS or an authenticator app, or it hasn't arrived yet. " +
+      "Ask the user for the code, then type it into the verification field with " +
+      "provision_act and continue — the session is still live.",
+    resume: "code",
+  };
+  return { session_id: sessionId, found, code, link, needs_user };
 }
 
 export async function awaitVerification(
@@ -1215,8 +1252,9 @@ export async function awaitVerification(
     sender: opts.sender ?? null,
     has_code: code !== null,
     has_link: link !== null,
+    needs_user: !found,
   });
-  return { session_id: sessionId, found, code, link };
+  return buildVerificationResult(sessionId, code, link);
 }
 
 export interface FinishResult {

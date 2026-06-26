@@ -287,9 +287,13 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
   name: "provision_await_verification",
   description:
     "Read the user's OWN inbox through their signed-in browser session (no IMAP, " +
-    "no mail token) to complete email verification: returns {found, code, link}. " +
-    "Pass `sender` (e.g. 'resend.com') to scope the search. Then type the code " +
-    "with provision_act, or goto the link. Scoped search-and-extract — it reads " +
+    "no mail token) to complete email verification: returns {found, code, link, " +
+    "needs_user?}. Pass `sender` (e.g. 'resend.com') to scope the search. On " +
+    "found=true, type the code with provision_act or goto the link. On " +
+    "found=false a `needs_user` object is returned (wall='verification_code') — " +
+    "the code came by SMS/authenticator or hasn't arrived: ASK THE USER for it, " +
+    "then type it with provision_act and continue. The session stays live; this " +
+    "is a resumable hand-back, not a failure. Scoped search-and-extract — reads " +
     "only the matching recent mail, never the whole inbox.",
   inputSchema: verifySchema,
   jsonInputSchema: {

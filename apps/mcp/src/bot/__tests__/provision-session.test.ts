@@ -11,6 +11,7 @@ import {
   elementRef,
   buildAccessibilitySnapshot,
   parseVerification,
+  buildVerificationResult,
   looksLikeCodeIdentifier,
   findCredentialTokens,
   classifyVouchflowCredentials,
@@ -242,6 +243,30 @@ describe("parseVerification (email OTP + link extraction)", () => {
     ]);
     expect(r.code).toBe("778201");
     expect(r.link).toContain("confirm");
+  });
+});
+
+describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
+  it("returns the code with no needs_user when a code was found", () => {
+    const r = buildVerificationResult("sk_1", "492013", null);
+    expect(r).toMatchObject({ session_id: "sk_1", found: true, code: "492013" });
+    expect(r.needs_user).toBeUndefined();
+  });
+
+  it("returns found=true with no needs_user when only a link was found", () => {
+    const r = buildVerificationResult("sk_1", null, "https://x.example/confirm");
+    expect(r.found).toBe(true);
+    expect(r.needs_user).toBeUndefined();
+  });
+
+  it("hands back to the user (resumable) when neither code nor link was found", () => {
+    const r = buildVerificationResult("sk_1", null, null);
+    expect(r.found).toBe(false);
+    expect(r.needs_user).toEqual({
+      wall: "verification_code",
+      message: expect.stringContaining("Ask the user for the code"),
+      resume: "code",
+    });
   });
 });
 
