@@ -53,6 +53,3 @@ package-lock.json
 .codegraph/
 tools/bin/
 .claude/settings.json
-
-# Local design drafts / generated docs in this repo are not committed by default.
-/docs/
