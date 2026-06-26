@@ -1,43 +1,31 @@
-# Autonomous heal pass — systemd user timer (T9)
+# Registry verify pass — systemd user timer
 
-Runs `mcp housekeeper --mode=heal --once --from=tools/housekeeper-services.yaml
---limit=100` **daily** on the operator's headless dev box — the autonomous
-engine that drives the project's two objective functions. Each fire does ONE
-pass:
+Runs the standalone **`@trusty-squire/housekeeper`** package (`ts-housekeeper`)
+**daily** on the operator's box. Each fire does ONE verify pass:
 
-1. **verify** — replay active + freshness-due skills. Rot (step/validator/
-   extraction failures ×3) → demoted; a wall (captcha/anti-bot) →
-   quarantined on the first hit. Transient/infra blips never demote.
-2. **discover** — run a virgin provision against the curated ~100-service
-   queue (`tools/housekeeper-services.yaml`); each success auto-promotes a new
-   skill. (Drop `--from` to fall back to on-demand telemetry-candidate +
-   freshly-demoted discovery instead of the curated sweep.)
-3. **digest** — one notification carrying both **objective functions**:
-   `verified N · demoted M · quarantined Q · re-skilled K · needs human ~X ·
-   discover P% (s/a) · skills T` — OF#1 = skills in the registry, OF#2 =
-   discovery success rate this pass (Telegram if `TELEGRAM_BOT_TOKEN` is set,
-   always to the journal). The same two metrics land on the registry admin
-   dashboard's **Objective functions** panel with a run-over-run trend.
+1. Pull the verifier queue from the registry (pending-review = promote
+   candidates, freshness-due active = demote candidates).
+2. For each skill, ask **codex** (holding the `@trusty-squire/mcp@next` MCP) to
+   reproduce the signup via the `provision_*` tools and report a boolean outcome.
+3. Relay the outcome to the registry, which applies the **mechanical rule**:
+   - a success promotes pending-review → active (one success is enough),
+   - the 3rd consecutive *real* failure demotes,
+   - walls quarantine on the first hit; transient/infra blips (incl. a dead
+     operator session → `login_wall`) never advance the demote counter.
 
-4. **fix** (the output side, `ExecStartPost`) — after the run measures, the
-   holistic fix-agent reads the failure batch from the capture dir, clusters by
-   root cause, proposes a generalizing fix per cluster, reconciles it against
-   the planner eval gate, and commits surviving fixes to `staging` (the `next`
-   / RC channel). Best-effort; never fails the timer. **Push is opt-in** —
-   without `TRUSTY_SQUIRE_FIX_AGENT_PUSH=1` it commits RCs locally but does not
-   push, so nothing reaches npm until you push. `next`→`latest` stays a human
-   promote (read the per-RC OF#2 trend on the dashboard, then `/ship` to main).
+There is no discover phase, no LLM proxy, and no fix-agent — codex is the only
+intelligence, and promote/demote is a deterministic rule in the registry. See
+`docs/DESIGN-housekeeper-codex-verify.md`.
 
-**Dogfood the RC:** keep this checkout on `staging` so the daily run executes
-the latest release candidate — the run becomes the live test of yesterday's RC.
-
-See `docs/AUTONOMOUS-LOOP.md` for the loop + objective functions,
-`docs/DESIGN-autonomous-output-loop.md` for the fix-agent + RC channel, and
-`docs/DESIGN-closed-loop-remediation.md` for the closed-loop design.
+**Dogfood:** keep this checkout on `staging` so the daily run executes the
+latest code.
 
 ## Install (one-time, as the operator)
 
 ```bash
+# Build the package in the checkout first:
+pnpm -F @trusty-squire/housekeeper build
+
 mkdir -p ~/.config/systemd/user
 cp tools/systemd/trusty-squire-heal.service ~/.config/systemd/user/
 cp tools/systemd/trusty-squire-heal.timer   ~/.config/systemd/user/
@@ -51,23 +39,27 @@ systemctl --user enable --now trusty-squire-heal.timer
 
 ## Prerequisites
 
-- A source checkout at `~/proj-ts` with `apps/mcp/dist` built
-  (`pnpm -F @trusty-squire/mcp build`). Edit `WorkingDirectory=` in the
-  `.service` if your checkout lives elsewhere.
-- `~/.config/trusty-squire/harvester.env` with at least
-  `REGISTRY_ADMIN_BEARER` and `TRUSTY_SQUIRE_REGISTRY_URL`; add
-  `TRUSTY_SQUIRE_MACHINE_TOKEN` + `TRUSTY_SQUIRE_ACCOUNT_ID` +
-  `UNIVERSAL_BOT_LLM_TIER=free` for the discover phase, and
-  `TELEGRAM_BOT_TOKEN` for the digest.
-- A logged-in bot Chrome profile (`mcp login`) — the discover phase drives
-  real OAuth signups. (A stale Google/GitHub session is the usual cause of
-  a needs_login-heavy run; refresh with `mcp login --force-relogin`.)
+- A source checkout at `~/proj-ts` with the package built
+  (`pnpm -F @trusty-squire/housekeeper build` → `apps/housekeeper/dist`). Edit
+  `WorkingDirectory=` in the `.service` if your checkout lives elsewhere.
+- The **codex CLI** installed + on PATH, configured with the
+  `@trusty-squire/mcp@next` MCP. Verify with
+  `node apps/housekeeper/dist/bin.js --check`.
+- A live **operator Google session** in the bot Chrome profile (codex+MCP act as
+  the operator to sign up). A dead session makes every verify return
+  `login_wall` — which is transient by design, so it can't demote anything; it
+  just means nothing gets verified until you refresh the session.
+- `~/.config/trusty-squire/harvester.env` with `REGISTRY_ADMIN_BEARER`
+  (required) and `TRUSTY_SQUIRE_REGISTRY_URL`. Optional knobs:
+  `HOUSEKEEPER_MAX_SKILLS_PER_RUN` (default 20), `HOUSEKEEPER_CODEX_CMD`
+  (default `codex`), `HOUSEKEEPER_PROMOTE_MIN_SUCCESSES` (default 1).
 
 ## Operate
 
 ```bash
+node apps/housekeeper/dist/bin.js --check               # preflight: codex + bearer
+node apps/housekeeper/dist/bin.js --once --dry          # a pass that posts nothing
 systemctl --user list-timers trusty-squire-heal.timer   # when it next fires
 systemctl --user start trusty-squire-heal.service        # run one pass now
-journalctl --user -u trusty-squire-heal.service -f       # watch a run (incl. [heal] digest)
-mcp skill needs-human                                    # the worklist of what still needs you
+journalctl --user -u trusty-squire-heal.service -f       # watch a run + the digest line
 ```

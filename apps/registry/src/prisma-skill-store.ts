@@ -348,28 +348,7 @@ export class PrismaSkillStore implements SkillStore {
     // transient (oauth/session/timeout) records the stat but must NOT
     // advance consecutive_verifier_failures, or a working skill thrashes
     // toward demotion on a blip. Unknown kinds default to transient.
-    // D2.C — a converged producer verdict from the fresh-verify
-    // sequential-confidence sampler is TRUSTED over the raw success count. A
-    // `hold` is an explicit no-op (no signal — don't even bump the stat
-    // counters). `promote`/`reject` map to a success/failure outcome so the
-    // shared C11 promote-gate + rot demote-path below apply unchanged; a
-    // `promote` additionally short-circuits the count threshold (promotes on
-    // this single converged outcome). Absent verdict → historic count semantics.
-    if (input.verdict === "hold") {
-      const current = (await this.client.skillRecord.findUnique({
-        where: { skill_id: input.skill_id },
-      })) as PrismaSkillRow | null;
-      if (current === null) {
-        throw new Error(`Cannot record verifier outcome for unknown skill ${input.skill_id}`);
-      }
-      return { record: toSkillStoreRecord(current), transition: "none" };
-    }
-    const effectiveKind: "success" | "failure" =
-      input.verdict === "promote"
-        ? "success"
-        : input.verdict === "reject"
-          ? "failure"
-          : input.kind;
+    const effectiveKind: "success" | "failure" = input.kind;
     const fclass = effectiveKind === "failure" ? classifyFailure(input.failure_kind) : null;
     const failureKind = (input.failure_kind ?? "unknown").slice(0, 80);
     return this.client.$transaction(async (tx) => {
@@ -403,8 +382,7 @@ export class PrismaSkillStore implements SkillStore {
       if (
         effectiveKind === "success" &&
         skill.status === "pending-review" &&
-        (input.verdict === "promote" ||
-          skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD)
+        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD
       ) {
         // C11 gate — same logic as InMemorySkillStore. If an existing
         // active skill for this service has a DIFFERENT signup_url or
@@ -488,14 +466,10 @@ export class PrismaSkillStore implements SkillStore {
       } else if (
         effectiveKind === "failure" &&
         fclass === "rot" &&
-        (input.verdict === "reject" ||
-          skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD)
+        skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
       ) {
-        // A producer-level `reject` is already a converged fresh-identity
-        // verdict (for example 0/4 informative replays), so trust it
-        // immediately. Non-verdict replay failures keep the historic 3-strike
-        // path. In both cases the branch is rot-only: wall/infra/transient
-        // failures never retire or demote here.
+        // Rot-only 3-strike: wall/infra/transient failures never retire or
+        // demote here.
         if (skill.status === "pending-review") {
           // Never validated — retire. Capture sidecars survive for
           // forensic value.

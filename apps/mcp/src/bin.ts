@@ -37,7 +37,9 @@ if (isVersionFlag) {
 
 const isServer = argv[0] === "server";
 const isSkill = argv[0] === "skill";
-const isHousekeeper = argv[0] === "housekeeper";
+// NB: the `housekeeper` subcommand moved to its own operator-only package
+// (@trusty-squire/housekeeper, the `ts-housekeeper` bin). `mcp housekeeper`
+// no longer exists here; the systemd timer invokes ts-housekeeper directly.
 
 async function dispatch(): Promise<number> {
   if (isServer) {
@@ -49,14 +51,6 @@ async function dispatch(): Promise<number> {
   if (isSkill) {
     // skill CLI returns its own exit code (T30 error taxonomy).
     return await runSkillCli(argv.slice(1));
-  }
-  if (isHousekeeper) {
-    // Operator-only tool, excluded from the published tarball
-    // (apps/mcp/package.json `files` strips dist/housekeeper). The
-    // import must be dynamic so end-user installs don't fault at
-    // module-load time on the missing path.
-    const { runHousekeeperCli } = await import("./housekeeper/cli.js");
-    return await runHousekeeperCli(argv.slice(1));
   }
   await runCli(argv);
   return 0;

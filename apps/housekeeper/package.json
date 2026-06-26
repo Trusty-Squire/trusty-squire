@@ -1,0 +1,28 @@
+{
+  "name": "@trusty-squire/housekeeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Operator-only registry housekeeper — a codex-exec-driven verify scheduler that promotes working skills and demotes stale ones. Never published to npm.",
+  "bin": {
+    "ts-housekeeper": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:cov": "vitest run --coverage",
+    "dev": "tsx src/bin.ts"
+  },
+  "dependencies": {
+    "@trusty-squire/skill-schema": "workspace:*",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^1.6.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}
