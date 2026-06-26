@@ -3,7 +3,7 @@
 //   npx @trusty-squire/mcp connect --target=claude-code
 //     Issues a machine token, then opens the trustysquire install-
 //     confirm page in the bot's own Chrome. The user signs in there
-//     once (Google or GitHub) — that single sign-in does TWO things:
+//     once with Google — that single sign-in does TWO things:
 //       (a) trustysquire claims the install and binds the machine to
 //           the user's account, and
 //       (b) the bot's Chrome profile gains a provider session it can
@@ -472,11 +472,11 @@ async function connect(args: Argv): Promise<void> {
   const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
 
-  // Preflight: an existing install that's fully provisioned (machine
-  // token + agent session token + a bot Google session marker) doesn't
-  // need to redo the browser confirm. Just rewrite the MCP config in
-  // place so the host agent picks up the latest server entrypoint and
-  // env. Pass --force-relogin to bypass (e.g. to switch Google account).
+  // Preflight: an existing install is "connected" only when BOTH the
+  // account-bound plumbing still works and the bot profile has a confirmed
+  // Google session. A bare machine/agent token can talk to Trusty Squire, but
+  // it cannot act as the user at third-party sites, so it must not skip the
+  // browser confirm. Pass --force-relogin to bypass (e.g. to switch Google).
   if (!args.forceRelogin) {
     const preflight = await checkAlreadyProvisioned();
     if (preflight !== null) {
@@ -484,13 +484,10 @@ async function connect(args: Argv): Promise<void> {
       await hydrateArgsFromStoredPreferences(args);
       await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
       await writeAgentConfig(target, agent, args);
-      const provNote =
-        preflight.providers.length > 0
-          ? `Already provisioned (${preflight.providers.join(" + ")}).`
-          : `Session valid — no bot OAuth login on this machine yet ` +
-            `(run ${ui.code("npx @trusty-squire/mcp login")} to enable ` +
-            `OAuth-preferring signups).`;
-      ui.success(`${provNote} ${agent.display_name} config refreshed.`);
+      ui.success(
+        `Already connected (${preflight.providers.join(" + ")}). ` +
+          `${agent.display_name} config refreshed.`,
+      );
       printProviderState(preflight.providers);
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
@@ -688,9 +685,9 @@ function printProviderState(providers: OAuthProviderId[]): void {
 // provider session afterwards — the user must run `mcp login` before
 // their first OAuth signup. This path is for CI / scripted installs.
 // True when the local session + bot profile already carry everything
-// install would establish. Returns the list of provider sessions
-// detected, or null when anything's missing. Best-effort: any read
-// error returns null and the caller proceeds with the normal flow.
+// connect would establish. Returns the list of confirmed provider sessions, or
+// null when anything's missing. Best-effort: any read/probe error returns null
+// and the caller proceeds with the normal browser flow.
 // Probe whether the stored agent token still authenticates. Agent
 // sessions have a 24h absolute cap, so a token can be PRESENT in the
 // session file but already dead on the server. Treating present as
@@ -716,19 +713,15 @@ export async function agentTokenStillValid(
   }
 }
 
-// Pure gate for the `connect` fast path: given the read session, whether
-// its agent token still validated, and the bot's provider markers, decide
-// whether connect can (re)write the MCP config WITHOUT a browser re-claim.
+// Pure gate for the `connect` fast path: given the read session, whether its
+// agent token still validated, and the bot's confirmed provider sessions,
+// decide whether connect can (re)write the MCP config WITHOUT a browser
+// re-claim.
 //
-// The provider marker is INFORMATIONAL — it tells the signup bot which
-// providers to auto-prefer for OAuth, NOT whether the host agent can be
-// wired up. A valid session (machine + agent token that just validated)
-// is sufficient. Gating on a non-empty marker used to force a full
-// browser re-claim on any box whose bot profile had no login yet (a fresh
-// machine that restored session.json, or a headless box where the claim
-// browser can't run) — leaving the user with NO config written and no
-// clear reason. So an empty `providers` is fine; we still return
-// provisioned. Exported for unit tests.
+// Account-bound plumbing is not enough. The product-level connection is the
+// bot-profile Google session: without it the host agent may be able to call the
+// Trusty Squire API, but cannot act as the user at third-party services.
+// GitHub is optional headroom; Google is the required primary identity.
 export function decideProvisioned(
   session: SessionData | null,
   tokenValid: boolean,
@@ -743,6 +736,7 @@ export function decideProvisioned(
     return null;
   }
   if (!tokenValid) return null;
+  if (!providers.includes("google")) return null;
   return { providers };
 }
 
@@ -765,9 +759,33 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
       session.api_base_url,
       session.agent_session_token,
     );
-    return decideProvisioned(session, stillValid, loggedInProviders());
+    // Probe the profile cookies instead of trusting the marker. The marker is a
+    // cache that can lie after logout/expiry; connect is rare enough to pay this
+    // cost, and this keeps "Already connected" aligned with the bot's real
+    // ability to wear the user's Google identity.
+    const providers = await detectActiveProviderSessions();
+    await syncConnectedProviders(providers);
+    return decideProvisioned(session, stillValid, providers);
   } catch {
     return null;
+  }
+}
+
+async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<void> {
+  clearAllProviderMarkers();
+  for (const p of providers) markProviderLoggedIn(p);
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (session === null) return;
+    await storage.write({
+      ...session,
+      connected_providers: [...providers],
+      saved_at: new Date().toISOString(),
+    });
+  } catch {
+    // Best-effort — marker/session drift only affects fast-path UX. The next
+    // connect/login/provision probe can repair it.
   }
 }
 

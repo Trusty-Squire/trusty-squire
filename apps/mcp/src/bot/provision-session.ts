@@ -19,6 +19,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
 import { extractApiKeyFromText, isTruncatedCapture, pickVerificationLink } from "./agent.js";
+import {
+  detectActiveProviderSessions,
+  ensureOAuthSession,
+} from "./google-login.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -638,8 +642,31 @@ export interface StartOptions {
   hint?: string;
 }
 
+async function ensureProvisionPrimaryProviderSession(
+  profileDir: string | undefined,
+): Promise<OAuthProviderId[]> {
+  const initial = await detectActiveProviderSessions(profileDir).catch(
+    () => [] as OAuthProviderId[],
+  );
+  if (initial.includes("google")) return initial;
+
+  const result = await ensureOAuthSession({
+    provider: "google",
+    ...(profileDir !== undefined ? { profileDir } : {}),
+  });
+  if (result.status !== "already_valid" && result.status !== "logged_in") {
+    return initial;
+  }
+
+  const after = await detectActiveProviderSessions(profileDir).catch(
+    () => [] as OAuthProviderId[],
+  );
+  return after.includes("google") ? after : ["google", ...after];
+}
+
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const id = randomUUID();
+  const liveProviders = await ensureProvisionPrimaryProviderSession(opts.profileDir);
   const browser = new BrowserController({
     ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
@@ -662,7 +689,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   // Tell the agent which provider the user actually has a live session for
   // (Google-preferred) — the bot knows from the profile cookies, so the agent
   // doesn't have to guess. Composed with the skill route hint (if any).
-  const liveProviders = await browser.detectSessionProviders().catch(() => [] as OAuthProviderId[]);
   const hintParts = [
     loginSessionGuidance(liveProviders),
     ...(opts.hint !== undefined ? [opts.hint] : []),
