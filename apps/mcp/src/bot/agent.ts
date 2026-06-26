@@ -44,7 +44,6 @@ import {
   type CandidateClass,
 } from "./extraction.js";
 import { notifyHeightenedAuth } from "./notify-api.js";
-import { sendTelegramHeightenedAuth } from "./telegram-notify.js";
 import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
 import { redactCredentials } from "./redact.js";
 import { readOperatorOtp, fromDomainFromUrl } from "./read-otp.js";
@@ -8444,7 +8443,7 @@ export class SignupAgent {
   }
 
   // 0.8.3-rc.1 — widened from 2 → 4 minutes. The 2-min window forced
-  // the operator to drop everything immediately on a Telegram alert.
+  // the operator to drop everything immediately on a heightened-auth alert.
   // For batch-harvest runs the operator is rarely staring at the
   // phone; 4 minutes gives realistic time to switch devices, unlock,
   // open the Google app, and tap. Matches the same wait window the
@@ -10372,14 +10371,6 @@ export class SignupAgent {
               machineToken: task.machineToken,
               apiBase: task.apiBase,
             });
-            // rc.18 — opt-in Telegram fallback. Bypasses the email
-            // path (which collapses to Sent only when GMAIL_USER ==
-            // account.email). No-op without TELEGRAM_BOT_TOKEN env.
-            void sendTelegramHeightenedAuth({
-              service: task.service,
-              digit: String(matchNum),
-              windowSeconds: 240,
-            });
           } else {
             // Extractor missed the number — Google phrasing has
             // drifted again. Surface a banner so the user knows to
@@ -10399,11 +10390,6 @@ export class SignupAgent {
               windowSeconds: 240,
               machineToken: task.machineToken,
               apiBase: task.apiBase,
-            });
-            void sendTelegramHeightenedAuth({
-              service: task.service,
-              digit: null,
-              windowSeconds: 240,
             });
           }
           // Either way (number found or not), the user can still
@@ -10523,8 +10509,8 @@ export class SignupAgent {
               `GitHub: challenge-clearing import/call threw (${err instanceof Error ? err.message : String(err)})`,
             );
           }
-          // 0.8.3-rc.1 — fall back to the phone-tap path: fire
-          // Telegram + heightened-auth notifications and wait 4
+          // 0.8.3-rc.1 — fall back to the phone-tap path: fire a
+          // heightened-auth notification and wait 4
           // minutes for the operator to tap their phone. This is the
           // same shape Google's challenge path already uses; without
           // it the bot just times out silently with no operator
@@ -10541,11 +10527,6 @@ export class SignupAgent {
             windowSeconds: 240,
             machineToken: task.machineToken,
             apiBase: task.apiBase,
-          });
-          void sendTelegramHeightenedAuth({
-            service: task.service,
-            digit: null,
-            windowSeconds: 240,
           });
           const cleared = await this.waitForGitHubChallenge(steps);
           if (cleared) {
@@ -11992,15 +11973,10 @@ ${formatInventory(input.inventory)}`,
       machineToken: this.currentMachineToken,
       apiBase: this.currentApiBase,
     });
-    void sendTelegramHeightenedAuth({
-      service,
-      digit,
-      windowSeconds: 240,
-    });
     // 0.8.3-rc.1 — vision-LLM fallback for the mid-post-verify path.
     // When the planner's reason names a challenge but no digit, take
     // a screenshot, ask Claude vision what number is on screen, and
-    // fire a SECOND Telegram with the extracted number. The first
+    // fire a SECOND notification with the extracted number. The first
     // notification went out immediately (so the operator knows to
     // grab their phone); this follows up with the number as soon as
     // vision returns (~2-5s).
@@ -12012,11 +11988,6 @@ ${formatInventory(input.inventory)}`,
             const followUp = `Google challenge mid-post-verify: vision LLM read "${visionDigit}" from the screen — tap that on your phone.`;
             console.error(`[universal-bot] ${followUp}`);
             steps.push(`Post-verify: ${followUp}`);
-            void sendTelegramHeightenedAuth({
-              service,
-              digit: visionDigit,
-              windowSeconds: 240,
-            });
             void notifyHeightenedAuth({
               service,
               digit: visionDigit,
