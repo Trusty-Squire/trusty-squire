@@ -3,6 +3,7 @@
 
 import { loadConfig } from "./config.js";
 import { runVerify } from "./scheduler.js";
+import { runPreflight } from "./preflight.js";
 
 const HELP = `ts-housekeeper — codex-driven registry verify scheduler
 
@@ -11,6 +12,7 @@ Usage:
 
   --once   Run a single verify pass and exit (default: loop on the timer).
   --dry    Drive codex + classify outcomes, but do NOT post promote/demote.
+  --check  Preflight: confirm codex + the admin bearer are set up, then exit.
   --help   Show this help.
 
 The loop pulls skills from the registry, asks codex (via the @next Trusty
@@ -39,7 +41,12 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<void> 
     process.stdout.write(HELP);
     return;
   }
-  const args = parseArgs(argv);
   const config = loadConfig();
+  if (argv.includes("--check")) {
+    const ok = await runPreflight(config);
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+  const args = parseArgs(argv);
   await runVerify(config, args);
 }

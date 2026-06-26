@@ -1,10 +1,9 @@
-# Fires the daily autonomous engine — one heal pass per day over the curated
-# ~100-service queue, emitting one digest with both objective functions.
+# Fires the daily registry verify pass — one codex-driven pass per day over the
+# verifier queue (promote pending-review, demote stale).
 # Persistent=true → if the box was asleep/off at the scheduled time, it runs
-# on next boot rather than skipping a cycle. (24h keeps the dashboard's 26h
-# DOWN-staleness threshold valid.)
+# on next boot rather than skipping a cycle.
 [Unit]
-Description=Run the Trusty Squire autonomous heal pass daily (~100 services)
+Description=Run the Trusty Squire registry verify pass daily
 
 [Timer]
 OnBootSec=10min

@@ -97,7 +97,7 @@ export interface SpawnResult {
 }
 export type Spawn = (cmd: string, args: readonly string[], timeoutMs: number) => Promise<SpawnResult>;
 
-const defaultSpawn: Spawn = (cmd, args, timeoutMs) =>
+export const defaultSpawn: Spawn = (cmd, args, timeoutMs) =>
   new Promise<SpawnResult>((resolve) => {
     execFile(
       cmd,
