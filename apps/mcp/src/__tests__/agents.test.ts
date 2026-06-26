@@ -187,6 +187,62 @@ describe("goose YAML writer", () => {
     expect(parsed.extensions.squire).toBeDefined();
   });
 
+  it("removes legacy Trusty Squire goose aliases that point at old packages", async () => {
+    const { stringify: yamlStringify } = await import("yaml");
+    const filePath = AGENTS.goose.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(
+      filePath,
+      yamlStringify({
+        extensions: {
+          trustysquire: {
+            enabled: true,
+            type: "stdio",
+            name: "trustysquire",
+            cmd: "npx",
+            args: ["-y", "@trusty-squire/mcp@0.4.1", "server"],
+            envs: {
+              TRUSTY_SQUIRE_AGENT_IDENTITY: "goose",
+              UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080",
+            },
+          },
+          custom: { cmd: "echo", args: ["hi"] },
+        },
+      }),
+    );
+
+    await AGENTS.goose.writeConfig({
+      command: "npx",
+      args: ["-y", "@trusty-squire/mcp@0.9.19-rc.12", "server"],
+      env: {
+        TRUSTY_SQUIRE_AGENT_IDENTITY: "goose",
+        TRUSTY_SQUIRE_REGISTRY_URL: "https://registry.trustysquire.ai",
+      },
+    });
+
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = yamlParse(raw) as {
+      extensions: {
+        trustysquire?: unknown;
+        custom?: unknown;
+        squire: { args: string[]; envs: Record<string, string> };
+      };
+    };
+    expect(parsed.extensions.trustysquire).toBeUndefined();
+    expect(parsed.extensions.custom).toBeDefined();
+    expect(parsed.extensions.squire.args).toEqual([
+      "-y",
+      "@trusty-squire/mcp@0.9.19-rc.12",
+      "server",
+    ]);
+    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe(
+      "socks5://127.0.0.1:1080",
+    );
+    expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_REGISTRY_URL).toBe(
+      "https://registry.trustysquire.ai",
+    );
+  });
+
   // Regression: pre-rc.21 writeConfig replaced the entire envs block on
   // every install. A re-install that omitted --proxy-url= wiped the
   // previously-set value. Merge contract: present key in input.env

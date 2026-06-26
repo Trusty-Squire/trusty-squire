@@ -1,5 +1,18 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.12 (2026-06-25)
+
+Prerelease (`next`). Fixes Goose installs that kept loading older Trusty Squire
+servers after reconnecting.
+
+- fixed(connect): Goose configs written from npx now launch
+  `npx -y @trusty-squire/mcp@<version> server` instead of pinning a temporary
+  npx cache path that can disappear or keep stale tool schemas alive.
+- fixed(connect): Goose reconnects now remove legacy `trustysquire` /
+  `trusty-squire` extension aliases, including old entries pinned to versions
+  like `@trusty-squire/mcp@0.4.1`, while preserving useful env settings such as
+  proxy configuration.
+
 ## 0.9.19-rc.11 (2026-06-25)
 
 Prerelease (`next`). Removes the old async provisioning surface and deprecated

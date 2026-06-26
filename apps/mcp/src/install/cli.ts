@@ -249,23 +249,14 @@ function isAgentTarget(s: string): s is AgentTarget {
 //    that points at a permanent path. Use the absolute bin.js path
 //    directly. Deterministic, offline, fast.
 //
-// 2. Ephemeral + stable version — the CLI was invoked via
-//    `npx @trusty-squire/mcp@X.Y.Z`, which copies the package into
-//    npx's throwaway cache. The cache CAN get swept, so we don't
-//    pin the cache path; instead we write `npx @trusty-squire/mcp@<version>`
-//    so the launch re-resolves against npm every time. Works as
-//    long as the version is on the public npm registry.
-//
-// 3. Ephemeral + prerelease version — the CLI was invoked via
-//    `npx <tarball-url>` (the GitHub-Release test pattern). The
-//    version isn't on npm, so case 2 would fail with `ETARGET`.
-//    We instead copy the package out of the ephemeral cache into
-//    `~/.trusty-squire/lib/mcp` and write a `node <stable>/dist/bin.js`
-//    launch. The stable copy survives npx-cache cleanup; if the user
-//    re-installs they overwrite it.
-//
-// Prerelease detection: semver prerelease versions carry a `-` (e.g.
-// `0.6.0-rc.1`). Stable versions don't. Cheap, reliable.
+// 2. Ephemeral — the CLI was invoked via npx, which copies the package into
+//    npx's throwaway cache. The cache CAN get swept, so never pin the cache
+//    path into a host agent config. Instead write
+//    `npx -y @trusty-squire/mcp@<version> server`, which re-resolves the exact
+//    published version on each agent launch. This matters for RCs: prerelease
+//    versions are published to npm on the `next` tag, so treating every
+//    prerelease as a non-registry tarball leaves Goose pointing at dead npx
+//    cache paths and stale tool schemas.
 /**
  * Copy an npx-style node_modules tree to a stable location.
  *
@@ -303,11 +294,15 @@ function resolveServerLaunch(): { command: string; args: string[] } {
   if (!ephemeral) {
     return { command: process.execPath, args: [binPath, "server"] };
   }
-  const isPrerelease = VERSION.includes("-");
-  if (!isPrerelease) {
-    return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
-  }
-  // Prerelease from GitHub Releases — copy the package PLUS the
+  return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
+}
+
+// Historical fallback for GitHub-release tarball installs. The normal install
+// path no longer calls this because RCs are published to npm and host configs
+// must not pin npx cache paths. Kept exported for the regression tests around
+// copying broken npx symlink trees.
+function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args: string[] } {
+  // Copy the package PLUS the
   // ephemeral cache's entire `node_modules` to a stable location.
   //
   // We need both because the package imports @modelcontextprotocol/sdk,
@@ -1244,5 +1239,6 @@ export {
   parseArgs,
   pollForClaim,
   printAsnWarning,
+  resolveCopiedNpxServerLaunch,
   resolveServerLaunch,
 };

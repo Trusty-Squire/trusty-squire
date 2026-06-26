@@ -69,6 +69,7 @@ export interface WriteConfigInput {
 }
 
 const SERVER_KEY = "squire";
+const LEGACY_SERVER_KEYS = ["trustysquire", "trusty-squire"] as const;
 
 // ── Helpers shared across JSON-format agents ─────────────────
 
@@ -229,8 +230,20 @@ const goose: AgentDefinition = {
         : {};
     // Merge env on top of any previously-set vars rather than replacing
     // wholesale. Same regression class as the JSON-mcp-servers path —
-    // see priorServerEnv() comment.
-    const priorEnvs = priorServerEnv(extensions[SERVER_KEY], "envs");
+    // see priorServerEnv() comment. Also absorb envs from legacy Goose
+    // entries (`trustysquire` / `trusty-squire`) before deleting them so
+    // old pinned packages cannot keep exposing stale tools.
+    const legacyEnvs = LEGACY_SERVER_KEYS.reduce<Record<string, string>>(
+      (acc, key) => ({ ...acc, ...priorServerEnv(extensions[key], "envs") }),
+      {},
+    );
+    const priorEnvs = {
+      ...legacyEnvs,
+      ...priorServerEnv(extensions[SERVER_KEY], "envs"),
+    };
+    for (const key of LEGACY_SERVER_KEYS) {
+      delete extensions[key];
+    }
     extensions[SERVER_KEY] = {
       type: "stdio",
       name: SERVER_KEY,
