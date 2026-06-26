@@ -170,9 +170,77 @@ One primitive, reused by every surface:
    "needs user" worklist instead of silent give-up. (Separate from A; do after.)
 6. **Deferred:** B (end-user autonomous), and any operator push for the C queue.
 
+## Spike results (2026-06-26) — Linux+Xvfb bridge is VIABLE
+
+Ran the feasibility spike on the Linux operator box (patchright Chrome headed on
+Xvfb, x11vnc attach, xdotool = the same XTEST path noVNC→x11vnc uses):
+
+| Question | Result |
+|---|---|
+| Chrome boots headed on a shareable X display (the F13 path)? | ✅ yes |
+| x11vnc attaches to the *running* browser's display? | ✅ yes |
+| Page renders correctly / viewable? | ✅ yes (screenshot confirmed) |
+| Human input (XTEST) registers a click on the page? | ✅ yes (click count incremented) |
+| Still works while the bot drives via CDP concurrently? | ✅ yes (clicks landed) |
+| Automation survives the external input? | ✅ yes (run continued) |
+
+**The late-attach bridge works on Linux+Xvfb.** No window manager needed (Chrome
+already holds X focus; XTEST clicks + keyboard reach the renderer). Codex's
+concurrent-control concern (#4) is real but *not* a blocker: the OS-input and
+CDP-input channels coexist — the only race is page *state*, solved by the
+**automation lock** (bot polls, never acts, while the human drives).
+
+Caveat learned the hard way: an early "input never registers" scare was a broken
+test page (a setContent inline `<script>` that never ran), not an input problem.
+Attach listeners via `evaluate`, not inline `<script>`, when spiking.
+
+### What the spike did NOT resolve (and reshapes the architecture)
+
+- **macOS is out of reach for the x11vnc rig — by nature, not just access.**
+  `x11vnc` is X11-only; macOS Chrome renders via Quartz, not X11, so the existing
+  rig **cannot** attach to Chrome on a Mac. (Also: the Tailscale Mac doesn't
+  advertise Tailscale SSH and has no authorized key for the dev box, so it's
+  currently un-drivable from here — a one-time enable.)
+- **Cross-platform (Mac/Windows end-users on Surface A) needs a different
+  viewer.** The strong candidate is a **CDP screencast** (`Page.startScreencast`
+  for frames + `Input.dispatchMouseEvent` for input): cross-platform, **tab-scoped**
+  (fixes Codex's "x11vnc is display-level" concern), input guaranteed to reach the
+  renderer (it's how Playwright drives), and no Xvfb/x11vnc/WM dependency. Cost:
+  it's more app-building (the host renders frames + captures clicks) vs noVNC's
+  ready-made browser viewer.
+
+### Decision the spike sharpens
+
+- **Linux (operator/housekeeper + Linux users):** x11vnc late-attach is proven —
+  buildable now.
+- **Cross-platform Surface A:** x11vnc won't work → CDP-screencast.
+- **So: build two viewers (x11vnc for Linux now, CDP-screencast later), or build
+  the CDP-screencast viewer once (cross-platform, more host UI work)?** This
+  replaces the original "is the bridge even possible" question — it is, on Linux.
+
+## Codex outside-voice findings folded in (2026-06-26)
+
+Beyond the bridge, fold these into implementation (not forks):
+- **Automation lock** (#4): while the user has control, the bot may poll, never act.
+- **Independent paused-session lifecycle** (#5,#7): sessions are live `Map`
+  objects with no paused-state/owner/timeout/reconnect/teardown. A returned
+  `paused_for_user` URL needs its own timers + teardown even if the host agent
+  disappears — the rig's `finally` only works inside one long call today.
+- **Don't reuse `runInBotChrome` as-is** (#2): it waits for the profile to be
+  *free* then launches its own Chrome; wrong abstraction for an in-flight session.
+- **Respect the self-launch/CDP launch path** (#3): don't force the old
+  `launchPersistentContext`/fingerprint-exposing path when bridging.
+- **Security** (#9,#10,#11): >8-char secret, single-viewer lock, kill-on-disconnect,
+  tab-scoped (not whole-desktop), and the URL leaks into transcripts/history.
+- **Payment/KYC ≠ phone** (#12): consent boundaries, explicit consent + distinct
+  status, not auto-"pausable".
+- **Keep 2captcha as primary, human as fallback** (#14) until data says otherwise.
+- **Path fix** (#13): `provision-gate.ts` lives at `apps/mcp/src/`, not `.../bot/`.
+
 ## Open questions
 
-1. **Attach vs relaunch.** Can we expose the running `BrowserController`'s Chrome
+1. **Attach vs relaunch.** RESOLVED for Linux (attach works). Remaining: can we
+   expose the running `BrowserController`'s Chrome
    over x11vnc without disrupting the in-flight automation (it's headed under
    Xvfb already via F13)? Or do we need CDP-attach a viewer? This is the crux of
    phase 1 — spike it first.
