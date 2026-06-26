@@ -2,6 +2,7 @@
 // scheduler.ts (Phase 3); this is the thin entry that parses flags and config.
 
 import { loadConfig } from "./config.js";
+import { runVerify } from "./scheduler.js";
 
 const HELP = `ts-housekeeper — codex-driven registry verify scheduler
 
@@ -40,10 +41,5 @@ export async function runHousekeeperCli(argv: readonly string[]): Promise<void> 
   }
   const args = parseArgs(argv);
   const config = loadConfig();
-  // Phase 3 wires runVerify(config, args) here.
-  process.stdout.write(
-    `housekeeper verify (once=${String(args.once)} dry=${String(args.dry)}) → ` +
-      `registry ${config.registryUrl}\n` +
-      `[scheduler not yet implemented — Phase 3]\n`,
-  );
+  await runVerify(config, args);
 }
