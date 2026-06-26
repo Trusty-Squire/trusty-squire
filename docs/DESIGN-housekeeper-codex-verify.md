@@ -168,14 +168,25 @@ must be re-pointed at the new package's `package.json`.
 - Notifiers (`telegram-notifier`, `github-issue-notifier`, `notifier`).
 
 **Registry change (`apps/registry`):**
-- Delete the confidence-sampler decision path; promote on first success.
-- Keep `verifier-outcome` → transition + the 3-strike demotion (now the whole
-  rule).
+- **The mechanical rule already exists** — no behavioral change needed.
+  `VERIFIER_PROMOTION_THRESHOLD = 1` (one success promotes; `skill-store.ts:390`)
+  and `VERIFIER_FAILURE_THRESHOLD = 3` (3rd consecutive *rot* failure demotes;
+  `:394`), with `classifyFailure` already gating: walls quarantine on the first
+  hit, transient/infra never advance the counter (`skill-store-memory.ts:444-486`,
+  mirrored in `prisma-skill-store.ts`). The new client omits the sampler `verdict`
+  field, so the registry uses exactly this count-based path.
+- **Deferred (low-value / high-risk):** removing the now-dead `verdict`/sampler
+  decision branch from the stores + route + schema. It is harmless dead code once
+  Phase 4 deletes its only producer (the old fresh-verify), and the registry is a
+  LIVE service Codex is actively reporting to — ripping out an API field there for
+  zero behavioral gain isn't worth the deploy risk mid-refactor. Tracked as a
+  follow-up to land after Phase 4.
 
 ## Phased plan
 
-0. **Registry:** simplify the promote rule (sampler → one-success); keep 3-strike
-   + transition. Tests for the mechanical rule.
+0. **Registry:** ✅ already satisfied — `VERIFIER_PROMOTION_THRESHOLD = 1` +
+   3-strike rot demotion + wall/transient guards are in place; omitting `verdict`
+   uses them. Dead verdict-path removal deferred to a post-Phase-4 follow-up.
 1. **Scaffold `apps/housekeeper`:** package.json (deps: skill-schema, yaml),
    tsconfig, bin entry. Copy/relocate `operator-env`/`session`/`version`.
 2. **Codex-exec runner:** the prompt template + spawn + outcome parse, with the
