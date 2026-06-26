@@ -122,9 +122,15 @@ const HTML_SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 export function redactHtml(html: string): string {
-  let out = redactCredentials(html);
+  // Run the SPECIFIC, structural DOM-secret patterns (captcha tokens, auth
+  // headers, password inputs) BEFORE the generic keyword-based credential
+  // redactor. The generic `token = "…"` contextual rule is greedy: on
+  // `window.token = "g-recaptcha-response":"<tok>"` it would otherwise redact
+  // the KEY NAME and consume its closing quote, destroying the structure the
+  // captcha pattern keys on — leaving the real token value un-redacted.
+  let out = html;
   for (const [re, repl] of HTML_SECRET_PATTERNS) {
     out = out.replace(re, repl);
   }
-  return out;
+  return redactCredentials(out);
 }
