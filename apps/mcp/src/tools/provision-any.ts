@@ -214,7 +214,10 @@ RESPONSES:
   message. If the user wants Trusty Squire to poll only matching OTP emails for
   requested services, tell them to run \`npx @trusty-squire/mcp settings\`, open
   Advanced settings, enable email verification polling, then retry.
-- status="captcha_blocked" → the site uses a captcha the bot can't pass; manual signup.
+- status="captcha_blocked" → the site uses an interactive captcha the bot can't pass.
+  Relay the message: offer to let the user sign up themselves once at the signup URL,
+  then have them paste a restricted/test API key — call store_credential to vault it
+  (it stays in the vault, never exposed) and continue with operate-tasks. Or skip.
 - status="oauth_required" → the service only offers OAuth signup; manual signup.
 - status="anti_bot_blocked" → the site's anti-bot gateway (Cloudflare/Sucuri/DataDome/Imperva)
   held the bot on its "Just a moment..." page indefinitely. IP/fingerprint risk-score block.
@@ -1234,9 +1237,17 @@ export function buildSignupResponse(
       steps: sanitizeSteps(result.steps),
       captcha_kind: result.captcha.kind,
       browser_channel: result.browser_channel ?? null,
+      // Flow B hand-off (wall-handoff design): an interactive captcha the bot
+      // can't clear is a one-time signup, not a dead end. Offer the user the
+      // sign-up-yourself-and-vault-the-key path (store_credential keeps the key
+      // in the vault, never exposed) instead of "manual signup, the end."
       message:
-        `${input.service} blocked automated signup with a ${result.captcha.kind} captcha. ` +
-        `Tell the user to sign up manually at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`}.`,
+        `${input.service} uses a ${result.captcha.kind} captcha the bot can't clear. ` +
+        `Since a service like this is signed up for once, the smoothest path: sign up ` +
+        `yourself at ${input.signup_url ?? `https://${input.service.toLowerCase()}.com`} ` +
+        `(~30s), then paste me a restricted/test API key — I'll store it in your vault ` +
+        `with store_credential and handle everything after (the key stays in the vault, ` +
+        `never exposed). Or skip this service.`,
     };
   }
 
