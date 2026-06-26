@@ -1,251 +1,177 @@
-# DESIGN — Wall hand-off: pause, surface a live browser, let the user clear it, resume
+# DESIGN — Wall hand-off: conversational hand-back (not a live-browser bridge)
 
 Status: **proposed** (design discussion 2026-06-26; not yet built). Branch:
-`claude/wall-handling`.
+`claude/wall-handling`. Supersedes the earlier "pause + surface a live browser"
+framing of this doc — that (the **live-browser bridge**) is now a documented,
+spiked, but **deferred shelf option** (last section). The chosen design is the
+cheap one.
 
 ## Thesis
 
-Today TS treats every "wall" (visible captcha, 2FA, phone/SMS, anti-bot
-interstitial) as **bypass-or-die**: try hard to defeat it, and on failure return
-a terminal give-up status. Replace that with **bypass-if-cheap, else hand off**:
-when the bot can't clear a wall autonomously, **pause the run, surface the *live*
-browser to the user, let them clear the wall, detect it, and resume** — instead
-of giving up.
+Today TS treats every wall (visible captcha, 2FA, phone/SMS, anti-bot) as
+**bypass-or-die**: try hard, then return a terminal give-up. Replace that with a
+**resumable conversational hand-back**: when the bot hits a wall it can't clear,
+it returns a structured `needs_user` signal, the host agent relays it in plain
+language, the user supplies the one missing piece (a code, or a credential they
+got themselves), and the run continues. **No live browser, no public tunnel, no
+new attack surface.**
 
-This converts the walls TS currently calls **permanently unservable**
-(`phone`/`SMS`, `kyc`, sometimes `payment` — `provision-gate.ts`
-`PERMANENT_WALL_KINDS`) into **user-assisted-servable**: those are exactly the
-walls a human clears in 20 seconds. It's a coverage expansion, not just nicer UX.
+## Why the cheap version, not the bridge
 
-## Research: this is NOT what browser-use does
+Walls are **rare overall, but bite on a few spine services (e.g. Stripe).** The
+honest analysis (full reasoning in the deferred-bridge section):
 
-The trigger for this work was "do what browser-use does." Worth correcting:
-**browser-use (2026) has no native pause / human-in-the-loop.** Its official
-answer to walls is "infrastructure, not code" — bypass harder via Browser Use
-Cloud (stealth fingerprinting + proxy rotation + CAPTCHA-solving). The community
-has asked for HITL ([issue #221], [discussion #1695]) but it isn't in the
-library. So browser-use is the *same* bypass-or-give-up philosophy we're leaving.
+1. **Walls split three ways and only one needs a live browser.** *Code-walls*
+   (SMS/authenticator/email OTP) just need the user to relay a code the bot then
+   types — a text exchange. *Start-walls* (a landing-page interstitial) lose
+   nothing to "retry / do it yourself." Only *interactive walls* (a visible
+   Turnstile checkbox, drag-puzzle, biometric) truly need in-page human input —
+   and that's the rare case.
+2. **Spine signups are one-time, and the model already operates existing
+   accounts.** You make one Stripe account ever; the recurring value (create a
+   product, mint a key) is an **operate-task on the logged-in account** — wall-free
+   (the Stripe operate-task already drives the existing dashboard, no captcha). So
+   the interactive wall only bites at *fresh signup*, a rare-squared event.
+3. **The bridge's value lands on end-users (often Macs), which the cheap rig
+   can't serve.** `x11vnc` is X11-only; macOS Chrome is Quartz. Serving the actual
+   use case would need the harder **cross-platform CDP-screencast** viewer — a
+   rare event needing the expensive version. Poor ROI, plus a live-authenticated-
+   session-on-a-public-URL attack surface.
 
-The **"surface a live browser, let the human clear it, resume"** pattern is the
-**Cloudflare Browser Run / Browserbase "Live View"** model:
+So: capture the SMS/OTP class fully and close the Stripe-class credibility gap,
+at ~5% of the bridge's cost and none of its security surface.
 
-1. Script detects a wall (login / CAPTCHA / MFA).
-2. It obtains a **Live View URL** into the *same running session* and shares it
-   with the user (Slack / email / UI).
-3. The human takes control of the live browser and clears the wall.
-4. The script detects completion by event/poll (navigation, a DOM element
-   appearing, network idle) with a timeout (~5 min), then resumes.
+## The two flows
 
-TS is unusually well placed to do this **on infra it already owns** (below) — it
-doesn't need to rent a cloud browser.
+### Flow A — code-walls (SMS / authenticator / email OTP). In-band; session + vault moat preserved.
 
-[issue #221]: https://github.com/browser-use/browser-use/issues/221
-[discussion #1695]: https://github.com/browser-use/browser-use
+```
+agent:  Mailgun texted a 6-digit code to verify your phone. What's the code?
+you:    492013
+agent:  (types it, keeps driving) … API key extracted and stored in your vault.
+```
 
-## TS is already ~80% there (two halves, never composed)
+The bot can't *read* the code but can *type* it. `await_verification` already
+does this for email (reads the user's Gmail); extend it with an "ask the user"
+branch when the channel is SMS/authenticator (no inbox to poll).
 
-The two pieces of the Live-View pattern already exist in the codebase:
+### Flow B — interactive captcha (the Stripe case). Out-of-band; one-time.
 
-1. **Pause → poll-live-page → detect-clear → resume.** `waitForGoogleChallenge`
-   / `waitForGitHubChallenge` (`apps/mcp/src/bot/agent.ts:11621`/`11698`): on a
-   Google number-match or GitHub "verify it's you," the bot already notifies,
-   pauses mid-run, polls the live page every 3s for up to 4 min, and resumes on
-   clear. **But it's wired ONLY for OAuth provider challenges** — not captcha,
-   anti-bot, phone, or form-OTP.
-2. **A live-browser-over-a-URL bridge.** `runInBotChrome` / `runHeadlessChrome`
-   (`apps/mcp/src/bot/google-login.ts:585`/`:679`): Xvfb + x11vnc + websockify +
-   branded noVNC + **cloudflared tunnel → public URL** + a `pollUntilDone` loop +
-   clean `teardown`. **But it spawns a *fresh* Chrome for `mcp login`** — it has
-   never been attached to the *running* signup `BrowserController`.
+```
+agent:  Stripe's signup wants a Turnstile checkbox I can't click. Options:
+        1. Sign up at dashboard.stripe.com/register yourself (~30s), then paste me
+           a restricted key — I'll vault it and handle everything after.
+        2. Skip Stripe.
+you:    rk_live_…
+agent:  (stores it in your vault) Got it. Create that $20/mo product now?
+```
 
-**The one genuinely hard new piece:** bridge the *in-flight* `BrowserController`
-Chrome out through the existing x11vnc/websockify/cloudflared rig, instead of
-launching a new browser. Everything else is composition + policy.
+You sign up for the giant once; TS operates it wall-free forever after. Closes
+the "it can't even do Stripe" credibility hole without a live browser.
 
-## Decisions
+## The `needs_user` resumable status (D1)
 
-### D1 — Build surface A (host-driven) first; defer B; C is a queue
+Replaces today's terminal give-up for walls (`provision-any.ts:1227-1408`):
 
-Three contexts the wall hand-off could serve. We build **A** first, **defer B**,
-and make **C** a worklist (no pause):
+```
+{ status: "needs_user",
+  wall: "sms_code" | "authenticator_code" | "interactive_captcha" | "phone_unavailable",
+  message: "<plain English the host agent relays>",
+  resume: "code" | "connect_existing" }
+```
 
-- **A — Host-driven `provision_*` (BUILD FIRST).** The host agent (Claude
-  Code/Codex) *is* the conversational surface, so hand-off is nearly free: a tool
-  returns a paused status + a Live View URL, the agent shows it to the user in
-  natural language, and resumes on clear. This is the strategic direction
-  (host-as-planner) and needs no notification plumbing.
-- **B — End-user autonomous provision (DEFER / likely YAGNI).** A background bot
-  on the user's laptop that pauses + notifies the user directly. Given the
-  host-as-planner direction, an end-user flow with *no* host agent watching is
-  rare; and without a per-user notification channel (Telegram was operator-only
-  and is being removed) there's no clean surface anyway. Revisit only if a real
-  no-host end-user flow appears.
-- **C — Unattended housekeeper (NO pause).** Nobody is watching an unattended
-  verify run, so it must not block on a human. It classifies the wall and routes
-  it to a **"needs user"** worklist (a small evolution of today's `quarantined`),
-  so walls accumulate as a checkable list instead of silent give-ups. A *push*
-  for that worklist is a separate, later, per-account-channel concern — NOT the
-  removed personal Telegram bot.
+- `resume: "code"` → agent asks the user, then `provision_act type=<code>`,
+  continues. (Flow A.)
+- `resume: "connect_existing"` → agent relays the external-signup hand-back; a
+  user-pasted credential goes to the vault. (Flow B.)
 
-### D2 — Telegram is removed (done on this branch)
-
-Telegram was operator-only (end users never set `TELEGRAM_BOT_TOKEN`); its main
-use (the housekeeper digest) already went with the housekeeper extraction, and
-the hand-off design routes all notification through the host agent. Ripped out
-(`telegram-notify.ts` + test + the `sendTelegramHeightenedAuth` call sites). The
-API `notifyHeightenedAuth` path + stderr banners remain.
-
-### D3 — The bypass/pause policy (never nag for the auto-handleable)
+## Bypass / hand-off policy (D2 — never nag for the auto-handleable)
 
 - **Keep auto-bypassing (no user):** invisible Turnstile / reCAPTCHA v3 (Tier-1
-  behavior sim — free, works; `runCaptchaGate` `agent.ts:5876`), and email-OTP
-  (the inbox poll already nails this — `provision_await_verification`,
-  `read-otp.ts`).
-- **Pause + hand off (only these):** visible Turnstile / reCAPTCHA-v2 checkbox,
-  authenticator/2FA codes, phone/SMS, and "verify it's you" device challenges —
-  the walls only a human can or should clear. This also lets interactive runs
-  **drop the paid 2captcha tier** (a human is cheaper and more reliable than a
-  solver whose tokens get rejected at the IP layer).
-- **Anti-bot interstitial (CF "just a moment"):** keep the existing wait/reload;
-  if it won't clear, offer the hand-off as a last resort (a human clicking the
-  Turnstile in the live browser may clear it) before any give-up.
+  behavior sim, free; `runCaptchaGate` `agent.ts:5876`), and email-OTP (the inbox
+  poll — `provision_await_verification`, `read-otp.ts`).
+- **Keep the 2captcha tier as the primary solver** for visible checkboxes (Codex
+  #14 — human hand-back is a *fallback*, not a replacement; revisit on data).
+- **Hand off (`needs_user`):** an SMS/authenticator code (→ Flow A); an
+  interactive captcha the solver can't beat (→ Flow B); a phone number we can't
+  supply.
+- **Payment/KYC stay terminal-with-consent** (Codex #12 — consent boundaries, not
+  20-second clears). They are NOT auto-handed-back.
 
-### D4 — Status taxonomy: a resumable paused state + the missing phone status
+## Minimal build (days, not weeks)
 
-- Add a **resumable** `paused_for_user` / `awaiting_user` status, distinct from
-  the terminal give-ups in the mapper (`provision-any.ts:1227-1408`). It carries
-  `{ live_view_url, reason, expires_in }`.
-- Add the missing **`phone_required`** host status (today phone walls collapse
-  into `verification_not_sent`/`failed` — a gap; `phone` exists only as a
-  `FailureStage` and a `PERMANENT_WALL_KIND`).
-- `provision-gate.ts` `PERMANENT_WALL_KINDS` (phone/kyc/payment) shift from
-  "refuse" to "pausable" in interactive contexts — a human can complete them.
+1. **`needs_user` status** on the `provision_*` results + the terminal mapper
+   (`provision-any.ts`). Replaces "manual signup, giving up" with the structured
+   resumable signal. Plus the missing `phone_required`/`sms_code` taxonomy.
+2. **`await_verification` "ask the user" branch** (SMS/authenticator) alongside
+   the inbox poll.
+3. **Accept-pasted-credential → vault** path for Flow B (the vault already takes
+   credentials; wire a `provision_store_credential` or reuse the extract write).
+4. **Tool-description / prompt copy** so the host agent relays each hand-back
+   cleanly (the two flows above are the copy).
 
-## The mechanism — `pauseAndSurface(reason)`
+No Xvfb, no x11vnc, no cloudflared, no live session on a public URL.
 
-One primitive, reused by every surface:
+## What it deliberately does NOT do
 
-1. **Bridge the running browser out.** Attach the existing
-   x11vnc/websockify/cloudflared rig (`google-login.ts`) to the *in-flight*
-   `BrowserController`'s Chrome/Xvfb display (the new work), yielding a
-   password-gated public Live View URL.
-2. **Surface it.** Surface A: return `{ status: "paused_for_user", reason,
-   live_view_url, expires_in }` as the tool result. (B/C: their own surfaces.)
-3. **Poll for clear.** Reuse the `waitFor*Challenge` poll: every ~3s check the
-   live page for (a) the wall element/text gone, (b) the expected next-step
-   element present, or (c) navigation off the challenge URL — with a timeout.
-4. **Resume or time out.** Cleared → tear down the bridge, continue the run.
-   Timed out → tear down, return a **resumable** `paused_timeout` (not a hard
-   fail).
+Let you clear a captcha *inside the bot's live session* mid-flow. That's the
+bridge (below). Cost of skipping it: on a *fresh* signup of an interactive-walled
+service, you lose the bot's in-progress session and do that signup yourself. For
+one-time spine services, that's the right trade.
 
-## UX — surface A in detail
+---
 
-- Agent drives a signup → hits a visible Turnstile / a 2FA prompt.
-- `provision_act` / `provision_captcha_gate` returns
-  `{ status: "paused_for_user", reason: "turnstile_checkbox",
-  live_view_url: "https://….trycloudflare.com", expires_in: 300 }`.
-- The agent tells the user, in its own words: *"Stripe wants a Turnstile
-  checkbox I can't solve — open this live browser, click it, and I'll continue:
-  \<URL\>."*
-- The bot auto-detects the clear (poll) **or** the user says "done" → a new
-  `provision_resume` tool (or the next `provision_observe`) continues.
-- Security: the Live View exposes the user's live session — keep it
-  password-gated (the rig already does) and tear it down on resume/timeout.
+# Deferred shelf option — the live-browser bridge
 
-## Phased plan
+Kept here because it was spiked and de-risked; revisit only if usage data shows
+*fresh signup behind an interactive wall* is a recurring pain the operate-existing
+model doesn't cover.
 
-1. **The bridge (hard part).** Make `pauseAndSurface` attach the rig to a running
-   `BrowserController` (vs spawning fresh). Unit-test the URL/teardown lifecycle;
-   manual live test against a known Turnstile service.
-2. **Surface A tools.** `paused_for_user` status + `live_view_url` on
-   `provision_captcha_gate` / `provision_act`, a `provision_resume` tool, and the
-   poll-for-clear loop. Tool-description copy so the host agent surfaces the URL
-   well.
-3. **Policy wiring (D3).** Branch `runCaptchaGate` + the OAuth-challenge handlers
-   into `pauseAndSurface` for the pause-list walls; keep auto-bypass for the
-   rest. Generalize the `waitFor*Challenge` poll to captcha/phone/anti-bot.
-4. **Taxonomy (D4).** `paused_for_user` / `paused_timeout` / `phone_required`;
-   `provision-gate` permanent→pausable in interactive contexts.
-5. **C — needs-user queue.** Route unattended-housekeeper walls to a registry
-   "needs user" worklist instead of silent give-up. (Separate from A; do after.)
-6. **Deferred:** B (end-user autonomous), and any operator push for the C queue.
+**The idea:** when the bot hits an interactive wall, expose the *running* browser
+to the user over a URL (TS's existing noVNC/cloudflared rig), let them clear it
+in-session, detect + resume. This is the Cloudflare Browser Run / Browserbase
+"Live View" pattern (browser-use itself has no HITL — it bypasses via its cloud).
 
-## Spike results (2026-06-26) — Linux+Xvfb bridge is VIABLE
+### Spike results (2026-06-26) — the bridge IS viable on Linux
 
-Ran the feasibility spike on the Linux operator box (patchright Chrome headed on
-Xvfb, x11vnc attach, xdotool = the same XTEST path noVNC→x11vnc uses):
+Patchright Chrome headed on Xvfb, x11vnc attach, xdotool (= the noVNC→x11vnc XTEST
+path):
 
 | Question | Result |
 |---|---|
-| Chrome boots headed on a shareable X display (the F13 path)? | ✅ yes |
-| x11vnc attaches to the *running* browser's display? | ✅ yes |
-| Page renders correctly / viewable? | ✅ yes (screenshot confirmed) |
-| Human input (XTEST) registers a click on the page? | ✅ yes (click count incremented) |
-| Still works while the bot drives via CDP concurrently? | ✅ yes (clicks landed) |
-| Automation survives the external input? | ✅ yes (run continued) |
+| Chrome boots headed on a shareable X display (the F13 path)? | ✅ |
+| x11vnc attaches to the *running* browser's display? | ✅ |
+| Human input (XTEST) registers a click on the page? | ✅ |
+| Still works while the bot drives via CDP concurrently? | ✅ |
+| Automation survives the external input? | ✅ |
 
-**The late-attach bridge works on Linux+Xvfb.** No window manager needed (Chrome
-already holds X focus; XTEST clicks + keyboard reach the renderer). Codex's
-concurrent-control concern (#4) is real but *not* a blocker: the OS-input and
-CDP-input channels coexist — the only race is page *state*, solved by the
-**automation lock** (bot polls, never acts, while the human drives).
+No window manager needed. The OS-input and CDP-input channels coexist; the only
+race is page *state*, solved by an **automation lock** (bot polls, never acts,
+while the human drives). (An early "input never registers" scare was a broken
+test page — a `setContent` inline `<script>` that never ran — not an input
+problem. Attach listeners via `evaluate` when spiking.)
 
-Caveat learned the hard way: an early "input never registers" scare was a broken
-test page (a setContent inline `<script>` that never ran), not an input problem.
-Attach listeners via `evaluate`, not inline `<script>`, when spiking.
+### Why it's still deferred (the costs the spike + Codex surfaced)
 
-### What the spike did NOT resolve (and reshapes the architecture)
+- **macOS can't use it by nature.** `x11vnc` is X11-only; macOS Chrome is Quartz.
+  Cross-platform Surface A would need a **CDP-screencast** viewer
+  (`Page.startScreencast` + `Input.dispatchMouseEvent`) — cross-platform,
+  tab-scoped, but more host-UI to build.
+- **New infra + lifecycle** (Codex #5,#7): a paused-session state machine with
+  independent owner/timeout/reconnect/teardown (the rig's `finally` only works
+  inside one long call today).
+- **`runInBotChrome` is the wrong abstraction to reuse** (Codex #2): it waits for
+  the profile to be free, then launches its *own* Chrome.
+- **Security surface** (Codex #9-11): a live authenticated session on a public
+  cloudflared URL; needs >8-char secret, single-viewer lock, kill-on-disconnect,
+  and the URL leaks into chat transcripts/history.
 
-- **macOS is out of reach for the x11vnc rig — by nature, not just access.**
-  `x11vnc` is X11-only; macOS Chrome renders via Quartz, not X11, so the existing
-  rig **cannot** attach to Chrome on a Mac. (Also: the Tailscale Mac doesn't
-  advertise Tailscale SSH and has no authorized key for the dev box, so it's
-  currently un-drivable from here — a one-time enable.)
-- **Cross-platform (Mac/Windows end-users on Surface A) needs a different
-  viewer.** The strong candidate is a **CDP screencast** (`Page.startScreencast`
-  for frames + `Input.dispatchMouseEvent` for input): cross-platform, **tab-scoped**
-  (fixes Codex's "x11vnc is display-level" concern), input guaranteed to reach the
-  renderer (it's how Playwright drives), and no Xvfb/x11vnc/WM dependency. Cost:
-  it's more app-building (the host renders frames + captures clicks) vs noVNC's
-  ready-made browser viewer.
+### If revisited, build order
 
-### Decision the spike sharpens
+1. Spike the **CDP-screencast** viewer on Linux + (when access is set up) macOS,
+   to decide one cross-platform viewer vs two.
+2. Paused-session lifecycle + automation lock + a `provision_resume` tool.
+3. Wire `runCaptchaGate` → pause for visible-captcha walls, behind a flag.
 
-- **Linux (operator/housekeeper + Linux users):** x11vnc late-attach is proven —
-  buildable now.
-- **Cross-platform Surface A:** x11vnc won't work → CDP-screencast.
-- **So: build two viewers (x11vnc for Linux now, CDP-screencast later), or build
-  the CDP-screencast viewer once (cross-platform, more host UI work)?** This
-  replaces the original "is the bridge even possible" question — it is, on Linux.
-
-## Codex outside-voice findings folded in (2026-06-26)
-
-Beyond the bridge, fold these into implementation (not forks):
-- **Automation lock** (#4): while the user has control, the bot may poll, never act.
-- **Independent paused-session lifecycle** (#5,#7): sessions are live `Map`
-  objects with no paused-state/owner/timeout/reconnect/teardown. A returned
-  `paused_for_user` URL needs its own timers + teardown even if the host agent
-  disappears — the rig's `finally` only works inside one long call today.
-- **Don't reuse `runInBotChrome` as-is** (#2): it waits for the profile to be
-  *free* then launches its own Chrome; wrong abstraction for an in-flight session.
-- **Respect the self-launch/CDP launch path** (#3): don't force the old
-  `launchPersistentContext`/fingerprint-exposing path when bridging.
-- **Security** (#9,#10,#11): >8-char secret, single-viewer lock, kill-on-disconnect,
-  tab-scoped (not whole-desktop), and the URL leaks into transcripts/history.
-- **Payment/KYC ≠ phone** (#12): consent boundaries, explicit consent + distinct
-  status, not auto-"pausable".
-- **Keep 2captcha as primary, human as fallback** (#14) until data says otherwise.
-- **Path fix** (#13): `provision-gate.ts` lives at `apps/mcp/src/`, not `.../bot/`.
-
-## Open questions
-
-1. **Attach vs relaunch.** RESOLVED for Linux (attach works). Remaining: can we
-   expose the running `BrowserController`'s Chrome
-   over x11vnc without disrupting the in-flight automation (it's headed under
-   Xvfb already via F13)? Or do we need CDP-attach a viewer? This is the crux of
-   phase 1 — spike it first.
-2. **Tunnel lifetime.** Cloudflare's Live View expires ~5 min; our cloudflared
-   `trycloudflare` tunnel can live for the run's duration — confirm and set a
-   sane pause timeout (lean 5–10 min, resumable).
-3. **Resume trigger.** Auto-detect (poll) vs explicit `provision_resume` vs both.
-   Default: both — poll auto-resumes, and the host can force-continue.
+(To unblock the macOS spike: enable Tailscale SSH on the Mac, or Remote Login +
+the dev-box key — currently the Mac is reachable but un-drivable from here.)
