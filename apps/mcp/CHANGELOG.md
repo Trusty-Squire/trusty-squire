@@ -1,5 +1,24 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.11 (2026-06-25)
+
+Prerelease (`next`). Removes the old async provisioning surface and deprecated
+installer compatibility flags for the host-driven signup flow.
+
+- removed(provision): the public MCP tool list no longer exposes `provision` or
+  `check_provision_status`; agents now drive signups directly with
+  `provision_start`, `provision_observe`, `provision_act`, `provision_extract`,
+  and `provision_finish`.
+- removed(connect): the old `install` command alias and deprecated flags
+  `--registry`, `--registry-url`, `--skip-login`, and `--skip-secondary` now
+  fail fast with explicit migration guidance.
+- changed(connect): managed skill registry participation defaults on, while
+  `--no-registry` remains the explicit opt-out.
+- changed(provision): the interactive signup driver is always available; the
+  previous environment opt-out was removed.
+- docs(connect): README, agent guidance, and helper scripts now describe
+  `connect` and the explicit signup-driver tools only.
+
 ## 0.9.19-rc.10 (2026-06-25)
 
 Prerelease (`next`). Improves the interactive signup driver after the latest

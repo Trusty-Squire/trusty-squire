@@ -1,7 +1,7 @@
 // Phase 1 — the interactive provisioning tool surface a frontier HOST agent
 // drives. The host is the planner; these tools are the browser + the moat.
 // Backed by ../bot/provision-session.ts (the session registry over the existing
-// BrowserController substrate). DEFAULT-ON (opt out with PROVISION_DRIVE_TOOLS=0).
+// BrowserController substrate).
 // Domain-scoping, the write-only-vault de-fang, and a per-action audit log are
 // in place; the consent-at-install prompt is the remaining hardening.
 
@@ -259,7 +259,7 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   },
 };
 
-export const PROVISION_DRIVE_TOOLS: Tool[] = [
+export const INTERACTIVE_SIGNUP_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionActTool,
@@ -268,12 +268,3 @@ export const PROVISION_DRIVE_TOOLS: Tool[] = [
   provisionExtractTool,
   provisionFinishTool,
 ] as Tool[];
-
-// DEFAULT-ON (2026-06-25 operator decision — "this will be the default soon").
-// The interactive provisioning tools ship by default; opt out with
-// PROVISION_DRIVE_TOOLS=0/false/off. Domain-scoping, the write-only-vault
-// de-fang, and the per-action audit log are in place; the consent-at-install
-// prompt is the remaining hardening (tracked in DESIGN-host-planner-perception).
-export function provisionDriveToolsEnabled(): boolean {
-  return !/^(0|false|off|no)$/i.test(process.env.PROVISION_DRIVE_TOOLS ?? "");
-}

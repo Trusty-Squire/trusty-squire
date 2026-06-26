@@ -139,7 +139,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   registryEnabled: boolean;
   consentOperatorInboxOtp?: boolean;
 }> {
-  const initialRegistryEnabled = opts.initialRegistryEnabled ?? false;
+  const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
   const wantAdvanced = bailIfCancelled(
     await confirm({
       message: "Configure advanced options? (proxy, registry, OTP)",

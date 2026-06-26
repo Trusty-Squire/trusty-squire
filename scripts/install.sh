@@ -6,9 +6,9 @@
 #   curl -fsSL .../install.sh | sh -s -- --target=claude-code
 #
 # This is a thin convenience wrapper around the npm package: it verifies
-# Node.js is present, then runs `npx @trusty-squire/mcp install`, passing
+# Node.js is present, then runs `npx @trusty-squire/mcp connect`, passing
 # through any arguments. If you already have Node, running
-# `npx @trusty-squire/mcp install` directly does exactly the same thing.
+# `npx @trusty-squire/mcp connect` directly does exactly the same thing.
 
 set -eu
 
@@ -35,4 +35,4 @@ if ! command -v npx >/dev/null 2>&1; then
 fi
 
 echo "trusty-squire: installing the MCP server via npx ..."
-exec npx -y @trusty-squire/mcp install "$@"
+exec npx -y @trusty-squire/mcp connect "$@"

@@ -13,16 +13,18 @@ orchestration.
 
 **One provisioning path:**
 
-**`provision`** — universal browser-automation bot (Playwright + Claude
-vision) for any SaaS signup. Account-bound, vault-backed, free up to
-`ACCOUNT_FREE_QUOTA` signups before billing kicks in. Closed-loop with
-the skill registry: successful runs publish a Skill that subsequent
+**Interactive signup driver** — the host agent plans each step with
+`provision_start`, `provision_observe`, `provision_act`, `provision_extract`,
+and `provision_finish`; Trusty Squire supplies the scoped browser, DOM/screenshot
+observations, vault extraction, and registry hints. Account-bound, vault-backed,
+free up to `ACCOUNT_FREE_QUOTA` signups before billing kicks in. Closed-loop
+with the skill registry: successful runs publish a Skill that subsequent
 provisions replay in ~30s instead of the bot's ~6min.
 
-A second tool path (hand-authored manifests + mandate engine + approval
-flow, formerly `provision_any_service` vs. `provision`) was sunset in
-0.8 — the bot covered every service the team would have written a
-native adapter for, faster than the manifest work paid for itself.
+The hand-authored manifest + mandate-engine path was sunset in 0.8, and
+the old async signup tool has now been removed from the public MCP surface.
+The browser driver covered every service the team would have written a native
+adapter for, faster than the manifest work paid for itself.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
@@ -112,7 +114,7 @@ can dip even while OF#1 rises. Read them together, not in isolation.
   - Long-poll inbox client, verification-link click, post-verify
     navigation loop
   - Hard cap of 15 LLM calls per signup (circuit breaker)
-- **Single-tier install flow.** `npx @trusty-squire/mcp install` does
+- **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for LLM proxy +
      inbox alias service).
@@ -121,7 +123,7 @@ can dip even while OF#1 rises. Read them together, not in isolation.
      account-bound `agent_session_token` to the local session file.
   3. Runs the one-time OAuth login (the `mcp login` flow folded in —
      Google/GitHub session into the bot's Chrome profile; non-fatal,
-     `--skip-login` opts out for CI). Headed (laptop/desktop) is the
+     `--skip-browser` opts out for CI). Headed (laptop/desktop) is the
      recommended environment; a headless box does a one-time remote-
      browser login (noVNC).
   Every install is account-bound — there is no anonymous tier. Free up
@@ -479,9 +481,8 @@ package would defeat the whole 0.7.0 thesis).
 **Client env on user machines:**
 - `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. **Auto-wired by `connect`
   as of rc.10**; defaults to `https://registry.trustysquire.ai`.
-  Override with `connect --registry-url=<url>`, disable with
-  `connect --no-registry` (skips the router entirely → universal bot
-  only).
+  The URL is not user-configurable; disable registry participation with
+  `connect --no-registry`.
 - `SKILL_SIGNING_PRIVATE_KEY` — required for `mcp skill promote`
   (operator-explicit signing). Auto-promote (rc.13+) falls back to
   an ephemeral Ed25519 keypair when this is unset, so the closed
@@ -503,7 +504,7 @@ package would defeat the whole 0.7.0 thesis).
 
 ### Goose / local-dev MCP install
 
-`npx @trusty-squire/mcp install --target=goose` writes the extension to
+`npx @trusty-squire/mcp connect --target=goose` writes the extension to
 `~/.config/goose/config.yaml` (modern goose's config file) — works for
 npx-installed users as of 0.4.2. (Before 0.4.2 it wrote `profiles.yaml`,
 the old pre-1.0 path, so goose never saw it.)

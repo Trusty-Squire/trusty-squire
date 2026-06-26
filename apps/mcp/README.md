@@ -48,10 +48,6 @@ Supported agents: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`
 
 After connecting, restart your agent to pick up the new tools.
 
-> **Renamed in 0.6.14:** the command used to be `install`. The old
-> `install` spelling still works (with a deprecation warning) and will
-> stay around for one major version.
-
 > **Developers only** — if you've cloned this repo and are running the
 > command from inside `~/trusty-squire/apps/mcp/`, npm 10's npx will
 > mistake the local workspace for the install target and fail with
@@ -68,43 +64,29 @@ Once installed, ask your agent in plain English:
 ```
 
 ```
-🛠  provision { "service": "Postmark" }
-✔  Signup started — run_id=mcp-mp7f4k8a-1c4e3f8a
-
-🛠  check_provision_status { "run_id": "mcp-mp7f4k8a-1c4e3f8a" }
-✔  status="success"
+🛠  provision_start { "service_url": "https://postmarkapp.com" }
+🛠  provision_observe { "session_id": "..." }
+🛠  provision_act { "session_id": "...", "kind": "click", "target": "..." }
+🛠  provision_extract { "session_id": "..." }
+✔  credentials: { api_key: "0c1b7c2a-..." }
    service: "Postmark"
-   credentials: { api_key: "0c1b7c2a-..." }
    stored_in_vault: true
+🛠  provision_finish { "session_id": "..." }
 ```
 
-The agent uses the key immediately. You see the signup happen in your vault.
+The agent drives the browser step by step. You see the signup happen in your vault.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `provision` | Start a signup. Returns a `run_id`. Async — takes 1–5 minutes. |
-| `check_provision_status` | Poll a run. Returns `running`, `success`, or one of the failure modes below. |
+| `provision_start` | Open a scoped signup browser session and return the first observation. |
+| `provision_observe` | Re-read the current page. |
+| `provision_act` | Take one browser action, then return the next observation. |
+| `provision_extract` | Reveal/copy credentials from the current credential page. |
+| `provision_finish` | Close the browser session. |
 | `list_credentials` | Browse what's already in your vault for this account. |
-| `get_credential` | Read a specific credential by service or id. |
-
-## Status responses
-
-`check_provision_status` returns one of:
-
-| Status | Meaning | What to do |
-|---|---|---|
-| `running` | Bot is mid-flow. Response carries `recent_steps[]` + `user_action_required` flag. | Poll again in ~30s. If `user_action_required=true`, surface the latest step to the user. |
-| `success` | Credentials extracted + stored. | Done. Show credentials. |
-| `verification_not_sent` | Service needs email verification that the bot could not complete. | Run `npx @trusty-squire/mcp settings`, enable matching OTP polling in Advanced settings, then retry; or finish manually. |
-| `captcha_blocked` | Site uses a captcha the bot can't pass. | Manual signup. |
-| `oauth_required` | Service only offers OAuth/SSO. The needed bot Google/GitHub session is missing. | Run `npx @trusty-squire/mcp login --provider=<google|github>` then retry. |
-| `oauth_consent_needs_review` | Service requested OAuth scopes beyond basic identity. Response lists `requested_scopes` and `unauthorized_scopes`. | Show the list to the user; on approval, retry with `allow_extra_oauth_scopes=[...]`. |
-| `anti_bot_blocked` | Site's anti-bot gateway (Cloudflare/Sucuri/DataDome/Imperva) refused the bot's IP/fingerprint risk score. | Manual signup. |
-| `onboarding_blocked` | Signed in OK, but the API key sits behind a billing/payment wall. | User must add a payment method, then retry. |
-| `needs_login` | One-time bot Google/GitHub session expired or missing. | Run `npx @trusty-squire/mcp login`. |
-| `payment_required` | This account hit the free signup quota. | Visit the `cta_billing_url` to upgrade. |
+| `use_credential` | Call an API through the write-only vault without exposing the raw secret. |
 
 ## How it works
 

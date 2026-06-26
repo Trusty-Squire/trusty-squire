@@ -1,6 +1,6 @@
-// Setup CLI — install / logout / login subcommands.
+// Setup CLI — connect / settings / logout / login subcommands.
 //
-//   npx @trusty-squire/mcp install --target=claude-code
+//   npx @trusty-squire/mcp connect --target=claude-code
 //     Issues a machine token, then opens the trustysquire install-
 //     confirm page in the bot's own Chrome. The user signs in there
 //     once (Google or GitHub) — that single sign-in does TWO things:
@@ -26,8 +26,7 @@
 //                        their own browser (CI / scripted installs)
 //   --proxy-url=<url>    bake a residential proxy into the MCP config's
 //                        env (UNIVERSAL_BOT_PROXY_URL)
-//   --no-registry        legacy hidden escape hatch; registry participation
-//                        is normally controlled in Advanced setup
+//   --no-registry        disable managed registry participation
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -95,11 +94,11 @@ type Argv = {
   noRegistry: boolean;
   registryConfigured?: boolean;
   // OAuth provider — for `login`, picks which provider to sign in to.
-  // For `install`, the provider is chosen by the user inside the
+  // For `connect`, the provider is chosen by the user inside the
   // trustysquire confirm page (Google or GitHub button), so this flag
   // is ignored there.
   providerArg?: ProviderArg;
-  // --skip-browser (also accepts the legacy --skip-login spelling):
+  // --skip-browser:
   // don't launch the bot's Chrome at the confirm URL. Print the URL
   // for the user to open in their own browser, then poll for claim.
   // The bot's Chrome profile won't gain a provider session — the user
@@ -139,25 +138,18 @@ interface InstallConsent {
 
 function parseArgs(argv: string[]): Argv {
   const positional = argv.filter((a) => !a.startsWith("--"));
-  // `connect` is the canonical command as of 0.6.14. `install` is kept
-  // as a hidden alias so any docs/scripts/blog-posts published against
-  // ≤0.6.13 still work — it emits a one-line deprecation notice but
-  // otherwise behaves identically. Default (no positional) → `connect`
-  // because the most common invocation is `npx @trusty-squire/mcp` with
-  // no args, and that should still kick off the setup flow.
-  let command = positional[0] ?? "connect";
+  // Default (no positional) → `connect` because the most common invocation is
+  // `npx @trusty-squire/mcp` with no args, and that should kick off setup.
+  const command = positional[0] ?? "connect";
   if (command === "install") {
-    console.warn(
-      "[trusty-squire] `install` is now `connect`. " +
-        "This alias still works but will be removed in a future major. " +
-        "Update your docs/scripts to: `npx @trusty-squire/mcp connect`.",
+    rejectDeprecatedCli(
+      "`install` has been removed. Use `npx @trusty-squire/mcp connect`.",
     );
-    command = "connect";
   }
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
-  let noRegistry = true;
+  let noRegistry = false;
   let registryConfigured = false;
   let providerArg: ProviderArg | undefined;
   let profileDir: string | undefined;
@@ -191,25 +183,25 @@ function parseArgs(argv: string[]): Argv {
       }
       proxyUrl = normalized;
     } else if (arg.startsWith("--registry-url=")) {
-      console.warn(
-        "[trusty-squire] --registry-url is no longer supported; " +
-          "Trusty Squire uses the managed skill registry.",
+      rejectDeprecatedCli(
+        "`--registry-url` has been removed. Trusty Squire uses the managed skill registry.",
       );
     } else if (arg === "--no-registry") {
       noRegistry = true;
       registryConfigured = true;
     } else if (arg === "--registry") {
-      noRegistry = false;
-      registryConfigured = true;
+      rejectDeprecatedCli(
+        "`--registry` has been removed because the managed registry is enabled by default.",
+      );
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
       if (p === "google" || p === "github") providerArg = p;
     } else if (arg.startsWith("--profile-dir=")) {
       profileDir = arg.slice("--profile-dir=".length);
-    } else if (arg === "--skip-browser" || arg === "--skip-login") {
-      // --skip-login kept as an alias for the 0.5.0 spelling so any
-      // scripted callers still work.
+    } else if (arg === "--skip-browser") {
       skipBrowser = true;
+    } else if (arg === "--skip-login") {
+      rejectDeprecatedCli("`--skip-login` has been removed. Use `--skip-browser`.");
     } else if (arg === "--force-relogin") {
       forceRelogin = true;
     } else if (arg.startsWith("--force-relogin=")) {
@@ -217,9 +209,7 @@ function parseArgs(argv: string[]): Argv {
       const p = arg.slice("--force-relogin=".length);
       if (p === "google" || p === "github") forceReloginProvider = p;
     } else if (arg === "--skip-secondary") {
-      // No-op: kept as a flag for backwards-compat. The 0.8.2 wizard
-      // collapsed step 1 + step 2 into one browser session, so there
-      // is no "secondary" stage left to skip.
+      rejectDeprecatedCli("`--skip-secondary` has been removed; connect is single-stage.");
     } else if (arg === "--no-interactive") {
       noInteractive = true;
     }
@@ -239,6 +229,11 @@ function parseArgs(argv: string[]): Argv {
   if (providerArg !== undefined) args.providerArg = providerArg;
   if (profileDir !== undefined && profileDir.length > 0) args.profileDir = profileDir;
   return args;
+}
+
+function rejectDeprecatedCli(message: string): never {
+  console.error(`[trusty-squire] ${message}`);
+  process.exit(64);
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
@@ -1158,10 +1153,10 @@ function printHelp(): void {
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
-  console.warn(`  --skip-login                 don't launch a browser (CI mode)`);
+  console.warn(`  --skip-browser               don't launch a browser (CI mode)`);
   console.warn(`  --force-relogin[=google|github] switch the bound account or one provider`);
   console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
-  console.warn(`  --registry                   enable managed registry participation`);
+  console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);
@@ -1242,11 +1237,8 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-// Back-compat alias: external imports of `install` keep working at the module
-// level. The CLI command got renamed; the function is the same.
 export {
   connect,
-  connect as install,
   logout,
   login,
   parseArgs,

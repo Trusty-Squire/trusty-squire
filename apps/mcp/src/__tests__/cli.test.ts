@@ -12,21 +12,21 @@ import { normalizeProxyUrl } from "../install/proxy-url.js";
 describe("parseArgs --proxy-url", () => {
   it("parses --proxy-url into proxyUrl", () => {
     expect(
-      parseArgs(["install", "--proxy-url=socks5://127.0.0.1:1080"]).proxyUrl,
+      parseArgs(["connect", "--proxy-url=socks5://127.0.0.1:1080"]).proxyUrl,
     ).toBe("socks5://127.0.0.1:1080");
   });
 
   it("leaves proxyUrl undefined when the flag is absent", () => {
-    expect(parseArgs(["install"]).proxyUrl).toBeUndefined();
+    expect(parseArgs(["connect"]).proxyUrl).toBeUndefined();
   });
 
   it("treats an empty --proxy-url= as unset", () => {
-    expect(parseArgs(["install", "--proxy-url="]).proxyUrl).toBeUndefined();
+    expect(parseArgs(["connect", "--proxy-url="]).proxyUrl).toBeUndefined();
   });
 
   it("parses --proxy-url alongside --target", () => {
     const a = parseArgs([
-      "install",
+      "connect",
       "--target=claude-code",
       "--proxy-url=http://user:pass@host:8080",
     ]);
@@ -47,39 +47,31 @@ describe("parseArgs --proxy-url", () => {
 
 describe("parseArgs --provider / --skip-browser", () => {
   it("parses google and github", () => {
-    expect(parseArgs(["install", "--provider=google"]).providerArg).toBe("google");
-    expect(parseArgs(["install", "--provider=github"]).providerArg).toBe("github");
+    expect(parseArgs(["connect", "--provider=google"]).providerArg).toBe("google");
+    expect(parseArgs(["connect", "--provider=github"]).providerArg).toBe("github");
   });
 
   it("ignores an unrecognized --provider value", () => {
-    expect(parseArgs(["install", "--provider=apple"]).providerArg).toBeUndefined();
+    expect(parseArgs(["connect", "--provider=apple"]).providerArg).toBeUndefined();
     // `both` was a 0.5.0 option; in 0.5.1 the user picks the provider
     // inside the trustysquire confirm page, so this is silently dropped.
-    expect(parseArgs(["install", "--provider=both"]).providerArg).toBeUndefined();
+    expect(parseArgs(["connect", "--provider=both"]).providerArg).toBeUndefined();
   });
 
-  it("defaults skipBrowser false and sets it with either spelling", () => {
-    expect(parseArgs(["install"]).skipBrowser).toBe(false);
-    expect(parseArgs(["install", "--skip-browser"]).skipBrowser).toBe(true);
-    // --skip-login kept as a legacy alias for the 0.5.0 spelling.
-    expect(parseArgs(["install", "--skip-login"]).skipBrowser).toBe(true);
+  it("defaults skipBrowser false and sets it with --skip-browser", () => {
+    expect(parseArgs(["connect"]).skipBrowser).toBe(false);
+    expect(parseArgs(["connect", "--skip-browser"]).skipBrowser).toBe(true);
   });
 
   it("parses --force-relogin for account switching", () => {
-    expect(parseArgs(["install"]).forceRelogin).toBe(false);
-    expect(parseArgs(["install", "--force-relogin"]).forceRelogin).toBe(true);
+    expect(parseArgs(["connect"]).forceRelogin).toBe(false);
+    expect(parseArgs(["connect", "--force-relogin"]).forceRelogin).toBe(true);
   });
 });
 
 describe("parseArgs registry", () => {
-  it("defaults registry participation off", () => {
-    expect(parseArgs(["connect"]).noRegistry).toBe(true);
-  });
-
-  it("enables registry participation with --registry", () => {
-    const args = parseArgs(["connect", "--registry"]);
-    expect(args.noRegistry).toBe(false);
-    expect(args.registryConfigured).toBe(true);
+  it("defaults registry participation on", () => {
+    expect(parseArgs(["connect"]).noRegistry).toBe(false);
   });
 
   it("keeps the legacy --no-registry flag as an explicit off switch", () => {
@@ -88,17 +80,22 @@ describe("parseArgs registry", () => {
     expect(args.registryConfigured).toBe(true);
   });
 
-  it("does not accept a custom registry URL", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const args = parseArgs(["connect", "--registry-url=https://staging.registry.test"]);
-      expect("registryUrl" in args).toBe(false);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("--registry-url is no longer supported"),
-      );
-    } finally {
-      warn.mockRestore();
-    }
+  it("rejects deprecated registry flags", () => {
+    expectDeprecatedExit(() => parseArgs(["connect", "--registry"]));
+    expectDeprecatedExit(() =>
+      parseArgs(["connect", "--registry-url=https://staging.registry.test"]),
+    );
+  });
+});
+
+describe("parseArgs deprecated flags", () => {
+  it("rejects the removed install alias", () => {
+    expectDeprecatedExit(() => parseArgs(["install"]));
+  });
+
+  it("rejects removed compatibility flags", () => {
+    expectDeprecatedExit(() => parseArgs(["connect", "--skip-login"]));
+    expectDeprecatedExit(() => parseArgs(["connect", "--skip-secondary"]));
   });
 });
 
@@ -115,3 +112,17 @@ describe("parseArgs --force-relogin", () => {
     expect(args.forceReloginProvider).toBe("github");
   });
 });
+
+function expectDeprecatedExit(fn: () => unknown): void {
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
+    throw new Error(`exit:${code}`);
+  });
+  try {
+    expect(fn).toThrow("exit:64");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("[trusty-squire]"));
+  } finally {
+    exit.mockRestore();
+    error.mockRestore();
+  }
+}

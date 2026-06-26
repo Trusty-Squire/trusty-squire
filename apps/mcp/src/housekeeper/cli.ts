@@ -137,8 +137,6 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     } else if (arg.startsWith("--interval-seconds=")) {
       const n = Number(arg.slice("--interval-seconds=".length));
       if (Number.isFinite(n) && n > 0) args.intervalSeconds = Math.floor(n);
-    } else if (arg.startsWith("--registry-url=")) {
-      args.registryUrl = arg.slice("--registry-url=".length);
     } else if (arg.startsWith("--admin-bearer=")) {
       args.adminBearer = arg.slice("--admin-bearer=".length);
     } else if (arg.startsWith("--agent=")) {
@@ -237,7 +235,6 @@ Pacing:
    timeout / no-signup run, and resets on a clean success.)
 
 Auth:
-  --registry-url=URL        Override TRUSTY_SQUIRE_REGISTRY_URL.
   --admin-bearer=TOKEN      Override REGISTRY_ADMIN_BEARER.
   --agent=AGENT             Fix proposer for --mode=fix/autoloop.
                             Only codex is accepted.

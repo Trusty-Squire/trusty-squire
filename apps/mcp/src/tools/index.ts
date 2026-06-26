@@ -11,12 +11,11 @@
 import { z, type ZodTypeAny } from "zod";
 import type { ApiClient } from "../api-client.js";
 import { listCredentialsTool } from "./list-credentials.js";
-import { provisionTool, checkProvisionStatusTool } from "./provision-any.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
 import { storeCredentialTool } from "./store-credential.js";
 import { useCredentialTool } from "./use-credential.js";
 import { grantAppAccessTool } from "./grant-app-access.js";
-import { PROVISION_DRIVE_TOOLS, provisionDriveToolsEnabled } from "./provision-drive.js";
+import { INTERACTIVE_SIGNUP_TOOLS } from "./provision-drive.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -39,10 +38,8 @@ export { ALWAYS_LOAD_META } from "./always-load.js";
 
 // All tools receive `api: ApiClient | null`. In the single-tier model
 // server.ts only invokes a handler after confirming a non-null api, but
-// the registry contract still types it as nullable so handlers like
-// check_provision_status (which doesn't need the API) don't have to
-// fake-narrow. assertApi() is the one-liner that asserts the
-// non-nullability for handlers that DO need the API.
+// the registry contract still types it as nullable. assertApi() is the
+// one-liner that asserts the non-nullability for handlers that DO need the API.
 export function assertApi(api: ApiClient | null): asserts api is ApiClient {
   if (api === null) {
     throw new Error(
@@ -51,15 +48,10 @@ export function assertApi(api: ApiClient | null): asserts api is ApiClient {
   }
 }
 
-// The agent-facing tool registry. The native-`provision` cluster (mandate
-// evaluator + adapter manifests + approval flow) was sunset in 0.8 — the
-// universal browser-driven bot covers every service the team would have
-// hand-authored a native adapter for, faster than the manifest work paid
-// for itself. What survives: the universal provision tool, its status
-// poll, vault reads, and the extract-failure diagnostic pair.
+// The agent-facing tool registry. The legacy async `provision` surface is no
+// longer exposed: host agents should drive signup explicitly through the
+// interactive provision_start/observe/act/extract/finish loop.
 export const TOOLS: Tool[] = [
-  provisionTool,
-  checkProvisionStatusTool,
   listCredentialsTool,
   // Vault lifecycle + write-only-sink proxy (the credential surface).
   storeCredentialTool,
@@ -70,10 +62,9 @@ export const TOOLS: Tool[] = [
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
   getExtractFailureTool,
-  // Phase 1 — interactive host-driven provisioning (provision_start/observe/
-  // act/captcha_gate/await_verification/extract/finish). Default-on; opt out
-  // with PROVISION_DRIVE_TOOLS=0.
-  ...(provisionDriveToolsEnabled() ? PROVISION_DRIVE_TOOLS : []),
+  // Interactive host-driven provisioning (provision_start/observe/act/
+  // captcha_gate/await_verification/extract/finish).
+  ...INTERACTIVE_SIGNUP_TOOLS,
 ] as Tool[];
 
 export function findTool(name: string): Tool | null {
@@ -86,8 +77,6 @@ export { z };
 // Per-tool re-exports so callers (tests, custom integrations) can
 // import a single tool without going through the TOOLS array.
 export {
-  provisionTool,
-  checkProvisionStatusTool,
   listCredentialsTool,
   storeCredentialTool,
   useCredentialTool,

@@ -256,7 +256,7 @@ else
 Try it:
   1. Sign up at http://localhost:3002/signup
   2. Pair Claude Code:
-       node apps/mcp/dist/install/cli.js install --target=claude-code --api-base=http://localhost:3000
+       node apps/mcp/dist/install/cli.js connect --target=claude-code --api-base=http://localhost:3000
   3. In Claude Code, ask the squire to provision Resend.
 
 For mobile access, run: pnpm demo:mobile
