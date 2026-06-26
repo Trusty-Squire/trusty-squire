@@ -1,16 +1,19 @@
 # Fires the daily registry verify pass — one codex-driven pass per day over the
 # verifier queue (promote pending-review, demote stale).
-# Persistent=true → if the box was asleep/off at the scheduled time, it runs
-# on next boot rather than skipping a cycle.
+#
+# OnCalendar (not OnBootSec/OnUnitActiveSec): a calendar schedule always computes
+# a next-elapse, and — unlike a monotonic timer — Persistent=true actually works
+# with it, so a missed run (box asleep/off at 04:00) fires on the next wake
+# instead of being skipped. The old monotonic config could end up with NO next
+# trigger until a reboot.
 [Unit]
 Description=Run the Trusty Squire registry verify pass daily
 
 [Timer]
-OnBootSec=10min
-OnUnitActiveSec=24h
+OnCalendar=*-*-* 04:00:00
 Persistent=true
-# Spread the start a little so it never lines up exactly with other timers.
-RandomizedDelaySec=5min
+# Spread the start so it never lines up exactly with other timers.
+RandomizedDelaySec=30min
 
 [Install]
 WantedBy=timers.target
