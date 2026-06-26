@@ -13,8 +13,9 @@ Today TS treats every wall (visible captcha, 2FA, phone/SMS, anti-bot) as
 **resumable conversational hand-back**: when the bot hits a wall it can't clear,
 it returns a structured `needs_user` signal, the host agent relays it in plain
 language, the user supplies the one missing piece (a code, or a credential they
-got themselves), and the run continues. **No live browser, no public tunnel, no
-new attack surface.**
+got themselves), and the run continues. **No live browser, no public tunnel.**
+(Flow B does paste API keys into the chat transcript — a smaller exposure than a
+live authenticated session on a public URL, but not zero; handled below.)
 
 ## Why the cheap version, not the bridge
 
@@ -29,9 +30,13 @@ honest analysis (full reasoning in the deferred-bridge section):
    and that's the rare case.
 2. **Spine signups are one-time, and the model already operates existing
    accounts.** You make one Stripe account ever; the recurring value (create a
-   product, mint a key) is an **operate-task on the logged-in account** — wall-free
-   (the Stripe operate-task already drives the existing dashboard, no captcha). So
-   the interactive wall only bites at *fresh signup*, a rare-squared event.
+   product, mint a key) is an **operate-task on the logged-in account** — *usually*
+   wall-free (the Stripe operate-task drives the existing dashboard via OAuth).
+   **Assumption to verify (Codex):** the code already has captcha gates around some
+   post-signup / key-mint flows, so a captcha CAN hit *during* an operate-task — in
+   which case "sign up yourself once" doesn't apply. Instrument it; don't assert it.
+   Caveat 2: "one-time" is per-user but **every new user** hits Stripe/Cloudflare
+   early, so this is on the onboarding critical path, not a rare tail.
 3. **The bridge's value lands on end-users (often Macs), which the cheap rig
    can't serve.** `x11vnc` is X11-only; macOS Chrome is Quartz. Serving the actual
    use case would need the harder **cross-platform CDP-screencast** viewer — a
@@ -69,21 +74,37 @@ agent:  (stores it in your vault) Got it. Create that $20/mo product now?
 You sign up for the giant once; TS operates it wall-free forever after. Closes
 the "it can't even do Stripe" credibility hole without a live browser.
 
-## The `needs_user` resumable status (D1)
+## Two contracts, because there are two provision surfaces (D1)
 
-Replaces today's terminal give-up for walls (`provision-any.ts:1227-1408`):
+Codex's load-bearing correction: there are **two** provision paths, and only one
+can actually resume in-band. So `needs_user` is **two** contracts, not one.
 
-```
-{ status: "needs_user",
-  wall: "sms_code" | "authenticator_code" | "interactive_captcha" | "phone_unavailable",
-  message: "<plain English the host agent relays>",
-  resume: "code" | "connect_existing" }
-```
+1. **Thick `provision_*` session tools** (host-driven; the live `BrowserController`
+   sits in the session `Map`). The browser is ALIVE, so a code can be supplied and
+   the run continues:
+   ```
+   needs_user_code = {
+     session_id, wall: "verification_code", message: "<the page's prompt>",
+     resume: "code", ttl_seconds
+   }
+   ```
+   Host asks the user → `provision_act {kind:"type", text:<code>}` → keep driving.
+   Session + vault moat preserved. (Flow A.)
 
-- `resume: "code"` → agent asks the user, then `provision_act type=<code>`,
-  continues. (Flow A.)
-- `resume: "connect_existing"` → agent relays the external-signup hand-back; a
-  user-pasted credential goes to the vault. (Flow B.)
+2. **Async `provision` path** (`provision-any.ts`) — has NO live resumable session;
+   it returns terminal and tears down (`:1227`). So here the contract is a
+   **terminal BYOK**, not a resume:
+   ```
+   needs_user_connect_existing = {
+     wall: "interactive_captcha" | "phone_unavailable",
+     message, signup_url, credential_shape: { service, type, auth_shape }
+   }
+   ```
+   Host relays the external-signup hand-back; a user-pasted credential is stored
+   with full metadata (below). (Flow B.)
+
+A status-mapper rename CANNOT resume a bot that already failed + cleaned up — so
+the async path is honestly terminal-with-a-graceful-exit, not "paused."
 
 ## Bypass / hand-off policy (D2 — never nag for the auto-handleable)
 
@@ -98,17 +119,24 @@ Replaces today's terminal give-up for walls (`provision-any.ts:1227-1408`):
 - **Payment/KYC stay terminal-with-consent** (Codex #12 — consent boundaries, not
   20-second clears). They are NOT auto-handed-back.
 
-## Minimal build (days, not weeks)
+## Build slices
 
-1. **`needs_user` status** on the `provision_*` results + the terminal mapper
-   (`provision-any.ts`). Replaces "manual signup, giving up" with the structured
-   resumable signal. Plus the missing `phone_required`/`sms_code` taxonomy.
-2. **`await_verification` "ask the user" branch** (SMS/authenticator) alongside
-   the inbox poll.
-3. **Accept-pasted-credential → vault** path for Flow B (the vault already takes
-   credentials; wire a `provision_store_credential` or reuse the extract write).
-4. **Tool-description / prompt copy** so the host agent relays each hand-back
+1. **Flow A — `needs_user_code` on the thick session** (`provision_await_verification`).
+   Today `awaitVerification` is **Gmail-only** (`provision-session.ts:1183`): it
+   navigates to mail.google.com and parses email. When it finds no code/link,
+   return `needs_user_code` (session still live) so the host asks the user and
+   types the code via `provision_act`. Unit-test the new return shape.
+2. **Flow B — `needs_user_connect_existing` (terminal BYOK)** on the async path.
+   Map captcha/phone walls in the terminal mapper (`provision-any.ts:1227`) to
+   this contract instead of `captcha_blocked`/`verification_not_sent`. Wire the
+   pasted credential through `store_credential` (`store-credential.ts`) **with full
+   metadata** — `{service, label, type, auth_shape, allowed_hosts}` + optional
+   validation — not a bare secret (Codex: letting the host infer all that is
+   brittle).
+3. **Tool-description / prompt copy** so the host agent relays each hand-back
    cleanly (the two flows above are the copy).
+4. **Honesty:** Flow B pastes keys into the transcript — document it; prefer a
+   *restricted/test* key in the hand-back copy.
 
 No Xvfb, no x11vnc, no cloudflared, no live session on a public URL.
 
