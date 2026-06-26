@@ -46,13 +46,18 @@ should move at least one of them up and neither down:
    generalizes to more of the long tail (and feeds OF#1). Measured as
    `discover_succeeded / discover_attempted` per heal pass.
 
-**How they're driven + monitored:** the daily heal pass (`mcp housekeeper
---mode=heal`, systemd timer in `tools/systemd/`) verifies skills, discovers
-across the curated ~100-service queue, and emits one digest carrying both
-metrics (Telegram + journal). The registry admin dashboard's **Objective
-functions** panel shows the live numbers + a run-over-run trend (stamped on
-each `HealRun`). See `docs/AUTONOMOUS-LOOP.md` for the loop + state machine
-and `AGENTS.md` for the skill-promotion pipeline.
+**How they're driven + monitored:** the daily **verify pass** (`ts-housekeeper`,
+systemd timer in `tools/systemd/`) keeps the registry honest — promote skills
+that still work, demote ones that don't. New-skill growth (OF#1) now comes from
+**auto-promote on real provisions** (the bot/host-driven `provision_*` captures),
+NOT a housekeeper discover sweep.
+
+> ⚠️ **OF framing needs a strategic revisit (2026-06-26).** The codex-verify
+> refactor deleted the housekeeper's proactive **discover** sweep, so OF#2 as
+> defined ("`discover_succeeded / discover_attempted` per heal pass") no longer
+> has a housekeeper-driven source — discovery moved to on-provision auto-promote.
+> OF#1 (active-skill count) still stands. Re-derive OF#2 against the new model
+> before relying on it. See `docs/DESIGN-housekeeper-codex-verify.md`.
 
 **Honest tension:** OF#1 and OF#2 can pull against each other — as the bot
 covers the easy services, the residual discovery queue gets harder, so OF#2
@@ -547,58 +552,47 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_LLM_TIER` | `cheap` | Primary LLM tier — `cheap`, `premium`, or `free`. `free` routes through OpenRouter's free models with a paid escape-hatch; the closed-loop verifier worker sets this. End-user installs leave it unset. |
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver. When set, runCaptchaGate falls through to 2Captcha after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). |
 | `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15`   | Per-signup circuit breaker |
-| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. **Operator housekeeper egress is now `socks5://100.104.88.126:1081` — a native gost SOCKS5 on the Mac over Tailscale (NOT the old `ssh -D` tunnel, which collapsed under Chrome's concurrency: 1/40 vs gost 40/40). Set in `harvester.env`. Full setup + the `tools/proxy-eval.sh` screener: `docs/HOUSEKEEPER-OPERATIONS.md`.** |
+| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID. Required when running `mcp housekeeper --mode=discover` (inbox-alias scoping + auto-promote attribution). End-user installs read this from session.json. |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (inbox-alias scoping + auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
-### Housekeeper env (`mcp housekeeper`)
+### Housekeeper env (`ts-housekeeper`)
 
-The merged verifier + discoverer + harvester. Runs from a SOURCE checkout on
-the operator box (`node apps/mcp/dist/bin.js housekeeper`), NOT on end-user
-laptops, and is excluded from the npm tarball (`apps/mcp/package.json` `files`
-omits `dist/housekeeper`).
+The housekeeper is now a **codex-driven registry verify pass** — its own
+operator-only package `@trusty-squire/housekeeper` (`apps/housekeeper/`, the
+`ts-housekeeper` bin), NOT part of the mcp tarball. Each pass pulls the registry
+verifier queue and, per skill, runs `codex exec` holding the
+`@trusty-squire/mcp@next` MCP to reproduce the signup; the registry applies the
+**mechanical rule** (one success promotes pending-review → active, the 3rd
+consecutive *rot* failure demotes). There is no discover, no fix-agent, no LLM
+proxy, no robot fleet — codex is the only intelligence. Design:
+`docs/DESIGN-housekeeper-codex-verify.md`.
 
-**→ Full operational runbook: `docs/HOUSEKEEPER-OPERATIONS.md`** — the single
-source of truth for the egress model (datacenter direct vs the Mac SSH-SOCKS
-tunnel), the **autonomous OAuth session model + what NOT to do**, the failure
-taxonomy (`needs_login`/`nav_timeout`/rot/wall), running a verify sweep /
-draining the backlog, and a diagnostic checklist. **Read it before debugging a
-sweep or changing housekeeper behavior — most failures are session state, not
-code.** (Operational narrative lives only there; this file holds values + the
-link.)
+**→ Operational runbook: `docs/HOUSEKEEPER-OPERATIONS.md`.** Install/timer:
+`tools/systemd/README.md`. Run a pass:
+```bash
+node apps/housekeeper/dist/bin.js --check        # preflight: codex on PATH + bearer set
+node apps/housekeeper/dist/bin.js --once [--dry]  # one verify pass (--dry posts nothing)
+```
 
-Three modes share one CLI: `--mode=verify` (skill replay; default),
-`--mode=discover` (universal bot; needs a machine token + account id),
-`--mode=heal` (scheduled verify→discover→digest, 12h systemd timer in
-`tools/systemd/`; design in `docs/DESIGN-closed-loop-remediation.md`).
-`--from=<path>` sources discover from a curated YAML; `--service=<slug>` is a
-single-service shortcut that implies discover. Each mode requires different
-auth (table below).
+Verify runs as the **operator's own connect-identity Google session** (codex+MCP
+act as the operator). A dead session → every skill returns `login_wall`, which is
+*transient by design* and never demotes — so the worst a broken box does is
+verify nothing; it can never demote good skills (fail-closed).
 
-**Verify-pool robots** (the OAuth fresh-identity fleet `verify-NN@trustysquire.ai`)
-are managed by `tools/provision-verify-robot.mjs` (list / create / **warm**
-[automated Google login via `tools/google-login-fleet.mjs`] / rotate / delete /
-licenses). It enforces a **cost cap** (`ROBOT_POOL_CAP`, default 10 billed seats)
-and **cost-flat rotation** (`rotate --make-room=N` is delete-before-create, so the
-active count never exceeds the cap). Full runbook: the "Verify-pool provisioning +
-cost-capped rotation" section of `docs/HOUSEKEEPER-OPERATIONS.md`.
-
-| Env var | Required by | Effect |
+| Env var | Default | Effect |
 |---|---|---|
-| `REGISTRY_ADMIN_BEARER` | verify, discover (telemetry) | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
-| `TRUSTY_SQUIRE_REGISTRY_URL` | all modes | Registry base URL. Default `https://registry.trustysquire.ai`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discover, --service | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the housekeeper host). |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | discover, --service | Inbox-alias scope + auto-promote attribution. |
-| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discover, --service | Default-on. Set `0`/`off` to capture without publishing. |
-| `UNIVERSAL_BOT_LLM_TIER=free` | all modes (recommended) | Routes through the free OpenRouter chain. |
-| `TELEGRAM_BOT_TOKEN` | `--telegram` notifier | Bot token from @BotFather. Chat id auto-resolved from getUpdates on first run, cached to `~/.trusty-squire/telegram-chat-id.txt`. |
-| `GH_REPO` | `--github-issues` notifier | `<owner>/<repo>` for issue posting. Default `Trusty-Squire/trusty-squire`. Requires `gh auth status` to succeed on the host. |
+| `REGISTRY_ADMIN_BEARER` | — (required) | `/admin/*` auth: reads the verifier queue + posts outcomes. |
+| `TRUSTY_SQUIRE_REGISTRY_URL` | `https://registry.trustysquire.ai` | Registry base URL. |
+| `HOUSEKEEPER_MAX_SKILLS_PER_RUN` | `20` | Per-pass cap (codex per skill is real wall-clock + token cost). |
+| `HOUSEKEEPER_CODEX_CMD` | `codex` | The codex CLI invocation (the runner appends `exec <prompt>`). |
+| `HOUSEKEEPER_PROMOTE_MIN_SUCCESSES` | `1` | Successes to promote (one is enough; bump for flaky services). |
 
-The curated services queue lives at `tools/housekeeper-services.yaml`,
-consumed via `mcp housekeeper --mode=discover --from=tools/housekeeper-services.yaml`.
+Prereq: the **codex CLI** on PATH, configured with `@trusty-squire/mcp@next`.
+Verify the box with `ts-housekeeper --check`.
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |
