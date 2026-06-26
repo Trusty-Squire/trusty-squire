@@ -45,6 +45,9 @@ export class PostSignupRecoveryState {
   triedFallbackUrls = new Set<string>();
   clickedKeysLinks = new Set<string>();
   clickedScopeLinks = new Set<string>();
+  recentCredentialActionSignatures: string[] = [];
+  revealSweepUrls = new Set<string>();
+  triedRenderAccountMenu = false;
   prematureDoneFallbacks = 0;
 
   navigateCount = 0;

@@ -2,12 +2,20 @@ import { describe, it, expect } from "vitest";
 import type { InteractiveElement } from "../browser.js";
 import {
   resolveTarget,
+  provisionElementRef,
+  provisionElementRefs,
+  stableElementId,
+  StaleProvisionRefError,
+  AmbiguousProvisionTargetError,
   hostAllowed,
   elementRef,
+  buildAccessibilitySnapshot,
   parseVerification,
   looksLikeCodeIdentifier,
   findCredentialTokens,
+  classifyVouchflowCredentials,
   detectExtractionBlock,
+  sanitizeExtractedCredentials,
   buildScreenOutline,
   provisionPerceptionGuidance,
   shouldBlockUnsafeProvisionAction,
@@ -108,6 +116,98 @@ describe("resolveTarget", () => {
       "#modal-create",
     );
   });
+
+  it("resolves a fresh generated ref against live elements", () => {
+    const ref = provisionElementRef(inv[0] as InteractiveElement, 7);
+    expect(ref).toMatch(/^@g7:/);
+    expect(resolveTarget(inv, ref, 7)?.selector).toBe("#g");
+  });
+
+  it("rejects generated refs from an older observation generation", () => {
+    const ref = provisionElementRef(inv[1] as InteractiveElement, 2);
+    expect(() => resolveTarget(inv, ref, 3)).toThrow(StaleProvisionRefError);
+  });
+
+  it("returns null when a fresh ref no longer maps to a live element", () => {
+    const ref = provisionElementRef(inv[0] as InteractiveElement, 4);
+    expect(resolveTarget(inv.slice(1), ref, 4)).toBeNull();
+  });
+
+  it("fails loudly on ambiguous repeated labels instead of guessing", () => {
+    const two = [
+      el({ visibleText: "Email", selector: "#modal-email" }),
+      el({ visibleText: "Email", selector: "#footer-email" }),
+    ];
+    expect(() => resolveTarget(two, "Email")).toThrow(AmbiguousProvisionTargetError);
+  });
+
+  it("stableElementId uses structure beyond the visible label", () => {
+    const modal = el({
+      visibleText: "Create account",
+      screenPath: "dialog:finish-account > button:create-account",
+    });
+    const background = el({
+      visibleText: "Create account",
+      screenPath: "main:dashboard > button:create-account",
+    });
+    expect(stableElementId(modal)).not.toBe(stableElementId(background));
+  });
+
+  it("adds ordinal suffixes so identical elements still get distinct refs", () => {
+    const twins = [
+      el({ visibleText: "Continue", selector: "#first" }),
+      el({ visibleText: "Continue", selector: "#second" }),
+    ];
+    const refs = provisionElementRefs(twins, 9);
+    const firstRef = refs.get(twins[0] as InteractiveElement);
+    const secondRef = refs.get(twins[1] as InteractiveElement);
+    expect(firstRef).toMatch(/_1$/);
+    expect(secondRef).toMatch(/_2$/);
+    expect(firstRef).not.toBe(secondRef);
+    expect(resolveTarget(twins, secondRef as string, 9)?.selector).toBe("#second");
+  });
+});
+
+describe("buildAccessibilitySnapshot", () => {
+  it("renders an AXI-style action tree with generated refs and regions", () => {
+    const elements = [
+      el({
+        visibleText: "Create account",
+        role: "button",
+        container: "dialog:finish-account",
+        screenPath: "dialog:finish-account > button:create-account",
+        selector: "#create",
+      }),
+      el({
+        tag: "input",
+        placeholder: "Email",
+        value: "",
+        container: "form:signup",
+        screenPath: "form:signup > textbox:email",
+        selector: "#email",
+      }),
+    ];
+    const snap = buildAccessibilitySnapshot(elements, 5);
+    expect(snap?.source).toBe("interactive_dom");
+    expect(snap?.refs).toBe(2);
+    expect(snap?.tree).toContain('region "dialog:finish-account"');
+    expect(snap?.tree).toContain('button "Create account" ref=@g5:');
+    expect(snap?.tree).toContain('textbox "Email" ref=@g5:');
+  });
+
+  it("truncates large trees at a line boundary", () => {
+    const elements = Array.from({ length: 40 }, (_, i) =>
+      el({
+        visibleText: `Button ${i}`,
+        container: "main:dashboard",
+        screenPath: `main:dashboard > button:${i}`,
+      }),
+    );
+    const snap = buildAccessibilitySnapshot(elements, 1, 160);
+    expect(snap?.truncated).toBe(true);
+    expect(snap?.total_chars).toBeGreaterThan(160);
+    expect(snap?.tree.endsWith("\n")).toBe(false);
+  });
 });
 
 describe("parseVerification (email OTP + link extraction)", () => {
@@ -180,11 +280,30 @@ describe("findCredentialTokens (multi-credential extraction)", () => {
     // has a separator but no digit → not a key
     expect(findCredentialTokens("user_account_settings_panel")).toEqual([]);
   });
+
+  it("does NOT pick up ordinary slug identifiers with dates", () => {
+    expect(findCredentialTokens("trusty-squire-dogfood-20260625")).toEqual([]);
+  });
+
+  it("classifies Vouchflow sandbox and live keys by capability", () => {
+    const page =
+      "SANDBOX WRITE vsk_sandbox_ad92ab8bc32c9bd7737105958f6b34465631cace " +
+      "READ vsk_sandbox_read_b0ce17bcfd375a450da2fd1ceeebf3199a89cd73 " +
+      "LIVE WRITE vsk_live_1536ea69786f3d176afde8d0d93cab852070245c " +
+      "LIVE READ vsk_live_read_3cd42451654aac8db0263d13de871f3741dd513e";
+    expect(classifyVouchflowCredentials(page)).toEqual({
+      sandbox_write_key: "vsk_sandbox_ad92ab8bc32c9bd7737105958f6b34465631cace",
+      sandbox_read_key: "vsk_sandbox_read_b0ce17bcfd375a450da2fd1ceeebf3199a89cd73",
+      live_write_key: "vsk_live_1536ea69786f3d176afde8d0d93cab852070245c",
+      live_read_key: "vsk_live_read_3cd42451654aac8db0263d13de871f3741dd513e",
+    });
+  });
 });
 
 describe("detectExtractionBlock (fail-closed on a login wall)", () => {
   it("flags X's anti-bot tombstone (the Grok false-green source)", () => {
-    const tombstone = "JavaScript is not available.\nWe've detected that JavaScript is disabled in this browser.";
+    const tombstone =
+      "JavaScript is not available.\nWe've detected that JavaScript is disabled in this browser.";
     expect(detectExtractionBlock(tombstone)).not.toBeNull();
     expect(detectExtractionBlock(tombstone)).toContain("login_wall");
   });
@@ -238,6 +357,66 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
       true,
     );
   });
+
+  it("allows tenant sibling hosts once they are added after organic redirect", () => {
+    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com"])).toBe(false);
+    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"])).toBe(
+      true,
+    );
+  });
+});
+
+describe("sanitizeExtractedCredentials", () => {
+  it("keeps Langfuse one-time keys and drops version/date/noise fields", () => {
+    const creds = sanitizeExtractedCredentials(
+      {
+        langfuse_secret_key: "sk-lf-...",
+        langfuse_public_key: "pk-lf-...",
+        api_key: "v3.198.0",
+        secret_key: "6/11/2026",
+        key: "pk-lf-d20a6e55-f210-4548-9ea0-10c3b0f136aa",
+        api_key_2: "sk-lf-6ec811e4-4339-46cf-956a-d156cd6356de",
+        api_key_3: "pk-lf-7e6848fa-3ac4-4ea1-8dba-86c4701d4d1d",
+      },
+      "https://cloud.langfuse.com/project/x/settings/api-keys",
+      'LANGFUSE_SECRET_KEY="sk-lf-6ec811e4-4339-46cf-956a-d156cd6356de"\nLANGFUSE_PUBLIC_KEY="pk-lf-7e6848fa-3ac4-4ea1-8dba-86c4701d4d1d"',
+    );
+
+    expect(creds).toEqual({
+      langfuse_secret_key: "sk-lf-6ec811e4-4339-46cf-956a-d156cd6356de",
+      api_key: "sk-lf-6ec811e4-4339-46cf-956a-d156cd6356de",
+      langfuse_public_key: "pk-lf-7e6848fa-3ac4-4ea1-8dba-86c4701d4d1d",
+    });
+  });
+
+  it("keeps a Neon napi token and drops referral/key-name clutter", () => {
+    const creds = sanitizeExtractedCredentials(
+      {
+        refcode: "4SBR8T8L",
+        key: "trusty-squire-dogfood-20260625",
+        api_token: "napi_5kvwlmqcwdeo360t4bt4vnqdwqvand8fvja3g7wv6ofb51948l26cs2rhri3bx7b",
+        api_key: "napi_5kvwlmqcwdeo360t4bt4vnqdwqvand8fvja3g7wv6ofb51948l26cs2rhri3bx7b",
+      },
+      "https://console.neon.tech/app/settings",
+    );
+
+    expect(creds).toEqual({
+      api_token: "napi_5kvwlmqcwdeo360t4bt4vnqdwqvand8fvja3g7wv6ofb51948l26cs2rhri3bx7b",
+      api_key: "napi_5kvwlmqcwdeo360t4bt4vnqdwqvand8fvja3g7wv6ofb51948l26cs2rhri3bx7b",
+    });
+  });
+
+  it("rejects Together key ids when no real secret is visible", () => {
+    const creds = sanitizeExtractedCredentials(
+      {
+        key: "key_CbQV1aVEkPobSKtY48w4W",
+        api_key: "key_CbQV1aVEkPobSKtY48w4W",
+      },
+      "https://api.together.ai/settings/projects/proj/api-keys",
+    );
+
+    expect(creds).toEqual({});
+  });
 });
 
 describe("provision perception guidance", () => {
@@ -253,20 +432,33 @@ describe("provision perception guidance", () => {
   });
 
   it("guards billing creation actions when live mode is visible", () => {
-    const reason = shouldBlockUnsafeProvisionAction(
-      "Dashboard Products Live mode",
-      { kind: "click", target: "Save product" },
-    );
+    const reason = shouldBlockUnsafeProvisionAction("Dashboard Products Live mode", {
+      kind: "click",
+      target: "Save product",
+    });
 
     expect(reason).toContain("live/production mode is visible");
   });
 
   it("allows billing creation actions when test mode is visible", () => {
     expect(
-      shouldBlockUnsafeProvisionAction(
-        "Dashboard Products Test mode",
-        { kind: "click", target: "Save product" },
-      ),
+      shouldBlockUnsafeProvisionAction("Dashboard Products Test mode", {
+        kind: "click",
+        target: "Save product",
+      }),
+    ).toBeNull();
+  });
+
+  it("treats sandbox usage controls as a visible test/sandbox mode marker", () => {
+    const text = "Settings Apps Sandbox usage Production usage";
+    const guidance = provisionPerceptionGuidance(text);
+
+    expect(guidance).toContain("Mode marker visible");
+    expect(
+      shouldBlockUnsafeProvisionAction(text, {
+        kind: "click",
+        target: "Save product",
+      }),
     ).toBeNull();
   });
 
@@ -282,19 +474,19 @@ describe("provision perception guidance", () => {
 
   it("does not guard unrelated non-creation clicks", () => {
     expect(
-      shouldBlockUnsafeProvisionAction(
-        "Dashboard Products Live mode",
-        { kind: "click", target: "Products" },
-      ),
+      shouldBlockUnsafeProvisionAction("Dashboard Products Live mode", {
+        kind: "click",
+        target: "Products",
+      }),
     ).toBeNull();
   });
 
   it("does not mistake a single marketing nav word for an authenticated app", () => {
     expect(
-      shouldBlockUnsafeProvisionAction(
-        "Products Pricing Docs Create account",
-        { kind: "click", target: "Create account" },
-      ),
+      shouldBlockUnsafeProvisionAction("Products Pricing Docs Create account", {
+        kind: "click",
+        target: "Create account",
+      }),
     ).toBeNull();
   });
 });

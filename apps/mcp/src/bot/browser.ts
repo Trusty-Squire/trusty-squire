@@ -6089,8 +6089,42 @@ export class BrowserController {
             /* malformed id — fall through */
           }
         }
+        const labelledBy = el.getAttribute("aria-labelledby");
+        if (labelledBy !== null && labelledBy.trim().length > 0) {
+          const parts: string[] = [];
+          for (const part of labelledBy.split(/\s+/)) {
+            const t = clean(document.getElementById(part)?.textContent);
+            if (t !== null) parts.push(t);
+          }
+          if (parts.length > 0) return clean(parts.join(" "));
+        }
         const anc = el.closest("label");
-        return anc !== null ? clean(anc.textContent) : null;
+        const ancestorLabel = anc !== null ? clean(anc.textContent) : null;
+        if (ancestorLabel !== null) return ancestorLabel;
+
+        let cur: Element | null = el;
+        for (let depth = 0; depth < 3 && cur !== null; depth += 1) {
+          let sib = cur.previousElementSibling;
+          for (let scanned = 0; scanned < 4 && sib !== null; scanned += 1) {
+            const nestedLabel = clean(sib.querySelector("label")?.textContent);
+            if (nestedLabel !== null) return nestedLabel;
+            const labelish =
+              sib.tagName.toLowerCase() === "label" ||
+              /\b(label|field|form|control)\b/i.test(sib.getAttribute("class") ?? "");
+            const t = clean(sib.textContent);
+            if (
+              t !== null &&
+              t.length <= 80 &&
+              !/[{};]/.test(t) &&
+              (labelish || t.split(/\s+/).length <= 8)
+            ) {
+              return t;
+            }
+            sib = sib.previousElementSibling;
+          }
+          cur = cur.parentElement;
+        }
+        return null;
       };
 
       const inConsent = (el: Element): boolean =>
@@ -6197,6 +6231,11 @@ export class BrowserController {
         clean(el.getAttribute("title")) ??
         clean(el.getAttribute("name")) ??
         clean(el.textContent);
+
+      const isFormControlElement = (el: Element): boolean =>
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLSelectElement;
 
       const regionFor = (el: Element): Element | null =>
         el.closest(
@@ -6392,7 +6431,9 @@ export class BrowserController {
         const pathLabel =
           isGoogleGSIIframe
             ? "Continue with Google"
-            : directLabel(el) ?? labelFor(el) ?? iconLabelFor(el);
+            : isFormControlElement(el)
+              ? labelFor(el) ?? directLabel(el) ?? iconLabelFor(el)
+              : directLabel(el) ?? labelFor(el) ?? iconLabelFor(el);
         out.push({
           tag: isGoogleGSIIframe ? "button" : el.tagName.toLowerCase(),
           type: el.getAttribute("type"),
@@ -6536,7 +6577,9 @@ export class BrowserController {
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
     this.maybeAttachOAuthNetListener();
-    this.oauthProductPage = this.page;
+    if (!/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())) {
+      this.oauthProductPage = this.page;
+    }
     // Race a popup `page` event against the click. context-level
     // "page" fires for both window.open popups and target=_blank.
     const popupPromise = this.context
@@ -6547,8 +6590,9 @@ export class BrowserController {
     if (popup !== null && popup !== this.page && !popup.isClosed()) {
       this.page = popup;
     }
+    this.adoptLivePage();
     try {
-      await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
+      await this.page?.waitForLoadState("domcontentloaded", { timeout: 30000 });
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
     }
@@ -6928,6 +6972,26 @@ export class BrowserController {
   // page otherwise). Cheap — no screenshot, unlike getState().
   currentUrl(): string {
     return this.page !== null ? this.page.url() : "";
+  }
+
+  recoverActivePage(): boolean {
+    return this.adoptLivePage();
+  }
+
+  private adoptLivePage(): boolean {
+    if (this.page !== null && !this.page.isClosed()) return true;
+    if (this.context === null) return false;
+    const pages = this.context.pages().filter((p) => !p.isClosed());
+    if (pages.length === 0) return false;
+    const product =
+      this.oauthProductPage !== null && !this.oauthProductPage.isClosed()
+        ? this.oauthProductPage
+        : null;
+    const nonAuth = [...pages]
+      .reverse()
+      .find((p) => !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(p.url()));
+    this.page = nonAuth ?? product ?? pages[pages.length - 1] ?? null;
+    return this.page !== null;
   }
 
   // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that

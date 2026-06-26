@@ -54,7 +54,8 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "provision_start",
   description:
     "Begin an interactive provisioning session: opens a scoped browser on the " +
-    "user's machine at service_url and returns {session_id, url, text, elements}. " +
+    "user's machine at service_url and returns {session_id, url, text, screen, " +
+    "accessibility, elements}. " +
     "YOU are the planner — read the observation, then drive the signup with " +
     "provision_act, re-read with provision_observe, and call provision_extract " +
     "when you reach the credentials. Always provision_finish when done. The " +
@@ -89,9 +90,11 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "provision_observe",
   description:
     "Re-read the current page of a provisioning session: returns {url, text, " +
-    "elements}. Each element has a `ref` (its visible label) you pass back as a " +
-    "target, plus `href` for links. Targets are re-resolved live, so refs stay " +
-    "valid across re-renders.",
+    "screen, accessibility, elements}. Each element has a fresh generated `ref` " +
+    "to pass back as provision_act.target, plus `label`/`href` for reading. " +
+    "Refs are scoped to the latest observation; stale refs fail loudly, so call " +
+    "provision_observe and retry with the new ref. Legacy label targets still " +
+    "work, but exact refs are safer on pages with repeated labels.",
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
@@ -141,10 +144,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "provision_act",
   description:
     "Take one action in a provisioning session, then return the resulting " +
-    "observation. kinds: click (target=element ref), type (target + text), " +
+    "observation. kinds: click (target=element ref, preferably elements[].ref), type (target + text), " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
-    "oauth_settle (return to the product page after the OAuth handshake).",
+    "oauth_settle (return to the product page after the OAuth handshake). If a " +
+    "target ref is stale, call provision_observe and retry with a fresh ref.",
   inputSchema: actSchema,
   jsonInputSchema: {
     type: "object",

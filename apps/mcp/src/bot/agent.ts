@@ -570,6 +570,16 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
   // /settings/* and /api-keys guesses miss it and the planner can get stuck
   // in Business Account > Team Members.
   paddle: ["/authentication-v2"],
+  // Together AI's project-scoped keys route is discoverable in the DOM, but the
+  // planner can loop between Create key and payment-skip affordances after it
+  // lands there. Pin the route so recovery starts at the credential surface.
+  togetherai: [
+    "https://api.together.ai/settings/projects/~current/api-keys",
+    "/settings/projects/~current/api-keys",
+  ],
+  // Cartesia's authenticated root/dashboard can expose key rows with Reveal
+  // controls; generic /settings/* guesses hit 404/error shells first.
+  cartesia: ["/", "/dashboard", "/start", "/api-keys"],
 };
 
 // Normalize a service name to the slug used as a SERVICE_KEYS_PATHS key:
@@ -578,6 +588,114 @@ const SERVICE_KEYS_PATHS: Readonly<Record<string, readonly string[]>> = {
 // the same key the map is authored under. Exported for unit testing.
 export function serviceSlug(service: string): string {
   return service.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+export function hasCuratedServiceKeyPath(service: string): boolean {
+  return SERVICE_KEYS_PATHS[serviceSlug(service)] !== undefined;
+}
+
+function elementLabel(el: InteractiveElement): string {
+  return [
+    el.visibleText,
+    el.ariaLabel,
+    el.title,
+    el.labelText,
+    el.iconLabel,
+    el.href,
+    el.testId,
+  ]
+    .filter((s): s is string => s !== null && s !== undefined)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function shouldRevealBeforeCredentialSweep(input: {
+  url: string;
+  pageText: string;
+}): boolean {
+  const haystack = `${input.url}\n${input.pageText}`;
+  return (
+    /\b(?:api[\s_-]*(?:keys?|tokens?)|access[\s_-]*tokens?|personal[\s_-]*access[\s_-]*tokens?|secret[\s_-]*keys?|auth[\s_-]*tokens?|credentials?|reveal|show\s+(?:key|token|secret)|copy\s+(?:key|token|secret))\b/i.test(
+      haystack,
+    ) &&
+    /(?:•{3,}|\*{3,}|[A-Za-z0-9]{2,4}[•*]{4,}|\b(?:reveal|show|unmask|view)\b)/i.test(
+      haystack,
+    )
+  );
+}
+
+export function credentialActionSignature(
+  step: PostVerifyStep,
+  inventory: readonly InteractiveElement[],
+): string | null {
+  if (!("selector" in step) || step.selector === undefined) return null;
+  const target = inventory.find((e) => e.selector === step.selector);
+  const label = [
+    target?.visibleText,
+    target?.ariaLabel,
+    target?.title,
+    target?.labelText,
+    target?.iconLabel,
+    step.reason,
+  ]
+    .filter((s): s is string => s !== null && s !== undefined)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (label.length === 0) return null;
+  const lower = label.toLowerCase();
+  if (
+    /\b(?:create|generate|new|add|issue|mint)\b.*\b(?:api\s*)?(?:key|token|secret|credential)s?\b/.test(
+      lower,
+    ) ||
+    /\b(?:api\s*)?(?:key|token|secret|credential)s?\b.*\b(?:create|generate|new|add|issue|mint)\b/.test(
+      lower,
+    )
+  ) {
+    return `${step.kind}:create-key`;
+  }
+  if (
+    /\b(?:skip|maybe later|not now|without)\b.*\b(?:payment|billing|card|deposit|credits?)\b/.test(
+      lower,
+    ) ||
+    /\b(?:payment|billing|card|deposit|credits?)\b.*\b(?:skip|maybe later|not now|without)\b/.test(
+      lower,
+    )
+  ) {
+    return `${step.kind}:skip-payment`;
+  }
+  if (/\b(?:add|make|initial)\b.*\b(?:payment|deposit|credits?)\b/.test(lower)) {
+    return `${step.kind}:payment`;
+  }
+  return null;
+}
+
+export function isRepeatingCredentialActionCycle(
+  signatures: readonly string[],
+  pageText = "",
+): boolean {
+  const interesting =
+    signatures.some((s) => /(?:create-key|payment|deposit)/.test(s)) ||
+    /\b(?:api\s*keys?|tokens?|payment|billing|deposit|credits?)\b/i.test(pageText);
+  if (!interesting) return false;
+  const last3 = signatures.slice(-3);
+  if (
+    last3.length === 3 &&
+    last3.every((s) => s === last3[0]) &&
+    /(?:create-key|skip-payment|payment)/.test(last3[0] ?? "")
+  ) {
+    return true;
+  }
+  const last5 = signatures.slice(-5);
+  return (
+    last5.length === 5 &&
+    last5[0] === last5[2] &&
+    last5[2] === last5[4] &&
+    last5[1] === last5[3] &&
+    last5[0] !== last5[1] &&
+    last5.some((s) => /(?:create-key|skip-payment|payment)/.test(s))
+  );
 }
 
 // 0.8.2-rc.10 — heuristic for "this account already exists on the
@@ -874,6 +992,58 @@ export function findApiKeysNavLink(
     else if (textHit) score += 1;
     if (el.tag === "a") score += 1; // prefer anchors over role=button
     if (el.inViewport === true) score += 1;
+    candidates.push({ el, score });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]!.el;
+}
+
+export function findRenderAccountSettingsLink(
+  inventory: readonly InteractiveElement[],
+  alreadyClicked: ReadonlySet<string> = new Set(),
+): InteractiveElement | null {
+  for (const el of inventory) {
+    if (el.visible === false) continue;
+    if (alreadyClicked.has(el.selector)) continue;
+    const clickable =
+      el.tag === "a" ||
+      el.tag === "button" ||
+      el.role === "link" ||
+      el.role === "button";
+    if (!clickable) continue;
+    const label = elementLabel(el);
+    if (/\baccount settings\b/i.test(label) || /\/u\/[^/\s]+\/settings(?:[#?\s]|$)/i.test(label)) {
+      return el;
+    }
+  }
+  return null;
+}
+
+export function findRenderAccountMenuTrigger(
+  inventory: readonly InteractiveElement[],
+): InteractiveElement | null {
+  const candidates: { el: InteractiveElement; score: number }[] = [];
+  for (const el of inventory) {
+    if (el.visible === false) continue;
+    const clickable = el.tag === "button" || el.role === "button";
+    if (!clickable) continue;
+    const label = elementLabel(el);
+    if (label.length === 0) continue;
+    const normalized = label.toLowerCase().trim();
+    if (
+      /\b(?:new|upgrade|search|settings|billing|projects?|blueprints?|notifications?|contact support|create|add)\b/i.test(
+        normalized,
+      )
+    ) {
+      continue;
+    }
+    let score = 0;
+    if (el.landmark === "header") score += 4;
+    if (/^[a-z]{1,3}$/i.test(normalized)) score += 3;
+    if (/\b(?:profile|account|user|avatar)\b/i.test(label)) score += 2;
+    if (el.inViewport === true) score += 1;
+    if (score <= 0) continue;
     candidates.push({ el, score });
   }
   if (candidates.length === 0) return null;
@@ -12202,6 +12372,54 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // form-fill phase already captured (captureSignupFormRounds); 0 on the
     // OAuth path, so this is unchanged for OAuth skills.
     let capturedRound = this.captureChainRound;
+    if (hasCuratedServiceKeyPath(args.service)) {
+      const fallback = pickStuckLoopFallbackUrl(
+        this.browser.currentUrl(),
+        recovery.triedFallbackUrls,
+        args.service,
+        this.resolvedSignupUrl,
+      );
+      if (fallback !== null) {
+        recovery.triedFallbackUrls.add(fallback);
+        args.steps.push(
+          `Post-verify: nav-search exhausted but ${args.service} has a curated credential route — trying ${fallback} before greedy planning.`,
+        );
+        try {
+          await this.browser.goto(fallback);
+          await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+          const direct = await this.harvestVisibleCredentials();
+          for (const [k, v] of Object.entries(direct)) {
+            if (credentials[k] === undefined) credentials[k] = v;
+          }
+          if (hasAnyExtractedCredential(credentials)) {
+            await this.writeFastPathSyntheticCapture(
+              args.service,
+              capturedRound,
+              oauth,
+              "curated credential route synthetic extract — nav-search exhausted, fallback route exposed credentials",
+            );
+            return credentials;
+          }
+          const minted = await this.attemptMintNewKey(args.steps, args.service);
+          if (minted !== null && hasAnyExtractedCredential(minted)) {
+            for (const [k, v] of Object.entries(minted)) {
+              if (credentials[k] === undefined) credentials[k] = v;
+            }
+            await this.writeFastPathSyntheticCapture(
+              args.service,
+              capturedRound,
+              oauth,
+              "curated credential route synthetic extract — minted/extracted after nav-search fallback",
+            );
+            return credentials;
+          }
+        } catch (err) {
+          args.steps.push(
+            `Post-verify: curated credential route fallback errored (${err instanceof Error ? err.message : String(err)}) — continuing with greedy planner.`,
+          );
+        }
+      }
+    }
     const credentialTracker = new PostSignupCredentialTracker(credentials);
     // Gate URLs we've already polled the operator's gmail for, so a
     // multi-round wait on the same email-OTP page doesn't re-poll.
@@ -12244,6 +12462,24 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
       // the planner choosing the right click, so an on-screen key is never
       // missed into a maxRounds bail. Merge-only (never overwrites a prior
       // capture); both extractors are best-effort.
+      try {
+        const currentUrl = this.browser.currentUrl();
+        if (!recovery.revealSweepUrls.has(currentUrl)) {
+          const sweepText = await this.browser.extractVisibleText().catch(() => "");
+          if (shouldRevealBeforeCredentialSweep({ url: currentUrl, pageText: sweepText })) {
+            recovery.revealSweepUrls.add(currentUrl);
+            const reveal = await this.browser.revealMaskedCredentials();
+            if (reveal.clicked > 0) {
+              args.steps.push(
+                `Post-verify round ${round}: credential surface has reveal controls — clicked ${reveal.clicked} before sweeping.`,
+              );
+              await this.browser.wait(1);
+            }
+          }
+        }
+      } catch {
+        // reveal is opportunistic; normal extraction still runs below
+      }
       try {
         const sweep = await this.extractCredentials();
         for (const [k, v] of Object.entries(sweep)) {
@@ -12615,6 +12851,92 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         }
       } else {
         lastReachablePostVerifyUrl = state.url;
+      }
+      if (
+        serviceSlug(args.service) === "render" &&
+        !hasAnyExtractedCredential(credentials) &&
+        /dashboard\.render\.com/i.test(state.url)
+      ) {
+        const onRenderAccountSettings = /\/u\/[^/]+\/settings\b/i.test(state.url);
+        if (!onRenderAccountSettings) {
+          const accountSettingsLink = findRenderAccountSettingsLink(
+            inventory,
+            recovery.clickedKeysLinks,
+          );
+          if (accountSettingsLink !== null) {
+            recovery.clickedKeysLinks.add(accountSettingsLink.selector);
+            const label =
+              accountSettingsLink.visibleText ??
+              accountSettingsLink.ariaLabel ??
+              accountSettingsLink.href ??
+              accountSettingsLink.selector;
+            args.steps.push(
+              `Post-verify round ${round}: Render account menu exposes "${label.slice(0, 60)}" — entering account settings before API-key navigation.`,
+            );
+            try {
+              await this.browser.click(accountSettingsLink.selector);
+              await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+              hint = undefined;
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
+              continue;
+            } catch (err) {
+              args.steps.push(
+                `Post-verify round ${round}: Render account-settings click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+              );
+            }
+          } else if (!recovery.triedRenderAccountMenu) {
+            const accountMenu = findRenderAccountMenuTrigger(inventory);
+            if (accountMenu !== null) {
+              recovery.triedRenderAccountMenu = true;
+              const label =
+                accountMenu.visibleText ??
+                accountMenu.ariaLabel ??
+                accountMenu.title ??
+                accountMenu.selector;
+              args.steps.push(
+                `Post-verify round ${round}: Render dashboard has no API-key link visible — opening account menu "${label.slice(0, 40)}".`,
+              );
+              try {
+                await this.browser.click(accountMenu.selector);
+                await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+                hint = undefined;
+                recovery.prevSignature = null;
+                recovery.prevInventorySize = -1;
+                continue;
+              } catch (err) {
+                args.steps.push(
+                  `Post-verify round ${round}: Render account-menu click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+                );
+              }
+            }
+          }
+        } else if (!/#api-keys\b/i.test(state.url)) {
+          const keysLink = findApiKeysNavLink(inventory, recovery.clickedKeysLinks);
+          if (keysLink !== null) {
+            recovery.clickedKeysLinks.add(keysLink.selector);
+            const label =
+              keysLink.visibleText ??
+              keysLink.ariaLabel ??
+              keysLink.href ??
+              keysLink.selector;
+            args.steps.push(
+              `Post-verify round ${round}: Render account settings reached — clicking API-key anchor "${label.slice(0, 60)}".`,
+            );
+            try {
+              await this.browser.click(keysLink.selector);
+              await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+              hint = undefined;
+              recovery.prevSignature = null;
+              recovery.prevInventorySize = -1;
+              continue;
+            } catch (err) {
+              args.steps.push(
+                `Post-verify round ${round}: Render API-key anchor click failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+              );
+            }
+          }
+        }
       }
       const emailAlias =
         args.verificationEmailAlias ??
@@ -13731,6 +14053,68 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         // a click before the navigate.
         recovery.prevSignature = null;
         recovery.prevInventorySize = inventory.length;
+      }
+
+      const actionCycleSignature = credentialActionSignature(nextStep, inventory);
+      if (actionCycleSignature !== null) {
+        recovery.recentCredentialActionSignatures.push(actionCycleSignature);
+        if (recovery.recentCredentialActionSignatures.length > 8) {
+          recovery.recentCredentialActionSignatures =
+            recovery.recentCredentialActionSignatures.slice(-8);
+        }
+        if (
+          isRepeatingCredentialActionCycle(
+            recovery.recentCredentialActionSignatures,
+            visiblePageText,
+          )
+        ) {
+          args.steps.push(
+            `Post-verify: detected repeating credential-action cycle (${recovery.recentCredentialActionSignatures.slice(-5).join(" → ")}) — trying extraction/fallback instead of repeating it.`,
+          );
+          const harvested = await this.harvestVisibleCredentials().catch(() => ({}));
+          for (const [k, v] of Object.entries(harvested)) {
+            if (credentials[k] === undefined) credentials[k] = v;
+          }
+          if (hasAnyExtractedCredential(credentials)) {
+            await this.writeFastPathSyntheticCapture(
+              args.service,
+              capturedRound,
+              oauth,
+              "repeating credential-action cycle synthetic extract — credentials were already visible",
+            );
+            return credentials;
+          }
+          const fallback = pickStuckLoopFallbackUrl(
+            state.url,
+            recovery.triedFallbackUrls,
+            args.service,
+            this.resolvedSignupUrl,
+          );
+          if (fallback !== null) {
+            recovery.triedFallbackUrls.add(fallback);
+            args.steps.push(
+              `Post-verify: credential-action cycle fallback — navigating to ${fallback}`,
+            );
+            try {
+              await this.browser.goto(fallback);
+              await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+            } catch (err) {
+              args.steps.push(
+                `Post-verify: credential-action cycle fallback navigate failed (${err instanceof Error ? err.message : String(err)}) — continuing.`,
+              );
+            }
+            recovery.prevSignature = null;
+            recovery.prevInventorySize = -1;
+            hint = undefined;
+            continue;
+          }
+          this.lastPostVerifyDoneReason =
+            `[stuck_loop] planner repeated credential/payment actions (${recovery.recentCredentialActionSignatures.slice(-5).join(" → ")}) with no usable credential and no fallback URL remaining.`;
+          args.steps.push(
+            `Post-verify: credential-action cycle unresolvable — breaking out with planner_stuck.`,
+          );
+          break;
+        }
       }
 
       // Record the kind of the step we're ABOUT to execute (all re-plan

@@ -1,5 +1,23 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.10 (2026-06-25)
+
+Prerelease (`next`). Improves the interactive signup driver after the latest
+dogfood batch against hosted developer tools.
+
+- feat(provision): observations now include generated action refs plus compact
+  accessibility-style region context, so planners can target repeated labels
+  without guessing from flat page text.
+- fix(provision): OAuth sessions recover the active product page after popup or
+  account-switch flows, and tenant subdomains reached by organic redirects can
+  be reused for scoped navigation.
+- fix(provision): credential extraction drops UI noise such as versions, dates,
+  referral codes, key names, masked placeholders, and Together-style key IDs.
+  Langfuse and Neon extraction now normalize the real one-time key/token fields.
+- fix(provision): post-signup recovery can try curated key routes, reveal masked
+  credential surfaces before sweeping, detect create-key/payment loops, and use
+  Render account settings when API keys live behind the account menu.
+
 ## 0.9.19-rc.9 (2026-06-25)
 
 Prerelease (`next`). Tightens the session-agent install flow after the first
