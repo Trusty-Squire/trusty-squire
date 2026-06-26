@@ -170,8 +170,20 @@ export function classifyNoCredentialPostSignup(
             `verification wall the bot will not cross — finish the signup manually.`,
         },
       };
-    case "payment":
+    case "oauth_account_link_verification":
       return {
+        gate,
+        failure: {
+          kind: gate.kind,
+          gate,
+          error:
+            `onboarding_blocked: ${input.service}'s OAuth account-link flow requires ` +
+            `verifying the operator's real email inbox before the account can be linked. ` +
+            `Finish the link manually, then retry provisioning.`,
+        },
+      };
+	    case "payment":
+	      return {
         gate,
         failure: {
           kind: gate.kind,
@@ -179,10 +191,21 @@ export function classifyNoCredentialPostSignup(
           error:
             `onboarding_blocked: ${input.service}'s API key sits behind a billing or ` +
             `payment-method wall the bot will not cross — finish the signup manually.`,
-        },
-      };
-    case "account_review":
-      return {
+	        },
+	      };
+	    case "permission_denied":
+	      return {
+	        gate,
+	        failure: {
+	          kind: gate.kind,
+	          gate,
+	          error:
+	            `onboarding_blocked: ${input.service} reached an authenticated route but the ` +
+	            `account lacks permission to continue or create credentials — finish the organization setup manually.`,
+	        },
+	      };
+	    case "account_review":
+	      return {
         gate,
         failure: {
           kind: gate.kind,

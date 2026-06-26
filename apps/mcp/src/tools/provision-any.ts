@@ -407,7 +407,7 @@ export const checkProvisionStatusTool = {
       // relay them to the user without waiting for the final result.
       // Last 15 is plenty for context — older entries are usually
       // navigation noise.
-      const recentSteps = record.stepsSink.slice(-15);
+      const recentSteps = sanitizeSteps(record.stepsSink.slice(-15));
       const userActionRequired = recentSteps.some((s) =>
         /match the number|tap \d+ on your phone|verify it's you|captcha/i.test(s),
       );
@@ -426,12 +426,12 @@ export const checkProvisionStatusTool = {
           : "Signup still in progress. Poll again in about 30 seconds.",
       };
     }
-    return await maybeAppendQuotaNudge({
+    return sanitizePublicResponse(await maybeAppendQuotaNudge({
       ...record.result,
       evidence: record.provisionRun.evidence.snapshot(),
       evidence_path: record.provisionRun.evidencePath,
       evidence_persistence: record.provisionRun.evidence.persistenceStatus(),
-    });
+    }));
   },
 };
 
@@ -476,6 +476,98 @@ async function maybeAppendQuotaNudge(result: unknown): Promise<unknown> {
     // best-effort — never let a status lookup change or break a real result
   }
   return result;
+}
+
+function sanitizeSteps(steps: readonly string[] | undefined): string[] {
+  return (steps ?? []).map((s) => redactCredentials(s));
+}
+
+function sanitizePublicValue(value: unknown, key?: string): unknown {
+  if (key === "credentials") return value;
+  if (typeof value === "string") return redactCredentials(value);
+  if (Array.isArray(value)) return value.map((v) => sanitizePublicValue(v));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = sanitizePublicValue(v, k);
+    }
+    return out;
+  }
+  return value;
+}
+
+export function sanitizePublicResponse(result: unknown): unknown {
+  return sanitizePublicValue(result);
+}
+
+function inferAccountState(result: SignupResult): "fresh" | "returning" | "unknown" {
+  const trail = result.steps.join("\n").toLowerCase();
+  if (
+    /\b(account already exists|already registered|returning-user|existing account|already authenticated|skipping signup)\b/.test(
+      trail,
+    )
+  ) {
+    return "returning";
+  }
+  if (result.via === "skill" && /\bawait_email_code skill\b/i.test(trail)) {
+    return "fresh";
+  }
+  if (/\busing email:|email verification|created workspace|created project|post-verify\b/i.test(trail)) {
+    return "fresh";
+  }
+  return "unknown";
+}
+
+type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+export async function validateServiceCredentialResult(
+  service: string,
+  result: SignupResult,
+  fetchImpl: FetchLike = fetch,
+): Promise<SignupResult> {
+  if (!result.success || result.credentials === undefined) return result;
+  if (!/^gitlab$/i.test(service.trim())) return result;
+
+  const apiKey = result.credentials.api_key;
+  if (apiKey === undefined || apiKey.trim().length === 0) return result;
+
+  const fail = (reason: string): SignupResult => {
+    const { credentials: _credentials, ...withoutCredentials } = result;
+    void _credentials;
+    return {
+      ...withoutCredentials,
+      success: false,
+      error:
+        `credential_validation_failed: gitlab api_key did not validate against ` +
+        `https://gitlab.com/api/v4/user (${reason})`,
+      steps: [
+        ...result.steps,
+        `Credential validation: GitLab API key rejected (${reason}).`,
+      ],
+    };
+  };
+
+  if (!apiKey.startsWith("glpat-")) {
+    return fail("expected a personal access token beginning glpat-");
+  }
+
+  try {
+    const resp = await fetchImpl("https://gitlab.com/api/v4/user", {
+      headers: { "PRIVATE-TOKEN": apiKey },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) return fail(`HTTP ${resp.status}`);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+
+  return {
+    ...result,
+    steps: [
+      ...result.steps,
+      "Credential validation: GitLab API key authenticated against /api/v4/user.",
+    ],
+  };
 }
 
 interface RunContext {
@@ -655,6 +747,7 @@ async function tryReplayLearnedSkill(
         skill,
         browser,
         mode: "dry",
+        log: (message) => ctx.stepsSink.push(message),
         templateValues: {
           EMAIL_ALIAS: ctx.alias,
           TOKEN_NAME: `mcp-${ctx.provisionRun.provisionId.slice(5)}`,
@@ -703,6 +796,7 @@ async function tryReplayLearnedSkill(
       skill,
       browser: fullBrowser,
       mode: "full",
+      log: (message) => ctx.stepsSink.push(message),
       templateValues: {
         EMAIL_ALIAS: ctx.alias,
         TOKEN_NAME: `mcp-${ctx.provisionRun.provisionId.slice(5)}`,
@@ -891,7 +985,7 @@ async function runSignupTask(
     };
 
     const bot = new UniversalSignupBot();
-    const result = await bot.signup({
+    let result = await bot.signup({
       service: input.service,
       ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
       // No curated URL → let resolveSignupUrl reuse a promoted skill's
@@ -952,6 +1046,7 @@ async function runSignupTask(
       apiBase: ctx.apiBase,
       allowOperatorInboxOtp: ctx.consentOperatorInboxOtp,
     });
+    result = await validateServiceCredentialResult(input.service, result);
 
     // Best-effort alias cleanup. Failure is non-fatal — the alias
     // TTL-expires anyway.
@@ -1056,20 +1151,23 @@ async function runSignupTask(
     // provider changes (lands as pending-review, not active).
     // Fire-and-forget — failures push to stepsSink with `[auto-
     // promote]` prefix and never fail the signup.
-    if (
-      result.success &&
-      ctx.consentSkillifyTelemetry &&
-      isAutoPromoteEnabled(process.env)
-    ) {
-      void runAutoPromote({
-        service: input.service,
-        stepsSink: ctx.stepsSink,
-        accountId: ctx.accountId,
-        ...(input.oauth_provider !== undefined
-          ? { oauthProvider: input.oauth_provider }
-          : {}),
-        ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
-      });
+    if (result.success && ctx.consentSkillifyTelemetry && isAutoPromoteEnabled(process.env)) {
+      const accountState = inferAccountState(result);
+      if (ctx.replayAttempted === true && accountState === "returning") {
+        ctx.stepsSink.push(
+          "[auto-promote] skipped — replay fell back to bot but the bot extracted credentials from an existing authenticated account, not a fresh signup capture.",
+        );
+      } else {
+        void runAutoPromote({
+          service: input.service,
+          stepsSink: ctx.stepsSink,
+          accountId: ctx.accountId,
+          ...(input.oauth_provider !== undefined
+            ? { oauthProvider: input.oauth_provider }
+            : {}),
+          ...(input.signup_url !== undefined ? { signupUrl: input.signup_url } : {}),
+        });
+      }
     }
     ctx.provisionRun.evidence.append("provision.run.completed", {
       status: result.success ? "success" : "failed",
@@ -1097,20 +1195,32 @@ export function buildSignupResponse(
   result: SignupResult,
 ): Record<string, unknown> {
   if (result.success && result.credentials !== undefined) {
+    const accountState = inferAccountState(result);
     return {
       status: "success",
       service: input.service,
       credentials: result.credentials,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       // Skill promoter (0.7.0): expose via + skill_id + skill_version
       // so the caller can tell whether the universal bot ran or a
       // Tier-2 learned skill served the result. Useful for the
       // operator console and for the "did we save an LLM call?"
       // telemetry pass in Phase 6.
       via: result.via ?? "bot",
+      provision_path: result.via === "skill" ? "registry_replay" : "universal_bot",
+      account_state: accountState,
+      credential_origin:
+        accountState === "returning"
+          ? "existing_authenticated_account"
+          : accountState === "fresh"
+            ? "fresh_signup_or_creation"
+            : "unknown",
       ...(result.skill_id !== undefined ? { skill_id: result.skill_id } : {}),
       ...(result.skill_version !== undefined ? { skill_version: result.skill_version } : {}),
-      message: `Successfully signed up for ${input.service}. Credentials are in this response — show them to the user (or save to their .env).`,
+      message:
+        accountState === "returning"
+          ? `Found credentials for ${input.service} in an existing authenticated account. Credentials are in this response.`
+          : `Successfully signed up for ${input.service}. Credentials are in this response — show them to the user (or save to their .env).`,
     };
   }
 
@@ -1121,7 +1231,7 @@ export function buildSignupResponse(
       status: "captcha_blocked",
       service: input.service,
       error: result.error ?? "Captcha challenge blocked automated signup.",
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       captcha_kind: result.captcha.kind,
       browser_channel: result.browser_channel ?? null,
       message:
@@ -1136,7 +1246,7 @@ export function buildSignupResponse(
       status: "oauth_required",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       message:
         `${input.service} only offers Google/GitHub (OAuth) signup — there is no email form the bot can fill. ` +
@@ -1154,7 +1264,7 @@ export function buildSignupResponse(
       status: "anti_bot_blocked",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       message:
         `${input.service}'s anti-bot gateway refused to let the bot through — IP/fingerprint risk ` +
@@ -1171,7 +1281,7 @@ export function buildSignupResponse(
       status: "needs_login",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       message:
         `The bot has no usable provider session for an OAuth signup. Tell the user to run ` +
@@ -1199,7 +1309,7 @@ export function buildSignupResponse(
       status: "needs_login",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       message:
         `${input.service} requires ${providerLabel} OAuth but the bot has no ${providerLabel} ` +
@@ -1220,7 +1330,7 @@ export function buildSignupResponse(
       status: "oauth_consent_needs_review",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       requested_scopes: allRequested,
       unauthorized_scopes: unauthorized,
@@ -1245,7 +1355,7 @@ export function buildSignupResponse(
       status: "onboarding_blocked",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       message:
         `${input.service} signed up via Google, but its API key is behind a billing/payment wall. ` +
@@ -1263,7 +1373,7 @@ export function buildSignupResponse(
       status: "verification_not_sent",
       service: input.service,
       error: result.error,
-      steps: result.steps,
+      steps: sanitizeSteps(result.steps),
       browser_channel: result.browser_channel ?? null,
       message:
         `${input.service} requires an email verification that Trusty Squire's automated ` +
@@ -1275,11 +1385,24 @@ export function buildSignupResponse(
     };
   }
 
+  if (result.error !== undefined && result.error.startsWith("credential_validation_failed")) {
+    return {
+      status: "credential_validation_failed",
+      service: input.service,
+      error: result.error,
+      steps: sanitizeSteps(result.steps),
+      browser_channel: result.browser_channel ?? null,
+      message:
+        `${input.service} signup returned a credential-shaped value, but it failed the service ` +
+        `validation check. Do not use or vault this credential; show steps[] for debugging.`,
+    };
+  }
+
   return {
     status: "failed",
     service: input.service,
     error: result.error ?? "Unknown error",
-    steps: result.steps,
+    steps: sanitizeSteps(result.steps),
     browser_channel: result.browser_channel ?? null,
     message: `Couldn't finish signing up for ${input.service}. Show the user the steps[] for debugging.`,
   };

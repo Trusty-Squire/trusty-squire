@@ -15,6 +15,7 @@ import {
   detectEmailOtpGate,
   detectGoogleNoAccount,
   detectManualLoginFallback,
+  detectOAuthRegistrationDisabled,
   detectSsoRestriction,
   detectStuckOnGoogleOAuth,
   findOAuthButton,
@@ -36,7 +37,10 @@ import type {
 } from "../browser.js";
 import type { TwoCaptchaResult, TwoCaptchaSolver } from "../captcha-solver-2captcha.js";
 import type { LLMClient, LLMResponse } from "../llm-client.js";
-import { buildSignupResponse } from "../../tools/provision-any.js";
+import {
+  buildSignupResponse,
+  validateServiceCredentialResult,
+} from "../../tools/provision-any.js";
 
 function mk(over: Partial<InteractiveElement>): InteractiveElement {
   return {
@@ -970,6 +974,26 @@ describe("detectGoogleNoAccount — Google login-only re-route (plunk)", () => {
   });
 });
 
+describe("detectOAuthRegistrationDisabled", () => {
+  it("fires on Clarifai's disabled SSO registration query", () => {
+    expect(
+      detectOAuthRegistrationDisabled(
+        "https://clarifai.com/login?error=SSO+account+registration+is+disabled.&signup=true",
+        "Log in with google",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not fire on generic SSO copy", () => {
+    expect(
+      detectOAuthRegistrationDisabled(
+        "https://example.com/login",
+        "Sign in with SSO or continue with email.",
+      ),
+    ).toBe(false);
+  });
+});
+
 // ───────────────────── scoreSignupButton oauthProvider ─────────────────────
 
 describe("scoreSignupButton — OAuth-first flip", () => {
@@ -1486,6 +1510,90 @@ describe("buildSignupResponse — OAuth statuses (T10)", () => {
       ...tail,
     });
     expect(res["status"]).toBe("success");
+  });
+
+  it("redacts credential-shaped step text while preserving the credential payload", () => {
+    const res = buildSignupResponse(base, {
+      success: true,
+      credentials: { api_key: "real-secret-value-kept" },
+      steps: [
+        "Post-verify: Key ID='workspace-key-prod-e2d1d974-c7ed-4d28-822c-0a6ef291518d' and Secret='s6d1rcPA8XQSvBkVgwETI43UtVq1SjGSK7z8c1lRSlJkSsvm'",
+      ],
+      llm_calls: 0,
+    });
+    expect(res["credentials"]).toEqual({ api_key: "real-secret-value-kept" });
+    expect(res["steps"]).toEqual([
+      "Post-verify: Key ID='REDACTED' and Secret='REDACTED'",
+    ]);
+  });
+
+  it("labels returning-account credential extraction distinctly from fresh signup", () => {
+    const res = buildSignupResponse(base, {
+      success: true,
+      credentials: { api_key: "k" },
+      steps: [
+        "already authenticated — skipping signup, routing straight to key extraction",
+      ],
+      llm_calls: 0,
+    });
+    expect(res["status"]).toBe("success");
+    expect(res["account_state"]).toBe("returning");
+    expect(res["credential_origin"]).toBe("existing_authenticated_account");
+    expect(String(res["message"])).toMatch(/existing authenticated account/);
+  });
+
+  it("downgrades GitLab success when the extracted api_key is not a PAT", async () => {
+    const result = await validateServiceCredentialResult("gitlab", {
+      success: true,
+      credentials: {
+        api_key: "not-a-gitlab-token",
+        email: "bot@example.test",
+        password: "pw",
+      },
+      steps: ["Post-verify: extracted api_key"],
+      llm_calls: 0,
+    });
+    expect(result.success).toBe(false);
+    expect(result.credentials).toBeUndefined();
+    expect(result.error).toMatch(/^credential_validation_failed:/);
+
+    const res = buildSignupResponse({ service: "gitlab" }, result);
+    expect(res["status"]).toBe("credential_validation_failed");
+  });
+
+  it("downgrades GitLab success when the PAT fails the API user check", async () => {
+    const fetchImpl = async () =>
+      new Response("unauthorized", { status: 401 });
+    const result = await validateServiceCredentialResult(
+      "gitlab",
+      {
+        success: true,
+        credentials: { api_key: "glpat-" + "a".repeat(32) },
+        steps: [],
+        llm_calls: 0,
+      },
+      fetchImpl,
+    );
+    expect(result.success).toBe(false);
+    expect(result.credentials).toBeUndefined();
+    expect(result.error).toContain("HTTP 401");
+  });
+
+  it("keeps GitLab success when the PAT validates", async () => {
+    const fetchImpl = async () => new Response("{}", { status: 200 });
+    const result = await validateServiceCredentialResult(
+      "gitlab",
+      {
+        success: true,
+        credentials: { api_key: "glpat-" + "b".repeat(32) },
+        steps: [],
+        llm_calls: 0,
+      },
+      fetchImpl,
+    );
+    expect(result.success).toBe(true);
+    expect(result.credentials?.api_key).toMatch(/^glpat-/);
+    expect(result.steps.at(-1)).toMatch(/authenticated/);
   });
 });
 

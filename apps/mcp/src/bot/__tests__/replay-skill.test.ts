@@ -852,6 +852,39 @@ describe("replaySkill — absent setup-click skip", () => {
     expect(clicks.some((c) => String(c.args[0]).includes("project"))).toBe(false);
   });
 
+  it("fails fast after too many consecutive absent setup steps before extraction", async () => {
+    const b = stubBrowser();
+    b.setInventoryFor("extract", [
+      inv({
+        tag: "button",
+        visibleText: "Create Token",
+        role: "button",
+        selector: "button.create-token",
+      }),
+      inv({ tag: "button", visibleText: "Copy", selector: "button.copy" }),
+    ]);
+
+    const result = await replaySkill({
+      skill: skillWith([
+        { kind: "click", text_match: "Proceed", role_hint: "button", provenance },
+        { kind: "click", text_match: "Continue", role_hint: "button", provenance },
+        { kind: "click", text_match: "Create my account", role_hint: "button", provenance },
+        { kind: "click", text_match: "Settings", role_hint: "button", provenance },
+        { kind: "click", text_match: "Configure cloud", role_hint: "button", provenance },
+        { kind: "click", text_match: "Create Token", role_hint: "button", provenance },
+        { kind: "extract_via_copy_button", near_text_hint: "Your token", provenance },
+      ]),
+      browser: b.controller,
+      mode: "full",
+    });
+
+    expect(result.kind).toBe("step_failed");
+    if (result.kind !== "step_failed") return;
+    expect(result.stepIndex).toBe(4);
+    expect(result.reason).toContain("stale_skill_path");
+    expect(b.history.some((c) => c.method === "click")).toBe(false);
+  });
+
   it("does NOT skip when the absent click IS the credential-creating click", async () => {
     const b = stubBrowser();
     // The credential-creating "Create Token" button is gone. Skipping it

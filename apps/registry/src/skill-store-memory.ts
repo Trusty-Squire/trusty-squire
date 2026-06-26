@@ -4,7 +4,14 @@
 // store.ts ships.
 
 import { randomUUID } from "node:crypto";
-import { canonicalizeServiceSlug, classifyFailure } from "@trusty-squire/skill-schema";
+import {
+  ACCOUNT_EXISTS_KIND,
+  NAV_TIMEOUT_KIND,
+  canonicalizeServiceSlug,
+  classifyFailure,
+  isNavNetworkFailure,
+  isReturningUserDivergence,
+} from "@trusty-squire/skill-schema";
 import type {
   InsertCaptureInput,
   InsertSkillInput,
@@ -28,6 +35,14 @@ import {
 
 const DEMOTION_THRESHOLD = 3;
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function replayOutcomeFailureKind(input: RecordReplayInput): string | null {
+  const outcome = input.outcome.trim().toLowerCase();
+  if (outcome === "ok" || outcome === "dry_pass") return null;
+  if (outcome === "step_failed" && isNavNetworkFailure(input.reason)) return NAV_TIMEOUT_KIND;
+  if (outcome === "step_failed" && isReturningUserDivergence(input.reason)) return ACCOUNT_EXISTS_KIND;
+  return outcome;
+}
 
 // Statuses collapsed to `superseded` when another row becomes the service's
 // active recipe. Mirrors PrismaSkillStore.STALE_ON_ACTIVATE_STATUSES — keep
@@ -238,13 +253,17 @@ export class InMemorySkillStore implements SkillStore {
 
     // Atomic update — in-memory means we just mutate. The Prisma
     // implementation uses a SQL UPDATE to get real atomicity (E3).
-    const isSuccess = input.outcome === "ok" || input.outcome === "dry_pass";
+    const failureKind = replayOutcomeFailureKind(input);
+    const isSuccess = failureKind === null;
+    const countsTowardDemotion = classifyFailure(failureKind) === "rot";
     if (isSuccess) {
       skill.replays_succeeded += 1;
       skill.consecutive_failures = 0;
     } else {
       skill.replays_failed += 1;
-      skill.consecutive_failures += 1;
+      if (countsTowardDemotion) {
+        skill.consecutive_failures += 1;
+      }
     }
     skill.last_replayed_at = new Date();
 

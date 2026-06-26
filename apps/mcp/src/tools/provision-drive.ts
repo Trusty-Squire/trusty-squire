@@ -15,6 +15,7 @@ import {
   captchaGate,
   awaitVerification,
   finishProvisionSession,
+  observedHostsForSession,
   type ProvisionAction,
 } from "../bot/provision-session.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
@@ -170,7 +171,22 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   },
 };
 
-const extractSchema = z.object({ session_id: z.string().min(1) });
+const extractSchema = z.object({
+  session_id: z.string().min(1),
+  store: z
+    .object({
+      service: z.string().min(1).max(120),
+      label: z.string().min(1).max(60).optional(),
+      env_var_suggestion: z.string().min(1).max(120).optional(),
+      type: z.string().min(1).max(60).optional(),
+      auth_shape: z
+        .string()
+        .max(120)
+        .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+        .optional(),
+    })
+    .optional(),
+});
 
 export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   name: "provision_extract",
@@ -178,7 +194,9 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "Reveal masked keys and extract credentials from the current page: returns " +
     "{credentials, candidate_count, blocked_reason?}. credentials may include " +
     "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
-    "plus named fields for multi-credential services. If `blocked_reason` is set, " +
+    "plus named fields for multi-credential services. Pass `store` to immediately " +
+    "save the extracted credential into the Trusty Squire vault with the session's " +
+    "observed hosts as allowed_hosts seed. If `blocked_reason` is set, " +
     "the page is a login wall / anti-bot interstitial with NO credential present " +
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page.",
@@ -186,10 +204,56 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   jsonInputSchema: {
     type: "object",
     required: ["session_id"],
-    properties: { session_id: { type: "string" } },
+    properties: {
+      session_id: { type: "string" },
+      store: {
+        type: "object",
+        required: ["service"],
+        properties: {
+          service: { type: "string" },
+          label: { type: "string" },
+          env_var_suggestion: { type: "string" },
+          type: { type: "string" },
+          auth_shape: { type: "string" },
+        },
+      },
+    },
   },
-  async handler(args) {
-    return await extractCredentials(args.session_id);
+  async handler(args, api) {
+    const extracted = await extractCredentials(args.session_id);
+    if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
+      return extracted;
+    }
+    if (api === null) {
+      throw new Error("provision_extract store requires an active Trusty Squire session");
+    }
+    const observedHosts = observedHostsForSession(args.session_id);
+    const values = extracted.credentials;
+    const singleValue = values.api_key;
+    const storeInput =
+      typeof singleValue === "string" && Object.keys(values).length === 1
+        ? { value: singleValue }
+        : { fields: values };
+    const stored = await api.storeCredential({
+      service: args.store.service,
+      ...(args.store.label !== undefined ? { label: args.store.label } : {}),
+      ...storeInput,
+      ...(args.store.env_var_suggestion !== undefined ? { env_var_suggestion: args.store.env_var_suggestion } : {}),
+      ...(args.store.type !== undefined ? { type: args.store.type } : { type: "api_key" }),
+      ...(args.store.auth_shape !== undefined ? { auth_shape: args.store.auth_shape } : {}),
+      ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+    });
+    return {
+      ...extracted,
+      stored_credential: {
+        reference: stored.reference,
+        service: stored.service,
+        label: stored.label,
+        field_names: stored.field_names,
+        allowed_hosts: stored.allowed_hosts,
+        updated: stored.updated,
+      },
+    };
   },
 };
 

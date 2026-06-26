@@ -141,6 +141,17 @@ export function findSignupLinkOnLoginPage(input: {
   const candidates = input.inventory
     .filter((el) => el.visible !== false)
     .filter((el) => el.tag === "a" || el.tag === "button" || el.role === "button")
+    .filter((el) => {
+      const label = elementLabel(el).toLowerCase();
+      const href = typeof el.href === "string" ? el.href.toLowerCase() : "";
+      if (/\b(?:privacy|policy|terms|tos|legal|cookies?|back|cancel|help|docs?|blog)\b/.test(label)) {
+        return false;
+      }
+      if (/\/(?:privacy|policy|terms|tos|legal|docs?|blog)(?:[/?#]|$)/.test(href)) {
+        return false;
+      }
+      return true;
+    })
     .map((el) => {
       const label = elementLabel(el).toLowerCase();
       let score = 0;

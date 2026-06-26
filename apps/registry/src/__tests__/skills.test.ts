@@ -598,6 +598,62 @@ describe("POST /skills/:skill_id/replay-outcome", () => {
     expect(active).toBeNull();
   });
 
+  it("records transient replay failures without advancing the demotion counter", async () => {
+    const { InMemorySkillStore } = await import("../skill-store-memory.js");
+    const directStore = new InMemorySkillStore();
+    await directStore.insert({
+      skill: validSkill({ skill_id: "01HZTRANSIENTFAILURES000001" }),
+      signature: "sig",
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+
+    for (const [outcome, reason] of [
+      ["needs_login", "Google session needs refresh"],
+      ["step_failed", "page.goto: net::ERR_TIMED_OUT at https://example.test/signup"],
+      [
+        "step_failed",
+        'No element matches text_match="SMTP & API". [returning-user: authenticated session diverged from fresh-signup capture (onboarding/nav element absent - not rot)]',
+      ],
+    ] as const) {
+      const r = await directStore.recordReplayOutcome({
+        skill_id: "01HZTRANSIENTFAILURES000001",
+        outcome,
+        reason,
+        account_id: "acct-1",
+        step_index: 1,
+      });
+      expect(r.demoted).toBe(false);
+      expect(r.consecutive_failures).toBe(0);
+    }
+
+    const active = await directStore.findActiveByService("railway");
+    expect(active?.skill_id).toBe("01HZTRANSIENTFAILURES000001");
+  });
+
+  it("counts stale skill paths as replay rot", async () => {
+    const { InMemorySkillStore } = await import("../skill-store-memory.js");
+    const directStore = new InMemorySkillStore();
+    await directStore.insert({
+      skill: validSkill({ skill_id: "01HZSTALESKILLPATH00000001" }),
+      signature: "sig",
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+
+    const r = await directStore.recordReplayOutcome({
+      skill_id: "01HZSTALESKILLPATH00000001",
+      outcome: "step_failed",
+      reason:
+        "stale_skill_path: 5 consecutive account-state-dependent setup steps were absent before credential extraction",
+      account_id: "acct-1",
+      step_index: 7,
+    });
+
+    expect(r.demoted).toBe(false);
+    expect(r.consecutive_failures).toBe(1);
+  });
+
   it("resets consecutive_failures on a successful outcome", async () => {
     // Two failures, then a success.
     for (let i = 0; i < 2; i++) {

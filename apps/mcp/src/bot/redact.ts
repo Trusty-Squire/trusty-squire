@@ -46,6 +46,21 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   /\bnpm_[A-Za-z0-9]{30,}/g,
 ];
 
+const CONTEXTUAL_SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [
+    /\b(api[_\s-]*key|secret|token|credential|password|key\s*id)\b(\s*(?:=|:)\s*['"])[^'"\n]{8,}(['"])/gi,
+    "$1$2REDACTED$3",
+  ],
+  [
+    /\b(api[_\s-]*key|secret|token|credential|password|key\s*id)\b(\s*(?:=|:)\s*)[A-Za-z0-9._|:/+=\-]{16,}/gi,
+    "$1$2REDACTED",
+  ],
+  [
+    /\b(api[_\s-]*key|secret|token|credential|password|key\s*id)\b(['"]?\s*,\s*['"]?value['"]?\s*:\s*['"])[^'"\n]{8,}(['"])/gi,
+    "$1$2REDACTED$3",
+  ],
+];
+
 // Replace each known-shape token with a redaction marker that
 // preserves the prefix + last 6 chars (for distinguishing leaks of
 // distinct keys in the same trail). New service prefixes go here AND
@@ -59,6 +74,9 @@ export function redactCredentials(text: string): string {
       const tail = m.slice(-6);
       return `${prefix}REDACTED…${tail}`;
     });
+  }
+  for (const [re, repl] of CONTEXTUAL_SECRET_PATTERNS) {
+    out = out.replace(re, repl);
   }
   return out;
 }

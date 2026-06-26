@@ -41,6 +41,20 @@ describe("PostSignupFlow terminal failure policy", () => {
     expect(result.failure?.error).toContain("phone/SMS verification wall");
   });
 
+  it("maps OAuth account-link email verification gates to onboarding_blocked", () => {
+    const result = classifyNoCredentialPostSignup({
+      service: "Xata",
+      frame: null,
+      fallbackText:
+        "Link Google Warning You need to verify your email address to link your account with Google. " +
+        "An email with instructions to link Google account lunchboxfortwo@gmail.com with your xata account has been sent to you.",
+      lastDoneReason: null,
+    });
+
+    expect(result.failure?.kind).toBe("oauth_account_link_verification");
+    expect(result.failure?.error).toContain("OAuth account-link flow requires");
+  });
+
   it("folds planner done reason into payment-wall classification", () => {
     const result = classifyNoCredentialPostSignup({
       service: "Koyeb",
@@ -69,7 +83,7 @@ describe("PostSignupFlow terminal failure policy", () => {
 describe("PostSignupCredentialTracker", () => {
   it("returns a single credential after it appears post-entry", () => {
     const tracker = new PostSignupCredentialTracker({});
-    const credentials = { api_key: "sk-live" };
+    const credentials = { api_key: "sk-live-123456" };
     const progress = tracker.observe(credentials);
 
     expect(
@@ -81,8 +95,8 @@ describe("PostSignupCredentialTracker", () => {
   });
 
   it("does not return seed-only credentials before the planner emits extract", () => {
-    const tracker = new PostSignupCredentialTracker({ api_key: "seed" });
-    const credentials = { api_key: "seed" };
+    const tracker = new PostSignupCredentialTracker({ api_key: "sk-seed-123456" });
+    const credentials = { api_key: "sk-seed-123456" };
     const progress = tracker.observe(credentials);
 
     expect(
@@ -91,9 +105,9 @@ describe("PostSignupCredentialTracker", () => {
   });
 
   it("allows seed credentials after the planner emits extract", () => {
-    const tracker = new PostSignupCredentialTracker({ api_key: "seed" });
+    const tracker = new PostSignupCredentialTracker({ api_key: "sk-seed-123456" });
     tracker.recordPlannerExtract();
-    const credentials = { api_key: "seed" };
+    const credentials = { api_key: "sk-seed-123456" };
     const progress = tracker.observe(credentials);
 
     expect(

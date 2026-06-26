@@ -255,6 +255,20 @@ describe("form-fill selector helpers", () => {
     expect(hit?.selector).toBe("#createone");
   });
 
+  it("does not treat policy, terms, or back links as signup affordances", () => {
+    const hit = findSignupLinkOnLoginPage({
+      url: "https://app.mor.org/signin",
+      title: "Sign in",
+      htmlOrText: "Sign in to your account. Don't have an account? Sign up",
+      inventory: [
+        { tag: "a", selector: "#privacy", visibleText: "Privacy Policy", href: "/signup/privacy", visible: true },
+        { tag: "a", selector: "#terms", visibleText: "Terms of Service", href: "/register/terms", visible: true },
+        { tag: "button", selector: "#back", visibleText: "Back", visible: true },
+      ],
+    });
+    expect(hit).toBeNull();
+  });
+
   it("prefers Send Code over a marketing Sign up now anchor on email-code pages", () => {
     expect(
       pickEmailCodeSubmitSelector({
