@@ -3,9 +3,13 @@
 // equivalent).
 
 import {
+  ACCOUNT_EXISTS_KIND,
+  NAV_TIMEOUT_KIND,
   canonicalizeServiceSlug,
   classifyFailure,
   equivalentServiceSlugs,
+  isNavNetworkFailure,
+  isReturningUserDivergence,
   parseSkill,
   type Skill,
 } from "@trusty-squire/skill-schema";
@@ -34,6 +38,14 @@ import {
 import { triggersHumanReview } from "./skill-store-memory.js";
 
 const DEMOTION_THRESHOLD = 3;
+
+function replayOutcomeFailureKind(input: RecordReplayInput): string | null {
+  const outcome = input.outcome.trim().toLowerCase();
+  if (outcome === "ok" || outcome === "dry_pass") return null;
+  if (outcome === "step_failed" && isNavNetworkFailure(input.reason)) return NAV_TIMEOUT_KIND;
+  if (outcome === "step_failed" && isReturningUserDivergence(input.reason)) return ACCOUNT_EXISTS_KIND;
+  return outcome;
+}
 
 // When a skill becomes the service's active recipe (verifier promote,
 // approveReview, reactivate), collapse every OTHER live row for the same
@@ -169,7 +181,9 @@ export class PrismaSkillStore implements SkillStore {
     // statement, then read back the updated row + write the replay
     // history entry. The transaction wraps it so a failed read-back
     // doesn't leave orphaned counter increments.
-    const isSuccess = input.outcome === "ok" || input.outcome === "dry_pass";
+    const failureKind = replayOutcomeFailureKind(input);
+    const isSuccess = failureKind === null;
+    const countsTowardDemotion = classifyFailure(failureKind) === "rot";
 
     return this.client.$transaction(async (tx) => {
       // Atomic increment via Prisma's `increment` operator — works
@@ -188,7 +202,9 @@ export class PrismaSkillStore implements SkillStore {
             where: { skill_id: input.skill_id },
             data: {
               replays_failed: { increment: 1 },
-              consecutive_failures: { increment: 1 },
+              ...(countsTowardDemotion
+                ? { consecutive_failures: { increment: 1 } }
+                : {}),
               last_replayed_at: new Date(),
             },
           })) as unknown as PrismaSkillRow);

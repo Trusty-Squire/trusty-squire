@@ -228,6 +228,15 @@ describe("isRequiredAccountSetupForm", () => {
     ).toBe(true);
   });
 
+  it("detects username-only setup forms before curated credential routes", () => {
+    expect(
+      isRequiredAccountSetupForm([
+        el({ tag: "input", type: "text", labelText: "Choose your username", selector: "#handle" }),
+        el({ tag: "button", visibleText: "Continue", selector: "#continue" }),
+      ]),
+    ).toBe(true);
+  });
+
   it("detects handle-only onboarding forms before clicking Continue (Val Town)", () => {
     expect(
       isRequiredAccountSetupForm([
@@ -360,6 +369,15 @@ describe("assessKeyGoal", () => {
   it("keys/settings URL with no create affordance → on_key_surface (caller extracts)", () => {
     const g = assessKeyGoal({ url: "https://x.test/settings/keys", pageText: "Your API key", inventory: dashInv });
     expect(g.kind).toBe("on_key_surface");
+  });
+
+  it("key-looking URLs that render a 404 are not treated as valid key surfaces", () => {
+    const g = assessKeyGoal({
+      url: "https://api.together.ai/settings/projects/proj_123/api-keys",
+      pageText: "404 Page not found Go to homepage",
+      inventory: [el({ tag: "a", visibleText: "Go to homepage", href: "/", selector: "#home" })],
+    });
+    expect(g.kind).toBe("not_yet");
   });
 
   it("does not classify ordinary nested settings pages as key surfaces", () => {

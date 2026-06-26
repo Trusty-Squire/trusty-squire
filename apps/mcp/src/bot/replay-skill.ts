@@ -152,6 +152,12 @@ export interface ReplayInput {
    */
   preferredOAuthProvider?: OAuthProviderId;
   /**
+   * Optional caller-visible diagnostics sink. The router wires this to
+   * check_provision_status recent_steps so returning-user skips and stale-route
+   * fallbacks are visible to the host agent instead of only stderr.
+   */
+  log?: (message: string) => void;
+  /**
    * 0.8.2-rc.19 — bypass the "skill must be active" guard. The verifier
    * loop NEEDS to replay pending-review skills (and sometimes demoted
    * ones) to gather the outcome data that drives promote/demote
@@ -216,6 +222,8 @@ export function revealPollMs(): number {
   return Number.isFinite(v) && v > 0 ? v : 8000;
 }
 
+const MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS = 4;
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
@@ -224,6 +232,10 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   const candidatesDir = input.candidatesDir;
   const llmFallback = input.llmFallback;
   const templateValues = input.templateValues ?? {};
+  const log = (message: string): void => {
+    console.error(message);
+    input.log?.(message);
+  };
 
   // Router-level guard: a demoted, pending-review, or superseded
   // skill is not replay-eligible for end-user provisions. The router
@@ -307,6 +319,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // before treating it as skippable. Once a form control succeeds the form is
   // present, and from then on absent fields keep the account-state skip.
   let reachedForm = false;
+  let consecutiveAbsentSetupSkips = 0;
   // Post-click settle parity with the live bot. A click can kick off server
   // work BEFORE the SPA navigates (zilliz's onboarding Continue provisions a
   // default org/project/cluster, then routes to the dashboard — several
@@ -378,7 +391,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       (await looksAuthenticatedReturningUser(browser))
     ) {
       const textMatch = step.kind === "click" ? step.text_match : "";
-      console.error(
+      log(
         `[replay] step ${i} (click text_match=${JSON.stringify(textMatch)}) ` +
           `is a first-run onboarding dismissal and the page is already an ` +
           `authenticated returning-user session — skipping.`,
@@ -474,11 +487,21 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // fallback planner; otherwise returning-user verify can burn the
         // entire timeout inventing a replacement for a step that should
         // not run.
-        console.error(
+        log(
           `[replay] step ${i} (click text_match=${JSON.stringify(step.text_match)}) ` +
             `target absent from page; skipping as optional setup step. ` +
             `Reason: ${validation.reason}`,
         );
+        consecutiveAbsentSetupSkips += 1;
+        if (consecutiveAbsentSetupSkips > MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS) {
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `stale_skill_path: ${consecutiveAbsentSetupSkips} consecutive account-state-dependent setup steps were absent before credential extraction; falling back to universal bot`,
+            capturedStep: step,
+          };
+        }
         continue;
       }
       const fallbackResult = await tryFallback(
@@ -506,13 +529,23 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // That's not rot — a later extract step still reaches the
         // credential, and the credential validator is the real backstop.
         // Skip the absent onboarding field rather than false-failing.
-        console.error(
+        log(
           `[replay] step ${i} (fill label_hint=${JSON.stringify(step.label_hint)}) ` +
             `input absent — skipping as account-state-dependent onboarding ` +
             `(account already registered; signup form gone). A later extract ` +
             `step still reaches the credential. Reason: ${validation.reason}`,
         );
         skippedOnboardingFill = true;
+        consecutiveAbsentSetupSkips += 1;
+        if (consecutiveAbsentSetupSkips > MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS) {
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `stale_skill_path: ${consecutiveAbsentSetupSkips} consecutive account-state-dependent setup steps were absent before credential extraction; falling back to universal bot`,
+            capturedStep: step,
+          };
+        }
         continue;
       } else if (
         step.kind === "select" &&
@@ -526,13 +559,23 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // different control. A later extract step still reaches the
         // credential and the credential validator is the backstop, so skip
         // rather than false-failing the whole replay.
-        console.error(
+        log(
           `[replay] step ${i} (select label_hint=${JSON.stringify(step.label_hint)}) ` +
             `select absent — skipping as account-state-dependent onboarding ` +
             `(account already registered; signup form gone). A later extract ` +
             `step still reaches the credential. Reason: ${validation.reason}`,
         );
         skippedOnboardingFill = true;
+        consecutiveAbsentSetupSkips += 1;
+        if (consecutiveAbsentSetupSkips > MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS) {
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `stale_skill_path: ${consecutiveAbsentSetupSkips} consecutive account-state-dependent setup steps were absent before credential extraction; falling back to universal bot`,
+            capturedStep: step,
+          };
+        }
         continue;
       } else if (
         step.kind === "click_oauth_button" &&
@@ -549,7 +592,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // rotted button still fails below; it returns true only on an actual
         // authenticated app shell. Skip the head and resume at the post-auth
         // credential-fetch tail, in returning-user mode.
-        console.error(
+        log(
           `[replay] step ${i} (click_oauth_button ${step.provider}) target absent, but the page ` +
             `is an authenticated returning-user session (account already exists) — skipping the ` +
             `login head and resuming at the post-auth credential tail.`,
@@ -566,6 +609,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         };
       }
     }
+    consecutiveAbsentSetupSkips = 0;
 
     // Execute. If execution itself throws (a transient browser fault),
     // surface it as a step failure with the underlying message —

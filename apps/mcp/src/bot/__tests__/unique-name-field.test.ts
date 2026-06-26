@@ -154,6 +154,30 @@ describe("findRelocatedCredentialPageRecoveryLink", () => {
       }),
     ).toBeNull();
   });
+
+  it("does not follow top-level marketing team links from a dead credential route", () => {
+    const inv = [
+      el({
+        tag: "a",
+        visibleText: "Teams",
+        href: "/teams",
+        selector: "#teams",
+      }),
+      el({
+        tag: "a",
+        visibleText: "Pricing",
+        href: "/pricing",
+        selector: "#pricing",
+      }),
+    ];
+    expect(
+      findRelocatedCredentialPageRecoveryLink({
+        currentUrl: "https://www.val.town/settings/api/new",
+        pageText: "Page not found. Explore Teams Pricing Docs Blog",
+        inventory: inv,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("findAccountScopeListEntry", () => {

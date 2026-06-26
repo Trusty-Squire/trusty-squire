@@ -137,6 +137,7 @@ export class ApiClient {
     env_var_suggestion?: string;
     type?: string;
     auth_shape?: string;
+    observed_hosts?: string[];
   }): Promise<{
     reference: string;
     service: string;

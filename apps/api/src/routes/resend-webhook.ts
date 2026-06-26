@@ -204,6 +204,7 @@ function normaliseInboundPayload(data: unknown): ResendInboundPayload | null {
       ? { received_at: pickString(d.received_at)! }
       : {}),
     ...(pickString(d.id) !== undefined ? { id: pickString(d.id)! } : {}),
+    ...(pickString(d.email_id) !== undefined ? { email_id: pickString(d.email_id)! } : {}),
   };
 }
 

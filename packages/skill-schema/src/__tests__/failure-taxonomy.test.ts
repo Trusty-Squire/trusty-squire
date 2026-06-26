@@ -152,6 +152,7 @@ describe("isReturningUserDivergence", () => {
       "step_failed step=5 target is disabled (aria-disabled=true) after 6s",
       'No element matches text_match="Create service token".',
       "validator_failed got=\"masked\" shape check",
+      "stale_skill_path: 5 consecutive account-state-dependent setup steps were absent before credential extraction",
     ]) {
       expect(isReturningUserDivergence(reason)).toBe(false);
     }

@@ -172,6 +172,25 @@ describe("Egress Grants — /v1/egress", () => {
     for (let i = 0; i < 5; i++) expect((await call()).statusCode).toBe(200);
   });
 
+  it("refuses to mint a grant for a credential with an empty host allowlist", async () => {
+    const account = await h.deps.accountStore.createAccount("empty-hosts@example.test", "Empty");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "UnknownProvider");
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/egress/grants",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: { service: "UnknownProvider" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({
+      error: "credential_unavailable",
+      reason: "empty_allowed_hosts",
+    });
+  });
+
   it("maps grant-store connection collapse to retryable 503 instead of raw 500", async () => {
     await h.server.close();
     const backing = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID }).egressGrantStore;

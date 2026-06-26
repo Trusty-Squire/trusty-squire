@@ -60,12 +60,14 @@ import { classifyObservationFrame } from "./state-classifier.js";
 import {
   classifyTerminalGate,
   isAtAccountReviewGate,
+  isAtOAuthAccountLinkVerificationGate,
   isAtPaywall,
   isOnboardingReviewGate,
   isSignupsClosed,
 } from "./terminal-gate.js";
 export {
   isAtAccountReviewGate,
+  isAtOAuthAccountLinkVerificationGate,
   isAtPaywall,
   isOnboardingReviewGate,
   isSignupsClosed,
@@ -94,11 +96,13 @@ import {
   extractAllLabeledTokensFromReason,
   hasAnyExtractedCredential,
   hasUsableCredentialBundle,
+  terminalReasonInvalidatesCredentialSuccess,
 } from "./credential-extraction-flow.js";
 export {
   extractAllLabeledTokensFromReason,
   hasAnyExtractedCredential,
   isMultiCredBundle,
+  terminalReasonInvalidatesCredentialSuccess,
 } from "./credential-extraction-flow.js";
 import {
   captureOnboardingRound,
@@ -114,6 +118,7 @@ import {
 } from "./semantic-transition.js";
 import {
   KEYS_DESTINATION_URL,
+  isRequiredAccountSetupForm,
   runNavSearch,
   type NavSearchBrowserPort,
   type NavSearchDeps,
@@ -1103,10 +1108,18 @@ export function findRelocatedCredentialPageRecoveryLink(input: {
       .trim();
     const haystack = `${href} ${text}`;
     if (!RELOCATION_RECOVERY_TEXT.test(haystack)) continue;
+    const isScopeRecovery = /\b(?:teams?|organisations?|organizations?)\b/i.test(haystack);
+    const pageAdvertisesScopeList =
+      /\b(?:teams? list|organisations? list|organizations? list|part of .* instead)\b/i.test(
+        relocatedText,
+      );
+    if (isScopeRecovery && !pageAdvertisesScopeList && !SCOPE_ENTITY_HREF.test(href)) {
+      continue;
+    }
     let score = 0;
     if (API_KEYS_HREF.test(href)) score += 6;
     if (API_KEYS_TEXT.test(text)) score += 4;
-    if (/\b(?:teams?|organisations?|organizations?)\b/i.test(haystack)) score += 3;
+    if (isScopeRecovery) score += 3;
     if (/\b(?:settings|accounts?|profile|developers?)\b/i.test(haystack)) score += 2;
     if (/\b(?:dashboard|home)\b/i.test(haystack)) score -= 2;
     if (el.inViewport === true) score += 1;
@@ -1363,17 +1376,63 @@ function shouldComposeFallbackOnAppOrigin(current: URL, app: URL): boolean {
   return /^(?:auth|authkit|login|accounts?|idp|sso|oauth|signin|signup)$/.test(firstLabel);
 }
 
+const SERVICE_NAME_TLD_SUFFIXES = new Set([
+  "ai",
+  "app",
+  "co",
+  "dev",
+  "io",
+  "so",
+  "xyz",
+]);
+
 // Last-resort canonical signup URL when the caller passed none and no
-// promoted skill / model resolution applies: <name>.com/signup, which
-// catches the common dev-SaaS case (Resend, Postmark, IPInfo, …). Non-.com
-// products and non-obvious entry points are handled upstream by
-// resolveSignupUrl (promoted-skill signup_url → model); a wrong .com guess
-// is recovered by the looksLikeSignupPage → Google-search fallback. The old
-// hand-maintained KNOWN_DOMAINS table was retired once the model + the
-// verified skill cache covered it. Exported for unit testing.
+// promoted skill / model resolution applies. Plain service names still use
+// <name>.com/signup for the common dev-SaaS case (Resend, Postmark, IPInfo,
+// …). Service names written with a plausible TLD suffix (together-ai, fly-io,
+// x-ai) preserve that signal as <name>.<tld>/signup; dogfood showed the old
+// compact .com fallback can send these to a different registered domain.
+// Non-obvious entry points are still handled upstream by promoted-skill URLs,
+// the canonical map, or the model.
 export function guessSignupUrl(service: string): string {
-  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const parts = service
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 0);
+  if (parts.length >= 2) {
+    const tld = parts[parts.length - 1];
+    const root = parts.slice(0, -1).join("");
+    if (tld !== undefined && SERVICE_NAME_TLD_SUFFIXES.has(tld) && root.length > 0) {
+      return `https://${root}.${tld}/signup`;
+    }
+  }
+  const slug = parts.join("");
   return `https://${slug}.com/signup`;
+}
+
+function explicitServiceDomain(service: string): string | null {
+  const parts = service
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((part) => part.length > 0);
+  if (parts.length < 2) return null;
+  const tld = parts[parts.length - 1];
+  const root = parts.slice(0, -1).join("");
+  if (tld === undefined || root.length === 0 || !SERVICE_NAME_TLD_SUFFIXES.has(tld)) {
+    return null;
+  }
+  return `${root}.${tld}`;
+}
+
+function modelUrlContradictsExplicitServiceDomain(service: string, url: string): boolean {
+  const expected = explicitServiceDomain(service);
+  if (expected === null) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host !== expected && !host.endsWith(`.${expected}`);
+  } catch {
+    return false;
+  }
 }
 
 const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
@@ -1403,6 +1462,13 @@ const CANONICAL_SIGNUP_URLS: Readonly<Record<string, string>> = {
   // verification. Current Anyscale docs identify console.anyscale.com as the
   // organization signup flow.
   anyscale: "https://console.anyscale.com",
+  // Cartesia's marketing /signup is currently a rendered 404/dead page. The
+  // self-serve auth app exposes the registration surface under its sign-in SPA.
+  cartesia: "https://play.cartesia.ai/sign-in/sign-up",
+  // Pinecone Assistant is a product, not a standalone domain. Reusing the
+  // generic service-name guess produced pineconeassistant.com, which does not
+  // resolve; assistant keys are issued from the normal Pinecone console.
+  pineconeassistant: "https://app.pinecone.io/signup",
 };
 
 function canonicalSignupUrl(service: string): string | null {
@@ -1520,6 +1586,12 @@ export async function resolveSignupUrl(
     });
     const url = firstHttpsUrl(resp.text);
     if (url !== null) {
+      if (modelUrlContradictsExplicitServiceDomain(service, url)) {
+        opts.log?.(
+          `Model URL for "${service}" contradicts explicit service domain (${url}) — using guess`,
+        );
+        return guessSignupUrl(service);
+      }
       opts.log?.(`Resolved signup URL for "${service}" via ${resp.backend}: ${url}`);
       return url;
     }
@@ -2872,6 +2944,37 @@ export function looksLike404(title: string, bodyText: string): boolean {
   return has404Token || notFoundPhrase;
 }
 
+export function looksLikeParkedDomainPage(title: string, bodyText: string): boolean {
+  const hay = `${title} ${bodyText}`.toLowerCase().replace(/\s+/g, " ").slice(0, 1200);
+  const saleSignal =
+    /\b(?:domain|website)\s+(?:name\s+)?(?:is\s+)?for sale\b/.test(hay) ||
+    /\bbuy this domain\b/.test(hay) ||
+    /\bthis domain may be for sale\b/.test(hay);
+  const parkingSignal =
+    /\b(?:domain parking|parked domain|sedo domain parking|hugedomains|dan\.com|afternic)\b/.test(hay) ||
+    /\bsearch for information\b/.test(hay);
+  return saleSignal && parkingSignal;
+}
+
+export function looksLikeBrowserNetworkError(title: string, bodyText: string): boolean {
+  const hay = `${title} ${bodyText}`.toLowerCase().replace(/\s+/g, " ").slice(0, 1200);
+  return (
+    /\bthis site can'?t be reached\b/.test(hay) ||
+    /\bcheck if there is a typo in\b/.test(hay) ||
+    /\b(?:dns_probe_finished|err_name_not_resolved|err_tunnel_connection_failed|err_connection_timed_out|err_connection_refused)\b/i.test(
+      hay,
+    )
+  );
+}
+
+export function shouldAbortOAuthFirstOnDeadPage(title: string, bodyText: string): boolean {
+  return (
+    looksLike404(title, bodyText) ||
+    looksLikeParkedDomainPage(title, bodyText) ||
+    looksLikeBrowserNetworkError(title, bodyText)
+  );
+}
+
 // Services whose credential is the auto-created Firebase/GCP "Browser key"
 // reachable from the Google Cloud API Credentials page. Both share the same
 // project-creation flow and the SAME AIzaSy key (it's both the firebase web
@@ -2976,6 +3079,9 @@ export function classifySignupHtml(
     titleLower.includes("not found") ||
     titleLower.includes("page not found")
   ) {
+    return "other";
+  }
+  if (looksLikeParkedDomainPage(title ?? "", text)) {
     return "other";
   }
 
@@ -3220,6 +3326,48 @@ export function findCreateAccountCta(
     if (e.tag !== "a" && e.tag !== "button" && e.role !== "button") continue;
     const text = `${e.visibleText ?? ""} ${e.ariaLabel ?? ""}`.trim();
     if (re.test(text)) return e;
+  }
+  return null;
+}
+
+// Post-OAuth account-link bridges (Auth0/Keycloak first-broker-login class)
+// can say "Account already exists" and offer a safe in-page action like
+// "Add to existing account". This is not a terminal verification wall: taking
+// the explicit link action usually completes the provider/session attachment
+// and redirects to the app. Conservative text gate + clickable CTA only.
+export function findOAuthAccountLinkCta(
+  pageText: string,
+  inventory: ReadonlyArray<InteractiveElement>,
+): InteractiveElement | null {
+  const text = pageText.toLowerCase().replace(/\s+/g, " ");
+  const accountLinkState =
+    /\baccount already exists\b/.test(text) ||
+    /\blink (?:your )?(?:google|github|oauth|social) account\b/.test(text) ||
+    /\badd to existing account\b/.test(text);
+  if (!accountLinkState) return null;
+
+  const acceptLink =
+    /\b(?:add to existing account|link (?:account|accounts|existing account)|continue with existing account|use existing account|connect (?:account|accounts))\b/i;
+  const rejectLink =
+    /\b(?:create new account|new account|review profile|cancel|back|not now|sign out|log out)\b/i;
+
+  for (const el of inventory) {
+    if (el.visible === false) continue;
+    if (el.tag !== "a" && el.tag !== "button" && el.role !== "button") continue;
+    const label = [
+      el.visibleText,
+      el.ariaLabel,
+      el.labelText,
+      el.title,
+      el.name,
+      el.id,
+    ]
+      .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+      .join(" ")
+      .trim();
+    if (label === "") continue;
+    if (rejectLink.test(label)) continue;
+    if (acceptLink.test(label)) return el;
   }
   return null;
 }
@@ -3485,6 +3633,17 @@ export function detectAntiBotBlock(html: string): string | null {
   if (/sucuri|sucuri website firewall/i.test(text)) return "Sucuri";
   if (/datadome|dd-captcha/i.test(text)) return "DataDome";
   if (/incapsula|imperva/i.test(text)) return "Imperva";
+  return null;
+}
+
+export function detectCredentialExtractionBlock(html: string, visibleText = ""): string | null {
+  const vendor = detectAntiBotBlock(html);
+  if (vendor !== null) {
+    return `${vendor} anti-bot interstitial`;
+  }
+  if (visibleText.trim().length <= 600 && isAntiBotInterstitialText(visibleText)) {
+    return "anti-bot interstitial";
+  }
   return null;
 }
 
@@ -4198,6 +4357,20 @@ export function detectSsoRestriction(pageText: string): boolean {
   // "Single Sign-On is required", "SSO organization membership".
   return /(?:managed\s+via\s+(?:sso|single\s+sign-?on)|sso[\s-]?managed|sso\s+organization|single\s+sign-?on\s+is\s+required|enforced\s+by\s+(?:sso|saml))/.test(
     lower,
+  );
+}
+
+export function detectOAuthRegistrationDisabled(url: string, bodyText: string): boolean {
+  let query = "";
+  try {
+    query = decodeURIComponent(new URL(url).search.replace(/\+/g, " ")).toLowerCase();
+  } catch {
+    query = "";
+  }
+  const hay = `${query} ${bodyText}`.toLowerCase().replace(/\s+/g, " ");
+  return (
+    /\b(?:sso|oauth|social|google|github)\s+account\s+registration\s+is\s+disabled\b/.test(hay) ||
+    /\bregistration\s+(?:via|with)\s+(?:sso|oauth|social|google|github)\s+is\s+disabled\b/.test(hay)
   );
 }
 
@@ -5426,6 +5599,30 @@ export function isSignupOrLoginRoute(url: string): boolean {
   }
 }
 
+export function isPostVerifyAuthResetRoute(input: {
+  url: string;
+  round: number;
+  hasExtractedCredential: boolean;
+}): boolean {
+  return (
+    input.round > 0 &&
+    !input.hasExtractedCredential &&
+    isSignupOrLoginRoute(input.url)
+  );
+}
+
+export function isGitHubOAuthRateLimitPage(url: string, htmlOrText: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "github.com" || !/^\/login\/oauth\/authorize\b/i.test(u.pathname)) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return /\btoo many requests\b/i.test(htmlOrText) || /\bsecondary rate limit\b/i.test(htmlOrText);
+}
+
 // The scheme://host root of a URL (no path/query) — the place a service
 // redirects an authenticated user to their dashboard. Null on a malformed
 // URL. Exported for unit tests.
@@ -6186,12 +6383,14 @@ export class SignupAgent {
     // stay on the email path. Without this, the auto-OAuth-first
     // detection on the *next* iteration sees the now-revealed
     // "Continue with Google" button and reroutes — exactly the
-    // regression that produced the Security Code challenge on
-    // methoxine's account during the rc.30 Railway run.
-    let committedToEmailPath = forceFormFill;
+	    // regression that produced the Security Code challenge on
+	    // methoxine's account during the rc.30 Railway run.
+	    let committedToEmailPath = forceFormFill;
+	    let lastGitHubAuthorizeUrl: string | null = null;
+	    let repeatedGitHubAuthorizeApprovals = 0;
 
-    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
-    for (;;) {
+	    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
+	    for (;;) {
       await this.browser.waitForFormReady();
       // Dismiss any cookie/consent banner so its overlay doesn't hide
       // the OAuth chooser or signup form. Only fires when a button
@@ -6226,15 +6425,38 @@ export class SignupAgent {
         };
       }
 
-      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(state.url)) {
-        const advanced = await this.browser.advanceOAuthConsent("github");
-        steps.push(
-          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
-        );
-        if (advanced) {
-          await this.browser.wait(3);
-          continue;
-        }
+	      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(state.url)) {
+	        if (isGitHubOAuthRateLimitPage(state.url, state.html)) {
+	          steps.push(
+	            "OAuth: GitHub authorize page returned a secondary rate limit — stopping instead of retrying consent.",
+	          );
+	          return {
+	            kind: "planning_failed",
+	            reason:
+	              "oauth_provider_rate_limited: GitHub returned a secondary rate limit during OAuth authorize",
+	          };
+	        }
+	        const advanced = await this.browser.advanceOAuthConsent("github");
+	        steps.push(
+	          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
+	        );
+	        if (advanced) {
+	          repeatedGitHubAuthorizeApprovals =
+	            lastGitHubAuthorizeUrl === state.url ? repeatedGitHubAuthorizeApprovals + 1 : 1;
+	          lastGitHubAuthorizeUrl = state.url;
+	          if (repeatedGitHubAuthorizeApprovals > 2) {
+	            steps.push(
+	              "OAuth: GitHub authorize page repeated after consent approval — aborting instead of re-approving in a loop.",
+	            );
+	            return {
+	              kind: "planning_failed",
+	              reason:
+	                "oauth_loop_detected: GitHub OAuth authorize page repeated after consent approval during form-fill",
+	            };
+	          }
+	          await this.browser.wait(3);
+	          continue;
+	        }
       }
 
       {
@@ -7118,8 +7340,10 @@ export class SignupAgent {
       }
     };
 
-    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
-    for (;;) {
+	    const oauthCandidates = await this.resolveOAuthCandidates(task, steps);
+	    let lastGitHubAuthorizeUrl: string | null = null;
+	    let repeatedGitHubAuthorizeApprovals = 0;
+	    for (;;) {
       await this.browser.waitForFormReady();
       const dismissed = await this.browser.dismissConsentBanner();
       if (dismissed !== null) steps.push(`Dismissed cookie consent: "${dismissed}"`);
@@ -7131,6 +7355,20 @@ export class SignupAgent {
       }
       const browserState = frame.state;
       const inventory = frame.inventory;
+      if (looksLikeParkedDomainPage(browserState.title, browserState.html)) {
+        steps.push("Form-fill: parked/domain-for-sale page detected — aborting signup automation.");
+        return {
+          kind: "planning_failed",
+          reason: "parked_domain: signup URL resolved to a domain-for-sale or parking page",
+        };
+      }
+      if (shouldAbortOAuthFirstOnDeadPage(browserState.title, browserState.html)) {
+        steps.push("Form-fill: dead/404 signup page detected — aborting OAuth-first wait.");
+        return {
+          kind: "planning_failed",
+          reason: "dead_signup_url: signup URL rendered a 404/dead page before any OAuth provider appeared",
+        };
+      }
 
       const googleIdentifierAdvance =
         await this.advancePinnedGoogleIdentifierPage({
@@ -7148,15 +7386,40 @@ export class SignupAgent {
         };
       }
 
-      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(browserState.url)) {
-        const advanced = await this.browser.advanceOAuthConsent("github");
-        steps.push(
-          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
-        );
-        if (advanced) {
-          await this.browser.wait(3);
-          continue;
-        }
+	      if (/^https:\/\/github\.com\/login\/oauth\/authorize\b/i.test(browserState.url)) {
+	        if (isGitHubOAuthRateLimitPage(browserState.url, browserState.html)) {
+	          steps.push(
+	            "OAuth: GitHub authorize page returned a secondary rate limit — stopping instead of retrying consent.",
+	          );
+	          return {
+	            kind: "planning_failed",
+	            reason:
+	              "oauth_provider_rate_limited: GitHub returned a secondary rate limit during OAuth authorize",
+	          };
+	        }
+	        const advanced = await this.browser.advanceOAuthConsent("github");
+	        steps.push(
+	          `OAuth: GitHub authorize page appeared during form-fill — ${advanced ? "approved consent" : "no approve control found"}`,
+	        );
+	        if (advanced) {
+	          repeatedGitHubAuthorizeApprovals =
+	            lastGitHubAuthorizeUrl === browserState.url
+	              ? repeatedGitHubAuthorizeApprovals + 1
+	              : 1;
+	          lastGitHubAuthorizeUrl = browserState.url;
+	          if (repeatedGitHubAuthorizeApprovals > 2) {
+	            steps.push(
+	              "OAuth: GitHub authorize page repeated after consent approval — aborting instead of re-approving in a loop.",
+	            );
+	            return {
+	              kind: "planning_failed",
+	              reason:
+	                "oauth_loop_detected: GitHub OAuth authorize page repeated after consent approval during form-fill",
+	            };
+	          }
+	          await this.browser.wait(3);
+	          continue;
+	        }
       }
 
       {
@@ -8587,11 +8850,12 @@ export class SignupAgent {
       // landing as a wrong-URL signal: clear signedIn so the recovery path
       // (Tier B CTA → real signup entry) runs instead of skipping signup.
       const landedBodyText = await this.browser.extractText().catch(() => "");
+      const landedDead = shouldAbortOAuthFirstOnDeadPage(landed.title, landedBodyText);
       const landed404 = looksLike404(landed.title, landedBodyText);
-      if (landed404 && signedIn) {
+      if (landedDead && signedIn) {
         signedIn = false;
         steps.push(
-          `${task.service}: landing ${pathOf(landed.url)} is a 404 shell, not an ` +
+          `${task.service}: landing ${pathOf(landed.url)} is a dead/404 shell, not an ` +
             `authenticated dashboard — recovering the real signup entry`,
         );
       }
@@ -8638,6 +8902,11 @@ export class SignupAgent {
             `skipping signup, routing straight to key extraction`,
         );
         alreadyAuthenticated = true;
+      } else if (landedDead) {
+        needsRecovery = true;
+        steps.push(
+          `${task.service}: landing ${pathOf(landed.url)} is a dead/404 signup page — attempting recovery`,
+        );
       } else if (task.signupUrl === undefined) {
         needsRecovery = !(await this.looksLikeSignupPage());
       } else {
@@ -9168,7 +9437,10 @@ export class SignupAgent {
               allowOperatorInboxOtp: task.allowOperatorInboxOtp === true,
             });
           }
-          if (hasUsableCredentialBundle(credentials)) {
+          if (
+            hasUsableCredentialBundle(credentials) &&
+            !terminalReasonInvalidatesCredentialSuccess(this.lastPostVerifyDoneReason)
+          ) {
             // 0.8.3-rc.1 — when extractCredentials short-circuited
             // before postVerifyLoop ran, no captures were written.
             // Emit a synthetic extract round so auto-promote can
@@ -9186,6 +9458,10 @@ export class SignupAgent {
               steps,
               ...this.resultTail(),
             };
+          }
+          if (terminalReasonInvalidatesCredentialSuccess(this.lastPostVerifyDoneReason)) {
+            this.lastPostVerifyDoneReason =
+              `[existing_account_no_extract] terminal planner reason invalidated the extracted candidate: ${this.lastPostVerifyDoneReason}`;
           }
           // 0.8.2-rc.10 — same sentinel-pattern routing the runOAuthFlow
           // path uses. The post-verify loop sets lastPostVerifyDoneReason
@@ -9542,7 +9818,7 @@ export class SignupAgent {
         }
       }
 
-      if (credentials.api_key !== undefined || credentials.username !== undefined) {
+      if (hasUsableCredentialBundle(credentials)) {
         // Form-fill + email success returns here WITHOUT entering the post-verify
         // loop, so its extract-round salvage never ran — write one now (mailjet).
         await this.salvageExtractCaptureIfNeeded(task.service, credentials, false);
@@ -10920,16 +11196,26 @@ export class SignupAgent {
       const gateState = await this.browser.getState();
       const gateText = await this.browser.extractText().catch(() => "");
       const gateInv = postOAuthInv;
-      // (a0) Google-login-only / no-account (plunk class). OAuth
-      // completed but the service bounced back saying this Google
-      // identity has no account (e.g. plunk's
-      // /auth/login?message=No%20account%20found…). MUST run before the
+	      // (a0) Google-login-only / no-account (plunk class). OAuth
+	      // completed but the service bounced back saying this Google
+	      // identity has no account (e.g. plunk's
+	      // /auth/login?message=No%20account%20found…). MUST run before the
       // manual-login-fallback gate below — this page IS a /login form, so
       // detectManualLoginFallback would otherwise swallow it as
       // oauth_session_not_persisted and abort. The account simply needs
-      // creating via email, so re-route to form-fill instead of bailing.
-      if (detectGoogleNoAccount(gateState.url, gateText)) {
-        // Commit to email for the rest of the run — OAuth is login-only here, so
+	      // creating via email, so re-route to form-fill instead of bailing.
+	      if (detectOAuthRegistrationDisabled(gateState.url, gateText)) {
+	        return {
+	          success: false,
+	          error:
+	            `oauth_signup_disabled: ${task.service} rejected OAuth signup because account ` +
+	            `registration through this SSO/OAuth provider is disabled. Try a non-OAuth signup path manually.`,
+	          steps,
+	          ...this.resultTail(),
+	        };
+	      }
+	      if (detectGoogleNoAccount(gateState.url, gateText)) {
+	        // Commit to email for the rest of the run — OAuth is login-only here, so
         // the OAuth-first scan must not re-fire after the form-fill re-route.
         this.committedToEmailPath = true;
         steps.push(
@@ -11170,13 +11456,20 @@ export class SignupAgent {
     // complete, usable bundle. Require >=2 named (non-metadata) credentials
     // so a lone ID (e.g. just application_id) still fails honestly: an ID
     // without a secret isn't a usable credential.
-    if (hasUsableCredentialBundle(credentials)) {
+    if (
+      hasUsableCredentialBundle(credentials) &&
+      !terminalReasonInvalidatesCredentialSuccess(this.lastPostVerifyDoneReason)
+    ) {
       return {
         success: true,
         credentials: { ...credentials },
         steps,
         ...this.resultTail(),
       };
+    }
+    if (terminalReasonInvalidatesCredentialSuccess(this.lastPostVerifyDoneReason)) {
+      this.lastPostVerifyDoneReason =
+        `[existing_account_no_extract] terminal planner reason invalidated the extracted candidate: ${this.lastPostVerifyDoneReason}`;
     }
 
     // No API key. Distinguish a billing/card wall (onboarding_blocked)
@@ -11206,11 +11499,12 @@ export class SignupAgent {
         ...this.resultTail(),
       };
     }
-    if (
-      postSignupGate.failure?.kind === "payment" ||
-      postSignupGate.failure?.kind === "phone"
-    ) {
-      return {
+	    if (
+	      postSignupGate.failure?.kind === "payment" ||
+	      postSignupGate.failure?.kind === "phone" ||
+	      postSignupGate.failure?.kind === "permission_denied"
+	    ) {
+	      return {
         success: false,
         error: postSignupGate.failure.error,
         steps,
@@ -12326,8 +12620,17 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     if (!/^(0|false|off|no)$/i.test(process.env.NAV_SEARCH ?? "")) {
       try {
         const navResult = await this.runNavSearchPhase(args, oauth);
-        if (Object.keys(navResult).some((k) => !NON_CREDENTIAL_KEYS.has(k))) {
+        if (hasUsableCredentialBundle(navResult)) {
           return navResult;
+        }
+        if (hasAnyExtractedCredential(navResult)) {
+          for (const [k, v] of Object.entries(navResult)) {
+            if (credentials[k] === undefined) credentials[k] = v;
+          }
+          args.steps.push(
+            "nav-search: found credential-shaped data, but not a final usable bundle yet — " +
+              "continuing post-verify extraction instead of returning a false failure",
+          );
         }
         if (
           this.resolvedSignupUrl !== undefined &&
@@ -12339,9 +12642,42 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           );
           return navResult;
         }
-        args.steps.push(
-          "nav-search: no key via navigation alone — handing off to the planner from the current surface",
-        );
+	        args.steps.push(
+	          "nav-search: no key via navigation alone — handing off to the planner from the current surface",
+	        );
+	        const afterNavText = await this.browser.extractText().catch(() => "");
+	        const afterNavInventory = await this.browser
+	          .extractInteractiveElements()
+	          .catch(() => [] as InteractiveElement[]);
+	        const accountLinkCta = findOAuthAccountLinkCta(afterNavText, afterNavInventory);
+	        if (accountLinkCta !== null) {
+	          const label = (
+	            accountLinkCta.visibleText ??
+	            accountLinkCta.ariaLabel ??
+	            accountLinkCta.labelText ??
+	            "link existing account"
+	          ).trim();
+	          args.steps.push(
+	            `Post-verify: OAuth account-link bridge detected — clicking "${label}" before planner handoff.`,
+	          );
+	          try {
+	            await this.browser.click(accountLinkCta.selector);
+	            await this.browser.wait(2);
+	            await this.browser.waitForInteractiveDom(5, 15_000).catch(() => undefined);
+	          } catch (err) {
+	            args.steps.push(
+	              `Post-verify: account-link bridge click threw (${err instanceof Error ? err.message : String(err)}) — continuing with planner handoff.`,
+	            );
+	          }
+	        }
+	        if (isAtOAuthAccountLinkVerificationGate(afterNavText)) {
+	          this.lastPostVerifyDoneReason =
+	            `[oauth_account_link_verification] ${afterNavText.slice(0, 300)}`;
+          args.steps.push(
+            "Post-verify: OAuth account-link email verification wall detected — stopping before fallback URL guesses.",
+          );
+          return {};
+        }
       } catch (err) {
         args.steps.push(
           `nav-search: errored (${err instanceof Error ? err.message : String(err)}) — falling back to the planner`,
@@ -12372,7 +12708,9 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
     // form-fill phase already captured (captureSignupFormRounds); 0 on the
     // OAuth path, so this is unchanged for OAuth skills.
     let capturedRound = this.captureChainRound;
-    if (hasCuratedServiceKeyPath(args.service)) {
+    const prePlannerInventory = await this.browser.extractInteractiveElements().catch(() => []);
+    const setupFormBlocksCuratedRoute = isRequiredAccountSetupForm(prePlannerInventory);
+    if (hasCuratedServiceKeyPath(args.service) && !setupFormBlocksCuratedRoute) {
       const fallback = pickStuckLoopFallbackUrl(
         this.browser.currentUrl(),
         recovery.triedFallbackUrls,
@@ -12419,6 +12757,10 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
           );
         }
       }
+    } else if (setupFormBlocksCuratedRoute) {
+      args.steps.push(
+        "Post-verify: required account setup form is still active — deferring curated credential route until setup is complete.",
+      );
     }
     const credentialTracker = new PostSignupCredentialTracker(credentials);
     // Gate URLs we've already polled the operator's gmail for, so a
@@ -12851,6 +13193,22 @@ Prefer items naming keys / tokens / API / developer / secrets; then credentials 
         }
       } else {
         lastReachablePostVerifyUrl = state.url;
+      }
+      if (
+        isPostVerifyAuthResetRoute({
+          url: state.url,
+          round,
+          hasExtractedCredential: hasAnyExtractedCredential(credentials),
+        })
+      ) {
+        this.lastPostVerifyDoneReason =
+          `[stuck_loop] post-verify credential search returned to auth/signup route ${state.url}; ` +
+          `stopping instead of starting a second signup.`;
+        args.steps.push(
+          `Post-verify round ${round}: credential search returned to auth/signup route (${pathOf(state.url)}) — ` +
+            `stopping instead of starting a second signup.`,
+        );
+        break;
       }
       if (
         serviceSlug(args.service) === "render" &&
@@ -15393,6 +15751,13 @@ ${formatInventory(input.inventory)}${
     if (typeof curUrl === "string" && isDocumentationUrl(curUrl)) {
       return credentials;
     }
+    const currentState = await this.browser.getState().catch(() => null);
+    if (
+      currentState !== null &&
+      detectCredentialExtractionBlock(currentState.html, titleFromHtml(currentState.html)) !== null
+    ) {
+      return credentials;
+    }
 
     for (const candidate of await this.browser.extractCredentialCandidates()) {
       const hit = extractApiKeyFromText(candidate);
@@ -15497,6 +15862,13 @@ ${formatInventory(input.inventory)}${
     const curUrl =
       typeof this.browser.currentUrl === "function" ? this.browser.currentUrl() : "";
     if (typeof curUrl === "string" && isDocumentationUrl(curUrl)) return {};
+    const currentState = await this.browser.getState().catch(() => null);
+    if (
+      currentState !== null &&
+      detectCredentialExtractionBlock(currentState.html, titleFromHtml(currentState.html)) !== null
+    ) {
+      return {};
+    }
 
     let st = initialExtractionState();
     const classify = (text: string): CandidateClass => {

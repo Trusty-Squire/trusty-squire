@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  detectCredentialExtractionBlock,
   extractApiKeyFromText,
   isTruncatedCapture,
   isCredentialNoiseCandidate,
@@ -274,6 +275,25 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
     // other page section and must not be picked up.
     const text = "API key:\n\nsomeUnrelatedToken1234567890";
     expect(extractApiKeyFromText(text)).toBeNull();
+  });
+});
+
+describe("detectCredentialExtractionBlock", () => {
+  it("flags GitLab's Cloudflare security verification page before candidate scans", () => {
+    const html =
+      '<title>Just a moment...</title><body><h1>gitlab.com</h1>' +
+      '<h2>Performing security verification</h2>' +
+      '<input type="hidden" name="cf-turnstile-response" />' +
+      '<div class="ray-id">Ray ID: <code>a1188f29ddf68758</code></div>' +
+      "</body>";
+    expect(detectCredentialExtractionBlock(html)).toBe("Cloudflare anti-bot interstitial");
+  });
+
+  it("does not block a normal API key dashboard", () => {
+    const html =
+      "<title>API keys</title><body><h1>API keys</h1>" +
+      "<div>API key: re_abcdefGHIJKLmnop1234567</div></body>";
+    expect(detectCredentialExtractionBlock(html)).toBeNull();
   });
 });
 

@@ -8,10 +8,13 @@ import { describe, expect, it } from "vitest";
 import {
   detectAlreadySignedIn,
   detectAntiBotBlock,
+  findOAuthAccountLinkCta,
   firstHttpsUrl,
   guessSignupUrl,
+  isGitHubOAuthRateLimitPage,
   isGoogleConsumerPostOAuthUrl,
   isGoogleSearchUrl,
+  isPostVerifyAuthResetRoute,
   resolveSignupUrl,
 } from "../agent.js";
 import type { InteractiveElement } from "../browser.js";
@@ -65,16 +68,21 @@ describe("guessSignupUrl", () => {
     expect(guessSignupUrl("send.grid")).toBe("https://sendgrid.com/signup");
   });
 
+  it("preserves explicit service-name TLD suffixes in the final fallback", () => {
+    expect(guessSignupUrl("together-ai")).toBe("https://together.ai/signup");
+    expect(guessSignupUrl("x-ai")).toBe("https://x.ai/signup");
+    expect(guessSignupUrl("fly-io")).toBe("https://fly.io/signup");
+  });
+
   it("handles single-word lowercase already", () => {
     expect(guessSignupUrl("resend")).toBe("https://resend.com/signup");
   });
 
   // guessSignupUrl is now the LAST-resort fallback only — the KNOWN_DOMAINS
-  // table was retired. Non-.com TLDs and non-obvious entry points are
-  // resolved upstream by resolveSignupUrl (promoted-skill URL → model), so
-  // even a service that lives on .io returns the .com guess from THIS
-  // function; a wrong guess is recovered by the Google-search fallback.
-  it("returns the .com guess even for non-.com products (resolved upstream now)", () => {
+  // table was retired. Non-obvious entry points are resolved upstream by
+  // resolveSignupUrl (promoted-skill URL → model), so simple names still use
+  // the .com guess; explicit name-as-domain suffixes preserve that signal.
+  it("returns the .com guess for simple names resolved upstream", () => {
     expect(guessSignupUrl("Sentry")).toBe("https://sentry.com/signup");
     expect(guessSignupUrl("Railway")).toBe("https://railway.com/signup");
   });
@@ -95,6 +103,84 @@ describe("firstHttpsUrl", () => {
   });
 });
 
+describe("isPostVerifyAuthResetRoute", () => {
+  it("allows first-round auth routes but stops later credential-search resets", () => {
+    expect(
+      isPostVerifyAuthResetRoute({
+        url: "https://www.val.town/auth/signup?redirect_url=%2F",
+        round: 0,
+        hasExtractedCredential: false,
+      }),
+    ).toBe(false);
+    expect(
+      isPostVerifyAuthResetRoute({
+        url: "https://www.val.town/auth/signup?redirect_url=%2F",
+        round: 3,
+        hasExtractedCredential: false,
+      }),
+    ).toBe(true);
+    expect(
+      isPostVerifyAuthResetRoute({
+        url: "https://www.val.town/auth/signup?redirect_url=%2F",
+        round: 3,
+        hasExtractedCredential: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("isGitHubOAuthRateLimitPage", () => {
+  it("detects GitHub OAuth secondary rate-limit pages", () => {
+    expect(
+      isGitHubOAuthRateLimitPage(
+        "https://github.com/login/oauth/authorize?client_id=x",
+        "Too many requests. You have exceeded a secondary rate limit.",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify non-GitHub or non-OAuth pages", () => {
+    expect(
+      isGitHubOAuthRateLimitPage(
+        "https://example.com/login/oauth/authorize",
+        "Too many requests",
+      ),
+    ).toBe(false);
+    expect(isGitHubOAuthRateLimitPage("https://github.com/settings/tokens", "Too many requests")).toBe(
+      false,
+    );
+  });
+});
+
+describe("findOAuthAccountLinkCta", () => {
+  it("selects the safe existing-account link action on account collision bridges", () => {
+    const add = mkEl({ selector: "#linkAccount", visibleText: "Add to existing account" });
+    expect(
+      findOAuthAccountLinkCta("Account already exists. Choose how to continue.", [
+        mkEl({ selector: "#review", visibleText: "Review profile" }),
+        add,
+      ]),
+    ).toBe(add);
+  });
+
+  it("does not click unrelated existing-account copy without an account-link page state", () => {
+    expect(
+      findOAuthAccountLinkCta("Welcome to the dashboard", [
+        mkEl({ selector: "#existing", visibleText: "Add to existing account" }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("rejects create-new and review-profile alternatives", () => {
+    expect(
+      findOAuthAccountLinkCta("Account already exists", [
+        mkEl({ selector: "#new", visibleText: "Create new account" }),
+        mkEl({ selector: "#review", visibleText: "Review profile" }),
+      ]),
+    ).toBeNull();
+  });
+});
+
 describe("resolveSignupUrl", () => {
   it("uses the model's resolved URL (the .io/.xyz fix)", async () => {
     expect(await resolveSignupUrl("xata", stubLLM("https://xata.io/signup"))).toBe(
@@ -109,6 +195,21 @@ describe("resolveSignupUrl", () => {
     expect(
       await resolveSignupUrl("xata", stubLLM("Sure — it's https://xata.io/signup")),
     ).toBe("https://xata.io/signup");
+  });
+
+  it("rejects model URLs that contradict an explicit service-name TLD", async () => {
+    expect(
+      await resolveSignupUrl("together-ai", stubLLM("https://console.together.xyz/signup")),
+    ).toBe("https://together.ai/signup");
+    expect(
+      await resolveSignupUrl("together-ai", stubLLM("https://api.together.ai/signup")),
+    ).toBe("https://api.together.ai/signup");
+  });
+
+  it("does not treat product descriptors as mandatory TLDs", async () => {
+    expect(
+      await resolveSignupUrl("grafana-cloud", stubLLM("https://grafana.com/auth/signup/select-idp")),
+    ).toBe("https://grafana.com/auth/signup/select-idp");
   });
 
   it("falls back to the .com guess when the model says UNKNOWN", async () => {
@@ -134,6 +235,8 @@ describe("resolveSignupUrl", () => {
   it("uses canonical signup URLs for services whose auth host breaks URL fallback", async () => {
     expect(await resolveSignupUrl("axiom", null)).toBe("https://app.axiom.co/register");
     expect(await resolveSignupUrl("anyscale", null)).toBe("https://console.anyscale.com");
+    expect(await resolveSignupUrl("cartesia", null)).toBe("https://play.cartesia.ai/sign-in/sign-up");
+    expect(await resolveSignupUrl("pinecone-assistant", null)).toBe("https://app.pinecone.io/signup");
   });
 
   it("logs the resolved URL via the optional logger", async () => {
@@ -166,6 +269,8 @@ describe("resolveSignupUrl", () => {
     );
     expect(await resolveSignupUrl("stackblitz", llm)).toBe("https://stackblitz.com/register");
     expect(await resolveSignupUrl("anyscale", llm)).toBe("https://console.anyscale.com");
+    expect(await resolveSignupUrl("cartesia", llm)).toBe("https://play.cartesia.ai/sign-in/sign-up");
+    expect(await resolveSignupUrl("pinecone-assistant", llm)).toBe("https://app.pinecone.io/signup");
     expect(calls.n).toBe(0);
   });
 

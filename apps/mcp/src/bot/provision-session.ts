@@ -676,6 +676,13 @@ export async function observe(sessionId: string): Promise<Observation> {
   return await observeSession(session);
 }
 
+export function observedHostsForSession(sessionId: string): string[] {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  widenAllowedHostsFromCurrentUrl(session);
+  return [...new Set(session.allowedHosts)];
+}
+
 async function observeSession(session: Session): Promise<Observation> {
   session.browser.recoverActivePage();
   widenAllowedHostsFromCurrentUrl(session);

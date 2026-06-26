@@ -74,6 +74,15 @@ describe("classifyTerminalGate", () => {
     expect(verdict.kind).toBe("account_review");
   });
 
+  it("classifies authenticated permission-denied app shells", () => {
+    const verdict = classifyTerminalGate({
+      frame: frame("Loading... Error: You do not have enough permissions to execute this request"),
+      fallbackText: "Loading... Error: You do not have enough permissions to execute this request",
+      lastDoneReason: null,
+    });
+    expect(verdict.kind).toBe("permission_denied");
+  });
+
   it("does not classify an active legal onboarding form as account review", () => {
     const visibleText =
       "Start building with Claude. What’s your full name? What should we call you? " +

@@ -160,9 +160,9 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       return;
     }
     const owned = await opts.deps.credentialStore.listByAccount(auth.account_id);
-    let reference: string | undefined;
+    let selected: CredentialRecord | undefined;
     if (parsed.data.reference !== undefined) {
-      reference = owned.find((c) => c.reference === parsed.data.reference)?.reference;
+      selected = owned.find((c) => c.reference === parsed.data.reference);
     } else {
       const matches = owned.filter(
         (c) =>
@@ -173,15 +173,24 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         reply.code(409).send({ error: "ambiguous_service", candidates: matches.map((c) => c.reference) });
         return;
       }
-      reference = matches[0]?.reference;
+      selected = matches[0];
     }
-    if (reference === undefined) {
+    if (selected === undefined) {
       reply.code(404).send({ error: "credential_not_found" });
+      return;
+    }
+    if (selected.allowed_hosts.length === 0) {
+      reply.code(409).send({
+        error: "credential_unavailable",
+        reason: "empty_allowed_hosts",
+        reference: selected.reference,
+        hint: "Re-store the credential with observed_hosts or edit allowed_hosts in the vault before minting an egress grant.",
+      });
       return;
     }
     const { grant, token } = mintGrant({
       account_id: auth.account_id,
-      credential_ref: reference,
+      credential_ref: selected.reference,
       rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? UNLIMITED_RATE,
       spend_cap_usd: parsed.data.spend_cap_usd ?? null,
       now: now().toISOString(),

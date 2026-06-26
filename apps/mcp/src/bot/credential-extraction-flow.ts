@@ -36,13 +36,56 @@ export const SINGLE_CREDENTIAL_FIELDS = new Set<string>([
   "project_api_key",
   "username",
   "access_token",
+  "auth_token",
+  "api_secret",
+  "secret_key",
+  "secret",
+  "token",
 ]);
+
+const SECRET_LIKE_SINGLE_FIELDS = new Set<string>([
+  "api_key",
+  "personal_api_key",
+  "project_api_key",
+  "access_token",
+  "auth_token",
+  "api_secret",
+  "secret_key",
+  "secret",
+  "token",
+]);
+
+const CREDENTIAL_PREFIX_RE =
+  /^(?:sk|pk|rk|phx|phc|gh[pousr]?|glpat|xox[baprs]|AIza|AKIA|ASIA|eyJ|ddp|tkn|tok|key|api)[A-Za-z0-9_.+/=-]*$/;
+
+export function isPlausibleCredentialValue(
+  key: string,
+  value: string | undefined,
+): boolean {
+  if (value === undefined) return false;
+  const v = value.trim();
+  if (v.length === 0) return false;
+  if (/\s/.test(v)) return false;
+  if (/[,"'<>]/.test(v)) return false;
+  if (/^[A-Za-z]+[.,:;!?-]?$/.test(v)) return false;
+  if (/^[^A-Za-z0-9]+$/.test(v)) return false;
+  if (/^[^@]+@[^@]+\.[^@]+$/.test(v)) return false;
+
+  if (!SECRET_LIKE_SINGLE_FIELDS.has(key)) return true;
+  if (v.length < 8) return false;
+  if (CREDENTIAL_PREFIX_RE.test(v)) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) return true;
+  if (/[A-Za-z]/.test(v) && /[0-9]/.test(v) && v.length >= 12) return true;
+  return /[_-]/.test(v) && v.length >= 16;
+}
 
 export function hasSingleCredentialValue(
   creds: Record<string, string | undefined>,
 ): boolean {
-  return credentialFieldNames(creds).some((key) =>
-    SINGLE_CREDENTIAL_FIELDS.has(key),
+  return Object.entries(creds).some(
+    ([key, value]) =>
+      SINGLE_CREDENTIAL_FIELDS.has(key) &&
+      isPlausibleCredentialValue(key, value),
   );
 }
 
@@ -75,6 +118,40 @@ export function hasUsableCredentialBundle(
 ): boolean {
   if (hasSingleCredentialValue(creds)) return true;
   return credentialFieldNames(creds).length >= 2;
+}
+
+// A terminal planner "done" reason can carry stronger evidence than an earlier
+// regex hit. If the visible page only exposes an identifier while the actual
+// secret is masked/unrecoverable, the earlier candidate is usually a key id,
+// project id, or rotation handle, not a usable credential.
+export function terminalReasonInvalidatesCredentialSuccess(
+  reason: string | null | undefined,
+): boolean {
+  if (reason === null || reason === undefined || reason.trim().length === 0) {
+    return false;
+  }
+  const text = reason.toLowerCase();
+  const namesSecret =
+    /\b(?:api\s*)?(?:key|token|secret)\b/.test(text) ||
+    /\b(?:credential|value)\b/.test(text);
+  if (!namesSecret) return false;
+
+  if (
+    /\bkey\s*id\b/.test(text) &&
+    /\b(?:visible|shown|available)\b/.test(text) &&
+    /\b(?:not\s+the\s+secret|secret\s+(?:is\s+)?(?:masked|hidden|not\s+(?:visible|shown|available|recoverable)))\b/.test(text)
+  ) {
+    return true;
+  }
+
+  if (
+    /\b(?:no|not any|without)\s+(?:option|button|way|ability|path)\s+to\s+(?:reveal|view|show|copy|extract|recover)\b/.test(text) &&
+    /\b(?:masked|hidden|unrecoverable|not\s+(?:recoverable|available|shown|visible)|only\s+to\s+rotate|rotate)\b/.test(text)
+  ) {
+    return true;
+  }
+
+  return /\bonly\s+to\s+rotate\b/.test(text) && /\b(?:masked|hidden|secret)\b/.test(text);
 }
 
 // Phase E — multi-credential planner-prose parser. When a service
