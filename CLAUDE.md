@@ -189,8 +189,8 @@ can dip even while OF#1 rises. Read them together, not in isolation.
 ## Active Sprint/Task
 
 **Autonomous self-improving loop:** the provision bot's named-state machine,
-per-state retry policy, and single escalation condition live in
-`docs/AUTONOMOUS-LOOP.md`; the skill-promotion pipeline (virgin success →
+per-state retry policy, and single escalation condition live in the
+state-classifier + policy code; the skill-promotion pipeline (virgin success →
 registry skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`. State
 classifier + policy: `packages/skill-schema/src/provision-state.ts` +
 `provision-policy.ts`.
