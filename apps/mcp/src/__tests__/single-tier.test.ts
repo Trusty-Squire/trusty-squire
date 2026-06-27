@@ -26,7 +26,7 @@ describe("single-tier — stale install gate", () => {
       // metadata operation and doesn't require auth.
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
-      expect(names).toContain("provision_start");
+      expect(names).toContain("operate_start");
       expect(names).not.toContain("provision");
       expect(names).not.toContain("check_provision_status");
 

@@ -45,10 +45,10 @@ const DEFAULT_AUTH_HOSTS: readonly string[] = [
 
 export interface ObservedElement {
   // Fresh action handle for this exact observation generation. Prefer this as
-  // provision_act.target; stale generations fail loudly instead of silently
+  // operate_act.target; stale generations fail loudly instead of silently
   // clicking a recycled DOM node.
   ref: string;
-  // Human label for display/backcompat. provision_act still accepts labels, but
+  // Human label for display/backcompat. operate_act still accepts labels, but
   // generated refs are safer on pages with repeated labels.
   label: string;
   tag: string;
@@ -202,7 +202,7 @@ const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, m
 // shape + url.
 function audit(sessionId: string, event: string, detail: Record<string, unknown> = {}): void {
   process.stderr.write(
-    `${JSON.stringify({ marker: "provision-audit", session_id: sessionId, event, ...detail })}\n`,
+    `${JSON.stringify({ marker: "provision-audit", surface: "operate", session_id: sessionId, event, ...detail })}\n`,
   );
 }
 
@@ -294,7 +294,7 @@ export class StaleProvisionRefError extends Error {
   ) {
     super(
       `stale_ref: target is from observation generation ${refGeneration}, ` +
-        `but current generation is ${currentGeneration}. Call provision_observe and retry with a fresh ref.`,
+        `but current generation is ${currentGeneration}. Call operate_observe and retry with a fresh ref.`,
     );
   }
 }
@@ -1337,7 +1337,7 @@ export interface CaptchaGateResult {
 
 // Detect a captcha and wait for it to clear. Behavior-sim (humanized clicks +
 // typing) during the drive already scores invisible Turnstile/reCAPTCHA-v3; for
-// a visible checkbox the host clicks it via provision_act, then calls this to
+// a visible checkbox the host clicks it via operate_act, then calls this to
 // wait for the token. Reuses the substrate's detector + settle poll.
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
   const session = sessions.get(sessionId);
@@ -1358,7 +1358,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
 // Flow A hand-back (wall-handoff design): the inbox poll found no code, but the
 // thick session is STILL LIVE, so this is resumable, not a give-up. The host
 // asks the user for the code (SMS / authenticator / not-yet-delivered email),
-// then types it with provision_act and keeps driving. Session + vault moat
+// then types it with operate_act and keeps driving. Session + vault moat
 // preserved. See docs/DESIGN-wall-handoff.md.
 export interface NeedsUserCode {
   wall: "verification_code";
@@ -1426,7 +1426,7 @@ export function buildVerificationResult(
       "No verification code found in the inbox automatically. The service may " +
       "have sent it by SMS or an authenticator app, or it hasn't arrived yet. " +
       "Ask the user for the code, then type it into the verification field with " +
-      "provision_act and continue — the session is still live.",
+      "operate_act and continue — the session is still live.",
     resume: "code",
   };
   return { session_id: sessionId, found, code, link, needs_user };

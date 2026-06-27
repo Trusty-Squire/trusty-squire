@@ -60,22 +60,23 @@ describe("TOOLS registry", () => {
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    // 6 base tools + the 7 interactive provisioning tools
-    // (provision_start/observe/act/captcha_gate/await_verification/extract/
-    // finish).
-    expect(TOOLS).toHaveLength(13);
+    // 6 base tools + the 8 operator-surface tools
+    // (operate_start/observe/act/captcha_gate/await_verification/extract/
+    // finish_task/finish).
+    expect(TOOLS).toHaveLength(14);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "get_extract_failure",
       "grant_app_access",
       "list_credentials",
       "list_extract_failures",
-      "provision_act",
-      "provision_await_verification",
-      "provision_captcha_gate",
-      "provision_extract",
-      "provision_finish",
-      "provision_observe",
-      "provision_start",
+      "operate_act",
+      "operate_await_verification",
+      "operate_captcha_gate",
+      "operate_extract",
+      "operate_finish",
+      "operate_finish_task",
+      "operate_observe",
+      "operate_start",
       "store_credential",
       "use_credential",
     ]);

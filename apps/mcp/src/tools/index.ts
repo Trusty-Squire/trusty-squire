@@ -15,7 +15,7 @@ import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failur
 import { storeCredentialTool } from "./store-credential.js";
 import { useCredentialTool } from "./use-credential.js";
 import { grantAppAccessTool } from "./grant-app-access.js";
-import { INTERACTIVE_SIGNUP_TOOLS } from "./provision-drive.js";
+import { OPERATE_TOOLS } from "./provision-drive.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -64,7 +64,7 @@ export const TOOLS: Tool[] = [
   getExtractFailureTool,
   // Interactive host-driven provisioning (provision_start/observe/act/
   // captcha_gate/await_verification/extract/finish).
-  ...INTERACTIVE_SIGNUP_TOOLS,
+  ...OPERATE_TOOLS,
 ] as Tool[];
 
 export function findTool(name: string): Tool | null {

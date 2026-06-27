@@ -7,6 +7,7 @@
 
 import { z } from "zod";
 import type { Tool } from "./index.js";
+import type { ApiClient } from "../api-client.js";
 import {
   startProvisionSession,
   observe,
@@ -61,14 +62,14 @@ const startSchema = z.object({
 });
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
-  name: "provision_start",
+  name: "operate_start",
   description:
     "Begin an interactive provisioning session: opens a scoped browser on the " +
     "user's machine at service_url and returns {session_id, url, text, screen, " +
     "accessibility, elements}. " +
     "YOU are the planner — read the observation, then drive the signup with " +
-    "provision_act, re-read with provision_observe, and call provision_extract " +
-    "when you reach the credentials. Always provision_finish when done. The " +
+    "operate_act, re-read with operate_observe, and call operate_extract " +
+    "when you reach the credentials. Always operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +
     "route (login method, where the key lives, how many credentials). Read it and " +
@@ -99,13 +100,13 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 const observeSchema = z.object({ session_id: z.string().min(1) });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
-  name: "provision_observe",
+  name: "operate_observe",
   description:
     "Re-read the current page of a provisioning session: returns {url, text, " +
     "screen, accessibility, elements}. Each element has a fresh generated `ref` " +
-    "to pass back as provision_act.target, plus `label`/`href` for reading. " +
+    "to pass back as operate_act.target, plus `label`/`href` for reading. " +
     "Refs are scoped to the latest observation; stale refs fail loudly, so call " +
-    "provision_observe and retry with the new ref. Legacy label targets still " +
+    "operate_observe and retry with the new ref. Legacy label targets still " +
     "work, but exact refs are safer on pages with repeated labels.",
   inputSchema: observeSchema,
   jsonInputSchema: {
@@ -137,7 +138,7 @@ const actSchema = z.object({
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
   const need = (v: string | undefined, name: string): string => {
     if (v === undefined || v.length === 0) {
-      throw new Error(`provision_act kind="${args.kind}" requires "${name}"`);
+      throw new Error(`operate_act kind="${args.kind}" requires "${name}"`);
     }
     return v;
   };
@@ -164,7 +165,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
 }
 
 export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
-  name: "provision_act",
+  name: "operate_act",
   description:
     "Take one action in a provisioning session, then return the resulting " +
     "observation. kinds: click (target=element ref, preferably elements[].ref), type (target + text), " +
@@ -173,9 +174,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "oauth_settle (return to the product page after the OAuth handshake), " +
     "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
     "GCP console into Firebase), type_secret (slot + target — type a secret you " +
-    "captured into a sealed slot via provision_extract{into_slot} into a field " +
+    "captured into a sealed slot via operate_extract{into_slot} into a field " +
     "on the current site; the value never leaves the browser). If a " +
-    "target ref is stale, call provision_observe and retry with a fresh ref.",
+    "target ref is stale, call operate_observe and retry with a fresh ref.",
   inputSchema: actSchema,
   jsonInputSchema: {
     type: "object",
@@ -202,34 +203,81 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   },
 };
 
+// Shared "store this credential in the vault" shape — used by both the
+// mid-session extract tool and the credentials terminal (operate_finish_task).
+const storeShape = z.object({
+  service: z.string().min(1).max(120),
+  label: z.string().min(1).max(60).optional(),
+  env_var_suggestion: z.string().min(1).max(120).optional(),
+  type: z.string().min(1).max(60).optional(),
+  // Explicit egress hosts: where this key may LATER be sent by the proxy.
+  // Read them off the API base URL the page/SDK snippet shows — a grounded
+  // read, not a guess. Unioned with the service-default + start/auto_widen
+  // scope (never mid_session task scope). Omit for a single-service key.
+  egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
+  auth_shape: z
+    .string()
+    .max(120)
+    .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+    .optional(),
+});
+type StoreSpec = z.infer<typeof storeShape>;
+
+const storeJsonProps = {
+  service: { type: "string" },
+  label: { type: "string" },
+  env_var_suggestion: { type: "string" },
+  type: { type: "string" },
+  egress_hosts: { type: "array", items: { type: "string" } },
+  auth_shape: { type: "string" },
+} as const;
+
+// Vault-store an extracted credential. Shared by extract + the credentials
+// terminal so the stored record is byte-identical regardless of entry point.
+async function persistExtracted(
+  sessionId: string,
+  credentials: Record<string, string>,
+  store: StoreSpec,
+  api: ApiClient,
+): Promise<{ reference: string; service: string; label: string | undefined; field_names: string[]; allowed_hosts: string[]; updated: boolean }> {
+  const observedHosts = [
+    ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
+  ];
+  const singleValue = credentials.api_key;
+  const storeInput =
+    typeof singleValue === "string" && Object.keys(credentials).length === 1
+      ? { value: singleValue }
+      : { fields: credentials };
+  const stored = await api.storeCredential({
+    service: store.service,
+    ...(store.label !== undefined ? { label: store.label } : {}),
+    ...storeInput,
+    ...(store.env_var_suggestion !== undefined ? { env_var_suggestion: store.env_var_suggestion } : {}),
+    ...(store.type !== undefined ? { type: store.type } : { type: "api_key" }),
+    ...(store.auth_shape !== undefined ? { auth_shape: store.auth_shape } : {}),
+    ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+  });
+  return {
+    reference: stored.reference,
+    service: stored.service,
+    label: stored.label,
+    field_names: stored.field_names,
+    allowed_hosts: stored.allowed_hosts,
+    updated: stored.updated,
+  };
+}
+
 const extractSchema = z.object({
   session_id: z.string().min(1),
   // Sealed transfer: stash the extracted secret in a session-local slot and
   // return ONLY a masked handle (never the value), so a later type_secret can
   // enter it into another site's form without the value crossing to the host.
   into_slot: z.string().min(1).max(60).optional(),
-  store: z
-    .object({
-      service: z.string().min(1).max(120),
-      label: z.string().min(1).max(60).optional(),
-      env_var_suggestion: z.string().min(1).max(120).optional(),
-      type: z.string().min(1).max(60).optional(),
-      // Explicit egress hosts: where this key may LATER be sent by the proxy.
-      // Read them off the API base URL the page/SDK snippet shows — a grounded
-      // read, not a guess. Unioned with the service-default + start/auto_widen
-      // scope (never mid_session task scope). Omit for a single-service key.
-      egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
-      auth_shape: z
-        .string()
-        .max(120)
-        .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
-        .optional(),
-    })
-    .optional(),
+  store: storeShape.optional(),
 });
 
 export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
-  name: "provision_extract",
+  name: "operate_extract",
   description:
     "Reveal masked keys and extract credentials from the current page: returns " +
     "{credentials, candidate_count, blocked_reason?}. credentials may include " +
@@ -290,55 +338,21 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       return extracted;
     }
     if (api === null) {
-      throw new Error("provision_extract store requires an active Trusty Squire session");
+      throw new Error("operate_extract store requires an active Trusty Squire session");
     }
-    // Egress allow-list seed: start/auto_widen scope (NOT mid_session task scope)
-    // unioned with any agent-declared egress_hosts (the API host the page shows).
-    // The vault unions this with the service-default; an unknown service with no
-    // egress_hosts fails closed (empty) by design.
-    const observedHosts = [
-      ...new Set([
-        ...(args.store.egress_hosts ?? []),
-        ...observedHostsForSession(args.session_id),
-      ]),
-    ];
-    const values = extracted.credentials;
-    const singleValue = values.api_key;
-    const storeInput =
-      typeof singleValue === "string" && Object.keys(values).length === 1
-        ? { value: singleValue }
-        : { fields: values };
-    const stored = await api.storeCredential({
-      service: args.store.service,
-      ...(args.store.label !== undefined ? { label: args.store.label } : {}),
-      ...storeInput,
-      ...(args.store.env_var_suggestion !== undefined ? { env_var_suggestion: args.store.env_var_suggestion } : {}),
-      ...(args.store.type !== undefined ? { type: args.store.type } : { type: "api_key" }),
-      ...(args.store.auth_shape !== undefined ? { auth_shape: args.store.auth_shape } : {}),
-      ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
-    });
-    return {
-      ...extracted,
-      stored_credential: {
-        reference: stored.reference,
-        service: stored.service,
-        label: stored.label,
-        field_names: stored.field_names,
-        allowed_hosts: stored.allowed_hosts,
-        updated: stored.updated,
-      },
-    };
+    const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
+    return { ...extracted, stored_credential: stored };
   },
 };
 
 const captchaSchema = z.object({ session_id: z.string().min(1) });
 
 export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
-  name: "provision_captcha_gate",
+  name: "operate_captcha_gate",
   description:
     "Detect a captcha and wait for it to clear: returns {found, variant, " +
     "settled}. Invisible Turnstile/reCAPTCHA-v3 usually clears from the humanized " +
-    "driving alone; for a visible checkbox, click it with provision_act first, " +
+    "driving alone; for a visible checkbox, click it with operate_act first, " +
     "then call this to wait for the token. settled=false means a challenge is " +
     "still up (surface captcha_blocked to the user).",
   inputSchema: captchaSchema,
@@ -358,15 +372,15 @@ const verifySchema = z.object({
 });
 
 export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> = {
-  name: "provision_await_verification",
+  name: "operate_await_verification",
   description:
     "Read the user's OWN inbox through their signed-in browser session (no IMAP, " +
     "no mail token) to complete email verification: returns {found, code, link, " +
     "needs_user?}. Pass `sender` (e.g. 'resend.com') to scope the search. On " +
-    "found=true, type the code with provision_act or goto the link. On " +
+    "found=true, type the code with operate_act or goto the link. On " +
     "found=false a `needs_user` object is returned (wall='verification_code') — " +
     "the code came by SMS/authenticator or hasn't arrived: ASK THE USER for it, " +
-    "then type it with provision_act and continue. The session stays live; this " +
+    "then type it with operate_act and continue. The session stays live; this " +
     "is a resumable hand-back, not a failure. Scoped search-and-extract — reads " +
     "only the matching recent mail, never the whole inbox.",
   inputSchema: verifySchema,
@@ -383,10 +397,80 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
   },
 };
 
+// Change 2 — the pluggable terminal. Two outcome kinds: `credentials` (the
+// signup case — extract + vault-store, byte-identical to operate_extract's
+// store path) and `result` (any operate task — a summary + optional structured
+// data: design-review findings, "task done" with confirmed in data, etc.).
+// Both close the session. `operate_finish` stays for abort/give-up.
+const finishTaskSchema = z.object({
+  session_id: z.string().min(1),
+  kind: z.enum(["credentials", "result"]),
+  // credentials kind: where to vault the extracted key (same shape as extract).
+  store: storeShape.optional(),
+  // result kind: a human-readable outcome + optional bounded structured data.
+  summary: z.string().max(4000).optional(),
+  data: z.record(z.string().max(4000)).optional(),
+});
+
+export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
+  name: "operate_finish_task",
+  description:
+    "Finish an operate task with its OUTCOME, then close the session. kind=" +
+    "'credentials' extracts + vault-stores the key (pass `store`; same as " +
+    "operate_extract's store), for signups/key-provisioning. kind='result' " +
+    "reports a `summary` (+ optional `data` map) for any other task — a design " +
+    "review's findings, extracted data, or 'task done' (put confirmed:true in " +
+    "data). Use operate_finish instead to abort without an outcome.",
+  inputSchema: finishTaskSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "kind"],
+    properties: {
+      session_id: { type: "string" },
+      kind: { type: "string", enum: ["credentials", "result"] },
+      store: { type: "object", required: ["service"], properties: storeJsonProps },
+      summary: { type: "string" },
+      data: { type: "object" },
+    },
+  },
+  async handler(args, api) {
+    if (args.kind === "credentials") {
+      const extracted = await extractCredentials(args.session_id);
+      if (args.store === undefined) {
+        throw new Error("operate_finish_task kind=credentials requires `store`");
+      }
+      if (api === null) {
+        throw new Error("operate_finish_task credentials requires an active Trusty Squire session");
+      }
+      const blocked = extracted.blocked_reason;
+      const stored =
+        Object.keys(extracted.credentials).length > 0
+          ? await persistExtracted(args.session_id, extracted.credentials, args.store, api)
+          : null;
+      const closed = await finishProvisionSession(args.session_id);
+      return {
+        kind: "credentials" as const,
+        url: closed.url,
+        candidate_count: extracted.candidate_count,
+        ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
+        stored_credential: stored,
+      };
+    }
+    // result kind — summary + bounded data, then close.
+    const closed = await finishProvisionSession(args.session_id);
+    return {
+      kind: "result" as const,
+      url: closed.url,
+      summary: (args.summary ?? "").slice(0, 4000),
+      ...(args.data !== undefined ? { data: args.data } : {}),
+    };
+  },
+};
+
 const finishSchema = z.object({ session_id: z.string().min(1) });
 
 export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
-  name: "provision_finish",
+  name: "operate_finish",
   description:
     "Close a provisioning session and tear down its browser. Always call this " +
     "when the run is complete (success or give-up) to release the browser.",
@@ -401,12 +485,13 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   },
 };
 
-export const INTERACTIVE_SIGNUP_TOOLS: Tool[] = [
+export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionActTool,
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,
+  provisionFinishTaskTool,
   provisionFinishTool,
 ] as Tool[];
