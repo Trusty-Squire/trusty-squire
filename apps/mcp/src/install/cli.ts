@@ -492,6 +492,18 @@ async function connect(args: Argv): Promise<void> {
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
+      // "Skipped but dead" notice (DESIGN-connect-session-validation): we
+      // short-circuited because Google is valid, but if the bot's GitHub session
+      // validated as dead, say so — a dead session must never be silently
+      // hidden. GitHub is optional, so we don't raise the ceremony for it; the
+      // user refreshes it explicitly when a GitHub-only service needs it.
+      if (!preflight.providers.includes("github")) {
+        ui.hint(
+          `GitHub session is not active — run ${ui.code(
+            "npx @trusty-squire/mcp connect --force-relogin=github",
+          )} if a service needs GitHub.`,
+        );
+      }
       ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
       return;
     }
