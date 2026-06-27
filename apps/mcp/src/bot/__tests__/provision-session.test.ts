@@ -417,6 +417,20 @@ describe("sanitizeExtractedCredentials", () => {
     });
   });
 
+  it("drops page-noise the vault was storing as junk keys (date/email/greeting/label)", () => {
+    const creds = sanitizeExtractedCredentials(
+      {
+        tally: "2026-06-23", // ISO date
+        gitlab: "jessicalopez889@trustysquire.ai", // email
+        replit: "Hi Lunchboxfortwo, what do you want to make?", // greeting (whitespace)
+        growthbook: "Owner:", // UI label fragment
+        api_key: "sk_live_realkey1234567890abcdef", // the one real key
+      },
+      "https://example.com/settings/api",
+    );
+    expect(creds).toEqual({ api_key: "sk_live_realkey1234567890abcdef" });
+  });
+
   it("keeps a Neon napi token and drops referral/key-name clutter", () => {
     const creds = sanitizeExtractedCredentials(
       {

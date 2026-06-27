@@ -1085,7 +1085,13 @@ function looksLikeCredentialValue(value: string): boolean {
 function isCredentialNoise(value: string): boolean {
   const v = value.trim();
   if (v.length === 0) return true;
+  // Whitespace anywhere → page prose, not a key (a greeting like "Hi X, what do
+  // you want to make?", a sentence, "Owner: foo"). Real keys never contain spaces.
+  if (/\s/.test(v)) return true;
   if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(v)) return true;
+  if (/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(v)) return true; // ISO date/timestamp (2026-06-23)
+  if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(v)) return true; // email address
+  if (v.endsWith(":")) return true; // a UI label fragment ("Owner:")
   if (/^v?\d+\.\d+\.\d+(?:[-+.][A-Za-z0-9.-]+)?$/.test(v)) return true;
   if (/^https?:\/\//i.test(v)) return true;
   if (/^trusty-squire-dogfood-\d{8}$/i.test(v)) return true;
@@ -1310,15 +1316,30 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     credentials[`api_key_${n}`] = tok;
   }
   const sanitized = sanitizeExtractedCredentials(credentials, browser.currentUrl(), haystack);
+  const found = Object.keys(sanitized).length > 0;
+  // Report-back so the agent keeps going instead of treating an empty result as
+  // done: if the page HAD labeled candidates but none survived as a real
+  // credential, they were page noise (a date/email/greeting) or a still-masked
+  // display — i.e. this isn't the keys page or the key needs revealing. Tell the
+  // agent that so it navigates/reveals and extracts again, rather than storing junk.
+  const notLegit =
+    !found && labeled.length > 0
+      ? "no_legit_credential: the page had candidate values but none looked like a " +
+        "real key (they were page text — a date/email/label — or a still-masked " +
+        "display). You are likely NOT on the API-keys page, or the key is masked. " +
+        "Navigate to the keys/settings page (or click reveal/show/copy), then extract again."
+      : null;
   audit(sessionId, "extract", {
-    found: Object.keys(sanitized).length > 0,
+    found,
     candidate_count: labeled.length,
+    not_legit: notLegit !== null,
   });
   return {
     session_id: sessionId,
     url: browser.currentUrl(),
     credentials: sanitized,
     candidate_count: labeled.length,
+    ...(notLegit !== null ? { blocked_reason: notLegit } : {}),
   };
 }
 

@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.17 (2026-06-27)
+
+Prerelease (`next`). Stops false-green credential extraction (page noise being
+stored as "keys"), and reports back so the agent retries instead of stopping.
+
+- **fix(extract):** harden the credential-noise filter — reject ISO dates
+  (`2026-06-23`), emails, anything containing whitespace (greetings/sentences),
+  and UI label fragments (`Owner:`). These were being stored in the vault as
+  junk "keys". Real keys have none of those shapes, so nothing legit is dropped.
+- **feat(extract):** when a page had candidate values but none survived as a
+  real credential, `operate_extract` now returns a `blocked_reason`
+  (`no_legit_credential: … navigate to the keys page or reveal the key, then
+  extract again`) instead of a silent empty — so the host agent keeps going
+  rather than treating junk/empty as success.
+
 ## 0.9.19-rc.16 (2026-06-27)
 
 Prerelease (`next`). Two fixes from the third live run.
