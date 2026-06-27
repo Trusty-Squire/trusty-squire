@@ -1,5 +1,17 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.18 (2026-06-27)
+
+Prerelease (`next`). The GitHub session validation (rc.16) is now the DEFAULT on
+every path, not opt-in.
+
+- **fix(connect):** `detectActiveProviderSessions` now validates GitHub
+  everywhere — including the hot provision start, not just the install display —
+  so the agent's "you have GitHub" hint and the connected_providers sync reflect
+  a session that actually works, not a dead-but-present cookie. Stays cheap: it
+  only pays the github.com round-trip when a GitHub cookie is present; no cookie
+  → fast false, no navigation. Google remains presence-based (it doesn't lie).
+
 ## 0.9.19-rc.17 (2026-06-27)
 
 Prerelease (`next`). Stops false-green credential extraction (page noise being

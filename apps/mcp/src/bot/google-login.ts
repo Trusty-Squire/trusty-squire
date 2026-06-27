@@ -202,7 +202,6 @@ async function validateProviderSession(
 // secondary-provider prompt fires) so the latency is acceptable.
 export async function detectActiveProviderSessions(
   profileDir: string = CHROME_PROFILE_DIR,
-  opts: { validate?: boolean } = {},
 ): Promise<OAuthProviderId[]> {
   // Quick best-effort gate — this runs at install boundaries, so a short
   // wait is fine: reclaim a stale lock, or briefly yield to a live run.
@@ -216,13 +215,13 @@ export async function detectActiveProviderSessions(
   try {
     const present: OAuthProviderId[] = [];
     for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
-      // validate=true (the install display) navigates to confirm the session is
-      // LIVE, not just cookie-present — kills the "GitHub marker lies" class.
-      // Default (the hot provision path) stays on the fast cookie check.
-      const ok = opts.validate === true
-        ? await validateProviderSession(ctx, LOGIN_TARGETS[id])
-        : await hasProviderSession(ctx, LOGIN_TARGETS[id]);
-      if (ok) present.push(id);
+      // ALWAYS validate (not just cookie-present) — this kills the "GitHub
+      // marker lies" class on EVERY path, including the hot provision start, not
+      // just the install display. validateProviderSession is cheap: it returns
+      // a fast false when no cookie is present (no navigation), and only pays
+      // the github.com round-trip when a github cookie EXISTS and must be proven
+      // live. Google stays presence-based (it doesn't lie this way).
+      if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
     }
     return present;
   } finally {

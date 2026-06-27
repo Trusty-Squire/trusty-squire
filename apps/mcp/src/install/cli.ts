@@ -606,7 +606,7 @@ async function connect(args: Argv): Promise<void> {
       fail: () => "Provider session check failed (continuing)",
       // validate=true: confirm each session is LIVE (not just cookie-present),
       // so a dead-but-present GitHub session isn't shown as connected.
-      task: () => detectActiveProviderSessions(undefined, { validate: true }),
+      task: () => detectActiveProviderSessions(),
     });
     if (actual !== null) {
       clearAllProviderMarkers();
@@ -766,7 +766,7 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     // cost, and this keeps "Already connected" aligned with the bot's real
     // ability to wear the user's Google identity. validate=true so a dead-but-
     // present GitHub session isn't persisted into connected_providers.
-    const providers = await detectActiveProviderSessions(undefined, { validate: true });
+    const providers = await detectActiveProviderSessions();
     await syncConnectedProviders(providers);
     return decideProvisioned(session, stillValid, providers);
   } catch {
