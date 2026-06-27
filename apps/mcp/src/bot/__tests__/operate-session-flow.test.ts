@@ -17,6 +17,8 @@ const h = vi.hoisted(() => ({
   started: 0,
   currentUrl: "",
   elements: [] as unknown[],
+  visibleText: "",
+  scrolls: [] as string[],
 }));
 
 vi.mock("../browser.js", () => ({
@@ -37,9 +39,15 @@ vi.mock("../browser.js", () => ({
       return h.elements;
     }
     async extractVisibleText(): Promise<string> {
-      return "";
+      return h.visibleText;
     }
     async waitForInteractiveDom(): Promise<void> {}
+    async waitForCaptchaChallengeToSettle(): Promise<boolean> {
+      return true;
+    }
+    async scrollViewport(direction: string): Promise<void> {
+      h.scrolls.push(direction);
+    }
     async type(selector: string, text: string): Promise<void> {
       h.typed.push({ selector, text });
     }
@@ -68,6 +76,7 @@ import {
   act,
   observedHostsForSession,
   stashSecretSlot,
+  awaitVerification,
   finishProvisionSession,
   closeAllProvisionSessions,
 } from "../provision-session.js";
@@ -88,6 +97,8 @@ beforeEach(() => {
   h.started = 0;
   h.currentUrl = "";
   h.elements = [];
+  h.visibleText = "";
+  h.scrolls = [];
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
@@ -201,5 +212,45 @@ describe("operate session — Change 5 precondition gate", () => {
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
     await finishProvisionSession(obs.session_id);
+  });
+});
+
+describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
+  it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const sid = obs.session_id;
+    h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
+    const res = await awaitVerification(sid, { intoSlot: "otp" });
+
+    expect(res.found).toBe(true);
+    expect(res.sealed).toBe(true);
+    expect(res.code).toBeNull(); // the raw code is NOT returned to the host
+    expect(res.slot?.preview).not.toContain("481920");
+
+    // The host enters it by slot — the real digits reach the page, not the host.
+    h.elements = [elem({ visibleText: "Code", selector: "#code" })];
+    await act(sid, { kind: "type_secret", slot: "otp", target: "Code" });
+    expect(h.typed.some((t) => t.text === "481920")).toBe(true);
+  });
+
+  it("returns the code normally when into_slot is NOT requested", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    h.visibleText = "Your verification code is 481920.";
+    const res = await awaitVerification(obs.session_id, {});
+    expect(res.code).toBe("481920");
+    expect(res.sealed).toBeUndefined();
+  });
+});
+
+describe("operate session — scroll (T5 fix: reveal below-the-fold controls)", () => {
+  it("scrolls the viewport down by default and re-observes", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://console.cloud.google.com/" });
+    await act(obs.session_id, { kind: "scroll" });
+    expect(h.scrolls).toEqual(["down"]);
+  });
+  it("honors an explicit direction", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://console.cloud.google.com/" });
+    await act(obs.session_id, { kind: "scroll", direction: "bottom" });
+    expect(h.scrolls).toEqual(["bottom"]);
   });
 });

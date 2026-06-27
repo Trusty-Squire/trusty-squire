@@ -2540,6 +2540,23 @@ export class BrowserController {
   //   3. Fallback: once wheel loop exits, set `scrollTop = scrollHeight`
   //      and dispatch a synthetic `scroll` event. Covers static lists
   //      whose handlers only debounce on the final scroll position.
+  // Operator surface — reveal below-the-fold controls so the planner can act on
+  // them (heavy SPAs like the GCP console render long forms whose lower fields
+  // sit outside the viewport and so never enter the element inventory). Scrolls
+  // the page by ~80% of a viewport (or to an extreme); the next observe picks
+  // up the newly-visible elements.
+  async scrollViewport(direction: "down" | "up" | "bottom" | "top" = "down"): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page.evaluate((dir: string) => {
+      const step = Math.round(window.innerHeight * 0.8);
+      if (dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
+      else if (dir === "top") window.scrollTo(0, 0);
+      else if (dir === "up") window.scrollBy(0, -step);
+      else window.scrollBy(0, step);
+    }, direction);
+    await this.page.waitForTimeout(350);
+  }
+
   async scrollToEndOfTOS(
     selector?: string,
   ): Promise<{

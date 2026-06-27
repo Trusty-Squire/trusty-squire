@@ -147,7 +147,10 @@ export type ProvisionAction =
   // Sealed credential transfer — type a secret held in a session-local slot
   // into a field, WITHOUT the value ever crossing the MCP boundary to the
   // host. The host orchestrates by slot name; the bot types the real value.
-  | { kind: "type_secret"; slot: string; target: string };
+  | { kind: "type_secret"; slot: string; target: string }
+  // Reveal below-the-fold controls on a long SPA form, then re-observe to pick
+  // up the newly-visible elements (heavy consoles render fields off-viewport).
+  | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" };
 
 // Where a host on the allow-set came from. start = declared at operate_start;
 // mid_session = added via an allow_host action; auto_widen = an organic
@@ -962,6 +965,10 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
       await browser.settleAfterOAuth();
       break;
     }
+    case "scroll": {
+      await browser.scrollViewport(action.direction ?? "down");
+      break;
+    }
     case "type_secret": {
       const value = session.secretSlots.get(action.slot);
       if (value === undefined) {
@@ -1361,7 +1368,8 @@ export interface NeedsUserCode {
 export interface VerificationResult {
   session_id: string;
   found: boolean;
-  // A short numeric OTP if one appears in the matching mail, else null.
+  // A short numeric OTP if one appears in the matching mail, else null. NULL
+  // when sealed (the code was stashed into a slot — use type_secret to enter it).
   code: string | null;
   // A verification/confirm link if present, else null. The host decides whether
   // to goto it (it is within the target's own domain → already domain-scoped).
@@ -1369,11 +1377,20 @@ export interface VerificationResult {
   // Set when found=false: the code wasn't auto-retrievable from the inbox. The
   // session is alive — ASK THE USER for the code and type it, don't abandon.
   needs_user?: NeedsUserCode;
+  // Set when into_slot was requested AND a code was found: the OTP was sealed
+  // into a session slot (host gets only the masked handle) so it never round-
+  // trips through the host. Enter it with operate_act type_secret{slot,target}.
+  sealed?: boolean;
+  slot?: SlotHandle;
 }
 
 export interface AwaitVerificationOptions {
   // Narrow the Gmail search to the sending service, e.g. "resend.com".
   sender?: string;
+  // Seal a found OTP into this session slot instead of returning it, so the
+  // code is typed via type_secret and never crosses the MCP boundary to the
+  // host (also dodges host-side payload truncation — see T3).
+  intoSlot?: string;
 }
 
 // Pure verification parser (exported for unit tests). Extracts a {code, link}
@@ -1459,8 +1476,15 @@ export async function awaitVerification(
     sender: opts.sender ?? null,
     has_code: code !== null,
     has_link: link !== null,
+    sealed: opts.intoSlot !== undefined && code !== null,
     needs_user: !found,
   });
+  // Seal the OTP into a slot when asked: the host gets a masked handle, not the
+  // code, and enters it with type_secret. The link (not secret) is still returned.
+  if (opts.intoSlot !== undefined && code !== null) {
+    const handle = stashSecretSlot(sessionId, opts.intoSlot, code);
+    return { session_id: sessionId, found: true, code: null, link, sealed: true, slot: handle };
+  }
   return buildVerificationResult(sessionId, code, link);
 }
 

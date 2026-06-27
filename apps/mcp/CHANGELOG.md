@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.14 (2026-06-26)
+
+Prerelease (`next`). Two fixes from the first live operator-surface test run
+(Codex against rc.13), plus removal of the inert `TRUSTY_SQUIRE_OPERATE` flag.
+
+- **feat(operate):** `operate_act{kind:"scroll", direction?}` reveals
+  below-the-fold controls on long SPA forms (the GCP-console capstone stalled
+  because lower fields never entered the element inventory). `operate_observe`
+  after a scroll picks up the newly-visible elements.
+- **feat(operate):** `operate_await_verification{into_slot}` seals a found email
+  OTP into a session slot — the host gets a masked handle, not the digits, and
+  enters it with `operate_act{type_secret, slot}`. The code never round-trips
+  through the host (safer, and dodges host-side payload truncation).
+- **removed:** the inert `TRUSTY_SQUIRE_OPERATE` flag (it gated nothing; the
+  real gate is per-call `require_live_identity`).
+
 ## 0.9.19-rc.13 (2026-06-26)
 
 Prerelease (`next`). **Operator surface Phase 1** — the host-driven browser

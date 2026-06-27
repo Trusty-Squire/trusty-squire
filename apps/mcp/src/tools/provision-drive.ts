@@ -123,7 +123,7 @@ const actSchema = z.object({
   session_id: z.string().min(1),
   kind: z.enum([
     "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-    "allow_host", "type_secret",
+    "allow_host", "type_secret", "scroll",
   ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
@@ -133,6 +133,8 @@ const actSchema = z.object({
   host: z.string().min(1).max(253).optional(),
   // type_secret: the sealed slot whose value to type into `target`.
   slot: z.string().min(1).max(60).optional(),
+  // scroll: which way to move the viewport (default "down").
+  direction: z.enum(["down", "up", "bottom", "top"]).optional(),
 });
 
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
@@ -161,6 +163,8 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "allow_host", host: need(args.host, "host") };
     case "type_secret":
       return { kind: "type_secret", slot: need(args.slot, "slot"), target: need(args.target, "target") };
+    case "scroll":
+      return { kind: "scroll", ...(args.direction !== undefined ? { direction: args.direction } : {}) };
   }
 }
 
@@ -175,7 +179,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
     "GCP console into Firebase), type_secret (slot + target — type a secret you " +
     "captured into a sealed slot via operate_extract{into_slot} into a field " +
-    "on the current site; the value never leaves the browser). If a " +
+    "on the current site; the value never leaves the browser), scroll (direction " +
+    "down/up/bottom/top, default down — reveal below-the-fold controls on a long " +
+    "form, then operate_observe to pick up the newly-visible elements). If a " +
     "target ref is stale, call operate_observe and retry with a fresh ref.",
   inputSchema: actSchema,
   jsonInputSchema: {
@@ -187,7 +193,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         type: "string",
         enum: [
           "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-          "allow_host", "type_secret",
+          "allow_host", "type_secret", "scroll",
         ],
       },
       target: { type: "string" },
@@ -196,6 +202,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       key: { type: "string" },
       host: { type: "string" },
       slot: { type: "string" },
+      direction: { type: "string", enum: ["down", "up", "bottom", "top"] },
     },
   },
   async handler(args) {
@@ -369,6 +376,10 @@ export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
 const verifySchema = z.object({
   session_id: z.string().min(1),
   sender: z.string().min(1).max(120).optional(),
+  // Seal a found OTP into this slot instead of returning it — then enter it
+  // with operate_act{type_secret, slot}. The code never reaches you (safer, and
+  // it dodges client-side payload truncation).
+  into_slot: z.string().min(1).max(60).optional(),
 });
 
 export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> = {
@@ -377,23 +388,30 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
     "Read the user's OWN inbox through their signed-in browser session (no IMAP, " +
     "no mail token) to complete email verification: returns {found, code, link, " +
     "needs_user?}. Pass `sender` (e.g. 'resend.com') to scope the search. On " +
-    "found=true, type the code with operate_act or goto the link. On " +
-    "found=false a `needs_user` object is returned (wall='verification_code') — " +
-    "the code came by SMS/authenticator or hasn't arrived: ASK THE USER for it, " +
-    "then type it with operate_act and continue. The session stays live; this " +
-    "is a resumable hand-back, not a failure. Scoped search-and-extract — reads " +
-    "only the matching recent mail, never the whole inbox.",
+    "found=true, type the code with operate_act or goto the link. PREFER passing " +
+    "`into_slot` (e.g. 'otp'): the code is sealed into a slot (you get a masked " +
+    "handle, not the digits) and you enter it with operate_act{type_secret, slot} " +
+    "— the code never round-trips through you. On found=false a `needs_user` " +
+    "object is returned (wall='verification_code') — the code came by SMS/" +
+    "authenticator or hasn't arrived: ASK THE USER for it, then type it with " +
+    "operate_act and continue. The session stays live; this is a resumable " +
+    "hand-back, not a failure. Scoped search-and-extract — reads only the matching " +
+    "recent mail, never the whole inbox.",
   inputSchema: verifySchema,
   jsonInputSchema: {
     type: "object",
     required: ["session_id"],
-    properties: { session_id: { type: "string" }, sender: { type: "string" } },
+    properties: {
+      session_id: { type: "string" },
+      sender: { type: "string" },
+      into_slot: { type: "string" },
+    },
   },
   async handler(args) {
-    return await awaitVerification(
-      args.session_id,
-      args.sender !== undefined ? { sender: args.sender } : {},
-    );
+    return await awaitVerification(args.session_id, {
+      ...(args.sender !== undefined ? { sender: args.sender } : {}),
+      ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
+    });
   },
 };
 
