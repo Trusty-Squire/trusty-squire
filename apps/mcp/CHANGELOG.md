@@ -1,5 +1,66 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.0-rc.0 (2026-06-27)
+
+- docs: prune stale TODOS.md snapshot; orient STATE.md (no history pruned)
+- chore: move bot test-services.md out of the compiled src/ tree
+- refactor(extract): converge credential-shape predicates + canonical masked-glyph
+- docs: freshen stale references to sunset systems
+- chore: remove dead code + orphaned build artifacts
+- chore(tools): op-driver /remember + /verify endpoints + use: launch mode
+- feat(operate): operator-recipe capture + replay (operate_remember / operate_use)
+- docs: design for user-saved operator workflows as skills (Phase A)
+- chore(tools): persistent single-session operate-driver harness
+- feat(operate): steer the host past real-identity signup walls
+- fix(extract): reveal keys hidden behind a view-button or copy-button aria-label
+- release(mcp): 0.9.19-rc.24 — recognize multi-segment vendor keys (luma-api-)
+- release(mcp): 0.9.19-rc.23 — force-relogin no longer wipes the other provider
+- chore(tools): tidy the comments that referenced the deleted orphan probes
+- chore(tools): drop orphaned operator probes + tidy their comment refs
+- release(mcp): 0.9.19-rc.22 — proactively prompt GitHub reconnect on dead session
+- release(mcp): 0.9.19-rc.21 — force-relogin=github routes to GitHub-only login
+- docs+fix(connect): session-validation spec + 'GitHub dead' notice on skip
+- release(mcp): 0.9.19-rc.20 — guidance: drive through setup forms + one-time secrets
+- release(mcp): 0.9.19-rc.19 — recognize hyphen-prefixed keys (tally) + web GitHub reconnect
+- release(mcp): 0.9.19-rc.18 — validate GitHub session on every path
+- release(mcp): 0.9.19-rc.17 — kill false-green extraction + report-back
+- release(mcp): 0.9.19-rc.16 — validate GitHub session + secret_label
+- release(mcp): 0.9.19-rc.15 — ARIA switch activation + masked-secret guard
+- fix(operate): never seal a masked secret into a slot
+- release(mcp): 0.9.19-rc.14 — scroll action + sealed OTP (T3/T5 fixes)
+- refactor(operate): delete the inert TRUSTY_SQUIRE_OPERATE flag
+- release(mcp): 0.9.19-rc.13 — operator surface Phase 1
+- test(operate): functional session-flow suite (8 tests, mocked browser)
+- feat(operate): Change 2+3 — 2-kind terminal + operate_* rename (no aliases)
+- feat(operate): Change 5 — Google-session precondition gate + operate feature flag
+- test(operate): validateAllowHost hardening + maskSecretValue (16 new cases, 71 pass)
+- feat(operate): Change 1+4 tool layer — allowed_hosts, allow_host, type_secret, into_slot, egress_hosts
+- feat(operate): Change 1+4 substrate — source-tracked allow-set, allow_host, sealed secret slots, egress decouple
+- chore: scrub stale pwa/inbox-api refs + drop dead/demo scripts
+- chore: final sweep — drop orphaned tools + old autonomous-loop docs; track 2 design notes
+- refactor: extract housekeeper to its own repo + delete dead apps/tools
+- feat(provision): wall hand-off Flow B — captcha_blocked → sign-up-and-vault hand-back
+- feat(provision): wall hand-off Flow A — needs_user_code on await_verification
+- docs(wall-handoff): fold Codex review — two contracts, metadata, honesty fixes
+- docs(wall-handoff): pivot to conversational hand-back; bridge → deferred shelf option
+- docs(wall-handoff): spike results — Linux+Xvfb bridge viable; fold Codex findings
+- fix(redact): run structural DOM-secret patterns before the generic redactor
+- chore: stop ignoring /docs/ — design notes belong in the repo
+- docs: design note — wall hand-off (pause, surface live browser, resume)
+- refactor(bot): rip out the operator-only Telegram notifier
+- fix(systemd): daily verify timer uses OnCalendar, not monotonic
+- refactor(registry): remove dead verdict/sampler decision path
+- docs(housekeeper): Phase 6 — rewrite runbook + CLAUDE.md for verify-only model
+- feat(housekeeper): Phase 5 — systemd verify unit + --check preflight
+- fix(connect): require google identity for connected state
+- chore: snapshot dogfood fixes
+- refactor(mcp): delete the old in-mcp housekeeper (moved to apps/housekeeper)
+- docs(housekeeper): Phase 0 — registry mechanical rule already present
+- feat(housekeeper): verify scheduler + thin registry client
+- feat(housekeeper): codex-exec runner + failure classifier
+- feat(housekeeper): scaffold apps/housekeeper standalone package
+- docs(housekeeper): design note — codex-driven verify scheduler
+
 ## 0.9.19-rc.24 (2026-06-27)
 
 Prerelease (`next`). Recognize multi-segment vendor keys.
