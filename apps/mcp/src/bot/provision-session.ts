@@ -135,16 +135,57 @@ export type ProvisionAction =
   // as the active page (the host then observes the account chooser/consent).
   | { kind: "oauth_click"; target: string }
   // Return to the product page after the OAuth handshake completes.
-  | { kind: "oauth_settle" };
+  | { kind: "oauth_settle" }
+  // Operator surface — declare a host to cross into mid-session (multi-app
+  // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
+  // with source "mid_session" and audited; the goto gate then permits it.
+  | { kind: "allow_host"; host: string }
+  // Sealed credential transfer — type a secret held in a session-local slot
+  // into a field, WITHOUT the value ever crossing the MCP boundary to the
+  // host. The host orchestrates by slot name; the bot types the real value.
+  | { kind: "type_secret"; slot: string; target: string };
+
+// Where a host on the allow-set came from. start = declared at operate_start;
+// mid_session = added via an allow_host action; auto_widen = an organic
+// same-base-domain redirect we trust. Source-tracked so every widening is
+// attributable, and so auto-widen only chains off START hosts (no scope creep
+// off an agent-declared mid_session host) and credential egress can exclude
+// mid_session task scope.
+export type HostSource = "start" | "mid_session" | "auto_widen";
+
+export interface AllowedHostEntry {
+  host: string;
+  source: HostSource;
+}
 
 interface Session {
   id: string;
   browser: BrowserController;
-  allowedHosts: string[];
+  allowedHosts: AllowedHostEntry[];
   generation: number;
+  // Sealed credential slots: secret values extracted in-session and held ONLY
+  // here so a later type_secret can enter them into another site's form. Never
+  // returned to the host (the write-only-vault moat extended to transfers).
+  secretSlots: Map<string, string>;
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
+}
+
+// Plain host list for the pieces that only need the names (goto gate, audit,
+// observed-hosts). The source metadata stays on the Session.
+function hostStrings(session: Session): string[] {
+  return session.allowedHosts.map((e) => e.host);
+}
+
+// Hosts that may seed credential EGRESS (where a stored key is later sent by
+// the proxy): start + auto_widen, never mid_session task scope — a wide operate
+// scope must not silently over-grant a key's egress allow-list (Codex). The
+// vault unions these with the service-default + any agent-declared egress_hosts.
+function egressSeedHosts(session: Session): string[] {
+  return session.allowedHosts
+    .filter((e) => e.source !== "mid_session")
+    .map((e) => e.host);
 }
 
 const sessions = new Map<string, Session>();
@@ -352,6 +393,39 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
+}
+
+// A two-label public suffix we must never let a single allow_host widen to —
+// adding "co.uk" would green-light every *.co.uk. Small curated set (the ones
+// the operator surface realistically touches); not a full PSL.
+const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
+  "co.jp", "co.nz", "co.in", "com.br", "co.za", "com.cn",
+  "github.io", "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
+  "vercel.app", "netlify.app", "herokuapp.com",
+]);
+
+// Validate an agent-declared allow_host host. Returns the normalized bare
+// hostname or an error string. Hardened (Codex): reject wildcards, ports,
+// schemes/paths, IDNA/punycode + non-ASCII (lookalike-spoof defense), IPv4/IPv6
+// literals, localhost/private hosts, bare TLDs, and two-label public suffixes.
+// This matters more now that type_secret can enter a secret on these hosts.
+export function validateAllowHost(raw: string): { host: string } | { error: string } {
+  const v = raw.trim().toLowerCase();
+  if (v.length === 0 || v.length > 253) return { error: "host empty or too long" };
+  if (/[/:@?#*\s]/.test(v)) return { error: "host must be a bare hostname (no scheme, port, path, wildcard, or whitespace)" };
+  if (/[^a-z0-9.-]/.test(v)) return { error: "host has non-ASCII or invalid characters (punycode/unicode spoofing rejected)" };
+  if (v.includes("xn--")) return { error: "punycode (xn--) hosts rejected — homograph-spoof risk" };
+  if (v.startsWith(".") || v.endsWith(".") || v.includes("..")) return { error: "malformed host (leading/trailing/double dot)" };
+  if (v === "localhost" || v.endsWith(".localhost")) return { error: "localhost is not an allowable cross-host" };
+  // IPv4 literal / dotted-quad — reject (egress + transfer must be by name).
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return { error: "IP-address hosts are not allowed (declare a hostname)" };
+  // IPv6 would contain ':' — already rejected by the ':' check above.
+  const labels = v.split(".");
+  if (labels.length < 2) return { error: "bare TLD / single-label host not allowed" };
+  if (labels.some((l) => l.length === 0 || l.length > 63)) return { error: "invalid host label length" };
+  if (TWO_LABEL_PUBLIC_SUFFIXES.has(v)) return { error: `"${v}" is a public suffix — widening to it would allow every subdomain` };
+  return { host: v };
 }
 
 function visibleModeMarkers(pageText: string): string[] {
@@ -619,11 +693,19 @@ function baseDomain(host: string): string {
 
 function widenAllowedHostsFromCurrentUrl(session: Session): void {
   const host = registrableHost(session.browser.currentUrl());
-  if (host === null || session.allowedHosts.includes(host)) return;
+  if (host === null || session.allowedHosts.some((e) => e.host === host)) return;
   const currentBase = baseDomain(host);
-  if (session.allowedHosts.some((allowed) => baseDomain(allowed) === currentBase)) {
-    session.allowedHosts.push(host);
-    audit(session.id, "scope_widen", { host, allowed_hosts: session.allowedHosts });
+  // Chain ONLY off START-sourced hosts: an organic redirect that shares a base
+  // domain with a host the user declared at start is trusted. We do NOT chain
+  // off mid_session or prior auto_widen hosts — that would let a single
+  // agent-declared host silently pull in a whole sibling tree (scope creep).
+  if (
+    session.allowedHosts.some(
+      (e) => e.source === "start" && baseDomain(e.host) === currentBase,
+    )
+  ) {
+    session.allowedHosts.push({ host, source: "auto_widen" });
+    audit(session.id, "scope_widen", { host, source: "auto_widen", allowed_hosts: hostStrings(session) });
   }
 }
 
@@ -636,6 +718,9 @@ export interface StartOptions {
   profileDir?: string;
   proxyUrl?: string;
   // Extra hosts to widen domain-scope (e.g. a known custom IdP/mail host).
+  // Seeded with source "start" alongside the service host. A multi-app operate
+  // task declares every app it spans here (GCP + Firebase + the user's app);
+  // the single-service signup case passes none (the one degenerate host).
   extraAllowedHosts?: readonly string[];
   // Registry route guidance the tool layer resolved (renderSkillHint). Attached
   // to the start observation so the agent reads the map before driving.
@@ -673,15 +758,28 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   });
   await browser.start();
   const targetHost = registrableHost(opts.serviceUrl);
-  const allowedHosts = [
+  const seedHosts = [
     ...(targetHost !== null ? [targetHost] : []),
     ...(opts.extraAllowedHosts ?? []),
   ];
-  const session: Session = { id, browser, allowedHosts, generation: 0, lastElements: [] };
+  // All start-declared hosts are sourced "start" — auto-widen chains off these,
+  // and credential egress may seed from these (but never from mid_session).
+  const allowedHosts: AllowedHostEntry[] = [...new Set(seedHosts)].map((host) => ({
+    host,
+    source: "start" as const,
+  }));
+  const session: Session = {
+    id,
+    browser,
+    allowedHosts,
+    generation: 0,
+    secretSlots: new Map(),
+    lastElements: [],
+  };
   sessions.set(id, session);
   audit(id, "start", {
     service_url: opts.serviceUrl,
-    allowed_hosts: allowedHosts,
+    allowed_hosts: hostStrings(session),
     has_hint: opts.hint !== undefined,
   });
   await browser.goto(opts.serviceUrl);
@@ -702,11 +800,42 @@ export async function observe(sessionId: string): Promise<Observation> {
   return await observeSession(session);
 }
 
+// Hosts to seed credential EGRESS from when storing a key extracted in this
+// session: start + auto_widen, NEVER mid_session task scope (a wide multi-app
+// operate scope must not silently over-grant a key's egress allow-list).
 export function observedHostsForSession(sessionId: string): string[] {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   widenAllowedHostsFromCurrentUrl(session);
-  return [...new Set(session.allowedHosts)];
+  return [...new Set(egressSeedHosts(session))];
+}
+
+// Mask a secret for a host-facing preview: keep a short prefix + last few
+// chars, redact the middle. Never reveals enough to reconstruct the value.
+export function maskSecretValue(value: string): string {
+  const v = value.trim();
+  if (v.length <= 8) return "••••";
+  const head = v.slice(0, Math.min(6, v.length - 4));
+  const tail = v.slice(-3);
+  return `${head}••••${tail}`;
+}
+
+export interface SlotHandle {
+  slot: string;
+  preview: string;
+  length: number;
+}
+
+// Stash a secret into a session-local slot and return ONLY a handle + masked
+// preview. The raw value stays in the Session and is never returned to the
+// host — a later type_secret enters it into another site's form. Extends the
+// write-only-vault moat to in-session credential transfer.
+export function stashSecretSlot(sessionId: string, slot: string, value: string): SlotHandle {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  session.secretSlots.set(slot, value);
+  audit(sessionId, "secret_slot_set", { slot, length: value.length });
+  return { slot, preview: maskSecretValue(value), length: value.length };
 }
 
 async function observeSession(session: Session): Promise<Observation> {
@@ -759,13 +888,25 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
 
   switch (action.kind) {
     case "goto": {
-      if (!hostAllowed(action.url, session.allowedHosts)) {
+      if (!hostAllowed(action.url, hostStrings(session))) {
         throw new Error(
           `goto blocked by domain-scope: ${action.url} is outside the allowed hosts ` +
-            `[${session.allowedHosts.join(", ")}] + auth providers`,
+            `[${hostStrings(session).join(", ")}] + auth providers. ` +
+            `Declare it first with an allow_host action if this task spans it.`,
         );
       }
       await browser.goto(action.url);
+      break;
+    }
+    case "allow_host": {
+      const checked = validateAllowHost(action.host);
+      if ("error" in checked) {
+        throw new Error(`allow_host rejected "${action.host}": ${checked.error}`);
+      }
+      if (!session.allowedHosts.some((e) => e.host === checked.host)) {
+        session.allowedHosts.push({ host: checked.host, source: "mid_session" });
+        audit(sessionId, "allow_host", { host: checked.host, allowed_hosts: hostStrings(session) });
+      }
       break;
     }
     case "press": {
@@ -774,6 +915,27 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
     }
     case "oauth_settle": {
       await browser.settleAfterOAuth();
+      break;
+    }
+    case "type_secret": {
+      const value = session.secretSlots.get(action.slot);
+      if (value === undefined) {
+        throw new Error(
+          `type_secret: no sealed slot named "${action.slot}". Capture it first with ` +
+            `operate_extract { into_slot: "${action.slot}" }. Known slots: ` +
+            `[${[...session.secretSlots.keys()].join(", ")}]`,
+        );
+      }
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target, session.generation);
+      if (el === null) {
+        throw new Error(`type_secret: no element matched target "${action.target}".`);
+      }
+      // Type the REAL value into the page. It crosses only browser↔page; the
+      // value is never returned to the host and never logged.
+      await browser.type(el.selector, value);
+      audit(sessionId, "type_secret", { slot: action.slot, target: action.target, host: registrableHost(browser.currentUrl()) });
       break;
     }
     case "click":
