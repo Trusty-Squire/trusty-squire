@@ -986,7 +986,15 @@ export async function ensureOAuthSession(opts?: {
       preflight: async (ctx) => {
         if (opts?.forceOpen === true) {
           try {
-            await ctx.clearCookies();
+            // Clear ONLY this provider's session cookies — never a bare
+            // ctx.clearCookies(), which wiped EVERY provider (a
+            // force-relogin=github would nuke the live Google session and the
+            // operate precondition gate would then fail "no Google session").
+            // The named session cookies are what define the login; dropping
+            // them forces the next load to the provider's login page.
+            for (const name of target.cookies) {
+              await ctx.clearCookies({ name });
+            }
           } catch {
             // best-effort — if clear fails we still proceed and let
             // the operator hit Sign Out manually in the noVNC.

@@ -1,5 +1,17 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.23 (2026-06-27)
+
+Prerelease (`next`). **Critical:** a force-relogin no longer wipes the *other*
+provider's session.
+
+- **fix(connect):** `ensureOAuthSession({forceOpen})` cleared **all** cookies
+  (bare `ctx.clearCookies()`), so `--force-relogin=github` (and
+  `login --provider=github --force-relogin`) nuked the live **Google** session —
+  after which every `require_live_identity` operate task failed the precondition
+  gate with "no live Google session." Now it clears only the *named provider's*
+  session cookies, leaving the other provider intact.
+
 ## 0.9.19-rc.22 (2026-06-27)
 
 Prerelease (`next`). connect now proactively fixes a dead GitHub session.
