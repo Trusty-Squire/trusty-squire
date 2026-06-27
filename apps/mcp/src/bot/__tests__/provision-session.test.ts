@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import type { InteractiveElement } from "../browser.js";
 import {
   resolveTarget,
@@ -23,7 +23,6 @@ import {
   validateAllowHost,
   maskSecretValue,
   googleSessionGate,
-  operateSurfaceEnabled,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -651,29 +650,5 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
   });
   it("fails closed when only a non-Google provider is live (no autonomous login)", () => {
     expect(googleSessionGate(["github"]).ok).toBe(false);
-  });
-});
-
-describe("operateSurfaceEnabled (Change 5 — feature flag, default OFF)", () => {
-  const orig = process.env.TRUSTY_SQUIRE_OPERATE;
-  afterEach(() => {
-    if (orig === undefined) delete process.env.TRUSTY_SQUIRE_OPERATE;
-    else process.env.TRUSTY_SQUIRE_OPERATE = orig;
-  });
-  it("is OFF when unset", () => {
-    delete process.env.TRUSTY_SQUIRE_OPERATE;
-    expect(operateSurfaceEnabled()).toBe(false);
-  });
-  it("is ON for 1/true/on", () => {
-    for (const v of ["1", "true", "on", "ON", "True"]) {
-      process.env.TRUSTY_SQUIRE_OPERATE = v;
-      expect(operateSurfaceEnabled()).toBe(true);
-    }
-  });
-  it("is OFF for 0/false/garbage", () => {
-    for (const v of ["0", "false", "off", "no", ""]) {
-      process.env.TRUSTY_SQUIRE_OPERATE = v;
-      expect(operateSurfaceEnabled()).toBe(false);
-    }
   });
 });

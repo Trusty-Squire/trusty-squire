@@ -735,14 +735,6 @@ export interface StartOptions {
   requireLiveIdentity?: boolean;
 }
 
-// Change 5 — the operator surface ships behind a flag. Default OFF in Phase 1
-// (opened only after the live "add Google OAuth" acceptance passes). When off,
-// the operate-only precondition gate is inert and provisioning is unchanged.
-export function operateSurfaceEnabled(): boolean {
-  const v = (process.env.TRUSTY_SQUIRE_OPERATE ?? "").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "on";
-}
-
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
 // acts as the user needs a LIVE Google session before it drives; absent /
 // expired / 2FA-challenged → hand back BEFORE the task starts, so the

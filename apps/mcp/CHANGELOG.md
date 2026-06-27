@@ -4,9 +4,9 @@
 
 Prerelease (`next`). **Operator surface Phase 1** — the host-driven browser
 tools generalize from "drive a signup, extract a key" to driving arbitrary,
-credential-gated, often multi-app tasks. The operate-only behavior (the
-Google-session precondition gate) is behind a flag (`TRUSTY_SQUIRE_OPERATE`,
-default OFF); the tool rename + new capabilities ship unconditionally.
+credential-gated, often multi-app tasks. Every new capability is opt-in
+per-call (the precondition gate fires only on `require_live_identity`; the new
+params/actions activate only when the host uses them).
 
 - **renamed:** the 7 `provision_*` tools → `operate_*` (no aliases), plus a new
   `operate_finish_task`. `operate_finish` stays for abort.
