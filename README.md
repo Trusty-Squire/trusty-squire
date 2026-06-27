@@ -11,9 +11,8 @@
 
 Trusty Squire plugs into your AI coding agent — Claude Code, Cursor, Codex — and takes
 over the credential grunt work that slows you down and leaks secrets. Your agent signs
-up for the services your project needs, keeps every key in a vault the key **never
-leaves**, and rotates them for you. You ship at your agent's speed; your secrets stay
-locked down.
+up for the services your project needs, locks every key in a vault it **never leaves**,
+and rotates them for you. You ship at your agent's speed; your secrets stay put.
 
 ### Why developers run it
 
@@ -30,13 +29,13 @@ locked down.
 
 ## What you can ask your squire
 
-1. **"Sign me up for Resend and drop the API key in my vault."** — signup automation, key extracted.
-2. **"Add Google OAuth login to my app."** — drives a multi-step task across consoles (GCP → OAuth Playground), the secret never leaving the vault.
-3. **"Give my deployed app a scoped, revocable OpenAI key — cap it at $20/mo."** — an *egress grant*: your code calls the provider through a proxy that injects the key; the raw secret stays in the vault.
-4. **"Rotate my Stripe key and update everywhere it's used."** — best-attempt rotation, with anything it couldn't do reported honestly.
-5. **"Show me everything that touched my keys in the last 90 days."** — a full audit ledger.
-6. **"Something leaked — kill that key now."** — revoke a grant on the spot.
-7. **"Stand up the same stack for a new project in 30 seconds."** — a successful run is saved as a skill and replayed instantly.
+1. **"Sign me up for Resend and put the API key in my vault."** — account created, key extracted and stored.
+2. **"Add Google OAuth login to my app."** — a multi-step setup driven across consoles (GCP → OAuth Playground); the secret is never exposed.
+3. **"Give my deployed app a scoped OpenAI key, capped at $50/mo."** — an *egress grant*: your code calls through a proxy that injects the key; the raw secret stays vaulted.
+4. **"Rotate my Stripe key and update everywhere it's used."** — rotated where we can, honest about what we can't.
+5. **"Show me everything that touched my keys in the last 90 days."** — the audit ledger.
+6. **"Something leaked — kill that key now."** — revoke the grant on the spot.
+7. **"Stand up the same stack for a new project."** — replayed from a saved skill in ~30s.
 
 ## Install
 
@@ -65,9 +64,6 @@ published to the registry, so the next person provisioning that service replays 
 ~30s instead of the agent re-figuring it out.
 
 ## Pricing
-
-For developers shipping with AI coding agents — move at your agent's speed without
-worrying about leaked secrets.
 
 - **Free** — provision, store keys, personal proxy use, 7-day audit, manual rotation.
 - **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, and
