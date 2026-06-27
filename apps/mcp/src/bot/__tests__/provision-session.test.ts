@@ -20,6 +20,8 @@ import {
   buildScreenOutline,
   provisionPerceptionGuidance,
   shouldBlockUnsafeProvisionAction,
+  validateAllowHost,
+  maskSecretValue,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -568,5 +570,65 @@ describe("buildScreenOutline", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("validateAllowHost (operator allow_host hardening)", () => {
+  it("accepts a normal bare hostname and lowercases it", () => {
+    expect(validateAllowHost("Console.Cloud.Google.com")).toEqual({
+      host: "console.cloud.google.com",
+    });
+  });
+  it("accepts a two-label app domain", () => {
+    expect(validateAllowHost("myapp.com")).toEqual({ host: "myapp.com" });
+  });
+  it("rejects a wildcard", () => {
+    expect(validateAllowHost("*.google.com")).toHaveProperty("error");
+  });
+  it("rejects a scheme/port/path", () => {
+    expect(validateAllowHost("https://x.com")).toHaveProperty("error");
+    expect(validateAllowHost("x.com:443")).toHaveProperty("error");
+    expect(validateAllowHost("x.com/login")).toHaveProperty("error");
+  });
+  it("rejects punycode (homograph spoof)", () => {
+    expect(validateAllowHost("xn--80ak6aa92e.com")).toHaveProperty("error");
+  });
+  it("rejects non-ASCII unicode lookalikes", () => {
+    expect(validateAllowHost("gооgle.com")).toHaveProperty("error"); // cyrillic о
+  });
+  it("rejects an IPv4 literal", () => {
+    expect(validateAllowHost("10.0.0.1")).toHaveProperty("error");
+  });
+  it("rejects an IPv6 literal (via the colon guard)", () => {
+    expect(validateAllowHost("::1")).toHaveProperty("error");
+    expect(validateAllowHost("[fe80::1]")).toHaveProperty("error");
+  });
+  it("rejects localhost", () => {
+    expect(validateAllowHost("localhost")).toHaveProperty("error");
+    expect(validateAllowHost("api.localhost")).toHaveProperty("error");
+  });
+  it("rejects a bare TLD / single label", () => {
+    expect(validateAllowHost("com")).toHaveProperty("error");
+  });
+  it("rejects a two-label public suffix (would allow every subdomain)", () => {
+    expect(validateAllowHost("co.uk")).toHaveProperty("error");
+    expect(validateAllowHost("vercel.app")).toHaveProperty("error");
+  });
+  it("rejects malformed dots", () => {
+    expect(validateAllowHost(".x.com")).toHaveProperty("error");
+    expect(validateAllowHost("x..com")).toHaveProperty("error");
+    expect(validateAllowHost("x.com.")).toHaveProperty("error");
+  });
+});
+
+describe("maskSecretValue (sealed transfer preview)", () => {
+  it("masks the middle of a long secret, keeping a short head + tail", () => {
+    const masked = maskSecretValue("GOCSPX-abcdef1234567890xyz");
+    expect(masked).toContain("••••");
+    expect(masked).not.toContain("abcdef1234567890");
+    expect(masked.startsWith("GOCSPX")).toBe(true);
+  });
+  it("fully redacts a short value (no reconstructable prefix)", () => {
+    expect(maskSecretValue("short")).toBe("••••");
   });
 });
