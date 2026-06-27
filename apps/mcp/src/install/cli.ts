@@ -544,6 +544,39 @@ async function connect(args: Argv): Promise<void> {
     }
   }
 
+  // DESIGN-connect-session-validation: a SCOPED force-relogin=github on an
+  // already-bound account is a GitHub-only login — Google's gate is already
+  // satisfied (the account is bound + its session is what we'd re-bind), so we
+  // must NOT drag the Google-first account-binding confirm page into it. Route
+  // straight to the provider-scoped login (the `login --provider=github` path):
+  // it opens a GitHub-only login (account chooser, since cookies were cleared
+  // above), never touching Google. Falls through to the full confirm flow only
+  // when the account isn't bound yet (nothing to skip) or the scope is google
+  // (which can re-bind the account and so needs the claim).
+  if (args.forceReloginProvider === "github") {
+    const bound = await checkAlreadyBound();
+    if (bound) {
+      ui.heading("Sign in to GitHub");
+      const result = await ensureOAuthSession({
+        provider: "github",
+        apiBaseUrl: args.apiBase,
+        forceOpen: true,
+      });
+      if (result.status === "logged_in" || result.status === "already_valid") {
+        await recordConnectedProvider("github");
+        await writeAgentConfig(target, agent, args);
+        ui.success("Signed in to GitHub. The bot is ready; config refreshed.");
+        return;
+      }
+      ui.fail(
+        result.status === "timeout"
+          ? `GitHub sign-in timed out. Retry: ${ui.code("npx @trusty-squire/mcp connect --force-relogin=github")}`
+          : `GitHub sign-in failed: ${result.detail ?? "unknown error"}`,
+      );
+      process.exit(1);
+    }
+  }
+
   const consent = consentFromArgs(args);
 
   // Detect egress class so the asn rides along in the install payload
@@ -783,6 +816,29 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     return decideProvisioned(session, stillValid, providers);
   } catch {
     return null;
+  }
+}
+
+// Is the account already BOUND? — a valid session (machine + agent token +
+// account id) whose agent token still validates. Unlike checkAlreadyProvisioned
+// this does NOT require a live Google session: it answers "is the install
+// claimed to an account", which is what a scoped GitHub force-relogin needs to
+// know it can skip the Google-binding confirm page.
+async function checkAlreadyBound(): Promise<boolean> {
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (
+      session === null ||
+      session.machine_token === undefined ||
+      session.agent_session_token === undefined ||
+      session.account_id === undefined
+    ) {
+      return false;
+    }
+    return await agentTokenStillValid(session.api_base_url, session.agent_session_token);
+  } catch {
+    return false;
   }
 }
 

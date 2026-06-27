@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.21 (2026-06-27)
+
+Prerelease (`next`). First slice of the connect/session-validation redesign
+(`docs/DESIGN-connect-session-validation.md`).
+
+- **fix(connect):** `--force-relogin=github` on an already-bound account now
+  routes straight to a **GitHub-only login** (with the account chooser, since the
+  session was cleared) — it no longer drags in the Google-first account-binding
+  page. Google's gate is already satisfied; GitHub is logged in on its own.
+- **fix(connect):** when connect short-circuits (Google valid + bound) but the
+  bot's GitHub session validated **dead**, it now prints a notice ("run
+  --force-relogin=github") instead of silently hiding it.
+
+Still pending (next slice): the plain-ceremony confirm page should drive the
+GitHub step from the bot's validated session, not the account link.
+
 ## 0.9.19-rc.20 (2026-06-27)
 
 Prerelease (`next`). Perception guidance so the host agent drives THROUGH setup
