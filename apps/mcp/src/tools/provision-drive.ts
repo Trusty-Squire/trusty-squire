@@ -16,6 +16,7 @@ import {
   awaitVerification,
   finishProvisionSession,
   observedHostsForSession,
+  stashSecretSlot,
   type ProvisionAction,
 } from "../bot/provision-session.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
@@ -48,6 +49,10 @@ async function resolveRouteHint(serviceUrl: string): Promise<string | undefined>
 
 const startSchema = z.object({
   service_url: z.string().url(),
+  // Multi-app operate tasks declare every host they span up front (GCP Console
+  // + Firebase + the user's app). Alias of extra_allowed_hosts; both seed
+  // source "start". A single-service signup passes neither.
+  allowed_hosts: z.array(z.string().min(1).max(120)).max(20).optional(),
   extra_allowed_hosts: z.array(z.string().min(1).max(120)).max(10).optional(),
 });
 
@@ -70,16 +75,16 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     required: ["service_url"],
     properties: {
       service_url: { type: "string" },
+      allowed_hosts: { type: "array", items: { type: "string" } },
       extra_allowed_hosts: { type: "array", items: { type: "string" } },
     },
   },
   async handler(args) {
     const hint = await resolveRouteHint(args.service_url);
+    const extra = [...(args.allowed_hosts ?? []), ...(args.extra_allowed_hosts ?? [])];
     return await startProvisionSession({
       serviceUrl: args.service_url,
-      ...(args.extra_allowed_hosts !== undefined
-        ? { extraAllowedHosts: args.extra_allowed_hosts }
-        : {}),
+      ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
       ...(hint !== undefined ? { hint } : {}),
     });
   },
@@ -109,11 +114,18 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
 
 const actSchema = z.object({
   session_id: z.string().min(1),
-  kind: z.enum(["click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle"]),
+  kind: z.enum([
+    "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
+    "allow_host", "type_secret",
+  ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
   url: z.string().url().optional(),
   key: z.string().min(1).max(40).optional(),
+  // allow_host: a bare hostname to cross into mid-session.
+  host: z.string().min(1).max(253).optional(),
+  // type_secret: the sealed slot whose value to type into `target`.
+  slot: z.string().min(1).max(60).optional(),
 });
 
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
@@ -138,6 +150,10 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "press", key: need(args.key, "key") };
     case "oauth_settle":
       return { kind: "oauth_settle" };
+    case "allow_host":
+      return { kind: "allow_host", host: need(args.host, "host") };
+    case "type_secret":
+      return { kind: "type_secret", slot: need(args.slot, "slot"), target: need(args.target, "target") };
   }
 }
 
@@ -148,7 +164,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "observation. kinds: click (target=element ref, preferably elements[].ref), type (target + text), " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
-    "oauth_settle (return to the product page after the OAuth handshake). If a " +
+    "oauth_settle (return to the product page after the OAuth handshake), " +
+    "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
+    "GCP console into Firebase), type_secret (slot + target — type a secret you " +
+    "captured into a sealed slot via provision_extract{into_slot} into a field " +
+    "on the current site; the value never leaves the browser). If a " +
     "target ref is stale, call provision_observe and retry with a fresh ref.",
   inputSchema: actSchema,
   jsonInputSchema: {
@@ -158,12 +178,17 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       session_id: { type: "string" },
       kind: {
         type: "string",
-        enum: ["click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle"],
+        enum: [
+          "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
+          "allow_host", "type_secret",
+        ],
       },
       target: { type: "string" },
       text: { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
+      host: { type: "string" },
+      slot: { type: "string" },
     },
   },
   async handler(args) {
@@ -173,12 +198,21 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
 
 const extractSchema = z.object({
   session_id: z.string().min(1),
+  // Sealed transfer: stash the extracted secret in a session-local slot and
+  // return ONLY a masked handle (never the value), so a later type_secret can
+  // enter it into another site's form without the value crossing to the host.
+  into_slot: z.string().min(1).max(60).optional(),
   store: z
     .object({
       service: z.string().min(1).max(120),
       label: z.string().min(1).max(60).optional(),
       env_var_suggestion: z.string().min(1).max(120).optional(),
       type: z.string().min(1).max(60).optional(),
+      // Explicit egress hosts: where this key may LATER be sent by the proxy.
+      // Read them off the API base URL the page/SDK snippet shows — a grounded
+      // read, not a guess. Unioned with the service-default + start/auto_widen
+      // scope (never mid_session task scope). Omit for a single-service key.
+      egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
       auth_shape: z
         .string()
         .max(120)
@@ -206,6 +240,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     required: ["session_id"],
     properties: {
       session_id: { type: "string" },
+      into_slot: { type: "string" },
       store: {
         type: "object",
         required: ["service"],
@@ -214,6 +249,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
           label: { type: "string" },
           env_var_suggestion: { type: "string" },
           type: { type: "string" },
+          egress_hosts: { type: "array", items: { type: "string" } },
           auth_shape: { type: "string" },
         },
       },
@@ -221,13 +257,45 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   },
   async handler(args, api) {
     const extracted = await extractCredentials(args.session_id);
+
+    // Sealed transfer: capture the primary secret into a session-local slot and
+    // return ONLY a masked handle. The value never reaches the host. A later
+    // type_secret enters it into another site's form. Mutually exclusive with
+    // store (a slotted secret is being shuttled, not vaulted, in this call).
+    if (args.into_slot !== undefined) {
+      const values = extracted.credentials;
+      const primary = values.api_key ?? Object.values(values)[0];
+      if (typeof primary !== "string" || primary.length === 0) {
+        return { ...extracted, slot: null, sealed: false };
+      }
+      const handle = stashSecretSlot(args.session_id, args.into_slot, primary);
+      // Strip raw credential VALUES from the response — host gets the handle only.
+      return {
+        session_id: extracted.session_id,
+        url: extracted.url,
+        candidate_count: extracted.candidate_count,
+        sealed: true,
+        slot: handle,
+        ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
+      };
+    }
+
     if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
       return extracted;
     }
     if (api === null) {
       throw new Error("provision_extract store requires an active Trusty Squire session");
     }
-    const observedHosts = observedHostsForSession(args.session_id);
+    // Egress allow-list seed: start/auto_widen scope (NOT mid_session task scope)
+    // unioned with any agent-declared egress_hosts (the API host the page shows).
+    // The vault unions this with the service-default; an unknown service with no
+    // egress_hosts fails closed (empty) by design.
+    const observedHosts = [
+      ...new Set([
+        ...(args.store.egress_hosts ?? []),
+        ...observedHostsForSession(args.session_id),
+      ]),
+    ];
     const values = extracted.credentials;
     const singleValue = values.api_key;
     const storeInput =
