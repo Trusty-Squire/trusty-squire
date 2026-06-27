@@ -1,5 +1,34 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.13 (2026-06-26)
+
+Prerelease (`next`). **Operator surface Phase 1** — the host-driven browser
+tools generalize from "drive a signup, extract a key" to driving arbitrary,
+credential-gated, often multi-app tasks. The operate-only behavior (the
+Google-session precondition gate) is behind a flag (`TRUSTY_SQUIRE_OPERATE`,
+default OFF); the tool rename + new capabilities ship unconditionally.
+
+- **renamed:** the 7 `provision_*` tools → `operate_*` (no aliases), plus a new
+  `operate_finish_task`. `operate_finish` stays for abort.
+- **feat(operate):** multi-app task scope — `operate_start{allowed_hosts[]}` and
+  a mid-session `allow_host` action let a task cross between apps (GCP Console →
+  Firebase → your app). Source-tracked allow-set; hardened host validation
+  (rejects punycode/IP/IPv6/public-suffix/port/wildcard).
+- **feat(operate):** sealed in-session credential transfer — `operate_extract`
+  `{into_slot}` stashes a secret server-side (host gets a masked handle only);
+  `operate_act{type_secret}` types the real value into another site's form. The
+  raw secret never crosses the MCP boundary (the write-only-vault moat extended
+  to transfers).
+- **feat(operate):** pluggable terminal — `operate_finish_task` reports
+  `kind:"credentials"` (extract + vault-store, byte-identical to the old store
+  path) or `kind:"result"` (a summary + structured data for any task).
+- **feat(operate):** Google-session precondition gate — operate tasks acting as
+  the user (`require_live_identity`) fail closed to a connect hand-back BEFORE
+  driving when no live session exists, instead of hitting a mid-task wall.
+- **security(vault):** credential egress decoupled from task scope — explicit
+  `egress_hosts` + service-default table (added gcp/firebase/fcm → googleapis);
+  a mid-session host never seeds a key's egress allow-list.
+
 ## 0.9.19-rc.12 (2026-06-25)
 
 Prerelease (`next`). Fixes Goose installs that kept loading older Trusty Squire
