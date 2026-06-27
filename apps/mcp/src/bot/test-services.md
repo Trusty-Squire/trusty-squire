@@ -47,8 +47,8 @@ sites are expected to fail until we add a CAPTCHA-solver integration.
 
 ```bash
 # From repo root
-ANTHROPIC_API_KEY=... pnpm --filter @trusty-squire/universal-bot exec \
-  tsx cli.ts resend https://resend.com/signup
+ANTHROPIC_API_KEY=... pnpm --filter @trusty-squire/mcp exec \
+  tsx src/bot/cli.ts resend https://resend.com/signup
 ```
 
 Set `UNIVERSAL_BOT_HEADLESS=false` to watch the browser drive the form.
