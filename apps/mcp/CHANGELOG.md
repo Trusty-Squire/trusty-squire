@@ -2,16 +2,31 @@
 
 ## 1.0.0-rc.0 (2026-06-27)
 
-- docs: prune stale TODOS.md snapshot; orient STATE.md (no history pruned)
-- chore: move bot test-services.md out of the compiled src/ tree
-- refactor(extract): converge credential-shape predicates + canonical masked-glyph
-- docs: freshen stale references to sunset systems
-- chore: remove dead code + orphaned build artifacts
-- chore(tools): op-driver /remember + /verify endpoints + use: launch mode
-- feat(operate): operator-recipe capture + replay (operate_remember / operate_use)
-- docs: design for user-saved operator workflows as skills (Phase A)
-- chore(tools): persistent single-session operate-driver harness
-- feat(operate): steer the host past real-identity signup walls
+First 1.0 release candidate. Headlines: the operator surface gains user-saved
+workflows, the credential-extraction shape logic is consolidated, and a
+production audit cleared out dead code + stale docs.
+
+**Operator surface — user-saved workflows (Phase A)**
+- `operate_remember` / `operate_use`: save a successful operator run as a named
+  local recipe (goal + text-targeted rail + sealed-slot references + a
+  machine-checkable postcondition) and replay it by name — planner-on-rails,
+  verified before close (the anti-false-green gate). Secrets are stored as slot
+  references, never values. See `docs/DESIGN-operator-skills.md`.
+- Persistent single-session operate-driver harness (`tools/op-driver.mjs`).
+
+**Extraction hardening**
+- Reveal keys hidden behind a "View" button (Zilliz) or a copy-button aria-label
+  (GCP's new client secret) — two real false-green/miss fixes.
+- Converged the credential-shape predicates into one canonical module + a single
+  masked-glyph definition (was four divergent spellings that disagreed — the
+  masked-key trap). 17 new tests.
+- Steer the host past real-identity signup walls: existing-account → log in and
+  read the existing key (OpenRouter); unlinked-OAuth → switch to email/OTP (Clerk).
+
+**Hygiene**
+- Removed dead code (dev spikes, an unregistered route) and orphaned artifacts
+  (retired SES records, a dangerous root `fly.toml`); freshened stale docs
+  (SES → Resend, version drift); pruned the stale `TODOS.md` snapshot.
 - fix(extract): reveal keys hidden behind a view-button or copy-button aria-label
 - release(mcp): 0.9.19-rc.24 — recognize multi-segment vendor keys (luma-api-)
 - release(mcp): 0.9.19-rc.23 — force-relogin no longer wipes the other provider
