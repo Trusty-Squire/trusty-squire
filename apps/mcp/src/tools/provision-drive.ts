@@ -29,6 +29,7 @@ import {
   fillTemplate,
   PostconditionSchema,
 } from "../bot/operator-recipe.js";
+import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 
@@ -345,14 +346,12 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       const values = extracted.credentials;
       // A still-masked display (Google's OAuth secret shows "GOCSPX-••••" with a
       // copy button) must NOT be sealed — the slot would hold junk. Reject any
-      // value with mask glyphs or the truncated-capture marker, and prefer a
-      // full value over the masked api_key when the page has both.
-      const looksMasked = (v: string): boolean =>
-        v.includes("•") || v.includes("…") || v.includes("***") || /\.{3,}/.test(v);
+      // value with mask glyphs (canonical isMaskedDisplay) or the truncated-capture
+      // marker, and prefer a full value over the masked api_key when the page has both.
       const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
       const candidates = Object.entries(values).filter(
         ([k, v]) =>
-          !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !looksMasked(v),
+          !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
       );
       // When the page shows several credentials (Google's client ID + secret),
       // a secret_label picks the right one by field name; otherwise take the
