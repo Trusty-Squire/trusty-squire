@@ -5234,13 +5234,11 @@ export class BrowserController {
         if (!hasDigit && /^[a-z][a-z_-]*$/i.test(s) && s.length < 16) return false;
         return true;
       };
-      const isMaskedShape = (s: string): boolean => {
-        // Common mask glyphs: bullet, asterisk, em-dash spam
-        if (/[•●⬤]{3,}/.test(s)) return true;
-        if (/\*{4,}/.test(s)) return true;
-        if (/^[•*]+$/.test(s)) return true;
-        return false;
-      };
+      // Inline mirror of credential-shape.ts MASKED_DISPLAY_RE — page.evaluate
+      // code can't import, so keep this regex byte-identical to the canonical.
+      // Any mask glyph: bullet/circle, 3+ asterisks, ellipsis, or 3+ dots. (Was
+      // `[•●⬤]{3,}|\*{4,}`, which MISSED the ellipsis masks GCP/Zilliz/S3 use.)
+      const isMaskedShape = (s: string): boolean => /[•●⬤]|\*{3,}|…|\.{3,}/.test(s);
 
       // Compute element-center coords for proximity matching.
       const centerOf = (el: Element): { x: number; y: number } => {

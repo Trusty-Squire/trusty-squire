@@ -94,7 +94,7 @@ Trusty Squire is a thin local MCP server that delegates the actual signup work t
 
 - **Browser:** real Chrome (channel = `chrome`) via Playwright + `playwright-extra` stealth plugin. Runs headed against an on-demand Xvfb on headless boxes — modern SaaS detect Chromium-headless and gate their forms.
 - **OAuth-first:** when the page offers Google or GitHub OAuth and the bot profile has that provider session, the bot takes the OAuth path. Consent screens are auto-approved only for basic identity scopes (`openid` / `email` / `profile`). Anything broader surfaces to you for approval.
-- **Email fallback:** for services without OAuth, the bot uses a per-run alias under `@trustysquire.com`, reads inbound mail via AWS SES → S3 → SNS → our API.
+- **Email fallback:** for services without OAuth, the bot uses a per-run alias under `@trustysquire.com`, reads inbound mail via a Resend inbound webhook → our API.
 - **Captcha handling:** Tier 1 (behavior simulation — bezier mouse paths, variable typing, post-load dwell) for invisible Turnstile / reCAPTCHA v3 scoring. Tier 2 (click-and-wait) for visible Turnstile / reCAPTCHA v2 checkboxes. Tier 3 image grids are out of scope.
 - **Session-agent form-fill:** when no OAuth + no native adapter exists, the Trusty Squire session agent drives signup from DOM-grounded page structure and screenshots. Selectors are picked from observed inventory, never invented.
 

@@ -322,15 +322,15 @@ flyctl deploy --config apps/api/fly.toml --dockerfile apps/api/Dockerfile.fly
 `prisma generate` for **both** schemas before `tsc` and deliberately
 keeps devDependencies — pruning with `pnpm install --prod` strips the
 generated Prisma clients out of `node_modules` and the server then
-crashes on boot. The root `Dockerfile` and `apps/api/Dockerfile` are
-stale (they reference a `prisma:generate` script that no longer exists)
-— don't use them.
+crashes on boot. The legacy root `Dockerfile` and `apps/api/Dockerfile`
+(which referenced a `prisma:generate` script that no longer exists) have
+been removed — only the `*.fly` Dockerfiles remain.
 
 ### npm distribution (the install path)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.8.17`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.9.19-rc.24`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was

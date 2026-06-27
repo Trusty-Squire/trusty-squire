@@ -12,7 +12,16 @@ import {
   extractCredentials,
   finishProvisionSession,
   stashSecretSlot,
+  rememberRecipe,
+  verifyPostcondition,
 } from "../apps/mcp/dist/bot/provision-session.js";
+import {
+  readRecipe,
+  renderOperatorRecipeHint,
+  recipeEntryUrl,
+  fillTemplate,
+} from "../apps/mcp/dist/bot/operator-recipe.js";
+import { isMaskedDisplay } from "../apps/mcp/dist/bot/credential-shape.js";
 
 const PORT = Number(process.env.OP_PORT || 8731);
 const startUrl = process.argv[2];
@@ -37,8 +46,6 @@ async function readBody(req) {
   return b ? JSON.parse(b) : {};
 }
 
-const looksMasked = (v) =>
-  v.includes("•") || v.includes("…") || v.includes("***") || /\.{3,}/.test(v);
 const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 const server = http.createServer(async (req, res) => {
@@ -55,7 +62,7 @@ const server = http.createServer(async (req, res) => {
       if (body.into_slot) {
         const vals = ex.credentials || {};
         const cands = Object.entries(vals).filter(
-          ([k, v]) => !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !looksMasked(v),
+          ([k, v]) => !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
         );
         const want = body.secret_label ? norm(body.secret_label) : null;
         // Prefer a candidate whose VALUE matches a caller-supplied shape (e.g.
@@ -94,6 +101,17 @@ const server = http.createServer(async (req, res) => {
       const handle = stashSecretSlot(sid, body.slot, body.value);
       return send(200, { sealed: true, slot: handle });
     }
+    if (req.url === "/remember") {
+      const r = await rememberRecipe(sid, {
+        name: body.name, goal: body.goal, postcondition: body.postcondition,
+      });
+      return send(200, r);
+    }
+    if (req.url === "/verify") {
+      const recipe = await readRecipe(body.name);
+      const r = await verifyPostcondition(sid, recipe.postcondition);
+      return send(200, r);
+    }
     if (req.url === "/ping") return send(200, { ok: true, sid });
     return send(404, { error: "unknown route" });
   } catch (e) {
@@ -101,12 +119,32 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-try {
-  const obs = await startProvisionSession({
+// `use:<recipe-name>` launch mode: start with the saved recipe's rail injected
+// as the hint (proves operate_use). Templates filled from OP_PARAMS (JSON env).
+async function startOptions() {
+  if (startUrl.startsWith("use:")) {
+    const recipe = await readRecipe(startUrl.slice(4));
+    const entry = recipeEntryUrl(recipe);
+    if (entry === null) throw new Error(`recipe has no goto entry`);
+    const params = JSON.parse(process.env.OP_PARAMS || "{}");
+    const { url, missing } = fillTemplate(entry, params);
+    if (missing.length) throw new Error(`recipe needs params: ${missing.join(", ")}`);
+    return {
+      serviceUrl: url,
+      ...(recipe.allowed_hosts.length ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
+      hint: renderOperatorRecipeHint(recipe),
+      ...(requireLive ? { requireLiveIdentity: true } : {}),
+    };
+  }
+  return {
     serviceUrl: startUrl,
     ...(allowed.length ? { extraAllowedHosts: allowed } : {}),
     ...(requireLive ? { requireLiveIdentity: true } : {}),
-  });
+  };
+}
+
+try {
+  const obs = await startProvisionSession(await startOptions());
   sid = obs.session_id;
   server.listen(PORT, "127.0.0.1", () => {
     console.log("OP_DRIVER_READY sid=" + sid + " port=" + PORT);

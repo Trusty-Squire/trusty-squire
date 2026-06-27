@@ -1,12 +1,11 @@
 {
   "extends": "./tsconfig.json",
-  "comment": "cli.ts, test-with-inbox.ts, the spikes and the thin-slice harness are manual dev tools — they must not be compiled into the published dist.",
+  "comment": "cli.ts and the eval/corpus harnesses are manual dev tools — they must not be compiled into the published dist.",
   "exclude": [
     "dist",
     "node_modules",
     "src/**/__tests__/**",
     "src/bot/cli.ts",
-    "src/bot/test-with-inbox.ts",
     "src/bot/eval-planner.ts",
     "src/bot/eval-onboarding.ts",
     "src/bot/eval-corpus.ts",
@@ -14,10 +13,6 @@
     "src/bot/eval-page.ts",
     "src/bot/build-corpus.ts",
     "src/bot/label-target.ts",
-    "src/bot/failure-stats.ts",
-    "src/bot/oauth-login-spike.ts",
-    "src/bot/oauth-thin-slice.ts",
-    "src/bot/oauth-affordance-probe.ts",
-    "src/bot/oauth-batch.ts"
+    "src/bot/failure-stats.ts"
   ]
 }

@@ -12,8 +12,6 @@ import {
   buildAccessibilitySnapshot,
   parseVerification,
   buildVerificationResult,
-  looksLikeCodeIdentifier,
-  findCredentialTokens,
   classifyVouchflowCredentials,
   detectExtractionBlock,
   sanitizeExtractedCredentials,
@@ -28,6 +26,7 @@ import {
   hasExistingAccountSignal,
   hasUnlinkedOAuthAccountSignal,
 } from "../provision-session.js";
+import { looksLikeCodeIdentifier, findCredentialTokens } from "../credential-shape.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
 // the rest get inert defaults so the fixtures stay readable.
