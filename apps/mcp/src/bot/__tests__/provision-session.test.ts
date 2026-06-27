@@ -314,6 +314,15 @@ describe("findCredentialTokens (multi-credential extraction)", () => {
     expect(findCredentialTokens("this-is-a-well-known-phrase-here")).toEqual([]);
   });
 
+  it("recognizes a MULTI-segment vendor key via its high-entropy run (Luma luma-api-…)", () => {
+    const toks = findCredentialTokens("Your key: luma-api-4Y7FDyM7kQ2bX9wZ1aL3pR");
+    expect(toks).toContain("luma-api-4Y7FDyM7kQ2bX9wZ1aL3pR");
+  });
+
+  it("still rejects a word-word-word-date slug (no high-entropy segment)", () => {
+    expect(findCredentialTokens("trusty-squire-dogfood-20260625")).toEqual([]);
+  });
+
   it("ignores prose and short/digitless tokens", () => {
     expect(findCredentialTokens("Welcome to your dashboard. Get started now.")).toEqual([]);
     // has a separator but no digit → not a key

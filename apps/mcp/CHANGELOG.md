@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.24 (2026-06-27)
+
+Prerelease (`next`). Recognize multi-segment vendor keys.
+
+- **fix(extract):** `looksLikeCredentialToken` now accepts a multi-hyphen vendor
+  key (Luma's `luma-api-4Y7FDyM…`) when a segment is a high-entropy run (≥10
+  chars with both a letter and a digit). Single-run/underscore keys were already
+  recognized; this adds the multi-segment case while still rejecting
+  word-word-word-date slugs (`trusty-squire-dogfood-20260625`).
+
 ## 0.9.19-rc.23 (2026-06-27)
 
 Prerelease (`next`). **Critical:** a force-relogin no longer wipes the *other*
