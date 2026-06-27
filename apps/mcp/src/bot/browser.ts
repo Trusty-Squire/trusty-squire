@@ -7113,8 +7113,8 @@ export class BrowserController {
   // `needs_login` where the full discover bot would just type the password —
   // a freshly-created robot account lands on the identifier page the first time
   // a given relying party requests OAuth even with a live session, and the
-  // robot's credentials are available to the verifier. Mirrors the proven
-  // tools/google-login-fleet.mjs in-page steps (email → Enter → password →
+  // robot's credentials are available to the verifier. Drives the standard
+  // Google in-page steps (email → Enter → password →
   // Enter → ToS/continue speedbumps) but operates on `this.page` instead of
   // navigating to myaccount — in the OAuth flow the success terminus is the
   // consent screen or the return to the relying party, NOT myaccount. Returns
