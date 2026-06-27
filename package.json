@@ -11,10 +11,7 @@
     "lint": "eslint \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\" --no-error-on-unmatched-pattern",
     "format": "prettier --write \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\"",
     "registry:publish": "pnpm --filter @trusty-squire/registry publish:adapter",
-    "release:mcp": "node tools/release-mcp.mjs",
-    "demo": "bash scripts/demo.sh",
-    "demo:mobile": "bash scripts/demo.sh mobile",
-    "demo:stop": "bash scripts/demo-stop.sh"
+    "release:mcp": "node tools/release-mcp.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

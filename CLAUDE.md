@@ -406,7 +406,7 @@ bin symlink and would catch any regression of the above.
 
 ### Ports / local dev
 - API: `API_PORT=3000` (default), `node apps/api/dist/server.js`
-- PWA: `pnpm -F @trusty-squire/pwa dev` (Next.js default 3000 — run
+- Web app: `pnpm -F @trusty-squire/web dev` (Next.js default 3000 — run
   one or the other, not both)
 - MCP: invoked by the host agent, not a long-running server
 
@@ -439,7 +439,7 @@ bin symlink and would catch any regression of the above.
 | `STRIPE_PRICE_ID` | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard). |
 
 **Billing (Stripe):** the free-signup quota (`ACCOUNT_FREE_QUOTA`) returns
-`402 payment_required` + `cta_billing_url` once hit. The PWA `/billing` page
+`402 payment_required` + `cta_billing_url` once hit. The web app's `/billing` page
 opens Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on
 payment Stripe fires `/v1/webhooks/stripe` which flips the account's
 `subscription_status` to `active` — and `active`/`trialing` lift the quota

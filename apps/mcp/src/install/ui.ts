@@ -1,5 +1,5 @@
 // Rich-CLI helpers for the install/login/logout flow. Mirrors the
-// PWA design system (apps/pwa/DESIGN.md) in terminal terms:
+// product design system (DESIGN.md, repo root) in terminal terms:
 // dark-first, ruthless simplicity, ONE accent (wine #cf3a52),
 // semantic colors for status, terse voice.
 //

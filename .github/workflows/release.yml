@@ -53,7 +53,7 @@ jobs:
         with:
           fetch-depth: 0   # need full history to see existing tags
 
-      # The monorepo contains Next.js apps (apps/web, apps/pwa) whose
+      # The monorepo contains a Next.js app (apps/web) whose
       # node_modules and .next caches blow past the default runner disk
       # quota (14GB free of 75GB). pnpm install + tests fail with ENOSPC.
       # Free ~25GB by removing preinstalled toolchains we don't use.
@@ -249,7 +249,7 @@ jobs:
 
       # Install ONLY mcp's dep tree (mcp + transitive workspace deps), not
       # the entire monorepo. A full `pnpm install` creates ~4M symlinks
-      # across apps/web + apps/pwa + their Next.js node_modules, which
+      # across apps/web + its Next.js node_modules, which
       # exceeds the GH runner's inode quota and crashes with ENOSPC mid-
       # install (NOT disk space — `df -h` shows 100GB free; it's inodes,
       # which `df -i` would show exhausted).
@@ -264,7 +264,7 @@ jobs:
 
       - name: Build mcp's workspace deps
         # Build ONLY what mcp depends on. A full `pnpm -r build` pulls in
-        # apps/web + apps/pwa (Next.js) which rebuild @prisma/client in
+        # apps/web (Next.js) which rebuilds @prisma/client in
         # parallel and race with inbox's tsc, breaking the inbox build.
         # Keep in sync with apps/mcp/package.json workspace deps.
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/inbox' build

@@ -10,8 +10,6 @@ export default [
       "**/build/**",
       "**/coverage/**",
       "**/*.config.*",
-      "apps/pwa/tests/e2e/**",
-      "apps/pwa/scripts/**",
     ],
   },
   {
