@@ -137,20 +137,21 @@ export default function BillingPage() {
         <div className="app-card">
           {justPaid && (
             <div className="app-banner ok" style={{ marginTop: 0, marginBottom: 16 }}>
-              You&apos;re subscribed — thanks! Your signups are now unlimited.
+              You&apos;re on Pro — thanks! Egress grants, extended audit, and
+              automated rotation are unlocked.
             </div>
           )}
           <h2 className="app-title" style={{ fontSize: "18px" }}>
-            {status?.cancel_at != null ? "Paid plan — cancels soon" : "Paid plan — active"}
+            {status?.cancel_at != null ? "Pro plan — cancels soon" : "Pro plan — active"}
           </h2>
           {status?.cancel_at != null ? (
             <p className="app-sub">
-              Unlimited signups until {fmtDate(status.cancel_at)}. Your plan is set to cancel
+              Pro until {fmtDate(status.cancel_at)}. Your plan is set to cancel
               then — reopen Manage to resume it before the date.
             </p>
           ) : (
             <p className="app-sub">
-              Unlimited signups.
+              Egress grants, 365-day audit, and automated rotation.
               {status?.current_period_end != null
                 ? ` Renews ${fmtDate(status.current_period_end)}.`
                 : ""}
@@ -206,7 +207,9 @@ export default function BillingPage() {
             Free plan
           </h2>
           <p className="app-sub">
-            You&apos;ve used your free signups. Upgrade for unlimited provisioning.
+            Provisioning and the vault are free. Upgrade to Pro for egress grants
+            on deployed apps, a 365-day audit trail, and automated rotation —
+            $20/mo.
           </p>
           <button
             type="button"
@@ -214,7 +217,7 @@ export default function BillingPage() {
             disabled={busy}
             onClick={() => go("/v1/billing/checkout")}
           >
-            {busy ? "Opening…" : "Upgrade"}
+            {busy ? "Opening…" : "Upgrade to Pro"}
           </button>
         </div>
       )}

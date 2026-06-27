@@ -126,6 +126,48 @@ h1 .dim{color:var(--muted)}
 .cap h3{font-size:21px;font-weight:600;letter-spacing:-.022em;line-height:1.18}
 .cap p{margin-top:var(--s-2);font-size:15px;color:var(--muted);line-height:1.6;
   max-width:56ch}
+.cap p .m{font-family:var(--mono);font-size:.9em;color:var(--fg)}
+
+/* pricing — flat hairline-ruled tiers, mono prices, one accent-marked focal
+   column (see DESIGN.md: no glossy cards, no gradients). */
+.price-hero{padding:var(--s-20) 0 var(--s-4);text-align:center}
+.price-hero h1{font-size:clamp(2rem,4vw,2.6rem);font-weight:600;
+  letter-spacing:-.03em;line-height:1.08}
+.price-hero p{margin:var(--s-3) auto 0;color:var(--muted);font-size:16px;max-width:48ch}
+.price-grid{display:grid;grid-template-columns:repeat(3,1fr);
+  border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;
+  margin:var(--s-12) 0 var(--s-24)}
+.tier{display:flex;flex-direction:column;padding:var(--s-8);
+  border-left:1px solid var(--line)}
+.tier:first-child{border-left:0}
+.tier.featured{background:var(--surface);box-shadow:inset 0 2px 0 var(--accent)}
+.tier-name{font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted)}
+.tier.featured .tier-name{color:var(--accent)}
+.tier-price{margin-top:var(--s-4);display:flex;align-items:baseline;gap:5px}
+.tier-price .amt{font-family:var(--mono);font-size:34px;font-weight:600;
+  letter-spacing:-.02em;color:var(--fg)}
+.tier-price .per{font-family:var(--mono);font-size:14px;color:var(--faint)}
+.tier-tag{margin-top:var(--s-2);font-size:13.5px;color:var(--muted);min-height:38px}
+.tier-cta{margin-top:var(--s-6);display:inline-flex;align-items:center;
+  justify-content:center;padding:9px 16px;border-radius:var(--r-md);
+  font-size:14px;font-weight:600;border:1px solid var(--line2);color:var(--fg);
+  transition:border-color .12s,color .12s,background .12s}
+.tier-cta:hover{border-color:var(--accent)}
+.tier-cta.primary{background:var(--accent-fill);border-color:var(--accent-fill);color:#fff}
+.tier-cta.primary:hover{background:var(--accent-fill-h);border-color:var(--accent-fill-h)}
+.tier-feats{list-style:none;margin-top:var(--s-6);display:flex;
+  flex-direction:column;gap:var(--s-3)}
+.tier-feats li{position:relative;padding-left:20px;font-size:13.5px;
+  color:var(--muted);line-height:1.5}
+.tier-feats li::before{content:"";position:absolute;left:2px;top:7px;
+  width:5px;height:5px;border-radius:1px;background:var(--accent)}
+.tier-feats strong{color:var(--fg);font-weight:600}
+@media(max-width:780px){
+  .price-grid{grid-template-columns:1fr}
+  .tier{border-left:0;border-top:1px solid var(--line)}
+  .tier:first-child{border-top:0}
+}
 
 /* end cta — flat band, no glow */
 .endcta{text-align:center;padding:var(--s-24) 0;border-top:1px solid var(--line)}

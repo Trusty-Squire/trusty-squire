@@ -58,6 +58,7 @@ export default function Page() {
             Trusty Squire
           </Link>
           <div className="nav-r">
+            <Link href="/pricing">Pricing</Link>
             <a href={DOCS_URL}>Docs</a>
             <a href={GITHUB_URL}>GitHub</a>
             <Link className="signin" href="/login">
@@ -87,9 +88,9 @@ export default function Page() {
               <span className="dim">Your trusty squire handles the rest.</span>
             </h1>
             <p className="sub">
-              Trusty Squire automates SaaS signups in your coding agent&apos;s
-              context and secures the keys in your hardware — so you can focus
-              on building.
+              Move at the speed of your AI agent — without worrying about leaked
+              secrets. Your squire signs up for the services you need, drives the
+              setup behind any login, and vaults every key it touches.
             </p>
             <div className="cta">
               <CopyChip />
@@ -118,36 +119,37 @@ export default function Page() {
       {/* ---------------- CAPABILITIES ---------------- */}
       <section className="wrap caps">
         <Reveal className="cap">
-          <div className="cap-num">01 / automate</div>
+          <div className="cap-num">01 / provision</div>
           <div className="cap-body">
-            <h3>Automates signups</h3>
+            <h3>Your agent handles signups</h3>
             <p>
-              The MCP signs you up to the SaaS platforms you need, right inside
-              Claude Code, Codex, Goose, and Cursor. No verification-email
-              detours, no digging dashboards for an API key.
+              Ask for a service — your squire creates the account, clears the
+              verification email, and brings back the API key. No fifteen-tab
+              signup detour, right inside Claude Code, Codex, Goose, and Cursor.
             </p>
           </div>
         </Reveal>
         <Reveal className="cap">
-          <div className="cap-num">02 / secure</div>
+          <div className="cap-num">02 / vault</div>
           <div className="cap-body">
-            <h3>Keeps your secrets</h3>
+            <h3>No secret ever leaves the vault</h3>
             <p>
-              Stop hand-managing dozens of production keys. Your squire stores
-              them in your hardware or a trusted password manager and grants
-              only safe, scoped access — used via the proxy, never shown to an
-              agent.
+              Stop scattering keys across <span className="m">.env</span> files
+              and cloud secret stores. Keys go in write-only; your code uses them
+              through a proxy that injects the value server-side and never hands
+              it back — so there&apos;s nothing to leak.
             </p>
           </div>
         </Reveal>
         <Reveal className="cap">
-          <div className="cap-num">03 / guardrails</div>
+          <div className="cap-num">03 / operate</div>
           <div className="cap-body">
-            <h3>Spends within your guardrails</h3>
+            <h3>Operate anything behind a login</h3>
             <p>
-              Squire agents run under provable spending limits and trust
-              boundaries. Anything that costs real money is surfaced to you for
-              biometric approval.
+              Complete complex tasks hidden behind auth walls with a single
+              prompt — wire up OAuth across consoles, configure webhooks, stand
+              up projects. Your squire does the click-work; the secret never
+              crosses into chat.
             </p>
           </div>
         </Reveal>
@@ -176,6 +178,7 @@ export default function Page() {
               Trusty Squire
             </Link>
             <div className="foot-l">
+              <Link href="/pricing">Pricing</Link>
               <a href={DOCS_URL}>Docs</a>
               <a href={NPM_URL}>npm</a>
               <a href={GITHUB_URL}>GitHub</a>
