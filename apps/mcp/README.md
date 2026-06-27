@@ -16,13 +16,13 @@
 Trusty Squire plugs into your AI coding agent — Claude Code, Cursor, Codex — and takes
 over the credential grunt work that slows you down and leaks secrets. Your agent signs
 up for the services your project needs, locks every key in a vault it never leaves, and
-rotates them for you.
+drives the multi-step setup behind any login.
 
 ## Why developers run it
 
 - **Your agent handles signups & SaaS provisioning** — ask for a service; it creates the account and brings back the API key.
 - **No secret ever leaves the vault** — no keys scattered across `.env` files and cloud secret stores; your code uses them through a proxy that injects the value server-side and never hands it back.
-- **Secrets rotate automatically** — periodic rotation on covered services, growing weekly.
+- **Operate anything behind a login** — complete complex tasks behind auth walls with one prompt: wire up OAuth across consoles, configure webhooks, stand up projects. The secret never crosses into chat.
 
 ## Install
 
@@ -81,9 +81,8 @@ A thin local MCP server that drives a real browser on your machine:
 
 ## Pricing
 
-- **Free** — provision, store keys, personal use, 7-day audit, manual rotation.
+- **Free** — provision, operate, store keys, personal use, 7-day audit, manual rotation.
 - **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, automated rotation.
-- **Enterprise** — org control plane + production-scale egress. Coming later.
 
 ## Configuration
 

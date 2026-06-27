@@ -32,8 +32,10 @@ dwarfs the fee) and signal consumer-tier seriousness.
 2. **No secret ever leaves the vault** — no more keys scattered across `.env`
    files and cloud secret stores; code uses them through an injecting proxy that
    never hands the raw value back, so there's nothing to leak.
-3. **Secrets rotate automatically** — periodic rotation on covered services
-   (growing weekly), the hygiene a password manager never does for you.
+3. **Operate anything behind a login** — complete complex tasks hidden behind
+   auth walls with one prompt: wire up OAuth across consoles, configure webhooks,
+   stand up projects. The secret never crosses into chat. (Rotation lives in the
+   Pro tier below — a paid feature, not a headline pillar.)
 
 Where we sit: Doppler/Infisical/Vault **store + sync** keys you hand them
 ($18–21/seat); Composio/Arcade **broker OAuth** for agent tool-calls; 1Password
@@ -52,11 +54,12 @@ configures, and rotates by driving the actual service.
 
 ## Tiers
 
-Free / Pro now. **Enterprise later** (org control plane + production-scale egress).
+**Free / Pro.** Two self-serve plans — the only prices a user sees are $0 and $20.
 
 | | Free | Pro |
 |---|---|---|
 | Provision (signup automation) | ✅ generous, cost-capped | ✅ |
+| Operate (multi-step tasks behind a login) | ✅ | ✅ |
 | Store keys (write-only vault) | ✅ | ✅ |
 | Personal use via injecting proxy | ✅ | ✅ |
 | Audit trail / ledger | 7-day | **365-day + export** |
@@ -65,9 +68,9 @@ Free / Pro now. **Enterprise later** (org control plane + production-scale egres
 
 **Price: $20/mo** (Cursor-band; the AI-coding-velocity buyer's reference price).
 
-**Enterprise (later):** shared vault + seats + SSO + device attestation + org-scale
-revoke, AND production-scale egress (priced to usage *in the sales motion* — never
-self-serve metering).
+Production-scale egress beyond Pro's fair-use is handled as a direct, custom
+conversation — usage-priced case-by-case, never self-serve metering, and not a
+published tier today.
 
 ## Pro anchor (how to pitch $20)
 
@@ -96,12 +99,14 @@ variable costs, each contained so they never run unbounded on the flat tier:
   deployed app makes routes through our proxy). Scales with traffic, unbounded.
   Contained by a **generous fair-use allotment** in Pro (sized so $20 covers cost
   at the cap; alert + grace + "talk to us", never hard-break prod) and routing
-  **production-scale to Enterprise** (where usage pricing is a sales conversation).
+  **production-scale to a direct custom conversation** (usage-priced case-by-case,
+  never self-serve metering).
 
 **The invariant:** *a flat price bundles only BOUNDED per-user cost.* Every variable
-cost is handled by fair-use (egress), central amortization (rotation skills), or
-Enterprise — **never billed flat-and-unbounded, never metered-and-scary.** No
-self-serve metering anywhere; the only prices a self-serve user sees are $0 and $20.
+cost is handled by fair-use (egress), central amortization (rotation skills), or a
+custom conversation for production-scale — **never billed flat-and-unbounded, never
+metered-and-scary.** No self-serve metering anywhere; the only prices a self-serve
+user sees are $0 and $20.
 
 **Free-tier defense:** free provisioning burns LLM with no revenue, but every signup
 grows the skill registry → future provisioning becomes a cheap replay → free
@@ -121,11 +126,11 @@ counter, not user-facing), and the entitlement gating are the remaining build.
    entitlement. Provisioning goes free (cost-cap, not paywall).
 3. **Stripe: add `tier` + the $20 Price ID** — Checkout/Portal/webhook already exist.
 4. **Internal egress usage counter** — per-grant request/GB count to enforce fair-use
-   + flag scale candidates for Enterprise. NOT surfaced as a user meter.
+   + flag scale candidates for a custom conversation. NOT surfaced as a user meter.
 5. **Migrate** — existing `active` subs → Pro; signup-quota logic → a free cost-cap.
 
 ## Brand vocabulary
 
 The old knight-tier names (Hedge Knight / Tourney Knight / Banner / Lord) and the
 `mandate`/spending-policy vocabulary are retired with the mandate-engine sunset.
-User-facing tiers are plainly **Free / Pro / Enterprise**.
+User-facing tiers are plainly **Free / Pro**.

@@ -4,9 +4,8 @@ import { Shield } from "../components/Shield";
 const DOCS_URL = "https://github.com/trusty-squire/trusty-squire#readme";
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/trusty-squire/trusty-squire";
-const CONTACT_URL = "mailto:hello@trustysquire.ai?subject=Trusty%20Squire%20Enterprise";
 
-// A flat, hairline-ruled three-tier table — mono prices, one accent-marked
+// A flat, hairline-ruled two-tier table — mono prices, one accent-marked
 // focal column (Pro). No glossy cards, no gradients (see DESIGN.md).
 export default function PricingPage() {
   return (
@@ -89,24 +88,6 @@ export default function PricingPage() {
               </li>
               <li>365-day audit trail + export</li>
               <li>Generous fair-use egress</li>
-            </ul>
-          </div>
-
-          {/* Enterprise */}
-          <div className="tier">
-            <div className="tier-name">Enterprise</div>
-            <div className="tier-price">
-              <span className="amt">Custom</span>
-            </div>
-            <div className="tier-tag">Coming later.</div>
-            <a className="tier-cta" href={CONTACT_URL}>
-              Talk to us
-            </a>
-            <ul className="tier-feats">
-              <li>Everything in Pro</li>
-              <li>Org control plane — shared vault, seats, SSO</li>
-              <li>Device attestation &amp; org-scale revoke</li>
-              <li>Production-scale egress</li>
             </ul>
           </div>
         </div>

@@ -134,9 +134,9 @@ h1 .dim{color:var(--muted)}
 .price-hero h1{font-size:clamp(2rem,4vw,2.6rem);font-weight:600;
   letter-spacing:-.03em;line-height:1.08}
 .price-hero p{margin:var(--s-3) auto 0;color:var(--muted);font-size:16px;max-width:48ch}
-.price-grid{display:grid;grid-template-columns:repeat(3,1fr);
+.price-grid{display:grid;grid-template-columns:repeat(2,1fr);
   border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;
-  margin:var(--s-12) 0 var(--s-24)}
+  max-width:760px;margin:var(--s-12) auto var(--s-24)}
 .tier{display:flex;flex-direction:column;padding:var(--s-8);
   border-left:1px solid var(--line)}
 .tier:first-child{border-left:0}

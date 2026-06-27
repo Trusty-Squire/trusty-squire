@@ -18,7 +18,8 @@
 Trusty Squire plugs into your AI coding agent — Claude Code, Cursor, Codex — and takes
 over the credential grunt work that slows you down and leaks secrets. Your agent signs
 up for the services your project needs, locks every key in a vault it **never leaves**,
-and rotates them for you. You ship at your agent's speed; your secrets stay put.
+and drives the multi-step setup behind any login. You ship at your agent's speed; your
+secrets stay put.
 
 ### Why developers run it
 
@@ -27,8 +28,9 @@ and rotates them for you. You ship at your agent's speed; your secrets stay put.
 - **No secret ever leaves the vault.** Stop scattering keys across `.env` files and
   cloud secret stores. Keys go in write-only; your code uses them through a proxy that
   injects the value server-side and never hands it back — so there's nothing to leak.
-- **Secrets rotate automatically.** Periodic rotation on the services we cover (growing
-  weekly) — the hygiene a password manager never actually does for you.
+- **Operate anything behind a login.** Complete complex tasks hidden behind auth walls
+  with one prompt — wire up OAuth across consoles, configure webhooks, stand up
+  projects. Your squire does the click-work; the secret never crosses into chat.
 
 > The store-vs-act difference: everyone else *stores* the keys you already have. Your
 > squire *gets* them, wires them up, and rotates them.
@@ -71,11 +73,9 @@ published to the registry, so the next person provisioning that service replays 
 
 ## Pricing
 
-- **Free** — provision, store keys, personal proxy use, 7-day audit, manual rotation.
+- **Free** — provision, operate, store keys, personal proxy use, 7-day audit, manual rotation.
 - **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, and
   automated rotation (covered services, growing weekly).
-- **Enterprise** — org control plane (shared vault, seats, SSO) + production-scale
-  egress. Coming later.
 
 See [`docs/BUSINESS-MODEL.md`](docs/BUSINESS-MODEL.md) for the full model.
 
