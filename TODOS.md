@@ -8,55 +8,22 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ---
 
-## Where we are (2026-06-07, `@trusty-squire/mcp@0.9.3`)
+## Where we are (2026-06-27, `@trusty-squire/mcp@0.9.19-rc.24`)
 
-**0.9.1 → 0.9.3 shipped to `latest`** since the 0.9.0 note below: housekeeper
-inter-run pacing (cooldown + adaptive backoff + per-IP daily cap, after a live
-run burned a residential exit); AB6 routing known-unwinnable services to manual;
-vault capture-seeded `allowed_hosts` + `use_credential` query-param auth; the
-`nav_timeout` classifier; **verify drives the OAuth consent handshake
-deterministically** instead of bailing to `needs_login`; and **the verify
-false-rot fix** — replay against an already-registered operator account no
-longer demotes a healthy signup-with-onboarding skill (returning-user
-divergence → transient `account_already_registered`). Registry-side: by-id
-returns live status, and promotion now collapses stale demoted/pending rows so
-the skill list stays clean (the duplicate clutter is gone). This consolidates
-the former `todos.md` (a stale 2026-05-30 triage snapshot, now deleted — its
-items are either shipped, in git history, or carried below).
+Since the 0.9.3 snapshot this section used to carry: the closed loop (virgin
+success → synthesized skill → replay), the operator surface (`operate_*`), and
+Stripe billing all shipped; the housekeeper moved to its own repo
+(`Trusty-Squire/trusty-squire-housekeeper`) and its proactive **discover sweep
+was removed** — new-skill growth now comes from **on-provision auto-promote**,
+not a discover run. The full 0.9.0→0.9.3 shipping recap lives in git history +
+`apps/mcp/CHANGELOG.md`. The anti-bot frontier stays settled (NOT detected; the
+"it's the IP" theory is falsified) — every "wall" decomposes into a
+nav/session/product-gate bug; see `STATE.md`.
 
-**0.9.0 shipped to `latest`** — the post-OAuth navigation work: a deterministic
-planner (temp 0), the **create-over-extract N1 wall broken** (live-validated:
-netlify + baseten reach a key, baseten was the eval's sealed holdout), the
-offline eval harness, `failure_stage`, and layered R3 redaction. Plus G14 (VNC
-passwdfile) and AB6 (route known-unwinnable services to manual before the run).
-
-
-
-**The anti-bot frontier is settled: we are NOT detected.** Measured this
-session with the real `BrowserController` (patchright hardened + SK-Broadband
-residential SOCKS): the session scores **reCAPTCHA v3 = 1.0**. The long-open
-"clean browser + residential IP together" experiment (old A3 item 1) has now
-been run, and the answer kills the "IP is the blocker" theory — every "wall"
-decomposed into our own handling bugs or a service-specific quirk, the large
-majority now fixed in 0.8.17:
-
-- invisible-reCAPTCHA handling (don't "solve" it — mint its token via the
-  enumerated widget id), Tier-3 2Captcha for visible v2
-- self-healing signup-URL resolver (HTTP probe + landing-page CTA, anchored on
-  the hint's registered domain) — stale `signup_url`s now self-heal
-- post-OAuth recovery: in-page signup-CTA, Google account-chooser in the
-  post-verify loop, adaptive hydration patience on OAuth-callback routes,
-  GSI/FedCM One-Tap (incl. `ConfirmIdpLogin` + `prompt()`)
-- consent-from-DOM (the `part=` URL that hides scopes), required-TOS checkbox,
-  multi-step signup continuation, **demo/sandbox-escape**
-- email verification: **anchor-text link picking** (beats SendGrid/Mailgun
-  click-tracker wrappers) + **verify-wall routing** into the inbox-poll flow
-- WebGL renderer spoof to a stock Intel GPU under patchright (page.evaluate
-  re-apply; `toString` masked)
-- **Email deliverability is PROVEN end-to-end** (`@trustysquire.ai` Workspace
-  catch-all → IMAP poll; a real `noreply@amplitude.com` activation email was
-  received + link-followed). The "fresh-MX withholding" theory is disproven —
-  our MX is reputable Google Workspace.
+> ⚠ Items below are carried from the 0.9.3 backlog and predate the
+> housekeeper-repo split + the discover-sweep removal. Re-triage before acting:
+> anything premised on a housekeeper "discover" run or the retired residential
+> proxy needs re-framing against the on-provision auto-promote model.
 
 **Genuinely still open (the real next frontiers), in priority order:**
 
@@ -108,7 +75,13 @@ email-signup-pending), so the verified-email account ≠ the browser's OAuth
 session. A clean single run on a fresh identity completes; reproducing needs a
 fresh Google identity or deleting the amplitude accounts. Not anti-bot.
 
-### N3 — Re-run the old "impossible-class" services on residential [P2, partially run — RE-PROMOTE]
+### N3 — Re-run the old "impossible-class" services on residential [P2, SUPERSEDED MECHANISM — re-frame]
+> ⚠ The `--mode=discover` housekeeper sweep + the residential proxy this item
+> relies on are both gone (discover removed; proxy retired, direct-first). The
+> services below are no longer re-promoted by a discover run — they ride the
+> on-provision auto-promote path. Keep the service list as a candidate set;
+> drop the discover/proxy/`n3-repromote.yaml` instructions.
+
 Run on residential 2026-06-04 (`~/.trusty-squire/logs/round3-*`). Confirmed:
 - **plunk ✅** — signed up, extracted 2 creds (`api_key` + `secret_key`,
   multi-cred), auto-promoted. (Earlier rounds failed `oauth_session_not_persisted`
@@ -251,7 +224,9 @@ One-liner each; detailed plans in older TODOS history.
   new accounts; for users who already have one, route through Composio's OAuth
   (100+ services pre-registered). Vault stores both API keys and OAuth refresh
   tokens under one slug. Needs a second credential model + per-user Composio UX.
-- **P5 — Stripe billing for TS subscriptions** — monetization, independent.
+- ~~**P5 — Stripe billing for TS subscriptions**~~ — **SHIPPED** (live
+  2026-06-10): free-quota → `402 payment_required` → Checkout → webhook flips
+  `subscription_status` active. See CLAUDE.md "Billing (Stripe)".
 - **P6 — Paid-SaaS via Stripe Issuing + mandate tab** — heaviest, longest
   external lead time (Stripe Issuing approval).
 
