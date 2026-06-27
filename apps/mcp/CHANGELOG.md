@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.15 (2026-06-27)
+
+Prerelease (`next`). Two fixes from the second live operator-surface run (the
+"add Google OAuth" capstone, which reached one Firebase toggle from done).
+
+- **fix(operate):** `operate_act{click}` now activates ARIA toggles —
+  `<button role="switch">` / `role="checkbox"` (Firebase's Google-provider
+  "Enable" switch, Material toggles). A synthetic click often doesn't flip these;
+  we now click, and if `aria-checked` doesn't move, focus + press Space (then
+  Enter). This was the last blocker on the OAuth capstone.
+- **fix(operate):** `operate_extract{into_slot}` never seals a *masked* secret —
+  Google's OAuth client secret renders as `GOCSPX-••••` + a copy button, and the
+  slot was capturing the mask. Now it prefers a non-masked value and, if only a
+  masked one is present, returns `sealed:false` with a "reveal it first" reason.
+
 ## 0.9.19-rc.14 (2026-06-26)
 
 Prerelease (`next`). Two fixes from the first live operator-surface test run

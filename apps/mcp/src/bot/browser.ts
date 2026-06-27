@@ -2037,6 +2037,28 @@ export class BrowserController {
           .catch(() => undefined);
         return;
       }
+      // ARIA toggle: a <button role="switch"> / role="checkbox" (Firebase's
+      // Google-provider "Enable" switch, MUI/Material toggles). A synthetic
+      // positional click frequently does NOT flip these — the handler binds to a
+      // keydown/pointer sequence the raw click misses, so click() returns but
+      // aria-checked never changes. The ARIA-correct activation is the keyboard:
+      // focus + Space. Click first (cheap); if aria-checked didn't move, focus
+      // and press Space. MEASURED 2026-06-27 (Firebase auth Enable switch).
+      if (probe.role === "switch" || probe.role === "checkbox") {
+        const node = this.page.locator(selector).first();
+        const readChecked = (): Promise<string | null> =>
+          node.getAttribute("aria-checked").catch(() => null);
+        const before = await readChecked();
+        await node.click({ timeout: 8000 }).catch(() => undefined);
+        if ((await readChecked()) === before) {
+          await node.focus().catch(() => undefined);
+          await this.page.keyboard.press("Space").catch(() => undefined);
+          if ((await readChecked()) === before) {
+            await this.page.keyboard.press("Enter").catch(() => undefined);
+          }
+        }
+        return;
+      }
     } catch {
       // element vanished / selector didn't resolve — fall through to a click
     }
