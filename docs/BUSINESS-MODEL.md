@@ -25,6 +25,16 @@ dwarfs the fee) and signal consumer-tier seriousness.
   already have. Your squire gets them, sets them up, and rotates them.*
 - **Rejected:** "credential control plane" (jargon).
 
+### The three headline value props (feature these everywhere)
+
+1. **Your agent handles signups & SaaS provisioning** — ask for a service, it
+   creates the account and brings back the API key.
+2. **No secret ever leaves the vault** — no more keys scattered across `.env`
+   files and cloud secret stores; code uses them through an injecting proxy that
+   never hands the raw value back, so there's nothing to leak.
+3. **Secrets rotate automatically** — periodic rotation on covered services
+   (growing weekly), the hygiene a password manager never does for you.
+
 Where we sit: Doppler/Infisical/Vault **store + sync** keys you hand them
 ($18–21/seat); Composio/Arcade **broker OAuth** for agent tool-calls; 1Password
 stores **human passwords**. Trusty Squire is the only one that **acts** — acquires,

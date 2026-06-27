@@ -9,17 +9,26 @@
 
 <p align="center"><strong>Never touch a signup form or paste an API key again.</strong></p>
 
-Trusty Squire is an agent that does the click-work on any service you log into — it
-**signs you up**, **sets things up** (OAuth, webhooks, projects), **vaults the keys**,
-gives your code **scoped access**, and **rotates** them. It installs into your coding
-agent (Claude Code, Cursor, Codex, …) as an MCP server, so you stay in your editor
-instead of context-switching to fifteen dashboards per project.
+Trusty Squire plugs into your AI coding agent — Claude Code, Cursor, Codex — and takes
+over the credential grunt work that slows you down and leaks secrets. Your agent signs
+up for the services your project needs, keeps every key in a vault the key **never
+leaves**, and rotates them for you. You ship at your agent's speed; your secrets stay
+locked down.
 
-> Everyone else *stores* the keys you already have. Your squire *gets* them, sets
-> them up, and rotates them — for the price of a password manager, not a
-> platform-engineering seat.
+### Why developers run it
 
-## What your squire does
+- **Your agent handles signups & SaaS provisioning.** Ask for a service — your squire
+  creates the account and brings back the API key. No fifteen-tab signup detour.
+- **No secret ever leaves the vault.** Stop scattering keys across `.env` files and
+  cloud secret stores. Keys go in write-only; your code uses them through a proxy that
+  injects the value server-side and never hands it back — so there's nothing to leak.
+- **Secrets rotate automatically.** Periodic rotation on the services we cover (growing
+  weekly) — the hygiene a password manager never actually does for you.
+
+> The store-vs-act difference: everyone else *stores* the keys you already have. Your
+> squire *gets* them, wires them up, and rotates them.
+
+## What you can ask your squire
 
 1. **"Sign me up for Resend and drop the API key in my vault."** — signup automation, key extracted.
 2. **"Add Google OAuth login to my app."** — drives a multi-step task across consoles (GCP → OAuth Playground), the secret never leaving the vault.
