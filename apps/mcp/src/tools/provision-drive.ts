@@ -54,6 +54,10 @@ const startSchema = z.object({
   // source "start". A single-service signup passes neither.
   allowed_hosts: z.array(z.string().min(1).max(120)).max(20).optional(),
   extra_allowed_hosts: z.array(z.string().min(1).max(120)).max(10).optional(),
+  // Operate tasks that act AS the user (drive a gated app on an existing
+  // account) set this so start fails closed to a connect hand-back if no live
+  // Google session exists — rather than driving into a mid-task login wall.
+  require_live_identity: z.boolean().optional(),
 });
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
@@ -77,6 +81,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       service_url: { type: "string" },
       allowed_hosts: { type: "array", items: { type: "string" } },
       extra_allowed_hosts: { type: "array", items: { type: "string" } },
+      require_live_identity: { type: "boolean" },
     },
   },
   async handler(args) {
@@ -85,6 +90,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     return await startProvisionSession({
       serviceUrl: args.service_url,
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
+      ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),
     });
   },

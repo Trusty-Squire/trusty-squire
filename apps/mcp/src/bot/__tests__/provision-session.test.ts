@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import type { InteractiveElement } from "../browser.js";
 import {
   resolveTarget,
@@ -22,6 +22,8 @@ import {
   shouldBlockUnsafeProvisionAction,
   validateAllowHost,
   maskSecretValue,
+  googleSessionGate,
+  operateSurfaceEnabled,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -630,5 +632,48 @@ describe("maskSecretValue (sealed transfer preview)", () => {
   });
   it("fully redacts a short value (no reconstructable prefix)", () => {
     expect(maskSecretValue("short")).toBe("••••");
+  });
+});
+
+describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () => {
+  it("passes when a live Google session exists", () => {
+    expect(googleSessionGate(["google"])).toEqual({ ok: true });
+    expect(googleSessionGate(["github", "google"])).toEqual({ ok: true });
+  });
+  it("fails closed to a connect hand-back when Google is absent", () => {
+    const r = googleSessionGate([]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.needs_user.wall).toBe("google_session");
+      expect(r.needs_user.resume).toBe("connect");
+      expect(r.needs_user.message).toMatch(/has NOT started/i);
+    }
+  });
+  it("fails closed when only a non-Google provider is live (no autonomous login)", () => {
+    expect(googleSessionGate(["github"]).ok).toBe(false);
+  });
+});
+
+describe("operateSurfaceEnabled (Change 5 — feature flag, default OFF)", () => {
+  const orig = process.env.TRUSTY_SQUIRE_OPERATE;
+  afterEach(() => {
+    if (orig === undefined) delete process.env.TRUSTY_SQUIRE_OPERATE;
+    else process.env.TRUSTY_SQUIRE_OPERATE = orig;
+  });
+  it("is OFF when unset", () => {
+    delete process.env.TRUSTY_SQUIRE_OPERATE;
+    expect(operateSurfaceEnabled()).toBe(false);
+  });
+  it("is ON for 1/true/on", () => {
+    for (const v of ["1", "true", "on", "ON", "True"]) {
+      process.env.TRUSTY_SQUIRE_OPERATE = v;
+      expect(operateSurfaceEnabled()).toBe(true);
+    }
+  });
+  it("is OFF for 0/false/garbage", () => {
+    for (const v of ["0", "false", "off", "no", ""]) {
+      process.env.TRUSTY_SQUIRE_OPERATE = v;
+      expect(operateSurfaceEnabled()).toBe(false);
+    }
   });
 });

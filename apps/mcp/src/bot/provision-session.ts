@@ -112,6 +112,10 @@ export interface Observation {
   // remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
   elements: ObservedElement[];
+  // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
+  // required a live Google session that was absent. The task did NOT start; the
+  // host asks the user to connect, then retries. No browser was driven.
+  needs_user?: NeedsUserConnect;
 }
 
 export interface AccessibilitySnapshot {
@@ -725,6 +729,45 @@ export interface StartOptions {
   // Registry route guidance the tool layer resolved (renderSkillHint). Attached
   // to the start observation so the agent reads the map before driving.
   hint?: string;
+  // Change 5 — operate tasks that act AS the user require a live Google session
+  // in the bot profile before driving. When true and no live session exists,
+  // start hands back (needs_user.connect) BEFORE touching the task.
+  requireLiveIdentity?: boolean;
+}
+
+// Change 5 — the operator surface ships behind a flag. Default OFF in Phase 1
+// (opened only after the live "add Google OAuth" acceptance passes). When off,
+// the operate-only precondition gate is inert and provisioning is unchanged.
+export function operateSurfaceEnabled(): boolean {
+  const v = (process.env.TRUSTY_SQUIRE_OPERATE ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "on";
+}
+
+// Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
+// acts as the user needs a LIVE Google session before it drives; absent /
+// expired / 2FA-challenged → hand back BEFORE the task starts, so the
+// human-in-the-loop dependency is explicit, never hidden (Codex). Pairs with the
+// install-time gate (install/cli.ts) that already requires a Google session.
+export interface NeedsUserConnect {
+  wall: "google_session";
+  message: string;
+  resume: "connect";
+}
+export function googleSessionGate(
+  liveProviders: readonly OAuthProviderId[],
+): { ok: true } | { ok: false; needs_user: NeedsUserConnect } {
+  if (liveProviders.includes("google")) return { ok: true };
+  return {
+    ok: false,
+    needs_user: {
+      wall: "google_session",
+      message:
+        "No live Google session in the bot profile, so the operator cannot act " +
+        "as you yet. Run `npx @trusty-squire/mcp connect` (or refresh the Google " +
+        "login) and retry — the task has NOT started and nothing was changed.",
+      resume: "connect",
+    },
+  };
 }
 
 async function ensureProvisionPrimaryProviderSession(
@@ -752,6 +795,16 @@ async function ensureProvisionPrimaryProviderSession(
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const id = randomUUID();
   const liveProviders = await ensureProvisionPrimaryProviderSession(opts.profileDir);
+  // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
+  // needs to act as the user and there's no live Google session, hand back now;
+  // do not start the browser or the task. No autonomous login is attempted.
+  if (opts.requireLiveIdentity === true) {
+    const gate = googleSessionGate(liveProviders);
+    if (!gate.ok) {
+      audit(id, "connect_gate", { ok: false, wall: "google_session" });
+      return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
+    }
+  }
   const browser = new BrowserController({
     ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
