@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.19 (2026-06-27)
+
+Prerelease (`next`). Stop refusing real keys whose vendor prefix isn't hardcoded.
+
+- **fix(extract):** `looksLikeCredentialToken` accepted only underscore tokens or
+  a hardcoded prefix list, so a real hyphen-prefixed key (Tally `tly-…`) was
+  refused and returned `no_legit_credential`. Now any `prefix-<single random
+  run>` token is recognized, while word-word-word-date slugs (multiple hyphens)
+  stay rejected.
+
 ## 0.9.19-rc.18 (2026-06-27)
 
 Prerelease (`next`). The GitHub session validation (rc.16) is now the DEFAULT on

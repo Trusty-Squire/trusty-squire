@@ -1156,7 +1156,12 @@ export function findCredentialTokens(text: string): string[] {
 
 function looksLikeCredentialToken(token: string): boolean {
   if (token.includes("_")) return true;
-  return /^(?:api|key|pk|re|rk|sk|xai|ghp|pat|vsk)-/i.test(token);
+  if (/^(?:api|key|pk|re|rk|sk|xai|ghp|pat|vsk|tly)-/i.test(token)) return true;
+  // <short alpha vendor prefix>-<single long alphanumeric run>. We don't
+  // enumerate every vendor prefix; any "prefix-<random run>" is a key. The body
+  // must be ONE alphanumeric run (no further separators) so a word-word-word-date
+  // slug (trusty-squire-dogfood-20260625) is excluded — that has multiple hyphens.
+  return /^[A-Za-z][A-Za-z0-9]{0,7}-[A-Za-z0-9]{12,}$/.test(token);
 }
 
 function firstTokenMatching(haystack: string, re: RegExp): string | null {

@@ -416,6 +416,26 @@ export default function InstallPage() {
               </button>
             </div>
           )}
+          {/* GitHub is linked to the ACCOUNT, but that's not the same as the
+              bot's Chrome having a live GitHub session — the account link
+              persists even after the bot's session expires. Always offer a
+              reconnect so a dead bot session can be refreshed (re-running the
+              OAuth in the bot's Chrome re-establishes its github.com login). */}
+          {step1Done && step2Done && (
+            <div className="wizard-actions">
+              <span className="wizard-step-hint">
+                Linked to your account. If the bot can&apos;t act on GitHub
+                (logins fail), reconnect to refresh its session.
+              </span>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={startGithub}
+              >
+                Reconnect GitHub
+              </button>
+            </div>
+          )}
         </WizardStep>
       </ol>
 

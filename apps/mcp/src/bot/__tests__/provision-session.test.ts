@@ -303,6 +303,15 @@ describe("findCredentialTokens (multi-credential extraction)", () => {
     expect(findCredentialTokens("loader.tweetUnavailableTombstoneHandler")).toEqual([]);
   });
 
+  it("recognizes a hyphen-prefixed vendor key whose prefix isn't hardcoded (Tally tly-)", () => {
+    const toks = findCredentialTokens("Your API key: tly-a1b2c3d4e5f6g7h8i9j0k1l2");
+    expect(toks).toContain("tly-a1b2c3d4e5f6g7h8i9j0k1l2");
+  });
+
+  it("still ignores hyphenated English prose (no digit, or whitespace)", () => {
+    expect(findCredentialTokens("this-is-a-well-known-phrase-here")).toEqual([]);
+  });
+
   it("ignores prose and short/digitless tokens", () => {
     expect(findCredentialTokens("Welcome to your dashboard. Get started now.")).toEqual([]);
     // has a separator but no digit → not a key
