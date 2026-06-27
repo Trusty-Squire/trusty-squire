@@ -1,4 +1,10 @@
-# Trusty Squire
+<p align="center">
+  <a href="https://trustysquire.ai" target="_blank" rel="noopener noreferrer">
+    <img width="84" height="84" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire" />
+  </a>
+</p>
+
+<h1 align="center">Trusty Squire</h1>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@trusty-squire/mcp"><img src="https://img.shields.io/npm/v/@trusty-squire/mcp?logo=npm&color=cb3837" alt="npm version" /></a>

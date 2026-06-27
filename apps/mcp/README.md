@@ -1,36 +1,28 @@
 <p align="center">
   <a href="https://trustysquire.ai" target="_blank" rel="noopener noreferrer">
-    <img width="96" height="96" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire" />
+    <img width="84" height="84" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire" />
   </a>
 </p>
 
-# Trusty Squire MCP
-
-> **Your AI coding agent's universal signup bot.** Ship faster by letting Claude
-> Code, Cursor, Goose, Codex, Cline, and Continue sign up for the SaaS services
-> they need — and hand you back a working API key.
+<p align="center"><strong>Never touch a signup form or paste an API key again.</strong></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@trusty-squire/mcp"><img src="https://img.shields.io/npm/v/@trusty-squire/mcp?logo=npm&color=cb3837" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/@trusty-squire/mcp"><img src="https://img.shields.io/npm/dm/@trusty-squire/mcp?color=cb3837" alt="npm downloads" /></a>
-  <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@trusty-squire/mcp?color=blue" alt="license" /></a>
-  <a href="https://github.com/Trusty-Squire/trusty-squire/stargazers"><img src="https://img.shields.io/github/stars/Trusty-Squire/trusty-squire?logo=github&color=eac54f" alt="GitHub stars" /></a>
-  <a href="https://github.com/Trusty-Squire/trusty-squire/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Trusty-Squire/trusty-squire/ci.yml?branch=main&label=CI&logo=github" alt="CI status" /></a>
   <img src="https://img.shields.io/node/v/@trusty-squire/mcp?logo=node.js&color=339933" alt="node version" />
-  <a href="https://glama.ai/mcp/servers/Trusty-Squire/trusty-squire"><img src="https://glama.ai/mcp/servers/Trusty-Squire/trusty-squire/badges/score.svg" alt="Glama MCP server score" /></a>
+  <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license" /></a>
 </p>
 
----
+Trusty Squire plugs into your AI coding agent — Claude Code, Cursor, Codex — and takes
+over the credential grunt work that slows you down and leaks secrets. Your agent signs
+up for the services your project needs, locks every key in a vault it never leaves, and
+rotates them for you.
 
-## What it does
+## Why developers run it
 
-You tell your coding agent: *"sign me up for Resend"*. Behind the scenes, Trusty Squire:
-
-1. Drives a real Chrome browser through the service's signup flow (OAuth path preferred, email form fallback, captcha and consent screens handled).
-2. Receives the verification email at a one-shot alias under `@trustysquire.com`, clicks the link, navigates to the API-key page.
-3. Extracts the API key and stores it in your vault — the agent gets a working credential back.
-
-You stay in control: the bot only requests basic OAuth scopes by default, surfaces phone / SMS / scope-broadening prompts back to you, and never types into a provider's login form.
+- **Your agent handles signups & SaaS provisioning** — ask for a service; it creates the account and brings back the API key.
+- **No secret ever leaves the vault** — no keys scattered across `.env` files and cloud secret stores; your code uses them through a proxy that injects the value server-side and never hands it back.
+- **Secrets rotate automatically** — periodic rotation on covered services, growing weekly.
 
 ## Install
 
@@ -38,7 +30,8 @@ You stay in control: the bot only requests basic OAuth scopes by default, surfac
 npx @trusty-squire/mcp connect
 ```
 
-That's it. The installer auto-detects your coding agent and writes the MCP config. To pin a target:
+That issues your account, signs you in (Google/GitHub), auto-detects your coding agent,
+and writes the MCP config. Restart your agent to pick up the tools. To pin a target:
 
 ```bash
 npx @trusty-squire/mcp connect --target=goose
@@ -46,100 +39,70 @@ npx @trusty-squire/mcp connect --target=goose
 
 Supported agents: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`.
 
-After connecting, restart your agent to pick up the new tools.
-
-> **Developers only** — if you've cloned this repo and are running the
-> command from inside `~/trusty-squire/apps/mcp/`, npm 10's npx will
-> mistake the local workspace for the install target and fail with
-> `sh: 1: mcp: not found`. Always `cd ~` (or anywhere outside the
-> repo) before running the connect command. End users don't hit this
-> because they don't have the source checked out.
-
 ## Example
 
-Once installed, ask your agent in plain English:
+Ask your agent in plain English:
 
 ```
 > sign me up for Postmark
 ```
 
 ```
-🛠  provision_start { "service_url": "https://postmarkapp.com" }
-🛠  provision_observe { "session_id": "..." }
-🛠  provision_act { "session_id": "...", "kind": "click", "target": "..." }
-🛠  provision_extract { "session_id": "..." }
-✔  credentials: { api_key: "0c1b7c2a-..." }
-   service: "Postmark"
-   stored_in_vault: true
-🛠  provision_finish { "session_id": "..." }
+🛠  operate_start      { "service_url": "https://postmarkapp.com" }
+🛠  operate_observe    { "session_id": "..." }
+🛠  operate_act        { "kind": "click", "target": "..." }
+🛠  operate_extract    { "session_id": "..." }
+✔  stored in vault    { service: "Postmark", credentials: ["api_key"] }
+🛠  operate_finish_task { "kind": "credentials" }
 ```
 
-The agent drives the browser step by step. You see the signup happen in your vault.
+The agent drives the browser step by step; the key lands in your vault, never in chat.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `provision_start` | Open a scoped signup browser session and return the first observation. |
-| `provision_observe` | Re-read the current page. |
-| `provision_act` | Take one browser action, then return the next observation. |
-| `provision_extract` | Reveal/copy credentials from the current credential page. |
-| `provision_finish` | Close the browser session. |
-| `list_credentials` | Browse what's already in your vault for this account. |
-| `use_credential` | Call an API through the write-only vault without exposing the raw secret. |
+| `operate_start` / `observe` / `act` | Open a scoped browser session, read the page, take one action at a time. |
+| `operate_extract` | Reveal and capture credentials from the current page. |
+| `operate_remember` / `operate_use` | Save a successful run as a skill; replay it by name in ~30s. |
+| `operate_finish_task` / `operate_finish` | Close with an outcome (store credentials) or just release the browser. |
+| `grant_app_access` | Mint a scoped, revocable, spend-capped key for a deployed app (egress grant). |
+| `list_credentials` / `use_credential` | Browse the vault; call an API through it without exposing the raw secret. |
 
 ## How it works
 
-Trusty Squire is a thin local MCP server that delegates the actual signup work to a bundled universal bot:
+A thin local MCP server that drives a real browser on your machine:
 
-- **Browser:** real Chrome (channel = `chrome`) via Playwright + `playwright-extra` stealth plugin. Runs headed against an on-demand Xvfb on headless boxes — modern SaaS detect Chromium-headless and gate their forms.
-- **OAuth-first:** when the page offers Google or GitHub OAuth and the bot profile has that provider session, the bot takes the OAuth path. Consent screens are auto-approved only for basic identity scopes (`openid` / `email` / `profile`). Anything broader surfaces to you for approval.
-- **Email fallback:** for services without OAuth, the bot uses a per-run alias under `@trustysquire.com`, reads inbound mail via a Resend inbound webhook → our API.
-- **Captcha handling:** Tier 1 (behavior simulation — bezier mouse paths, variable typing, post-load dwell) for invisible Turnstile / reCAPTCHA v3 scoring. Tier 2 (click-and-wait) for visible Turnstile / reCAPTCHA v2 checkboxes. Tier 3 image grids are out of scope.
-- **Session-agent form-fill:** when no OAuth + no native adapter exists, the Trusty Squire session agent drives signup from DOM-grounded page structure and screenshots. Selectors are picked from observed inventory, never invented.
+- **Browser:** real Chrome via Playwright + a stealth plugin, headed against an on-demand Xvfb on headless boxes (modern SaaS gate Chromium-headless).
+- **OAuth-first:** takes the Google/GitHub OAuth path when offered; auto-approves only basic identity scopes (`openid`/`email`/`profile`), surfacing anything broader to you.
+- **Email fallback:** a one-shot alias under `@trustysquire.com`, read via a Resend inbound webhook.
+- **Captcha:** behavior simulation for invisible Turnstile / reCAPTCHA v3; click-and-wait for visible v2.
+- **Write-only vault:** the raw secret is stored write-only and only ever *injected* server-side by the proxy — the agent never sees it.
+
+## Pricing
+
+- **Free** — provision, store keys, personal use, 7-day audit, manual rotation.
+- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, automated rotation.
+- **Enterprise** — org control plane + production-scale egress. Coming later.
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API gateway URL |
-| `UNIVERSAL_BOT_PREFER_CHEAP` | `true` | Use Gemini Flash for vision planning; premium model fallback only on parse failure |
-| `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15` | Per-signup circuit breaker |
-| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`socks5://host:port` or `http://user:pass@host:port`). Used only for datacenter-class egress unless `UNIVERSAL_BOT_PROXY_ALWAYS=true`. |
-| `UNIVERSAL_BOT_HEADLESS` | `false` | Force Chromium-headless. Set `true` only when you specifically want no display surface. |
+| `UNIVERSAL_BOT_PREFER_CHEAP` | `true` | Cheap-tier vision planning; premium fallback only on parse failure |
+| `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15` | Per-run circuit breaker |
+| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`socks5://…`); datacenter egress only unless `UNIVERSAL_BOT_PROXY_ALWAYS=true` |
+| `UNIVERSAL_BOT_HEADLESS` | `false` | Force Chromium-headless (only when you want no display surface) |
 
-## Supported coding agents
+## Security & privacy
 
-| Agent | MCP config location |
-|---|---|
-| Claude Code | `~/.claude.json` |
-| Cursor | `~/.cursor/mcp.json` |
-| Codex CLI | `~/.codex/config.toml` |
-| Goose | `~/.config/goose/config.yaml` |
-| Cline | `<VS Code globalStorage>/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` |
-| Continue | `~/.continue/config.yaml` |
+- The bot **never** types into a Google/GitHub login form (it stops and returns `needs_login`), and never auto-approves OAuth scopes beyond basic identity.
+- The MCP server runs on your machine; it does not phone home with traffic data.
+- Per-run email aliases auto-expire (bodies cleared at 7 days, rows deleted at 90); LLM proxy events deleted at 30 days.
 
-Each writer is idempotent: re-installing won't duplicate entries, and any env vars previously written are preserved on re-install.
-
-## Security boundaries
-
-The bot is allowed to do, on your behalf:
-- Fill an email/password signup form with a generated email + password.
-- Approve a provider OAuth consent screen *only* when every requested scope is basic identity (`openid` / `email` / `profile`).
-- Click verification links arriving at our one-shot per-run aliases.
-
-The bot will **never**:
-- Type into a Google/GitHub login form. If it lands on one, it stops and returns `needs_login`.
-- Auto-approve OAuth scopes broader than basic identity. It returns `oauth_consent_needs_review` and surfaces the scope list to you.
-- Persist or transmit your Google password. You enter it once during `mcp login` directly on Google's page.
-
-## Privacy
-
-- The MCP server runs on your machine. It does not phone home with traffic data.
-- Per-run email aliases auto-expire (body text cleared at 7 days; row deleted at 90 days).
-- LLM proxy usage events are retained for 30 days then deleted.
-- Source: [github.com/Trusty-Squire/trusty-squire](https://github.com/Trusty-Squire/trusty-squire).
+> **Developers note:** if you've cloned this repo, run `connect` from outside it (`cd ~` first). From inside `~/trusty-squire/apps/mcp/`, npm 10's npx mistakes the local workspace for the target and fails `sh: 1: mcp: not found`. End users don't hit this.
 
 ## License
 
-MIT. See [LICENSE](https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE).
+[MIT](https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE) © Trusty Squire
