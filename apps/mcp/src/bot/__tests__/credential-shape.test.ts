@@ -24,8 +24,8 @@ describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spel
     expect(isMaskedDisplay("sk-or-v1-1687...")).toBe(true);
   });
   it("does NOT flag a real unmasked key", () => {
-    expect(isMaskedDisplay("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")).toBe(false);
-    expect(isMaskedDisplay("re_8sZ2k9QwErTyUiOpAsDfGhJk")).toBe(false);
+    expect(isMaskedDisplay("GOCSPX-not-a-real-secret-1234567890")).toBe(false);
+    expect(isMaskedDisplay("re_fake_1234567890abcdef")).toBe(false);
     expect(isMaskedDisplay("phx_aBcD1234")).toBe(false);
   });
   it("does NOT flag a JWT (single dots, not 3+ consecutive)", () => {
@@ -64,7 +64,7 @@ describe("isCredentialNoise (reject non-key page text)", () => {
     expect(isCredentialNoise("sk-or-v1-1687…")).toBe(true);
   });
   it("does NOT reject a real key", () => {
-    expect(isCredentialNoise("re_8sZ2k9QwErTyUiOpAsDfGhJk")).toBe(false);
+    expect(isCredentialNoise("re_fake_1234567890abcdef")).toBe(false);
   });
 });
 
