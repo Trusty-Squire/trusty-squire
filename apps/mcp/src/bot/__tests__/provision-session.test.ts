@@ -25,6 +25,8 @@ import {
   googleSessionGate,
   isOnboardingOrOrgForm,
   hasOneTimeSecretModal,
+  hasExistingAccountSignal,
+  hasUnlinkedOAuthAccountSignal,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -632,6 +634,46 @@ describe("hasOneTimeSecretModal (Luma one-time reveal)", () => {
   });
   it("does NOT fire on an ordinary always-visible key field", () => {
     expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(false);
+  });
+});
+
+describe("hasExistingAccountSignal (real-identity already registered — OpenRouter)", () => {
+  it("detects the openrouter 'invalid credentials' login flip", () => {
+    expect(hasExistingAccountSignal("Sign in to continue. Invalid credentials.")).toBe(true);
+  });
+  it("detects 'an account with this email already exists'", () => {
+    expect(hasExistingAccountSignal("An account with this email already exists. Sign in instead.")).toBe(true);
+  });
+  it("detects 'email is already registered'", () => {
+    expect(hasExistingAccountSignal("That email is already registered.")).toBe(true);
+  });
+  it("does NOT fire on a clean fresh signup form", () => {
+    expect(hasExistingAccountSignal("Create your account — enter your email to get started")).toBe(false);
+  });
+  it("does NOT fire on a bare 'Already have an account? Sign in' link", () => {
+    expect(hasExistingAccountSignal("Sign up. Already have an account? Sign in")).toBe(false);
+  });
+  it("surfaces the log-in steer through provisionPerceptionGuidance", () => {
+    const g = provisionPerceptionGuidance("Invalid credentials. Please try again.");
+    expect(g).toContain("Existing account");
+    expect(g).toContain("LOGGING IN");
+  });
+});
+
+describe("hasUnlinkedOAuthAccountSignal (OAuth not linked — Clerk)", () => {
+  it("detects clerk's 'The External Account was not found'", () => {
+    expect(hasUnlinkedOAuthAccountSignal("The External Account was not found.")).toBe(true);
+  });
+  it("detects 'no account found for this Google account'", () => {
+    expect(hasUnlinkedOAuthAccountSignal("No account found for this Google account.")).toBe(true);
+  });
+  it("does NOT fire on a normal OAuth consent screen", () => {
+    expect(hasUnlinkedOAuthAccountSignal("Continue with Google to sign in")).toBe(false);
+  });
+  it("steers to email/OTP via provisionPerceptionGuidance", () => {
+    const g = provisionPerceptionGuidance("The External Account was not found.");
+    expect(g).toContain("Unlinked OAuth");
+    expect(g).toContain("EMAIL signup/OTP");
   });
 });
 

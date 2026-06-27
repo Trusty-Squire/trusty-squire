@@ -5124,14 +5124,8 @@ export class BrowserController {
       // For each, walk up a few ancestors and dump the subtree's
       // innerText. The token is somewhere in there.
       const seen = new Set<string>();
-      for (const btn of copyButtons) {
-        let anc: HTMLElement | null = btn;
-        for (let i = 0; i < 6 && anc !== null; i++) {
-          anc = anc.parentElement;
-        }
-        if (anc === null) continue;
-        const text = (anc.innerText ?? "").trim();
-        if (text.length === 0 || text.length > 4096) continue;
+      const harvest = (text: string): void => {
+        if (text.length === 0 || text.length > 4096) return;
         // Tokenize by whitespace — each token is a separate candidate.
         text.split(/\s+/).forEach((tok) => {
           if (tok.length < 16 || tok.length > 256) return;
@@ -5139,6 +5133,20 @@ export class BrowserController {
           seen.add(tok);
           out.push(tok);
         });
+      };
+      for (const btn of copyButtons) {
+        // The value often lives in the copy button's OWN aria-label/title
+        // ("Copy to clipboard: GOCSPX-…", "Copy api key sk-…") rather than in
+        // any visible text node — GCP's new client-secret reveal does exactly
+        // this, so the innerText-only walk below would miss it entirely.
+        harvest(`${btn.getAttribute("aria-label") ?? ""} ${btn.getAttribute("title") ?? ""}`.trim());
+        // Then walk up a few ancestors and dump the subtree's innerText.
+        let anc: HTMLElement | null = btn;
+        for (let i = 0; i < 6 && anc !== null; i++) {
+          anc = anc.parentElement;
+        }
+        if (anc === null) continue;
+        harvest((anc.innerText ?? "").trim());
       }
       return out;
     });
@@ -5487,8 +5495,46 @@ export class BrowserController {
           if (!isVisible(el)) return;
           masked.push({ el, row: rowAncestor(el) });
         });
+      const selectorFor = (el: Element): string => {
+        const tag = el.tagName.toLowerCase();
+        const all = Array.from(document.querySelectorAll(tag));
+        const idx = all.indexOf(el);
+        return `${tag}:nth-of-type(${idx + 1})`;
+      };
+
+      // No masked placeholder anywhere — but some consoles hide the key
+      // ENTIRELY behind a "View/Show Key" button with no ••• shown at all
+      // (Zilliz's "View My Personal Key"). The row-anchored pass below has
+      // nothing to anchor on, so without this the reveal pass bails and the
+      // extractor reports no_legit_credential on a page that DOES have a key.
+      // Anchor-free fallback: click a button whose label pairs a SAFE reveal
+      // verb with a credential noun, excluding destructive verbs (reset/
+      // regenerate/delete/revoke/rotate would mint or destroy a key, not
+      // reveal the existing one).
       if (masked.length === 0) {
-        return { selectors: [] as string[], diagnostic: ["no_masked_displays"] };
+        const KEY_NOUN = /\b(?:api\s*key|secret|token|credential|personal\s+key|access\s+key|key)\b/i;
+        const SAFE_REVEAL = /\b(?:view|show|reveal|display|see)\b/i;
+        const DESTRUCTIVE = /\b(?:reset|regenerat\w*|delete|revoke|rotate|create|new|remove|add|download)\b/i;
+        const out: string[] = [];
+        const diag: string[] = [];
+        document
+          .querySelectorAll<HTMLElement>('button, [role="button"], a[role="button"]')
+          .forEach((el) => {
+            if (!isVisible(el)) return;
+            const hay =
+              `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`
+                .replace(/\s+/g, " ")
+                .trim();
+            if (hay.length === 0 || hay.length > 60) return;
+            if (!SAFE_REVEAL.test(hay) || !KEY_NOUN.test(hay)) return;
+            if (DESTRUCTIVE.test(hay)) return;
+            out.push(selectorFor(el));
+            diag.push(`anchorless_key_reveal:"${hay.slice(0, 40)}"`);
+          });
+        return {
+          selectors: out,
+          diagnostic: out.length > 0 ? diag : ["no_masked_displays"],
+        };
       }
 
       // 2. Classify candidate buttons. Prefer SHOW/REVEAL/EYE; fall
@@ -5516,13 +5562,6 @@ export class BrowserController {
             else if (COPY_PATTERN.test(hay)) copyBtns.push(el);
           });
         return { showBtns, copyBtns };
-      };
-
-      const selectorFor = (el: Element): string => {
-        const tag = el.tagName.toLowerCase();
-        const all = Array.from(document.querySelectorAll(tag));
-        const idx = all.indexOf(el);
-        return `${tag}:nth-of-type(${idx + 1})`;
       };
 
       const selectors: string[] = [];

@@ -525,6 +525,35 @@ export function hasOneTimeSecretModal(pageText: string): boolean {
   );
 }
 
+// The operator acts as the user's REAL identity (not a fresh disposable alias
+// like the universal bot), so a service the user already has an account on
+// rejects a fresh signup — the page flips to a login form / "already
+// registered" / "invalid credentials". This is NOT a wall: the right move is to
+// LOG IN with the existing identity and read the EXISTING key, not retry signup.
+export function hasExistingAccountSignal(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  return (
+    /\binvalid\s+(?:credentials|password|email\s+or\s+password|login)\b/i.test(text) ||
+    /\b(?:account|email|user(?:name)?)\s+(?:already\s+)?(?:exists|is\s+already\s+(?:registered|in\s+use|taken))\b/i.test(text) ||
+    /\b(?:email|account)\s+is\s+already\s+(?:registered|in\s+use|associated|taken)\b/i.test(text) ||
+    /\bthis\s+(?:email|account)\s+is\s+already\b/i.test(text) ||
+    /\ban?\s+account\s+(?:with\s+this\s+email\s+)?already\s+exists\b/i.test(text)
+  );
+}
+
+// An OAuth provider returned "account not found" — the user's Google/GitHub
+// identity is not a LINKED account on this service (Clerk-style: the OAuth
+// button is sign-IN only, signup is email-OTP). Retrying the OAuth button loops
+// forever; the fix is to switch to the email/OTP signup path.
+export function hasUnlinkedOAuthAccountSignal(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  return (
+    /\bexternal\s+account\s+(?:was\s+)?not\s+found\b/i.test(text) ||
+    /\bno\s+(?:account|user)\s+(?:was\s+)?found\s+(?:for|with)\s+this\s+(?:google|github|oauth|external|account)\b/i.test(text) ||
+    /\b(?:couldn'?t|could\s+not|unable\s+to)\s+find\s+(?:an?\s+)?(?:account|user)\b[\s\w]{0,30}?\b(?:google|github|oauth|external)\b/i.test(text)
+  );
+}
+
 function isAccountSetupActionTarget(target: string): boolean {
   return /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
     target,
@@ -562,6 +591,30 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
         "inferred values (your name; an organization/workspace/team name such as your " +
         "name or 'Personal'; pick the smallest/free plan) and submit to continue. Do " +
         "not stop or report a wall — drive through it to reach the keys page.",
+    );
+  }
+
+  // Existing-account signal — you act as the user's REAL identity, which may
+  // already be registered here. A fresh signup will keep failing.
+  if (hasExistingAccountSignal(pageText)) {
+    parts.push(
+      "Existing account: you are acting as the user's REAL identity, which " +
+        "already appears to have an account here (login form / 'already " +
+        "registered' / 'invalid credentials'). Do NOT retry signup. Switch to " +
+        "LOGGING IN — prefer the OAuth provider the user has a live session for, " +
+        "or a password reset — then navigate to the EXISTING API key and extract it.",
+    );
+  }
+
+  // Unlinked-OAuth signal — the OAuth identity isn't a linked account; the OAuth
+  // button is sign-in only. Stop clicking it; use the email/OTP signup path.
+  if (hasUnlinkedOAuthAccountSignal(pageText)) {
+    parts.push(
+      "Unlinked OAuth identity: the provider returned 'account not found' — your " +
+        "Google/GitHub identity is not a linked account here, so the OAuth button " +
+        "is sign-IN only. Do NOT keep clicking it. Switch to EMAIL signup/OTP " +
+        "(submit the email field, then operate_await_verification for the code) to " +
+        "create the account, then continue to the keys page.",
     );
   }
 
