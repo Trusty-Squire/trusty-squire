@@ -604,7 +604,9 @@ async function connect(args: Argv): Promise<void> {
       start: "Checking provider sessions",
       done: "Provider sessions checked",
       fail: () => "Provider session check failed (continuing)",
-      task: () => detectActiveProviderSessions(),
+      // validate=true: confirm each session is LIVE (not just cookie-present),
+      // so a dead-but-present GitHub session isn't shown as connected.
+      task: () => detectActiveProviderSessions(undefined, { validate: true }),
     });
     if (actual !== null) {
       clearAllProviderMarkers();
@@ -762,8 +764,9 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     // Probe the profile cookies instead of trusting the marker. The marker is a
     // cache that can lie after logout/expiry; connect is rare enough to pay this
     // cost, and this keeps "Already connected" aligned with the bot's real
-    // ability to wear the user's Google identity.
-    const providers = await detectActiveProviderSessions();
+    // ability to wear the user's Google identity. validate=true so a dead-but-
+    // present GitHub session isn't persisted into connected_providers.
+    const providers = await detectActiveProviderSessions(undefined, { validate: true });
     await syncConnectedProviders(providers);
     return decideProvisioned(session, stillValid, providers);
   } catch {

@@ -280,6 +280,11 @@ const extractSchema = z.object({
   // return ONLY a masked handle (never the value), so a later type_secret can
   // enter it into another site's form without the value crossing to the host.
   into_slot: z.string().min(1).max(60).optional(),
+  // Disambiguate WHICH credential to seal when the page shows several (Google's
+  // OAuth dialog has both a client ID and a client secret). Matches the
+  // credential's field label, e.g. "client secret" / "secret". Omit when there's
+  // only one.
+  secret_label: z.string().min(1).max(60).optional(),
   store: storeShape.optional(),
 });
 
@@ -294,7 +299,10 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "observed hosts as allowed_hosts seed. If `blocked_reason` is set, " +
     "the page is a login wall / anti-bot interstitial with NO credential present " +
     "(do not treat the empty result as a real key) — drive an interactive login " +
-    "or hand back to the user. Call when you have navigated to the keys page.",
+    "or hand back to the user. Call when you have navigated to the keys page. " +
+    "With `into_slot`, a still-masked value is refused (reveal it first); pass " +
+    "`secret_label` (e.g. \"client secret\") to pick the right one when the page " +
+    "shows several credentials.",
   inputSchema: extractSchema,
   jsonInputSchema: {
     type: "object",
@@ -302,6 +310,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     properties: {
       session_id: { type: "string" },
       into_slot: { type: "string" },
+      secret_label: { type: "string" },
       store: {
         type: "object",
         required: ["service"],
@@ -331,10 +340,18 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       // full value over the masked api_key when the page has both.
       const looksMasked = (v: string): boolean =>
         v.includes("•") || v.includes("…") || v.includes("***") || /\.{3,}/.test(v);
-      const full = Object.entries(values)
-        .filter(([k]) => !k.endsWith("_truncated"))
-        .map(([, v]) => v)
-        .find((v) => typeof v === "string" && v.length >= 8 && !looksMasked(v));
+      const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const candidates = Object.entries(values).filter(
+        ([k, v]) =>
+          !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !looksMasked(v),
+      );
+      // When the page shows several credentials (Google's client ID + secret),
+      // a secret_label picks the right one by field name; otherwise take the
+      // first full value. Falling back avoids a hard fail when the label misses.
+      const wantKey = args.secret_label !== undefined ? norm(args.secret_label) : null;
+      const matched =
+        wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
+      const full = (matched ?? candidates[0])?.[1];
       if (typeof full !== "string" || full.length === 0) {
         return {
           session_id: extracted.session_id,

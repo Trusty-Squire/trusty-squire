@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.16 (2026-06-27)
+
+Prerelease (`next`). Two fixes from the third live run.
+
+- **fix(connect):** the "GitHub marker lies" bug — a GitHub session that expired
+  server-side leaves its `user_session` cookie in the profile, so the install
+  display showed GitHub "connected" when it wasn't (and tasks then failed to
+  authorize). The install/preflight checks now *validate* the session
+  (`detectActiveProviderSessions({validate:true})` navigates to github.com and
+  reads the refreshed `logged_in` flag) instead of trusting cookie presence. The
+  hot provision path stays on the fast cookie check.
+- **fix(operate):** `operate_extract{into_slot, secret_label?}` — when a page
+  shows several credentials (Google's OAuth dialog has both a client ID and a
+  client secret), the into_slot capture was sealing the first non-masked value
+  (the ID). Pass `secret_label:"client secret"` to seal the right one.
+
 ## 0.9.19-rc.15 (2026-06-27)
 
 Prerelease (`next`). Two fixes from the second live operator-surface run (the
