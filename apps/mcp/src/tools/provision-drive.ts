@@ -18,8 +18,17 @@ import {
   finishProvisionSession,
   observedHostsForSession,
   stashSecretSlot,
+  rememberRecipe,
+  verifyPostcondition,
   type ProvisionAction,
 } from "../bot/provision-session.js";
+import {
+  readRecipe,
+  renderOperatorRecipeHint,
+  recipeEntryUrl,
+  fillTemplate,
+  PostconditionSchema,
+} from "../bot/operator-recipe.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 
@@ -463,6 +472,9 @@ const finishTaskSchema = z.object({
   // result kind: a human-readable outcome + optional bounded structured data.
   summary: z.string().max(4000).optional(),
   data: z.record(z.string().max(4000)).optional(),
+  // result kind: verify a saved operator-recipe's postcondition before closing
+  // (the anti-false-green gate). `verified.confirmed` reflects the machine check.
+  verify_recipe: z.string().min(1).max(80).optional(),
 });
 
 export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
@@ -484,6 +496,7 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
       store: { type: "object", required: ["service"], properties: storeJsonProps },
       summary: { type: "string" },
       data: { type: "object" },
+      verify_recipe: { type: "string" },
     },
   },
   async handler(args, api) {
@@ -509,12 +522,18 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
         stored_credential: stored,
       };
     }
-    // result kind — summary + bounded data, then close.
+    // result kind — optionally verify a saved recipe's postcondition (the
+    // anti-false-green gate) against the live session BEFORE closing, then close.
+    const verified =
+      args.verify_recipe !== undefined
+        ? await verifyPostcondition(args.session_id, (await readRecipe(args.verify_recipe)).postcondition)
+        : undefined;
     const closed = await finishProvisionSession(args.session_id);
     return {
       kind: "result" as const,
       url: closed.url,
       summary: (args.summary ?? "").slice(0, 4000),
+      ...(verified !== undefined ? { verified } : {}),
       ...(args.data !== undefined ? { data: args.data } : {}),
     };
   },
@@ -538,6 +557,104 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   },
 };
 
+// ── operator-recipe tools (Phase A — docs/DESIGN-operator-skills.md) ──
+
+const rememberSchema = z.object({
+  session_id: z.string().min(1),
+  name: z.string().min(1).max(80),
+  goal: z.string().min(1).max(300),
+  postcondition: PostconditionSchema,
+});
+
+export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
+  name: "operate_remember",
+  description:
+    "Save the CURRENT successful operate session as a replayable operator-recipe " +
+    "(local, named). Pass `name`, a one-line `goal`, and a `postcondition` — the " +
+    "machine-checkable success signal: kind 'execute_capability' observes the " +
+    "end-state now; `success_signal` is {field_text,min_value_len} (a field whose " +
+    "value is at least N chars — checked by LENGTH, never the value), {text_present}, " +
+    "or {url_contains}. The recipe stores the session's TEXT-targeted action trace " +
+    "as a rail; sealed secrets become slot references, NEVER values. Call AFTER the " +
+    "task succeeded; replay later with operate_use{name}.",
+  inputSchema: rememberSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "name", "goal", "postcondition"],
+    properties: {
+      session_id: { type: "string" },
+      name: { type: "string" },
+      goal: { type: "string" },
+      postcondition: {
+        type: "object",
+        required: ["kind", "describe", "success_signal"],
+        properties: {
+          kind: { type: "string", enum: ["execute_capability", "observe_artifact"] },
+          describe: { type: "string" },
+          success_signal: { type: "object" },
+          probe_url: { type: "string" },
+        },
+      },
+    },
+  },
+  async handler(args) {
+    return await rememberRecipe(args.session_id, {
+      name: args.name,
+      goal: args.goal,
+      postcondition: args.postcondition,
+    });
+  },
+};
+
+const useSchema = z.object({
+  name: z.string().min(1).max(80),
+  params: z.record(z.string().max(2000)).optional(),
+  require_live_identity: z.boolean().optional(),
+});
+
+export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
+  name: "operate_use",
+  description:
+    "Replay a saved operator-recipe by name: opens a scoped browser at the recipe's " +
+    "entry and returns the start observation with the recipe's route as a `hint` — a " +
+    "MAP to drive toward, NOT a literal script (re-plan if the live page diverges). " +
+    "Fill ${VAR} entry templates via `params` (e.g. {PROJECT:'my-proj'}). Sealed " +
+    "steps must be re-sealed + typed yourself (operate_extract{into_slot} → " +
+    "type_secret) — the recipe never holds secret values. Drive the task, then " +
+    "operate_finish_task{kind:'result', verify_recipe:<name>} to verify the " +
+    "postcondition (the anti-false-green gate).",
+  inputSchema: useSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["name"],
+    properties: {
+      name: { type: "string" },
+      params: { type: "object" },
+      require_live_identity: { type: "boolean" },
+    },
+  },
+  async handler(args) {
+    const recipe = await readRecipe(args.name);
+    const entry = recipeEntryUrl(recipe);
+    if (entry === null) {
+      throw new Error(`operator-recipe "${args.name}" has no entry (goto) step to start from`);
+    }
+    const { url, missing } = fillTemplate(entry, args.params ?? {});
+    if (missing.length > 0) {
+      throw new Error(
+        `operator-recipe "${args.name}" needs params: ${missing.join(", ")} — ` +
+          `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
+      );
+    }
+    return await startProvisionSession({
+      serviceUrl: url,
+      ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
+      hint: renderOperatorRecipeHint(recipe),
+      ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+    });
+  },
+};
+
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
@@ -545,6 +662,8 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,
+  provisionRememberTool,
+  provisionUseTool,
   provisionFinishTaskTool,
   provisionFinishTool,
 ] as Tool[];

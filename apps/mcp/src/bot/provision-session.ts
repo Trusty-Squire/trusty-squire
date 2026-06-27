@@ -24,6 +24,16 @@ import {
   ensureOAuthSession,
 } from "./google-login.js";
 import { loginSessionGuidance } from "./skill-hint.js";
+import {
+  type OperatorRecipe,
+  type TraceEntry,
+  type TraceAction,
+  type Postcondition,
+  type PostconditionResult,
+  type PostconditionSnapshot,
+  checkSuccessSignal,
+  writeRecipe,
+} from "./operator-recipe.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   initialExtractionState,
@@ -177,6 +187,11 @@ interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
+  // Phase A operator-recipe capture (docs/DESIGN-operator-skills.md): the
+  // ordered, TEXT-targeted action trace of this session, so a successful run can
+  // be `remember`ed as a replayable rail. Records visible text + non-secret
+  // params only — sealed secret values stay in secretSlots, never the trace.
+  actionTrace: TraceEntry[];
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -927,6 +942,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     generation: 0,
     secretSlots: new Map(),
     lastElements: [],
+    actionTrace: [],
   };
   sessions.set(id, session);
   audit(id, "start", {
@@ -986,6 +1002,9 @@ export function stashSecretSlot(sessionId: string, slot: string, value: string):
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   session.secretSlots.set(slot, value);
+  // Record the SEAL in the recipe trace (the value never goes in — only that a
+  // secret was sealed into this slot, so the replay rail says "reveal+seal here").
+  session.actionTrace.push({ action: { kind: "extract", slot } });
   audit(sessionId, "secret_slot_set", { slot, length: value.length });
   return { slot, preview: maskSecretValue(value), length: value.length };
 }
@@ -1038,6 +1057,10 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
     ...("url" in action ? { url: action.url } : {}),
   });
 
+  // Captured for the operator-recipe trace: the element a target action
+  // resolved to, so we record the VISIBLE text it acted on (not the ref).
+  let resolvedEl: InteractiveElement | null = null;
+
   switch (action.kind) {
     case "goto": {
       if (!hostAllowed(action.url, hostStrings(session))) {
@@ -1088,6 +1111,7 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
       if (el === null) {
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
+      resolvedEl = el;
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       await browser.type(el.selector, value);
@@ -1116,6 +1140,7 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
               .join(", "),
         );
       }
+      resolvedEl = el;
       if (action.kind === "click") await browser.click(el.selector);
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
       else if (action.kind === "type") await browser.type(el.selector, action.text);
@@ -1124,7 +1149,41 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
       break;
     }
   }
+  recordTrace(session, action, resolvedEl);
   return await observeSession(session);
+}
+
+// Append a TEXT-targeted entry to the session's operator-recipe trace. Stores
+// the visible text the action hit (never a ref/coordinate) + non-secret params.
+// `extract` (the seal) is recorded separately in stashSecretSlot.
+function traceTextFor(el: InteractiveElement | null): string | undefined {
+  if (el === null) return undefined;
+  const keys = elementTargetKeys(el);
+  const first = keys[0];
+  return typeof first === "string" && first.length > 0 ? first.slice(0, 120) : undefined;
+}
+
+function recordTrace(
+  session: Session,
+  action: ProvisionAction,
+  el: InteractiveElement | null,
+): void {
+  const text = traceTextFor(el);
+  const withText = text !== undefined ? { text_match: text } : {};
+  let a: TraceAction;
+  switch (action.kind) {
+    case "goto": a = { kind: "goto", url_template: action.url }; break;
+    case "allow_host": a = { kind: "allow_host", host: action.host }; break;
+    case "press": a = { kind: "press", key: action.key }; break;
+    case "oauth_settle": a = { kind: "oauth_settle" }; break;
+    case "scroll": a = { kind: "scroll", ...(action.direction !== undefined ? { direction: action.direction } : {}) }; break;
+    case "type": a = { kind: "type", ...withText, value: action.text }; break;
+    case "type_secret": a = { kind: "type_secret", slot: action.slot, ...withText }; break;
+    case "click": a = { kind: "click", ...withText }; break;
+    case "js_click": a = { kind: "js_click", ...withText }; break;
+    case "oauth_click": a = { kind: "oauth_click", ...withText }; break;
+  }
+  session.actionTrace.push({ action: a });
 }
 
 async function settleAfterStateChange(browser: BrowserController): Promise<void> {
@@ -1135,6 +1194,70 @@ async function settleAfterStateChange(browser: BrowserController): Promise<void>
     if (text.replace(/\s+/g, " ").trim().length > 0) return;
     await settle(300);
   }
+}
+
+// ── operator-recipe: remember a successful run, verify a postcondition ──
+
+// Persist the session's action trace as a named, replayable operator-recipe.
+// Sealed secrets become SLOT references (stored:false) — never values. The
+// recipe's scope = start + auto_widen hosts (mid_session crossings replay via
+// the trace's own allow_host steps).
+export async function rememberRecipe(
+  sessionId: string,
+  opts: { name: string; goal: string; postcondition: Postcondition },
+): Promise<{ file: string; name: string; steps: number; secrets: string[] }> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
+  const recipe: OperatorRecipe = {
+    name: opts.name,
+    schema_version: 1,
+    goal: opts.goal,
+    allowed_hosts: [...new Set(egressSeedHosts(session))],
+    trace: session.actionTrace,
+    secrets,
+    postcondition: opts.postcondition,
+  };
+  const file = await writeRecipe(recipe);
+  audit(sessionId, "remember_recipe", {
+    name: opts.name, steps: recipe.trace.length, secrets: secrets.length, file,
+  });
+  return { file, name: opts.name, steps: recipe.trace.length, secrets: secrets.map((s) => s.slot) };
+}
+
+// Read a single page snapshot for postcondition checking. Field VALUES are
+// reduced to lengths here so a token/secret success-signal can't leak.
+async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
+  const obs = await observeSession(session);
+  const fields = obs.elements
+    .filter((e) => typeof e.value === "string" && e.value.length > 0)
+    .map((e) => ({ label: e.label, value_len: (e.value ?? "").length }));
+  return { url: obs.url, text: obs.text, fields };
+}
+
+// Verify a recipe's postcondition against the live session — the anti-false-
+// green gate for replay. execute_capability checks the current end-state;
+// observe_artifact navigates to the probe surface first (Phase B paces this).
+export async function verifyPostcondition(
+  sessionId: string,
+  postcondition: Postcondition,
+): Promise<PostconditionResult> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
+    const host = registrableHost(postcondition.probe_url);
+    if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
+      session.allowedHosts.push({ host, source: "mid_session" });
+    }
+    await session.browser.goto(postcondition.probe_url);
+    await settle(1500);
+  }
+  const snap = await snapshotForPostcondition(session);
+  const result = checkSuccessSignal(postcondition.success_signal, snap);
+  audit(sessionId, "verify_postcondition", {
+    kind: postcondition.kind, confirmed: result.confirmed, reason: result.reason,
+  });
+  return result;
 }
 
 // ── extraction (the `extract` thick tool) ──
