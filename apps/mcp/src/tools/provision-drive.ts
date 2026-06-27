@@ -325,11 +325,29 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     // store (a slotted secret is being shuttled, not vaulted, in this call).
     if (args.into_slot !== undefined) {
       const values = extracted.credentials;
-      const primary = values.api_key ?? Object.values(values)[0];
-      if (typeof primary !== "string" || primary.length === 0) {
-        return { ...extracted, slot: null, sealed: false };
+      // A still-masked display (Google's OAuth secret shows "GOCSPX-••••" with a
+      // copy button) must NOT be sealed — the slot would hold junk. Reject any
+      // value with mask glyphs or the truncated-capture marker, and prefer a
+      // full value over the masked api_key when the page has both.
+      const looksMasked = (v: string): boolean =>
+        v.includes("•") || v.includes("…") || v.includes("***") || /\.{3,}/.test(v);
+      const full = Object.entries(values)
+        .filter(([k]) => !k.endsWith("_truncated"))
+        .map(([, v]) => v)
+        .find((v) => typeof v === "string" && v.length >= 8 && !looksMasked(v));
+      if (typeof full !== "string" || full.length === 0) {
+        return {
+          session_id: extracted.session_id,
+          url: extracted.url,
+          candidate_count: extracted.candidate_count,
+          sealed: false,
+          slot: null,
+          blocked_reason:
+            "the secret is still masked/hidden — reveal it first (click the " +
+            "show/reveal/copy control near the key), then operate_extract again",
+        };
       }
-      const handle = stashSecretSlot(args.session_id, args.into_slot, primary);
+      const handle = stashSecretSlot(args.session_id, args.into_slot, full);
       // Strip raw credential VALUES from the response — host gets the handle only.
       return {
         session_id: extracted.session_id,
