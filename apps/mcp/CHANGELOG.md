@@ -1,5 +1,18 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.22 (2026-06-27)
+
+Prerelease (`next`). connect now proactively fixes a dead GitHub session.
+
+- **feat(connect):** when a plain `connect` would short-circuit (Google valid +
+  bound) but the bot's GitHub session validated **dead**, it now **prompts**
+  "Reconnect GitHub now?" (default yes) and does a GitHub-only login if accepted
+  — instead of just printing a notice. A dead GitHub session is exactly why
+  people re-run connect (GitHub-OAuth signups were failing), so it's fixed in
+  place. Skippable; non-interactive/scripted installs fall back to the notice.
+- **refactor:** the GitHub-only relogin is now a shared helper used by both
+  `--force-relogin=github` and the proactive prompt.
+
 ## 0.9.19-rc.21 (2026-06-27)
 
 Prerelease (`next`). First slice of the connect/session-validation redesign

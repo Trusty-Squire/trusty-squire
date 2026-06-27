@@ -44,6 +44,7 @@ import {
   detectInstalledAgents,
   writeClaudeCodePermissions,
   type AgentTarget,
+  type AgentDefinition,
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
@@ -71,6 +72,7 @@ import {
   showOutro,
 } from "./interactive.js";
 import chalk from "chalk";
+import { confirm, isCancel } from "@clack/prompts";
 import { normalizeProxyUrl } from "./proxy-url.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
@@ -492,17 +494,12 @@ async function connect(args: Argv): Promise<void> {
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
-      // "Skipped but dead" notice (DESIGN-connect-session-validation): we
-      // short-circuited because Google is valid, but if the bot's GitHub session
-      // validated as dead, say so — a dead session must never be silently
-      // hidden. GitHub is optional, so we don't raise the ceremony for it; the
-      // user refreshes it explicitly when a GitHub-only service needs it.
+      // DESIGN-connect-session-validation: we short-circuited because Google is
+      // valid + bound, but if the bot's GitHub session validated DEAD, proactively
+      // offer to reconnect it — a dead GitHub session is exactly why people re-run
+      // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
       if (!preflight.providers.includes("github")) {
-        ui.hint(
-          `GitHub session is not active — run ${ui.code(
-            "npx @trusty-squire/mcp connect --force-relogin=github",
-          )} if a service needs GitHub.`,
-        );
+        await offerGithubReloginIfDead(args, target, agent);
       }
       ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
       return;
@@ -553,28 +550,10 @@ async function connect(args: Argv): Promise<void> {
   // above), never touching Google. Falls through to the full confirm flow only
   // when the account isn't bound yet (nothing to skip) or the scope is google
   // (which can re-bind the account and so needs the claim).
-  if (args.forceReloginProvider === "github") {
-    const bound = await checkAlreadyBound();
-    if (bound) {
-      ui.heading("Sign in to GitHub");
-      const result = await ensureOAuthSession({
-        provider: "github",
-        apiBaseUrl: args.apiBase,
-        forceOpen: true,
-      });
-      if (result.status === "logged_in" || result.status === "already_valid") {
-        await recordConnectedProvider("github");
-        await writeAgentConfig(target, agent, args);
-        ui.success("Signed in to GitHub. The bot is ready; config refreshed.");
-        return;
-      }
-      ui.fail(
-        result.status === "timeout"
-          ? `GitHub sign-in timed out. Retry: ${ui.code("npx @trusty-squire/mcp connect --force-relogin=github")}`
-          : `GitHub sign-in failed: ${result.detail ?? "unknown error"}`,
-      );
-      process.exit(1);
-    }
+  if (args.forceReloginProvider === "github" && (await checkAlreadyBound())) {
+    const ok = await reloginGithubOnly(args, target, agent, { writeConfig: true });
+    if (ok) return;
+    process.exit(1);
   }
 
   const consent = consentFromArgs(args);
@@ -840,6 +819,63 @@ async function checkAlreadyBound(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// A GitHub-only login in the bot's profile (the provider-scoped path) — clears
+// the GitHub session and opens a fresh GitHub login (account chooser). Used by
+// `--force-relogin=github` and by the proactive prompt when connect detects a
+// dead GitHub session. Returns true on success.
+async function reloginGithubOnly(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
+  opts: { writeConfig: boolean },
+): Promise<boolean> {
+  ui.heading("Sign in to GitHub");
+  clearProviderLoggedIn("github");
+  const result = await ensureOAuthSession({
+    provider: "github",
+    apiBaseUrl: args.apiBase,
+    forceOpen: true,
+  });
+  if (result.status === "logged_in" || result.status === "already_valid") {
+    await recordConnectedProvider("github");
+    if (opts.writeConfig) await writeAgentConfig(target, agent, args);
+    ui.success("Signed in to GitHub. The bot is ready.");
+    return true;
+  }
+  ui.fail(
+    result.status === "timeout"
+      ? "GitHub sign-in timed out."
+      : `GitHub sign-in failed: ${result.detail ?? "unknown error"}`,
+  );
+  return false;
+}
+
+// Connect short-circuited (Google valid + bound) but the bot's GitHub session
+// validated DEAD. GitHub is optional, but a dead session is exactly why a user
+// re-runs connect (GitHub-OAuth signups were failing), so PROACTIVELY offer to
+// fix it rather than just noticing. Skippable; non-interactive falls back to a
+// notice so scripted installs never block.
+async function offerGithubReloginIfDead(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
+): Promise<void> {
+  const reconnectHint = `run ${ui.code("npx @trusty-squire/mcp connect --force-relogin=github")} when a service needs GitHub`;
+  if (process.stdout.isTTY !== true || args.noInteractive) {
+    ui.hint(`GitHub session is not active — ${reconnectHint}.`);
+    return;
+  }
+  const answer = await confirm({
+    message: "Your GitHub session looks dead (GitHub-only signups will fail). Reconnect GitHub now?",
+    initialValue: true,
+  });
+  if (isCancel(answer) || answer !== true) {
+    ui.hint(`Skipped GitHub — ${reconnectHint}.`);
+    return;
+  }
+  await reloginGithubOnly(args, target, agent, { writeConfig: false });
 }
 
 async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<void> {
