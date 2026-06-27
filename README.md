@@ -57,10 +57,14 @@ published to the registry, so the next person provisioning that service replays 
 
 ## Pricing
 
+For developers shipping with AI coding agents — move at your agent's speed without
+worrying about leaked secrets.
+
 - **Free** — provision, store keys, personal proxy use, 7-day audit, manual rotation.
-- **Pro ($3.99/mo billed annually, $4.99 monthly)** — egress grants for deployed apps,
-  365-day audit + export, and automated best-attempt rotation.
-- **Enterprise** — org control plane (shared vault, seats, SSO). Coming later.
+- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, and
+  automated rotation (covered services, growing weekly).
+- **Enterprise** — org control plane (shared vault, seats, SSO) + production-scale
+  egress. Coming later.
 
 See [`docs/BUSINESS-MODEL.md`](docs/BUSINESS-MODEL.md) for the full model.
 
