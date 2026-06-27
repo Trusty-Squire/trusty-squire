@@ -23,6 +23,8 @@ import {
   validateAllowHost,
   maskSecretValue,
   googleSessionGate,
+  isOnboardingOrOrgForm,
+  hasOneTimeSecretModal,
 } from "../provision-session.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
@@ -594,6 +596,33 @@ describe("buildScreenOutline", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("isOnboardingOrOrgForm (setup forms are not walls)", () => {
+  it("detects the instant-db / 'tell us about yourself' onboarding", () => {
+    expect(isOnboardingOrOrgForm("Tell us about yourself to finish setup")).toBe(true);
+  });
+  it("detects growthbook's 'you aren't part of an organization yet'", () => {
+    expect(isOnboardingOrOrgForm("You aren't part of an organization yet. Create one to continue.")).toBe(true);
+  });
+  it("detects an anyscale-style create-org/workspace form", () => {
+    expect(isOnboardingOrOrgForm("Create your organization Name your team")).toBe(true);
+  });
+  it("does NOT fire on an ordinary keys page", () => {
+    expect(isOnboardingOrOrgForm("API Keys — create a new key for your project")).toBe(false);
+  });
+});
+
+describe("hasOneTimeSecretModal (Luma one-time reveal)", () => {
+  it("detects 'you won't be able to see this again'", () => {
+    expect(hasOneTimeSecretModal("Copy your API key. You won't be able to view it again.")).toBe(true);
+  });
+  it("detects 'make sure to copy your secret now'", () => {
+    expect(hasOneTimeSecretModal("Make sure to copy your secret key now and store it securely.")).toBe(true);
+  });
+  it("does NOT fire on an ordinary always-visible key field", () => {
+    expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(false);
   });
 });
 

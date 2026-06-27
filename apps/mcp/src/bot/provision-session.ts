@@ -495,6 +495,36 @@ function hasAccountSetupOverlay(pageText: string): boolean {
   );
 }
 
+// An onboarding / org-or-workspace creation form that GATES the keys page. These
+// are NOT walls — the agent should fill the required fields with sensible
+// inferred values and submit to proceed. Broader than hasAccountSetupOverlay
+// (it also catches "create organization / you aren't part of an org yet").
+export function isOnboardingOrOrgForm(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  if (hasAccountSetupOverlay(text)) return true;
+  return (
+    /\byou\s+(?:aren'?t|are not|do not|don'?t)\s+(?:part of|belong to|have)\b.*\borgani[sz]ation\b/i.test(text) ||
+    /\bcreate\s+(?:a\s+|your\s+|an\s+|new\s+)?(?:organi[sz]ation|org|workspace|team|project|company)\b/i.test(text) ||
+    /\bname\s+(?:your\s+)?(?:organi[sz]ation|workspace|team|project|company)\b/i.test(text) ||
+    /\b(?:what'?s|what is)\s+your\s+name\b/i.test(text) ||
+    /\bget\s+started\b.*\b(?:name|organi[sz]ation|workspace|team)\b/i.test(text)
+  );
+}
+
+// A "copy your key NOW — it won't be shown again" one-time reveal (Luma, many
+// console secrets). The value is on screen but vanishes on dismiss/navigate, so
+// the agent must extract it immediately (and name it with secret_label), not
+// click away first.
+export function hasOneTimeSecretModal(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  return (
+    /\b(?:won'?t|will not|can'?t|cannot|never)\b[\s\w]{0,30}?\b(?:shown|displayed|see|view|retriev\w*|access\w*)\b[\s\w]{0,20}?\bagain\b/i.test(text) ||
+    /\b(?:only|last)\s+time\b.*\b(?:see|view|copy|shown)\b/i.test(text) ||
+    /\b(?:copy|save|store)\s+(?:and\s+save\s+)?(?:your\s+|this\s+|the\s+)?(?:secret|api\s*key|key|token|credential)\b.*\b(?:now|securely|somewhere|before)\b/i.test(text) ||
+    /\bmake\s+sure\s+to\s+(?:copy|save|store)\b/i.test(text)
+  );
+}
+
 function isAccountSetupActionTarget(target: string): boolean {
   return /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
     target,
@@ -513,6 +543,27 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   const modeMarkers = visibleModeMarkers(pageText);
   const setupOverlay = hasAccountSetupOverlay(pageText);
   const parts: string[] = [];
+
+  // One-time secret reveal — extract NOW; it vanishes if you navigate away.
+  if (hasOneTimeSecretModal(pageText)) {
+    parts.push(
+      "One-time secret: the key/secret is shown HERE and will NOT be shown again. " +
+        "Extract it immediately with operate_extract (use secret_label to pick the " +
+        "right field if several values are shown, and into_slot/store to capture it) " +
+        "BEFORE clicking anything that could dismiss this modal or navigate away.",
+    );
+  }
+
+  // Onboarding / org-creation form — fill it, don't treat it as a wall.
+  if (isOnboardingOrOrgForm(pageText)) {
+    parts.push(
+      "Onboarding/setup form: this is NOT a wall and NOT a failure. It gates the " +
+        "keys/dashboard behind a setup step. Fill the required fields with sensible " +
+        "inferred values (your name; an organization/workspace/team name such as your " +
+        "name or 'Personal'; pick the smallest/free plan) and submit to continue. Do " +
+        "not stop or report a wall — drive through it to reach the keys page.",
+    );
+  }
 
   if (modeMarkers.length > 0) {
     parts.push(`Mode marker visible: ${modeMarkers.join(", ")}.`);

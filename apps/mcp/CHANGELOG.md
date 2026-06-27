@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 0.9.19-rc.20 (2026-06-27)
+
+Prerelease (`next`). Perception guidance so the host agent drives THROUGH setup
+forms and one-time-secret modals instead of treating them as walls.
+
+- **feat(operate):** the observation `guidance` now flags an **onboarding /
+  org-creation form** ("Tell us about yourself", "create your organization",
+  "you aren't part of an org yet") as NOT a wall — telling the agent to fill the
+  required fields with sensible inferred values (name; org/workspace = your name
+  or "Personal"; smallest/free plan) and submit to reach the keys page.
+- **feat(operate):** the guidance now flags a **one-time secret reveal** ("won't
+  be shown again", "copy your key now") — telling the agent to extract it
+  IMMEDIATELY (with `secret_label` to pick the right field) before navigating
+  away, since the value vanishes. Addresses the Luma one-time-key miss.
+
 ## 0.9.19-rc.19 (2026-06-27)
 
 Prerelease (`next`). Stop refusing real keys whose vendor prefix isn't hardcoded.
