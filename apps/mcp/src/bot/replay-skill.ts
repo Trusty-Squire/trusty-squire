@@ -55,10 +55,9 @@ import { loggedInProviders } from "./login-state.js";
 import {
   isTruncatedCapture,
   extractApiKeyFromText,
-  findOAuthButton,
   isCredentialNoiseCandidate,
-  detectAlreadySignedIn,
-} from "./agent.js";
+} from "./credential-text.js";
+import { findOAuthButton, detectAlreadySignedIn } from "./oauth-detect.js";
 import { type OAuthProviderId, OAUTH_PROVIDERS, extractOAuthScopes } from "./oauth-providers.js";
 import { scrapeGoogleScopePhrases } from "./google-login.js";
 import type { Page } from "playwright";

@@ -45,7 +45,7 @@ import {
   type SkillStepProvenance,
 } from "@trusty-squire/skill-schema";
 import type { InteractiveElement } from "./browser.js";
-import type { PostVerifyStep } from "./agent.js";
+import type { PostVerifyStep } from "./provision-types.js";
 import { extractAllLabeledTokensFromReason } from "./credential-extraction-flow.js";
 import {
   verifyCaptureChain,

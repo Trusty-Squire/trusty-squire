@@ -42,7 +42,7 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { InteractiveElement } from "./browser.js";
-import type { PostVerifyStep, SignupResult } from "./agent.js";
+import type { PostVerifyStep, SignupResult } from "./provision-types.js";
 import { classifyFailureStage, type FailureStage } from "./failure-stage.js";
 import {
   classifySemanticFailure,

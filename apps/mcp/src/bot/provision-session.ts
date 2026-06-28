@@ -18,7 +18,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
-import { extractApiKeyFromText, isTruncatedCapture, pickVerificationLink } from "./agent.js";
+import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
+import { pickVerificationLink } from "./email-verification.js";
 import {
   detectActiveProviderSessions,
   ensureOAuthSession,
