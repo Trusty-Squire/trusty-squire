@@ -1,6 +1,6 @@
 # Changelog — @trusty-squire/mcp
 
-## Unreleased (staging)
+## 1.0.1-rc.1 (2026-06-28)
 
 **Universal-bot retirement (completed)**
 - Excised the autonomous skill-replay engine (`replay-skill.ts` + the
